@@ -874,16 +874,32 @@ def _folder_has_compiled_output(folder: str) -> tuple[str, str] | None:
       * ``"txt"``  — a ``*_translated.txt`` alongside the progress file.
       * ``"html"`` — a ``*_translated.html`` alongside the progress file.
     """
+    outputs = _list_compiled_outputs(folder)
+    return outputs[0] if outputs else None
+
+
+def _list_compiled_outputs(folder: str) -> list[tuple[str, str]]:
+    """Return every compiled output in *folder* as ``[(path, kind), …]``.
+
+    Same detection rules as :func:`_folder_has_compiled_output`, but
+    returns the FULL list in priority order instead of just the first.
+    Used by :func:`scan_output_folders` to flag folders that contain
+    more than one compiled artefact (e.g. two ``.epub`` files from
+    successive recompiles, or a ``.epub`` paired with a leftover
+    ``*_translated.html``) so the card can render a warning badge and
+    the user can investigate / clean up.
+    """
+    results: list[tuple[str, str]] = []
     try:
         entries = list(os.scandir(folder))
     except (PermissionError, OSError):
-        return None
+        return results
     # EPUBs win when present — that's the typical compiled shelf artifact.
     for entry in entries:
         if not entry.is_file(follow_symlinks=False):
             continue
         if entry.name.lower().endswith(".epub"):
-            return entry.path, "epub"
+            results.append((entry.path, "epub"))
     # Fall-back compiled outputs for TXT/PDF/HTML translations.
     priority = (("_translated.pdf", "pdf"),
                 ("_translated.txt", "txt"),
@@ -894,8 +910,8 @@ def _folder_has_compiled_output(folder: str) -> tuple[str, str] | None:
                 continue
             nl = entry.name.lower()
             if nl.endswith(suffix):
-                return entry.path, kind
-    return None
+                results.append((entry.path, kind))
+    return results
 
 
 def _detect_workspace_kind(folder: str, source_epub_path: str = "") -> str:
@@ -1254,10 +1270,24 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
 
                 progress_file = os.path.join(folder, "translation_progress.json")
                 metadata_file = os.path.join(folder, "metadata.json")
-                compiled = _folder_has_compiled_output(folder)
+                # Walk EVERY compiled output so we can warn the user
+                # when a folder contains more than one (e.g. a stale
+                # ``*.epub`` from a previous compile left next to a new
+                # one, or a ``*_translated.html`` paired with a
+                # compiled ``.epub``). The first entry keeps its usual
+                # "primary compiled output" role.
+                compiled_outputs = _list_compiled_outputs(folder)
+                compiled = compiled_outputs[0] if compiled_outputs else None
                 output_epub = compiled[0] if (compiled and compiled[1] == "epub") else None
                 compiled_path = compiled[0] if compiled else None
                 compiled_kind = compiled[1] if compiled else None
+                # Conflicts = every compiled file beyond the primary.
+                # We record (basename, kind) so the _BookCard tooltip
+                # can name each one without showing full absolute paths.
+                compiled_conflicts = [
+                    (os.path.basename(p), k)
+                    for p, k in compiled_outputs[1:]
+                ]
                 has_progress = os.path.isfile(progress_file)
                 has_metadata = os.path.isfile(metadata_file)
 
@@ -1439,6 +1469,13 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                     "has_compiled_output": bool(compiled),
                     "compiled_output_path": compiled_path or "",
                     "compiled_output_kind": compiled_kind or "",
+                    # List of ``(basename, kind)`` tuples for compiled
+                    # artefacts in the folder BEYOND the primary one.
+                    # Empty list for normal single-output folders;
+                    # populated when the scanner detected stale or
+                    # duplicate compiled files so the card can show
+                    # a ⚠ warning badge.
+                    "compiled_conflicts": compiled_conflicts,
                 })
     results.sort(key=lambda r: r["mtime"], reverse=True)
     return results
@@ -2274,6 +2311,38 @@ class _BookCard(QFrame):
         badge_lbl.setAttribute(Qt.WA_TranslucentBackground)
         badge_lbl.setStyleSheet(f"color: {badge_color}; font-size: 7pt; font-weight: bold; background: transparent;")
         info_row.addWidget(badge_lbl)
+        # Multi-output warning: the scanner detected more than one
+        # compiled artefact in this book's output folder (e.g. two
+        # ``.epub`` files from successive recompiles, or a stale
+        # ``*_translated.html`` sitting next to a fresh ``.epub``).
+        # Surface it as a small ⚠ badge so the user can clean up —
+        # the primary compiled output is still chosen deterministically
+        # (EPUB > PDF > TXT > HTML) but this warns them that the
+        # deterministic pick may not be what they expected.
+        conflicts = list(book.get("compiled_conflicts") or [])
+        if conflicts:
+            conflict_lbl = QLabel(f"\u26a0 +{len(conflicts)}")
+            conflict_lbl.setAttribute(Qt.WA_TranslucentBackground)
+            conflict_lbl.setStyleSheet(
+                "color: #ffb347; font-size: 7pt; font-weight: bold; "
+                "background: rgba(255, 179, 71, 0.15); "
+                "border: 1px solid #ffb347; border-radius: 3px; "
+                "padding: 0 4px; margin-left: 2px;"
+            )
+            # Lightweight human-readable summary for the tooltip:
+            # "Extra compiled files in this folder:\n  • foo.epub (EPUB)".
+            tip_lines = ["Extra compiled files in this folder:"]
+            for name, kind in conflicts[:8]:
+                tip_lines.append(f"  \u2022 {name} ({kind.upper()})")
+            if len(conflicts) > 8:
+                tip_lines.append(f"  \u2026 and {len(conflicts) - 8} more.")
+            tip_lines.append(
+                "\nThe card displays only the primary output (EPUB > PDF > "
+                "TXT > HTML); delete the stale artefacts to avoid "
+                "confusion on the next scan."
+            )
+            conflict_lbl.setToolTip("\n".join(tip_lines))
+            info_row.addWidget(conflict_lbl)
         info_row.addStretch()
         layout.addLayout(info_row)
 
@@ -3806,6 +3875,7 @@ class EpubLibraryDialog(QDialog):
                     str(b.get("raw_source_path", "") or ""),
                     float(b.get("mtime", 0) or 0),
                     int(b.get("size", 0) or 0),
+                    len(b.get("compiled_conflicts") or []),
                 )
                 for b in books
             }
