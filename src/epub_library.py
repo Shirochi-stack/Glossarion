@@ -993,6 +993,70 @@ def _find_raw_source_for_folder(folder: str) -> str | None:
     return None
 
 
+def _find_raw_source_for_library_epub(library_epub_path: str) -> str:
+    """Best-effort lookup for the raw source of a Library/Translated EPUB.
+
+    Unlike :func:`_find_raw_source_for_folder` (which starts from an
+    output-folder layout complete with ``source_epub.txt``), this helper
+    works purely from a compiled EPUB sitting inside ``Library/Translated``
+    and has to recover the original source by name matching + the origins
+    registry. Search order:
+
+      1. ``Library/Raw/<same-stem>.epub`` — direct basename match, the
+         common case for files organized into the library together.
+      2. ``load_library_raw_inputs()`` — any registered raw input whose
+         filename stem matches.
+      3. ``library_origins['translated']`` — when this compiled EPUB was
+         organized from an output folder, that folder's ``source_epub.txt``
+         / Library/Raw match is usually the raw counterpart.
+
+    Returns an absolute path string, or ``""`` when nothing matched.
+    """
+    if not library_epub_path or not os.path.isfile(library_epub_path):
+        return ""
+    stem = os.path.splitext(os.path.basename(library_epub_path))[0]
+    if not stem:
+        return ""
+    # 1. Library/Raw/<stem>.epub (case-insensitive extension match)
+    raw_dir = get_library_raw_dir()
+    try:
+        with os.scandir(raw_dir) as it:
+            for entry in it:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                nm = entry.name
+                nl = nm.lower()
+                if not nl.endswith(".epub"):
+                    continue
+                if os.path.splitext(nm)[0] == stem:
+                    return os.path.abspath(entry.path)
+    except (PermissionError, OSError, FileNotFoundError):
+        pass
+    # 2. Raw-inputs registry
+    for p in load_library_raw_inputs():
+        if not p or not os.path.isfile(p):
+            continue
+        if not p.lower().endswith(".epub"):
+            continue
+        if os.path.splitext(os.path.basename(p))[0] == stem:
+            return os.path.abspath(p)
+    # 3. origins["translated"] → source output folder → raw resolver
+    try:
+        origins = _load_origins()
+        trans_map = origins.get("translated", {}) or {}
+        orig_path = trans_map.get(os.path.basename(library_epub_path))
+        if orig_path:
+            orig_folder = os.path.dirname(orig_path)
+            if orig_folder and os.path.isdir(orig_folder):
+                resolved = _find_raw_source_for_folder(orig_folder)
+                if resolved and os.path.isfile(resolved):
+                    return os.path.abspath(resolved)
+    except Exception:
+        logger.debug("Library-raw origins lookup failed: %s",
+                     traceback.format_exc())
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Cover helpers
 # ---------------------------------------------------------------------------
@@ -1087,6 +1151,12 @@ def scan_library_completed(config: dict | None = None) -> list[dict]:
                                 stat = os.stat(entry.path)
                             except OSError:
                                 continue
+                            # Resolve a possible raw counterpart in
+                            # Library/Raw so the reader's "Raw" toggle
+                            # can flip between compiled and source
+                            # without re-picking the file manually.
+                            raw_counterpart = _find_raw_source_for_library_epub(
+                                entry.path)
                             results.append({
                                 "name": os.path.splitext(entry.name)[0],
                                 "path": entry.path,
@@ -1094,6 +1164,7 @@ def scan_library_completed(config: dict | None = None) -> list[dict]:
                                 "mtime": stat.st_mtime,
                                 "in_library": True,
                                 "type": "epub",
+                                "raw_source_path": raw_counterpart,
                             })
                         elif entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
                             _walk(entry.path, max_depth, depth + 1)
@@ -1834,6 +1905,41 @@ class _DualScannerThread(QThread):
 
         completed_from_output, in_progress = split_output_folders_by_status(output_rows)
 
+        # Post-organize dedup: any output folder whose compiled EPUB was
+        # moved into Library/Translated shows up in TWO scans:
+        #   * ``scan_library_completed`` — the new Library/Translated file.
+        #   * ``scan_output_folders``    — the owning folder (no compiled
+        #     EPUB anymore but progress=100% still classifies it as
+        #     ``completed``).
+        # The origins registry tells us which output folders were the
+        # source of a library-filed EPUB; we skip those ghost
+        # folder-only rows so the user sees a single card per book.
+        try:
+            origins = _load_origins()
+            trans_map = origins.get("translated", {}) or {}
+        except Exception:
+            trans_map = {}
+        organized_folders: set[str] = set()
+        for orig_path in trans_map.values():
+            if not orig_path:
+                continue
+            folder = os.path.dirname(str(orig_path))
+            if folder:
+                organized_folders.add(
+                    os.path.normcase(os.path.normpath(
+                        os.path.abspath(folder)))
+                )
+
+        def _is_organized_ghost(row: dict) -> bool:
+            """True when *row* is an output-folder scan result whose
+            compiled EPUB has been organized into Library/Translated."""
+            folder = row.get("output_folder") or ""
+            if not folder:
+                return False
+            fk = os.path.normcase(os.path.normpath(
+                os.path.abspath(folder)))
+            return fk in organized_folders
+
         # Merge: library entries first (they're the curated shelf), then
         # output-folder completions that aren't already represented by path.
         seen_paths: set[str] = set()
@@ -1848,9 +1954,17 @@ class _DualScannerThread(QThread):
             key = os.path.normcase(os.path.normpath(os.path.abspath(r["path"])))
             if key in seen_paths:
                 continue
+            if _is_organized_ghost(r):
+                continue
             seen_paths.add(key)
             completed.append(r)
         completed.sort(key=lambda r: r["mtime"], reverse=True)
+
+        # Apply the same ghost-filter to the In Progress tab so a
+        # post-organize folder that somehow slips through the "completed"
+        # classification (partial undo, mismatched progress file, etc.)
+        # doesn't linger as a phantom in-progress card either.
+        in_progress = [r for r in in_progress if not _is_organized_ghost(r)]
 
         self.finished.emit(in_progress, completed)
 
@@ -2890,18 +3004,41 @@ class EpubLibraryDialog(QDialog):
         return btn
 
     def _count_raw_movable(self) -> int:
-        """Return how many In-Progress raw sources aren't already in Library/Raw."""
+        """Return how many raw sources aren't already in Library/Raw.
+
+        Walks BOTH the In Progress and Completed book lists — a book at
+        100 %% progress lives in ``_completed_books`` yet its raw source
+        may still be sitting outside Library/Raw (e.g. the original EPUB
+        that fed the translation). Library-tagged entries are skipped
+        because their raw, if any, is already filed. Raw paths are
+        deduplicated so one file counted against two scan rows doesn't
+        double the counter.
+        """
         raw_abs = os.path.normcase(os.path.normpath(
             os.path.abspath(get_library_raw_dir())))
         count = 0
-        for book in self._in_progress_books:
+        seen: set[str] = set()
+
+        def _bump(book: dict) -> int:
             p = book.get("raw_source_path") or ""
             if not p or not os.path.isfile(p):
-                continue
+                return 0
             parent = os.path.normcase(os.path.normpath(
                 os.path.abspath(os.path.dirname(p))))
-            if parent != raw_abs:
-                count += 1
+            if parent == raw_abs:
+                return 0
+            key = os.path.normcase(os.path.normpath(os.path.abspath(p)))
+            if key in seen:
+                return 0
+            seen.add(key)
+            return 1
+
+        for book in self._in_progress_books:
+            count += _bump(book)
+        for book in self._completed_books:
+            if book.get("in_library"):
+                continue
+            count += _bump(book)
         return count
 
     def _count_trans_movable(self) -> int:
@@ -3250,16 +3387,38 @@ class EpubLibraryDialog(QDialog):
         raw_abs = os.path.normcase(os.path.normpath(os.path.abspath(raw_dir)))
         trans_abs = os.path.normcase(os.path.normpath(os.path.abspath(trans_dir)))
 
-        # Collect raw sources that aren't already in Library/Raw.
+        # Collect raw sources that aren't already in Library/Raw. Walk
+        # BOTH tabs — a book at 100 %% progress lives in
+        # ``_completed_books`` but its raw source may still be sitting
+        # outside Library/Raw (the common case for a freshly-compiled
+        # translation). Previously only ``_in_progress_books`` was
+        # inspected, so finishing a translation effectively hid the raw
+        # from "Organize" forever. Raw paths are deduped so a book that
+        # appears in both scans doesn't get scheduled twice.
         raw_moves: list[tuple[dict, str]] = []
-        for book in self._in_progress_books:
+        seen_raw_keys: set[str] = set()
+
+        def _queue_raw(book: dict) -> None:
             p = book.get("raw_source_path") or ""
             if not p or not os.path.isfile(p):
-                continue
-            parent = os.path.normcase(os.path.normpath(os.path.abspath(os.path.dirname(p))))
+                return
+            parent = os.path.normcase(os.path.normpath(
+                os.path.abspath(os.path.dirname(p))))
             if parent == raw_abs:
-                continue
+                return
+            key = os.path.normcase(os.path.normpath(os.path.abspath(p)))
+            if key in seen_raw_keys:
+                return
+            seen_raw_keys.add(key)
             raw_moves.append((book, p))
+
+        for book in self._in_progress_books:
+            _queue_raw(book)
+        for book in self._completed_books:
+            # Library entries are already filed — nothing to organize.
+            if book.get("in_library"):
+                continue
+            _queue_raw(book)
 
         # Collect compiled EPUBs that aren't already in Library/Translated.
         translated_moves: list[tuple[dict, str]] = []
@@ -3796,7 +3955,27 @@ class EpubLibraryDialog(QDialog):
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
             QApplication.processEvents()
-            reader = EpubReaderDialog(book["path"], config=self._config, parent=self)
+            # When the card carries a distinct raw source (Completed-tab
+            # EPUB that was organized alongside its Library/Raw pair, or
+            # an in-progress promotion) pass it as the reader's alt so
+            # the Show-raw pill can flip between translated and source.
+            book_path = book.get("path", "")
+            alt_path = book.get("raw_source_path", "") or ""
+            if alt_path:
+                try:
+                    if os.path.normcase(os.path.abspath(alt_path)) == \
+                            os.path.normcase(os.path.abspath(book_path)):
+                        alt_path = ""
+                except Exception:
+                    alt_path = ""
+                if alt_path and not os.path.isfile(alt_path):
+                    alt_path = ""
+            reader = EpubReaderDialog(
+                book_path,
+                config=self._config,
+                parent=self,
+                alt_epub_path=alt_path or None,
+            )
             QApplication.restoreOverrideCursor()
             reader.setModal(False)
             reader.setAttribute(Qt.WA_DeleteOnClose)
@@ -5708,6 +5887,23 @@ class BookDetailsDialog(QDialog):
                 initial_filename = None
                 if isinstance(initial_chapter, int) and 0 <= initial_chapter < len(self._chapters_info):
                     initial_filename = self._chapters_info[initial_chapter].get("filename") or None
+                # Completed-tab mode (no overlay, has raw source): let the
+                # reader flip between the compiled EPUB (book_path) and
+                # the resolved raw source. Skipped when an overlay is
+                # active — overlay mode handles the Raw toggle by
+                # swapping in-memory chapter lists instead of reloading.
+                alt_for_reader = ""
+                if (not overlay and not raw_only
+                        and not self._book.get("is_in_progress")
+                        and raw_source
+                        and os.path.isfile(raw_source)
+                        and raw_source.lower().endswith(".epub")):
+                    try:
+                        if os.path.normcase(os.path.abspath(raw_source)) != \
+                                os.path.normcase(os.path.abspath(epub_for_reader)):
+                            alt_for_reader = raw_source
+                    except Exception:
+                        alt_for_reader = ""
                 reader = EpubReaderDialog(
                     epub_for_reader,
                     config=self._config,
@@ -5721,6 +5917,7 @@ class BookDetailsDialog(QDialog):
                     # TOC matches what the Book Details chapter list
                     # shows (cover / nav / toc hidden when this is off).
                     show_special_files=self._show_special_files,
+                    alt_epub_path=alt_for_reader or None,
                 )
                 QApplication.restoreOverrideCursor()
                 reader.setModal(False)
@@ -6210,10 +6407,28 @@ class EpubReaderDialog(QDialog):
                  translated_overlay: dict | None = None,
                  extra_image_dirs: list[str] | None = None,
                  window_title: str | None = None,
-                 show_special_files: bool | None = None):
+                 show_special_files: bool | None = None,
+                 alt_epub_path: str | None = None):
         super().__init__(parent)
         self._epub_path = epub_path
         self._config = config or {}
+        # Dual-path mode: when the caller passes ``alt_epub_path`` (the raw
+        # source EPUB that pairs with the compiled one), the Show-raw pill
+        # swaps ``_epub_path`` between the two and reloads. Used by the
+        # Completed tab so users can flip between a compiled translation
+        # and its original without dropping out of the reader.
+        #
+        # The primary file (``_translated_epub_path``) is whatever the
+        # caller opened; the alt (``_raw_epub_alt_path``) is the raw
+        # counterpart. Either field is "" when not available.
+        self._translated_epub_path = str(epub_path or "")
+        self._raw_epub_alt_path = ""
+        if alt_epub_path:
+            alt_abs = os.path.abspath(str(alt_epub_path))
+            cur_abs = os.path.abspath(str(epub_path or ""))
+            if (os.path.isfile(alt_abs)
+                    and os.path.normcase(alt_abs) != os.path.normcase(cur_abs)):
+                self._raw_epub_alt_path = alt_abs
         self._chapters: list[tuple[str, str]] = []
         # Parallel (untouched) chapter list kept alongside the possibly-
         # overlaid ``_chapters`` so the Show-raw toolbar toggle can flip
@@ -6234,10 +6449,23 @@ class EpubReaderDialog(QDialog):
         else:
             self._show_special_files = bool(show_special_files)
         # Show-raw toggle: when True, the TOC + content pane render the
-        # raw source chapters instead of the translated overlay. Only
-        # meaningful when a ``_translated_overlay`` is actually attached;
-        # the toolbar button is hidden otherwise. Persisted in config.
+        # raw source chapters instead of the translated overlay. Two
+        # modes back this flag:
+        #   * Overlay mode: a ``_translated_overlay`` dict was attached
+        #     (typical for the In Progress tab) — flipping the toggle
+        #     swaps ``_chapters`` between raw and overlaid copies.
+        #   * Dual-path mode: a ``alt_epub_path`` was attached (typical
+        #     for the Completed tab when the raw source is resolvable)
+        #     — flipping the toggle swaps ``_epub_path`` between the
+        #     compiled and raw EPUBs and reloads.
+        # The pill is hidden when neither applies. Persisted in config.
         self._show_raw = bool(self._config.get('epub_reader_show_raw', False))
+        # If we can satisfy the persisted "raw" state via the dual-path
+        # alt (no overlay scenario), start the reader on the raw EPUB so
+        # the user sees what they last chose.
+        if (self._show_raw and self._raw_epub_alt_path
+                and not (translated_overlay or {})):
+            self._epub_path = self._raw_epub_alt_path
         # Restore persisted reader settings
         self._font_size = self._config.get('epub_reader_font_size', 14)
         self._line_spacing = self._config.get('epub_reader_line_spacing', 1.8)
@@ -6827,12 +7055,26 @@ class EpubReaderDialog(QDialog):
         # Persist both flavors + pick the one matching the current toggle.
         self._chapters_raw = raw_chapters
         self._chapters_overlaid = overlaid_chapters
-        chapters = raw_chapters if self._show_raw else overlaid_chapters
-        # Only expose the Show-raw pill when an overlay actually landed on
-        # at least one chapter — otherwise raw == overlaid and the toggle
-        # would do nothing.
+        chapters = raw_chapters if (self._show_raw and overlay_applied) else overlaid_chapters
+        # Expose the Show-raw pill when EITHER a translated overlay landed
+        # on at least one chapter (overlay mode) OR a dual-path alt EPUB
+        # was wired up by the caller (Completed tab, raw source present).
+        # Otherwise there's nothing to toggle against.
+        has_dual_path = bool(self._raw_epub_alt_path)
         if getattr(self, "_raw_btn", None) is not None:
-            self._raw_btn.setVisible(bool(overlay_applied))
+            self._raw_btn.setVisible(bool(overlay_applied) or has_dual_path)
+            # Sync the pill's checked state with the actually-rendered
+            # content, which can diverge from the persisted default when
+            # overlay mode couldn't satisfy the "raw" preference.
+            currently_raw = bool(
+                (overlay_applied and self._show_raw)
+                or (has_dual_path and os.path.normcase(os.path.abspath(
+                    self._epub_path)) == os.path.normcase(
+                    self._raw_epub_alt_path))
+            )
+            self._raw_btn.blockSignals(True)
+            self._raw_btn.setChecked(currently_raw)
+            self._raw_btn.blockSignals(False)
         # Augment the EPUB's own image table with anything discovered in the
         # translator's output folder(s). Translated chapters often reference
         # images that were renamed/moved during translation.
@@ -7564,25 +7806,46 @@ class EpubReaderDialog(QDialog):
     # ── Chapter rendering ───────────────────────────────────────────────
 
     def _on_show_raw_toggled(self, checked: bool):
-        """Swap the TOC + current page between raw and translated content.
+        """Swap between raw and translated content.
 
-        Cheap: the raw and overlaid chapter lists are both precomputed at
-        load time, so this just flips ``_chapters`` between them, rebuilds
-        the TOC entries (so titles match the active flavor), and re-renders
-        whichever chapter was showing. Page caches are invalidated because
-        paginated character counts differ between translations.
+        Two backing modes:
+          * **Overlay mode** — both raw and overlaid chapter lists were
+            precomputed at load time, so this just flips ``_chapters``
+            between them, rebuilds the TOC (titles differ between
+            flavors), invalidates the paginated-page cache (page counts
+            differ between translations) and re-renders. Cheap, no I/O.
+          * **Dual-path mode** — the caller attached an alt EPUB (raw
+            counterpart of a compiled Completed-tab book). Flipping the
+            toggle swaps ``_epub_path`` between the compiled and raw
+            files and restarts the loader via
+            :meth:`_reload_epub_from_active_path`.
         """
         new_value = bool(checked)
         if new_value == self._show_raw:
             return
         self._show_raw = new_value
-        # Never mutate self._config directly on wrong keys; close-event
-        # persistence already handles writing the flag at dialog close.
         try:
             self._config['epub_reader_show_raw'] = self._show_raw
         except Exception:
             pass
-        # Nothing to flip against if the overlay isn't loaded yet.
+        # Dual-path mode takes precedence: it's the only meaningful
+        # interpretation when no overlay was supplied. We also fall
+        # through to it when overlay mode has nothing loaded yet (e.g.
+        # toggle clicked mid-load before chapters exist).
+        has_overlay = bool(self._chapters_overlaid) and any(
+            (self._chapters_overlaid[i] != self._chapters_raw[i])
+            for i in range(min(len(self._chapters_overlaid),
+                               len(self._chapters_raw)))
+        )
+        if self._raw_epub_alt_path and not has_overlay:
+            target = (self._raw_epub_alt_path if self._show_raw
+                      else self._translated_epub_path)
+            if not target or not os.path.isfile(target):
+                return
+            self._epub_path = target
+            self._reload_epub_from_active_path()
+            return
+        # Overlay mode — in-memory chapter swap.
         if not self._chapters_raw and not self._chapters_overlaid:
             return
         self._chapters = (self._chapters_raw if self._show_raw
@@ -7604,6 +7867,35 @@ class EpubReaderDialog(QDialog):
         self._loaded_chapter = -1
         if self._chapters:
             self._render_current()
+
+    def _reload_epub_from_active_path(self):
+        """Restart the loader pipeline against the current ``_epub_path``.
+
+        Called by the Show-raw toggle in dual-path mode: after swapping
+        ``_epub_path`` to the raw (or back to the compiled) EPUB, we need
+        to reset chapter / image state and re-run the spinner + loader
+        exactly like the initial open sequence. The temp image directory
+        is left behind on purpose — it's keyed by the active epub_path
+        and will be re-created on the first ``_process_html`` call.
+        """
+        self._chapters = []
+        self._chapters_raw = []
+        self._chapters_overlaid = []
+        self._chapter_filenames = []
+        self._images = {}
+        self._chapter_page_cache = {}
+        self._loaded_chapter = -1
+        self._current_page = 0
+        if hasattr(self, "_img_temp_dir"):
+            # Clear so _process_html picks a fresh per-EPUB temp dir.
+            try:
+                del self._img_temp_dir
+            except AttributeError:
+                pass
+        self._toc_list.blockSignals(True)
+        self._toc_list.clear()
+        self._toc_list.blockSignals(False)
+        self._start_loading()
 
     def _on_chapter_selected(self, row):
         if row < 0 or row >= len(self._chapters):
