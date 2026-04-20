@@ -2486,9 +2486,18 @@ class EpubLibraryDialog(QDialog):
         # "Import EPUB" button (see :meth:`_import_paths_into_library`).
         self.setAcceptDrops(True)
         self._setup_ui()
-        # Defer the filesystem scan so the dialog paints immediately;
-        # on large libraries scan_for_epubs() + cover-thread spawn can otherwise
-        # block the UI for a noticeable fraction of a second on first open.
+        # Flip the dialog into its loading state BEFORE the caller
+        # shows it. Previously ``_show_loading`` was called by the
+        # deferred :meth:`_load_books` tick, which meant the dialog's
+        # first paint rendered empty tabs (no spinner, no cards) for
+        # one event-loop iteration — visible to the user as a blank
+        # window for a noticeable fraction of a second. Doing the
+        # widget swap here guarantees the very first paint already
+        # shows the Halgakos spinner + "Scanning library…" strip.
+        self._show_loading()
+        # Defer the filesystem scan so the dialog paints the loading
+        # state immediately and the scanner thread only kicks off on
+        # the next event-loop tick (keeps the show-flow snappy).
         QTimer.singleShot(0, self._load_books)
         # Auto-refresh library every 2 seconds (start after initial load)
         self._auto_refresh_timer = QTimer(self)
@@ -3787,7 +3796,13 @@ class EpubLibraryDialog(QDialog):
         self._update_organize_counts()
 
     def _load_books(self):
-        """Kick off an async scan of both tabs and show the loading spinner."""
+        """Kick off an async scan of both tabs and show the loading spinner.
+
+        Safe to call whether the loading state is already active (first
+        open — :meth:`__init__` primes it before ``show()``) or not
+        (later refreshes from the "Refresh" button) — ``_show_loading``
+        is idempotent.
+        """
         for t in self._cover_threads:
             try:
                 t.quit()
