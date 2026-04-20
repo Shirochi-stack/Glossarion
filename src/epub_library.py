@@ -417,6 +417,90 @@ def _folder_has_output_epub(folder: str) -> str | None:
     return None
 
 
+def _folder_has_compiled_output(folder: str) -> tuple[str, str] | None:
+    """Return ``(path, kind)`` for any compiled translation output, or None.
+
+    Recognized kinds (in priority order):
+      * ``"epub"`` — any ``*.epub`` at the folder root.
+      * ``"pdf"``  — a ``*_translated.pdf`` alongside the progress file.
+      * ``"txt"``  — a ``*_translated.txt`` alongside the progress file.
+      * ``"html"`` — a ``*_translated.html`` alongside the progress file.
+    """
+    try:
+        entries = list(os.scandir(folder))
+    except (PermissionError, OSError):
+        return None
+    # EPUBs win when present — that's the typical compiled shelf artifact.
+    for entry in entries:
+        if not entry.is_file(follow_symlinks=False):
+            continue
+        if entry.name.lower().endswith(".epub"):
+            return entry.path, "epub"
+    # Fall-back compiled outputs for TXT/PDF/HTML translations.
+    priority = (("_translated.pdf", "pdf"),
+                ("_translated.txt", "txt"),
+                ("_translated.html", "html"))
+    for suffix, kind in priority:
+        for entry in entries:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            nl = entry.name.lower()
+            if nl.endswith(suffix):
+                return entry.path, kind
+    return None
+
+
+def _detect_workspace_kind(folder: str, source_epub_path: str = "") -> str:
+    """Best-effort classification of a translation workspace.
+
+    Returns one of ``"epub"``, ``"txt"``, ``"pdf"``, ``"image"`` or ``"other"``.
+    The heuristic is:
+      1. If *source_epub_path* is provided and has a known extension, use it.
+      2. Folder contains ``content.opf`` / ``*.epub`` → EPUB.
+      3. Folder contains a compiled ``*_translated.{txt,pdf,html}`` → that kind.
+      4. Folder contains ``word_count/`` and no OPF → TXT (the Glossarion
+         text translator writes word_count per chunk, EPUBs don't).
+      5. Otherwise → ``"other"``.
+    """
+    if source_epub_path:
+        low = source_epub_path.lower()
+        for ext, kind in ((".epub", "epub"), (".txt", "txt"), (".pdf", "pdf")):
+            if low.endswith(ext):
+                return kind
+        if low.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")):
+            return "image"
+    try:
+        has_opf = False
+        has_epub = False
+        has_word_count_dir = False
+        translated_ext: str | None = None
+        for entry in os.scandir(folder):
+            nm = entry.name.lower()
+            if entry.is_file(follow_symlinks=False):
+                if nm.endswith(".opf"):
+                    has_opf = True
+                elif nm.endswith(".epub"):
+                    has_epub = True
+                elif nm.endswith("_translated.txt"):
+                    translated_ext = translated_ext or "txt"
+                elif nm.endswith("_translated.pdf"):
+                    translated_ext = translated_ext or "pdf"
+                elif nm.endswith("_translated.html"):
+                    translated_ext = translated_ext or "html"
+            elif entry.is_dir(follow_symlinks=False):
+                if nm == "word_count":
+                    has_word_count_dir = True
+    except (PermissionError, OSError):
+        return "other"
+    if has_opf or has_epub:
+        return "epub"
+    if translated_ext:
+        return translated_ext
+    if has_word_count_dir:
+        return "txt"
+    return "other"
+
+
 def _read_source_epub_pointer(folder: str) -> str | None:
     """Return the source EPUB path recorded in ``source_epub.txt`` if present.
 
@@ -553,16 +637,20 @@ def scan_library_completed(config: dict | None = None) -> list[dict]:
 
 
 def scan_output_folders(config: dict | None = None) -> list[dict]:
-    """Scan the output root(s) for translation folders (one card per folder).
+    """Scan the output root(s) for translation folders.
 
     Honors the OUTPUT_DIRECTORY override strictly via :func:`_resolve_output_roots`.
-    A folder qualifies when it has at least one of:
-      * ``translation_progress.json``
-      * ``metadata.json``
-      * a compiled ``.epub``
+    A folder qualifies when it has either a compiled ``.epub`` *or* a
+    translation_progress.json with at least one recorded chapter.
 
     Each result carries ``metadata_json`` (already loaded) so the card/details
     dialog can render without a second filesystem hit.
+
+    Folders with a compiled ``.epub`` are emitted as ``type="epub"`` so they
+    render identically to Library entries in the Completed tab (``path`` is
+    the .epub itself). Folders without a compiled EPUB are emitted as
+    ``type="in_progress"`` for the In Progress tab. Callers use
+    :func:`split_output_folders_by_status` to partition the two lists.
     """
     import json as _json
     roots = _resolve_output_roots(config)
@@ -588,13 +676,35 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
 
                 progress_file = os.path.join(folder, "translation_progress.json")
                 metadata_file = os.path.join(folder, "metadata.json")
-                output_epub = _folder_has_output_epub(folder)
+                compiled = _folder_has_compiled_output(folder)
+                output_epub = compiled[0] if (compiled and compiled[1] == "epub") else None
+                compiled_path = compiled[0] if compiled else None
+                compiled_kind = compiled[1] if compiled else None
                 has_progress = os.path.isfile(progress_file)
                 has_metadata = os.path.isfile(metadata_file)
-                # Must look like a translation workspace — otherwise random
-                # sibling directories of the output root would flood the tab.
-                if not has_progress and not has_metadata and not output_epub:
+
+                # Eagerly load the progress summary so we can tell a *seed*
+                # progress file (created when the user loaded a glossary but
+                # never ran a translation) apart from an active one.
+                summary = _read_progress_summary(progress_file) if has_progress else None
+                total = summary["total"] if summary else 0
+                done = summary["completed"] if summary else 0
+                failed = summary["failed"] if summary else 0
+
+                # A folder qualifies as a real translation workspace when
+                # there's a compiled output (epub/pdf/txt/html) inside OR the
+                # progress file records at least one chapter. The bare
+                # 68-byte seed ``{"chapters": {}, ...}`` written during
+                # glossary import is deliberately excluded.
+                if not compiled and total <= 0:
                     continue
+
+                # Classify source kind (epub / txt / pdf / image / other) so
+                # the card can show a meaningful type badge. We peek at the
+                # source_epub.txt pointer first (authoritative when present),
+                # then fall back to filesystem heuristics.
+                source_pointer = _read_source_epub_pointer(folder) or ""
+                workspace_kind = _detect_workspace_kind(folder, source_pointer)
 
                 metadata_json: dict = {}
                 if has_metadata:
@@ -606,32 +716,48 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                     except (OSError, _json.JSONDecodeError):
                         metadata_json = {}
 
-                summary = _read_progress_summary(progress_file) if has_progress else None
-                total = summary["total"] if summary else 0
-                done = summary["completed"] if summary else 0
-                failed = summary["failed"] if summary else 0
-
                 # Title precedence: metadata.json title → folder basename.
                 raw_title = (metadata_json.get("title")
                              or metadata_json.get("original_title")
                              or entry.name)
 
-                try:
-                    stat = os.stat(folder)
-                except OSError:
-                    continue
+                # Cards with any compiled output (epub/pdf/txt/html) are
+                # finished; they render on the Completed tab. The card type
+                # matches the compiled artifact kind so the badge is
+                # accurate. Folders without a compiled output stay on the
+                # In Progress tab keyed by their *workspace* kind (so a TXT
+                # translation in progress shows a TXT badge, not FOLDER).
+                if compiled:
+                    card_path = compiled_path
+                    card_type = compiled_kind  # "epub" / "pdf" / "txt" / "html"
+                    is_in_progress = False
+                    try:
+                        stat = os.stat(compiled_path)
+                    except OSError:
+                        continue
+                else:
+                    card_path = folder
+                    card_type = "in_progress"
+                    is_in_progress = True
+                    try:
+                        stat = os.stat(folder)
+                    except OSError:
+                        continue
 
                 results.append({
                     "name": raw_title,
                     "folder_name": entry.name,
-                    # Use the folder itself as the card's identifying path so
-                    # downstream code can locate progress artifacts trivially.
-                    "path": folder,
+                    "path": card_path,
                     "size": stat.st_size,
                     "mtime": stat.st_mtime,
                     "in_library": False,
-                    "type": "in_progress",
-                    "is_in_progress": True,
+                    "type": card_type,
+                    # The workspace kind is the *source* type (epub/txt/pdf
+                    # /image/other). Independent of ``type`` (which may be
+                    # the compiled output kind). Used by the card to pick
+                    # the right badge for in-progress folders.
+                    "workspace_kind": workspace_kind,
+                    "is_in_progress": is_in_progress,
                     "output_folder": folder,
                     "progress_file": progress_file if has_progress else "",
                     "metadata_json_path": metadata_file if has_metadata else "",
@@ -642,9 +768,24 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                     "pending_chapters": max(0, total - done),
                     "has_output_epub": bool(output_epub),
                     "output_epub_path": output_epub or "",
+                    "has_compiled_output": bool(compiled),
+                    "compiled_output_path": compiled_path or "",
+                    "compiled_output_kind": compiled_kind or "",
                 })
     results.sort(key=lambda r: r["mtime"], reverse=True)
     return results
+
+
+def split_output_folders_by_status(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split ``scan_output_folders`` results into (completed, in_progress).
+
+    An entry goes to *completed* when any compiled output (epub/pdf/txt/html)
+    exists on disk. Everything else is still in progress.
+    """
+    completed = [r for r in rows if r.get("has_compiled_output") or r.get("has_output_epub")]
+    in_progress = [r for r in rows
+                   if not (r.get("has_compiled_output") or r.get("has_output_epub"))]
+    return completed, in_progress
 
 
 def _find_in_progress_novels(config: dict | None = None) -> list[dict]:
@@ -1006,10 +1147,14 @@ class _LibraryScannerThread(QThread):
 
 
 class _DualScannerThread(QThread):
-    """Scan Library (Completed) and output roots (In Progress) in one shot.
+    """Scan both library and output roots, partitioning by completion status.
 
-    Emits ``(in_progress_list, completed_list)`` so the tabbed dialog can
-    refresh both panes from a single worker run.
+    Emits ``(in_progress_list, completed_list)`` where:
+      * in_progress_list — output folders with a progress file but no compiled EPUB yet.
+      * completed_list — Library EPUBs + output folders whose compiled EPUB exists.
+
+    Entries whose compiled EPUB already lives in the Library folder are
+    deduped (library entry wins) so the same book can't appear twice.
     """
     finished = Signal(list, list)
 
@@ -1019,15 +1164,36 @@ class _DualScannerThread(QThread):
 
     def run(self):
         try:
-            in_progress = scan_output_folders(self._config)
+            output_rows = scan_output_folders(self._config)
         except Exception:
-            logger.debug("In-progress scan failed: %s", traceback.format_exc())
-            in_progress = []
+            logger.debug("Output scan failed: %s", traceback.format_exc())
+            output_rows = []
         try:
-            completed = scan_library_completed(self._config)
+            library_rows = scan_library_completed(self._config)
         except Exception:
-            logger.debug("Completed scan failed: %s", traceback.format_exc())
-            completed = []
+            logger.debug("Library scan failed: %s", traceback.format_exc())
+            library_rows = []
+
+        completed_from_output, in_progress = split_output_folders_by_status(output_rows)
+
+        # Merge: library entries first (they're the curated shelf), then
+        # output-folder completions that aren't already represented by path.
+        seen_paths: set[str] = set()
+        completed: list[dict] = []
+        for r in library_rows:
+            key = os.path.normcase(os.path.normpath(os.path.abspath(r["path"])))
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            completed.append(r)
+        for r in completed_from_output:
+            key = os.path.normcase(os.path.normpath(os.path.abspath(r["path"])))
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            completed.append(r)
+        completed.sort(key=lambda r: r["mtime"], reverse=True)
+
         self.finished.emit(in_progress, completed)
 
 
@@ -1111,15 +1277,24 @@ class _BookCard(QFrame):
         title_lbl.setToolTip(book["name"])
         layout.addWidget(title_lbl)
 
-        # Size + file type badge on same row
+        # Size + file type badge on same row. For in-progress folders the
+        # badge reflects the *source* workspace kind (epub/txt/pdf/image)
+        # so users can distinguish a TXT translation's progress file from
+        # an EPUB's at a glance.
         file_type = book.get("type", "epub")
         type_info = {
-            "epub": ("\U0001f4d5EPUB", "#6c63ff"),
-            "pdf": ("\U0001f4c4PDF", "#e74c3c"),
-            "txt": ("\U0001f4d7TXT", "#2ecc71"),
+            "epub":  ("\U0001f4d5EPUB",  "#6c63ff"),
+            "pdf":   ("\U0001f4c4PDF",   "#e74c3c"),
+            "txt":   ("\U0001f4d7TXT",   "#2ecc71"),
+            "html":  ("\U0001f310HTML",  "#3498db"),
+            "image": ("\U0001f5bc\ufe0fIMG", "#f39c12"),
             "in_progress": ("\U0001f4c1FOLDER", "#ffd166"),
         }
-        badge_text, badge_color = type_info.get(file_type, ("\U0001f4d5EPUB", "#6c63ff"))
+        if file_type == "in_progress":
+            kind = (book.get("workspace_kind") or "other").lower()
+            badge_text, badge_color = type_info.get(kind, type_info["in_progress"])
+        else:
+            badge_text, badge_color = type_info.get(file_type, type_info["epub"])
         size_mb = book["size"] / (1024 * 1024)
         size_str = f"{size_mb:.1f} MB" if size_mb >= 1 else f"{book['size'] / 1024:.0f} KB"
         info_row = QHBoxLayout()
@@ -1495,7 +1670,9 @@ class EpubLibraryDialog(QDialog):
         self._comp_scroll.setWidget(self._comp_grid_container)
         comp_layout.addWidget(self._comp_scroll, 1)
         self._comp_empty_label = QLabel(
-            "Your Library is empty.\nOrganize finished EPUBs into this folder to see them here.")
+            "Your Library is empty.\n\n"
+            "Drop finished .epub files into the Library folder\n"
+            "(or use \u201cOpen Library Folder\u201d above) to see them here.")
         self._comp_empty_label.setAlignment(Qt.AlignCenter)
         self._comp_empty_label.setStyleSheet("color: #555; font-size: 12pt; padding: 40px;")
         self._comp_empty_label.hide()
