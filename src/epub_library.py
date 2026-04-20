@@ -528,6 +528,24 @@ def _resolve_output_roots(config: dict | None = None) -> list[str]:
     return []
 
 
+def _is_gallery_filename(name: str) -> bool:
+    """Return True if *name* refers to the auto-generated gallery page.
+
+    Matches ``gallery.xhtml``, ``gallery.html``, ``Gallery.xhtml``,
+    ``response_gallery.*`` and similar variants (case-insensitive,
+    extension-agnostic). The gallery is injected by the translator's
+    compile step, never a real source chapter, so it must never count
+    toward the translation progress fraction nor render a status badge.
+    """
+    if not name:
+        return False
+    base = os.path.basename(str(name)).lower()
+    if base.startswith("response_"):
+        base = base[len("response_"):]
+    stem = os.path.splitext(base)[0]
+    return stem == "gallery"
+
+
 def _read_progress_summary(progress_file: str, exclude_special: bool = False) -> dict | None:
     """Return a lightweight summary of translation_progress.json or None on failure.
 
@@ -558,18 +576,23 @@ def _read_progress_summary(progress_file: str, exclude_special: bool = False) ->
     for key, ch in chapters.items():
         if not isinstance(ch, dict):
             continue
+        name = (ch.get("original_basename")
+                or ch.get("output_file")
+                or str(key)
+                or "")
+        # Auto-generated gallery entries never count toward progress,
+        # regardless of the translate-special-files toggle.
+        if _is_gallery_filename(name):
+            continue
         if exclude_special:
             # Prefer original_basename (source file) over output_file
             # (response_*.html) so a run started with translate_special=ON
             # and flipped OFF still filters correctly. Fall back to the
             # progress-file key as a last resort.
-            name = (ch.get("original_basename")
-                    or ch.get("output_file")
-                    or str(key)
-                    or "").lower()
-            if name.startswith("response_"):
-                name = name[len("response_"):]
-            stem = os.path.splitext(os.path.basename(name))[0]
+            low = name.lower()
+            if low.startswith("response_"):
+                low = low[len("response_"):]
+            stem = os.path.splitext(os.path.basename(low))[0]
             # Only skip when we HAVE a filename to judge by — entries
             # with no recognizable name stay in the count rather than
             # silently disappearing.
@@ -661,9 +684,14 @@ def _count_epub_spine_items(epub_path: str, exclude_special: bool = False) -> in
                     if spine is not None:
                         for itemref in spine.findall(f"{{{OPF}}}itemref"):
                             idref = itemref.get("idref") or ""
+                            href = manifest.get(idref, "")
+                            basename = os.path.basename(href)
+                            # Auto-generated gallery page never counts
+                            # toward the spine total, no matter the
+                            # translate-special-files toggle.
+                            if _is_gallery_filename(basename):
+                                continue
                             if exclude_special:
-                                href = manifest.get(idref, "")
-                                basename = os.path.basename(href)
                                 if not _re.search(r"\d", basename):
                                     continue
                             count += 1
@@ -718,6 +746,9 @@ def _count_translated_response_files(folder: str, exclude_special: bool = False)
             if not lower.startswith("response_"):
                 continue
             if not lower.endswith((".html", ".xhtml", ".htm", ".txt")):
+                continue
+            # Gallery is auto-generated — never count it toward done.
+            if _is_gallery_filename(entry.name):
                 continue
             if exclude_special:
                 stem = os.path.splitext(lower[len("response_"):])[0]
@@ -1125,16 +1156,24 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
 
                 # Compute translation_state for the UI. This decides whether
                 # the card shows a "Not started" pill or an "In progress"
-                # fraction in :class:`_BookCard`. Base the not-started
-                # signal on the *raw* progress file contents (before spine /
-                # filesystem enrichment) so freshly imported EPUBs whose
-                # spine count is now non-zero still read as "not_started".
-                if compiled:
+                # fraction in :class:`_BookCard` AND which tab it lands on.
+                #
+                # IMPORTANT: the done/total fraction is the authoritative
+                # signal, NOT the presence of a compiled ``.epub`` in the
+                # folder. A compiled EPUB from a previous partial run can
+                # sit next to an in-progress translation whose spine isn't
+                # fully covered yet — e.g. 58/60 with specials still
+                # pending and ``translate_special_files`` on. In that case
+                # we MUST classify as "in_progress" so the toggle actually
+                # moves the card between tabs.
+                if done >= total and total > 0:
                     translation_state = "completed"
                 elif progress_total <= 0 and fs_done == 0:
-                    translation_state = "not_started"
-                elif done >= total and total > 0:
-                    translation_state = "completed"
+                    # No meaningful progress data at all — trust the
+                    # presence of a compiled EPUB as a "completed" signal
+                    # (library import / pre-existing build). Otherwise
+                    # this is a freshly scaffolded workspace.
+                    translation_state = "completed" if compiled else "not_started"
                 else:
                     translation_state = "in_progress"
 
@@ -1159,13 +1198,15 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                              or metadata_json.get("original_title")
                              or entry.name)
 
-                # Cards with any compiled output (epub/pdf/txt/html) are
-                # finished; they render on the Completed tab. The card type
-                # matches the compiled artifact kind so the badge is
-                # accurate. Folders without a compiled output stay on the
-                # In Progress tab keyed by their *workspace* kind (so a TXT
-                # translation in progress shows a TXT badge, not FOLDER).
-                if compiled:
+                # Card shape follows the real translation state, NOT the
+                # mere presence of a compiled ``.epub``. A compiled file
+                # next to an in-progress translation (partial run / user
+                # recompiled mid-way with specials still pending) keeps
+                # the folder-based card so ribbons + progress pills still
+                # render. Only a genuinely completed workspace promotes
+                # the card to a plain EPUB/PDF/TXT/HTML entry.
+                promote_to_compiled = bool(compiled) and translation_state == "completed"
+                if promote_to_compiled:
                     card_path = compiled_path
                     card_type = compiled_kind  # "epub" / "pdf" / "txt" / "html"
                     is_in_progress = False
@@ -1176,7 +1217,7 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 else:
                     card_path = folder
                     card_type = "in_progress"
-                    is_in_progress = True
+                    is_in_progress = (translation_state != "completed")
                     try:
                         stat = os.stat(folder)
                     except OSError:
@@ -1224,19 +1265,22 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
 def split_output_folders_by_status(rows: list[dict]) -> tuple[list[dict], list[dict]]:
     """Split ``scan_output_folders`` results into (completed, in_progress).
 
-    An entry goes to *completed* when any of these is true:
-      * a compiled output (epub/pdf/txt/html) exists on disk
-      * ``translation_state == "completed"`` — all spine chapters are
-        translated (done >= total) even if the user hasn't compiled the
-        output EPUB yet. At 100% progress it's no longer "in progress".
-    Everything else is still in progress.
+    Routing is driven by ``translation_state`` — ``"completed"`` means
+    done >= total (the scanner already treats that as authoritative, so
+    a compiled ``.epub`` alone doesn't force the card to Completed when
+    only 58/60 chapters are actually translated). Missing / empty state
+    falls back to ``has_compiled_output`` / ``has_output_epub`` for
+    backwards compatibility with pre-v2 rows.
     """
     completed: list[dict] = []
     in_progress: list[dict] = []
     for r in rows:
-        if (r.get("has_compiled_output")
-                or r.get("has_output_epub")
-                or r.get("translation_state") == "completed"):
+        state = r.get("translation_state")
+        if state == "completed":
+            completed.append(r)
+        elif state in ("in_progress", "not_started"):
+            in_progress.append(r)
+        elif r.get("has_compiled_output") or r.get("has_output_epub"):
             completed.append(r)
         else:
             in_progress.append(r)
@@ -3987,6 +4031,10 @@ class _BookDetailsLoader(QThread):
                 # message, etc.). The BookDetailsDialog filters these out by
                 # default, matching the Progress Manager's behavior.
                 is_special = not bool(_re.search(r"\d", filename))
+                # Gallery pages are injected by the EPUB compile step and are
+                # not real source chapters. They're rendered in the list but
+                # carry no status badge and never count toward progress.
+                is_gallery = _is_gallery_filename(filename)
                 norm_key = _norm(filename)
                 match = prog_by_basename.get(norm_key) or prog_by_output.get(norm_key)
                 status = (match or {}).get("status", "")
@@ -4017,6 +4065,10 @@ class _BookDetailsLoader(QThread):
                     # context against which "pending" is meaningful. Without
                     # one, leave status empty so the row shows no badge.
                     status = "pending" if has_progress_context else ""
+                # Gallery entries get no status — badge is suppressed in
+                # :class:`_ChapterRow` and progress counters skip them.
+                if is_gallery:
+                    status = ""
                 chapters_info.append({
                     "index": idx,
                     "filename": filename,
@@ -4025,6 +4077,7 @@ class _BookDetailsLoader(QThread):
                     "translated_path": translated_path,
                     "status": status,
                     "is_special": is_special,
+                    "is_gallery": is_gallery,
                 })
 
             # metadata_json was loaded in Phase 1 above.
@@ -4615,11 +4668,16 @@ class BookDetailsDialog(QDialog):
         if not self._book.get("is_in_progress"):
             self._progress_strip.hide()
             return
+        # Gallery pages are unconditionally excluded (translator-generated,
+        # not real source chapters). ``is_special`` is additionally used
+        # to honor the user's "Show special files" checkbox.
         if self._show_special_files:
-            progress_items = self._chapters_info
+            progress_items = [c for c in self._chapters_info
+                              if not c.get("is_gallery")]
         else:
             progress_items = [c for c in self._chapters_info
-                              if not c.get("is_special")]
+                              if not c.get("is_special")
+                              and not c.get("is_gallery")]
         done = sum(1 for c in progress_items if c.get("status") == "completed")
         total = len(progress_items) or int(self._book.get("total_chapters", 0) or 0)
         # When the book has reached 100% translation, the card already
@@ -4683,11 +4741,17 @@ class BookDetailsDialog(QDialog):
         self._update_toc_toggle_label()
 
     def _visible_counts(self) -> tuple[int, int]:
-        """Return (done, total) considering the special-files toggle."""
+        """Return (done, total) considering the special-files toggle.
+
+        Gallery pages are unconditionally excluded — they're
+        translator-generated artefacts, not real source chapters.
+        """
         if self._show_special_files:
-            items = self._chapters_info
+            items = [c for c in self._chapters_info
+                     if not c.get("is_gallery")]
         else:
-            items = [c for c in self._chapters_info if not c.get("is_special")]
+            items = [c for c in self._chapters_info
+                     if not c.get("is_special") and not c.get("is_gallery")]
         total = len(items)
         done = sum(1 for c in items if c.get("status") == "completed")
         return done, total
@@ -5014,6 +5078,11 @@ class _ChapterRow(QFrame):
         layout.addLayout(text_col, 1)
 
         badge = None
+        # Gallery rows render without any badge — they're auto-generated
+        # artefacts, not real source chapters.
+        is_gallery = bool(info.get("is_gallery"))
+        if is_gallery:
+            status = ""
         if status == "completed":
             badge = QLabel("\u2714 Translated")
             badge.setStyleSheet(
