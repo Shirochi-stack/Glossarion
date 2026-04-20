@@ -1544,21 +1544,37 @@ class _CoverLoader(QThread):
     finished = Signal(str, str)
 
     def __init__(self, file_path: str, file_type: str = "epub", config: dict | None = None,
-                 original_path: str | None = None, parent=None):
+                 original_path: str | None = None, raw_source_path: str | None = None,
+                 parent=None):
         super().__init__(parent)
         self._file_path = file_path
         self._file_type = file_type
         self._config = config or {}
         self._original_path = original_path
+        # For in-progress cards the output folder has no images yet, so the
+        # thumbnail must be pulled directly from the resolved raw source EPUB.
+        self._raw_source_path = raw_source_path or ""
 
     def run(self):
         if self._file_type == "epub":
             cover = _extract_cover(self._file_path)
         elif self._file_type == "in_progress":
             # For an in-progress card the "path" is the output folder itself.
-            cover = _find_cover_in_dir(self._file_path)
-            # As a secondary pass, try the compiled output EPUB (if any) so
-            # finished-but-not-organized novels still show a real cover.
+            cover = None
+            # Primary source: the resolved raw EPUB in Library/Raw (or
+            # wherever source_epub.txt points). This is the only way to
+            # produce a real thumbnail for Not Started cards, whose output
+            # folder is still empty.
+            if (self._raw_source_path
+                    and self._raw_source_path.lower().endswith(".epub")
+                    and os.path.isfile(self._raw_source_path)):
+                cover = _extract_cover(self._raw_source_path)
+            # Secondary: images the translator has produced in the output
+            # folder so far (mid-translation or retranslation runs).
+            if not cover:
+                cover = _find_cover_in_dir(self._file_path)
+            # Tertiary: compiled output EPUB (if any) for finished-but-not-
+            # organized novels.
             if not cover:
                 try:
                     for entry in os.scandir(self._file_path):
@@ -2657,6 +2673,7 @@ class EpubLibraryDialog(QDialog):
                 file_type=book.get("type", "epub"),
                 config=self._config,
                 original_path=book.get("original_path"),
+                raw_source_path=book.get("raw_source_path"),
                 parent=self,
             )
             loader.finished.connect(self._on_cover_loaded)
@@ -2783,7 +2800,17 @@ class EpubLibraryDialog(QDialog):
         if file_type == "in_progress":
             details_action = menu.addAction("\U0001f4d1  Open Book Details")
             details_action.triggered.connect(lambda: self._on_card_clicked(book))
+            # Always expose "Open in Reader" when an EPUB source is
+            # resolvable — either the raw source (Not Started / mid-
+            # translation cards) or a compiled translated EPUB.
+            raw_src = book.get("raw_source_path") or ""
             out_epub = book.get("output_epub_path") or ""
+            if (raw_src and raw_src.lower().endswith(".epub")
+                    and os.path.isfile(raw_src)):
+                raw_reader_action = menu.addAction("\U0001f4d6  Open in Reader")
+                raw_reader_action.triggered.connect(
+                    lambda p=raw_src: self._open_reader_direct({"path": p, "type": "epub"})
+                )
             if out_epub and os.path.isfile(out_epub):
                 reader_action = menu.addAction("\U0001f4d6  Open Translated EPUB")
                 reader_action.triggered.connect(
