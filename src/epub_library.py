@@ -5803,12 +5803,34 @@ class BookDetailsDialog(QDialog):
         else:
             layout.addStretch()
 
+    # Per-tick batch size for :meth:`_populate_chapters` — small enough
+    # that one tick fits comfortably inside a Qt event-loop iteration
+    # (so mouse / keyboard / scroll events aren't starved) but big
+    # enough that a 700-chapter book finishes in a handful of ticks.
+    _POPULATE_BATCH_SIZE = 40
+
     def _populate_chapters(self):
+        """Rebuild the chapter row list, yielding between batches.
+
+        A compiled EPUB with hundreds of chapters used to freeze the
+        UI for multiple seconds while every :class:`_ChapterRow` widget
+        was constructed synchronously. We now build the rows in batches
+        of :data:`_POPULATE_BATCH_SIZE` per tick via a zero-interval
+        ``QTimer``, so the Qt event loop keeps dispatching in between.
+        Any pre-existing batch timer is cancelled first so a toggle
+        flip (e.g. Show raw titles) doesn't double-render.
+        """
         # Tear down before rebuilding and disable activation for the window
         # of time while we're mutating the list — this flag is read from
         # :meth:`_on_chapter_activated` to squash spurious clicks that
         # might land while Phase 2 is still populating rows.
         self._chapters_loaded = False
+        # Cancel any in-flight batch timer from a previous call. Users
+        # can retrigger this via the Show-raw-titles toggle or a scan
+        # refresh while the previous batch is still rendering.
+        populate_timer = getattr(self, "_populate_timer", None)
+        if populate_timer is not None and populate_timer.isActive():
+            populate_timer.stop()
         # Clear previous rows
         while self._chap_layout.count():
             item = self._chap_layout.takeAt(0)
@@ -5817,8 +5839,54 @@ class BookDetailsDialog(QDialog):
                 w.setParent(None)
                 w.deleteLater()
 
-        show_raw_title = bool(self._show_raw_titles)
-        for info in self._chapters_info:
+        # Snapshot the state the worker uses so a mid-flight toggle
+        # change can't cross-contaminate the rendering flavor.
+        self._populate_infos = list(self._chapters_info)
+        self._populate_idx = 0
+        self._populate_show_raw_title = bool(self._show_raw_titles)
+
+        if not self._populate_infos:
+            self._chap_layout.addStretch()
+            self._apply_chapter_filter(self._toc_search.text())
+            self._update_toc_toggle_label()
+            self._chapters_loaded = True
+            return
+
+        if populate_timer is None:
+            populate_timer = QTimer(self)
+            populate_timer.setSingleShot(False)
+            populate_timer.setInterval(0)  # yield every event-loop tick
+            populate_timer.timeout.connect(self._populate_chapters_batch_tick)
+            self._populate_timer = populate_timer
+
+        # Render the first batch synchronously so the user sees
+        # immediate progress, then let the timer chip away at the rest.
+        self._populate_chapters_batch_tick()
+        if self._populate_idx < len(self._populate_infos):
+            populate_timer.start()
+
+    def _populate_chapters_batch_tick(self):
+        """Render the next :data:`_POPULATE_BATCH_SIZE` chapter rows.
+
+        Each row is faded in via a ``QGraphicsOpacityEffect`` +
+        ``QPropertyAnimation``; the animation's start time is staggered
+        by a few milliseconds per position in the batch so rows cascade
+        into view instead of all popping in together. The effect and
+        animation are parented to the row itself, so both die with the
+        row when the list is rebuilt — no manual cleanup needed.
+
+        Stops the driving ``QTimer`` and finalizes the TOC state once
+        every row has been appended to the layout.
+        """
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+        infos = getattr(self, "_populate_infos", None) or []
+        start = int(getattr(self, "_populate_idx", 0) or 0)
+        end = min(start + self._POPULATE_BATCH_SIZE, len(infos))
+        show_raw_title = bool(getattr(self, "_populate_show_raw_title", False))
+        selected_idx = self._selected_chapter_idx
+        for i in range(start, end):
+            info = infos[i]
             row = _ChapterRow(
                 info,
                 parent=self._chap_container,
@@ -5826,14 +5894,39 @@ class BookDetailsDialog(QDialog):
             )
             row.activated.connect(self._on_chapter_activated)
             row.clicked.connect(self._on_chapter_clicked)
-            if info.get("index") == self._selected_chapter_idx:
+            if info.get("index") == selected_idx:
                 row.set_selected(True)
             self._chap_layout.addWidget(row)
-        self._chap_layout.addStretch()
-        self._apply_chapter_filter(self._toc_search.text())
-        self._update_toc_toggle_label()
-        # Rows are now safe to open.
-        self._chapters_loaded = True
+
+            # Start hidden (opacity 0) then animate up to fully opaque.
+            effect = QGraphicsOpacityEffect(row)
+            effect.setOpacity(0.0)
+            row.setGraphicsEffect(effect)
+            anim = QPropertyAnimation(effect, b"opacity", row)
+            anim.setDuration(220)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            # Stagger by position within this batch. Capping the delay
+            # at 16 * (batch_size - 1) keeps even a full batch's tail
+            # finishing within ~840 ms, which still feels snappy.
+            stagger_ms = (i - start) * 16
+            if stagger_ms > 0:
+                QTimer.singleShot(stagger_ms, anim.start)
+            else:
+                anim.start()
+        self._populate_idx = end
+        if end >= len(infos):
+            # Final tick: cap the layout with the stretch, apply any
+            # active filter, refresh the "(done/total)" TOC header, and
+            # unlock activation so double-clicks open the reader.
+            timer = getattr(self, "_populate_timer", None)
+            if timer is not None and timer.isActive():
+                timer.stop()
+            self._chap_layout.addStretch()
+            self._apply_chapter_filter(self._toc_search.text())
+            self._update_toc_toggle_label()
+            self._chapters_loaded = True
 
     def _on_chapter_clicked(self, idx: int):
         """Update the single-select focus to the clicked chapter row."""
@@ -6413,6 +6506,124 @@ class _ChapterRow(QFrame):
 # ---------------------------------------------------------------------------
 # EPUB Reader — background loader thread
 # ---------------------------------------------------------------------------
+
+class _OverlayMergeThread(QThread):
+    """Off-UI-thread merge of the reader's loaded chapters against the
+    translated-chapter overlay and any extra image directories.
+
+    Both operations are file-I/O bound (reading per-chapter HTML from
+    disk, walking image subfolders) and used to run synchronously in
+    :meth:`EpubReaderDialog._on_epub_loaded_from_cache`, making an
+    in-progress book with hundreds of translated chapters visibly lag
+    the Qt event loop on open. Running them in a dedicated QThread —
+    plus a ``ThreadPoolExecutor`` inside for concurrent small reads —
+    keeps the UI responsive while the worker hits the disk.
+
+    Emits ``done(overlaid_chapters, merged_images, overlay_applied)``
+    once all reads finish.
+    """
+    done = Signal(list, dict, bool)
+
+    def __init__(self, raw_chapters, images, filenames, overlay_map,
+                 extra_image_dirs, parent=None):
+        super().__init__(parent)
+        self._raw_chapters = list(raw_chapters or [])
+        self._images = dict(images or {})
+        self._filenames = list(filenames or [])
+        self._overlay = dict(overlay_map or {})
+        self._extra_dirs = list(extra_image_dirs or [])
+
+    def run(self):
+        raw = self._raw_chapters
+        overlaid = raw
+        overlay_applied = False
+
+        # --- Overlay merge: per-chapter translated HTML reads ---
+        # Done through a small ThreadPoolExecutor so N sequential disk
+        # hits collapse into a couple of parallel batches. Errors per
+        # chapter are logged and the raw content is kept so one bad
+        # overlay file can't poison the whole merge.
+        if self._overlay and raw:
+            filenames = self._filenames
+            overlay = self._overlay
+
+            def _fetch_overlay(idx_title_content):
+                idx, (title, content) = idx_title_content
+                fname = filenames[idx] if idx < len(filenames) else ""
+                key = os.path.basename(fname).lower() if fname else ""
+                ov = overlay.get(key) if key else None
+                if not ov:
+                    return (idx, title, content, False)
+                path = ov.get("path") or ""
+                if not (path and os.path.isfile(path)):
+                    return (idx, title, content, False)
+                try:
+                    with open(path, "rb") as f:
+                        data = f.read()
+                except OSError:
+                    logger.debug("Overlay read failed: %s",
+                                 traceback.format_exc())
+                    return (idx, title, content, False)
+                translated_html = data.decode("utf-8", errors="replace")
+                new_title = title
+                if ov.get("title"):
+                    new_title = str(ov["title"])
+                return (idx, new_title, translated_html, True)
+
+            try:
+                max_workers = min(32, max(4, (os.cpu_count() or 2) * 4))
+                items = list(enumerate(raw))
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    results = list(pool.map(_fetch_overlay, items))
+            except Exception:
+                logger.debug("Overlay parallel merge failed, "
+                             "falling back to sequential: %s",
+                             traceback.format_exc())
+                results = [_fetch_overlay(item)
+                           for item in enumerate(raw)]
+
+            merged = [None] * len(raw)
+            for idx, title, content, applied in results:
+                merged[idx] = (title, content)
+                if applied:
+                    overlay_applied = True
+            overlaid = merged
+
+        # --- Extra image-directory scan ---
+        # Augments the EPUB's own image table with files discovered in
+        # the translator's output folder (e.g. ``images/``,
+        # ``translated_images/``) so overlaid chapters can resolve any
+        # assets the compiled EPUB doesn't carry.
+        images = self._images
+        if self._extra_dirs:
+            merged_imgs = dict(images)
+            _img_exts = (".jpg", ".jpeg", ".png", ".gif",
+                         ".webp", ".svg", ".bmp")
+            for dir_path in self._extra_dirs:
+                if not dir_path or not os.path.isdir(dir_path):
+                    continue
+                try:
+                    for entry in os.scandir(dir_path):
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        if not entry.name.lower().endswith(_img_exts):
+                            continue
+                        try:
+                            with open(entry.path, "rb") as f:
+                                data = f.read()
+                        except OSError:
+                            continue
+                        merged_imgs.setdefault(entry.name, data)
+                        rel = os.path.basename(dir_path) + "/" + entry.name
+                        merged_imgs.setdefault(rel, data)
+                        merged_imgs.setdefault(
+                            "images/" + entry.name, data)
+                except (PermissionError, OSError):
+                    continue
+            images = merged_imgs
+
+        self.done.emit(overlaid, images, overlay_applied)
+
 
 class _EpubLoaderThread(QThread):
     """Load the EPUB in a background thread and write result to cache.
@@ -7339,93 +7550,70 @@ class EpubReaderDialog(QDialog):
     def _on_epub_loaded_from_cache(self, chapters, images, filenames=None):
         self._spin_timer.stop()
         filenames = list(filenames or [])
-        # Keep the raw list pristine so the Show-raw toggle can swap back
-        # to it at any time without re-parsing the EPUB.
         raw_chapters = list(chapters or [])
-        overlaid_chapters = raw_chapters
-        # Apply translated-content overlay: swap source HTML (and optionally
-        # the chapter title) with translated versions for chapters that have
-        # a response_*.html on disk. Source chapters without an overlay entry
-        # are left untouched so the user can still read pending chapters raw.
-        # Overlay is keyed by the source filename basename so chapter-order
-        # differences between the reader's loader and the BookDetailsDialog's
-        # spine parser don't cause off-by-one mismatches (bug: raw+translated
-        # rows appearing as duplicates in the TOC).
-        overlay_applied = False
-        if self._translated_overlay and raw_chapters:
-            merged: list[tuple[str, str]] = []
-            for idx, (title, content) in enumerate(raw_chapters):
-                fname = filenames[idx] if idx < len(filenames) else ""
-                key = os.path.basename(fname).lower() if fname else ""
-                ov = self._translated_overlay.get(key) if key else None
-                if ov:
-                    path = ov.get("path") or ""
-                    if path and os.path.isfile(path):
-                        try:
-                            with open(path, "rb") as f:
-                                raw = f.read()
-                            translated_html = raw.decode("utf-8", errors="replace")
-                            content = translated_html
-                            overlay_applied = True
-                            if ov.get("title"):
-                                title = str(ov["title"])
-                        except OSError:
-                            logger.debug("Could not read translated overlay %s: %s",
-                                         path, traceback.format_exc())
-                merged.append((title, content))
-            overlaid_chapters = merged
+        # Fast path: nothing to merge (plain EPUB open, no overlay, no
+        # extra image directories). The UI can finalize immediately.
+        if not self._translated_overlay and not self._extra_image_dirs:
+            self._finalize_post_load(raw_chapters, raw_chapters, images or {},
+                                     False, filenames)
+            return
+        # Heavy path: hand the per-chapter file reads + image-dir scan to
+        # :class:`_OverlayMergeThread` so the Qt event loop stays free.
+        # Stash raw + filenames on self so the done signal's slot can
+        # seed the finalizer without having to round-trip them through
+        # the worker (images are modified there, chapters are produced).
+        self._pending_raw_chapters = raw_chapters
+        self._pending_filenames = filenames
+        # Cancel any in-flight worker from a previous load (e.g. the
+        # user closed + reopened quickly, or the Raw toggle fired a
+        # dual-path reload before the previous merge finished).
+        prev = getattr(self, "_overlay_thread", None)
+        if prev is not None:
+            try:
+                prev.done.disconnect()
+            except Exception:
+                pass
+            try:
+                prev.quit()
+            except Exception:
+                pass
+        self._overlay_thread = _OverlayMergeThread(
+            raw_chapters=raw_chapters,
+            images=images or {},
+            filenames=filenames,
+            overlay_map=self._translated_overlay,
+            extra_image_dirs=self._extra_image_dirs,
+            parent=self,
+        )
+        self._overlay_thread.done.connect(self._on_overlay_merge_done)
+        self._overlay_thread.start()
+
+    def _on_overlay_merge_done(self, overlaid_chapters, merged_images,
+                               overlay_applied: bool):
+        """Merge worker finished: hand off to the main-thread finalizer."""
+        raw_chapters = getattr(self, "_pending_raw_chapters", []) or []
+        filenames = getattr(self, "_pending_filenames", []) or []
+        self._pending_raw_chapters = []
+        self._pending_filenames = []
+        self._finalize_post_load(
+            raw_chapters, overlaid_chapters,
+            merged_images, bool(overlay_applied), filenames)
+
+    def _finalize_post_load(self, raw_chapters, overlaid_chapters, images,
+                            overlay_applied: bool, filenames):
+        """Install the loaded chapters + images into the reader UI.
+
+        Split out from :meth:`_on_epub_loaded_from_cache` so the
+        translator-overlay merge + extra-image-dir scan can run in
+        :class:`_OverlayMergeThread` without blocking the event loop.
+        For the fast path (plain EPUB, no overlay) the loader calls this
+        directly; for the heavy path it's invoked via the worker's
+        ``done`` signal.
+        """
         # Persist both flavors + pick the one matching the current toggle.
         self._chapters_raw = raw_chapters
         self._chapters_overlaid = overlaid_chapters
         chapters = raw_chapters if (self._show_raw and overlay_applied) else overlaid_chapters
-        # Expose the Show-raw pill when EITHER a translated overlay landed
-        # on at least one chapter (overlay mode) OR a dual-path alt EPUB
-        # was wired up by the caller (Completed tab, raw source present).
-        # Otherwise there's nothing to toggle against.
-        has_dual_path = bool(self._raw_epub_alt_path)
-        if getattr(self, "_raw_btn", None) is not None:
-            self._raw_btn.setVisible(bool(overlay_applied) or has_dual_path)
-            # Sync the pill's checked state with the actually-rendered
-            # content, which can diverge from the persisted default when
-            # overlay mode couldn't satisfy the "raw" preference.
-            currently_raw = bool(
-                (overlay_applied and self._show_raw)
-                or (has_dual_path and os.path.normcase(os.path.abspath(
-                    self._epub_path)) == os.path.normcase(
-                    self._raw_epub_alt_path))
-            )
-            self._raw_btn.blockSignals(True)
-            self._raw_btn.setChecked(currently_raw)
-            self._raw_btn.blockSignals(False)
-        # Augment the EPUB's own image table with anything discovered in the
-        # translator's output folder(s). Translated chapters often reference
-        # images that were renamed/moved during translation.
-        if self._extra_image_dirs:
-            merged_images = dict(images or {})
-            _img_exts = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp")
-            for dir_path in self._extra_image_dirs:
-                if not dir_path or not os.path.isdir(dir_path):
-                    continue
-                try:
-                    for entry in os.scandir(dir_path):
-                        if not entry.is_file(follow_symlinks=False):
-                            continue
-                        if not entry.name.lower().endswith(_img_exts):
-                            continue
-                        try:
-                            with open(entry.path, "rb") as f:
-                                data = f.read()
-                        except OSError:
-                            continue
-                        # Store under several aliases so the chapter HTML can
-                        # resolve them regardless of how src="…" is written.
-                        merged_images.setdefault(entry.name, data)
-                        rel = os.path.basename(dir_path) + "/" + entry.name
-                        merged_images.setdefault(rel, data)
-                        merged_images.setdefault("images/" + entry.name, data)
-                except (PermissionError, OSError):
-                    continue
-            images = merged_images
         self._chapters = chapters
         self._images = images
         # Keep filenames around so callers can resolve chapter indices by
