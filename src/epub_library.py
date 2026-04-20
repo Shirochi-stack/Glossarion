@@ -239,23 +239,42 @@ def _epub_cache_dir() -> str:
     return d
 
 
-def _epub_cache_key(epub_path: str) -> str:
-    """Generate a cache key from path + file modification time."""
+# Bump this salt whenever the loader's output schema changes so old
+# pickled caches miss cleanly instead of being served back forever.
+#   v2  — spine-first chapter resolution + text/html fallback.
+#   v3  — authoritative items (cover, nav, TOC pages) no longer dropped
+#          by the text-length filter.
+#   v4  — reader respects the Show-special-files toggle (cache key now
+#          embeds its state so on/off entries don't collide).
+_EPUB_CACHE_SCHEMA = "v4"
+
+
+def _epub_cache_key(epub_path: str, show_special_files: bool = True) -> str:
+    """Generate a cache key from path + file modification time + schema.
+
+    *show_special_files* is baked into the key so switching the
+    Show-special-files toggle forces a fresh parse instead of serving a
+    cache produced under the opposite toggle state.
+    """
     try:
         mtime = os.path.getmtime(epub_path)
     except OSError:
         mtime = 0
-    raw = f"{epub_path}|{mtime}".encode("utf-8")
+    salt = f"{_EPUB_CACHE_SCHEMA}|special={int(bool(show_special_files))}"
+    raw = f"{epub_path}|{mtime}|{salt}".encode("utf-8")
     return hashlib.md5(raw).hexdigest()[:16]
 
 
-def _load_epub_cache(epub_path: str):
+def _load_epub_cache(epub_path: str, show_special_files: bool = True):
     """Try to load cached EPUB data.
 
     Returns ``(chapters, images, filenames)`` where ``filenames`` is a parallel
     list of source item names (one per chapter entry) or ``None`` on failure.
     ``filenames`` is empty when the cache predates that field — callers must
     handle that gracefully.
+
+    *show_special_files* is forwarded to :func:`_epub_cache_key` so the
+    on / off variants of the cache don't collide.
 
     Cache entries with an **empty chapter list** are treated as invalid and
     discarded. They're almost always the fingerprint of a past load failure
@@ -265,7 +284,7 @@ def _load_epub_cache(epub_path: str):
     """
     import pickle
     try:
-        key = _epub_cache_key(epub_path)
+        key = _epub_cache_key(epub_path, show_special_files)
         cache_file = os.path.join(_epub_cache_dir(), f"{key}.pkl")
         if os.path.isfile(cache_file):
             with open(cache_file, "rb") as f:
@@ -285,11 +304,16 @@ def _load_epub_cache(epub_path: str):
     return None
 
 
-def _save_epub_cache(epub_path: str, chapters, images, filenames=None):
-    """Save parsed EPUB data to disk cache."""
+def _save_epub_cache(epub_path: str, chapters, images, filenames=None,
+                     show_special_files: bool = True):
+    """Save parsed EPUB data to disk cache.
+
+    *show_special_files* is forwarded to :func:`_epub_cache_key` so the
+    on / off variants of the cache are stored under distinct keys.
+    """
     import pickle
     try:
-        key = _epub_cache_key(epub_path)
+        key = _epub_cache_key(epub_path, show_special_files)
         cache_file = os.path.join(_epub_cache_dir(), f"{key}.pkl")
         with open(cache_file, "wb") as f:
             pickle.dump({
@@ -734,6 +758,48 @@ def _resolve_translate_special_files(config: dict | None) -> bool:
     if env in ("0", "false", "no", "off"):
         return False
     return bool((config or {}).get("translate_special_files", False))
+
+
+def _resolve_show_special_files(config: dict | None) -> bool:
+    """Return the effective "show special files" flag for reader / details.
+
+    Mirrors the logic baked into :class:`BookDetailsDialog.__init__` so
+    callers that don't go through Book Details (e.g. the library card's
+    "Open in Reader" context-menu action) still pick up the same resolved
+    state: the explicit ``epub_details_show_special_files`` preference
+    when set, else the global ``translate_special_files`` flag. An
+    explicit False is only honoured when the global is also False —
+    turning ON "translate special" always propagates through.
+    """
+    cfg = config or {}
+    translate_special = _resolve_translate_special_files(cfg)
+    stored = cfg.get("epub_details_show_special_files", None)
+    if stored is None:
+        return translate_special
+    return bool(stored) or translate_special
+
+
+def _is_special_spine_item(name: str) -> bool:
+    """Return True if *name* is a "special" (non-numbered) spine item.
+
+    Matches the digit-stem heuristic used by :func:`_count_epub_spine_items`
+    and :func:`_count_translated_response_files`: any spine entry whose
+    basename (minus a ``response_`` prefix, minus the extension) contains
+    no digit is treated as a named special page — cover, nav, toc, info,
+    message, afterword, etc. — rather than a numbered chapter. The
+    reader hides these when the Show-special-files toggle is off so the
+    TOC mirrors what the translator will actually process.
+    """
+    import re as _re
+    if not name:
+        return False
+    base = os.path.basename(str(name)).lower()
+    if base.startswith("response_"):
+        base = base[len("response_"):]
+    stem = os.path.splitext(base)[0]
+    if not stem:
+        return False
+    return not _re.search(r"\d", stem)
 
 
 def _count_translated_response_files(folder: str, exclude_special: bool = False) -> int:
@@ -5651,6 +5717,10 @@ class BookDetailsDialog(QDialog):
                     translated_overlay=overlay or None,
                     extra_image_dirs=extra_dirs or None,
                     window_title=window_title,
+                    # Propagate the dialog's current toggle so the reader's
+                    # TOC matches what the Book Details chapter list
+                    # shows (cover / nav / toc hidden when this is off).
+                    show_special_files=self._show_special_files,
                 )
                 QApplication.restoreOverrideCursor()
                 reader.setModal(False)
@@ -5924,9 +5994,16 @@ class _EpubLoaderThread(QThread):
     done = Signal()          # success — data available via cache
     error = Signal(str)
 
-    def __init__(self, epub_path: str, parent=None):
+    def __init__(self, epub_path: str, parent=None,
+                 show_special_files: bool = True):
         super().__init__(parent)
         self._epub_path = epub_path
+        # When False, spine items flagged as "special" (no-digit stem —
+        # cover / nav / toc / info / message / …) are excluded from the
+        # chapter list so the TOC mirrors what the translator would act
+        # on with ``translate_special_files`` off. Baked into the cache
+        # key so on / off variants don't collide.
+        self._show_special_files = bool(show_special_files)
 
     def run(self):
         try:
@@ -5973,10 +6050,18 @@ class _EpubLoaderThread(QThread):
             #      "No readable content" dialog.
             _HTML_EXTS = (".html", ".xhtml", ".htm")
 
-            chapter_items: list = []
+            # ``chapter_items`` entries are (item, authoritative_flag). The
+            # flag is True when the item was sourced from the spine or
+            # ebooklib's ITEM_DOCUMENT pass — i.e. the author explicitly
+            # declared it as reading content. Those items survive even when
+            # they're text-light (cover pages, nav pages, TOC stubs, etc.).
+            # False entries came from the extension-only last-resort sweep
+            # and are still subject to the strict text filter so noisy
+            # manifests don't dump random empty fragments into the TOC.
+            chapter_items: list[tuple[object, bool]] = []
             seen_names: set[str] = set()
 
-            def _add_item(it) -> None:
+            def _add_item(it, authoritative: bool) -> None:
                 if it is None:
                     return
                 name = it.get_name() or ""
@@ -5985,9 +6070,9 @@ class _EpubLoaderThread(QThread):
                 if not name.lower().endswith(_HTML_EXTS):
                     return
                 seen_names.add(name)
-                chapter_items.append(it)
+                chapter_items.append((it, authoritative))
 
-            # Pass 1: spine order.
+            # Pass 1: spine order (authoritative).
             try:
                 spine = getattr(book, "spine", None) or []
                 for entry in spine:
@@ -5999,32 +6084,59 @@ class _EpubLoaderThread(QThread):
                         item_id = entry
                     if not item_id:
                         continue
-                    _add_item(book.get_item_with_id(str(item_id)))
+                    _add_item(book.get_item_with_id(str(item_id)), True)
             except Exception:
                 logger.debug("Spine walk failed: %s", traceback.format_exc())
 
-            # Pass 2: ebooklib's ITEM_DOCUMENT classification.
+            # Pass 2: ebooklib's ITEM_DOCUMENT classification (authoritative).
             if not chapter_items:
                 for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
-                    _add_item(item)
+                    _add_item(item, True)
 
-            # Pass 3: extension-only sweep across the whole manifest. Only
-            # runs when we found nothing (or just a single cover-like item)
-            # via the authoritative passes, so well-formed EPUBs don't pay
-            # any extra cost here.
+            # Pass 3: extension-only sweep across the whole manifest
+            # (non-authoritative). Only runs when we found nothing (or just
+            # a single cover-like item) via the authoritative passes, so
+            # well-formed EPUBs don't pay any extra cost here.
             if len(chapter_items) <= 1:
                 for item in book.get_items():
-                    _add_item(item)
+                    _add_item(item, False)
 
             chapters: list[tuple[str, str]] = []
             filenames: list[str] = []
-            for item in chapter_items:
+            for item, authoritative in chapter_items:
                 try:
+                    # "Show special files" toggle: when OFF, drop named
+                    # non-chapter pages (cover.xhtml, nav.xhtml, toc.xhtml,
+                    # info.html, …) so the TOC matches what the
+                    # translator considers real chapters. This still
+                    # respects spine ordering for the chapters that DO
+                    # survive — we just prune the specials.
+                    if not self._show_special_files and _is_special_spine_item(
+                            item.get_name() or ""):
+                        continue
+
                     content = item.get_content().decode("utf-8", errors="replace")
                     soup = BeautifulSoup(content, "html.parser")
                     text = soup.get_text(strip=True)
-                    if not text or len(text) < 10:
+                    # Non-authoritative items (pass 3) must clear a minimum
+                    # text bar to keep the TOC free of fragmentary noise.
+                    # Authoritative items (spine / ITEM_DOCUMENT) are kept
+                    # even when text-light because the author put them in
+                    # the reading order deliberately — e.g. the cover page
+                    # (just an <img>) or a navigation/TOC page whose visible
+                    # text is mostly the chapter titles themselves.
+                    if not authoritative and (not text or len(text) < 10):
                         continue
+                    # Authoritative-but-totally-empty items (no text AND no
+                    # images AND no links) are still dropped — they're
+                    # almost always accidental spine entries (e.g. a
+                    # placeholder that never got populated).
+                    if authoritative and not text:
+                        has_img = bool(soup.find("img"))
+                        has_svg = bool(soup.find("svg"))
+                        has_link = bool(soup.find("a"))
+                        if not (has_img or has_svg or has_link):
+                            continue
 
                     title = None
                     title_tag = soup.find("title")
@@ -6049,8 +6161,13 @@ class _EpubLoaderThread(QThread):
                 except Exception:
                     logger.debug("Skipped chapter: %s", traceback.format_exc())
 
-            # Write to cache (avoids emitting large data through Qt signals)
-            _save_epub_cache(self._epub_path, chapters, images, filenames)
+            # Write to cache (avoids emitting large data through Qt signals).
+            # Key-scoped by the Show-special-files state so the two
+            # variants don't overwrite each other.
+            _save_epub_cache(
+                self._epub_path, chapters, images, filenames,
+                show_special_files=self._show_special_files,
+            )
             self.done.emit()
         except Exception as exc:
             logger.error("EPUB load error: %s\n%s", exc, traceback.format_exc())
@@ -6092,13 +6209,35 @@ class EpubReaderDialog(QDialog):
                  initial_chapter_filename: str | None = None,
                  translated_overlay: dict | None = None,
                  extra_image_dirs: list[str] | None = None,
-                 window_title: str | None = None):
+                 window_title: str | None = None,
+                 show_special_files: bool | None = None):
         super().__init__(parent)
         self._epub_path = epub_path
         self._config = config or {}
         self._chapters: list[tuple[str, str]] = []
+        # Parallel (untouched) chapter list kept alongside the possibly-
+        # overlaid ``_chapters`` so the Show-raw toolbar toggle can flip
+        # between them without re-parsing the EPUB. ``_chapters_overlaid``
+        # is the result of applying ``_translated_overlay`` to the raw
+        # chapters — when there's no overlay the two lists are identical.
+        self._chapters_raw: list[tuple[str, str]] = []
+        self._chapters_overlaid: list[tuple[str, str]] = []
         self._chapter_filenames: list[str] = []
         self._images: dict[str, bytes] = {}
+        # Whether to surface non-chapter spine items (cover / nav / toc /
+        # info / …) in the TOC. Caller can force the flag; otherwise we
+        # resolve it the same way BookDetailsDialog does, so opening a
+        # reader directly from a library card picks up the user's last
+        # toggle state instead of silently diverging.
+        if show_special_files is None:
+            self._show_special_files = _resolve_show_special_files(self._config)
+        else:
+            self._show_special_files = bool(show_special_files)
+        # Show-raw toggle: when True, the TOC + content pane render the
+        # raw source chapters instead of the translated overlay. Only
+        # meaningful when a ``_translated_overlay`` is actually attached;
+        # the toolbar button is hidden otherwise. Persisted in config.
+        self._show_raw = bool(self._config.get('epub_reader_show_raw', False))
         # Restore persisted reader settings
         self._font_size = self._config.get('epub_reader_font_size', 14)
         self._line_spacing = self._config.get('epub_reader_line_spacing', 1.8)
@@ -6231,6 +6370,36 @@ class EpubReaderDialog(QDialog):
         self._layout_combo.setFocusPolicy(Qt.StrongFocus)
         self._layout_combo.installEventFilter(self)
         toolbar.addWidget(self._layout_combo)
+
+        toolbar.addSpacing(6)
+
+        # Show-raw toggle: flips the reader between translated overlay
+        # and raw source content on the fly. Hidden until the loader
+        # confirms a translated overlay exists (there's nothing to
+        # toggle against for a plain EPUB open). Visually matches the
+        # "Raw titles" pill on the Library toolbar so the two surfaces
+        # read as the same control in different locations.
+        self._raw_btn = QPushButton("\U0001f524  Raw")
+        self._raw_btn.setToolTip(
+            "Show the raw source-language content instead of the translated \n"
+            "overlay. Useful for comparing a chapter against its original."
+        )
+        self._raw_btn.setFixedHeight(26)
+        self._raw_btn.setCursor(Qt.PointingHandCursor)
+        self._raw_btn.setCheckable(True)
+        self._raw_btn.setChecked(self._show_raw)
+        self._raw_btn.setStyleSheet("""
+            QPushButton { background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
+                color: #b0b0c0; font-size: 8.5pt; font-weight: bold; padding: 2px 10px; }
+            QPushButton:hover { background: #3a3a5e; color: #e0e0e0; }
+            QPushButton:checked { background: #6c63ff; border-color: #7c73ff; color: #fff; }
+        """)
+        self._raw_btn.toggled.connect(self._on_show_raw_toggled)
+        # Hidden until we know whether there's a translated overlay to flip
+        # against — :meth:`_on_epub_loaded_from_cache` reveals it when the
+        # overlaid list actually differs from the raw one.
+        self._raw_btn.hide()
+        toolbar.addWidget(self._raw_btn)
 
         toolbar.addSpacing(8)
 
@@ -6586,7 +6755,8 @@ class EpubReaderDialog(QDialog):
         self._spin_angle = 0
         self._spin_timer.start()
         # Try cache first
-        cached = _load_epub_cache(self._epub_path)
+        cached = _load_epub_cache(
+            self._epub_path, show_special_files=self._show_special_files)
         if cached:
             chapters, images, filenames = cached
             # Older caches may not carry filenames. If an overlay is requested
@@ -6598,7 +6768,10 @@ class EpubReaderDialog(QDialog):
                 QTimer.singleShot(0, lambda: self._on_epub_loaded_from_cache(
                     chapters, images, filenames))
                 return
-        self._loader_thread = _EpubLoaderThread(self._epub_path, self)
+        self._loader_thread = _EpubLoaderThread(
+            self._epub_path, self,
+            show_special_files=self._show_special_files,
+        )
         self._loader_thread.done.connect(lambda: self._on_loader_done())
         self._loader_thread.error.connect(lambda msg: self._on_epub_error(msg))
         self._loader_thread.start()
@@ -6606,7 +6779,8 @@ class EpubReaderDialog(QDialog):
     @Slot()
     def _on_loader_done(self):
         """Loader finished — read data from cache file (avoids large signal data)."""
-        cached = _load_epub_cache(self._epub_path)
+        cached = _load_epub_cache(
+            self._epub_path, show_special_files=self._show_special_files)
         if cached:
             self._on_epub_loaded_from_cache(*cached)
         else:
@@ -6615,6 +6789,10 @@ class EpubReaderDialog(QDialog):
     def _on_epub_loaded_from_cache(self, chapters, images, filenames=None):
         self._spin_timer.stop()
         filenames = list(filenames or [])
+        # Keep the raw list pristine so the Show-raw toggle can swap back
+        # to it at any time without re-parsing the EPUB.
+        raw_chapters = list(chapters or [])
+        overlaid_chapters = raw_chapters
         # Apply translated-content overlay: swap source HTML (and optionally
         # the chapter title) with translated versions for chapters that have
         # a response_*.html on disk. Source chapters without an overlay entry
@@ -6623,9 +6801,10 @@ class EpubReaderDialog(QDialog):
         # differences between the reader's loader and the BookDetailsDialog's
         # spine parser don't cause off-by-one mismatches (bug: raw+translated
         # rows appearing as duplicates in the TOC).
-        if self._translated_overlay and chapters:
+        overlay_applied = False
+        if self._translated_overlay and raw_chapters:
             merged: list[tuple[str, str]] = []
-            for idx, (title, content) in enumerate(chapters):
+            for idx, (title, content) in enumerate(raw_chapters):
                 fname = filenames[idx] if idx < len(filenames) else ""
                 key = os.path.basename(fname).lower() if fname else ""
                 ov = self._translated_overlay.get(key) if key else None
@@ -6637,13 +6816,23 @@ class EpubReaderDialog(QDialog):
                                 raw = f.read()
                             translated_html = raw.decode("utf-8", errors="replace")
                             content = translated_html
+                            overlay_applied = True
                             if ov.get("title"):
                                 title = str(ov["title"])
                         except OSError:
                             logger.debug("Could not read translated overlay %s: %s",
                                          path, traceback.format_exc())
                 merged.append((title, content))
-            chapters = merged
+            overlaid_chapters = merged
+        # Persist both flavors + pick the one matching the current toggle.
+        self._chapters_raw = raw_chapters
+        self._chapters_overlaid = overlaid_chapters
+        chapters = raw_chapters if self._show_raw else overlaid_chapters
+        # Only expose the Show-raw pill when an overlay actually landed on
+        # at least one chapter — otherwise raw == overlaid and the toggle
+        # would do nothing.
+        if getattr(self, "_raw_btn", None) is not None:
+            self._raw_btn.setVisible(bool(overlay_applied))
         # Augment the EPUB's own image table with anything discovered in the
         # translator's output folder(s). Translated chapters often reference
         # images that were renamed/moved during translation.
@@ -7369,9 +7558,52 @@ class EpubReaderDialog(QDialog):
         self._config['epub_reader_theme'] = self._theme_index
         self._config['epub_reader_layout'] = self._layout_mode
         self._config['epub_reader_font_family'] = self._font_family
+        self._config['epub_reader_show_raw'] = self._show_raw
         super().closeEvent(event)
 
-    # ── Chapter rendering ──────────────────────────────────────────────────
+    # ── Chapter rendering ───────────────────────────────────────────────
+
+    def _on_show_raw_toggled(self, checked: bool):
+        """Swap the TOC + current page between raw and translated content.
+
+        Cheap: the raw and overlaid chapter lists are both precomputed at
+        load time, so this just flips ``_chapters`` between them, rebuilds
+        the TOC entries (so titles match the active flavor), and re-renders
+        whichever chapter was showing. Page caches are invalidated because
+        paginated character counts differ between translations.
+        """
+        new_value = bool(checked)
+        if new_value == self._show_raw:
+            return
+        self._show_raw = new_value
+        # Never mutate self._config directly on wrong keys; close-event
+        # persistence already handles writing the flag at dialog close.
+        try:
+            self._config['epub_reader_show_raw'] = self._show_raw
+        except Exception:
+            pass
+        # Nothing to flip against if the overlay isn't loaded yet.
+        if not self._chapters_raw and not self._chapters_overlaid:
+            return
+        self._chapters = (self._chapters_raw if self._show_raw
+                          else self._chapters_overlaid)
+        # Rebuild TOC entries so titles reflect the active flavor. Hold
+        # the current row so we don't lose the reading position.
+        current_row = max(0, min(self._current_row, len(self._chapters) - 1))
+        self._toc_list.blockSignals(True)
+        self._toc_list.clear()
+        for title, _ in self._chapters:
+            self._toc_list.addItem(QListWidgetItem(title))
+        self._toc_list.setCurrentRow(current_row)
+        self._toc_list.blockSignals(False)
+        self._current_row = current_row
+        # Force a fresh paginated render: page-count caches differ
+        # between translations and the currently-loaded chapter needs to
+        # be re-set from the new source.
+        self._chapter_page_cache = {}
+        self._loaded_chapter = -1
+        if self._chapters:
+            self._render_current()
 
     def _on_chapter_selected(self, row):
         if row < 0 or row >= len(self._chapters):
