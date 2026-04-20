@@ -3779,9 +3779,20 @@ class BookDetailsDialog(QDialog):
         self._metadata_json: dict = {}
         self._loader: _BookDetailsLoader | None = None
         self._active_reader: QDialog | None = None
-        # Whether the "show special files" toggle is on (hidden by default to
-        # match Retranslation_GUI's Progress Manager behavior for EPUBs).
-        self._show_special_files = bool(self._config.get("epub_details_show_special_files", False))
+        # Whether the "show special files" toggle is on. Its initial state is
+        # coupled to the global "Translate Special Files" setting (Other
+        # Settings): if the translator is configured to handle cover / nav /
+        # toc files, the dialog defaults to showing them too and counting
+        # them in the progress percentage. The user can still override the
+        # toggle per-dialog — the override is persisted in config.
+        _translate_special = _resolve_translate_special_files(self._config)
+        _stored_show = self._config.get("epub_details_show_special_files", None)
+        if _stored_show is None:
+            self._show_special_files = _translate_special
+        else:
+            # User has an explicit preference — honor it, but also respect
+            # the translate-special toggle so turning it ON auto-propagates.
+            self._show_special_files = bool(_stored_show) or _translate_special
 
         epub_path = book["path"]
         pretty = book.get("name") or os.path.splitext(os.path.basename(epub_path))[0]
@@ -4280,36 +4291,7 @@ class BookDetailsDialog(QDialog):
         # In-progress strip + reader-entry-point relabeling
         has_translated = any(c.get("translated_path") for c in self._chapters_info)
         if self._book.get("is_in_progress"):
-            # Respect the "translate special files" toggle so a book whose
-            # only un-translated entries are special files (nav / toc /
-            # cover / …) doesn't stall the progress bar at 98%. When the
-            # toggle is off (default), those files are never translated by
-            # design and shouldn't count toward the denominator.
-            translate_special = _resolve_translate_special_files(self._config)
-            if translate_special:
-                progress_items = self._chapters_info
-            else:
-                progress_items = [c for c in self._chapters_info
-                                  if not c.get("is_special")]
-            done = sum(1 for c in progress_items if c["status"] == "completed")
-            total = len(progress_items) or int(self._book.get("total_chapters", 0) or 0)
-            # When the book has reached 100% translation, the card already
-            # renders on the Completed tab without an "in progress" ribbon
-            # (see :func:`split_output_folders_by_status`). Hide the details
-            # strip too so the dialog doesn't contradict the card.
-            translation_done = bool(total) and done >= total
-            state = self._book.get("translation_state") or ""
-            if translation_done or state == "completed":
-                self._progress_strip.hide()
-            elif total:
-                pct = int(round((done / total) * 100))
-                self._progress_strip.setText(
-                    f"\u23f3  Translation in progress \u2014 {done}/{total} chapters ({pct}%)"
-                )
-                self._progress_strip.show()
-            else:
-                self._progress_strip.setText("\u23f3  Translation in progress")
-                self._progress_strip.show()
+            self._update_progress_strip()
             # When any chapter has been translated, the primary reader shows
             # the translated content (raw fallback for pending chapters). The
             # secondary "Read raw source" button remains for the raw view.
@@ -4329,6 +4311,51 @@ class BookDetailsDialog(QDialog):
         # Button availability is handled inside :meth:`_apply_hero_payload`
         # so both the preview and the final pass enable / disable actions
         # consistently. No extra work needed here.
+
+    def _update_progress_strip(self):
+        """Refresh the "Translation in progress" strip.
+
+        Uses ``self._show_special_files`` as the counting toggle so the
+        user-visible "Show special files" checkbox drives the percentage
+        (in addition to the chapter list filter). Rules:
+
+        - Checkbox ON  → count every spine chapter, including cover /
+          nav / toc, toward the denominator.
+        - Checkbox OFF → exclude special files so a book doesn't sit at
+          98/100 forever when the only untranslated entries are files
+          the translator skips by design.
+
+        The checkbox itself is initialized from the global
+        ``translate_special_files`` setting (see :meth:`__init__`), so
+        enabling that toggle in Other Settings cascades into the dialog.
+        """
+        if not self._book.get("is_in_progress"):
+            self._progress_strip.hide()
+            return
+        if self._show_special_files:
+            progress_items = self._chapters_info
+        else:
+            progress_items = [c for c in self._chapters_info
+                              if not c.get("is_special")]
+        done = sum(1 for c in progress_items if c.get("status") == "completed")
+        total = len(progress_items) or int(self._book.get("total_chapters", 0) or 0)
+        # When the book has reached 100% translation, the card already
+        # renders on the Completed tab without an "in progress" ribbon
+        # (see :func:`split_output_folders_by_status`). Hide the details
+        # strip too so the dialog doesn't contradict the card.
+        translation_done = bool(total) and done >= total
+        state = self._book.get("translation_state") or ""
+        if translation_done or state == "completed":
+            self._progress_strip.hide()
+            return
+        if total:
+            pct = int(round((done / total) * 100))
+            self._progress_strip.setText(
+                f"\u23f3  Translation in progress \u2014 {done}/{total} chapters ({pct}%)"
+            )
+        else:
+            self._progress_strip.setText("\u23f3  Translation in progress")
+        self._progress_strip.show()
 
     def _fill_chip_row(self, layout: QHBoxLayout, values: list[str]):
         # Remove all but the trailing stretch
@@ -4427,6 +4454,10 @@ class BookDetailsDialog(QDialog):
         except Exception:
             pass
         self._apply_chapter_filter(self._toc_search.text())
+        # The "Translation in progress — X/Y" strip now reflects this
+        # toggle's state too, so refresh its fraction whenever the user
+        # flips the checkbox.
+        self._update_progress_strip()
 
     def _toggle_chapters(self):
         show = not self._chap_container.isVisible()
