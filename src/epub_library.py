@@ -2124,6 +2124,16 @@ class BookDetailsDialog(QDialog):
         self._start_btn.clicked.connect(lambda: self._open_reader())
         actions.addWidget(self._start_btn)
 
+        # Secondary action (only shown for in-progress novels) to open the
+        # untouched source EPUB without the translated overlay.
+        self._raw_btn = QPushButton("\U0001f4dc  Read raw source")
+        self._raw_btn.setProperty("class", "icon-btn")
+        self._raw_btn.setCursor(Qt.PointingHandCursor)
+        self._raw_btn.setToolTip("Open the source EPUB without the translated overlay")
+        self._raw_btn.clicked.connect(lambda: self._open_reader(raw_only=True))
+        self._raw_btn.hide()
+        actions.addWidget(self._raw_btn)
+
         self._folder_btn = QPushButton("\U0001f4c2")
         self._folder_btn.setProperty("class", "icon-btn")
         self._folder_btn.setToolTip("Open output folder in file explorer")
@@ -2325,7 +2335,8 @@ class BookDetailsDialog(QDialog):
         self._tags_heading.setVisible(bool(tags))
         self._tags_row.setVisible(bool(tags))
 
-        # In-progress strip
+        # In-progress strip + reader-entry-point relabeling
+        has_translated = any(c.get("translated_path") for c in self._chapters_info)
         if self._book.get("is_in_progress"):
             done = sum(1 for c in self._chapters_info if c["status"] == "completed")
             total = len(self._chapters_info) or int(self._book.get("total_chapters", 0) or 0)
@@ -2337,10 +2348,19 @@ class BookDetailsDialog(QDialog):
             else:
                 self._progress_strip.setText("\u23f3  Translation in progress")
             self._progress_strip.show()
-            self._start_btn.setText("\U0001f4d6  Read raw source")
+            # When any chapter has been translated, the primary reader shows
+            # the translated content (raw fallback for pending chapters). The
+            # secondary "Read raw source" button remains for the raw view.
+            if has_translated:
+                self._start_btn.setText("\U0001f4d6  Read translated")
+                self._raw_btn.show()
+            else:
+                self._start_btn.setText("\U0001f4d6  Read raw source")
+                self._raw_btn.hide()
         else:
             self._progress_strip.hide()
             self._start_btn.setText("\U0001f4d6  Start reading")
+            self._raw_btn.hide()
 
         # Chapter rows
         self._populate_chapters()
@@ -2449,15 +2469,59 @@ class BookDetailsDialog(QDialog):
 
     # -- Actions ------------------------------------------------------------
 
-    def _open_reader(self, initial_chapter: int | None = None):
+    def _build_translated_overlay(self) -> tuple[dict[int, dict], list[str]]:
+        """Return (overlay, extra_image_dirs) for a translated reader view.
+
+        The overlay maps spine-chapter index → translated HTML path + title so
+        the reader can swap source content with translated content in place,
+        leaving pending chapters as raw fallback. Image directories let the
+        reader resolve assets that only exist in the translator's output.
+        """
+        overlay: dict[int, dict] = {}
+        for ci in self._chapters_info:
+            path = ci.get("translated_path") or ""
+            if not path or not os.path.isfile(path):
+                continue
+            overlay[int(ci.get("index", 0))] = {
+                "path": path,
+                "title": ci.get("translated_title") or "",
+            }
+        extra_dirs: list[str] = []
+        output_folder = self._book.get("output_folder")
+        if output_folder and os.path.isdir(output_folder):
+            for sub in ("images", "translated_images"):
+                candidate = os.path.join(output_folder, sub)
+                if os.path.isdir(candidate):
+                    extra_dirs.append(candidate)
+        return overlay, extra_dirs
+
+    def _open_reader(self, initial_chapter: int | None = None, raw_only: bool = False):
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
             QApplication.processEvents()
+            overlay: dict[int, dict] = {}
+            extra_dirs: list[str] = []
+            window_title = None
+            # Only offer the translated overlay when the book is actually an
+            # in-progress novel with at least one translated chapter on disk.
+            if not raw_only and self._book.get("is_in_progress"):
+                overlay, extra_dirs = self._build_translated_overlay()
+                if overlay:
+                    # Derive the displayed title from the metadata.json /
+                    # OPF title, falling back to the book's name.
+                    window_title = (self._metadata_json.get("title")
+                                    or self._details.get("title")
+                                    or self._book.get("name"))
+                    if window_title:
+                        window_title = f"{window_title} (Translated)"
             reader = EpubReaderDialog(
                 self._book["path"],
                 config=self._config,
                 parent=self,
                 initial_chapter=initial_chapter,
+                translated_overlay=overlay or None,
+                extra_image_dirs=extra_dirs or None,
+                window_title=window_title,
             )
             QApplication.restoreOverrideCursor()
             reader.setModal(False)
@@ -2670,7 +2734,10 @@ class EpubReaderDialog(QDialog):
     """EPUB reader with chapter navigation, layout modes, and theme support."""
 
     def __init__(self, epub_path: str, config: dict | None = None, parent=None,
-                 initial_chapter: int | None = None):
+                 initial_chapter: int | None = None,
+                 translated_overlay: dict | None = None,
+                 extra_image_dirs: list[str] | None = None,
+                 window_title: str | None = None):
         super().__init__(parent)
         self._epub_path = epub_path
         self._config = config or {}
@@ -2687,11 +2754,33 @@ class EpubReaderDialog(QDialog):
         # The index is clamped to the available chapter range once the EPUB
         # has finished loading (see _on_epub_loaded_from_cache).
         self._initial_chapter = initial_chapter if isinstance(initial_chapter, int) and initial_chapter >= 0 else None
+        # Optional translated-content overlay for in-progress novels. Maps a
+        # zero-based source chapter index to either a translated HTML file path
+        # (str) or a dict of the form ``{"path": str, "title": Optional[str]}``.
+        # Entries are applied right after the source EPUB is loaded so the
+        # reader's existing pagination/theme pipeline is reused as-is.
+        self._translated_overlay: dict[int, dict] = {}
+        if isinstance(translated_overlay, dict):
+            for k, v in translated_overlay.items():
+                try:
+                    idx = int(k)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(v, str):
+                    self._translated_overlay[idx] = {"path": v}
+                elif isinstance(v, dict) and v.get("path"):
+                    self._translated_overlay[idx] = dict(v)
+        # Extra image search directories (e.g. <output_folder>/images,
+        # <output_folder>/translated_images) used to augment the EPUB's own
+        # image table so translated chapters can resolve their assets.
+        self._extra_image_dirs: list[str] = list(extra_image_dirs or [])
         self._current_row = 0
         self._current_page = 0  # viewport-based page for single/double page modes
         self._loader_thread: _EpubLoaderThread | None = None
 
-        self.setWindowTitle(f"📖 {os.path.splitext(os.path.basename(epub_path))[0]}")
+        title_text = window_title or os.path.splitext(os.path.basename(epub_path))[0]
+        self._window_title_text = title_text
+        self.setWindowTitle(f"\U0001f4d6 {title_text}")
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
         # Ratio-based sizing relative to screen
         screen = self.screen()
@@ -2743,7 +2832,7 @@ class EpubReaderDialog(QDialog):
         toolbar.setContentsMargins(10, 6, 10, 6)
         toolbar.setSpacing(6)
 
-        title_lbl = QLabel(f"📖 {os.path.splitext(os.path.basename(self._epub_path))[0]}")
+        title_lbl = QLabel(f"\U0001f4d6 {getattr(self, '_window_title_text', os.path.splitext(os.path.basename(self._epub_path))[0])}")
         title_lbl.setStyleSheet("font-size: 11pt; font-weight: bold; color: #e0e0e0;")
         title_lbl.setMaximumWidth(400)
         toolbar.addWidget(title_lbl)
@@ -3152,6 +3241,58 @@ class EpubReaderDialog(QDialog):
 
     def _on_epub_loaded_from_cache(self, chapters, images):
         self._spin_timer.stop()
+        # Apply translated-content overlay: swap source HTML (and optionally
+        # the chapter title) with translated versions for chapters that have
+        # a response_*.html on disk. Source chapters without an overlay entry
+        # are left untouched so the user can still read pending chapters raw.
+        if self._translated_overlay and chapters:
+            merged: list[tuple[str, str]] = []
+            for idx, (title, content) in enumerate(chapters):
+                ov = self._translated_overlay.get(idx)
+                if ov:
+                    path = ov.get("path") or ""
+                    if path and os.path.isfile(path):
+                        try:
+                            with open(path, "rb") as f:
+                                raw = f.read()
+                            translated_html = raw.decode("utf-8", errors="replace")
+                            content = translated_html
+                            if ov.get("title"):
+                                title = str(ov["title"])
+                        except OSError:
+                            logger.debug("Could not read translated overlay %s: %s",
+                                         path, traceback.format_exc())
+                merged.append((title, content))
+            chapters = merged
+        # Augment the EPUB's own image table with anything discovered in the
+        # translator's output folder(s). Translated chapters often reference
+        # images that were renamed/moved during translation.
+        if self._extra_image_dirs:
+            merged_images = dict(images or {})
+            _img_exts = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp")
+            for dir_path in self._extra_image_dirs:
+                if not dir_path or not os.path.isdir(dir_path):
+                    continue
+                try:
+                    for entry in os.scandir(dir_path):
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        if not entry.name.lower().endswith(_img_exts):
+                            continue
+                        try:
+                            with open(entry.path, "rb") as f:
+                                data = f.read()
+                        except OSError:
+                            continue
+                        # Store under several aliases so the chapter HTML can
+                        # resolve them regardless of how src="…" is written.
+                        merged_images.setdefault(entry.name, data)
+                        rel = os.path.basename(dir_path) + "/" + entry.name
+                        merged_images.setdefault(rel, data)
+                        merged_images.setdefault("images/" + entry.name, data)
+                except (PermissionError, OSError):
+                    continue
+            images = merged_images
         self._chapters = chapters
         self._images = images
         self._chapter_page_cache = {}  # {chapter_index: page_count}
