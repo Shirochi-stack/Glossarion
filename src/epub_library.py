@@ -2543,6 +2543,59 @@ class EpubLibraryDialog(QDialog):
 
         self.setStyleSheet("QDialog { background: #12121e; }")
 
+        # Drag-over overlay: semi-transparent purple panel with a centered
+        # "Drop to import" message. Shown in :meth:`dragEnterEvent` and
+        # hidden in :meth:`dragLeaveEvent` / :meth:`dropEvent`. It's a
+        # plain child widget positioned manually so it covers the whole
+        # dialog without participating in the root layout.
+        self._drop_overlay = QLabel(self)
+        self._drop_overlay.setObjectName("drop-overlay")
+        self._drop_overlay.setAlignment(Qt.AlignCenter)
+        self._drop_overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._drop_overlay.setText(
+            "\U0001f4e5\n\nDrop files to import into your Library\n\n"
+            "EPUB \u00b7 PDF \u00b7 TXT \u00b7 HTML"
+        )
+        self._drop_overlay.setStyleSheet(
+            "QLabel#drop-overlay {"
+            " background: rgba(108, 99, 255, 0.22);"
+            " color: #e8e4ff;"
+            " border: 3px dashed #8078ff;"
+            " border-radius: 12px;"
+            " font-size: 14pt;"
+            " font-weight: bold;"
+            "}"
+        )
+        self._drop_overlay.hide()
+
+        # Toast widget: animated non-modal status line that appears at the
+        # bottom of the dialog. Used instead of QMessageBox for drag-drop
+        # imports so the flow stays click-free.
+        self._toast = QLabel(self)
+        self._toast.setObjectName("toast")
+        self._toast.setAlignment(Qt.AlignCenter)
+        self._toast.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._toast.setStyleSheet(
+            "QLabel#toast {"
+            " background: rgba(42, 45, 90, 0.96);"
+            " color: #e8e4ff;"
+            " border: 1px solid #8078ff;"
+            " border-radius: 10px;"
+            " padding: 10px 18px;"
+            " font-size: 10pt;"
+            " font-weight: bold;"
+            "}"
+        )
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        self._toast_opacity = QGraphicsOpacityEffect(self._toast)
+        self._toast_opacity.setOpacity(0.0)
+        self._toast.setGraphicsEffect(self._toast_opacity)
+        self._toast.hide()
+        self._toast_hide_timer = QTimer(self)
+        self._toast_hide_timer.setSingleShot(True)
+        self._toast_hide_timer.timeout.connect(self._fade_out_toast)
+        self._toast_anim = None  # current QPropertyAnimation (if any)
+
     # -- Tab / scan / render helpers ----------------------------------------
 
     def _rotate_spinner(self):
@@ -2774,42 +2827,67 @@ class EpubLibraryDialog(QDialog):
                 errors.append(f"{os.path.basename(raw_path)}: {exc}")
         if imported:
             QTimer.singleShot(0, self._load_books)
-        # Summary dialog — one message per batch, not per file.
-        if imported or skipped or errors:
-            title = "Import"
-            parts: list[str] = []
-            if imported:
-                parts.append(
-                    f"Imported {len(imported)} file{'s' if len(imported) != 1 else ''} "
-                    f"into Library/Raw."
-                )
-                if len(imported) <= 10:
-                    parts.append("\n".join(
-                        "  \u2022 " + os.path.basename(p) for p in imported))
-                else:
-                    parts.append("\n".join(
-                        "  \u2022 " + os.path.basename(p) for p in imported[:10]))
-                    parts.append(f"  \u2026 and {len(imported) - 10} more.")
-            if skipped:
-                parts.append(
-                    f"\nSkipped {len(skipped)} file{'s' if len(skipped) != 1 else ''}:"
-                )
-                parts.append("\n".join("  \u2022 " + s for s in skipped[:8]))
-            if errors:
-                parts.append(
-                    f"\n{len(errors)} error{'s' if len(errors) != 1 else ''}:"
-                )
-                parts.append("\n".join("  \u2022 " + e for e in errors[:5]))
-            if imported:
-                parts.append(
-                    "\nRight-click any card and choose \u201cLoad for translation\u201d "
-                    "when you're ready to translate."
-                )
-            body = "\n".join(parts)
+        if not (imported or skipped or errors):
+            return
+        # Drag-drop imports get animated, non-modal status feedback. File-
+        # picker imports keep the detailed summary dialog so users who
+        # explicitly chose "Import EPUB" still see per-file diagnostics.
+        if source == "drop":
             if imported and not errors:
-                QMessageBox.information(self, title, body)
+                self._show_toast(
+                    f"\u2705  Imported {len(imported)} file"
+                    f"{'s' if len(imported) != 1 else ''} into Library/Raw"
+                )
+            elif imported and errors:
+                self._show_toast(
+                    f"\u26a0\ufe0f  Imported {len(imported)}, failed {len(errors)}"
+                )
+            elif errors:
+                self._show_toast(
+                    f"\u26a0\ufe0f  Import failed ({len(errors)} error"
+                    f"{'s' if len(errors) != 1 else ''})"
+                )
+            elif skipped:
+                self._show_toast(
+                    f"\u2139\ufe0f  Skipped {len(skipped)} unsupported file"
+                    f"{'s' if len(skipped) != 1 else ''}"
+                )
+            return
+        # Summary dialog — one message per batch, not per file.
+        title = "Import"
+        parts: list[str] = []
+        if imported:
+            parts.append(
+                f"Imported {len(imported)} file{'s' if len(imported) != 1 else ''} "
+                f"into Library/Raw."
+            )
+            if len(imported) <= 10:
+                parts.append("\n".join(
+                    "  \u2022 " + os.path.basename(p) for p in imported))
             else:
-                QMessageBox.warning(self, title, body)
+                parts.append("\n".join(
+                    "  \u2022 " + os.path.basename(p) for p in imported[:10]))
+                parts.append(f"  \u2026 and {len(imported) - 10} more.")
+        if skipped:
+            parts.append(
+                f"\nSkipped {len(skipped)} file{'s' if len(skipped) != 1 else ''}:"
+            )
+            parts.append("\n".join("  \u2022 " + s for s in skipped[:8]))
+        if errors:
+            parts.append(
+                f"\n{len(errors)} error{'s' if len(errors) != 1 else ''}:"
+            )
+            parts.append("\n".join("  \u2022 " + e for e in errors[:5]))
+        if imported:
+            parts.append(
+                "\nRight-click any card and choose \u201cLoad for translation\u201d "
+                "when you're ready to translate."
+            )
+        body = "\n".join(parts)
+        if imported and not errors:
+            QMessageBox.information(self, title, body)
+        else:
+            QMessageBox.warning(self, title, body)
 
     def _import_single_file(self, path: str) -> str | None:
         """Copy *path* into Library/Raw and scaffold its output folder.
@@ -3710,6 +3788,9 @@ class EpubLibraryDialog(QDialog):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # Keep the drag overlay + toast glued to the current geometry — they
+        # don't participate in the root layout since they float above it.
+        self._reposition_overlays()
         # Debounce: re-flow cards once the user stops dragging (300ms).
         if not (self._ip_cards or self._comp_cards):
             return
@@ -3718,6 +3799,31 @@ class EpubLibraryDialog(QDialog):
             self._resize_timer.setSingleShot(True)
             self._resize_timer.timeout.connect(self._refresh_view)
         self._resize_timer.start(300)
+
+    def _reposition_overlays(self):
+        """Re-layout the drop overlay + toast after a resize / show event."""
+        if getattr(self, "_drop_overlay", None) is not None:
+            margin = 16
+            self._drop_overlay.setGeometry(
+                margin, margin,
+                max(0, self.width() - margin * 2),
+                max(0, self.height() - margin * 2),
+            )
+            self._drop_overlay.raise_()
+        if getattr(self, "_toast", None) is not None:
+            self._toast.adjustSize()
+            tw = min(self._toast.width(), max(240, self.width() - 40))
+            th = self._toast.height()
+            self._toast.setGeometry(
+                (self.width() - tw) // 2,
+                self.height() - th - 24,
+                tw, th,
+            )
+            self._toast.raise_()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._reposition_overlays()
 
     def closeEvent(self, event):
         """Hide the dialog instead of closing \u2014 persist settings."""
@@ -3748,6 +3854,7 @@ class EpubLibraryDialog(QDialog):
         if self._dnd_accept_event(event):
             event.setDropAction(Qt.CopyAction)
             event.acceptProposedAction()
+            self._show_drop_overlay(True)
         else:
             event.ignore()
 
@@ -3758,7 +3865,12 @@ class EpubLibraryDialog(QDialog):
         else:
             event.ignore()
 
+    def dragLeaveEvent(self, event):
+        self._show_drop_overlay(False)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event):
+        self._show_drop_overlay(False)
         mime = event.mimeData()
         if not mime or not mime.hasUrls():
             event.ignore()
@@ -3780,7 +3892,80 @@ class EpubLibraryDialog(QDialog):
             self._tabs.setCurrentIndex(0)
         except Exception:
             pass
+        # Immediate toast so the user sees something happened even before
+        # the import pipeline finishes. The pipeline will replace this with
+        # a final "Imported N" status in :meth:`_import_paths_into_library`.
+        self._show_toast(
+            f"\U0001f4e5  Importing {len(paths)} file"
+            f"{'s' if len(paths) != 1 else ''}\u2026",
+            auto_hide_ms=0,
+        )
         self._import_paths_into_library(paths, source="drop")
+
+    # -- Overlay / toast helpers --------------------------------------------
+
+    def _show_drop_overlay(self, visible: bool):
+        """Show / hide the purple "drop to import" overlay panel."""
+        if getattr(self, "_drop_overlay", None) is None:
+            return
+        if visible:
+            self._reposition_overlays()
+            self._drop_overlay.show()
+            self._drop_overlay.raise_()
+        else:
+            self._drop_overlay.hide()
+
+    def _show_toast(self, text: str, auto_hide_ms: int = 2600):
+        """Fade in a short status line at the bottom of the dialog.
+
+        *auto_hide_ms* == 0 keeps the toast visible until the next
+        :meth:`_show_toast` call or an explicit :meth:`_fade_out_toast`.
+        Used by the drag-drop pipeline to stream a two-stage "Importing…"
+        → "Imported N" status update without any modal interruption.
+        """
+        if getattr(self, "_toast", None) is None:
+            return
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+        self._toast_hide_timer.stop()
+        self._toast.setText(text)
+        self._reposition_overlays()
+        self._toast.show()
+        self._toast.raise_()
+        # Cancel any in-flight fade so a rapid second call doesn't race
+        # the previous animation to zero opacity.
+        if self._toast_anim is not None:
+            try:
+                self._toast_anim.stop()
+            except Exception:
+                pass
+        anim = QPropertyAnimation(self._toast_opacity, b"opacity", self)
+        anim.setDuration(180)
+        anim.setStartValue(float(self._toast_opacity.opacity()))
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.start()
+        self._toast_anim = anim
+        if auto_hide_ms > 0:
+            self._toast_hide_timer.start(auto_hide_ms)
+
+    def _fade_out_toast(self):
+        """Fade the toast back to 0 opacity and hide it on completion."""
+        if getattr(self, "_toast", None) is None or not self._toast.isVisible():
+            return
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+        if self._toast_anim is not None:
+            try:
+                self._toast_anim.stop()
+            except Exception:
+                pass
+        anim = QPropertyAnimation(self._toast_opacity, b"opacity", self)
+        anim.setDuration(260)
+        anim.setStartValue(float(self._toast_opacity.opacity()))
+        anim.setEndValue(0.0)
+        anim.setEasingCurve(QEasingCurve.InCubic)
+        anim.finished.connect(self._toast.hide)
+        anim.start()
+        self._toast_anim = anim
 
 
 # ---------------------------------------------------------------------------
