@@ -1543,6 +1543,22 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         # Custom glossary fields and entry types
         self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
+
+        # Seed 'description' as the default custom field on first run so the
+        # {description_mandatory}, {description_detailed}, {description_in_language}
+        # and {description_excluded_note} placeholders in the fallback glossary
+        # prompts (see _init_default_prompts) expand correctly even if the user
+        # clicks Extract Glossary before opening Glossary Manager. Mirrors the
+        # logic in GlossaryManager_GUI.py so the two paths agree, and respects
+        # the 'custom_field_description_removed' flag if the user intentionally
+        # removed it.
+        if (
+            not self.custom_glossary_fields
+            and not self.config.get('custom_field_description_removed', False)
+        ):
+            self.custom_glossary_fields = ['description']
+            self.config['custom_glossary_fields'] = self.custom_glossary_fields
+
         self.custom_entry_types = self.config.get('custom_entry_types', {
             'character': {'enabled': True, 'has_gender': True},
             'term': {'enabled': True, 'has_gender': False}
@@ -20542,13 +20558,19 @@ Important rules:
                     self.append_log(f"❌ [INIT] Failed to initialize GLOSSARY_CUSTOM_ENTRY_TYPES: {e}")
             
             try:
+                # Always write GLOSSARY_CUSTOM_FIELDS so downstream consumers
+                # (extract_glossary_from_epub._apply_description_rule_placeholders,
+                # GlossaryManager, etc.) see a deterministic value and never fall
+                # back to a stale env var from a previous run. An empty list is
+                # serialized as "[]" — still a valid JSON array that decodes to
+                # []. The prompt placeholder logic treats [] the same as "no
+                # description field", which is the correct semantic.
                 custom_glossary_fields = self.config.get('custom_glossary_fields', [])
-                if custom_glossary_fields:
-                    custom_fields_json = json.dumps(custom_glossary_fields)
-                    os.environ['GLOSSARY_CUSTOM_FIELDS'] = custom_fields_json
-                    if debug_mode:
-                        self.append_log(f"🔍 [INIT] ENV GLOSSARY_CUSTOM_FIELDS: {len(custom_fields_json)} chars")
-                    initialized_count += 1
+                custom_fields_json = json.dumps(custom_glossary_fields)
+                os.environ['GLOSSARY_CUSTOM_FIELDS'] = custom_fields_json
+                if debug_mode:
+                    self.append_log(f"🔍 [INIT] ENV GLOSSARY_CUSTOM_FIELDS: {len(custom_fields_json)} chars")
+                initialized_count += 1
             except Exception as e:
                 if debug_mode:
                     self.append_log(f"❌ [INIT] Failed to initialize GLOSSARY_CUSTOM_FIELDS: {e}")
