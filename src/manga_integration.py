@@ -11701,61 +11701,48 @@ class MangaTranslationTab(QObject):
             # Update rendering settings
             self._apply_rendering_settings()
             
-            # Ensure inpainting settings are properly synchronized
-            if hasattr(self, 'inpainting_mode_var'):
-                inpainting_mode = self.inpainting_mode_var.get()
-                
-                if inpainting_mode == 'skip':
-                    self.translator.skip_inpainting = True
+            # Ensure inpainting settings are properly synchronized.
+            # PySide6 build: drive this from the Skip Inpainter checkbox
+            # (self.skip_inpainting_value) and the inpaint method radios
+            # (self.inpaint_method_value: 'local' | 'cloud' | 'hybrid').
+            # The legacy Tkinter `inpainting_mode_var` no longer exists.
+            skip_inpainting_flag = bool(
+                getattr(self, 'skip_inpainting_value',
+                        self.main_gui.config.get('manga_skip_inpainting', False))
+            )
+            inpaint_method = str(
+                getattr(self, 'inpaint_method_value',
+                        self.main_gui.config.get('manga_inpaint_method', 'local'))
+            ).lower()
+
+            if skip_inpainting_flag:
+                self.translator.skip_inpainting = True
+                self.translator.use_cloud_inpainting = False
+                self.translator.inpaint_mode = 'skip'
+                self._log("Inpainting: SKIP (toggle enabled)", "info")
+            elif inpaint_method == 'cloud':
+                self.translator.skip_inpainting = False
+                saved_api_key = self.main_gui.config.get('replicate_api_key', '')
+                if saved_api_key:
+                    self.translator.use_cloud_inpainting = True
+                    self.translator.replicate_api_key = saved_api_key
+                    self.translator.inpaint_mode = 'cloud'
+                    self._log("Inpainting: CLOUD (Replicate)", "debug")
+                else:
                     self.translator.use_cloud_inpainting = False
-                    self._log("Inpainting: SKIP", "debug")
-                    
-                elif inpainting_mode == 'local':
-                    self.translator.skip_inpainting = False
-                    self.translator.use_cloud_inpainting = False
-                    
-                    # IMPORTANT: Load the local inpainting model if not already loaded
-                    if hasattr(self, 'local_model_var'):
-                        selected_model = self.local_model_var.get()
-                        if selected_model and selected_model != "None":
-                            # Get model path from available models
-                            model_info = self.available_local_models.get(selected_model)
-                            if model_info:
-                                model_path = model_info['path']
-                                # Load the model into translator
-                                if hasattr(self.translator, 'load_local_inpainting_model'):
-                                    success = self.translator.load_local_inpainting_model(model_path)
-                                    if success:
-                                        self._log(f"Inpainting: LOCAL - Loaded {selected_model}", "info")
-                                    else:
-                                        self._log(f"Inpainting: Failed to load local model {selected_model}", "error")
-                                else:
-                                    # Set the model path directly if no load method
-                                    self.translator.local_inpaint_model_path = model_path
-                                    self._log(f"Inpainting: LOCAL - Set model path for {selected_model}", "info")
-                            else:
-                                self._log("Inpainting: LOCAL - No model selected", "warning")
-                        else:
-                            self._log("Inpainting: LOCAL - No model configured", "warning")
-                    else:
-                        self._log("Inpainting: LOCAL (default)", "debug")
-                    
-                elif inpainting_mode == 'cloud':
-                    self.translator.skip_inpainting = False
-                    saved_api_key = self.main_gui.config.get('replicate_api_key', '')
-                    if saved_api_key:
-                        self.translator.use_cloud_inpainting = True
-                        self.translator.replicate_api_key = saved_api_key
-                        self._log("Inpainting: CLOUD (Replicate)", "debug")
-                    else:
-                        # Fallback to local if no API key
-                        self.translator.use_cloud_inpainting = False
-                        self._log("Inpainting: LOCAL (no Replicate key, fallback)", "warning")
-            else:
-                # Default to local inpainting if variable doesn't exist
+                    self.translator.inpaint_mode = 'local'
+                    self._log("Inpainting: LOCAL (no Replicate key, fallback)", "warning")
+            elif inpaint_method == 'hybrid':
                 self.translator.skip_inpainting = False
                 self.translator.use_cloud_inpainting = False
-                self._log("Inpainting: LOCAL (default)", "debug")
+                self.translator.inpaint_mode = 'hybrid'
+                self._log("Inpainting: HYBRID", "debug")
+            else:
+                # Local (default)
+                self.translator.skip_inpainting = False
+                self.translator.use_cloud_inpainting = False
+                self.translator.inpaint_mode = 'local'
+                self._log("Inpainting: LOCAL", "debug")
 
             # Double-check the settings are applied correctly
             self._log(f"Inpainting final status:", "debug")
@@ -12007,20 +11994,33 @@ class MangaTranslationTab(QObject):
         if hasattr(self, 'constrain_to_bubble_value'):
             self.translator.constrain_to_bubble = self.constrain_to_bubble_value
         
-        # Handle inpainting mode (radio: skip/local/cloud/hybrid)
-        mode = None
-        if hasattr(self, 'inpainting_mode_var'):
-            mode = self.inpainting_mode_var.get()
+        # Handle inpainting mode.
+        # PySide6 build: derive mode from the Skip Inpainter checkbox
+        # (self.skip_inpainting_value) and the method radios
+        # (self.inpaint_method_value: 'local' | 'cloud' | 'hybrid').
+        # The legacy Tkinter `inpainting_mode_var` no longer exists.
+        skip_inpainting_flag = bool(
+            getattr(self, 'skip_inpainting_value',
+                    self.main_gui.config.get('manga_skip_inpainting', False))
+        )
+        inpaint_method = str(
+            getattr(self, 'inpaint_method_value',
+                    self.main_gui.config.get('manga_inpaint_method', 'local'))
+        ).lower()
+        if skip_inpainting_flag:
+            mode = 'skip'
+        elif inpaint_method in ('cloud', 'hybrid'):
+            mode = inpaint_method
         else:
             mode = 'local'
-        
+
         # Persist selected mode on translator
         self.translator.inpaint_mode = mode
-        
+
         if mode == 'skip':
             self.translator.skip_inpainting = True
             self.translator.use_cloud_inpainting = False
-            self._log("  Inpainting: Skipped", "info")
+            self._log("  Inpainting: Skipped (toggle enabled)", "info")
         elif mode == 'cloud':
             self.translator.skip_inpainting = False
             saved_api_key = self.main_gui.config.get('replicate_api_key', '')
