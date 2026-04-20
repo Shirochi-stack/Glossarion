@@ -2937,7 +2937,12 @@ class EpubLibraryDialog(QDialog):
         self._spin_angle = 0
         self._spin_timer = QTimer(self)
         self._spin_timer.setInterval(25)  # ~40 fps
-        self._spin_timer.timeout.connect(self._rotate_spinner)
+        # Wrap in a lambda so PySide6 routes the call directly instead
+        # of going through Qt's meta-object slot-lookup — certain
+        # PySide6 builds raise ``AttributeError: Slot 'EpubLibraryDialog::
+        # _rotate_spinner()' not found`` on ``QTimer.timeout`` dispatch
+        # even when the method exists and is ``@Slot()``-decorated.
+        self._spin_timer.timeout.connect(lambda: self._rotate_spinner())
         loading_text = QLabel("Scanning library\u2026")
         loading_text.setAlignment(Qt.AlignCenter)
         loading_text.setStyleSheet("color: #888; font-size: 11pt; padding-top: 4px;")
@@ -7454,6 +7459,17 @@ class EpubReaderDialog(QDialog):
         self._extra_image_dirs: list[str] = list(extra_image_dirs or [])
         self._current_row = 0
         self._current_page = 0  # viewport-based page for single/double page modes
+        # Page-count cache + currently-rendered-chapter sentinel need to
+        # exist BEFORE ``_setup_ui`` runs — the QWebEngineView widgets
+        # created there kick off an initial ``setUrl("about:blank")``
+        # asynchronously, which can fire ``loadFinished`` and reach
+        # :meth:`_finalize_single_page` before
+        # :meth:`_finalize_post_load` initializes these attributes.
+        # Leaving them out causes the about:blank load to crash with
+        # ``AttributeError: 'EpubReaderDialog' object has no attribute
+        # '_chapter_page_cache'``.
+        self._chapter_page_cache: dict[int, int] = {}
+        self._loaded_chapter: int = -1
         self._loader_thread: _EpubLoaderThread | None = None
 
         title_text = window_title or os.path.splitext(os.path.basename(epub_path))[0]
@@ -7736,8 +7752,13 @@ class EpubReaderDialog(QDialog):
         self._spin_angle = 0
         self._spin_timer = QTimer(self)
         self._spin_timer.setInterval(25)  # ~40 fps
-        self._spin_timer.timeout.connect(self._rotate_spinner)
-        loading_text = QLabel("Loading EPUB…")
+        # Wrap in a lambda so PySide6 routes the call directly instead
+        # of going through Qt's meta-object slot-lookup — certain
+        # PySide6 builds raise ``AttributeError: Slot 'EpubReaderDialog::
+        # _rotate_spinner()' not found`` on ``QTimer.timeout`` dispatch
+        # even when the method exists and is ``@Slot()``-decorated.
+        self._spin_timer.timeout.connect(lambda: self._rotate_spinner())
+        loading_text = QLabel("Loading EPUB\u2026")
         loading_text.setAlignment(Qt.AlignCenter)
         loading_text.setStyleSheet("color: #888; font-size: 11pt; padding-top: 8px;")
         loading_layout.addWidget(loading_text)
@@ -8062,7 +8083,15 @@ class EpubReaderDialog(QDialog):
             extra_image_dirs=self._extra_image_dirs,
             parent=self,
         )
-        self._overlay_thread.done.connect(self._on_overlay_merge_done)
+        # Lambda-wrap so PySide6 routes the delivery directly instead
+        # of going through Qt's meta-object slot-lookup — the same
+        # build quirk that hits ``_rotate_spinner`` also surfaces here
+        # as ``AttributeError: Slot 'EpubReaderDialog::
+        # _on_overlay_merge_done(...)' not found``.
+        self._overlay_thread.done.connect(
+            lambda overlaid, imgs, applied:
+                self._on_overlay_merge_done(overlaid, imgs, applied)
+        )
         self._overlay_thread.start()
 
     @Slot(object, object, bool)
@@ -8734,6 +8763,15 @@ class EpubReaderDialog(QDialog):
     def _on_reader_load_finished(self, ok):
         """Called when QWebEngineView finishes loading HTML."""
         if not ok:
+            return
+        # Ignore stray load events that fire before a real chapter was
+        # ever queued up. ``_make_reader_widget`` calls
+        # ``setUrl("about:blank")`` to prime the view, which asynchronously
+        # triggers ``loadFinished`` after :meth:`_setup_ui` has connected
+        # this handler but before any chapter data is present. Without
+        # this guard, :meth:`_finalize_single_page` runs against an
+        # empty state and crashes the Python callback pipeline.
+        if not self._chapters:
             return
         # Prime phase: the scroll-mode render has just completed. Swap
         # back to the configured paginated mode immediately — this is the
