@@ -4330,10 +4330,17 @@ class EpubLibraryDialog(QDialog):
         self._reposition_overlays()
 
     def closeEvent(self, event):
-        """Hide the dialog instead of closing \u2014 persist settings."""
+        """Hide the dialog instead of closing \u2014 persist settings.
+
+        Also asks the translator parent to flush the in-memory config
+        dict to ``config.json`` via :func:`_persist_config_via_parent`,
+        so library settings survive app crashes / force-quits instead
+        of only persisting when the main window's own save runs.
+        """
         self._config['epub_library_sort'] = self._sort_mode
         self._config['epub_library_card_size'] = self._card_size
         self._config['epub_library_tab'] = self._current_tab
+        _persist_config_via_parent(self)
         event.ignore()
         self.hide()
 
@@ -6647,6 +6654,49 @@ def _target_lang_to_google_code(name: str) -> str:
     return _READER_GT_LANG_CODES.get(key, "en")
 
 
+def _persist_config_via_parent(widget) -> bool:
+    """Walk *widget*'s parent chain looking for a ``save_config`` method and call it.
+
+    Both :class:`EpubLibraryDialog` and :class:`EpubReaderDialog` mutate
+    the shared ``config`` dict on close (layout mode, font size, sort
+    order, etc.), but that dict only lives in memory until the
+    translator's main window persists it to ``config.json``. On a normal
+    quit the main window's own save runs first, but users who close the
+    app by killing the tab — or who simply want their reader settings
+    to outlive a crash — would lose the just-written values. Walking up
+    to the :class:`TranslatorGUI` (or whichever parent exposes
+    ``save_config``) and triggering a silent save here makes the in-memory
+    changes durable as soon as the dialog closes.
+
+    Returns True when a save ran, False when no eligible parent was
+    found or the save itself raised. Uses ``show_message=False`` when
+    the signature accepts it so the silent-save path doesn't pop an
+    unexpected message box.
+    """
+    try:
+        parent = widget.parent() if hasattr(widget, "parent") else None
+    except Exception:
+        parent = None
+    while parent is not None:
+        save = getattr(parent, "save_config", None)
+        if callable(save):
+            try:
+                try:
+                    save(show_message=False)
+                except TypeError:
+                    save()
+                return True
+            except Exception:
+                logger.debug("Parent save_config failed: %s",
+                             traceback.format_exc())
+                return False
+        try:
+            parent = parent.parent()
+        except Exception:
+            break
+    return False
+
+
 # Reader themes — first one is the default and matches translator_gui.py's dark palette
 _READER_THEMES = [
     {"name": "Dark",     "bg": "#1e1e1e", "fg": "#d4d4d4", "heading": "#c8c8f0",
@@ -7831,15 +7881,17 @@ class EpubReaderDialog(QDialog):
     def _show_reader_context_menu(self, browser, pos):
         """Populate + show the right-click menu for *browser* at *pos*.
 
-        The menu carries two entries driven off the current selection:
+        Menu contents are scoped to the reader's current flavor so the
+        verb matches what the user is looking at:
 
-          * **Google Translate** — opens ``translate.google.com`` in the
-            default browser with ``sl=auto`` and ``tl`` wired to the
-            translator's target-language dropdown (``output_language``).
-            Useful as a quick machine-translation sanity check against
-            the in-app translation for truncation / fidelity issues.
-          * **Search on web** — opens a Google search for the selected
-            text in the default browser.
+          * **Raw** mode — the selection is source-language text, so the
+            sole action is **Google Translate** (``translate.google.com``
+            with ``sl=auto`` + ``tl=<target_language>``). This is the
+            manual-MT sanity-check flow the reader was built for.
+          * **Translated** mode — the selection is already in the target
+            language, so instead we offer **Define on web**, a Google
+            search with the ``define`` operator that surfaces the
+            dictionary card for the selected word / phrase.
 
         Both entries are disabled when no text is selected so the menu
         reads clearly instead of silently doing nothing.
@@ -7858,25 +7910,27 @@ class EpubReaderDialog(QDialog):
             QMenu::item:disabled { color: #555; }
         """)
 
-        gt_action = menu.addAction(
-            f"\U0001f310  Google Translate \u2192 {target_lang}")
-        gt_action.setToolTip(
-            f"Open translate.google.com in your default browser with the "
-            f"selection machine-translated into {target_lang} "
-            f"(source language auto-detected)."
-        )
-        gt_action.setEnabled(has_selection)
-        gt_action.triggered.connect(
-            lambda: self._open_google_translate(selected, target_code))
-
-        search_action = menu.addAction("\U0001f50d  Search on web")
-        search_action.setToolTip(
-            "Open a Google search for the selected text in your default "
-            "browser."
-        )
-        search_action.setEnabled(has_selection)
-        search_action.triggered.connect(
-            lambda: self._open_web_search(selected))
+        if getattr(self, "_show_raw", False):
+            gt_action = menu.addAction(
+                f"\U0001f310  Google Translate \u2192 {target_lang}")
+            gt_action.setToolTip(
+                f"Open translate.google.com in your default browser with the "
+                f"selection machine-translated into {target_lang} "
+                f"(source language auto-detected)."
+            )
+            gt_action.setEnabled(has_selection)
+            gt_action.triggered.connect(
+                lambda: self._open_google_translate(selected, target_code))
+        else:
+            def_action = menu.addAction("\U0001f4d6  Define on web")
+            def_action.setToolTip(
+                "Look up the selected word / phrase on Google using the "
+                "'define' operator — surfaces the dictionary card above "
+                "the regular search results."
+            )
+            def_action.setEnabled(has_selection)
+            def_action.triggered.connect(
+                lambda: self._open_web_define(selected))
 
         menu.exec(browser.mapToGlobal(pos))
 
@@ -7899,19 +7953,27 @@ class EpubReaderDialog(QDialog):
             logger.debug("Google Translate open failed: %s",
                          traceback.format_exc())
 
-    def _open_web_search(self, text: str) -> None:
-        """Hand off *text* to a Google web search in the default browser."""
+    def _open_web_define(self, text: str) -> None:
+        """Open Google's ``define:`` card for *text* in the default browser.
+
+        Uses the ``define`` query prefix rather than a bare search so the
+        dictionary entry (with pronunciation, part of speech, and
+        definitions) renders at the top of the results page. For
+        multi-word selections Google still surfaces the best-matching
+        dictionary card; when no dictionary hit exists Google silently
+        degrades to normal results.
+        """
         text = (text or "").strip()
         if not text:
             return
         from urllib.parse import quote
         from PySide6.QtGui import QDesktopServices
-        encoded = quote(text, safe="")
+        encoded = quote(f"define {text}", safe="")
         url = f"https://www.google.com/search?q={encoded}"
         try:
             QDesktopServices.openUrl(QUrl(url))
         except Exception:
-            logger.debug("Web search open failed: %s",
+            logger.debug("Web define open failed: %s",
                          traceback.format_exc())
 
     def _on_reader_load_finished(self, ok):
@@ -8221,7 +8283,7 @@ class EpubReaderDialog(QDialog):
             self._render_current()
 
     def closeEvent(self, event):
-        """Persist reader settings back into config.
+        """Persist reader settings back into config and flush to disk.
 
         The priming pass in :meth:`_on_epub_loaded_from_cache` temporarily
         flips ``_layout_mode`` to :data:`LAYOUT_SCROLL` while the first
@@ -8231,6 +8293,13 @@ class EpubReaderDialog(QDialog):
         ``"scroll"`` — and since Scroll never triggers priming, every
         subsequent open would open in Scroll and stay there. Fall back
         to ``_prime_saved_mode`` whenever the priming flag is still set.
+
+        After writing into the in-memory ``_config`` dict we also ask
+        the translator parent to flush to ``config.json`` via
+        :func:`_persist_config_via_parent` so the values actually
+        survive to the next session — the main window's own save only
+        runs on an orderly quit, and users' library / reader tweaks
+        shouldn't hinge on that.
         """
         self._config['epub_reader_font_size'] = self._font_size
         self._config['epub_reader_line_spacing'] = self._line_spacing
@@ -8242,6 +8311,7 @@ class EpubReaderDialog(QDialog):
             self._config['epub_reader_layout'] = self._layout_mode
         self._config['epub_reader_font_family'] = self._font_family
         self._config['epub_reader_show_raw'] = self._show_raw
+        _persist_config_via_parent(self)
         super().closeEvent(event)
 
     # ── Chapter rendering ───────────────────────────────────────────────
