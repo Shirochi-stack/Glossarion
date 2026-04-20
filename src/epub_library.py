@@ -1644,6 +1644,79 @@ class _CoverLoader(QThread):
         self.finished.emit(self._file_path, cover or "")
 
 
+class _SelectableGrid(QWidget):
+    """Grid container that supports click-drag rubber-band selection.
+
+    Emits :attr:`rubber_band_selection` once the user finishes a drag.
+    Plain clicks on empty space emit :attr:`empty_clicked` so the parent
+    can clear the current selection. Clicks that land on a :class:`_BookCard`
+    child are handled by the card itself (this widget never receives those).
+    """
+    # (list_of_books_inside_band, modifiers)
+    rubber_band_selection = Signal(list, object)
+    # (modifiers) — fired on a plain click with no drag
+    empty_clicked = Signal(object)
+
+    # Minimum pointer movement (Manhattan distance in px) before we start
+    # showing the rubber band. Prevents a stray twitch on mouse press from
+    # accidentally replacing the current multi-selection with nothing.
+    _DRAG_THRESHOLD = 4
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rubber_band = None
+        self._drag_origin = None
+        self._drag_modifiers = None
+        self._drag_started = False
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_origin = event.pos()
+            self._drag_modifiers = event.modifiers()
+            self._drag_started = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_origin is not None and (event.buttons() & Qt.LeftButton):
+            from PySide6.QtCore import QRect, QSize
+            from PySide6.QtWidgets import QRubberBand
+            delta = event.pos() - self._drag_origin
+            distance = abs(delta.x()) + abs(delta.y())
+            if not self._drag_started and distance > self._DRAG_THRESHOLD:
+                self._drag_started = True
+                if self._rubber_band is None:
+                    self._rubber_band = QRubberBand(QRubberBand.Rectangle, self)
+                self._rubber_band.setGeometry(QRect(self._drag_origin, QSize()))
+                self._rubber_band.show()
+            if self._drag_started and self._rubber_band is not None:
+                rect = QRect(self._drag_origin, event.pos()).normalized()
+                self._rubber_band.setGeometry(rect)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        try:
+            if self._drag_started and self._rubber_band is not None:
+                rect = self._rubber_band.geometry()
+                self._rubber_band.hide()
+                books: list = []
+                for child in self.children():
+                    if isinstance(child, _BookCard):
+                        if rect.intersects(child.geometry()):
+                            books.append(child.book)
+                self.rubber_band_selection.emit(
+                    books, self._drag_modifiers or Qt.NoModifier)
+            elif (event.button() == Qt.LeftButton
+                    and self._drag_origin is not None):
+                # Plain click on empty space (no drag) — let the parent
+                # decide whether to clear the selection.
+                self.empty_clicked.emit(self._drag_modifiers or Qt.NoModifier)
+        finally:
+            self._drag_origin = None
+            self._drag_modifiers = None
+            self._drag_started = False
+        super().mouseReleaseEvent(event)
+
+
 class _BookCard(QFrame):
     clicked = Signal(dict)
     context_menu_requested = Signal(dict, object)
@@ -1895,6 +1968,10 @@ class EpubLibraryDialog(QDialog):
         self._card_size = self._config.get('epub_library_card_size', SIZE_COMPACT)
         self._current_tab = self._config.get('epub_library_tab', 0)
         self._scanner_thread: _DualScannerThread | None = None
+        # Enable drag-and-drop of EPUB / TXT / PDF / HTML files onto the
+        # dialog. Drops are routed through the same import pipeline as the
+        # "Import EPUB" button (see :meth:`_import_paths_into_library`).
+        self.setAcceptDrops(True)
         self._setup_ui()
         # Defer the filesystem scan so the dialog paints immediately;
         # on large libraries scan_for_epubs() + cover-thread spawn can otherwise
@@ -2139,7 +2216,12 @@ class EpubLibraryDialog(QDialog):
             "QScrollArea { border: none; background: transparent; }"
             "QScrollBar:vertical { width: 8px; background: #1a1a2e; }"
             "QScrollBar::handle:vertical { background: #3a3a5e; border-radius: 4px; }")
-        self._ip_grid_container = QWidget()
+        # Use :class:`_SelectableGrid` so the user can click-drag a
+        # rubber-band rectangle across multiple cards to select them.
+        self._ip_grid_container = _SelectableGrid()
+        self._ip_grid_container.rubber_band_selection.connect(
+            self._on_rubber_band_selection)
+        self._ip_grid_container.empty_clicked.connect(self._on_empty_area_clicked)
         self._ip_grid_layout = QGridLayout(self._ip_grid_container)
         self._ip_grid_layout.setContentsMargins(1, 1, 1, 1)
         self._ip_scroll.setWidget(self._ip_grid_container)
@@ -2176,7 +2258,10 @@ class EpubLibraryDialog(QDialog):
         self._comp_scroll = QScrollArea()
         self._comp_scroll.setWidgetResizable(True)
         self._comp_scroll.setStyleSheet(self._ip_scroll.styleSheet())
-        self._comp_grid_container = QWidget()
+        self._comp_grid_container = _SelectableGrid()
+        self._comp_grid_container.rubber_band_selection.connect(
+            self._on_rubber_band_selection)
+        self._comp_grid_container.empty_clicked.connect(self._on_empty_area_clicked)
         self._comp_grid_layout = QGridLayout(self._comp_grid_container)
         self._comp_grid_layout.setContentsMargins(1, 1, 1, 1)
         self._comp_scroll.setWidget(self._comp_grid_container)
@@ -2304,27 +2389,105 @@ class EpubLibraryDialog(QDialog):
         _open_folder_in_explorer(lib)
 
     def _import_epub(self):
-        """Pick a raw source EPUB, copy it into Library/Raw, and scaffold an
-        output folder in the configured output root with a source_epub.txt
-        pointer. This is how the In Progress tab picks the book up later.
+        """Pick raw source EPUB(s), copy them into Library/Raw, and scaffold
+        output folders in the configured output root with a source_epub.txt
+        pointer. This is how the In Progress tab picks each book up later.
 
-        The import does NOT push the file into the translator's input field
+        The import does NOT push the files into the translator's input field
         — that's what the context-menu "Load for translation" action is for.
         """
         from PySide6.QtWidgets import QFileDialog
         start_dir = str(Path.home() / "Downloads")
         if not os.path.isdir(start_dir):
             start_dir = str(Path.home())
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import EPUB into Library", start_dir,
-            "EPUB files (*.epub);;All supported (*.epub *.txt *.pdf);;All files (*.*)",
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Import file(s) into Library", start_dir,
+            "EPUB files (*.epub);;All supported (*.epub *.txt *.pdf *.html);;All files (*.*)",
         )
-        if not path:
+        if not paths:
             return
-        path = os.path.abspath(path)
-        if not os.path.isfile(path):
-            QMessageBox.warning(self, "Import EPUB", "Selected path is not a file.")
+        self._import_paths_into_library(paths, source="picker")
+
+    def _import_paths_into_library(self, paths, source: str = "picker"):
+        """Core import pipeline used by both the file picker and drag-drop.
+
+        Copies each supported file into ``Library/Raw`` (counter-suffix on
+        name collision), scaffolds an output folder with a
+        ``source_epub.txt`` sidecar + empty ``translation_progress.json``,
+        and refreshes the library once all files have been processed.
+        Shows a single summary dialog at the end so batch imports don't
+        spam modal messages.
+        """
+        if not paths:
             return
+        supported_exts = (".epub", ".txt", ".pdf", ".html", ".htm")
+        imported: list[str] = []
+        skipped: list[str] = []
+        errors: list[str] = []
+        for raw_path in paths:
+            try:
+                if not raw_path:
+                    continue
+                path = os.path.abspath(raw_path)
+                if not os.path.isfile(path):
+                    skipped.append(f"{os.path.basename(raw_path)} (not a file)")
+                    continue
+                if not path.lower().endswith(supported_exts):
+                    skipped.append(f"{os.path.basename(path)} (unsupported type)")
+                    continue
+                dest = self._import_single_file(path)
+                if dest:
+                    imported.append(dest)
+            except Exception as exc:
+                logger.error("Import failed for %s: %s\n%s",
+                             raw_path, exc, traceback.format_exc())
+                errors.append(f"{os.path.basename(raw_path)}: {exc}")
+        if imported:
+            QTimer.singleShot(0, self._load_books)
+        # Summary dialog — one message per batch, not per file.
+        if imported or skipped or errors:
+            title = "Import"
+            parts: list[str] = []
+            if imported:
+                parts.append(
+                    f"Imported {len(imported)} file{'s' if len(imported) != 1 else ''} "
+                    f"into Library/Raw."
+                )
+                if len(imported) <= 10:
+                    parts.append("\n".join(
+                        "  \u2022 " + os.path.basename(p) for p in imported))
+                else:
+                    parts.append("\n".join(
+                        "  \u2022 " + os.path.basename(p) for p in imported[:10]))
+                    parts.append(f"  \u2026 and {len(imported) - 10} more.")
+            if skipped:
+                parts.append(
+                    f"\nSkipped {len(skipped)} file{'s' if len(skipped) != 1 else ''}:"
+                )
+                parts.append("\n".join("  \u2022 " + s for s in skipped[:8]))
+            if errors:
+                parts.append(
+                    f"\n{len(errors)} error{'s' if len(errors) != 1 else ''}:"
+                )
+                parts.append("\n".join("  \u2022 " + e for e in errors[:5]))
+            if imported:
+                parts.append(
+                    "\nRight-click any card and choose \u201cLoad for translation\u201d "
+                    "when you're ready to translate."
+                )
+            body = "\n".join(parts)
+            if imported and not errors:
+                QMessageBox.information(self, title, body)
+            else:
+                QMessageBox.warning(self, title, body)
+
+    def _import_single_file(self, path: str) -> str | None:
+        """Copy *path* into Library/Raw and scaffold its output folder.
+
+        Returns the destination path in Library/Raw on success, None on
+        failure. Raises no exceptions — failures are logged and surfaced
+        via the caller's aggregated error list.
+        """
         try:
             raw_dir = get_library_raw_dir()
             dest = os.path.join(raw_dir, os.path.basename(path))
@@ -2344,12 +2507,9 @@ class EpubLibraryDialog(QDialog):
                 shutil.copy2(path, dest)
             record_library_raw_input(dest)
         except Exception as exc:
-            logger.error("Import copy failed: %s\n%s", exc, traceback.format_exc())
-            QMessageBox.warning(self, "Import EPUB",
-                                f"Could not copy the EPUB into Library/Raw:\n{exc}")
-            return
-        # Scaffold the output folder so the card appears in the In Progress
-        # tab right away (empty progress file + source_epub.txt pointer).
+            logger.error("Import copy failed for %s: %s\n%s",
+                         path, exc, traceback.format_exc())
+            raise
         try:
             roots = _resolve_output_roots(self._config)
             if roots:
@@ -2360,26 +2520,20 @@ class EpubLibraryDialog(QDialog):
                 sidecar = os.path.join(output_folder, "source_epub.txt")
                 with open(sidecar, "w", encoding="utf-8") as f:
                     f.write(dest)
-                progress_file_path = os.path.join(output_folder, "translation_progress.json")
+                progress_file_path = os.path.join(
+                    output_folder, "translation_progress.json")
                 if not os.path.isfile(progress_file_path):
                     import json as _json
                     with open(progress_file_path, "w", encoding="utf-8") as pf:
-                        _json.dump({"chapters": {}, "chapter_chunks": {}, "version": "2.1"},
-                                   pf, ensure_ascii=False, indent=2)
+                        _json.dump(
+                            {"chapters": {}, "chapter_chunks": {}, "version": "2.1"},
+                            pf, ensure_ascii=False, indent=2,
+                        )
         except Exception as exc:
-            logger.error("Output scaffold failed: %s\n%s", exc, traceback.format_exc())
-            QMessageBox.warning(self, "Import EPUB",
-                                f"Copied into Library/Raw, but could not create the "
-                                f"output folder:\n{exc}")
-            return
-        QMessageBox.information(
-            self, "Import EPUB",
-            f"Imported into Library/Raw:\n{os.path.basename(dest)}\n\n"
-            f"An output folder has been created. Right-click the card and\n"
-            f"choose \u201cLoad for translation\u201d when you're ready to translate.",
-        )
-        # Force a refresh so the card shows up immediately.
-        QTimer.singleShot(0, self._load_books)
+            logger.error("Output scaffold failed for %s: %s\n%s",
+                         path, exc, traceback.format_exc())
+            raise
+        return dest
 
     def _load_for_translation(self, book: dict):
         """Push the card's raw source path into the translator's input field.
@@ -2867,6 +3021,38 @@ class EpubLibraryDialog(QDialog):
             return self._selected_paths_ip, self._ip_cards
         return self._selected_paths_comp, self._comp_cards
 
+    def _on_rubber_band_selection(self, books: list, modifiers):
+        """Apply rubber-band drag selection to the active tab.
+
+        Ctrl / Shift preserves the existing selection and adds to it;
+        a plain drag replaces the selection with whatever landed in the
+        rubber-band rectangle.
+        """
+        selected, cards = self._active_selection()
+        paths = {b.get("path", "") for b in books if b.get("path", "")}
+        extend = bool(modifiers & (Qt.ControlModifier | Qt.ShiftModifier))
+        if not extend:
+            selected.clear()
+        selected.update(paths)
+        for c in cards:
+            c.set_selected(c.book.get("path", "") in selected)
+
+    def _on_empty_area_clicked(self, modifiers):
+        """Clear the active-tab selection when user clicks empty grid space.
+
+        Skipped when the user is modifying the existing selection with
+        Ctrl / Shift — otherwise a fat-fingered click would wipe a
+        carefully-built multi-selection.
+        """
+        if modifiers & (Qt.ControlModifier | Qt.ShiftModifier):
+            return
+        selected, cards = self._active_selection()
+        if not selected:
+            return
+        selected.clear()
+        for c in cards:
+            c.set_selected(False)
+
     def _on_card_select_requested(self, book: dict, modifiers):
         """Handle left-click selection with modifier semantics.
 
@@ -3096,17 +3282,78 @@ class EpubLibraryDialog(QDialog):
         event.ignore()
         self.hide()
 
+    # -- Drag & drop import -------------------------------------------------
+
+    _DND_SUPPORTED_EXTS = (".epub", ".txt", ".pdf", ".html", ".htm")
+
+    def _dnd_accept_event(self, event) -> bool:
+        """Return True iff the drag payload contains at least one supported file."""
+        mime = event.mimeData()
+        if not mime or not mime.hasUrls():
+            return False
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            path = url.toLocalFile()
+            if path and path.lower().endswith(self._DND_SUPPORTED_EXTS):
+                return True
+        return False
+
+    def dragEnterEvent(self, event):
+        if self._dnd_accept_event(event):
+            event.setDropAction(Qt.CopyAction)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if self._dnd_accept_event(event):
+            event.setDropAction(Qt.CopyAction)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        mime = event.mimeData()
+        if not mime or not mime.hasUrls():
+            event.ignore()
+            return
+        paths: list[str] = []
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            p = url.toLocalFile()
+            if p and p.lower().endswith(self._DND_SUPPORTED_EXTS):
+                paths.append(p)
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        # Switch to the In Progress tab so the freshly-imported cards are
+        # visible as soon as the scan refresh lands.
+        try:
+            self._tabs.setCurrentIndex(0)
+        except Exception:
+            pass
+        self._import_paths_into_library(paths, source="drop")
+
 
 # ---------------------------------------------------------------------------
 # Book Details — metadata / TOC parser
 # ---------------------------------------------------------------------------
 
-def _parse_epub_details(epub_path: str) -> dict:
+def _parse_epub_details(epub_path: str, parse_chapter_titles: bool = True) -> dict:
     """Extract OPF metadata, spine order and per-chapter raw titles.
 
     Returns a dict shaped roughly like the OPF DC schema plus a ``chapters``
     list of ``{'href', 'filename', 'title'}``. All fields are best-effort and
     may be empty strings/lists on failure.
+
+    When *parse_chapter_titles* is False, per-chapter HTML is not opened
+    and chapter titles fall back to filename-derived labels. This is the
+    fast path :class:`_BookDetailsLoader` uses for its preview pass so
+    the cover + metadata render immediately while the real titles are
+    parsed in the background.
     """
     import zipfile
     import posixpath
@@ -3199,8 +3446,12 @@ def _parse_epub_details(epub_path: str) -> dict:
                         ordered_hrefs.append((idref, manifest[idref][0]))
 
             # Parse each chapter file for a title. Keep it cheap: only peek at
-            # the first ~32KB which is more than enough for <title>/<h1>.
-            from bs4 import BeautifulSoup
+            # the first ~32KB which is more than enough for <title>/<h1>. The
+            # per-chapter HTML scan is the dominant cost for large spines
+            # (~399 chapters), so callers that only need metadata skip it
+            # via ``parse_chapter_titles=False`` and use filename fallbacks.
+            if parse_chapter_titles:
+                from bs4 import BeautifulSoup
             chapters = []
             for idref, href in ordered_hrefs:
                 media_type = manifest.get(idref, ("", ""))[1]
@@ -3210,7 +3461,7 @@ def _parse_epub_details(epub_path: str) -> dict:
                                      "title": os.path.splitext(os.path.basename(href))[0]})
                     continue
                 title = ""
-                if href in names_set:
+                if parse_chapter_titles and href in names_set:
                     try:
                         raw = zf.read(href)[:32_768]
                         soup = BeautifulSoup(raw, "html.parser")
@@ -3256,7 +3507,20 @@ def _read_translated_chapter_title(path: str) -> str:
 
 
 class _BookDetailsLoader(QThread):
-    """Parse EPUB metadata + TOC + translation status off the UI thread."""
+    """Parse EPUB metadata + TOC + translation status off the UI thread.
+
+    Emits two signals during the lifetime of a single ``run()`` call:
+
+    * :attr:`preview_ready` — fires as soon as the OPF metadata + cover
+      are extracted (fast path, no per-chapter HTML parsing). The details
+      dialog renders the hero (cover, title, synopsis, metadata grid)
+      immediately from this payload so the user isn't staring at a
+      Halgakos placeholder while ~400 chapter HTML blobs are decoded.
+    * :attr:`done` — fires once the full chapters_info list (including
+      per-chapter raw titles, translated titles, and on-disk status)
+      has been built. Drives the chapter list + progress strip.
+    """
+    preview_ready = Signal(dict)
     done = Signal(dict)
     error = Signal(str)
 
@@ -3321,7 +3585,12 @@ class _BookDetailsLoader(QThread):
             source_is_epub = (bool(source_epub)
                               and source_epub.lower().endswith(".epub")
                               and os.path.isfile(source_epub))
-            details = _parse_epub_details(source_epub) if source_is_epub else {
+
+            # ---- Phase 1: Fast metadata + cover (no per-chapter HTML) ----
+            # Skips the BeautifulSoup pass over every spine chapter so the
+            # details hero paints instantly; the full chapter titles are
+            # re-parsed in Phase 2 below and emitted via ``done``.
+            details = _parse_epub_details(source_epub, parse_chapter_titles=False) if source_is_epub else {
                 "title": "", "authors": [], "publisher": "", "language": "",
                 "date": "", "description": "", "subjects": [], "identifier": "",
                 "chapters": [],
@@ -3333,6 +3602,34 @@ class _BookDetailsLoader(QThread):
             # back to any image the output folder has on disk.
             if not cover and output_folder and os.path.isdir(output_folder):
                 cover = _find_cover_in_dir(output_folder)
+
+            # Load metadata.json eagerly so the preview already has the
+            # translator-overriden title / authors / description.
+            metadata_json = None
+            if output_folder:
+                meta_path = os.path.join(output_folder, "metadata.json")
+                if os.path.isfile(meta_path):
+                    try:
+                        import json as _json
+                        with open(meta_path, "r", encoding="utf-8") as f:
+                            metadata_json = _json.load(f)
+                    except Exception:
+                        metadata_json = None
+
+            # Emit the preview so the dialog can paint the hero row now.
+            self.preview_ready.emit({
+                "details": details,
+                "cover": cover or "",
+                "metadata_json": metadata_json or {},
+            })
+
+            # ---- Phase 2: Slow per-chapter title parsing ----
+            # Re-parse the spine WITH per-chapter HTML title extraction so
+            # the chapter list can show "Prologue", "Chapter 1: ..." etc.
+            # rather than just filename stubs.
+            if source_is_epub:
+                details = _parse_epub_details(source_epub, parse_chapter_titles=True)
+
             prog = None
             if progress_file and os.path.isfile(progress_file):
                 summary = _read_progress_summary(progress_file)
@@ -3447,17 +3744,7 @@ class _BookDetailsLoader(QThread):
                     "is_special": is_special,
                 })
 
-            # Optional metadata.json overrides (translator-produced).
-            metadata_json = None
-            if output_folder:
-                meta_path = os.path.join(output_folder, "metadata.json")
-                if os.path.isfile(meta_path):
-                    try:
-                        import json as _json
-                        with open(meta_path, "r", encoding="utf-8") as f:
-                            metadata_json = _json.load(f)
-                    except Exception:
-                        metadata_json = None
+            # metadata_json was loaded in Phase 1 above.
 
             self.done.emit({
                 "details": details,
@@ -3805,10 +4092,33 @@ class BookDetailsDialog(QDialog):
 
     def _start_loading(self):
         self._synopsis_lbl.setText("Loading book details\u2026")
+        # Install a placeholder in the chapters section so the user sees
+        # activity while the (slower) spine parse is running in the
+        # background. Replaced in :meth:`_on_details_ready` with real rows.
+        self._show_chapter_placeholder()
         self._loader = _BookDetailsLoader(self._book, self)
+        # ``preview_ready`` fires first with cover + metadata so the hero
+        # paints immediately; ``done`` follows with the full chapter list.
+        self._loader.preview_ready.connect(self._on_preview_ready)
         self._loader.done.connect(self._on_details_ready)
         self._loader.error.connect(self._on_details_error)
         self._loader.start()
+
+    def _show_chapter_placeholder(self):
+        """Render a "Loading chapters\u2026" row while Phase 2 is running."""
+        while self._chap_layout.count():
+            item = self._chap_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+        loading = QLabel("\u23f3  Loading chapters\u2026")
+        loading.setAlignment(Qt.AlignCenter)
+        loading.setStyleSheet(
+            "color: #7a8599; font-size: 10pt; padding: 22px; font-style: italic;"
+        )
+        self._chap_layout.addWidget(loading)
+        self._chap_layout.addStretch()
 
     def _apply_halgakos_fallback(self):
         """Render the Halgakos brand icon into the cover label.
@@ -3843,11 +4153,15 @@ class BookDetailsDialog(QDialog):
             self._cover_lbl.setPixmap(QPixmap())
             self._cover_lbl.setText("\U0001f4d6")
 
-    @Slot(dict)
-    def _on_details_ready(self, payload: dict):
-        self._details = payload.get("details", {}) or {}
-        self._chapters_info = payload.get("chapters_info", []) or []
-        self._metadata_json = payload.get("metadata_json", {}) or {}
+    def _apply_hero_payload(self, payload: dict):
+        """Paint cover + title + author + synopsis + metadata grid.
+
+        Shared between :meth:`_on_preview_ready` (fast pass, no chapter
+        data yet) and :meth:`_on_details_ready` (final pass). Safe to
+        call repeatedly — the grid is cleared + rebuilt each invocation.
+        """
+        self._details = payload.get("details", self._details) or self._details
+        self._metadata_json = payload.get("metadata_json", self._metadata_json) or self._metadata_json
         cover_path = payload.get("cover", "")
         cover_applied = False
         if cover_path:
@@ -3921,6 +4235,48 @@ class BookDetailsDialog(QDialog):
         self._tags_heading.setVisible(bool(tags))
         self._tags_row.setVisible(bool(tags))
 
+        # Button availability — also dim the emoji + update tooltip so it's
+        # obvious why the action isn't usable. (Previously only computed in
+        # _on_details_ready; moved to the shared hero pass so the preview
+        # already enables / disables the actions correctly.)
+        out_folder = self._book.get("output_folder") or ""
+        folder_ok = bool(out_folder) and os.path.isdir(out_folder)
+        self._folder_btn.setEnabled(folder_ok)
+        self._folder_btn.setCursor(Qt.PointingHandCursor if folder_ok else Qt.ForbiddenCursor)
+        self._folder_btn_opacity.setOpacity(1.0 if folder_ok else 0.35)
+        self._folder_btn.setToolTip(
+            "Open output folder in file explorer" if folder_ok
+            else "Output folder not available for this book"
+        )
+        src_path = (self._book.get("raw_source_path", "")
+                    or self._book.get("path", "") or "")
+        source_ok = bool(src_path) and os.path.isfile(src_path)
+        self._source_btn.setEnabled(source_ok)
+        self._source_btn.setCursor(Qt.PointingHandCursor if source_ok else Qt.ForbiddenCursor)
+        self._source_btn_opacity.setOpacity(1.0 if source_ok else 0.35)
+        self._source_btn.setToolTip(
+            "Reveal source file" if source_ok
+            else "Source file not found on disk"
+        )
+
+    @Slot(dict)
+    def _on_preview_ready(self, payload: dict):
+        """Render the hero row from Phase 1 (cover + metadata) immediately.
+
+        Called before ``_on_details_ready`` so the user sees a fully
+        populated cover + title + synopsis in milliseconds, without
+        waiting for the spine's per-chapter HTML parse.
+        """
+        self._apply_hero_payload(payload)
+
+    @Slot(dict)
+    def _on_details_ready(self, payload: dict):
+        self._chapters_info = payload.get("chapters_info", []) or []
+        # Re-apply the hero with the richer details returned by Phase 2
+        # (OPF now includes real chapter titles, metadata_json may have
+        # been re-loaded). Hero widgets are idempotent so this is safe.
+        self._apply_hero_payload(payload)
+
         # In-progress strip + reader-entry-point relabeling
         has_translated = any(c.get("translated_path") for c in self._chapters_info)
         if self._book.get("is_in_progress"):
@@ -3970,34 +4326,9 @@ class BookDetailsDialog(QDialog):
 
         # Chapter rows
         self._populate_chapters()
-
-        # Button availability — also dim the emoji + update tooltip so it's
-        # obvious why the action isn't usable. Qt's default disabled state
-        # only grays the button chrome; emoji glyphs are unaffected by the
-        # stylesheet `color:` rule, so we lower the widget's opacity directly.
-        out_folder = self._book.get("output_folder") or ""
-        folder_ok = bool(out_folder) and os.path.isdir(out_folder)
-        self._folder_btn.setEnabled(folder_ok)
-        self._folder_btn.setCursor(Qt.PointingHandCursor if folder_ok else Qt.ForbiddenCursor)
-        self._folder_btn_opacity.setOpacity(1.0 if folder_ok else 0.35)
-        self._folder_btn.setToolTip(
-            "Open output folder in file explorer" if folder_ok
-            else "Output folder not available for this book"
-        )
-
-        # For in-progress cards ``path`` is the output folder, not the raw
-        # source file — prefer ``raw_source_path`` so the reveal button
-        # targets the actual file on disk.
-        src_path = (self._book.get("raw_source_path", "")
-                    or self._book.get("path", "") or "")
-        source_ok = bool(src_path) and os.path.isfile(src_path)
-        self._source_btn.setEnabled(source_ok)
-        self._source_btn.setCursor(Qt.PointingHandCursor if source_ok else Qt.ForbiddenCursor)
-        self._source_btn_opacity.setOpacity(1.0 if source_ok else 0.35)
-        self._source_btn.setToolTip(
-            "Reveal source file" if source_ok
-            else "Source file not found on disk"
-        )
+        # Button availability is handled inside :meth:`_apply_hero_payload`
+        # so both the preview and the final pass enable / disable actions
+        # consistently. No extra work needed here.
 
     def _fill_chip_row(self, layout: QHBoxLayout, values: list[str]):
         # Remove all but the trailing stretch
