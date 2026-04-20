@@ -529,15 +529,35 @@ def _extract_cover(epub_path: str) -> str | None:
 
 
 def _open_folder_in_explorer(path: str):
+    """Reveal *path* in the OS file manager.
+
+    On Windows the subprocess call passes ``CREATE_NO_WINDOW`` so the
+    spawned ``explorer.exe`` invocation doesn't flash a console window
+    beside the cursor before the Explorer pane appears. The viewer-open
+    helpers elsewhere in this module already use the same flag; this
+    brings ``_open_folder_in_explorer`` into line so there are no
+    unsuppressed Popen paths left.
+    """
+    # CREATE_NO_WINDOW lives on ``subprocess`` on Windows and is a
+    # no-op elsewhere, so we resolve it with ``getattr`` for a
+    # cross-platform single-expression form. 0x08000000 is the raw
+    # value for older / frozen interpreters that don't expose the
+    # attribute directly.
+    _no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
     try:
         folder = os.path.dirname(path) if os.path.isfile(path) else path
         if platform.system() == "Windows":
             if os.path.isfile(path):
-                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+                subprocess.Popen(
+                    ["explorer", "/select,", os.path.normpath(path)],
+                    creationflags=_no_window,
+                )
             else:
                 os.startfile(folder)
         elif platform.system() == "Darwin":
-            subprocess.Popen(["open", "-R", path] if os.path.isfile(path) else ["open", folder])
+            subprocess.Popen(
+                ["open", "-R", path] if os.path.isfile(path) else ["open", folder]
+            )
         else:
             subprocess.Popen(["xdg-open", folder])
     except Exception as exc:
