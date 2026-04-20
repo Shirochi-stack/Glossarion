@@ -5439,6 +5439,30 @@ class BookDetailsDialog(QDialog):
         self._chap_layout.setSpacing(4)
         # Visible by default — the TOC is the main reading entry point.
         body_layout.addWidget(self._chap_container)
+        # Separate "user intent" flag for the chapter section's
+        # visibility. The loading placeholder flips ``_chap_container``'s
+        # visibility as an implementation detail, so we can't use
+        # :meth:`isVisible` as the source of truth — we'd end up
+        # collapsing the section every time the placeholder hid the
+        # container. :meth:`_toggle_chapters` updates this flag; every
+        # other codepath (populate, refresh, search filter) consults it.
+        self._chap_section_expanded = True
+
+        # Standalone "⏳  Loading chapters…" placeholder that sits in the
+        # same body slot as the chapter container. Kept as a SIBLING
+        # widget (not inside ``_chap_layout``) so it stays on screen
+        # uninterrupted while :meth:`_populate_chapters` clears the
+        # layout + batches in the new rows — the user sees one loading
+        # state that ends with all rows appearing at once, instead of
+        # watching rows pop in over multiple seconds.
+        self._chap_loading_lbl = QLabel("\u23f3  Loading chapters\u2026")
+        self._chap_loading_lbl.setAlignment(Qt.AlignCenter)
+        self._chap_loading_lbl.setMinimumHeight(60)
+        self._chap_loading_lbl.setStyleSheet(
+            "color: #7a8599; font-size: 10pt; padding: 28px 22px 24px 22px;"
+        )
+        self._chap_loading_lbl.hide()
+        body_layout.addWidget(self._chap_loading_lbl)
 
         body_layout.addStretch()
         outer.addWidget(self._scroll, 1)
@@ -5460,26 +5484,29 @@ class BookDetailsDialog(QDialog):
         self._loader.start()
 
     def _show_chapter_placeholder(self):
-        """Render a "Loading chapters\u2026" row while Phase 2 is running."""
+        """Show the "⏳  Loading chapters…" placeholder while the chapter
+        list isn't ready to display.
+
+        Toggles the standalone :attr:`_chap_loading_lbl` sibling widget
+        instead of stuffing a label inside ``_chap_layout`` — that way
+        the clear-and-rebuild inside :meth:`_populate_chapters` can
+        happen silently behind the hidden container while the user
+        still sees a steady loading message.
+        """
+        # Clear any stale rows (e.g. leftover from a previous open)
+        # without resurrecting a per-layout placeholder label.
         while self._chap_layout.count():
             item = self._chap_layout.takeAt(0)
             w = item.widget()
             if w:
                 w.setParent(None)
                 w.deleteLater()
-        # The previous version combined an italic font with the hourglass
-        # emoji, which Qt renders with a color emoji font that doesn’t have
-        # an italic variant — the resulting glyph metrics clipped the top
-        # of the emoji. Drop the italic, reserve a min-height, and add a
-        # bit more top padding so the emoji has room to breathe.
-        loading = QLabel("\u23f3  Loading chapters\u2026")
-        loading.setAlignment(Qt.AlignCenter)
-        loading.setMinimumHeight(60)
-        loading.setStyleSheet(
-            "color: #7a8599; font-size: 10pt; padding: 28px 22px 24px 22px;"
-        )
-        self._chap_layout.addWidget(loading)
-        self._chap_layout.addStretch()
+        # Hide the chapter container (which is currently empty) and show
+        # the sibling placeholder in its slot.
+        if getattr(self, "_chap_container", None) is not None:
+            self._chap_container.hide()
+        if getattr(self, "_chap_loading_lbl", None) is not None:
+            self._chap_loading_lbl.show()
 
     def _apply_halgakos_fallback(self):
         """Render the Halgakos brand icon into the cover label.
@@ -5817,8 +5844,13 @@ class BookDetailsDialog(QDialog):
         was constructed synchronously. We now build the rows in batches
         of :data:`_POPULATE_BATCH_SIZE` per tick via a zero-interval
         ``QTimer``, so the Qt event loop keeps dispatching in between.
-        Any pre-existing batch timer is cancelled first so a toggle
-        flip (e.g. Show raw titles) doesn't double-render.
+        The chapter container stays hidden behind the
+        "⏳  Loading chapters…" placeholder while the batches land, so
+        the user sees one steady loading state that flips to the fully
+        built list in a single swap — rather than watching rows pop in
+        over multiple seconds. Any pre-existing batch timer is
+        cancelled first so a toggle flip (e.g. Show raw titles)
+        doesn't double-render.
         """
         # Tear down before rebuilding and disable activation for the window
         # of time while we're mutating the list — this flag is read from
@@ -5831,7 +5863,25 @@ class BookDetailsDialog(QDialog):
         populate_timer = getattr(self, "_populate_timer", None)
         if populate_timer is not None and populate_timer.isActive():
             populate_timer.stop()
-        # Clear previous rows
+        # Read user intent from the toggle flag rather than the
+        # container's live visibility — the placeholder hides the
+        # container as an implementation detail, so isVisible() would
+        # incorrectly report "collapsed" on every load.
+        target_visible = bool(getattr(self, "_chap_section_expanded", True))
+        # Hide the container while we clear + rebuild it, and show the
+        # sibling loading placeholder in its slot so the user isn't
+        # staring at an empty space or flickering rows.
+        try:
+            self._chap_container.hide()
+        except Exception:
+            pass
+        if getattr(self, "_chap_loading_lbl", None) is not None:
+            # Only show the placeholder when the user currently expects
+            # the chapter section to be visible. For a collapsed TOC we
+            # leave it hidden too — otherwise clicking Refresh would
+            # surprise the user with an unwanted reveal.
+            self._chap_loading_lbl.setVisible(bool(target_visible))
+        # Clear previous rows (placeholder now lives outside this layout).
         while self._chap_layout.count():
             item = self._chap_layout.takeAt(0)
             w = item.widget()
@@ -5844,11 +5894,18 @@ class BookDetailsDialog(QDialog):
         self._populate_infos = list(self._chapters_info)
         self._populate_idx = 0
         self._populate_show_raw_title = bool(self._show_raw_titles)
+        self._populate_target_visible = bool(target_visible)
 
         if not self._populate_infos:
             self._chap_layout.addStretch()
             self._apply_chapter_filter(self._toc_search.text())
             self._update_toc_toggle_label()
+            # Nothing to build — flip the loading placeholder back off
+            # and reveal the (empty) container if the user expects it.
+            if getattr(self, "_chap_loading_lbl", None) is not None:
+                self._chap_loading_lbl.hide()
+            if target_visible:
+                self._chap_container.show()
             self._chapters_loaded = True
             return
 
@@ -5859,11 +5916,12 @@ class BookDetailsDialog(QDialog):
             populate_timer.timeout.connect(self._populate_chapters_batch_tick)
             self._populate_timer = populate_timer
 
-        # Render the first batch synchronously so the user sees
-        # immediate progress, then let the timer chip away at the rest.
-        self._populate_chapters_batch_tick()
-        if self._populate_idx < len(self._populate_infos):
-            populate_timer.start()
+        # Kick the first batch off asynchronously so the loading
+        # placeholder actually paints before we start building rows
+        # behind it. Starting the timer triggers the first tick on the
+        # next event-loop iteration, by which point the UI has already
+        # had a chance to swap in the "⏳ Loading chapters…" label.
+        populate_timer.start()
 
     def _populate_chapters_batch_tick(self):
         """Render the next :data:`_POPULATE_BATCH_SIZE` chapter rows.
@@ -5899,6 +5957,13 @@ class BookDetailsDialog(QDialog):
             self._chap_layout.addStretch()
             self._apply_chapter_filter(self._toc_search.text())
             self._update_toc_toggle_label()
+            # Swap: hide the loading placeholder and reveal the fully
+            # built chapter container in one go, so the user sees the
+            # whole list appear at once instead of the per-batch pop-in.
+            if getattr(self, "_chap_loading_lbl", None) is not None:
+                self._chap_loading_lbl.hide()
+            if getattr(self, "_populate_target_visible", True):
+                self._chap_container.show()
             self._chapters_loaded = True
 
     def _on_chapter_clicked(self, idx: int):
@@ -5943,7 +6008,10 @@ class BookDetailsDialog(QDialog):
 
     def _update_toc_toggle_label(self):
         done, total = self._visible_counts()
-        prefix = "\u25bc  Chapters" if self._chap_container.isVisible() else "\u25b6  Chapters"
+        # Use the intent flag (not the container's live visibility) so
+        # the arrow glyph doesn't flip to ▶ while the loading
+        # placeholder is masking the container during a batched build.
+        prefix = "\u25bc  Chapters" if self._chap_section_expanded else "\u25b6  Chapters"
         if not total:
             suffix = "  (\u2014)"
         elif self._has_progress_context():
@@ -6004,8 +6072,14 @@ class BookDetailsDialog(QDialog):
             self._populate_chapters()
 
     def _toggle_chapters(self):
-        show = not self._chap_container.isVisible()
+        # Flip user intent, then apply it to the actual widgets.
+        show = not bool(getattr(self, "_chap_section_expanded", True))
+        self._chap_section_expanded = show
         self._chap_container.setVisible(show)
+        # Loading placeholder never survives a manual toggle — if the
+        # user collapsed mid-load, it makes no sense to keep showing it.
+        if getattr(self, "_chap_loading_lbl", None) is not None:
+            self._chap_loading_lbl.hide()
         self._toc_search.setVisible(show)
         self._special_cb.setVisible(show)
         # Mirror the applicability rule used in :meth:`_on_details_ready`
