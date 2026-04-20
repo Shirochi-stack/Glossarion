@@ -25,8 +25,8 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QToolButton,
     QApplication, QMenu, QComboBox, QStackedWidget
 )
-from PySide6.QtCore import Qt, QSize, Signal, Slot, QThread, QTimer, QSizeF, QUrl
-from PySide6.QtGui import QPixmap, QFont, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform
+from PySide6.QtCore import Qt, QSize, QRect, Signal, Slot, QThread, QTimer, QSizeF, QUrl
+from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform
 
 # Use QWebEngineView for full CSS support (images, block layout, etc.)
 try:
@@ -1523,17 +1523,89 @@ SIZE_6XL = "6xl"
 
 _ALL_SIZES = [SIZE_COMPACT, SIZE_NORMAL, SIZE_LARGE, SIZE_XL, SIZE_2XL, SIZE_3XL, SIZE_4XL, SIZE_5XL, SIZE_6XL]
 
+# Title rendering: there's no hard character cap anymore — the title is
+# rendered at ``title_size`` first; if it overflows ``title_max_h`` vertically
+# we dynamically shrink the font down to ``title_min_size`` and only truncate
+# with an ellipsis if even that's not enough. See :func:`_fit_title_text`.
 _SIZE_PRESETS = {
-    SIZE_COMPACT: {"card_w": 110, "cover_h": 140, "title_size": "8pt", "title_max_len": 36, "title_max_h": 64, "spacing": 3},
-    SIZE_NORMAL:  {"card_w": 140, "cover_h": 175, "title_size": "8.5pt", "title_max_len": 48, "title_max_h": 72, "spacing": 4},
-    SIZE_LARGE:   {"card_w": 180, "cover_h": 225, "title_size": "9pt", "title_max_len": 64, "title_max_h": 80, "spacing": 5},
-    SIZE_XL:      {"card_w": 230, "cover_h": 290, "title_size": "9.5pt", "title_max_len": 80, "title_max_h": 88, "spacing": 6},
-    SIZE_2XL:     {"card_w": 290, "cover_h": 365, "title_size": "10pt", "title_max_len": 100, "title_max_h": 96, "spacing": 8},
-    SIZE_3XL:     {"card_w": 360, "cover_h": 450, "title_size": "10.5pt", "title_max_len": 120, "title_max_h": 104, "spacing": 10},
-    SIZE_4XL:     {"card_w": 440, "cover_h": 550, "title_size": "11pt", "title_max_len": 140, "title_max_h": 112, "spacing": 12},
-    SIZE_5XL:     {"card_w": 530, "cover_h": 660, "title_size": "11.5pt", "title_max_len": 160, "title_max_h": 120, "spacing": 14},
-    SIZE_6XL:     {"card_w": 630, "cover_h": 790, "title_size": "12pt", "title_max_len": 180, "title_max_h": 128, "spacing": 16},
+    SIZE_COMPACT: {"card_w": 110, "cover_h": 140, "title_size": "8.5pt",  "title_min_size": "6.5pt", "title_max_h": 48, "spacing": 3},
+    SIZE_NORMAL:  {"card_w": 140, "cover_h": 175, "title_size": "9pt",    "title_min_size": "7pt",   "title_max_h": 52, "spacing": 4},
+    SIZE_LARGE:   {"card_w": 180, "cover_h": 225, "title_size": "9.5pt",  "title_min_size": "7.5pt", "title_max_h": 58, "spacing": 5},
+    SIZE_XL:      {"card_w": 230, "cover_h": 290, "title_size": "10pt",   "title_min_size": "8pt",   "title_max_h": 64, "spacing": 6},
+    SIZE_2XL:     {"card_w": 290, "cover_h": 365, "title_size": "10.5pt", "title_min_size": "8pt",   "title_max_h": 72, "spacing": 8},
+    SIZE_3XL:     {"card_w": 360, "cover_h": 450, "title_size": "11pt",   "title_min_size": "8.5pt", "title_max_h": 80, "spacing": 10},
+    SIZE_4XL:     {"card_w": 440, "cover_h": 550, "title_size": "11.5pt", "title_min_size": "9pt",   "title_max_h": 88, "spacing": 12},
+    SIZE_5XL:     {"card_w": 530, "cover_h": 660, "title_size": "12pt",   "title_min_size": "9.5pt", "title_max_h": 96, "spacing": 14},
+    SIZE_6XL:     {"card_w": 630, "cover_h": 790, "title_size": "12.5pt", "title_min_size": "10pt",  "title_max_h": 104, "spacing": 16},
 }
+
+
+def _parse_pt(pt_str) -> float:
+    """Parse a CSS-like point-size string (e.g. ``"8.5pt"``) to a float."""
+    try:
+        return float(str(pt_str).replace("pt", "").strip())
+    except (ValueError, TypeError):
+        return 9.0
+
+
+def _fit_title_text(
+    text: str,
+    avail_width: int,
+    max_height: int,
+    base_pt: float,
+    base_font: QFont | None = None,
+    min_pt: float = 6.5,
+    step: float = 0.5,
+) -> tuple[str, float]:
+    """Return (rendered_text, font_pt) that fits inside the given box.
+
+    Strategy:
+      1. Render *text* at *base_pt* with word-wrap inside ``avail_width``.
+      2. If the wrapped text overflows ``max_height`` vertically, shrink the
+         font size in ``step`` pt increments down to ``min_pt``.
+      3. If even at ``min_pt`` the text still overflows, truncate it with
+         an ellipsis at the longest prefix that does fit (binary search).
+
+    No hard character cap — short titles always render at full size, and
+    long titles gracefully scale / trim as needed.
+    """
+    text = text or ""
+    avail_width = max(1, int(avail_width))
+    max_height = max(1, int(max_height))
+    base_pt = float(base_pt)
+    min_pt = min(float(min_pt), base_pt)
+
+    def _height(s: str, pt_size: float) -> int:
+        f = QFont(base_font) if base_font is not None else QFont()
+        f.setPointSizeF(pt_size)
+        f.setBold(True)
+        fm = QFontMetrics(f)
+        rect = fm.boundingRect(
+            QRect(0, 0, avail_width, 100_000),
+            int(Qt.TextWordWrap),
+            s,
+        )
+        return rect.height()
+
+    pt = base_pt
+    while pt > min_pt and _height(text, pt) > max_height:
+        pt = max(min_pt, pt - step)
+
+    if _height(text, pt) <= max_height:
+        return text, pt
+
+    # Overflows even at the minimum size — truncate with an ellipsis.
+    ellipsis = "\u2026"
+    lo, hi, best = 1, max(1, len(text)), 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = text[:mid].rstrip() + ellipsis
+        if _height(candidate, pt) <= max_height:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return text[:best].rstrip() + ellipsis, pt
 
 
 def _find_folder_cover(file_path: str, config: dict | None = None, original_path: str | None = None) -> str | None:
@@ -1871,16 +1943,36 @@ class _BookCard(QFrame):
             self.cover_label.setText("📖")
         layout.addWidget(self.cover_label)
 
-        title = book["name"]
-        max_len = p.get("title_max_len", 24)
-        if len(title) > max_len:
-            title = title[:max_len - 2] + "…"
-        title_lbl = QLabel(title)
+        # Title: try to render the full name at the preset font size; shrink
+        # the font (down to ``title_min_size``) if it wraps past the max
+        # height, and fall back to an ellipsis only as a last resort. See
+        # :func:`_fit_title_text`.
+        full_title = book["name"]
+        base_pt = _parse_pt(p.get("title_size", "9pt"))
+        min_pt = _parse_pt(p.get("title_min_size", "6.5pt"))
+        max_title_h = p.get("title_max_h", 36)
+        title_lbl = QLabel()
         title_lbl.setWordWrap(True)
-        title_lbl.setMaximumHeight(p.get("title_max_h", 36))
+        # Fixed (not max) height so every card’s title area is the same
+        # size — short titles leave blank space below rather than making
+        # the card itself shorter.
+        title_lbl.setFixedHeight(max_title_h)
+        title_lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         title_lbl.setAttribute(Qt.WA_TranslucentBackground)
-        title_lbl.setStyleSheet(f"color: #e0e0e0; font-size: {p.get('title_size', '9pt')}; font-weight: bold; background: transparent;")
-        title_lbl.setToolTip(book["name"])
+        title_lbl.setToolTip(full_title)
+        fitted_text, fitted_pt = _fit_title_text(
+            full_title,
+            avail_width=self._card_w - 10,
+            max_height=max_title_h,
+            base_pt=base_pt,
+            base_font=title_lbl.font(),
+            min_pt=min_pt,
+        )
+        title_lbl.setText(fitted_text)
+        title_lbl.setStyleSheet(
+            f"color: #e0e0e0; font-size: {fitted_pt:g}pt; "
+            "font-weight: bold; background: transparent;"
+        )
         layout.addWidget(title_lbl)
 
         # Size + file type badge on same row. For in-progress folders the
@@ -1976,6 +2068,15 @@ class _BookCard(QFrame):
                 )
                 self._progress_ribbon.move(0, 0)
                 self._progress_ribbon.show()
+
+        # Trailing stretch + fixed card height so every card — whether
+        # in-progress, not-started, or completed — occupies the exact same
+        # footprint in the grid. The reserved block covers the size / badge
+        # row, the (optional) progress pill row, layout spacings, and the
+        # content margins.
+        layout.addStretch()
+        reserved_h = 54 + p.get("spacing", 4)
+        self.setFixedHeight(self._cover_h + max_title_h + reserved_h)
 
     def set_selected(self, selected: bool):
         """Toggle the card's "selected" visual state.
