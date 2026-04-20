@@ -1877,6 +1877,19 @@ class _BookDetailsLoader(QThread):
             cover = _extract_cover(self._book["path"])
             progress_file = self._book.get("progress_file")
             output_folder = self._book.get("output_folder")
+            # When the book came from the normal library walk (not the
+            # in-progress scan) we don't yet know whether a progress file sits
+            # next to it. Check the enclosing directory for the standard
+            # translator artifacts so completed EPUBs that live inside their
+            # own output folder still get per-chapter status and translated
+            # titles in the details dialog.
+            if not progress_file or not output_folder:
+                parent = os.path.dirname(self._book.get("path", ""))
+                if parent and os.path.isdir(parent):
+                    candidate_pf = os.path.join(parent, "translation_progress.json")
+                    if os.path.isfile(candidate_pf):
+                        progress_file = candidate_pf
+                        output_folder = parent
             prog = None
             if progress_file and os.path.isfile(progress_file):
                 summary = _read_progress_summary(progress_file)
