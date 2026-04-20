@@ -10322,7 +10322,7 @@ class MangaTranslator:
                 # Don't immediately fall back to "create on demand"
                 key = (local_method, os.path.abspath(os.path.normpath(model_path)) if model_path else '')
                 inp_shared = None
-                poll_timeout = 180  # 3 minutes max wait
+                poll_timeout = 120  # 2 minutes max wait
                 poll_interval = 0.5  # Check every 500ms
                 import time
                 start_time = time.time()

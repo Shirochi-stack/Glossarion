@@ -166,6 +166,27 @@ def _reset_cancellation_flags(self):
             print(f"[CANCEL_RESET] MangaTranslator was {was_mt_cancelled}, now reset")
         except Exception as e:
             print(f"[CANCEL_RESET] MangaTranslator reset failed: {e}")
+
+        # CRITICAL: Release stale pool checkouts from interrupted translations.
+        # When the user hits Stop mid-translation, the inpainter/detector that
+        # was in use never reaches `_return_inpainter_to_pool()`, so its
+        # reference stays in `rec['checked_out']`. The next Translate /
+        # Translate All click would then see `spare in checked_out == True`
+        # for every spare and fall into the long wait loop
+        # ("⏳ All inpainter instances in use… waiting up to 1800s").
+        # The Start Translation path already calls this via
+        # `_reset_global_cancellation`; mirror that behavior here so the
+        # workflow buttons recover the pool after a stop+restart too.
+        try:
+            from manga_translator import MangaTranslator
+            released_inp, released_det = MangaTranslator.force_release_all_pool_checkouts()
+            if released_inp or released_det:
+                print(
+                    f"[CANCEL_RESET] Force-released stale pool checkouts: "
+                    f"{released_inp} inpainter(s), {released_det} detector(s)"
+                )
+        except Exception as e:
+            print(f"[CANCEL_RESET] force_release_all_pool_checkouts failed: {e}")
         
         # CRITICAL: Reset instance-level cancel_requested on MangaTranslator
         # _check_stop() latches this to True and keeps returning True!
