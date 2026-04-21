@@ -2546,16 +2546,22 @@ _ALL_SIZES = [SIZE_COMPACT, SIZE_NORMAL, SIZE_LARGE, SIZE_XL, SIZE_2XL, SIZE_3XL
 # rendered at ``title_size`` first; if it overflows ``title_max_h`` vertically
 # we dynamically shrink the font down to ``title_min_size`` and only truncate
 # with an ellipsis if even that's not enough. See :func:`_fit_title_text`.
+# ``cover_h`` is ~15.5% taller than the raw aspect-match height of
+# ``card_w`` (a 10% bump followed by another 5%) so the thumbnail
+# area claims more of the card's footprint without the width
+# changing — the image renders with more vertical room to fill
+# (still via ``KeepAspectRatio``, so wider covers letterbox a
+# little less) while leaving the text rows below it untouched.
 _SIZE_PRESETS = {
-    SIZE_COMPACT: {"card_w": 110, "cover_h": 140, "title_size": "8.5pt",  "title_min_size": "6.5pt", "title_max_h": 48, "spacing": 3},
-    SIZE_NORMAL:  {"card_w": 140, "cover_h": 175, "title_size": "9pt",    "title_min_size": "7pt",   "title_max_h": 52, "spacing": 4},
-    SIZE_LARGE:   {"card_w": 180, "cover_h": 225, "title_size": "9.5pt",  "title_min_size": "7.5pt", "title_max_h": 58, "spacing": 5},
-    SIZE_XL:      {"card_w": 230, "cover_h": 290, "title_size": "10pt",   "title_min_size": "8pt",   "title_max_h": 64, "spacing": 6},
-    SIZE_2XL:     {"card_w": 290, "cover_h": 365, "title_size": "10.5pt", "title_min_size": "8pt",   "title_max_h": 72, "spacing": 8},
-    SIZE_3XL:     {"card_w": 360, "cover_h": 450, "title_size": "11pt",   "title_min_size": "8.5pt", "title_max_h": 80, "spacing": 10},
-    SIZE_4XL:     {"card_w": 440, "cover_h": 550, "title_size": "11.5pt", "title_min_size": "9pt",   "title_max_h": 88, "spacing": 12},
-    SIZE_5XL:     {"card_w": 530, "cover_h": 660, "title_size": "12pt",   "title_min_size": "9.5pt", "title_max_h": 96, "spacing": 14},
-    SIZE_6XL:     {"card_w": 630, "cover_h": 790, "title_size": "12.5pt", "title_min_size": "10pt",  "title_max_h": 104, "spacing": 16},
+    SIZE_COMPACT: {"card_w": 110, "cover_h": 162, "title_size": "8.5pt",  "title_min_size": "6.5pt", "title_max_h": 50,  "spacing": 3},
+    SIZE_NORMAL:  {"card_w": 140, "cover_h": 203, "title_size": "9pt",    "title_min_size": "7pt",   "title_max_h": 55,  "spacing": 4},
+    SIZE_LARGE:   {"card_w": 180, "cover_h": 260, "title_size": "9.5pt",  "title_min_size": "7.5pt", "title_max_h": 61,  "spacing": 5},
+    SIZE_XL:      {"card_w": 230, "cover_h": 335, "title_size": "10pt",   "title_min_size": "8pt",   "title_max_h": 67,  "spacing": 6},
+    SIZE_2XL:     {"card_w": 290, "cover_h": 422, "title_size": "10.5pt", "title_min_size": "8pt",   "title_max_h": 76,  "spacing": 8},
+    SIZE_3XL:     {"card_w": 360, "cover_h": 520, "title_size": "11pt",   "title_min_size": "8.5pt", "title_max_h": 84,  "spacing": 10},
+    SIZE_4XL:     {"card_w": 440, "cover_h": 635, "title_size": "11.5pt", "title_min_size": "9pt",   "title_max_h": 92,  "spacing": 12},
+    SIZE_5XL:     {"card_w": 530, "cover_h": 762, "title_size": "12pt",   "title_min_size": "9.5pt", "title_max_h": 101, "spacing": 14},
+    SIZE_6XL:     {"card_w": 630, "cover_h": 912, "title_size": "12.5pt", "title_min_size": "10pt",  "title_max_h": 109, "spacing": 16},
 }
 
 
