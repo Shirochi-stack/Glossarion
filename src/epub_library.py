@@ -2573,6 +2573,82 @@ def _parse_pt(pt_str) -> float:
         return 9.0
 
 
+def _create_styled_checkbox(text: str = "", parent=None):
+    """Build a QCheckBox styled identically to Other Settings / main GUI.
+
+    Mirrors :meth:`TranslatorGUI._create_styled_checkbox` so every
+    checkbox in the Library dialogs reads as a first-class citizen of
+    the same app — same indicator border / fill colours, same “✓”
+    label overlay that paints the checkmark (Qt’s default indicator
+    rendering on Windows drops the tick at small sizes). The overlay
+    is a click-through QLabel child positioned inside the indicator,
+    shown / hidden in sync with the checkbox state.
+    """
+    from PySide6.QtWidgets import QCheckBox, QLabel
+
+    checkbox = QCheckBox(text, parent)
+    checkbox.setStyleSheet("""
+        QCheckBox {
+            color: white;
+            spacing: 6px;
+        }
+        QCheckBox::indicator {
+            width: 14px;
+            height: 14px;
+            border: 1px solid #5a9fd4;
+            border-radius: 2px;
+            background-color: #2d2d2d;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #5a9fd4;
+            border-color: #5a9fd4;
+        }
+        QCheckBox::indicator:hover {
+            border-color: #7bb3e0;
+        }
+        QCheckBox:disabled {
+            color: #666666;
+        }
+        QCheckBox::indicator:disabled {
+            background-color: #1a1a1a;
+            border-color: #3a3a3a;
+        }
+    """)
+
+    checkmark = QLabel("\u2713", checkbox)
+    checkmark.setStyleSheet(
+        "QLabel { color: white; background: transparent; "
+        "font-weight: bold; font-size: 11px; }"
+    )
+    checkmark.setAlignment(Qt.AlignCenter)
+    checkmark.hide()
+    checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+    def _position_checkmark():
+        try:
+            checkmark.setGeometry(2, 1, 14, 14)
+        except RuntimeError:
+            # Underlying widget was destroyed
+            pass
+
+    def _update_checkmark():
+        try:
+            if checkbox.isChecked():
+                _position_checkmark()
+                checkmark.show()
+            else:
+                checkmark.hide()
+        except RuntimeError:
+            pass
+
+    checkbox.stateChanged.connect(_update_checkmark)
+    # Defer the first positioning until the widget has actually laid
+    # out — otherwise ``setGeometry`` runs before the style sheet
+    # has sized the indicator and the “✓” can be drawn outside it.
+    QTimer.singleShot(0, lambda: (_position_checkmark(), _update_checkmark()))
+    return checkbox
+
+
 def _fit_pill_font_pt(text: str, max_width: int,
                       base_pt: float = 7.0, min_pt: float = 5.0,
                       step: float = 0.5,
@@ -4815,28 +4891,21 @@ class _ScanForRawDialog(QDialog):
         ext_lbl.setStyleSheet(
             "color: #888; font-size: 8.5pt; background: transparent;")
         ext_row.addWidget(ext_lbl)
-        ext_css = (
-            "QCheckBox { color: #c8cbe0; font-size: 9pt; spacing: 6px;"
-            " padding: 2px 6px; background: transparent; }"
-            "QCheckBox:disabled { color: #6a6d80; }"
-            "QCheckBox::indicator { width: 14px; height: 14px; "
-            "border: 1px solid #5a9fd4; border-radius: 2px; "
-            "background-color: #1e1e2e; }"
-            "QCheckBox::indicator:checked { background-color: #17a2b8; "
-            "border-color: #20b2cc; }"
-            "QCheckBox::indicator:disabled { border-color: #3a3a5e; "
-            "background-color: #1a1a2a; }"
-            "QCheckBox::indicator:hover { border-color: #7bb3e0; }"
-        )
-        self._auto_cb = QCheckBox("Auto")
+        # Every checkbox in this row goes through
+        # :func:`_create_styled_checkbox` so the visual language matches
+        # the Other Settings dialog exactly (same indicator border /
+        # fill / hover colours, same “✓” overlay). The previous
+        # bespoke ``ext_css`` stylesheet used teal accent colours and
+        # drew a slightly different indicator, so flipping between
+        # Other Settings and this dialog made the checkboxes look
+        # like they came from two different apps.
+        self._auto_cb = _create_styled_checkbox("Auto")
         self._auto_cb.setToolTip(
             "Automatically pick the extensions to scan for based on "
             "each missing-raw card's workspace kind. Turn this off "
             "to override with the checkboxes to the right."
         )
         self._auto_cb.setChecked(self._auto_mode)
-        self._auto_cb.setAttribute(Qt.WA_TranslucentBackground)
-        self._auto_cb.setStyleSheet(ext_css)
         self._auto_cb.toggled.connect(self._on_auto_toggled)
         ext_row.addWidget(self._auto_cb)
         self._ext_cbs: dict[str, QCheckBox] = {}
@@ -4846,10 +4915,8 @@ class _ScanForRawDialog(QDialog):
             ("pdf",  ".pdf"),
             ("html", ".html"),
         ):
-            cb = QCheckBox(label)
+            cb = _create_styled_checkbox(label)
             cb.setChecked(ext in self._selected_exts)
-            cb.setAttribute(Qt.WA_TranslucentBackground)
-            cb.setStyleSheet(ext_css)
             cb.toggled.connect(
                 lambda checked, e=ext: self._on_ext_toggled(e, checked))
             self._ext_cbs[ext] = cb
@@ -9417,15 +9484,9 @@ class EpubLibraryDialog(QDialog):
         row_layout.setSpacing(8)
 
         checkbox.setChecked(True)
-        checkbox.setStyleSheet(
-            "QCheckBox { color: #e0e0e0; spacing: 8px; }"
-            "QCheckBox::indicator { width: 16px; height: 16px; "
-            "border: 1px solid #5a9fd4; border-radius: 3px; "
-            "background: #1a1a2a; }"
-            "QCheckBox::indicator:checked { background: #5a9fd4; "
-            "border-color: #5a9fd4; }"
-            "QCheckBox::indicator:hover { border-color: #7bb3e0; }"
-        )
+        # The caller now constructs the checkbox via
+        # :func:`_create_styled_checkbox`, so its stylesheet already
+        # matches Other Settings exactly \u2014 don't overwrite it here.
         checkbox.setToolTip(
             "Uncheck to exclude this item from the delete batch."
         )
@@ -9585,7 +9646,7 @@ class EpubLibraryDialog(QDialog):
                 sep.setStyleSheet("color: #2a2a3e; background: #2a2a3e;")
                 sep.setFixedHeight(1)
                 inner_layout.addWidget(sep)
-            cb = QCheckBox()
+            cb = _create_styled_checkbox()
             checkboxes.append(cb)
             row_widget = self._build_target_row_widget(target, cb)
             inner_layout.addWidget(row_widget)
@@ -10781,41 +10842,31 @@ class BookDetailsDialog(QDialog):
         chap_header.addStretch()
         # "Show special files" toggle mirrors the Progress Manager's behavior.
         # Hidden by default for EPUBs so files like cover/nav/toc/info don't
-        # clutter the list; user state is persisted via config.
-        from PySide6.QtWidgets import QCheckBox
-        self._special_cb = QCheckBox("Show special files (cover, nav, toc)")
+        # clutter the list; user state is persisted via config. Built via
+        # :func:`_create_styled_checkbox` so the Book Details header reads
+        # as the same visual vocabulary as Other Settings (identical
+        # indicator border / fill / hover colours + “✓” overlay).
+        self._special_cb = _create_styled_checkbox(
+            "Show special files (cover, nav, toc)")
         self._special_cb.setToolTip(
             "When enabled, shows special files (files without chapter numbers "
             "like cover, nav, toc, info, message, etc.)"
         )
         self._special_cb.setChecked(self._show_special_files)
-        self._special_cb.setStyleSheet("""
-            QCheckBox { color: #c8cbe0; font-size: 9pt; spacing: 6px; padding: 4px 6px; }
-            QCheckBox::indicator {
-                width: 14px; height: 14px;
-                border: 1px solid #5a9fd4; border-radius: 2px;
-                background-color: #1e1e2e;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #5a9fd4; border-color: #5a9fd4;
-                image: none;
-            }
-            QCheckBox::indicator:hover { border-color: #7bb3e0; }
-        """)
         self._special_cb.toggled.connect(self._on_special_files_toggled)
         chap_header.addWidget(self._special_cb)
         # "Show raw titles" toggle: when checked, every chapter row displays
         # the source-language title instead of the translated one (if any).
         # Only useful for in-progress EPUBs where translated titles exist —
-        # hidden otherwise via :meth:`_on_details_ready`.
-        self._raw_titles_cb = QCheckBox("Show raw titles")
+        # hidden otherwise via :meth:`_on_details_ready`. Shares the Other
+        # Settings styling via the same helper as ``_special_cb``.
+        self._raw_titles_cb = _create_styled_checkbox("Show raw titles")
         self._raw_titles_cb.setToolTip(
             "Show the source-language chapter titles instead of the "
             "translated titles, even for chapters that have already been "
             "translated."
         )
         self._raw_titles_cb.setChecked(self._show_raw_titles)
-        self._raw_titles_cb.setStyleSheet(self._special_cb.styleSheet())
         self._raw_titles_cb.toggled.connect(self._on_raw_titles_toggled)
         # Hidden by default; the details-ready handler flips it on for
         # in-progress EPUBs that actually have translated chapters to
