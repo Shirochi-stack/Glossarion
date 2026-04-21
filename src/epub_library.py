@@ -2179,6 +2179,84 @@ class _LibraryScannerThread(QThread):
         self.finished.emit(results)
 
 
+def _attach_cross_location_duplicates(completed: list[dict],
+                                      output_rows: list[dict]) -> None:
+    """Flag completed cards whose EPUB basename exists in two places.
+
+    The ⚠ ``compiled_conflicts`` badge is normally populated by
+    :func:`scan_output_folders` for *intra-folder* duplicates (two
+    compiled artefacts in the same output workspace). It never fired
+    when the duplication was *cross-location* — e.g. one EPUB in
+    ``Library/Translated/Foo.epub`` and a second in
+    ``<output_root>/Foo/Foo.epub`` — because those two paths come from
+    different scans. This helper walks the merged completed list and
+    the raw ``output_rows`` (pre-ghost-filter) and appends a conflict
+    entry on every card that shares a basename with a compiled output
+    at a different path.
+
+    Modifies *completed* in place; does not return anything.
+    """
+    if not completed:
+        return
+
+    # Map lowercased basename → list of compiled abs paths that exist
+    # on disk in any of the scanned output folders. ``output_rows``
+    # carries ``compiled_output_path`` for every folder the output
+    # scanner saw, including the ones that got ghost-filtered from
+    # the merged completed list.
+    by_basename: dict[str, list[str]] = {}
+    for r in output_rows or []:
+        cpath = r.get("compiled_output_path") or ""
+        if not cpath or not os.path.isfile(cpath):
+            continue
+        key = os.path.basename(cpath).lower()
+        by_basename.setdefault(key, []).append(cpath)
+    # Also index the compiled basenames that actually survived into
+    # the merged completed list so two non-ghost output-folder cards
+    # with the same filename still flag each other.
+    for r in completed:
+        p = r.get("path", "") or ""
+        if not p or not p.lower().endswith(".epub"):
+            continue
+        key = os.path.basename(p).lower()
+        by_basename.setdefault(key, [])
+        if p not in by_basename[key]:
+            by_basename[key].append(p)
+    if not by_basename:
+        return
+
+    for r in completed:
+        p = r.get("path", "") or ""
+        if not p or not p.lower().endswith(".epub"):
+            continue
+        key = os.path.basename(p).lower()
+        siblings = by_basename.get(key, [])
+        if len(siblings) < 2:
+            continue
+        self_abs = os.path.normcase(os.path.normpath(
+            os.path.abspath(p)))
+        existing = list(r.get("compiled_conflicts") or [])
+        # Seed with the basenames already recorded so we don't double
+        # up when intra-folder conflicts ALSO exist on the same card.
+        seen_labels = {lbl for lbl, _kind in existing}
+        for other in siblings:
+            other_abs = os.path.normcase(os.path.normpath(
+                os.path.abspath(other)))
+            if other_abs == self_abs:
+                continue
+            # Tag the extra copy with its *parent directory* name so
+            # the tooltip makes it obvious where the duplicate lives
+            # (``Foo.epub (Library/Translated)`` vs. ``Foo.epub (Foo)``).
+            parent = os.path.basename(os.path.dirname(other)) or "…"
+            label = f"{os.path.basename(other)} ({parent})"
+            if label in seen_labels:
+                continue
+            seen_labels.add(label)
+            existing.append((label, "epub"))
+        if existing:
+            r["compiled_conflicts"] = existing
+
+
 class _DualScannerThread(QThread):
     """Scan both library and output roots, partitioning by completion status.
 
@@ -2269,6 +2347,16 @@ class _DualScannerThread(QThread):
         # classification (partial undo, mismatched progress file, etc.)
         # doesn't linger as a phantom in-progress card either.
         in_progress = [r for r in in_progress if not _is_organized_ghost(r)]
+
+        # Cross-location duplicate detection: if a ``Library/Translated``
+        # entry has the same basename as a compiled EPUB still sitting in
+        # an output folder, surface it on the library card's ⚠ badge.
+        # This catches the case where the user organized the EPUB into
+        # the library but the original (or a re-compiled copy) still
+        # lives in the output folder — without this check, the ghost
+        # filter above silently dropped the output row and the user
+        # never saw any indication that two physical copies exist.
+        _attach_cross_location_duplicates(completed, output_rows)
 
         self.finished.emit(in_progress, completed)
 
