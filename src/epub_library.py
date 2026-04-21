@@ -1656,33 +1656,31 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 # pill label on :class:`_BookCard` AND which tab the
                 # card lands on.
                 #
-                # A workspace only graduates to "completed" when the
-                # translation fraction is 100 %% AND a compiled output
-                # (EPUB/PDF/TXT/HTML) is actually present on disk.
-                # Requiring the compile step closes the duplicate-card
-                # problem: a 100 %%-translated-but-not-compiled workspace
-                # used to pop up on the Completed tab alongside any
-                # Library/Translated sibling, creating two cards for
-                # the same book. Now the workspace stays on In Progress
-                # with a "Ready to compile" pill until the user
-                # actually builds the EPUB, at which point the promoted
-                # card replaces the in-progress one.
-                compiled_ok = bool(compiled)
+                # PROGRESS is the priority signal — the compile gate
+                # only fires AFTER progress says the workspace is at
+                # 100 %%. Partial or zero-progress workspaces are never
+                # promoted by the presence of a stray compiled file:
+                #
+                #   * partial progress          → "in_progress"
+                #   * no progress + no response → "not_started"
+                #   * 100 %% + compiled artefact → "completed"
+                #   * 100 %% + no compiled       → "ready_to_compile"
+                #
+                # The "ready_to_compile" state lives on the In Progress
+                # tab with a distinct pill so users know the next step
+                # is Build, not Translate.
                 fully_translated = done >= total and total > 0
-                if fully_translated and compiled_ok:
-                    translation_state = "completed"
-                elif fully_translated:
-                    # All chapters translated but no compiled artifact —
-                    # the user still owes us a build. Keep the card on
-                    # In Progress so the Compile / Open-in-reader flow
-                    # is the obvious next step.
-                    translation_state = "ready_to_compile"
+                if fully_translated:
+                    if compiled:
+                        translation_state = "completed"
+                    else:
+                        translation_state = "ready_to_compile"
                 elif progress_total <= 0 and fs_done == 0:
-                    # No meaningful progress data at all — trust the
-                    # presence of a compiled EPUB as a "completed" signal
-                    # (library import / pre-existing build). Otherwise
-                    # this is a freshly scaffolded workspace.
-                    translation_state = "completed" if compiled_ok else "not_started"
+                    # Partial / zero progress: compile state is
+                    # deliberately IGNORED here. A stray compiled
+                    # EPUB in an otherwise-empty workspace no longer
+                    # silently promotes the card to Completed.
+                    translation_state = "not_started"
                 else:
                     translation_state = "in_progress"
 
@@ -2514,6 +2512,105 @@ class _DualScannerThread(QThread):
         # doesn't linger as a phantom in-progress card either.
         in_progress = [r for r in in_progress if not _is_organized_ghost(r)]
 
+        # Library-vs-workspace state inheritance via ``origins.txt``.
+        # NO dedupe — every card stays visible exactly once. Each
+        # ``Library/Translated`` entry inherits the translation_state
+        # + progress numbers of its owning workspace when
+        # ``origins['translated']`` links them, regardless of whether
+        # that workspace was ghost-filtered above. That fixes the
+        # "99%% but shown as Completed" regression after organize:
+        # the ghost filter takes the workspace *row* off the In
+        # Progress list, and this block re-routes the library row
+        # (which replaces it) onto the In Progress tab while the
+        # underlying translation is still at 99 %%.
+        #
+        # ``trans_map`` maps ``library_basename → original_workspace_path``;
+        # the parent dir of that path is the workspace folder. Rows
+        # without a ``trans_map`` record (drag-dropped onto the
+        # Completed tab with no organize trail) stay untouched.
+        workspace_by_folder: dict[str, dict] = {}
+        for ws in output_rows:
+            ws_folder = ws.get("output_folder") or ""
+            if not ws_folder:
+                continue
+            workspace_by_folder[
+                os.path.normcase(os.path.normpath(
+                    os.path.abspath(ws_folder)))
+            ] = ws
+
+        if workspace_by_folder and trans_map:
+            for r in completed:
+                if not r.get("in_library"):
+                    continue
+                lib_basename = os.path.basename(r.get("path", "") or "")
+                orig_path = trans_map.get(lib_basename)
+                if not orig_path:
+                    continue
+                orig_folder = os.path.dirname(str(orig_path))
+                if not orig_folder:
+                    continue
+                origin_key = os.path.normcase(os.path.normpath(
+                    os.path.abspath(orig_folder)))
+                ws_row = workspace_by_folder.get(origin_key)
+                if not ws_row:
+                    continue
+                ws_state = ws_row.get("translation_state") or ""
+                # Only inherit when the workspace is actually NOT
+                # completed — otherwise a finished book would get
+                # yanked onto the In Progress tab with stale
+                # progress numbers. A completed workspace + library
+                # file is the normal post-organize state; leave the
+                # library card alone there.
+                if ws_state == "completed" or not ws_state:
+                    continue
+                r["translation_state"] = ws_state
+                r["is_in_progress"] = True
+                r["total_chapters"] = ws_row.get("total_chapters", 0)
+                r["completed_chapters"] = ws_row.get(
+                    "completed_chapters", 0)
+                r["failed_chapters"] = ws_row.get("failed_chapters", 0)
+                r["pending_chapters"] = ws_row.get(
+                    "pending_chapters", 0)
+                r["output_folder"] = ws_row.get("output_folder", "")
+                r["progress_file"] = ws_row.get("progress_file", "")
+                # Track the raw source so the In Progress card can
+                # render a cover / resolve the raw-open actions
+                # even though the row itself lives in Library/Translated.
+                raw_src_from_ws = ws_row.get("raw_source_path") or ""
+                if raw_src_from_ws:
+                    r["raw_source_path"] = raw_src_from_ws
+
+            # Move any library rows that inherited a non-completed
+            # state over to the In Progress tab, and make sure we
+            # don't end up with a duplicate workspace row for the
+            # SAME output folder in the in_progress bucket (can
+            # happen when the ghost filter didn't kick in).
+            moved_in_progress_folders: set[str] = set()
+            still_completed: list[dict] = []
+            for r in completed:
+                state = r.get("translation_state")
+                if state and state != "completed" and r.get("in_library"):
+                    in_progress.append(r)
+                    of = r.get("output_folder") or ""
+                    if of:
+                        moved_in_progress_folders.add(
+                            os.path.normcase(os.path.normpath(
+                                os.path.abspath(of)))
+                        )
+                else:
+                    still_completed.append(r)
+            completed = still_completed
+
+            if moved_in_progress_folders:
+                in_progress = [
+                    r for r in in_progress
+                    if not r.get("in_library")
+                    and os.path.normcase(os.path.normpath(
+                        os.path.abspath(r.get("output_folder", ""))))
+                    not in moved_in_progress_folders
+                    or r.get("in_library")
+                ]
+
         # Cross-location duplicate detection: if a ``Library/Translated``
         # entry has the same basename as a compiled EPUB still sitting in
         # an output folder, surface it on the library card's ⚠ badge.
@@ -2883,21 +2980,15 @@ class _BookCard(QFrame):
                     ribbon_text = "NOT STARTED"
                     ribbon_bg = "rgba(138, 180, 208, 0.92)"
                 elif state == "ready_to_compile":
-                    # Every chapter has been translated, but the
-                    # user hasn't produced the final compiled EPUB
-                    # yet — the card parks on the In Progress tab
-                    # with a distinct green pill so the user knows
-                    # "Compile" is the next step, rather than
-                    # hunting for another chapter to translate.
                     pill = QLabel(
                         f"\u2728 Ready to compile "
                         f"({done}/{total})" if total
                         else "\u2728 Ready to compile"
                     )
                     pill.setToolTip(
-                        "All chapters translated \u2014 "
-                        "compile the final EPUB to graduate this "
-                        "card to the Completed tab."
+                        "All chapters translated \u2014 compile the "
+                        "final EPUB to graduate this card to the "
+                        "Completed tab."
                     )
                     pill.setStyleSheet(
                         "color: #6ee8a0; "
