@@ -27,7 +27,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'L_Glossarion_Lite v8.5.2'  # CHANGED: Updated version
+APP_NAME = 'L_Glossarion_OmegaLite v8.5.2'  # OmegaLite: OpenAI-only, no AI Hunter
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -72,19 +72,12 @@ print(f"  GTK_FOLDER env var: {gtk_folder}")
 print(f"  Checking candidates: {msys2_bin_candidates}")
 print(f"  Selected MSYS2 bin: {msys2_bin}")
 
-if msys2_bin and os.path.exists(msys2_bin):
+# OmegaLite: WeasyPrint (PDF) is excluded, so MSYS2 GTK DLLs are NOT collected.
+if False and msys2_bin and os.path.exists(msys2_bin):  # Disabled in OmegaLite
     dll_list = glob.glob(os.path.join(msys2_bin, '*.dll'))
-    print(f"  Found {len(dll_list)} DLL files in {msys2_bin}")
-    if dll_list:
-        # Print first few DLLs for verification
-        print(f"  Sample DLLs: {[os.path.basename(d) for d in dll_list[:5]]}")
-        for dll in dll_list:
-            binaries.append((dll, '.'))
-        print(f"  Added {len(dll_list)} MSYS2 DLLs for WeasyPrint")
-    else:
-        print(f"  WARNING: No DLLs found in {msys2_bin}")
-else:
-    print(f"  WARNING: No MSYS2 directory found in any candidate location")
+    for dll in dll_list:
+        binaries.append((dll, '.'))
+print("  OmegaLite: skipping MSYS2 DLL collection (WeasyPrint excluded)")
 
 # Collect data files from packages that need them
 for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
@@ -147,9 +140,8 @@ app_files = [
     ('http_logger.py', '.'),
     ('shutdown_utils.py', '.'),
     
-    # AI Hunter Enhanced
-    ('ai_hunter_enhanced.py', '.'),
-    
+    # AI Hunter Enhanced: EXCLUDED in OmegaLite (only quick scan is available)
+	# ('ai_hunter_enhanced.py', '.'),
     # Dialog animations
     ('dialog_animations.py', '.'),
     
@@ -190,17 +182,17 @@ app_files = [
 	# Environment variable size limit workaround
 	('large_env.py', '.'),
 
-	# AuthGPT - ChatGPT subscription OAuth
+	# Auth modules: only authgpt (ChatGPT OAuth) retained
 	('authgpt_auth.py', '.'),
-	('authgem_auth.py', '.'),
-	('authza_auth.py', '.'),
+	# ('authgem_auth.py', '.'),   # EXCLUDED: Gemini OAuth not needed
+	# ('authza_auth.py', '.'),    # EXCLUDED: Z.AI OAuth + playwright not needed
 	('token_encryption.py', '.'),
 
 	# Antigravity Cloud Code proxy
 	('antigravity_proxy.py', '.'),
 
-	# gRPC Gemini client
-	('grpc_gemini_client.py', '.'),
+	# gRPC Gemini client: EXCLUDED (no Gemini in OmegaLite)
+	# ('grpc_gemini_client.py', '.'),
 
 	# EPUB Library & Reader
 	('epub_library.py', '.'),
@@ -247,7 +239,7 @@ app_modules = [
     'splash_utils',
     'dpi_setup',
     'other_settings',      # Other Settings module
-    'ai_hunter_enhanced',  # AI Hunter Enhanced module
+    # 'ai_hunter_enhanced',  # EXCLUDED in OmegaLite (quick scan only)
     'dialog_animations',   # Dialog fade animations
     'spinning',            # Spinning icon helper
     'rotatable_label',     # Rotatable label widget
@@ -270,13 +262,13 @@ app_modules = [
 	'hyphen_textwrap',
 	'duplicate_detection_config',
 	'large_env',
-	'authgpt_auth',  # ChatGPT subscription OAuth
-	'authgem_auth',  # Gemini subscription OAuth
-	'authza_auth',  # Azure/Additional auth
-	'token_encryption',  # Encrypted token storage
-	'antigravity_proxy',  # Antigravity Cloud Code proxy
-	'grpc_gemini_client',  # gRPC Gemini client
-	'epub_library',  # EPUB Library & Reader
+	'authgpt_auth',    # ChatGPT subscription OAuth
+	# 'authgem_auth',  # EXCLUDED: Gemini OAuth not needed in OmegaLite
+	# 'authza_auth',   # EXCLUDED: Z.AI OAuth + playwright not needed
+	'token_encryption',
+	'antigravity_proxy',
+	# 'grpc_gemini_client',  # EXCLUDED: no Gemini in OmegaLite
+	'epub_library',
 ]
 # GUI Framework
 gui_modules = [
@@ -396,120 +388,23 @@ image_modules = [
 
 # AI/API Clients (Including Google Cloud Vision)
 api_modules = [
-    # Google AI
-    'google',
-	'google.genai',
-	'google.genai.types',
-    'google.auth',
-    'google.auth.transport',
-    'google.auth.transport.requests',
-    'google.auth.transport.grpc',
-    'google.auth.crypt',
-    'google.auth.exceptions',
-    'google.oauth2',
-    'google.oauth2.credentials',
-    'google.api_core',
-    'google.api_core.client_options',
-    'google.api_core.exceptions',
-    'google.api_core.gapic_v1',
-    'google.api_core.operations_v1',
-    'google.api_core.protobuf_helpers',
-    'google.protobuf',
-    'google.protobuf.message',
-    'google.protobuf.descriptor',
-    'google.protobuf.json_format',
-    'google.protobuf.internal',
-    'google.protobuf.reflection',
-    'google.rpc',
-    'google.type',
-    
-    # Azure (for Azure OpenAI endpoints - NOT Computer Vision)
-    'azure',
-    'azure.core',
-    'azure.core.credentials',
-    'azure.core.exceptions',
-    'azure.core.pipeline',
-    'azure.core.pipeline.transport',
-    'azure.core.pipeline.policies',
-    'azure.core.rest',
-    'azure.core.tracing',
-    'azure.core.utils',
-    'azure.identity',
-    'azure.common',
-    
-    # Additional Azure dependencies
-    'isodate',  # Required by Azure
-    'oauthlib',  # May be required for Azure auth
-    'requests_oauthlib',  # May be required for Azure auth
-	
-	# Google Cloud Translate
-	'google.cloud.translate',
-	'google.cloud.translate_v2',
-	'google.cloud.translate_v3',
-	'google.cloud.translate_v3.types',
-	'google.cloud.translate_v3.services',
-	'google.cloud.translate_v3.services.translation_service',
-	
-	# DeepL
-	'deepl',
-	'deepl.translator',
-	'deepl.exceptions',
-	'deepl.api',
-	'deepl.http',
-	'deepl.util',
-	'deepl.auth',
-	'deepl.model',	
-    
-    'proto',
-    'proto.message',
-    'grpcio',
-    'grpcio_status',
-    'googleapis_common_protos',
-	
-	# Google Vertex AI:
-    'google.cloud.aiplatform',
-    'google.cloud.aiplatform_v1', 
-    'google.cloud.aiplatform_v1beta1',
-    'vertexai',
-    'vertexai.generative_models',
-    'vertexai.language_models',
-    
-    # OpenAI
-    'openai',
-    'openai.api_resources',
-    'openai.error',
-    'openai.util',
-    'openai.version',
-    'openai.api_requestor',
-    'openai.openai_response',
-    'openai._base_client',
-    'openai._constants',
-    'openai._models',
-    'openai._response',
-    'openai._legacy_response',
-    'openai._streaming',
-    'openai._exceptions',
-    'openai.resources',
-    'openai.resources.chat',
-    'openai.resources.completions',
-    'openai.types',
-    'openai.types.chat',
-    
-    # Anthropic
-    'anthropic',
-    'anthropic._client',
-    'anthropic._base_client',
-    'anthropic._constants',
-    'anthropic._models',
-    'anthropic._response',
-    'anthropic._streaming',
-    'anthropic._exceptions',
-    'anthropic.resources',
-    'anthropic.resources.messages',
-    'anthropic.types',
-    'anthropic.types.message',
-    'anthropic.types.content_block',
-    'anthropic.types.usage',
+	# All Google SDKs: EXCLUDED in OmegaLite
+    # Only OpenAI-compatible endpoints are supported.
+    # 'google', 'google.genai', 'google.genai.types',
+    # 'google.auth', 'google.oauth2', 'google.api_core', 'google.protobuf',
+    # 'google.cloud.aiplatform', 'google.cloud.translate', 'google.cloud.vision',
+    # 'vertexai', 'vertexai.generative_models',
+    # 'proto', 'proto.message', 'grpcio', 'grpcio_status', 'googleapis_common_protos',
+
+    # Azure: EXCLUDED in OmegaLite (Azure OpenAI uses the OpenAI SDK directly)
+    # 'azure', 'azure.core', 'azure.identity',
+    # 'isodate', 'oauthlib', 'requests_oauthlib',
+
+    # DeepL: EXCLUDED in OmegaLite
+    # 'deepl', 'deepl.translator',
+
+    # Anthropic: EXCLUDED in OmegaLite
+    # 'anthropic', 'anthropic._client',
     
     # HTTP clients
     'httpx',
@@ -538,28 +433,17 @@ api_modules = [
     'anyio.streams',
     'anyio.streams.memory',
 	
-	# POE API Wrapper (add these at the end)
-    'poe_api_wrapper',
-    'poe_api_wrapper.api',
-    'poe_api_wrapper.client',
-    'poe_api_wrapper.models',
-    'poe_api_wrapper.utils',
-    'ballyregan',
-    'ballyregan.proxies',
-    
-    # WebSocket support for POE
-    'websocket',
-    'websocket._core',
-    'websocket._app',
-    'websocket._url',
-    'websocket._http',
-    'websocket._logging',
-    'websocket._socket',
-    'websocket._ssl_compat',
-    'websocket._abnf',
-    'websocket._handshake',
-    'websocket._exceptions',
-    'websockets',
+    # POE / WebSocket: EXCLUDED in OmegaLite
+    # 'poe_api_wrapper', 'ballyregan',
+    # 'websocket', 'websockets',
+
+    # Only keep OpenAI + httpx/httpcore (needed by the OpenAI SDK)
+    'openai', 'openai.api_resources', 'openai.error', 'openai.util',
+    'openai.version', 'openai.api_requestor', 'openai.openai_response',
+    'openai._base_client', 'openai._constants', 'openai._models',
+    'openai._response', 'openai._legacy_response', 'openai._streaming',
+    'openai._exceptions', 'openai.resources', 'openai.resources.chat',
+    'openai.resources.completions', 'openai.types', 'openai.types.chat',
 ]
 
 # Text Processing & NLP
@@ -604,19 +488,9 @@ text_modules = [
 	'functools',
 	'lru',
  
-    # AI Hunter (Datasketch)
-    'datasketch',
-    'datasketch.minhash',
-    'datasketch.lsh',
-    'datasketch.lshensemble',
-    'datasketch.weighted_minhash',
-    'datasketch.hyperloglog',
-    'datasketch.lshforest',
-    'datasketch.lean_minhash',
-    'datasketch.hashfunc',
-    'datasketch.storage',
-    'datasketch.experimental',
-    'datasketch.version',
+    # AI Hunter (Datasketch): EXCLUDED in OmegaLite
+    # Quick scan (scan_html_folder.py + rapidfuzz) is kept instead.
+    # 'datasketch', 'datasketch.minhash', 'datasketch.lsh', ...
     
     # Regex
     'regex',
@@ -1108,10 +982,21 @@ excludes = [
 
     # ============================================================================
     # PLAYWRIGHT - 98 MB uncompressed bundled Node.js runtime
-    # authza_auth.py uses playwright for Z.AI OAuth browser automation.
-    # It is safely optional (PLAYWRIGHT_AVAILABLE flag handles absence).
     # ============================================================================
     'playwright', 'playwright.*',
+
+    # ============================================================================
+    # WEASYPRINT + GTK/Cairo/Pango stack - excluded in OmegaLite.
+    # PDF generation is not needed; this also drops the MSYS2 DLL payload.
+    # ============================================================================
+    'weasyprint', 'weasyprint.*',
+    'cairocffi', 'cairocffi.*',
+    'cairosvg', 'cairosvg.*',
+    'tinycss2', 'tinycss2.*',
+    'cssselect2', 'cssselect2.*',
+    'pydyf', 'pydyf.*',
+    'zopfli', 'zopfli.*',
+    'brotli',
 ]
 
 # ============================================================================
