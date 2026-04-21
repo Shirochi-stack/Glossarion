@@ -3837,32 +3837,43 @@ class _BookCard(QFrame):
 # ---------------------------------------------------------------------------
 
 class _RawScanWorker(QThread):
-    """Walk the user-selected folder for raw source files off the UI thread.
+    """Walk + match raw source files off the UI thread.
 
-    The folder could easily be a multi-hundred-gig download archive,
-    so doing :func:`os.walk` synchronously on the main thread freezes
-    the dialog for several seconds every time the user tweaks a
-    filter. This worker runs the walk in a background ``QThread``
-    and fans per-subdirectory file classification out across a
-    :class:`concurrent.futures.ThreadPoolExecutor` so the normalization
-    pass doesn't bottleneck on the walking thread. Results are
-    emitted back to the main thread via the ``results`` signal as
-    ``(scan_folder, [(norm_stem, abs_path), …])``.
+    Both the ``os.walk`` and the per-workspace matching run here so
+    the only main-thread work after a scan is building the tree
+    rows. Previously the matching pass (especially Fuzzy mode's
+    ``difflib.SequenceMatcher.ratio()`` across every candidate)
+    ran back on the UI thread and stalled the dialog for seconds
+    on big folders.
 
-    The worker is *cancellable*: calling :meth:`cancel` stops the
-    walk at the next directory boundary so a rapid extension /
-    folder toggle doesn't keep a stale scan running in the
-    background.
+    The worker accepts an optional ``prewalked`` candidate list so
+    mode / threshold changes don't have to re-walk the folder —
+    the dialog caches the last walk result and hands it back for
+    fast re-matching.
+
+    A :class:`concurrent.futures.ThreadPoolExecutor` inside the
+    worker fans per-directory classification out across 4 threads
+    so the normalization pass doesn't bottleneck on the walking
+    thread. Cancellable via :meth:`cancel` so a rapid UI toggle
+    can stop a stale scan at the next directory / workspace
+    boundary.
     """
 
-    results = Signal(str, list)
+    # (scan_folder, candidates, matches_dict)
+    results = Signal(str, list, dict)
 
     def __init__(self, scan_folder: str, ext_suffixes: tuple[str, ...],
-                 tracking_names: frozenset, parent=None):
+                 tracking_names: frozenset,
+                 books: list[dict], mode: str, threshold: int,
+                 prewalked: list | None = None, parent=None):
         super().__init__(parent)
         self._folder = scan_folder
         self._suffixes = ext_suffixes
         self._tracking = tracking_names
+        self._books = list(books or [])
+        self._mode = mode
+        self._threshold = int(threshold)
+        self._prewalked = prewalked
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -3896,19 +3907,13 @@ class _RawScanWorker(QThread):
             out.append((key, os.path.join(root_dir, name)))
         return out
 
-    def run(self) -> None:
+    def _walk(self) -> list[tuple[str, str]]:
         candidates: list[tuple[str, str]] = []
         folder = self._folder
         if not folder or not os.path.isdir(folder):
-            self.results.emit(folder, candidates)
-            return
+            return candidates
         try:
             futures: list = []
-            # Keep the pool small — walking is the real bottleneck,
-            # and spawning too many threads on a typical SSD just
-            # wastes context-switches without shortening the wall
-            # time. 4 workers is enough to hide the normalization
-            # cost behind the walk I/O.
             with ThreadPoolExecutor(
                 max_workers=4,
                 thread_name_prefix="ScanForRaw",
@@ -3935,9 +3940,124 @@ class _RawScanWorker(QThread):
         except Exception:
             logger.debug(
                 "ScanForRaw worker crashed: %s", traceback.format_exc())
+        return candidates
+
+    @staticmethod
+    def _book_keys(book: dict) -> list[str]:
+        keys: set[str] = set()
+        fn = book.get("folder_name") or os.path.basename(
+            book.get("output_folder") or book.get("path") or "")
+        if fn:
+            keys.add(_norm_book_key(os.path.splitext(fn)[0]))
+        md = book.get("metadata_json") or {}
+        if isinstance(md, dict):
+            for md_key in ("title", "original_title",
+                           "translated_title", "raw_title",
+                           "source_title", "english_title"):
+                val = md.get(md_key)
+                if isinstance(val, str) and val.strip():
+                    keys.add(_norm_book_key(val))
+        return [k for k in keys if k]
+
+    def _compute_matches(self,
+                         candidates: list[tuple[str, str]]) -> dict:
+        """Return ``{output_folder: {book, path, ratio, accepted}}``.
+
+        All heavy lifting (including Fuzzy's ``SequenceMatcher``
+        calls) runs here on the worker thread. Main thread only
+        receives the final dict and paints the tree.
+        """
+        import difflib
+        matches: dict[str, dict] = {}
+        mode = self._mode
+        threshold = self._threshold / 100.0
+        # Pool the SequenceMatcher calls across workers too — for a
+        # big candidate set Fuzzy matching is the real hotspot.
+        def _best_for(book: dict) -> tuple[str, float]:
+            book_keys = self._book_keys(book)
+            if not book_keys or not candidates:
+                return "", 0.0
+            if mode == _ScanForRawDialog.MATCH_EXACT:
+                book_key_set = set(book_keys)
+                for cand_key, cand_path in candidates:
+                    if self._cancelled:
+                        break
+                    if cand_key in book_key_set:
+                        return cand_path, 1.0
+                return "", 0.0
+            best_path = ""
+            best_ratio = 0.0
+            sm = difflib.SequenceMatcher()
+            for cand_key, cand_path in candidates:
+                if self._cancelled:
+                    break
+                sm.set_seq2(cand_key)
+                for wk in book_keys:
+                    sm.set_seq1(wk)
+                    # Cheap length-ratio prefilter — skip candidates
+                    # that can't possibly reach the threshold so we
+                    # don't pay for a full ratio() call on obvious
+                    # non-matches. real_quick_ratio is O(1).
+                    if sm.real_quick_ratio() < threshold:
+                        continue
+                    ratio = sm.ratio()
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_path = cand_path
+                        if best_ratio >= 0.999:
+                            return best_path, best_ratio
+            if best_ratio >= threshold:
+                return best_path, best_ratio
+            return "", best_ratio
+
+        try:
+            with ThreadPoolExecutor(
+                max_workers=4,
+                thread_name_prefix="ScanForRawMatch",
+            ) as executor:
+                book_futures = []
+                for book in self._books:
+                    if self._cancelled:
+                        break
+                    ws_folder = (book.get("output_folder")
+                                 or book.get("path") or "")
+                    if not ws_folder:
+                        continue
+                    book_futures.append(
+                        (ws_folder, book,
+                         executor.submit(_best_for, book)))
+                for ws_folder, book, fut in book_futures:
+                    if self._cancelled:
+                        break
+                    try:
+                        matched_path, ratio = fut.result()
+                    except Exception:
+                        matched_path, ratio = "", 0.0
+                        logger.debug(
+                            "ScanForRaw match task failed: %s",
+                            traceback.format_exc())
+                    matches[ws_folder] = {
+                        "book": book,
+                        "path": matched_path,
+                        "ratio": ratio,
+                        "accepted": bool(matched_path),
+                    }
+        except Exception:
+            logger.debug(
+                "ScanForRaw match pass crashed: %s",
+                traceback.format_exc())
+        return matches
+
+    def run(self) -> None:
+        candidates = (list(self._prewalked)
+                      if self._prewalked is not None
+                      else self._walk())
         if self._cancelled:
             return
-        self.results.emit(folder, candidates)
+        matches = self._compute_matches(candidates)
+        if self._cancelled:
+            return
+        self.results.emit(self._folder, candidates, matches)
 
 
 class _ScanForRawDialog(QDialog):
@@ -4378,7 +4498,9 @@ class _ScanForRawDialog(QDialog):
         except Exception:
             pass
         self._update_threshold_enabled()
-        self._recompute_matches()
+        # Mode change is a re-match only, so reuse the cached
+        # candidates from the last walk (no folder rescan).
+        self._rematch_only()
 
     def _on_threshold_changed(self, value: int):
         self._threshold = int(value)
@@ -4388,7 +4510,7 @@ class _ScanForRawDialog(QDialog):
         except Exception:
             pass
         if self._mode == self.MATCH_FUZZY:
-            self._recompute_matches()
+            self._rematch_only()
 
     def _update_threshold_enabled(self):
         enabled = self._mode == self.MATCH_FUZZY
@@ -4463,19 +4585,7 @@ class _ScanForRawDialog(QDialog):
             cb.blockSignals(False)
 
     # -- Scanning + matching -----------------------------------------------
-    def _rescan_folder(self):
-        """Kick off a background scan of the current folder.
-
-        The walk runs on a :class:`_RawScanWorker` backed by a
-        :class:`concurrent.futures.ThreadPoolExecutor` so the dialog
-        stays responsive even for huge folders. Any previously
-        running worker is cancelled first so rapid folder /
-        extension toggles don't leave multiple scans racing.
-        """
-        self._candidates.clear()
-        # Cancel any in-flight scan before launching a new one —
-        # its results would be for stale settings and would either
-        # clobber the fresh matches or fire after the dialog closes.
+    def _cancel_worker(self):
         if self._scan_worker is not None:
             try:
                 self._scan_worker.cancel()
@@ -4483,6 +4593,32 @@ class _ScanForRawDialog(QDialog):
             except Exception:
                 pass
             self._scan_worker = None
+
+    def _ext_suffixes(self) -> tuple[str, ...]:
+        """Build the suffix tuple from the current extension selection.
+
+        The HTML checkbox covers both ``.html`` and ``.htm`` because
+        they're interchangeable on disk.
+        """
+        ext_suffixes: tuple[str, ...] = tuple(
+            f".{e}" if e != "html" else ".html"
+            for e in self._selected_exts
+        )
+        if "html" in self._selected_exts:
+            ext_suffixes = ext_suffixes + (".htm",)
+        return ext_suffixes
+
+    def _rescan_folder(self):
+        """Kick off a background walk + match of the current folder.
+
+        Walk AND match both run on :class:`_RawScanWorker` so the
+        dialog stays responsive even for huge folders with heavy
+        Fuzzy matching. Any previously running worker is cancelled
+        first so rapid folder / extension toggles don't leave
+        multiple scans racing.
+        """
+        self._candidates.clear()
+        self._cancel_worker()
         if not self._scan_folder or not os.path.isdir(self._scan_folder):
             self._status_lbl.setText(
                 "\u26a0 Pick a folder that exists on disk.")
@@ -4490,99 +4626,59 @@ class _ScanForRawDialog(QDialog):
             self._tree.clear()
             self._apply_btn.setEnabled(False)
             return
-        # Build the suffix tuple from the user's current checkbox
-        # selection. Includes both ``.html`` and ``.htm`` under the
-        # HTML checkbox since they're interchangeable on disk.
-        ext_suffixes: tuple[str, ...] = tuple(
-            f".{e}" if e != "html" else ".html"
-            for e in self._selected_exts
-        )
-        if "html" in self._selected_exts:
-            ext_suffixes = ext_suffixes + (".htm",)
         # Paint a "scanning…" placeholder so the UI reflects the
         # in-flight state rather than silently showing stale rows.
         self._status_lbl.setText(
             f"\u23f3 Scanning {self._scan_folder}\u2026")
         self._apply_btn.setEnabled(False)
         self._scan_worker = _RawScanWorker(
-            self._scan_folder, ext_suffixes,
-            _LIBRARY_TRACKING_FILENAMES, parent=self)
+            self._scan_folder, self._ext_suffixes(),
+            _LIBRARY_TRACKING_FILENAMES,
+            books=self._books, mode=self._mode,
+            threshold=self._threshold,
+            parent=self,
+        )
         self._scan_worker.results.connect(self._on_scan_results)
         self._scan_worker.start()
 
-    @Slot(str, list)
+    def _rematch_only(self):
+        """Re-run matching against the cached candidate list.
+
+        Used by mode / slider changes so we don't re-walk the
+        folder every time the user drags the Similarity slider.
+        Falls back to a full rescan when no cached candidates exist
+        yet (e.g. the user hasn't picked a folder).
+        """
+        if not self._candidates:
+            self._rescan_folder()
+            return
+        self._cancel_worker()
+        self._status_lbl.setText("\u23f3 Re-matching\u2026")
+        self._apply_btn.setEnabled(False)
+        self._scan_worker = _RawScanWorker(
+            self._scan_folder, self._ext_suffixes(),
+            _LIBRARY_TRACKING_FILENAMES,
+            books=self._books, mode=self._mode,
+            threshold=self._threshold,
+            prewalked=list(self._candidates),
+            parent=self,
+        )
+        self._scan_worker.results.connect(self._on_scan_results)
+        self._scan_worker.start()
+
+    @Slot(str, list, dict)
     def _on_scan_results(self, scan_folder: str,
-                         candidates: list) -> None:
+                         candidates: list,
+                         matches: dict) -> None:
         """Worker callback — runs on the main thread via Qt signal.
 
-        Ignores results whose *scan_folder* no longer matches the
-        dialog's current folder (the user switched folders mid-scan).
+        The worker did both the walk and the matching, so all we
+        need to do is cache candidates and paint the tree.
         """
         if scan_folder != self._scan_folder:
             return
         self._candidates = list(candidates)
-        self._recompute_matches()
-
-    def _workspace_keys(self, book: dict) -> list[str]:
-        keys: set[str] = set()
-        fn = book.get("folder_name") or os.path.basename(
-            book.get("output_folder") or book.get("path") or "")
-        if fn:
-            keys.add(_norm_book_key(os.path.splitext(fn)[0]))
-        md = book.get("metadata_json") or {}
-        if isinstance(md, dict):
-            for md_key in ("title", "original_title",
-                           "translated_title", "raw_title",
-                           "source_title", "english_title"):
-                val = md.get(md_key)
-                if isinstance(val, str) and val.strip():
-                    keys.add(_norm_book_key(val))
-        return [k for k in keys if k]
-
-    def _best_match(self, book: dict) -> tuple[str, float]:
-        """Return (matched_path, ratio) for *book* under the current mode.
-
-        ratio=0.0 means no match. For exact mode ratio=1.0 on hit.
-        """
-        book_keys = self._workspace_keys(book)
-        if not book_keys or not self._candidates:
-            return "", 0.0
-        if self._mode == self.MATCH_EXACT:
-            book_key_set = set(book_keys)
-            for cand_key, cand_path in self._candidates:
-                if cand_key in book_key_set:
-                    return cand_path, 1.0
-            return "", 0.0
-        # Fuzzy — take the best SequenceMatcher ratio across all
-        # candidate keys for this workspace.
-        import difflib
-        threshold = self._threshold / 100.0
-        best_path = ""
-        best_ratio = 0.0
-        for cand_key, cand_path in self._candidates:
-            for wk in book_keys:
-                ratio = difflib.SequenceMatcher(
-                    None, wk, cand_key).ratio()
-                if ratio > best_ratio:
-                    best_ratio = ratio
-                    best_path = cand_path
-        if best_ratio >= threshold:
-            return best_path, best_ratio
-        return "", best_ratio
-
-    def _recompute_matches(self):
-        self._matches.clear()
-        for book in self._books:
-            ws_folder = book.get("output_folder") or book.get("path") or ""
-            if not ws_folder:
-                continue
-            matched_path, ratio = self._best_match(book)
-            self._matches[ws_folder] = {
-                "book": book,
-                "path": matched_path,
-                "ratio": ratio,
-                "accepted": bool(matched_path),
-            }
+        self._matches = dict(matches)
         self._populate_tree()
 
     def _populate_tree(self):
@@ -4649,11 +4745,44 @@ class _ScanForRawDialog(QDialog):
                     item.setForeground(1, QColor("#6a6d80"))
             self._tree.addTopLevelItem(item)
         self._tree.blockSignals(False)
-        self._status_lbl.setText(
-            f"{hits} of {len(self._matches)} workspace"
-            f"{'s' if len(self._matches) != 1 else ''} matched "
-            f"({'exact' if self._mode == self.MATCH_EXACT else f'fuzzy ≥ {self._threshold}%'})."
-        )
+        mode_label = (
+            "exact" if self._mode == self.MATCH_EXACT
+            else f"fuzzy \u2265 {self._threshold}%")
+        workspace_count = len(self._matches)
+        candidate_count = len(self._candidates)
+        if workspace_count == 0:
+            # No missing-raw cards fed into the dialog in the first
+            # place — usually means the button was opened before
+            # the scanner populated any workspaces.
+            self._status_lbl.setText(
+                "\u24d8 No missing-raw workspaces to pair.")
+        elif candidate_count == 0:
+            self._status_lbl.setText(
+                "\u26a0 No candidate files found in this folder "
+                f"({mode_label}). Pick a different folder or "
+                "enable more extensions."
+            )
+        elif hits == 0:
+            hint = (
+                "try lowering the Similarity slider"
+                if self._mode == self.MATCH_FUZZY
+                else "switch to Fuzzy match or rename the raw "
+                     "files to match the workspace folder names")
+            self._status_lbl.setText(
+                f"\u26a0 0 of {workspace_count} workspace"
+                f"{'s' if workspace_count != 1 else ''} matched "
+                f"({candidate_count} candidate file"
+                f"{'s' if candidate_count != 1 else ''} scanned, "
+                f"{mode_label}). Try {hint}."
+            )
+        else:
+            self._status_lbl.setText(
+                f"\u2714 {hits} of {workspace_count} workspace"
+                f"{'s' if workspace_count != 1 else ''} matched "
+                f"({candidate_count} candidate file"
+                f"{'s' if candidate_count != 1 else ''} scanned, "
+                f"{mode_label})."
+            )
         self._apply_btn.setEnabled(hits > 0)
 
     def _on_tree_item_changed(self, item, column: int):
