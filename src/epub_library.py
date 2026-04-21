@@ -2587,10 +2587,20 @@ def _create_styled_checkbox(text: str = "", parent=None):
     from PySide6.QtWidgets import QCheckBox, QLabel
 
     checkbox = QCheckBox(text, parent)
+    # Let the row/dialog background paint through the checkbox widget.
+    # Without ``WA_TranslucentBackground`` Qt fills the QCheckBox's
+    # bounding rect with the widget's base brush (a solid grey on
+    # Windows' Fusion/Vista styles), so the extension toggles in the
+    # Scan for Raw Sources dialog rendered as opaque boxes sitting on
+    # top of the row. Combined with ``background: transparent;`` in
+    # the stylesheet below this makes the label + indicator area
+    # genuinely transparent — only the 14×14 indicator keeps a fill.
+    checkbox.setAttribute(Qt.WA_TranslucentBackground)
     checkbox.setStyleSheet("""
         QCheckBox {
             color: white;
             spacing: 6px;
+            background: transparent;
         }
         QCheckBox::indicator {
             width: 14px;
