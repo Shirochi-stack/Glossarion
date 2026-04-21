@@ -1059,6 +1059,28 @@ a.binaries = [b for b in a.binaries if not any([
     b[0].startswith('fastavro/'),
     # onnxruntime_extensions — GPU/ML runtime, not needed
     b[0].startswith('onnxruntime_extensions'),
+    # -----------------------------------------------------------------------
+    # Unused PySide6 QML/Quick DLLs (32 MB) — not needed for basic Qt Widgets UI
+    # -----------------------------------------------------------------------
+    b[0].startswith('PySide6\\Qt6Quick3D'),
+    b[0].startswith('PySide6\\Qt6Charts'),
+    b[0].startswith('PySide6\\Qt6Location'),
+    b[0].startswith('PySide6\\Qt6DataVisualization'),
+    b[0].startswith('PySide6\\Qt6RemoteObjects'),
+    b[0].startswith('PySide6\\Qt6SpatialAudio'),
+    b[0].startswith('PySide6\\Qt6Graphs'),
+    b[0].startswith('PySide6\\Qt6QuickEffects'),
+    b[0].startswith('PySide6\\Qt6QuickParticles'),
+    b[0].startswith('PySide6\\Qt6QuickDialogs'),
+    b[0].startswith('PySide6\\Qt6QuickControls2'),
+    b[0].startswith('PySide6\\Qt6QuickTemplates2'),
+    b[0].startswith('PySide6\\Qt6ShaderTools'),
+    b[0].startswith('PySide6\\Qt63D'),
+    'Qt6Quick3D' in b[0],
+    b[0].startswith('PySide6\\qml\\'),   # All QML plugins (VirtualKeyboard, Controls, etc.)
+    b[0] == 'PySide6\\QtOpenGL.pyd',
+    b[0] == 'PySide6\\QtQuick.pyd',
+    'v8_context_snapshot' in b[0],
 ])]
 
 # Remove torch, playwright data, and OmegaLite-excluded package data files

@@ -368,7 +368,18 @@ class UpdateManager(QObject):
         self.selected_asset = None  # Store selected asset for download
         self._build_variant = self._detect_build_variant()
         print(f"[DEBUG] Detected build variant: {self._build_variant}")
-    
+        
+        # Get version from the main GUI's __version__ variable
+        if hasattr(main_gui, '__version__'):
+            self.CURRENT_VERSION = main_gui.__version__
+        else:
+            # Extract from window title as fallback
+            title = self.main_gui.windowTitle()
+            if 'v' in title:
+                self.CURRENT_VERSION = title.split('v')[-1].strip()
+            else:
+                self.CURRENT_VERSION = "0.0.0"
+
     def _detect_build_variant(self) -> str:
         """Detect which build variant is currently running from the exe filename.
         
@@ -395,17 +406,6 @@ class UpdateManager(QObject):
                 return 'Standard'
         except Exception:
             return 'Lite'  # Safe default
-        
-        # Get version from the main GUI's __version__ variable
-        if hasattr(main_gui, '__version__'):
-            self.CURRENT_VERSION = main_gui.__version__
-        else:
-            # Extract from window title as fallback
-            title = self.main_gui.windowTitle()
-            if 'v' in title:
-                self.CURRENT_VERSION = title.split('v')[-1].strip()
-            else:
-                self.CURRENT_VERSION = "0.0.0"
     
     def _load_halgakos_pixmap(self, logical_size: int = 72):
         """Load Halgakos icon with HiDPI scaling."""
