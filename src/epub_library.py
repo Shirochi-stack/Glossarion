@@ -40,6 +40,83 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# -- Module-level render caches ---------------------------------------------
+# Flipping the library's View dropdown (S / M / L / XL / …) invalidates the
+# per-card ``preset_key`` and forces cards to rebuild. The rebuild itself is
+# necessary, but the two hottest sub-operations are pure and cacheable:
+#   1. scaling the same cover/fallback pixmap to the same (w, h)
+#   2. fitting the same title / pill text into the same box
+# Caching both removes most of the remaining latency after the cover-loader
+# thread fix, especially on large libraries where many cards share a rebuild.
+_RENDER_RESULT_CACHE_LIMIT = 4096
+_TITLE_FIT_CACHE: dict[tuple, tuple[str, float]] = {}
+_PILL_FONT_CACHE: dict[tuple, float] = {}
+_SCALED_PIXMAP_CACHE_LIMIT = 512
+_SCALED_PIXMAP_CACHE: dict[tuple[str, int, int], QPixmap] = {}
+_BASE_PIXMAP_CACHE_LIMIT = 256
+_BASE_PIXMAP_CACHE: dict[str, QPixmap] = {}
+
+
+def _cache_put_bounded(cache: dict, key, value, limit: int) -> None:
+    """Insert *key*/*value* into *cache*, evicting the oldest entry if full."""
+    try:
+        if key in cache:
+            cache.pop(key, None)
+        elif len(cache) >= int(limit):
+            cache.pop(next(iter(cache)))
+    except Exception:
+        pass
+    cache[key] = value
+
+
+def _font_cache_key(font: QFont | None) -> str:
+    """Return a stable, hashable key for *font* suitable for dict caches."""
+    if font is None:
+        return ""
+    try:
+        return font.toString()
+    except Exception:
+        try:
+            return font.family()
+        except Exception:
+            return ""
+
+
+def _cached_scaled_pixmap(path: str, width: int, height: int) -> QPixmap | None:
+    """Return a cached smooth-scaled pixmap for *(path, width, height)*.
+
+    Caches both the base loaded ``QPixmap`` and the scaled result so a card
+    resize doesn't re-hit disk or re-run smooth scaling for covers / the
+    fallback Halgakos icon that were already used once.
+    """
+    if not path or width <= 0 or height <= 0:
+        return None
+    try:
+        norm_path = os.path.normcase(os.path.abspath(path))
+    except Exception:
+        norm_path = path
+    scaled_key = (norm_path, int(width), int(height))
+    cached_scaled = _SCALED_PIXMAP_CACHE.get(scaled_key)
+    if cached_scaled is not None:
+        return cached_scaled
+    base = _BASE_PIXMAP_CACHE.get(norm_path)
+    if base is None:
+        try:
+            base = QPixmap(norm_path)
+        except Exception:
+            return None
+        if base is None or base.isNull():
+            return None
+        _cache_put_bounded(
+            _BASE_PIXMAP_CACHE, norm_path, base, _BASE_PIXMAP_CACHE_LIMIT)
+    scaled = base.scaled(
+        int(width), int(height),
+        Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    _cache_put_bounded(
+        _SCALED_PIXMAP_CACHE, scaled_key, scaled,
+        _SCALED_PIXMAP_CACHE_LIMIT)
+    return scaled
+
 
 class _NoWheelComboBox(QComboBox):
     """QComboBox that ignores mouse-wheel scroll to prevent accidental changes.
@@ -2705,14 +2782,31 @@ def _fit_pill_font_pt(text: str, max_width: int,
     pt = float(base_pt)
     min_pt = float(min_pt)
     step = float(step)
+    cache_key = (
+        text,
+        max_width,
+        round(pt, 3),
+        round(min_pt, 3),
+        round(step, 3),
+        int(horiz_padding),
+        bool(bold),
+        _font_cache_key(base_font),
+    )
+    cached = _PILL_FONT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     while pt > min_pt:
         f = QFont(base_font) if base_font is not None else QFont()
         f.setPointSizeF(pt)
         f.setBold(bold)
         fm = QFontMetrics(f)
         if fm.horizontalAdvance(text) + horiz_padding <= max_width:
+            _cache_put_bounded(
+                _PILL_FONT_CACHE, cache_key, pt, _RENDER_RESULT_CACHE_LIMIT)
             return pt
         pt = max(min_pt, pt - step)
+    _cache_put_bounded(
+        _PILL_FONT_CACHE, cache_key, min_pt, _RENDER_RESULT_CACHE_LIMIT)
     return min_pt
 
 
@@ -2742,6 +2836,19 @@ def _fit_title_text(
     max_height = max(1, int(max_height))
     base_pt = float(base_pt)
     min_pt = min(float(min_pt), base_pt)
+    step = float(step)
+    cache_key = (
+        text,
+        avail_width,
+        max_height,
+        round(base_pt, 3),
+        round(min_pt, 3),
+        round(step, 3),
+        _font_cache_key(base_font),
+    )
+    cached = _TITLE_FIT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     # Measure via ``QTextLayout`` with ``WrapAtWordBoundaryOrAnywhere``.
     # Plain ``QFontMetrics.boundingRect(TextWordWrap)`` under-measures
@@ -2756,10 +2863,15 @@ def _fit_title_text(
     _text_option = QTextOption()
     _text_option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
     _text_option.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+    _height_cache: dict[tuple[str, float], int] = {}
 
     def _height(s: str, pt_size: float) -> int:
         if not s:
             return 0
+        height_key = (s, round(float(pt_size), 3))
+        cached_height = _height_cache.get(height_key)
+        if cached_height is not None:
+            return cached_height
         f = QFont(base_font) if base_font is not None else QFont()
         f.setPointSizeF(pt_size)
         f.setBold(True)
@@ -2778,14 +2890,19 @@ def _fit_title_text(
         # Round up so a fractional overflow of a pixel still trips the
         # shrink loop — better to shrink an extra half-step than to let
         # the descender of the last line get clipped.
-        return int(y + 0.999)
+        out = int(y + 0.999)
+        _height_cache[height_key] = out
+        return out
 
     pt = base_pt
     while pt > min_pt and _height(text, pt) > max_height:
         pt = max(min_pt, pt - step)
 
     if _height(text, pt) <= max_height:
-        return text, pt
+        result = (text, pt)
+        _cache_put_bounded(
+            _TITLE_FIT_CACHE, cache_key, result, _RENDER_RESULT_CACHE_LIMIT)
+        return result
 
     # Overflows even at the minimum size — truncate with an ellipsis.
     ellipsis = "\u2026"
@@ -2798,7 +2915,10 @@ def _fit_title_text(
             lo = mid + 1
         else:
             hi = mid - 1
-    return text[:best].rstrip() + ellipsis, pt
+    result = (text[:best].rstrip() + ellipsis, pt)
+    _cache_put_bounded(
+        _TITLE_FIT_CACHE, cache_key, result, _RENDER_RESULT_CACHE_LIMIT)
+    return result
 
 
 class _FittedTitleLabel(QWidget):
@@ -4314,11 +4434,10 @@ class _BookCard(QFrame):
 
     def _set_fallback_icon(self, icon_path: str):
         try:
-            pm = QPixmap(icon_path)
-            if not pm.isNull():
-                target_w = int(self._cover_h * 0.5)
-                target_h = int(self._cover_h * 0.6)
-                scaled = pm.scaled(target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            target_w = int(self._cover_h * 0.5)
+            target_h = int(self._cover_h * 0.6)
+            scaled = _cached_scaled_pixmap(icon_path, target_w, target_h)
+            if scaled is not None and not scaled.isNull():
                 self.cover_label.setPixmap(scaled)
                 self.cover_label.setText("")
         except Exception:
@@ -4327,9 +4446,9 @@ class _BookCard(QFrame):
 
     def set_cover(self, image_path: str):
         try:
-            pm = QPixmap(image_path)
-            if not pm.isNull():
-                scaled = pm.scaled(self._card_w - 8, self._cover_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            scaled = _cached_scaled_pixmap(
+                image_path, self._card_w - 8, self._cover_h)
+            if scaled is not None and not scaled.isNull():
                 self.cover_label.setPixmap(scaled)
                 self.cover_label.setText("")
                 self._has_cover = True
@@ -8356,6 +8475,14 @@ class EpubLibraryDialog(QDialog):
         """
         selected_paths = selected_paths if selected_paths is not None else set()
         card_cache = card_cache if card_cache is not None else {}
+        grid_widget = grid_layout.parentWidget()
+        _grid_updates_were_enabled = None
+        if grid_widget is not None:
+            try:
+                _grid_updates_were_enabled = grid_widget.updatesEnabled()
+                grid_widget.setUpdatesEnabled(False)
+            except Exception:
+                _grid_updates_were_enabled = None
         visible_paths = {b.get("path", "") for b in books}
         # "Known" paths for the underlying data. When the caller
         # hands us the full unfiltered list we use it; otherwise we
@@ -8408,6 +8535,12 @@ class EpubLibraryDialog(QDialog):
         if not books:
             empty_label.show()
             count_label.setText("")
+            if grid_widget is not None and _grid_updates_were_enabled is not None:
+                try:
+                    grid_widget.setUpdatesEnabled(_grid_updates_were_enabled)
+                    grid_widget.update()
+                except Exception:
+                    pass
             return
 
         empty_label.hide()
@@ -8424,7 +8557,6 @@ class EpubLibraryDialog(QDialog):
         # surface cards lay out on. Falling back to the dialog width
         # minus a fudge factor covers the first paint when the grid
         # hasn't been sized yet.
-        grid_widget = grid_layout.parentWidget()
         try:
             viewport_w = int(grid_widget.width()) if grid_widget else 0
         except Exception:
@@ -8559,6 +8691,12 @@ class EpubLibraryDialog(QDialog):
         for r in range(last_row):
             grid_layout.setRowStretch(r, 0)
         grid_layout.setRowStretch(last_row, 1)
+        if grid_widget is not None and _grid_updates_were_enabled is not None:
+            try:
+                grid_widget.setUpdatesEnabled(_grid_updates_were_enabled)
+                grid_widget.update()
+            except Exception:
+                pass
 
     def _populate_in_progress(self, books: list[dict]):
         if not hasattr(self, "_ip_card_cache"):
