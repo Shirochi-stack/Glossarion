@@ -72,19 +72,12 @@ print(f"  GTK_FOLDER env var: {gtk_folder}")
 print(f"  Checking candidates: {msys2_bin_candidates}")
 print(f"  Selected MSYS2 bin: {msys2_bin}")
 
-if msys2_bin and os.path.exists(msys2_bin):
+# SuperLite: WeasyPrint (PDF) is excluded, so MSYS2 GTK DLLs are NOT collected.
+if False and msys2_bin and os.path.exists(msys2_bin):  # Disabled in SuperLite
     dll_list = glob.glob(os.path.join(msys2_bin, '*.dll'))
-    print(f"  Found {len(dll_list)} DLL files in {msys2_bin}")
-    if dll_list:
-        # Print first few DLLs for verification
-        print(f"  Sample DLLs: {[os.path.basename(d) for d in dll_list[:5]]}")
-        for dll in dll_list:
-            binaries.append((dll, '.'))
-        print(f"  Added {len(dll_list)} MSYS2 DLLs for WeasyPrint")
-    else:
-        print(f"  WARNING: No DLLs found in {msys2_bin}")
-else:
-    print(f"  WARNING: No MSYS2 directory found in any candidate location")
+    for dll in dll_list:
+        binaries.append((dll, '.'))
+print("  SuperLite: skipping MSYS2 DLL collection (WeasyPrint excluded)")
 
 # Collect data files from packages that need them
 for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
@@ -1108,8 +1101,6 @@ excludes = [
 
     # ============================================================================
     # PLAYWRIGHT - 98 MB uncompressed bundled Node.js runtime
-    # authza_auth.py uses playwright for Z.AI OAuth browser automation.
-    # It is safely optional (PLAYWRIGHT_AVAILABLE flag handles absence).
     # ============================================================================
     'playwright', 'playwright.*',
 
@@ -1119,6 +1110,19 @@ excludes = [
     # ============================================================================
     'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore',
     'PySide6.QtWebEngineQuick',
+
+    # ============================================================================
+    # WEASYPRINT + GTK/Cairo/Pango stack - excluded in SuperLite.
+    # PDF generation is not needed; this also drops the MSYS2 DLL payload.
+    # ============================================================================
+    'weasyprint', 'weasyprint.*',
+    'cairocffi', 'cairocffi.*',
+    'cairosvg', 'cairosvg.*',
+    'tinycss2', 'tinycss2.*',
+    'cssselect2', 'cssselect2.*',
+    'pydyf', 'pydyf.*',
+    'zopfli', 'zopfli.*',
+    'brotli',
 ]
 
 # ============================================================================
@@ -1160,9 +1164,14 @@ a.binaries = [b for b in a.binaries if not any([
     'Qt6WebEngineCore' in b[0],
     'QtWebEngineProcess' in b[0],
     b[0].startswith('PySide6\\Qt6WebEngine'),
+    # Strip pymupdf — PDF rendering, not needed without WeasyPrint
+    b[0].startswith('pymupdf\\'),
+    b[0].startswith('pymupdf/'),
+    'mupdfcpp' in b[0],
+    '_mupdf' in b[0],
 ])]
 
-# Remove torch, playwright data, and QtWebEngine data files
+# Remove torch, playwright data, and QtWebEngine/WeasyPrint data files
 a.datas = [d for d in a.datas if not any([
     'torch' in d[0].lower(),
     'torch-' in d[0],
@@ -1174,6 +1183,8 @@ a.datas = [d for d in a.datas if not any([
     'qtwebengine' in d[0].lower(),
     d[0].startswith('PySide6\\resources\\qtwebengine'),
     d[0] == 'PySide6\\resources\\icudtl.dat',
+    # pymupdf data
+    d[0].startswith('pymupdf'),
 ])]
 
 a.pure = [p for p in a.pure if not any([

@@ -1029,29 +1029,74 @@ a.binaries = [b for b in a.binaries if not any([
     'hdf5.dll' in b[0],
     'libsndfile' in b[0],
     'geos-' in b[0],
-    # Remove conflicting MSVC runtime DLLs (keep only system ones)
+    # Remove conflicting MSVC runtime DLLs
     b[0].lower() in ['msvcr90.dll', 'msvcp90.dll', 'msvcr100.dll', 'msvcp100.dll',
                      'msvcr110.dll', 'msvcp110.dll', 'msvcr120.dll', 'msvcp120.dll'],
     # Strip playwright binary driver (Node.js runtime, 85 MB uncompressed)
     b[0].startswith('playwright'),
+    # -----------------------------------------------------------------------
+    # OmegaLite-specific binary exclusions (not caught by `excludes` list)
+    # -----------------------------------------------------------------------
+    # QtWebEngine / Chromium — epub_library.py triggers this even as a data file
+    'Qt6WebEngineCore' in b[0],
+    'QtWebEngineProcess' in b[0],
+    b[0].startswith('PySide6\\Qt6WebEngine'),
+    b[0].startswith('PySide6\\resources\\qtwebengine'),
+    b[0] == 'PySide6\\resources\\icudtl.dat',
+    # grpc compiled extension (4.5 MB) — no Google SDKs in OmegaLite
+    b[0].startswith('grpc\\'),
+    b[0].startswith('grpc/'),
+    # pymupdf — PDF rendering, not needed without WeasyPrint/PDF generation
+    b[0].startswith('pymupdf\\'),
+    b[0].startswith('pymupdf/'),
+    'mupdfcpp' in b[0],
+    '_mupdf' in b[0],
+    # pdfminer — PDF text extraction, not needed in OmegaLite
+    b[0].startswith('pdfminer\\'),
+    b[0].startswith('pdfminer/'),
+    # fastavro — used by grpc/aiplatform, not needed
+    b[0].startswith('fastavro\\'),
+    b[0].startswith('fastavro/'),
+    # onnxruntime_extensions — GPU/ML runtime, not needed
+    b[0].startswith('onnxruntime_extensions'),
 ])]
 
-# Remove torch and playwright data files
+# Remove torch, playwright data, and OmegaLite-excluded package data files
 a.datas = [d for d in a.datas if not any([
     'torch' in d[0].lower(),
     'torch-' in d[0],
     '.dist-info' in d[0] and 'torch' in d[0].lower(),
-    # Playwright data (JS files, node.exe, etc.)
+    # Playwright data
     d[0].startswith('playwright'),
     d[0].startswith('playwright\\'),
+    # QtWebEngine resource files (pak, icudtl.dat)
+    'qtwebengine' in d[0].lower(),
+    d[0].startswith('PySide6\\resources\\qtwebengine'),
+    d[0] == 'PySide6\\resources\\icudtl.dat',
+    # pymupdf data
+    d[0].startswith('pymupdf'),
+    # pdfminer data
+    d[0].startswith('pdfminer'),
+    # grpc data
+    d[0].startswith('grpc\\'),
+    # fastavro data
+    d[0].startswith('fastavro\\'),
 ])]
 
 a.pure = [p for p in a.pure if not any([
     'torch' in str(p).lower(),
     'pytorch' in str(p).lower(),
     '_torchcodec' in str(p),
-    # Playwright Python modules
     str(p[0]).startswith('playwright'),
+    str(p[0]).startswith('grpc'),
+    str(p[0]).startswith('pymupdf'),
+    str(p[0]).startswith('pdfminer'),
+    str(p[0]).startswith('fastavro'),
+    str(p[0]).startswith('weasyprint'),
+    str(p[0]).startswith('cairocffi'),
+    str(p[0]).startswith('anthropic'),
+    str(p[0]).startswith('vertexai'),
+    str(p[0]).startswith('deepl'),
 ])]
 
 # ============================================================================

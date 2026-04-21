@@ -5888,15 +5888,43 @@ class EpubLibraryDialog(QDialog):
     def wheelEvent(self, event):
         """Ctrl+Wheel to zoom card size."""
         if event.modifiers() & Qt.ControlModifier:
-            sizes = _ALL_SIZES
-            idx = sizes.index(self._card_size) if self._card_size in sizes else 0
-            if event.angleDelta().y() > 0 and idx < len(sizes) - 1:
-                self._set_card_size(sizes[idx + 1])
-            elif event.angleDelta().y() < 0 and idx > 0:
-                self._set_card_size(sizes[idx - 1])
+            self._handle_ctrl_wheel(event.angleDelta().y())
             event.accept()
         else:
             super().wheelEvent(event)
+
+    def _handle_ctrl_wheel(self, delta_y: int) -> None:
+        """Step the card-size preset up / down based on wheel direction."""
+        if not delta_y:
+            return
+        sizes = _ALL_SIZES
+        idx = sizes.index(self._card_size) if self._card_size in sizes else 0
+        if delta_y > 0 and idx < len(sizes) - 1:
+            self._set_card_size(sizes[idx + 1])
+        elif delta_y < 0 and idx > 0:
+            self._set_card_size(sizes[idx - 1])
+
+    def eventFilter(self, obj, event):
+        """Route Ctrl+Wheel on the grid scroll areas into the card zoom.
+
+        Without this filter :class:`QScrollArea` swallows every wheel
+        event to drive its own vertical scrolling, so the dialog's
+        :meth:`wheelEvent` never runs when the cursor is over the grid
+        \u2014 which is where the user naturally scrolls. Intercepting
+        the wheel event here, checking for Ctrl, and forwarding it to
+        :meth:`_handle_ctrl_wheel` lets the same gesture zoom cards
+        regardless of where the cursor lives. Plain wheel events fall
+        through so normal grid scrolling keeps working.
+        """
+        from PySide6.QtCore import QEvent
+        if event.type() == QEvent.Wheel and (event.modifiers() & Qt.ControlModifier):
+            try:
+                self._handle_ctrl_wheel(event.angleDelta().y())
+            except Exception:
+                pass
+            event.accept()
+            return True
+        return super().eventFilter(obj, event)
 
     def _make_sort_btn(self, text, tooltip, mode):
         btn = QPushButton(text)
@@ -6267,6 +6295,14 @@ class EpubLibraryDialog(QDialog):
         self._ip_grid_layout.setContentsMargins(1, 1, 1, 1)
         self._ip_scroll.setWidget(self._ip_grid_container)
         ip_layout.addWidget(self._ip_scroll, 1)
+        # QScrollArea eats wheel events for its own scrolling, so the
+        # dialog-level :meth:`wheelEvent` never fires when the cursor is
+        # over the grid. Installing this event filter on the scroll
+        # area + its viewport lets Ctrl+Wheel zoom the card size instead
+        # of scrolling the grid (plain wheel still scrolls normally).
+        self._ip_scroll.installEventFilter(self)
+        self._ip_scroll.viewport().installEventFilter(self)
+        self._ip_grid_container.installEventFilter(self)
         self._ip_empty_label = QLabel(
             "No translations in progress.\nUse \u201cImport EPUB\u201d to start one.")
         self._ip_empty_label.setAlignment(Qt.AlignCenter)
@@ -6333,6 +6369,10 @@ class EpubLibraryDialog(QDialog):
         self._comp_grid_layout.setContentsMargins(1, 1, 1, 1)
         self._comp_scroll.setWidget(self._comp_grid_container)
         comp_layout.addWidget(self._comp_scroll, 1)
+        # Same Ctrl+Wheel interception as the In Progress scroll area.
+        self._comp_scroll.installEventFilter(self)
+        self._comp_scroll.viewport().installEventFilter(self)
+        self._comp_grid_container.installEventFilter(self)
         self._comp_empty_label = QLabel(
             "Your Library is empty.\n\n"
             "Drop finished .epub files here \u2014 or click\n"
