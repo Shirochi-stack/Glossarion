@@ -2291,31 +2291,42 @@ class _SelectableGrid(QWidget):
 
 
 def _card_raw_title(book: dict) -> str:
-    """Best-guess raw / source-language title for a library flash card.
+    """Best-guess raw / source-language label for a library flash card.
 
-    Resolution order:
-      1. ``metadata.json`` explicit ``original_title`` / ``raw_title`` /
-         ``source_title`` keys when the translator stored one.
-      2. ``folder_name`` — for in-progress workspaces this equals the raw
-         EPUB's basename (output folders are scaffolded from the source
-         filename).
-      3. Stem of ``raw_source_path`` when the scanner resolved one.
-      4. Stem of ``original_path`` recorded in the origins registry (for
-         Library-organized files that were moved from elsewhere).
+    The "Raw titles" toolbar toggle maps to *this* function, and users
+    expect it to reveal the original source *filename* on disk — the
+    one they'd use to hunt the file down in Explorer — not a
+    translated metadata title that happens to sit in ``metadata.json``.
+    Resolution order (filename-first):
+
+      1. Stem of ``raw_source_path`` — the resolved raw EPUB / PDF /
+         TXT the scanner matched to this card. This is the authoritative
+         source filename whenever it's available.
+      2. Stem of ``original_path`` recorded in the origins registry
+         (Library-organized files that were moved from elsewhere still
+         know where they came from).
+      3. ``folder_name`` — for in-progress workspaces this equals the
+         raw EPUB's basename because output folders are scaffolded from
+         the source filename.
+      4. ``metadata.json`` ``original_title`` / ``raw_title`` /
+         ``source_title`` when the translator stored one explicitly.
+         (Kept as a fallback so books without a resolvable raw source
+         still surface *something* source-language-y rather than
+         reverting to the translated name.)
       5. Fall back to the card's default ``name``.
     """
+    for path_key in ("raw_source_path", "original_path"):
+        p = book.get(path_key) or ""
+        if p:
+            return os.path.splitext(os.path.basename(p))[0]
+    fn = book.get("folder_name")
+    if fn:
+        return str(fn)
     md = book.get("metadata_json") or {}
     for key in ("original_title", "raw_title", "source_title"):
         val = md.get(key)
         if val:
             return str(val)
-    fn = book.get("folder_name")
-    if fn:
-        return str(fn)
-    for path_key in ("raw_source_path", "original_path"):
-        p = book.get(path_key) or ""
-        if p:
-            return os.path.splitext(os.path.basename(p))[0]
     return str(book.get("name", ""))
 
 
@@ -2869,9 +2880,11 @@ class EpubLibraryDialog(QDialog):
         # filter rather than a one-shot action.
         self._raw_titles_btn = QPushButton("\U0001f524  Raw titles")
         self._raw_titles_btn.setToolTip(
-            "Show the raw source-language title on every card instead of \n"
-            "the translated / compiled-EPUB title. Useful for finding a \n"
-            "book by its original name."
+            "Show the raw source filename on every card instead of the \n"
+            "translated / compiled-EPUB title. Falls back to the source-\n"
+            "language title from metadata when no source filename is \n"
+            "available. Useful for finding a book by the name it has \n"
+            "on disk."
         )
         self._raw_titles_btn.setFixedHeight(26)
         self._raw_titles_btn.setCursor(Qt.PointingHandCursor)
