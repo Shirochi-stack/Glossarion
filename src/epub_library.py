@@ -4847,6 +4847,32 @@ class EpubLibraryDialog(QDialog):
         self._raw_titles_btn.toggled.connect(self._on_raw_titles_toggled)
         toolbar.addWidget(self._raw_titles_btn)
         toolbar.addStretch()
+        # "Scan for Raw" lives on the shared toolbar so it's reachable
+        # from either tab — the missing-raw warning badge can appear
+        # on In Progress OR Completed cards, so pinning the action to
+        # one tab hides it from the user whenever they're looking at
+        # the other. Only visible when at least one flash card has
+        # the ``missing_raw_file`` warning; there's nothing for the
+        # dialog to do otherwise.
+        self._scan_raw_btn = QPushButton("\U0001f50d  Scan for Raw")
+        self._scan_raw_btn.setCursor(Qt.PointingHandCursor)
+        self._scan_raw_btn.setToolTip(
+            "Walk a folder for raw source files and link each "
+            "missing-raw workspace to its match. Supports exact "
+            "filename matching and fuzzy matching (with an "
+            "adjustable similarity threshold) and defaults to the "
+            "extensions each workspace's kind implies. Writes"
+            " ``source_epub.txt`` in each matched workspace so the "
+            "scanner resolves the raw automatically on future scans."
+        )
+        self._scan_raw_btn.setStyleSheet(
+            "QPushButton { background: #17a2b8; color: white; "
+            "border-radius: 4px; padding: 6px 14px; font-size: 9pt; "
+            "font-weight: bold; border: none; }"
+            "QPushButton:hover { background: #20b2cc; }")
+        self._scan_raw_btn.clicked.connect(self._open_scan_for_raw)
+        self._scan_raw_btn.hide()
+        toolbar.addWidget(self._scan_raw_btn)
         # "Open Library Folder" lives on the shared toolbar above the
         # tabs so it's reachable from either tab without having to
         # swap over to Completed first.
@@ -4964,31 +4990,6 @@ class EpubLibraryDialog(QDialog):
         comp_action_row.addWidget(self._comp_organize_btn)
         self._comp_undo_btn = self._make_undo_button(kind="comp")
         comp_action_row.addWidget(self._comp_undo_btn)
-        # "Scan for Raw" lives on the Completed tab's action row.
-        # Only visible when at least one flash card has the
-        # ``missing_raw_file`` warning — there's nothing for the
-        # dialog to do when every workspace's raw is already
-        # resolvable, so we hide the button entirely until it's
-        # actionable.
-        self._scan_raw_btn = QPushButton("\U0001f50d  Scan for Raw")
-        self._scan_raw_btn.setCursor(Qt.PointingHandCursor)
-        self._scan_raw_btn.setToolTip(
-            "Walk a folder for raw source files and link each "
-            "missing-raw workspace to its match. Supports exact "
-            "filename matching and fuzzy matching (with an "
-            "adjustable similarity threshold) and defaults to the "
-            "extensions each workspace's kind implies. Writes"
-            " ``source_epub.txt`` in each matched workspace so the "
-            "scanner resolves the raw automatically on future scans."
-        )
-        self._scan_raw_btn.setStyleSheet(
-            "QPushButton { background: #17a2b8; color: white; "
-            "border-radius: 4px; padding: 6px 14px; font-size: 9pt; "
-            "font-weight: bold; border: none; }"
-            "QPushButton:hover { background: #20b2cc; }")
-        self._scan_raw_btn.clicked.connect(self._open_scan_for_raw)
-        self._scan_raw_btn.hide()
-        comp_action_row.addWidget(self._scan_raw_btn)
         # "Add Translation" mirrors the In Progress tab's Import EPUB
         # slot — it sits next to Organize / Undo so registering a
         # compiled EPUB is reachable directly from the Completed tab.
