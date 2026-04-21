@@ -1819,7 +1819,25 @@ def scan_library_completed(config: dict | None = None) -> list[dict]:
                                 "mtime": stat.st_mtime,
                                 "in_library": True,
                                 "type": "epub",
-                                "raw_source_path": raw_counterpart,
+                                "raw_source_path": raw_counterpart or "",
+                                # Library-filed cards need the same
+                                # ``missing_raw_file`` flag as
+                                # workspace cards so the \u26a0
+                                # \"missing raw\" badge renders when
+                                # the compiled EPUB's original raw
+                                # can't be resolved via origins /
+                                # Library/Raw / the raw-inputs
+                                # registry. Without this, a library
+                                # card that inherited \"in_progress\"
+                                # state via :class:`_DualScannerThread`
+                                # silently dropped the badge even
+                                # though the raw was genuinely gone
+                                # \u2014 and Reveal source file hid
+                                # itself (since the raw file was
+                                # unresolvable) without a
+                                # corresponding warning.
+                                "missing_raw_file": not bool(
+                                    raw_counterpart),
                             })
                         elif entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
                             _walk(entry.path, max_depth, depth + 1)
@@ -1860,6 +1878,15 @@ def scan_library_completed(config: dict | None = None) -> list[dict]:
             "registered_translated": True,
             "type": "epub",
             "raw_source_path": "",
+            # Registered-in-place translated imports have no raw
+            # link by construction \u2014 they're drag-dropped
+            # compiled EPUBs with no associated workspace. The
+            # badge would be misleading here because the
+            # concept of a \"raw source\" doesn't apply to these
+            # cards at all; default the flag to False so the
+            # missing-raw warning stays scoped to workspace /
+            # organized library entries.
+            "missing_raw_file": False,
         })
 
     results.sort(key=lambda r: r["mtime"], reverse=True)
@@ -3249,6 +3276,16 @@ class _DualScannerThread(QThread):
                 raw_src_from_ws = ws_row.get("raw_source_path") or ""
                 if raw_src_from_ws:
                     r["raw_source_path"] = raw_src_from_ws
+                # Keep ``missing_raw_file`` honest for inherited
+                # library rows. If after inheritance the card
+                # still has no resolvable raw source (neither its
+                # own library-side lookup nor the workspace
+                # produced one), flip the flag on so the
+                # \u26a0 \"missing raw\" badge surfaces. Otherwise
+                # (raw path present on either side) keep the flag
+                # off so the badge doesn't render spuriously.
+                r["missing_raw_file"] = not bool(
+                    r.get("raw_source_path") or "")
 
             # Move any library rows that inherited a non-completed
             # state over to the In Progress tab, and make sure we
@@ -7935,26 +7972,93 @@ class EpubLibraryDialog(QDialog):
         menu.exec(pos)
 
     @staticmethod
-    def _card_has_saved_raw_link(book: dict) -> bool:
-        """Return True when the card's workspace has a ``source_epub.txt``.
+    def _raw_is_in_library_raw(raw_src: str) -> bool:
+        """True when *raw_src* lives directly inside ``Library/Raw``.
 
-        Works for both workspace-backed cards (``output_folder``
-        present on the book dict) AND library-filed cards whose
-        compiled EPUB was organized into ``Library/Translated``
-        \u2014 the latter don't carry ``output_folder`` directly but
-        :func:`_resolve_book_output_folder` recovers it from
-        ``library_origins['translated']``. Without this path the
-        Clear action silently skipped library-filed entries while
-        working fine for every other card, which read as an
-        inconsistency even though the sidecar still existed.
+        A raw sitting in ``Library/Raw`` is resolved by the scanner
+        via the implicit ``Library/Raw/<folder_name>.<ext>`` filename
+        pattern (route 2 of :func:`_find_raw_source_for_folder`),
+        which is NOT a \"saved link\" the user can clear from the
+        UI \u2014 the file itself is the match. Detecting that case
+        here lets the Clear action hide itself and refuse to run
+        for those cards, so the user isn't shown a no-op.
+        """
+        if not raw_src:
+            return False
+        try:
+            raw_parent = os.path.normcase(os.path.normpath(
+                os.path.abspath(os.path.dirname(raw_src))))
+            lib_raw = os.path.normcase(os.path.normpath(
+                os.path.abspath(get_library_raw_dir())))
+        except (TypeError, ValueError, OSError):
+            return False
+        return bool(lib_raw) and raw_parent == lib_raw
+
+    @staticmethod
+    def _card_has_saved_raw_link(book: dict) -> bool:
+        """Return True when the card has something to clear.
+
+        A card has a \"saved raw link\" when ANY of the following
+        surface the raw source for it:
+
+          1. ``<workspace>/source_epub.txt`` exists on disk
+             (written by the translator / Scan-for-Raw).
+          2. ``book['raw_source_path']`` is listed in
+             ``library_raw_inputs.txt`` (registered through the
+             translator run, Import, or Scan-for-Raw's Apply pass).
+
+        Route 2 of :func:`_find_raw_source_for_folder` \u2014 the
+        implicit ``Library/Raw/<folder_name>.ext`` filename-pattern
+        match \u2014 is NOT considered here because there's
+        nothing to \"clear\" (the file itself is the match
+        source; removing it would require moving / renaming it).
+        Cards whose ``raw_source_path`` resolves to a file living
+        inside ``Library/Raw`` are skipped entirely, even when a
+        sidecar or registry entry happens to exist \u2014 the
+        Library/Raw file takes priority in the scanner and would
+        keep resolving the match after a Clear, so the action
+        would read as broken.
+
+        Workspace resolution goes through
+        :func:`_resolve_book_output_folder` so library-filed cards
+        whose compiled EPUB was organized into ``Library/Translated``
+        still resolve to their originating workspace via the
+        origins registry.
         """
         if not isinstance(book, dict):
             return False
-        ws_folder = _resolve_book_output_folder(book)
-        if not ws_folder or not os.path.isdir(ws_folder):
+        raw_src = book.get("raw_source_path") or ""
+        # Library/Raw-backed raws don't expose a clearable link.
+        if EpubLibraryDialog._raw_is_in_library_raw(raw_src):
             return False
-        sidecar = os.path.join(ws_folder, "source_epub.txt")
-        return os.path.isfile(sidecar)
+        # 1. Sidecar on disk.
+        ws_folder = _resolve_book_output_folder(book)
+        if ws_folder and os.path.isdir(ws_folder):
+            sidecar = os.path.join(ws_folder, "source_epub.txt")
+            if os.path.isfile(sidecar):
+                return True
+        # 2. Registry-backed link.
+        if not raw_src:
+            return False
+        try:
+            raw_key = os.path.normcase(os.path.normpath(
+                os.path.abspath(raw_src)))
+        except (TypeError, ValueError):
+            return False
+        try:
+            for p in load_library_raw_inputs():
+                if not p:
+                    continue
+                try:
+                    reg_key = os.path.normcase(os.path.normpath(
+                        os.path.abspath(p)))
+                except Exception:
+                    continue
+                if reg_key == raw_key:
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _clear_saved_raw_link(self, books: list):
         """Delete the ``source_epub.txt`` sidecar(s) after confirmation.
@@ -7977,32 +8081,89 @@ class EpubLibraryDialog(QDialog):
         # still resolve to their originating workspace via the
         # origins registry \u2014 otherwise the Clear action silently
         # skipped them, which the user observed as an inconsistency.
-        targets: list[tuple[str, str, dict]] = []
-        seen: set[str] = set()
+        #
+        # Each target carries the workspace folder (if any), the raw
+        # pointer recorded on disk (sidecar content OR
+        # ``raw_source_path`` as a fallback for registry-only
+        # entries), and a flag telling the deletion pass whether a
+        # sidecar actually existed on disk. Cards whose raw was
+        # resolved only via the registry have no sidecar to delete
+        # but still benefit from unregistering the raw so the next
+        # scan can re-derive the match cleanly.
+        targets: list[tuple[str, str, dict, bool]] = []
+        seen_ws: set[str] = set()
+        seen_registry: set[str] = set()
         for b in books:
+            # Skip cards whose raw lives in ``Library/Raw`` \u2014 the
+            # filename-pattern route resolves those regardless of
+            # any sidecar / registry state, so \"clearing\" would be
+            # a no-op (the scanner would just re-resolve the raw
+            # via route 2 on the next scan).
+            raw_src_full = b.get("raw_source_path") or ""
+            if self._raw_is_in_library_raw(raw_src_full):
+                continue
             ws_folder = _resolve_book_output_folder(b)
-            if not ws_folder or not os.path.isdir(ws_folder):
+            sidecar = ""
+            sidecar_raw = ""
+            if ws_folder and os.path.isdir(ws_folder):
+                cand = os.path.join(ws_folder, "source_epub.txt")
+                if os.path.isfile(cand):
+                    sidecar = cand
+                    try:
+                        with open(sidecar, "r", encoding="utf-8") as fh:
+                            sidecar_raw = fh.read().strip()
+                    except OSError:
+                        sidecar_raw = ""
+            if sidecar:
+                ws_key = os.path.normcase(os.path.normpath(
+                    os.path.abspath(ws_folder)))
+                if ws_key in seen_ws:
+                    continue
+                seen_ws.add(ws_key)
+                targets.append((ws_folder, sidecar_raw, b, True))
                 continue
-            key = os.path.normcase(os.path.normpath(
-                os.path.abspath(ws_folder)))
-            if key in seen:
-                continue
-            seen.add(key)
-            sidecar = os.path.join(ws_folder, "source_epub.txt")
-            if not os.path.isfile(sidecar):
+            # No sidecar \u2014 registry-only link?
+            raw_src = raw_src_full
+            if not raw_src:
                 continue
             try:
-                with open(sidecar, "r", encoding="utf-8") as fh:
-                    old_raw = fh.read().strip()
-            except OSError:
-                old_raw = ""
-            targets.append((ws_folder, old_raw, b))
+                raw_key = os.path.normcase(os.path.normpath(
+                    os.path.abspath(raw_src)))
+            except (TypeError, ValueError):
+                continue
+            in_registry = False
+            try:
+                for p in load_library_raw_inputs():
+                    if not p:
+                        continue
+                    try:
+                        reg_key = os.path.normcase(os.path.normpath(
+                            os.path.abspath(p)))
+                    except Exception:
+                        continue
+                    if reg_key == raw_key:
+                        in_registry = True
+                        break
+            except Exception:
+                in_registry = False
+            if not in_registry:
+                continue
+            if raw_key in seen_registry:
+                continue
+            seen_registry.add(raw_key)
+            # ``ws_folder`` may be empty here \u2014 that's fine, we
+            # just skip sidecar deletion and only unregister.
+            targets.append((ws_folder or "", raw_src, b, False))
         if not targets:
             return
         # Confirmation prompt: list the affected workspace(s) and the
-        # raw path each is currently pointing at.
+        # raw path each is currently pointing at. The explanatory
+        # footer varies based on whether we're deleting sidecars,
+        # unregistering raws, or both \u2014 the user shouldn't see
+        # \"only source_epub.txt is deleted\" when a registry-only
+        # entry is being cleared.
         preview_lines = []
-        for ws_folder, old_raw, b in targets[:6]:
+        for ws_folder, old_raw, b, _had_sidecar in targets[:6]:
             label = (b.get("folder_name")
                      or os.path.basename(ws_folder)
                      or b.get("name") or "")
@@ -8013,6 +8174,29 @@ class EpubLibraryDialog(QDialog):
                 preview_lines.append(f"  \u2022 {label}")
         if len(targets) > 6:
             preview_lines.append(f"  \u2026 and {len(targets) - 6} more.")
+        has_sidecars = any(t[3] for t in targets)
+        has_registry_only = any(not t[3] for t in targets)
+        if has_sidecars and has_registry_only:
+            footer = (
+                "The workspace folders are left untouched \u2014 "
+                "``source_epub.txt`` is deleted where present, and "
+                "the raw path is unregistered from "
+                "``library_raw_inputs.txt``. The next library scan "
+                "will re-detect the workspace kind from the folder "
+                "contents.")
+        elif has_sidecars:
+            footer = (
+                "The workspace folders are left untouched \u2014 "
+                "only ``source_epub.txt`` is deleted. The next "
+                "library scan will re-detect the workspace kind "
+                "from the folder contents.")
+        else:
+            footer = (
+                "No ``source_epub.txt`` sidecar exists for these "
+                "cards \u2014 the raw path will be unregistered from "
+                "``library_raw_inputs.txt`` instead. The next "
+                "library scan will re-detect the workspace kind "
+                "from the folder contents.")
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Question)
         msg.setWindowTitle("Clear saved raw link")
@@ -8021,10 +8205,7 @@ class EpubLibraryDialog(QDialog):
                 "Remove the saved raw-source pointer for this "
                 "workspace?\n\n"
                 + "\n".join(preview_lines)
-                + "\n\nThe workspace folder is left untouched \u2014 "
-                "only ``source_epub.txt`` is deleted. The next "
-                "library scan will re-detect the workspace kind "
-                "from the folder contents."
+                + "\n\n" + footer
             )
         else:
             msg.setText(
@@ -8032,10 +8213,7 @@ class EpubLibraryDialog(QDialog):
                 f"{len(targets)} workspace"
                 f"{'s' if len(targets) != 1 else ''}?\n\n"
                 + "\n".join(preview_lines)
-                + "\n\nThe workspace folders are left untouched \u2014 "
-                "only each ``source_epub.txt`` is deleted. The next "
-                "library scan will re-detect the workspace kind "
-                "from the folder contents."
+                + "\n\n" + footer
             )
         msg.setStandardButtons(
             QMessageBox.Yes | QMessageBox.Cancel)
@@ -8043,22 +8221,45 @@ class EpubLibraryDialog(QDialog):
         if msg.exec() != QMessageBox.Yes:
             return
         cleared = 0
-        for ws_folder, old_raw, _b in targets:
-            sidecar = os.path.join(ws_folder, "source_epub.txt")
-            try:
-                os.remove(sidecar)
+        for ws_folder, old_raw, _b, had_sidecar in targets:
+            if had_sidecar and ws_folder:
+                sidecar = os.path.join(ws_folder, "source_epub.txt")
+                try:
+                    os.remove(sidecar)
+                    cleared += 1
+                except OSError as exc:
+                    logger.debug(
+                        "Clear saved raw link failed for %s: %s",
+                        sidecar, exc)
+                    continue
+            else:
+                # Registry-only link \u2014 no sidecar to delete, but
+                # unregistering the raw still counts as \"cleared\".
                 cleared += 1
-            except OSError as exc:
-                logger.debug(
-                    "Clear saved raw link failed for %s: %s",
-                    sidecar, exc)
-                continue
-            # Drop the now-unreferenced raw from the registry. If any
-            # OTHER workspace still points at this raw, leave the
-            # registry entry alone so that workspace doesn't lose
-            # its pairing.
             if not old_raw:
                 continue
+            if not had_sidecar:
+                # Registry-only clear: the registry entry IS the
+                # link for this card. Remove it unconditionally,
+                # even if other workspaces reference the same raw
+                # via their own ``source_epub.txt`` sidecars \u2014
+                # those keep resolving through route 1 and don't
+                # depend on the registry. The previous code ran
+                # the same \"still referenced\" sweep used for
+                # sidecar-based clears, which would see those
+                # sidecars and refuse to unregister, leaving this
+                # card's link stubbornly in place.
+                try:
+                    remove_library_raw_input(old_raw)
+                except Exception:
+                    logger.debug(
+                        "Registry-only unregister failed: %s",
+                        traceback.format_exc())
+                continue
+            # Sidecar-based clear: the sweep protects against
+            # orphaning a raw that another workspace still needs
+            # as a registry fallback. Only drop the registry
+            # entry when no OTHER workspace points at it.
             try:
                 still_referenced = False
                 roots_checked: set[str] = set()
