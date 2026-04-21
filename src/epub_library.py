@@ -618,39 +618,61 @@ def _extract_cover(epub_path: str) -> str | None:
 
 
 def _open_folder_in_explorer(path: str):
-    """Reveal *path* in the OS file manager.
+    """Reveal *path* in the OS file manager (non-blocking).
 
-    On Windows the subprocess call passes ``CREATE_NO_WINDOW`` so the
-    spawned ``explorer.exe`` invocation doesn't flash a console window
-    beside the cursor before the Explorer pane appears. The viewer-open
-    helpers elsewhere in this module already use the same flag; this
-    brings ``_open_folder_in_explorer`` into line so there are no
-    unsuppressed Popen paths left.
+    The actual spawn (``subprocess.Popen`` / ``os.startfile``) runs on
+    a short-lived daemon thread because ``CreateProcess`` /
+    ``ShellExecuteEx`` on Windows can stall the caller for 0.5–1 s
+    while explorer.exe initialises COM and resolves the target. On
+    the Qt main thread that shows up as a visible freeze between
+    clicking a "Reveal source file" / "Open Output Folder" action and
+    the Explorer window actually appearing. Off-loading the spawn
+    means the click handler returns immediately and Qt can paint the
+    next frame while Windows is still bringing Explorer up.
+
+    On Windows the subprocess call also passes ``CREATE_NO_WINDOW``
+    so the spawned helper doesn't flash a console window beside the
+    cursor before Explorer paints its pane.
     """
-    # CREATE_NO_WINDOW lives on ``subprocess`` on Windows and is a
-    # no-op elsewhere, so we resolve it with ``getattr`` for a
-    # cross-platform single-expression form. 0x08000000 is the raw
-    # value for older / frozen interpreters that don't expose the
-    # attribute directly.
+    if not path:
+        return
+    # Snapshot the values the worker needs so it doesn't poke at
+    # shared state from a background thread.
     _no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
     try:
-        folder = os.path.dirname(path) if os.path.isfile(path) else path
-        if platform.system() == "Windows":
-            if os.path.isfile(path):
+        is_file = os.path.isfile(path)
+    except OSError:
+        is_file = False
+    folder = os.path.dirname(path) if is_file else path
+    normalized = os.path.normpath(path) if is_file else path
+    system_name = platform.system()
+
+    def _worker():
+        try:
+            if system_name == "Windows":
+                if is_file:
+                    subprocess.Popen(
+                        ["explorer", "/select,", normalized],
+                        creationflags=_no_window,
+                    )
+                else:
+                    os.startfile(folder)
+            elif system_name == "Darwin":
                 subprocess.Popen(
-                    ["explorer", "/select,", os.path.normpath(path)],
-                    creationflags=_no_window,
+                    ["open", "-R", path] if is_file else ["open", folder]
                 )
             else:
-                os.startfile(folder)
-        elif platform.system() == "Darwin":
-            subprocess.Popen(
-                ["open", "-R", path] if os.path.isfile(path) else ["open", folder]
-            )
-        else:
-            subprocess.Popen(["xdg-open", folder])
-    except Exception as exc:
-        logger.warning("Failed to open folder: %s\n%s", exc, traceback.format_exc())
+                subprocess.Popen(["xdg-open", folder])
+        except Exception as exc:
+            logger.warning("Failed to open folder: %s\n%s",
+                           exc, traceback.format_exc())
+
+    import threading as _threading
+    _threading.Thread(
+        target=_worker,
+        name="OpenFolderInExplorer",
+        daemon=True,
+    ).start()
 
 
 # ---------------------------------------------------------------------------
