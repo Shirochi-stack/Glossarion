@@ -3888,9 +3888,9 @@ class _ScanForRawDialog(QDialog):
                  or not b.get("raw_source_path"))
         ]
         self._mode = self._config.get(
-            "epub_library_scan_raw_mode", self.MATCH_FUZZY)
+            "epub_library_scan_raw_mode", self.MATCH_EXACT)
         if self._mode not in (self.MATCH_EXACT, self.MATCH_FUZZY):
-            self._mode = self.MATCH_FUZZY
+            self._mode = self.MATCH_EXACT
         try:
             self._threshold = int(
                 self._config.get("epub_library_scan_raw_threshold", 70))
@@ -4065,9 +4065,17 @@ class _ScanForRawDialog(QDialog):
         self._rb_exact.setAttribute(Qt.WA_TranslucentBackground)
         self._rb_fuzzy.setAttribute(Qt.WA_TranslucentBackground)
         radio_css = (
-            "QRadioButton { color: #c8cbe0; font-size: 9pt; spacing: 4px; "
-            "background: transparent; }"
-            "QRadioButton::indicator { width: 12px; height: 12px; }"
+            "QRadioButton { color: #c8cbe0; font-size: 9pt; spacing: 6px; "
+            "background: transparent; padding: 2px 4px; }"
+            "QRadioButton::indicator { width: 14px; height: 14px; "
+            "border: 1px solid #5a9fd4; border-radius: 8px; "
+            "background-color: #1e1e2e; }"
+            "QRadioButton::indicator:checked { background-color: "
+            "qradialgradient(cx:0.5, cy:0.5, radius:0.5, "
+            "fx:0.5, fy:0.5, stop:0 #20b2cc, stop:0.55 #17a2b8, "
+            "stop:0.6 #1e1e2e, stop:1 #1e1e2e); "
+            "border-color: #20b2cc; }"
+            "QRadioButton::indicator:hover { border-color: #7bb3e0; }"
         )
         self._rb_exact.setStyleSheet(radio_css)
         self._rb_fuzzy.setStyleSheet(radio_css)
@@ -4456,16 +4464,30 @@ class _ScanForRawDialog(QDialog):
         hits = 0
         for ws_folder, info in self._matches.items():
             book = info["book"]
+            # Column 1 shows the workspace's ON-DISK folder basename
+            # so the user can compare it directly to the matched raw
+            # filename in column 2. The metadata-driven ``book['name']``
+            # is the translated title (e.g. "The Slaves I Kicked Out")
+            # which is useless for filename matching — the folder name
+            # (e.g. "[393761] ㄝㅇㅏㄴㄴㄴ...") is what the
+            # scanner actually pairs against.
+            workspace_label = (book.get("folder_name")
+                               or os.path.basename(ws_folder)
+                               or book.get("name")
+                               or "")
             item = self._QTreeWidgetItem([
                 "",
-                str(book.get("name")
-                    or book.get("folder_name")
-                    or os.path.basename(ws_folder)),
+                str(workspace_label),
                 (os.path.basename(info["path"])
                  if info["path"] else "\u2014 no match"),
                 (f"{info['ratio'] * 100:.0f}%"
                  if info["ratio"] > 0 else "\u2014"),
             ])
+            # Tooltip on the workspace column reveals the full folder
+            # path for users who want to verify which workspace on
+            # disk the row points at.
+            if ws_folder:
+                item.setToolTip(1, ws_folder)
             item.setData(0, Qt.UserRole, ws_folder)
             if info["path"]:
                 item.setToolTip(2, info["path"])
@@ -4475,13 +4497,29 @@ class _ScanForRawDialog(QDialog):
                     Qt.Checked if info["accepted"] else Qt.Unchecked)
                 hits += 1
             else:
-                # No candidate — disable the checkbox row.
+                # No candidate — disable the checkbox row and paint
+                # the workspace name in a dimmed color so it reads
+                # as unreachable. ``QPalette.Disabled`` /
+                # ``QPalette.Text`` are *class-level* enums on
+                # ``QPalette`` itself; accessing them through a
+                # palette *instance* (as in
+                # ``QApplication.palette().Disabled``) raises
+                # ``AttributeError`` on PySide6 because the instance
+                # doesn't re-export the enum values.
+                from PySide6.QtGui import QPalette, QColor
                 item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable
                               & ~Qt.ItemIsSelectable)
-                item.setForeground(
-                    1, QApplication.palette().brush(
-                        QApplication.palette().Disabled,
-                        QApplication.palette().Text))
+                try:
+                    item.setForeground(
+                        1, QApplication.palette().brush(
+                            QPalette.Disabled, QPalette.Text))
+                except Exception:
+                    # Palette brush lookup failed on some Qt builds
+                    # (themed stylesheets sometimes strip the
+                    # Disabled group). Fall back to a hardcoded
+                    # dimmed grey so the row still reads as
+                    # unreachable.
+                    item.setForeground(1, QColor("#6a6d80"))
             self._tree.addTopLevelItem(item)
         self._tree.blockSignals(False)
         self._status_lbl.setText(
@@ -4847,32 +4885,6 @@ class EpubLibraryDialog(QDialog):
         self._raw_titles_btn.toggled.connect(self._on_raw_titles_toggled)
         toolbar.addWidget(self._raw_titles_btn)
         toolbar.addStretch()
-        # "Scan for Raw" lives on the shared toolbar so it's reachable
-        # from either tab — the missing-raw warning badge can appear
-        # on In Progress OR Completed cards, so pinning the action to
-        # one tab hides it from the user whenever they're looking at
-        # the other. Only visible when at least one flash card has
-        # the ``missing_raw_file`` warning; there's nothing for the
-        # dialog to do otherwise.
-        self._scan_raw_btn = QPushButton("\U0001f50d  Scan for Raw")
-        self._scan_raw_btn.setCursor(Qt.PointingHandCursor)
-        self._scan_raw_btn.setToolTip(
-            "Walk a folder for raw source files and link each "
-            "missing-raw workspace to its match. Supports exact "
-            "filename matching and fuzzy matching (with an "
-            "adjustable similarity threshold) and defaults to the "
-            "extensions each workspace's kind implies. Writes"
-            " ``source_epub.txt`` in each matched workspace so the "
-            "scanner resolves the raw automatically on future scans."
-        )
-        self._scan_raw_btn.setStyleSheet(
-            "QPushButton { background: #17a2b8; color: white; "
-            "border-radius: 4px; padding: 6px 14px; font-size: 9pt; "
-            "font-weight: bold; border: none; }"
-            "QPushButton:hover { background: #20b2cc; }")
-        self._scan_raw_btn.clicked.connect(self._open_scan_for_raw)
-        self._scan_raw_btn.hide()
-        toolbar.addWidget(self._scan_raw_btn)
         # "Open Library Folder" lives on the shared toolbar above the
         # tabs so it's reachable from either tab without having to
         # swap over to Completed first.
@@ -4913,6 +4925,45 @@ class EpubLibraryDialog(QDialog):
                                      border-color: #2a2a3e; }
             QTabBar::tab:hover:!selected { background: #252540; color: #e0e0e0; }
         """)
+
+        # "Scan for Raw" as a corner widget on the tab bar so it sits
+        # directly next to the tabs — visible from either tab without
+        # needing to switch. Only shown when at least one flash card
+        # has the ``missing_raw_file`` warning; hidden otherwise by
+        # :meth:`_update_organize_counts`.
+        self._scan_raw_btn = QPushButton("\U0001f50d  Scan for Raw")
+        self._scan_raw_btn.setCursor(Qt.PointingHandCursor)
+        self._scan_raw_btn.setToolTip(
+            "Walk a folder for raw source files and link each "
+            "missing-raw workspace to its match. Supports exact "
+            "filename matching and fuzzy matching (with an "
+            "adjustable similarity threshold) and defaults to the "
+            "extensions each workspace's kind implies. Writes"
+            " ``source_epub.txt`` in each matched workspace so the "
+            "scanner resolves the raw automatically on future scans."
+        )
+        self._scan_raw_btn.setStyleSheet(
+            "QPushButton { background: #17a2b8; color: white; "
+            "border-radius: 4px; padding: 4px 12px; font-size: 9pt; "
+            "font-weight: bold; border: none; }"
+            "QPushButton:hover { background: #20b2cc; }")
+        self._scan_raw_btn.setFixedHeight(28)
+        self._scan_raw_btn.clicked.connect(self._open_scan_for_raw)
+        self._scan_raw_btn.hide()
+        # Wrap the button in a QWidget with vertical margins so it
+        # doesn't crowd the bottom of the tab bar (corner widgets
+        # otherwise sit flush against the tab strip's baseline and
+        # the button's hover border would bleed into the tab-bar
+        # underline). Placed on the LEFT corner so it reads as
+        # sitting next to the In Progress / Completed tab labels
+        # rather than floating at the far-right edge of the dialog.
+        from PySide6.QtWidgets import QWidget as _QWidget
+        scan_corner = _QWidget()
+        scan_corner_layout = QHBoxLayout(scan_corner)
+        scan_corner_layout.setContentsMargins(6, 4, 8, 6)
+        scan_corner_layout.setSpacing(0)
+        scan_corner_layout.addWidget(self._scan_raw_btn)
+        self._tabs.setCornerWidget(scan_corner, Qt.TopLeftCorner)
 
         # --- In Progress tab ---
         self._ip_tab = QWidget()
