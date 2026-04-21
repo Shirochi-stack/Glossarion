@@ -6644,6 +6644,28 @@ def _create_processing_options_section(self, parent):
     
     # Emergency Glossary Compliance
     glossary_compliance_cb = self._create_styled_checkbox("Emergency Glossary Compliance")
+    glossary_compliance_cb.setToolTip(
+        "<b>Emergency Glossary Compliance</b><br><br>"
+        "Pre-edits the source chapter text with the active glossary\u2019s "
+        "raw \u2192 translated replacements <i>before</i> sending it to the "
+        "translation API, guaranteeing character / term / location names "
+        "come back consistent even when the model ignores the glossary "
+        "prompt.<br><br>"
+        "<b>Mode</b> controls which entry types are substituted:<br>"
+        "\u00b7 <b>Characters</b> \u2014 only character-name entries "
+        "(safest; minimal chance of mangling unrelated text).<br>"
+        "\u00b7 <b>All</b> \u2014 every entry in the glossary "
+        "(terms, locations, abilities, items, organizations, titles, "
+        "books\u2026). Maximum coverage, higher risk of over-substitution "
+        "in ambiguous phrases.<br>"
+        "\u00b7 <b>Custom</b> \u2014 pick specific entry types via the "
+        "Configure\u2026 dialog (the list is populated from the glossary "
+        "file currently attached to the selected EPUB).<br><br>"
+        "Substitutions happen in-memory; the original source file on "
+        "disk is never modified. Turn this OFF for prose where "
+        "aggressive name-replacement would corrupt wordplay, "
+        "honorifics, or puns."
+    )
     try:
         if not hasattr(self, 'emergency_glossary_compliance_var'):
             self.emergency_glossary_compliance_var = self.config.get('emergency_glossary_compliance', False)
