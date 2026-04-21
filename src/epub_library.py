@@ -5017,6 +5017,33 @@ class EpubLibraryDialog(QDialog):
             )
             source_action.triggered.connect(
                 lambda: _open_folder_in_explorer(source_target))
+        # Reveal the compiled / translated EPUB itself. Resolution:
+        #   * Library-organized cards   → ``book['path']`` (the EPUB
+        #     in ``Library/Translated``).
+        #   * Completed non-library     → ``compiled_output_path`` or
+        #     ``output_epub_path`` from the scanner, falling back to
+        #     ``book['path']`` when it ends in ``.epub``.
+        #   * In-progress cards         → ``output_epub_path`` when a
+        #     compiled EPUB already exists in the output folder (the
+        #     card is "Not started / In progress" but a previous run
+        #     may have left a compiled artefact behind).
+        # Omitted entirely when no translated EPUB exists on disk.
+        translation_target = (
+            book.get("path") if (book.get("in_library")
+                                 and str(book.get("path", "")).lower().endswith(".epub"))
+            else (book.get("compiled_output_path")
+                  or book.get("output_epub_path")
+                  or (book.get("path") if str(book.get("path", "")).lower().endswith(".epub")
+                      else ""))
+        )
+        if translation_target and os.path.isfile(translation_target):
+            translation_action = menu.addAction(
+                "\U0001f4d5  Reveal Translated File")
+            translation_action.setToolTip(
+                f"Reveal translated file:\n{translation_target}"
+            )
+            translation_action.triggered.connect(
+                lambda: _open_folder_in_explorer(translation_target))
         menu.addSeparator()
         copy_path_action = menu.addAction("\U0001f4cb  Copy Path")
         copy_path_action.triggered.connect(lambda: QApplication.clipboard().setText(book["path"]))
@@ -5054,58 +5081,87 @@ class EpubLibraryDialog(QDialog):
           * **Output-folder cards** (``type == "in_progress"`` OR any
             completed card with a resolvable ``output_folder``) —
             delete the folder recursively so every sibling artefact
-            goes with it. This previously only fired for in-progress
-            cards, which meant a compiled PDF sitting next to a
-            ``*_translated.html`` would only remove the PDF — the next
-            scan would promote the HTML as the new compiled output and
-            re-spawn a card over the same folder, forcing the user to
-            hit Delete a second time.
+            goes with it.
           * Everything else — delete ``book['path']`` as a plain file.
 
-        Deletions are irreversible — the user sees a single
-        confirmation dialog summarizing everything that will be
-        removed.
+        Confirmation policy:
+
+          * When every selected card is "Not Started" (no translated
+            chapters on disk yet), a plain Yes / Cancel dialog is
+            enough — there's no meaningful work to lose.
+          * Otherwise the user has to type the word "Halgakos"
+            (case-insensitive) into a confirmation field before the
+            Delete button enables. This is an intentional speed bump
+            because the delete is recursive and unrecoverable: a
+            completed translation's ``response_*.html`` files,
+            ``translation_progress.json``, ``images/``, and the
+            compiled EPUB all go together when the card gets removed.
         """
         if not books:
             return
-        # Resolve targets: (label, path, is_folder)
-        targets: list[tuple[str, str, bool]] = []
+        # Resolve targets: (label, path, is_folder, book_dict). We keep
+        # the book dict so the confirmation dialog can classify each
+        # target (Not Started vs. In Progress vs. Completed) and
+        # enumerate what's inside a folder target.
+        targets: list[tuple[str, str, bool, dict]] = []
         seen_targets: set[str] = set()
 
-        def _queue(label: str, pth: str, is_folder: bool) -> None:
+        def _queue(label: str, pth: str, is_folder: bool, book: dict) -> None:
             key = os.path.normcase(os.path.normpath(os.path.abspath(pth)))
             if key in seen_targets:
                 return
             seen_targets.add(key)
-            targets.append((label, pth, is_folder))
+            targets.append((label, pth, is_folder, book))
+
+        # Library/Raw absolute path prefix — used to decide whether a
+        # card's raw source qualifies for auto-cleanup alongside the
+        # workspace. Only raws that actually live inside ``Library/Raw``
+        # are deletable; raws anywhere else (Downloads, a user's own
+        # folder) are explicitly left untouched so deleting a card
+        # never removes files the library didn't put there itself.
+        raw_dir_abs = os.path.normcase(os.path.normpath(
+            os.path.abspath(get_library_raw_dir())))
+
+        def _queue_library_raw_copy(b: dict) -> None:
+            rp = b.get("raw_source_path") or ""
+            if not rp or not os.path.isfile(rp):
+                return
+            rp_parent = os.path.normcase(os.path.normpath(
+                os.path.abspath(os.path.dirname(rp))))
+            if rp_parent != raw_dir_abs:
+                # Raw lives outside Library/Raw — never touch it.
+                return
+            _queue(os.path.basename(rp), rp, False, b)
 
         for b in books:
             file_type = b.get("type", "epub")
             in_library = bool(b.get("in_library"))
             output_folder = b.get("output_folder") or ""
-            # In-progress cards always delete the folder.
+            # In-progress cards always delete the folder + (when present)
+            # the matching raw in Library/Raw. The raw is only queued
+            # when it actually sits inside ``Library/Raw`` so we never
+            # wipe a source file that originated from Downloads or any
+            # other user directory.
             if file_type == "in_progress":
                 folder = output_folder or b.get("path", "") or ""
                 if folder and os.path.isdir(folder):
                     _queue(b.get("name") or os.path.basename(folder),
-                           folder, True)
+                           folder, True, b)
+                _queue_library_raw_copy(b)
                 continue
             # Completed but NOT library-filed: the card represents the
             # entire output-folder workspace (compiled file plus any
             # ``response_*``, ``_translated.*``, ``images/``, etc.).
-            # Delete the folder so a single click actually cleans up
-            # every artefact — otherwise the next auto-refresh scan
-            # would promote the leftover ``_translated.html`` /
-            # ``_translated.txt`` into a new card.
             if (not in_library and output_folder
                     and os.path.isdir(output_folder)):
                 _queue(b.get("name") or os.path.basename(output_folder),
-                       output_folder, True)
+                       output_folder, True, b)
+                _queue_library_raw_copy(b)
                 continue
             # Library entry (or any other loose file-backed card).
             p = b.get("path", "") or ""
             if p and os.path.isfile(p):
-                _queue(b.get("name") or os.path.basename(p), p, False)
+                _queue(b.get("name") or os.path.basename(p), p, False, b)
         if not targets:
             QMessageBox.information(
                 self, "Delete",
@@ -5114,30 +5170,46 @@ class EpubLibraryDialog(QDialog):
             )
             return
 
-        # Build a confirmation summary.
-        msg = QMessageBox(self)
-        msg.setIcon(QMessageBox.Warning)
-        msg.setWindowTitle("Delete")
-        lines = []
-        for label, pth, is_folder in targets[:10]:
-            kind = "folder" if is_folder else "file"
-            lines.append(f"  \u2022 {label}  ({kind})")
-        if len(targets) > 10:
-            lines.append(f"  \u2026 and {len(targets) - 10} more.")
-        msg.setText(
-            f"Permanently delete {len(targets)} "
-            f"item{'s' if len(targets) != 1 else ''}?\n\n"
-            + "\n".join(lines)
-            + "\n\nThis cannot be undone."
-        )
-        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
-        msg.setDefaultButton(QMessageBox.Cancel)
-        if msg.exec() != QMessageBox.Yes:
+        # Classify the batch. Simple prompt is only allowed when EVERY
+        # target came from a "Not Started" card — any in-progress or
+        # completed workspace (including a Library/Translated compiled
+        # EPUB) in the selection bumps the whole batch into the
+        # typed-keyword prompt.
+        def _is_not_started(b: dict) -> bool:
+            state = (b.get("translation_state") or "").lower()
+            if state:
+                return state == "not_started"
+            # Fallback for rows without an explicit ``translation_state``
+            # field: only *in-progress workspace* cards can be
+            # "not_started". Library/Translated entries and compiled
+            # output cards have ``type`` set to the file kind
+            # (``"epub"`` / ``"pdf"`` / …) and represent finished work —
+            # they must ALWAYS take the typed-keyword prompt path,
+            # otherwise the simple Yes/Cancel dialog would let a
+            # finished compiled EPUB (or worse, a shelf-filed one) be
+            # deleted with a single click. Library entries don't
+            # populate ``completed_chapters`` / ``has_compiled_output``
+            # so the old progress-based heuristic fell through to
+            # ``True`` for them — hence the explicit type gate here.
+            if b.get("type") != "in_progress":
+                return False
+            if b.get("in_library"):
+                return False
+            return (int(b.get("completed_chapters", 0) or 0) == 0
+                    and not b.get("has_compiled_output", False))
+
+        all_not_started = all(_is_not_started(b) for _l, _p, _f, b in targets)
+
+        if all_not_started:
+            proceed = self._confirm_delete_simple(targets)
+        else:
+            proceed = self._confirm_delete_with_keyword(targets)
+        if not proceed:
             return
 
         deleted = 0
         errors: list[str] = []
-        for label, pth, is_folder in targets:
+        for label, pth, is_folder, _b in targets:
             try:
                 if is_folder:
                     shutil.rmtree(pth)
@@ -5169,6 +5241,264 @@ class EpubLibraryDialog(QDialog):
             QMessageBox.information(self, "Delete", summary)
         # Re-scan so the library immediately reflects the deletions.
         QTimer.singleShot(0, self._load_books)
+
+    # -- Delete-confirmation helpers ----------------------------------------
+    # Either keyword unlocks the Delete button in the typed-confirmation
+    # dialog. ``"halgakos"`` is the thematic brand-name safeguard;
+    # ``"delete"`` is the mundane escape hatch for users who don't want
+    # to hunt down the Glossarion mascot. Both are matched after
+    # ``.strip().lower()`` so case / surrounding whitespace is forgiven.
+    _DELETE_KEYWORDS = ("halgakos", "delete")
+
+    @staticmethod
+    def _summarize_folder_contents(folder: str) -> list[str]:
+        """Return a bulleted breakdown of artefacts inside *folder*.
+
+        Used to build a detailed "exactly what gets deleted" warning
+        for output-folder workspaces. Unknown / unclassified files
+        fall into "other files" so the counts always add up.
+        """
+        counts = {
+            "translated chapter HTML files": 0,
+            "compiled EPUB files": 0,
+            "compiled PDF files": 0,
+            "translated text files": 0,
+            "translated HTML pages": 0,
+            "images": 0,
+            "glossary files": 0,
+            "progress / history files": 0,
+            "other files": 0,
+        }
+        total_bytes = 0
+        try:
+            for root, _dirs, files in os.walk(folder):
+                for name in files:
+                    ln = name.lower()
+                    fpath = os.path.join(root, name)
+                    try:
+                        total_bytes += os.path.getsize(fpath)
+                    except OSError:
+                        pass
+                    if ln.startswith("response_") and ln.endswith(
+                            (".html", ".htm", ".xhtml")):
+                        counts["translated chapter HTML files"] += 1
+                    elif ln.endswith(".epub"):
+                        counts["compiled EPUB files"] += 1
+                    elif "_translated" in ln and ln.endswith(".pdf"):
+                        counts["compiled PDF files"] += 1
+                    elif "_translated" in ln and ln.endswith(".txt"):
+                        counts["translated text files"] += 1
+                    elif "_translated" in ln and ln.endswith(
+                            (".html", ".htm", ".xhtml")):
+                        counts["translated HTML pages"] += 1
+                    elif ln.endswith(
+                            (".jpg", ".jpeg", ".png", ".webp",
+                             ".gif", ".bmp")):
+                        counts["images"] += 1
+                    elif "glossary" in ln:
+                        counts["glossary files"] += 1
+                    elif ln in (
+                            "translation_progress.json",
+                            "translation_history.json",
+                            "metadata.json",
+                            "source_epub.txt",
+                    ):
+                        counts["progress / history files"] += 1
+                    else:
+                        counts["other files"] += 1
+        except OSError:
+            return []
+
+        lines = [
+            f"    \u00b7 {v} {k}"
+            for k, v in counts.items() if v > 0
+        ]
+        if total_bytes:
+            if total_bytes >= 1024 * 1024:
+                size_str = f"{total_bytes / (1024 * 1024):.1f} MB"
+            else:
+                size_str = f"{total_bytes / 1024:.0f} KB"
+            lines.append(f"    \u00b7 total on disk: {size_str}")
+        return lines
+
+    def _format_delete_detail(
+        self, targets: list[tuple[str, str, bool, dict]]
+    ) -> str:
+        """Build a rich "what will be deleted" block for the dialog."""
+        lines: list[str] = []
+        for label, pth, is_folder, _book in targets[:10]:
+            if is_folder:
+                lines.append(f"\u25be  {label}  —  output folder")
+                lines.append(f"       {pth}")
+                contents = self._summarize_folder_contents(pth)
+                if contents:
+                    lines.extend(contents)
+                else:
+                    lines.append("    \u00b7 (folder is empty)")
+            else:
+                try:
+                    size = os.path.getsize(pth)
+                    if size >= 1024 * 1024:
+                        size_str = f"{size / (1024 * 1024):.1f} MB"
+                    else:
+                        size_str = f"{size / 1024:.0f} KB"
+                except OSError:
+                    size_str = "?"
+                lines.append(f"\u25be  {label}  —  file ({size_str})")
+                lines.append(f"       {pth}")
+            lines.append("")
+        if len(targets) > 10:
+            lines.append(f"\u2026 and {len(targets) - 10} more item(s).")
+        return "\n".join(lines).rstrip()
+
+    def _confirm_delete_simple(
+        self, targets: list[tuple[str, str, bool, dict]]
+    ) -> bool:
+        """Yes / Cancel confirmation for Not-Started-only batches."""
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Delete")
+        preview = self._format_delete_detail(targets)
+        msg.setText(
+            f"Permanently delete {len(targets)} "
+            f"Not Started item{'s' if len(targets) != 1 else ''}?\n\n"
+            f"{preview}\n\nThis cannot be undone."
+        )
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        msg.setDefaultButton(QMessageBox.Cancel)
+        return msg.exec() == QMessageBox.Yes
+
+    def _confirm_delete_with_keyword(
+        self, targets: list[tuple[str, str, bool, dict]]
+    ) -> bool:
+        """Typed-keyword confirmation for in-progress / completed cards.
+
+        Shows a modal dialog with the detailed artefact summary and a
+        text field. The Delete button is disabled until the user types
+        :attr:`_DELETE_KEYWORD` (case-insensitive, leading/trailing
+        whitespace forgiven). The speed-bump is deliberately harder to
+        bypass than a Yes/No because each target wipes real translation
+        work (response HTMLs, progress JSON, images, compiled EPUBs).
+        """
+        from PySide6.QtWidgets import (
+            QDialog, QDialogButtonBox, QTextEdit,
+        )
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Delete \u2014 confirmation required")
+        dlg.setModal(True)
+        dlg.setMinimumWidth(560)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(10)
+
+        headline = QLabel(
+            f"\u26a0  Permanent delete \u2014 {len(targets)} "
+            f"item{'s' if len(targets) != 1 else ''}"
+        )
+        headline.setStyleSheet(
+            "color: #ff8080; font-size: 13pt; font-weight: bold;"
+        )
+        layout.addWidget(headline)
+
+        # Count folders vs files in the batch for the subtitle.
+        folder_count = sum(1 for _l, _p, f, _b in targets if f)
+        file_count = len(targets) - folder_count
+        subtitle_bits = []
+        if folder_count:
+            subtitle_bits.append(
+                f"{folder_count} output folder"
+                f"{'s' if folder_count != 1 else ''}"
+            )
+        if file_count:
+            subtitle_bits.append(
+                f"{file_count} file{'s' if file_count != 1 else ''}"
+            )
+        subtitle = QLabel(
+            "The following will be removed from disk ("
+            + " + ".join(subtitle_bits) + "):"
+        )
+        subtitle.setStyleSheet("color: #c8cbe0; font-size: 10pt;")
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+
+        detail_box = QTextEdit()
+        detail_box.setReadOnly(True)
+        detail_box.setPlainText(self._format_delete_detail(targets))
+        detail_box.setStyleSheet(
+            "QTextEdit { background: #1a1a2a; color: #e0e0e0; "
+            "border: 1px solid #3a3a5e; border-radius: 4px; "
+            "font-family: Consolas, Menlo, monospace; font-size: 9pt; "
+            "padding: 8px; }"
+        )
+        detail_box.setMinimumHeight(180)
+        detail_box.setMaximumHeight(280)
+        layout.addWidget(detail_box)
+
+        warning = QLabel(
+            "This removes the output folder(s) recursively \u2014 "
+            "every translated chapter, progress tracker, image, and "
+            "compiled EPUB inside goes with it. This cannot be undone."
+        )
+        warning.setStyleSheet(
+            "color: #ffb347; font-size: 9.5pt; "
+            "background: rgba(255, 179, 71, 0.12); "
+            "border: 1px solid #ffb347; border-radius: 4px; "
+            "padding: 6px 10px;"
+        )
+        warning.setWordWrap(True)
+        layout.addWidget(warning)
+
+        # Typed-keyword prompt. Showing both expected words in the
+        # instruction + one of them in the placeholder makes it obvious
+        # the user needs to type EXACTLY that — no discovery required.
+        pretty = " or ".join(
+            f"<b>{kw.capitalize()}</b>" for kw in self._DELETE_KEYWORDS
+        )
+        instr = QLabel(
+            f"Type {pretty} below to unlock the Delete button "
+            f"(case-insensitive):"
+        )
+        instr.setTextFormat(Qt.RichText)
+        instr.setStyleSheet("color: #c8cbe0; font-size: 10pt;")
+        layout.addWidget(instr)
+
+        entry = QLineEdit()
+        # Placeholder shows one of the accepted keywords so the field
+        # visually nudges the user toward typing *something* without
+        # forcing either specific choice.
+        entry.setPlaceholderText(self._DELETE_KEYWORDS[0].capitalize())
+        entry.setStyleSheet(
+            "QLineEdit { background: #1e1e2e; color: #e0e0e0; "
+            "border: 1px solid #3a3a5e; border-radius: 4px; "
+            "padding: 6px 10px; font-size: 10pt; }"
+            "QLineEdit:focus { border-color: #6c63ff; }"
+        )
+        layout.addWidget(entry)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Cancel)
+        delete_btn = QPushButton("\U0001f5d1\ufe0f  Delete")
+        delete_btn.setEnabled(False)
+        delete_btn.setStyleSheet(
+            "QPushButton { background: #c0392b; color: white; border: none; "
+            "border-radius: 4px; padding: 6px 18px; font-weight: bold; }"
+            "QPushButton:hover:enabled { background: #e74c3c; }"
+            "QPushButton:disabled { background: #3a3a3a; color: #888; }"
+        )
+        btns.addButton(delete_btn, QDialogButtonBox.AcceptRole)
+        btns.rejected.connect(dlg.reject)
+        delete_btn.clicked.connect(dlg.accept)
+        layout.addWidget(btns)
+
+        def _on_text_changed(text: str) -> None:
+            delete_btn.setEnabled(
+                text.strip().lower() in self._DELETE_KEYWORDS
+            )
+
+        entry.textChanged.connect(_on_text_changed)
+        entry.setFocus()
+        return dlg.exec() == QDialog.Accepted
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
