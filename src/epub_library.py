@@ -3930,15 +3930,20 @@ class _BookCard(QFrame):
         base_pt = _parse_pt(p.get("title_size", "9pt"))
         min_pt = _parse_pt(p.get("title_min_size", "6.5pt"))
         max_title_h = p.get("title_max_h", 36)
-        # Cards WITHOUT a missing-raw warning inherit the 16 px slot
+        # Cards WITHOUT any warning badge inherit the 16 px slot
         # we reserve at the bottom (see ``reserved_h += 16`` below)
         # as extra title room — otherwise that space just sits
         # empty, the card looks bottom-heavy, and longer titles
-        # ellipsize unnecessarily. Cards WITH the warning keep the
+        # ellipsize unnecessarily. Cards WITH a warning keep the
         # slot for the badge and the title stays at its preset
         # height. Either way the total card height is identical so
-        # the grid rows line up.
-        _has_warning_preview = bool(book.get("missing_raw_file"))
+        # the grid rows line up. Both ``missing_raw_file`` and
+        # ``compiled_conflicts`` render on the same dedicated
+        # ``warnings_row`` below, so either one counts as a warning
+        # for the purposes of the title-height reservation.
+        _has_warning_preview = bool(
+            book.get("missing_raw_file")
+            or book.get("compiled_conflicts"))
         effective_max_title_h = max_title_h + (0 if _has_warning_preview else 16)
         # Custom-paint widget whose wrap mode matches :func:`_fit_title_text`'s
         # measurement, so the shrink loop's chosen font size always fits
@@ -3999,85 +4004,97 @@ class _BookCard(QFrame):
         badge_lbl.setAttribute(Qt.WA_TranslucentBackground)
         badge_lbl.setStyleSheet(f"color: {badge_color}; font-size: 7pt; font-weight: bold; background: transparent;")
         info_row.addWidget(badge_lbl)
-        # Multi-output warning: the scanner detected more than one
-        # compiled artefact in this book's output folder (e.g. two
-        # ``.epub`` files from successive recompiles, or a stale
-        # ``*_translated.html`` sitting next to a fresh ``.epub``).
-        # Surface it as a small ⚠ badge so the user can clean up —
-        # the primary compiled output is still chosen deterministically
-        # (EPUB > PDF > TXT > HTML) but this warns them that the
-        # deterministic pick may not be what they expected.
-        conflicts = list(book.get("compiled_conflicts") or [])
-        if conflicts:
-            conflict_lbl = QLabel(f"\u26a0 +{len(conflicts)}")
-            conflict_lbl.setAttribute(Qt.WA_TranslucentBackground)
-            # Dynamic font size: the conflict badge usually reads
-            # “⚠ +2” / “⚠ +12” (short), but Compact / Normal cards still
-            # put it next to the size + EPUB badges, so shrink before
-            # it pushes its row past the card edge.
-            _conflict_budget = max(32, int(self._card_w / 3))
-            _conflict_pt = _fit_pill_font_pt(
-                conflict_lbl.text(), _conflict_budget,
-                base_pt=7.0, min_pt=5.5, horiz_padding=12,
-            )
-            conflict_lbl.setStyleSheet(
-                f"color: #ffb347; font-size: {_conflict_pt}pt; font-weight: bold; "
-                "background: rgba(255, 179, 71, 0.15); "
-                "border: 1px solid #ffb347; border-radius: 3px; "
-                "padding: 0 4px; margin-left: 2px;"
-            )
-            # Lightweight human-readable summary for the tooltip:
-            # "Extra compiled files in this folder:\n  • foo.epub (EPUB)".
-            tip_lines = ["Extra compiled files in this folder:"]
-            for name, kind in conflicts[:8]:
-                tip_lines.append(f"  \u2022 {name} ({kind.upper()})")
-            if len(conflicts) > 8:
-                tip_lines.append(f"  \u2026 and {len(conflicts) - 8} more.")
-            tip_lines.append(
-                "\nThe card displays only the primary output (EPUB > PDF > "
-                "TXT > HTML); delete the stale artefacts to avoid "
-                "confusion on the next scan."
-            )
-            conflict_lbl.setToolTip("\n".join(tip_lines))
-            info_row.addWidget(conflict_lbl)
         info_row.addStretch()
         layout.addLayout(info_row)
 
-        # Missing-raw-file warning: the workspace still has a
-        # compiled / progress / response trail but the ORIGINAL raw
-        # source EPUB can't be resolved on disk anymore. Surface it
-        # as a ⚠ badge on its OWN row — stacking it beside the
-        # size / badge on ``info_row`` used to clip “⚠ missing raw”
-        # down to “⚠ …” once the card was Compact / Normal, because
-        # the size label + EPUB badge already claimed most of the
-        # row’s width.
-        has_warnings_row = bool(book.get("missing_raw_file"))
+        # Warnings row: every warning badge (both ``missing_raw_file``
+        # and ``compiled_conflicts``) is stacked onto its own dedicated
+        # row below the size / badge row so the Completed tab's
+        # “⚠ +N” conflicts badge reads as a peer of In Progress's
+        # “⚠ missing raw” — both sit beneath ``info_row`` instead of
+        # being crammed next to the size label. Stacking them beside
+        # the size / badge on ``info_row`` used to clip long labels
+        # (“⚠ missing raw” → “⚠ …”) once the card was Compact /
+        # Normal, because the size label + EPUB badge already claimed
+        # most of the row’s width.
+        #
+        # Multi-output (``compiled_conflicts``): the scanner detected
+        # more than one compiled artefact in this book's output folder
+        # (e.g. two ``.epub`` files from successive recompiles, or a
+        # stale ``*_translated.html`` sitting next to a fresh
+        # ``.epub``). The primary compiled output is still chosen
+        # deterministically (EPUB > PDF > TXT > HTML) but this warns
+        # the user that the deterministic pick may not be what they
+        # expected.
+        #
+        # Missing-raw (``missing_raw_file``): the workspace still has
+        # a compiled / progress / response trail but the ORIGINAL raw
+        # source EPUB can't be resolved on disk anymore. Actions that
+        # need the raw source (Reveal source, Read raw, Load for
+        # translation) are disabled while this flag is set.
+        conflicts = list(book.get("compiled_conflicts") or [])
+        has_missing_raw = bool(book.get("missing_raw_file"))
+        has_warnings_row = bool(conflicts) or has_missing_raw
         if has_warnings_row:
             warnings_row = QHBoxLayout()
             warnings_row.setContentsMargins(0, 0, 0, 0)
             warnings_row.setSpacing(4)
-            missing_lbl = QLabel("\u26a0 missing raw")
-            missing_lbl.setAttribute(Qt.WA_TranslucentBackground)
-            _missing_budget = max(40, int(self._card_w - 12))
-            _missing_pt = _fit_pill_font_pt(
-                missing_lbl.text(), _missing_budget,
-                base_pt=7.0, min_pt=5.5, horiz_padding=14,
-            )
-            missing_lbl.setStyleSheet(
-                f"color: #ff9e6d; font-size: {_missing_pt}pt; font-weight: bold; "
-                "background: rgba(255, 158, 109, 0.15); "
-                "border: 1px solid #ff9e6d; border-radius: 3px; "
-                "padding: 0 4px;"
-            )
-            missing_lbl.setToolTip(
-                "The raw source file for this book can't be found on "
-                "disk \u2014 Library/Raw, source_epub.txt, and the "
-                "raw-inputs registry all came up empty. The compiled "
-                "output is still readable, but actions that need the "
-                "raw source (Reveal source, Read raw, Load for "
-                "translation) will be disabled."
-            )
-            warnings_row.addWidget(missing_lbl)
+            if has_missing_raw:
+                missing_lbl = QLabel("\u26a0 missing raw")
+                missing_lbl.setAttribute(Qt.WA_TranslucentBackground)
+                _missing_budget = max(40, int(self._card_w - 12))
+                _missing_pt = _fit_pill_font_pt(
+                    missing_lbl.text(), _missing_budget,
+                    base_pt=7.0, min_pt=5.5, horiz_padding=14,
+                )
+                missing_lbl.setStyleSheet(
+                    f"color: #ff9e6d; font-size: {_missing_pt}pt; font-weight: bold; "
+                    "background: rgba(255, 158, 109, 0.15); "
+                    "border: 1px solid #ff9e6d; border-radius: 3px; "
+                    "padding: 0 4px;"
+                )
+                missing_lbl.setToolTip(
+                    "The raw source file for this book can't be found on "
+                    "disk \u2014 Library/Raw, source_epub.txt, and the "
+                    "raw-inputs registry all came up empty. The compiled "
+                    "output is still readable, but actions that need the "
+                    "raw source (Reveal source, Read raw, Load for "
+                    "translation) will be disabled."
+                )
+                warnings_row.addWidget(missing_lbl)
+            if conflicts:
+                conflict_lbl = QLabel(f"\u26a0 +{len(conflicts)}")
+                conflict_lbl.setAttribute(Qt.WA_TranslucentBackground)
+                # Dynamic font size: the conflict badge usually reads
+                # “⚠ +2” / “⚠ +12” (short). Now that it lives on its
+                # own row the whole card width is available, but we
+                # still clamp so a runaway “+999” can't blow the row
+                # out on a Compact card.
+                _conflict_budget = max(40, int(self._card_w - 12))
+                _conflict_pt = _fit_pill_font_pt(
+                    conflict_lbl.text(), _conflict_budget,
+                    base_pt=7.0, min_pt=5.5, horiz_padding=12,
+                )
+                conflict_lbl.setStyleSheet(
+                    f"color: #ffb347; font-size: {_conflict_pt}pt; font-weight: bold; "
+                    "background: rgba(255, 179, 71, 0.15); "
+                    "border: 1px solid #ffb347; border-radius: 3px; "
+                    "padding: 0 4px;"
+                )
+                # Lightweight human-readable summary for the tooltip:
+                # "Extra compiled files in this folder:\n  • foo.epub (EPUB)".
+                tip_lines = ["Extra compiled files in this folder:"]
+                for name, kind in conflicts[:8]:
+                    tip_lines.append(f"  \u2022 {name} ({kind.upper()})")
+                if len(conflicts) > 8:
+                    tip_lines.append(f"  \u2026 and {len(conflicts) - 8} more.")
+                tip_lines.append(
+                    "\nThe card displays only the primary output (EPUB > PDF > "
+                    "TXT > HTML); delete the stale artefacts to avoid "
+                    "confusion on the next scan."
+                )
+                conflict_lbl.setToolTip("\n".join(tip_lines))
+                warnings_row.addWidget(conflict_lbl)
             warnings_row.addStretch()
             layout.addLayout(warnings_row)
 
@@ -5881,7 +5898,11 @@ class EpubLibraryDialog(QDialog):
         toolbar.addWidget(format_lbl)
         self._format_combo = _NoWheelComboBox()
         self._format_combo.setFixedHeight(26)
-        self._format_combo.setFixedWidth(96)
+        # Narrow footprint: the longest label is "HTML" (4 chars). The
+        # width only needs to cover that + the drop-down arrow + a
+        # small padding budget, so the combo doesn't hog toolbar space
+        # that the Raw titles / Open Library Folder buttons want.
+        self._format_combo.setFixedWidth(72)
         self._format_combo.setCursor(Qt.PointingHandCursor)
         self._format_combo.setFocusPolicy(Qt.StrongFocus)
         self._format_combo.setToolTip(
@@ -5932,7 +5953,8 @@ class EpubLibraryDialog(QDialog):
         toolbar.addWidget(size_lbl)
         self._size_combo = _NoWheelComboBox()
         self._size_combo.setFixedHeight(26)
-        self._size_combo.setFixedWidth(80)
+        # Narrow footprint: the longest label is "6XL" (3 chars).
+        self._size_combo.setFixedWidth(62)
         self._size_combo.setCursor(Qt.PointingHandCursor)
         self._size_combo.setFocusPolicy(Qt.StrongFocus)
         self._size_combo.setToolTip(
