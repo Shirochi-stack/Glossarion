@@ -3820,18 +3820,28 @@ class _BookCard(QFrame):
         base_pt = _parse_pt(p.get("title_size", "9pt"))
         min_pt = _parse_pt(p.get("title_min_size", "6.5pt"))
         max_title_h = p.get("title_max_h", 36)
+        # Cards WITHOUT a missing-raw warning inherit the 16 px slot
+        # we reserve at the bottom (see ``reserved_h += 16`` below)
+        # as extra title room — otherwise that space just sits
+        # empty, the card looks bottom-heavy, and longer titles
+        # ellipsize unnecessarily. Cards WITH the warning keep the
+        # slot for the badge and the title stays at its preset
+        # height. Either way the total card height is identical so
+        # the grid rows line up.
+        _has_warning_preview = bool(book.get("missing_raw_file"))
+        effective_max_title_h = max_title_h + (0 if _has_warning_preview else 16)
         # Custom-paint widget whose wrap mode matches :func:`_fit_title_text`'s
         # measurement, so the shrink loop's chosen font size always fits
         # the box even for long Hangul / CJK filename-style raw titles.
         title_lbl = _FittedTitleLabel()
         title_lbl.setFixedWidth(self._card_w - 10)
-        title_lbl.setFixedHeight(max_title_h)
+        title_lbl.setFixedHeight(effective_max_title_h)
         title_lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         title_lbl.setToolTip(full_title)
         fitted_text, fitted_pt = _fit_title_text(
             full_title,
             avail_width=self._card_w - 10,
-            max_height=max_title_h,
+            max_height=effective_max_title_h,
             base_pt=base_pt,
             base_font=title_lbl.font(),
             min_pt=min_pt,
@@ -3985,13 +3995,28 @@ class _BookCard(QFrame):
                 # the card’s fixed width. We subtract the card’s own
                 # left/right padding (8 px), the ~30 px the “NN%”
                 # label to the right takes when the “in_progress”
-                # branch shows it, and a small buffer for the row’s
-                # 4 px spacing + measurement error.
+                # branch shows it, and a generous buffer for the
+                # row’s 4 px spacing, border, and Qt’s emoji-width
+                # under-measurement (✨, ⏳, ⚠, 🆕 all render a
+                # few px wider than ``QFontMetrics.horizontalAdvance``
+                # predicts on Windows, which is why “Ready to compile
+                # (15/15)” clipped at 7 pt even though the measurement
+                # said it fit).
                 _needs_pct_lbl = bool(total) and state not in (
                     "outdated_progress", "not_started", "ready_to_compile",
                 )
                 _pct_reservation = 30 if _needs_pct_lbl else 0
-                _pill_budget = max(40, int(self._card_w - 12 - _pct_reservation))
+                _pill_budget = max(40, int(self._card_w - 16 - _pct_reservation))
+                # Horizontal padding used by every call below covers
+                # 10 px CSS padding (5 + 5), 2 px border, and 10 px of
+                # safety buffer for emoji-width drift / antialiasing
+                # so the shrink loop’s “it fits” result actually fits
+                # on every system font. Pair with ``min_pt=4.5`` so
+                # the worst-case label (“Ready to compile (1589/1589)”
+                # on a Compact card) still lands without truncation.
+                _pill_horiz_padding = 22
+                _pill_base_font = QFont(self.font())
+                _pill_base_font.setBold(True)
                 if state == "outdated_progress":
                     pill = QLabel("\u26a0 Outdated Progress file")
                     pill.setToolTip(
@@ -4003,7 +4028,9 @@ class _BookCard(QFrame):
                     )
                     _pill_pt = _fit_pill_font_pt(
                         pill.text(), _pill_budget,
-                        base_pt=7.0, min_pt=5.0, horiz_padding=14,
+                        base_pt=7.0, min_pt=4.5,
+                        horiz_padding=_pill_horiz_padding,
+                        base_font=_pill_base_font,
                     )
                     pill.setStyleSheet(
                         "color: #ffb347; "
@@ -4020,7 +4047,9 @@ class _BookCard(QFrame):
                     pill.setToolTip("Imported into Library/Raw, translation not started yet.")
                     _pill_pt = _fit_pill_font_pt(
                         pill.text(), _pill_budget,
-                        base_pt=7.0, min_pt=5.0, horiz_padding=14,
+                        base_pt=7.0, min_pt=4.5,
+                        horiz_padding=_pill_horiz_padding,
+                        base_font=_pill_base_font,
                     )
                     pill.setStyleSheet(
                         "color: #8ab4d0; background: rgba(138, 180, 208, 0.15); "
@@ -4044,7 +4073,9 @@ class _BookCard(QFrame):
                     )
                     _pill_pt = _fit_pill_font_pt(
                         pill.text(), _pill_budget,
-                        base_pt=7.0, min_pt=5.0, horiz_padding=14,
+                        base_pt=7.0, min_pt=4.5,
+                        horiz_padding=_pill_horiz_padding,
+                        base_font=_pill_base_font,
                     )
                     pill.setStyleSheet(
                         "color: #6ee8a0; "
@@ -4063,7 +4094,9 @@ class _BookCard(QFrame):
                     )
                     _pill_pt = _fit_pill_font_pt(
                         pill.text(), _pill_budget,
-                        base_pt=7.0, min_pt=5.0, horiz_padding=14,
+                        base_pt=7.0, min_pt=4.5,
+                        horiz_padding=_pill_horiz_padding,
+                        base_font=_pill_base_font,
                     )
                     pill.setStyleSheet(
                         "color: #ffd166; background: rgba(108, 99, 255, 0.18); "
@@ -4080,6 +4113,16 @@ class _BookCard(QFrame):
                     ribbon_text = "IN PROGRESS"
                     ribbon_bg = "rgba(108, 99, 255, 0.92)"
                 progress_row.addStretch()
+                # Pin the progress row to the BOTTOM of the card by
+                # inserting a vertical stretch above it. Without this
+                # stretch the pill floats mid-card (between info_row /
+                # warnings_row and the ``layout.addStretch()`` below),
+                # so a card without a warning row sits with a dead
+                # band below the pill while another card WITH a
+                # warning has the pill tucked in the middle. Pinning
+                # the pill to the bottom lines every card’s pill up
+                # along the same baseline across the grid.
+                layout.addStretch()
                 layout.addLayout(progress_row)
 
                 # Corner ribbon on the cover label (absolutely positioned child)
