@@ -7797,6 +7797,23 @@ class EpubLibraryDialog(QDialog):
                           if c.book.get("path", "") in selected]
         if not selected_books:
             selected_books = [book]
+        # Pre-resolve ``raw_source_path`` on every selected book
+        # BEFORE any gate runs. :func:`_resolve_book_source_file`
+        # caches the result on the book dict via the same
+        # ``_find_raw_source_for_library_epub`` fallback that Book
+        # Details uses, so Load / Reveal / Clear all see the same
+        # resolved path. Without this, a library-filed card whose
+        # scan left ``raw_source_path`` empty would show Reveal
+        # (the resolver's first call) while Load and Clear silently
+        # missed \u2014 exactly the \"Book Details finds it fine,
+        # context menu can't\" inconsistency the user hit.
+        for _b in selected_books:
+            try:
+                _resolve_book_source_file(_b)
+            except Exception:
+                logger.debug(
+                    "Context-menu raw-source prefetch failed: %s",
+                    traceback.format_exc())
         file_type = book.get("type", "epub")
         if file_type == "in_progress":
             details_action = menu.addAction("\U0001f4d1  Open Book Details")
@@ -7995,6 +8012,37 @@ class EpubLibraryDialog(QDialog):
         return bool(lib_raw) and raw_parent == lib_raw
 
     @staticmethod
+    def _library_raw_match_for_book(book: dict) -> str:
+        """Return a ``Library/Raw/<folder_name>.<ext>`` file path if
+        one exists on disk for this workspace, else ``""``.
+
+        Mirrors route 2 of :func:`_find_raw_source_for_folder` so
+        the Clear gate can detect when the card is effectively
+        Library/Raw-backed EVEN IF its cached ``raw_source_path``
+        points elsewhere (e.g. the sidecar was written before the
+        raw was moved into Library/Raw). When this returns a hit,
+        the scanner's next pass WILL resolve the raw via route 2
+        regardless of sidecar / registry state, so clearing would
+        be a no-op.
+        """
+        if not isinstance(book, dict):
+            return ""
+        folder_name = book.get("folder_name") or ""
+        if not folder_name:
+            ws_folder = _resolve_book_output_folder(book)
+            if ws_folder:
+                folder_name = os.path.basename(
+                    os.path.normpath(ws_folder))
+        if not folder_name:
+            return ""
+        raw_dir = get_library_raw_dir()
+        for ext in (".epub", ".txt", ".pdf", ".html"):
+            candidate = os.path.join(raw_dir, folder_name + ext)
+            if os.path.isfile(candidate):
+                return candidate
+        return ""
+
+    @staticmethod
     def _card_has_saved_raw_link(book: dict) -> bool:
         """Return True when the card has something to clear.
 
@@ -8012,12 +8060,13 @@ class EpubLibraryDialog(QDialog):
         match \u2014 is NOT considered here because there's
         nothing to \"clear\" (the file itself is the match
         source; removing it would require moving / renaming it).
-        Cards whose ``raw_source_path`` resolves to a file living
-        inside ``Library/Raw`` are skipped entirely, even when a
-        sidecar or registry entry happens to exist \u2014 the
-        Library/Raw file takes priority in the scanner and would
-        keep resolving the match after a Clear, so the action
-        would read as broken.
+        Cards whose raw is resolvable via that pattern are
+        skipped entirely \u2014 including cards whose cached
+        ``raw_source_path`` still points at the pre-move location
+        but whose workspace folder name would NOW match a file in
+        ``Library/Raw``. The scanner will re-resolve via route 2
+        on the next pass regardless of what a sidecar / registry
+        entry says, so clearing would read as broken.
 
         Workspace resolution goes through
         :func:`_resolve_book_output_folder` so library-filed cards
@@ -8028,8 +8077,14 @@ class EpubLibraryDialog(QDialog):
         if not isinstance(book, dict):
             return False
         raw_src = book.get("raw_source_path") or ""
-        # Library/Raw-backed raws don't expose a clearable link.
+        # Library/Raw-backed raws don't expose a clearable link
+        # \u2014 whether the card's cached ``raw_source_path``
+        # points there directly, or a matching file sitting in
+        # ``Library/Raw`` is waiting to be picked up by route 2
+        # on the next scan.
         if EpubLibraryDialog._raw_is_in_library_raw(raw_src):
+            return False
+        if EpubLibraryDialog._library_raw_match_for_book(book):
             return False
         # 1. Sidecar on disk.
         ws_folder = _resolve_book_output_folder(book)
@@ -8098,9 +8153,17 @@ class EpubLibraryDialog(QDialog):
             # filename-pattern route resolves those regardless of
             # any sidecar / registry state, so \"clearing\" would be
             # a no-op (the scanner would just re-resolve the raw
-            # via route 2 on the next scan).
+            # via route 2 on the next scan). The second check
+            # covers cards whose cached ``raw_source_path`` is
+            # stale but whose workspace folder name now matches a
+            # file in ``Library/Raw`` (post-Organize or manual
+            # copy). Without it a leftover sidecar would keep the
+            # action visible even though clearing it would have
+            # no user-visible effect.
             raw_src_full = b.get("raw_source_path") or ""
             if self._raw_is_in_library_raw(raw_src_full):
+                continue
+            if self._library_raw_match_for_book(b):
                 continue
             ws_folder = _resolve_book_output_folder(b)
             sidecar = ""
