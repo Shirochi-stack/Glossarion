@@ -1682,8 +1682,43 @@ Text to analyze:
         self.fireworks_base_url_var = self.config.get('fireworks_base_url', '')
         self.use_custom_openai_endpoint_var = self.config.get('use_custom_openai_endpoint', False)
         
-        # Initialize metadata/batch variables the same way
-        self.translate_metadata_fields = self.config.get('translate_metadata_fields', {})
+        # Initialize metadata/batch variables the same way.
+        #
+        # Seed the default field selection (description + subject) when
+        # ``translate_metadata_fields`` hasn't been written to config yet
+        # \u2014 previously the attribute sat at ``{}`` until the user
+        # opened "Configure Metadata Translation" and clicked Save,
+        # and every downstream gate (``any(translate_metadata_fields
+        # .values())`` in :func:`metadata_batch_translator
+        # .enhance_epub_compiler` + :meth:`EPUBCompiler.compile`) read
+        # that empty dict as "nothing to translate" and silently
+        # skipped the metadata pass. The Book Title path stayed
+        # working because it's driven by a separate
+        # ``translate_book_title_var`` flag. Mirroring the dialog's
+        # ``default_enabled_fields`` here makes a fresh install /
+        # stale config behave the way the UI advertises. A config
+        # entry with any recognisable field keys \u2014 including all-
+        # False, which means the user explicitly deselected \u2014 is
+        # left untouched so we never override a real choice. The
+        # ``_per_epub`` scaffolding key is ignored for this purpose
+        # so a config that only holds per-EPUB overrides still
+        # triggers the seeding path.
+        _cfg_mf = self.config.get('translate_metadata_fields', None)
+        if not isinstance(_cfg_mf, dict):
+            _cfg_mf = {}
+        _configured_keys = {k for k in _cfg_mf.keys() if k != '_per_epub'}
+        if not _configured_keys:
+            _cfg_mf = dict(_cfg_mf)
+            _cfg_mf.update({'description': True, 'subject': True})
+            # Persist immediately so the env-var payload + any
+            # downstream consumer sees the same defaults the dialog
+            # would have written, without waiting for the next
+            # ``save_config`` tick.
+            try:
+                self.config['translate_metadata_fields'] = _cfg_mf
+            except Exception:
+                pass
+        self.translate_metadata_fields = _cfg_mf
         # Initialize metadata translation UI and prompts
         try:
             from metadata_batch_translator import MetadataBatchTranslatorUI
