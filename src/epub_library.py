@@ -40,6 +40,23 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+class _NoWheelComboBox(QComboBox):
+    """QComboBox that ignores mouse-wheel scroll to prevent accidental changes.
+
+    A plain QComboBox changes its current selection whenever the user
+    scrolls the mouse wheel while the widget has focus (or just sits
+    under the cursor). That's hostile inside a scrollable toolbar where
+    the user wants to scroll the page or zoom cards — a stray wheel
+    tick silently flips the active filter. Overriding ``wheelEvent`` to
+    ignore the event keeps the popup + keyboard navigation intact but
+    locks the combo against wheel-driven changes.
+    """
+
+    def wheelEvent(self, event):  # type: ignore[override]
+        event.ignore()
+
+
 # ---------------------------------------------------------------------------
 # Paths & Utilities
 # ---------------------------------------------------------------------------
@@ -5854,40 +5871,110 @@ class EpubLibraryDialog(QDialog):
             self._sort_btns[mode] = btn
             toolbar.addWidget(btn)
         toolbar.addSpacing(16)
+        # Format filter dropdown (replaces the previous row of chip
+        # buttons). :class:`_NoWheelComboBox` prevents the filter from
+        # accidentally flipping when the user scrolls the toolbar. Each
+        # item carries its FORMAT_* key as ``itemData`` so the handler
+        # never has to map a display label back to a filter key.
         format_lbl = QLabel("Format:")
         format_lbl.setStyleSheet("color: #888; font-size: 8.5pt;")
         toolbar.addWidget(format_lbl)
-        self._format_btns = {}
-        for text, tip, key in [
-            ("All",  "Show every file type", FORMAT_ALL),
-            ("EPUB", "Show only EPUB books / workspaces", FORMAT_EPUB),
-            ("TXT",  "Show only TXT translations", FORMAT_TXT),
-            ("PDF",  "Show only PDF translations", FORMAT_PDF),
-            ("HTML", "Show only HTML translations", FORMAT_HTML),
-            ("IMG",  "Show only image-based (manga / comic) workspaces", FORMAT_IMAGE),
-        ]:
-            btn = self._make_format_btn(text, tip, key)
-            self._format_btns[key] = btn
-            toolbar.addWidget(btn)
+        self._format_combo = _NoWheelComboBox()
+        self._format_combo.setFixedHeight(26)
+        self._format_combo.setFixedWidth(96)
+        self._format_combo.setCursor(Qt.PointingHandCursor)
+        self._format_combo.setFocusPolicy(Qt.StrongFocus)
+        self._format_combo.setToolTip(
+            "Filter library cards by file format (All / EPUB / TXT / "
+            "PDF / HTML / image). Mouse wheel is intentionally ignored.")
+        self._format_combo.setStyleSheet("""
+            QComboBox {
+                background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
+                color: #e0e0e0; font-size: 8.5pt; font-weight: bold; padding: 2px 8px;
+            }
+            QComboBox:hover { border-color: #20b2cc; color: #fff; }
+            QComboBox::drop-down { border: none; width: 18px; }
+            QComboBox::down-arrow { image: url(noimg); width: 10px; height: 10px; }
+            QComboBox QAbstractItemView {
+                background: #1e1e2e; color: #e0e0e0; selection-background-color: #17a2b8;
+                border: 1px solid #3a3a5e; font-size: 8.5pt;
+            }
+        """)
+        self._format_options = [
+            (FORMAT_ALL,   "All",  "Show every file type"),
+            (FORMAT_EPUB,  "EPUB", "Show only EPUB books / workspaces"),
+            (FORMAT_TXT,   "TXT",  "Show only TXT translations"),
+            (FORMAT_PDF,   "PDF",  "Show only PDF translations"),
+            (FORMAT_HTML,  "HTML", "Show only HTML translations"),
+            (FORMAT_IMAGE, "IMG",  "Show only image-based (manga / comic) workspaces"),
+        ]
+        for key, label, tip in self._format_options:
+            self._format_combo.addItem(label, key)
+            self._format_combo.setItemData(
+                self._format_combo.count() - 1, tip, Qt.ToolTipRole)
+        # Restore persisted selection before wiring the signal so the
+        # initial ``setCurrentIndex`` doesn't spuriously refresh the view.
+        for i, (key, _label, _tip) in enumerate(self._format_options):
+            if key == self._format_filter:
+                self._format_combo.setCurrentIndex(i)
+                break
+        self._format_combo.currentIndexChanged.connect(
+            lambda idx: self._set_format_filter(
+                self._format_combo.itemData(idx)))
+        toolbar.addWidget(self._format_combo)
         toolbar.addSpacing(16)
+        # View / thumbnail-size dropdown (replaces the previous row of
+        # S / M / L / XL… chip buttons). Same :class:`_NoWheelComboBox`
+        # pattern as the Format filter so a mouse wheel can't silently
+        # resize every card while the user is trying to scroll.
         size_lbl = QLabel("View:")
         size_lbl.setStyleSheet("color: #888; font-size: 8.5pt;")
         toolbar.addWidget(size_lbl)
-        self._size_btns = {}
-        for text, tip, key in [
-            ("S", "Compact thumbnails", SIZE_COMPACT),
-            ("M", "Normal thumbnails", SIZE_NORMAL),
-            ("L", "Large thumbnails", SIZE_LARGE),
-            ("XL", "Extra large thumbnails", SIZE_XL),
-            ("2XL", "2XL thumbnails", SIZE_2XL),
-            ("3XL", "3XL thumbnails", SIZE_3XL),
-            ("4XL", "4XL thumbnails", SIZE_4XL),
-            ("5XL", "5XL thumbnails", SIZE_5XL),
-            ("6XL", "6XL thumbnails", SIZE_6XL),
-        ]:
-            btn = self._make_size_btn(text, tip, key)
-            self._size_btns[key] = btn
-            toolbar.addWidget(btn)
+        self._size_combo = _NoWheelComboBox()
+        self._size_combo.setFixedHeight(26)
+        self._size_combo.setFixedWidth(80)
+        self._size_combo.setCursor(Qt.PointingHandCursor)
+        self._size_combo.setFocusPolicy(Qt.StrongFocus)
+        self._size_combo.setToolTip(
+            "Thumbnail size for the library grid. Mouse wheel is "
+            "intentionally ignored \u2014 use Ctrl+Wheel / Ctrl+= / Ctrl+- "
+            "to zoom cards instead.")
+        self._size_combo.setStyleSheet("""
+            QComboBox {
+                background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
+                color: #e0e0e0; font-size: 8.5pt; font-weight: bold; padding: 2px 8px;
+            }
+            QComboBox:hover { border-color: #20b2cc; color: #fff; }
+            QComboBox::drop-down { border: none; width: 18px; }
+            QComboBox::down-arrow { image: url(noimg); width: 10px; height: 10px; }
+            QComboBox QAbstractItemView {
+                background: #1e1e2e; color: #e0e0e0; selection-background-color: #17a2b8;
+                border: 1px solid #3a3a5e; font-size: 8.5pt;
+            }
+        """)
+        self._size_options = [
+            (SIZE_COMPACT, "S",   "Compact thumbnails"),
+            (SIZE_NORMAL,  "M",   "Normal thumbnails"),
+            (SIZE_LARGE,   "L",   "Large thumbnails"),
+            (SIZE_XL,      "XL",  "Extra large thumbnails"),
+            (SIZE_2XL,     "2XL", "2XL thumbnails"),
+            (SIZE_3XL,     "3XL", "3XL thumbnails"),
+            (SIZE_4XL,     "4XL", "4XL thumbnails"),
+            (SIZE_5XL,     "5XL", "5XL thumbnails"),
+            (SIZE_6XL,     "6XL", "6XL thumbnails"),
+        ]
+        for key, label, tip in self._size_options:
+            self._size_combo.addItem(label, key)
+            self._size_combo.setItemData(
+                self._size_combo.count() - 1, tip, Qt.ToolTipRole)
+        for i, (key, _label, _tip) in enumerate(self._size_options):
+            if key == self._card_size:
+                self._size_combo.setCurrentIndex(i)
+                break
+        self._size_combo.currentIndexChanged.connect(
+            lambda idx: self._set_card_size(
+                self._size_combo.itemData(idx)))
+        toolbar.addWidget(self._size_combo)
         toolbar.addSpacing(16)
         # "Show raw titles" toggle: when checked, every flash card displays
         # the raw source-language title instead of the translated one. Same
@@ -6271,23 +6358,29 @@ class EpubLibraryDialog(QDialog):
         self._refresh_view()
 
     def _set_format_filter(self, fmt_key: str):
-        """Change the active file-format filter and refresh both tabs."""
-        if fmt_key == self._format_filter:
-            # Clicking the already-active chip is a no-op — keep the
-            # chip checked rather than letting Qt toggle it off and
-            # leaving the user in a transient "no filter selected"
-            # state that would still render as FORMAT_ALL.
-            btn = self._format_btns.get(fmt_key)
-            if btn is not None:
-                btn.setChecked(True)
+        """Change the active file-format filter and refresh both tabs.
+
+        Driven by the ``Format`` dropdown (:class:`_NoWheelComboBox`).
+        The combo's current selection is the source of truth \u2014 we
+        sync it defensively in case the change came from a keyboard
+        shortcut or an external call rather than the combo itself.
+        """
+        if not fmt_key or fmt_key == self._format_filter:
             return
         self._format_filter = fmt_key
         try:
             self._config["epub_library_format_filter"] = fmt_key
         except Exception:
             pass
-        for k, btn in self._format_btns.items():
-            btn.setChecked(k == fmt_key)
+        combo = getattr(self, "_format_combo", None)
+        if combo is not None:
+            for i in range(combo.count()):
+                if combo.itemData(i) == fmt_key:
+                    if combo.currentIndex() != i:
+                        combo.blockSignals(True)
+                        combo.setCurrentIndex(i)
+                        combo.blockSignals(False)
+                    break
         self._refresh_view()
 
     @staticmethod
@@ -6321,9 +6414,25 @@ class EpubLibraryDialog(QDialog):
         return mapping.get(kind, FORMAT_ALL)
 
     def _set_card_size(self, size_key):
+        """Change the active card size and refresh both tabs.
+
+        Driven by the ``View`` dropdown (:class:`_NoWheelComboBox`) and
+        also by Ctrl+Wheel / Ctrl+= / Ctrl+- shortcuts. The combo is
+        synced defensively so every entry point keeps the dropdown
+        in lockstep with :attr:`_card_size`.
+        """
+        if not size_key:
+            return
         self._card_size = size_key
-        for k, btn in self._size_btns.items():
-            btn.setChecked(k == size_key)
+        combo = getattr(self, "_size_combo", None)
+        if combo is not None:
+            for i in range(combo.count()):
+                if combo.itemData(i) == size_key:
+                    if combo.currentIndex() != i:
+                        combo.blockSignals(True)
+                        combo.setCurrentIndex(i)
+                        combo.blockSignals(False)
+                    break
         self._refresh_view()
 
     def _on_raw_titles_toggled(self, checked: bool):
@@ -11905,6 +12014,34 @@ class BookDetailsDialog(QDialog):
                             alt_for_reader = raw_source
                     except Exception:
                         alt_for_reader = ""
+                # Auto-refresh provider: only wired up in overlay mode
+                # (in-progress novels). Calls ``_build_translated_overlay``
+                # via a ``sip``-safe guard so the reader doesn't crash
+                # when the details dialog is closed before it. The
+                # reader ticks this on a :class:`QTimer` and re-merges
+                # only when the returned overlay actually changed, so
+                # the user can read a chapter while the translator
+                # keeps filling in later ones in the background.
+                overlay_provider = None
+                if overlay:
+                    def overlay_provider():  # noqa: E306
+                        # Returning ``None`` rather than ``({}, [])`` on
+                        # failure is deliberate: the reader treats a
+                        # ``None`` return as "no change" and skips the
+                        # tick, whereas an empty overlay would be diffed
+                        # as a legitimate change \u2014 wiping every
+                        # translated chapter out of the reader until the
+                        # next successful tick. This matters because the
+                        # BookDetails dialog uses ``WA_DeleteOnClose``,
+                        # so ``self`` may be a deleted QObject by the
+                        # time the timer fires.
+                        try:
+                            return self._build_translated_overlay()
+                        except Exception:
+                            logger.debug(
+                                "Overlay refresh rebuild failed: %s",
+                                traceback.format_exc())
+                            return None
                 reader = EpubReaderDialog(
                     epub_for_reader,
                     config=self._config,
@@ -11919,6 +12056,7 @@ class BookDetailsDialog(QDialog):
                     # shows (cover / nav / toc hidden when this is off).
                     show_special_files=self._show_special_files,
                     alt_epub_path=alt_for_reader or None,
+                    overlay_provider=overlay_provider,
                 )
                 QApplication.restoreOverrideCursor()
                 reader.setModal(False)
@@ -12743,7 +12881,9 @@ class EpubReaderDialog(QDialog):
                  extra_image_dirs: list[str] | None = None,
                  window_title: str | None = None,
                  show_special_files: bool | None = None,
-                 alt_epub_path: str | None = None):
+                 alt_epub_path: str | None = None,
+                 overlay_provider=None,
+                 auto_refresh_interval_ms: int = 3000):
         super().__init__(parent)
         self._epub_path = epub_path
         self._config = config or {}
@@ -12841,6 +12981,19 @@ class EpubReaderDialog(QDialog):
         # <output_folder>/translated_images) used to augment the EPUB's own
         # image table so translated chapters can resolve their assets.
         self._extra_image_dirs: list[str] = list(extra_image_dirs or [])
+        # Auto-refresh: when a ``overlay_provider`` callable is supplied
+        # (typically :meth:`BookDetailsDialog._build_translated_overlay`)
+        # the reader ticks a :class:`QTimer` on a short interval, re-runs
+        # the provider, and \u2014 if the returned overlay differs from the
+        # currently-merged one \u2014 fires a fresh :class:`_OverlayMergeThread`
+        # to pick up newly translated chapters. This lets users read an
+        # in-progress novel while the translator fills chapters in behind
+        # them. The timer is started after the initial load lands (see
+        # :meth:`_finalize_post_load`) so auto-refresh can't race the
+        # first paint, and stops in :meth:`closeEvent`.
+        self._overlay_provider = overlay_provider if callable(overlay_provider) else None
+        self._auto_refresh_interval_ms = max(500, int(auto_refresh_interval_ms or 0))
+        self._overlay_refresh_timer: QTimer | None = None
         self._current_row = 0
         self._current_page = 0  # viewport-based page for single/double page modes
         # Page-count cache + currently-rendered-chapter sentinel need to
@@ -13626,6 +13779,231 @@ class EpubReaderDialog(QDialog):
                 "<div style='text-align:center; padding: 60px; color: #888;'>"
                 "<p style='font-size: 16pt;'>📭</p>"
                 "<p>No readable content found in this EPUB.</p></div>")
+
+        # Kick off the auto-refresh timer now that the initial load has
+        # finished. Only started once per dialog \u2014 subsequent finalize
+        # calls (from :meth:`_on_show_raw_toggled` reloads or from
+        # :meth:`_on_auto_refresh_merge_done` itself) skip this branch.
+        self._ensure_overlay_refresh_timer()
+
+    def _ensure_overlay_refresh_timer(self):
+        """Start the translated-overlay auto-refresh timer (idempotent).
+
+        No-ops when no ``overlay_provider`` was supplied (e.g. plain
+        EPUB opens, dual-path Completed-tab opens). Also skipped when
+        the timer has already been created by a previous finalize \u2014
+        a single ``QTimer`` drives every subsequent tick.
+        """
+        if not callable(getattr(self, "_overlay_provider", None)):
+            return
+        if getattr(self, "_overlay_refresh_timer", None) is not None:
+            return
+        timer = QTimer(self)
+        timer.setInterval(self._auto_refresh_interval_ms)
+        # Lambda-wrap so PySide6 routes the callback directly instead of
+        # going through Qt's meta-object slot-lookup \u2014 same quirk that
+        # forces ``_rotate_spinner`` to be dispatched via a lambda.
+        timer.timeout.connect(lambda: self._on_overlay_refresh_tick())
+        self._overlay_refresh_timer = timer
+        timer.start()
+
+    @Slot()
+    def _on_overlay_refresh_tick(self):
+        """Poll the overlay provider and re-merge when the overlay changed.
+
+        The translator writes ``response_*.html`` files as it finishes
+        each chapter. The provider (typically
+        :meth:`BookDetailsDialog._build_translated_overlay`) rescans
+        that state and returns a fresh ``(overlay_map, extra_dirs)``
+        tuple. When the returned overlay differs from the one currently
+        merged into :attr:`_chapters_overlaid` (either new chapter
+        entries or a rewritten response file with a newer mtime) we
+        fire another :class:`_OverlayMergeThread` off the UI thread
+        and swap its result in via :meth:`_on_auto_refresh_merge_done`.
+
+        Safety rails keep the tick cheap and non-disruptive:
+          * Hidden dialog \u2192 bail out (no point paying for disk I/O).
+          * Active load / merge thread \u2192 bail out (don't pile on).
+          * Empty raw chapter list \u2192 bail out (initial load hasn't
+            landed yet).
+          * Identical overlay signature \u2192 bail out (nothing changed).
+        """
+        provider = getattr(self, "_overlay_provider", None)
+        if not callable(provider):
+            return
+        try:
+            if not self.isVisible():
+                return
+        except Exception:
+            pass
+        # Don't stack refresh merges on top of each other or on top of
+        # the initial loader.
+        for attr in ("_overlay_thread", "_loader_thread",
+                     "_cache_loader_thread"):
+            t = getattr(self, attr, None)
+            if t is None:
+                continue
+            try:
+                if t.isRunning():
+                    return
+            except Exception:
+                pass
+        if not self._chapters_raw:
+            return
+        try:
+            result = provider()
+        except Exception:
+            logger.debug("Overlay provider raised: %s",
+                         traceback.format_exc())
+            return
+        # Accept either a bare overlay dict or a (overlay, extra_dirs)
+        # tuple so the provider stays flexible.
+        if isinstance(result, tuple) and len(result) == 2:
+            raw_overlay, new_extra_dirs = result
+        elif isinstance(result, dict):
+            raw_overlay, new_extra_dirs = result, self._extra_image_dirs
+        else:
+            return
+        # Normalise keys the same way ``__init__`` does so the diff
+        # below compares like-for-like.
+        normalised: dict[str, dict] = {}
+        for k, v in (raw_overlay or {}).items():
+            if not k:
+                continue
+            key = os.path.basename(str(k)).lower()
+            if not key:
+                continue
+            if isinstance(v, str):
+                normalised[key] = {"path": v}
+            elif isinstance(v, dict) and v.get("path"):
+                normalised[key] = dict(v)
+
+        def _sig(overlay: dict) -> tuple:
+            sig = []
+            for k in sorted(overlay.keys()):
+                entry = overlay[k] or {}
+                p = entry.get("path", "") or ""
+                try:
+                    m = (os.path.getmtime(p)
+                         if p and os.path.isfile(p) else 0.0)
+                except OSError:
+                    m = 0.0
+                sig.append((k, p, m, entry.get("title", "") or ""))
+            return tuple(sig)
+
+        new_sig = _sig(normalised)
+        old_sig = _sig(self._translated_overlay)
+        extras_changed = (list(new_extra_dirs or [])
+                          != list(self._extra_image_dirs or []))
+        if new_sig == old_sig and not extras_changed:
+            return
+        # Swap in the new overlay + extra dirs, then kick a merge thread
+        # that reuses the already-loaded raw chapters + images.
+        self._translated_overlay = normalised
+        self._extra_image_dirs = list(new_extra_dirs or [])
+        raw_chapters = list(self._chapters_raw)
+        filenames = list(self._chapter_filenames)
+        self._pending_raw_chapters = raw_chapters
+        self._pending_filenames = filenames
+        prev = getattr(self, "_overlay_thread", None)
+        if prev is not None:
+            try:
+                prev.done.disconnect()
+            except Exception:
+                pass
+            try:
+                prev.quit()
+            except Exception:
+                pass
+        self._overlay_thread = _OverlayMergeThread(
+            raw_chapters=raw_chapters,
+            images=dict(self._images),
+            filenames=filenames,
+            overlay_map=self._translated_overlay,
+            extra_image_dirs=self._extra_image_dirs,
+            parent=self,
+        )
+        # Route the ``done`` signal to the in-place updater rather than
+        # :meth:`_on_overlay_merge_done` \u2014 the latter re-runs the
+        # full finalize pass (with its priming-mode render), which
+        # would blank the reader on every tick.
+        self._overlay_thread.done.connect(
+            lambda overlaid, imgs, applied:
+                self._on_auto_refresh_merge_done(
+                    overlaid, imgs, applied)
+        )
+        self._overlay_thread.start()
+
+    @Slot(object, object, bool)
+    def _on_auto_refresh_merge_done(self, overlaid_chapters,
+                                    merged_images,
+                                    overlay_applied: bool):
+        """Swap refreshed chapters into the UI without a full re-render.
+
+        Differs from :meth:`_on_overlay_merge_done` in two key ways:
+          * Backing chapter + image state is replaced, the TOC is
+            rebuilt, and the Show-raw pill visibility is refreshed,
+            but the reader pane itself is only re-rendered when the
+            currently-viewed chapter's content actually changed. New
+            chapters that the user hasn't opened yet therefore land
+            silently in the TOC; the active chapter keeps its scroll
+            / page position.
+          * Reading position is preserved via the existing page-hint
+            plumbing \u2014 if the current chapter's content did change,
+            the finalizer rehydrates it to the same proportional
+            page rather than jumping back to page 1.
+        """
+        pending_raw = getattr(self, "_pending_raw_chapters", []) or []
+        self._pending_raw_chapters = []
+        self._pending_filenames = []
+        # Snapshot the active chapter's content BEFORE we swap the
+        # backing list so we can detect whether it changed.
+        prev_current = None
+        if 0 <= self._current_row < len(self._chapters):
+            prev_current = self._chapters[self._current_row]
+        self._chapters_raw = pending_raw or self._chapters_raw
+        self._chapters_overlaid = overlaid_chapters or []
+        self._images = merged_images or self._images
+        if self._show_raw and overlay_applied:
+            new_chapters = self._chapters_raw
+        else:
+            new_chapters = self._chapters_overlaid or self._chapters_raw
+        prev_row = self._current_row
+        self._chapters = new_chapters
+        # Rebuild the TOC, preserving the current selection. Chapter
+        # count can grow (new translated chapters surface with
+        # translated titles) but never shrinks during a refresh.
+        self._toc_list.blockSignals(True)
+        self._toc_list.clear()
+        for title, _ in new_chapters:
+            self._toc_list.addItem(QListWidgetItem(title))
+        if new_chapters:
+            new_row = max(0, min(prev_row, len(new_chapters) - 1))
+            self._toc_list.setCurrentRow(new_row)
+            self._current_row = new_row
+        else:
+            self._current_row = 0
+        self._toc_list.blockSignals(False)
+        # Refresh the Show-raw pill visibility \u2014 overlay_applied can
+        # flip from False \u2192 True when the first translated chapter
+        # lands mid-read.
+        has_dual_path = bool(getattr(self, "_raw_epub_alt_path", ""))
+        if getattr(self, "_raw_btn", None) is not None:
+            self._raw_btn.setVisible(
+                bool(overlay_applied) or has_dual_path)
+        # If the active chapter's content changed, re-render it with a
+        # position hint so the user lands back near where they were.
+        # If unchanged, leave the viewport alone \u2014 this keeps
+        # scroll position + paginated page rock steady across ticks.
+        if (prev_current is not None
+                and 0 <= self._current_row < len(new_chapters)
+                and new_chapters[self._current_row] != prev_current):
+            self._pending_page_hint = self._capture_position_hint()
+            self._chapter_page_cache.pop(self._current_row, None)
+            self._loaded_chapter = -1
+            self._render_current()
+        else:
+            self._update_nav_buttons()
 
     def _get_chapter_pages(self, chapter_idx):
         """Get page count for a chapter (cached or live-compute for current)."""
@@ -14488,6 +14866,25 @@ class EpubReaderDialog(QDialog):
             self._config['epub_reader_layout'] = self._layout_mode
         self._config['epub_reader_font_family'] = self._font_family
         self._config['epub_reader_show_raw'] = self._show_raw
+        # Stop the auto-refresh timer + any in-flight merge thread so
+        # the closed dialog can't fire callbacks against a deleted UI.
+        timer = getattr(self, "_overlay_refresh_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
+            self._overlay_refresh_timer = None
+        overlay_thread = getattr(self, "_overlay_thread", None)
+        if overlay_thread is not None:
+            try:
+                overlay_thread.done.disconnect()
+            except Exception:
+                pass
+            try:
+                overlay_thread.quit()
+            except Exception:
+                pass
         _persist_config_via_parent(self)
         super().closeEvent(event)
 
