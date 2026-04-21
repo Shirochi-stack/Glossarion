@@ -16863,6 +16863,15 @@ Important rules:
                     dlg.import_epubs_requested.connect(self._handle_library_import_epubs)
                 except Exception:
                     pass
+                # Organize / Undo relocate files on disk — rewrite any
+                # stale paths we're still holding in ``entry_epub`` or
+                # ``selected_files`` so clicking Run after Organize
+                # doesn't target a file that just moved into
+                # Library/Raw (or back out of it on Undo).
+                try:
+                    dlg.files_reorganized.connect(self._handle_library_files_reorganized)
+                except Exception:
+                    pass
                 self._epub_library_dialog = dlg
             if dlg.isVisible():
                 dlg.raise_()
@@ -16986,6 +16995,95 @@ Important rules:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Import EPUBs",
                                 f"Could not load EPUBs:\n{e}")
+
+    def _handle_library_files_reorganized(self, moves):
+        """Library \u2192 Organize / Undo: rewrite stale input paths.
+
+        *moves* is a list of ``(old_abs_path, new_abs_path)`` tuples
+        emitted by :class:`EpubLibraryDialog` after it moves raw /
+        translated files on disk. We rewrite any occurrence of an old
+        path we're currently holding in ``self.selected_files`` /
+        ``self.entry_epub`` to its new location, so clicking Run
+        immediately after an Organize operation doesn't fire against
+        a path that no longer exists.
+        """
+        try:
+            if not moves:
+                return
+            # Build a lookup keyed by the NORMCASED normpath of the old
+            # abs path so cross-drive / mixed-separator comparisons work
+            # correctly on Windows. Values are the new abs paths exactly
+            # as they were written to disk (preserve original casing).
+            remap: dict[str, str] = {}
+            for pair in moves:
+                try:
+                    old_p, new_p = pair
+                except (TypeError, ValueError):
+                    continue
+                if not old_p or not new_p:
+                    continue
+                try:
+                    key = os.path.normcase(os.path.normpath(
+                        os.path.abspath(old_p)))
+                except Exception:
+                    continue
+                remap[key] = os.path.abspath(new_p)
+            if not remap:
+                return
+
+            def _maybe_remap(p: str) -> str:
+                if not p:
+                    return p
+                try:
+                    key = os.path.normcase(os.path.normpath(
+                        os.path.abspath(p)))
+                except Exception:
+                    return p
+                return remap.get(key, p)
+
+            updated_any = False
+            # Rewrite selected_files in-place so downstream code (Run
+            # button, glossary mapping, etc.) picks up the new path.
+            try:
+                current = list(getattr(self, 'selected_files', []) or [])
+                new_list = []
+                for p in current:
+                    np = _maybe_remap(p)
+                    if np != p:
+                        updated_any = True
+                    new_list.append(np)
+                if updated_any:
+                    self.selected_files = new_list
+            except Exception:
+                pass
+
+            # Rewrite the entry_epub line edit. When the field shows a
+            # multi-file summary like "3 files selected (…)" we leave
+            # the label alone — selected_files is already the source
+            # of truth for those runs.
+            try:
+                if hasattr(self, 'entry_epub') and self.entry_epub is not None:
+                    text = self.entry_epub.text().strip()
+                    if (text
+                            and not text.startswith("No file selected")
+                            and "files selected" not in text):
+                        new_text = _maybe_remap(text)
+                        if new_text != text:
+                            self.entry_epub.setText(new_text)
+                            updated_any = True
+            except Exception:
+                pass
+
+            if updated_any:
+                try:
+                    self.append_log(
+                        "\U0001f4c2 Updated input path(s) after Library move."
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            # Never let a path-rewrite failure block the library dialog.
+            pass
 
     def _on_library_closed(self):
         """Persist config when library/reader dialogs close."""

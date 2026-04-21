@@ -3327,14 +3327,86 @@ class EpubLibraryDialog(QDialog):
             return
         self._import_paths_into_library(paths, source="picker", target="raw")
 
+    def _prompt_duplicate_policy(self, collisions: list[tuple[str, str]],
+                                 dest_label: str) -> str | None:
+        """Ask the user how to handle one or more duplicate filenames.
+
+        *collisions* is a list of ``(source_path, existing_dest_path)``
+        tuples — one entry per file whose basename already exists in the
+        destination folder. Previously the import code silently resolved
+        collisions by appending a counter suffix (``name (2).epub``),
+        which meant a raw EPUB dropped twice produced two separate
+        copies and, on the translator side, two unrelated output
+        folders. The user never got a chance to say "this is the same
+        book, just replace it".
+
+        Returns one of: ``"replace"``, ``"keep_both"``, ``"skip"``,
+        or ``None`` when the user cancels (the whole import is then
+        aborted). The returned policy is applied to *every* colliding
+        file in the batch — per-file prompting would be much noisier
+        for multi-drop imports and matches what Explorer / Finder do.
+        """
+        if not collisions:
+            return "keep_both"
+        n = len(collisions)
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Question)
+        msg.setWindowTitle("Duplicate files")
+        preview_lines = []
+        for src, existing in collisions[:6]:
+            preview_lines.append(f"  \u2022 {os.path.basename(existing)}")
+        if n > 6:
+            preview_lines.append(f"  \u2026 and {n - 6} more.")
+        if n == 1:
+            msg.setText(
+                f"A file named \u201c{os.path.basename(collisions[0][1])}\u201d "
+                f"already exists in {dest_label}.\n\n"
+                f"What would you like to do?"
+            )
+        else:
+            msg.setText(
+                f"{n} files being imported already exist in {dest_label}:\n\n"
+                + "\n".join(preview_lines)
+                + "\n\nWhat would you like to do with the duplicates?"
+            )
+        btn_replace = msg.addButton(
+            "Replace" + (" All" if n > 1 else ""), QMessageBox.AcceptRole)
+        btn_keep = msg.addButton(
+            "Keep Both" + (" All" if n > 1 else ""), QMessageBox.AcceptRole)
+        btn_skip = msg.addButton(
+            "Skip" + (" All" if n > 1 else ""), QMessageBox.AcceptRole)
+        btn_cancel = msg.addButton(QMessageBox.Cancel)
+        btn_replace.setToolTip(
+            "Overwrite the existing file(s) with the new one(s). "
+            "Cannot be undone."
+        )
+        btn_keep.setToolTip(
+            "Keep both copies. The new file(s) get a counter suffix "
+            "like \u201cname (2).epub\u201d."
+        )
+        btn_skip.setToolTip("Don't import the duplicate(s).")
+        msg.setDefaultButton(btn_keep)
+        msg.exec()
+        chosen = msg.clickedButton()
+        if chosen is btn_replace:
+            return "replace"
+        if chosen is btn_keep:
+            return "keep_both"
+        if chosen is btn_skip:
+            return "skip"
+        return None  # cancel
+
     def _import_paths_into_library(self, paths, source: str = "picker",
                                    target: str = "raw"):
         """Core import pipeline used by both the file picker and drag-drop.
 
-        Copies each supported file into the library (counter-suffix on name
-        collision), and refreshes the library once all files have been
-        processed. Shows a single summary dialog at the end so batch imports
-        don't spam modal messages.
+        Copies each supported file into the library. When one or more of
+        the dropped files collides with an existing name in the
+        destination, the user is prompted once (Replace / Keep Both /
+        Skip / Cancel) and that decision is applied to every duplicate
+        in the batch. Refreshes the library once all files have been
+        processed and shows a single summary dialog at the end so batch
+        imports don't spam modal messages.
 
         *target* selects the destination:
           * ``"raw"`` (default): copy into ``Library/Raw`` and scaffold an
@@ -3351,41 +3423,78 @@ class EpubLibraryDialog(QDialog):
         if target == "translated":
             supported_exts = (".epub",)
             dest_label = "Library/Translated"
+            dest_dir = get_library_translated_dir()
         else:
             supported_exts = (".epub", ".txt", ".pdf", ".html", ".htm")
             dest_label = "Library/Raw"
+            dest_dir = get_library_raw_dir()
+
+        # First pass: validate each path and bucket it as
+        #   * skipped (missing / wrong type),
+        #   * fresh (no name collision; always copied), or
+        #   * colliding (same basename already in dest; policy decides).
         imported: list[str] = []
         skipped: list[str] = []
         errors: list[str] = []
+        fresh: list[str] = []
+        collisions: list[tuple[str, str]] = []  # (src, existing_dest)
         for raw_path in paths:
+            if not raw_path:
+                continue
             try:
-                if not raw_path:
-                    continue
                 path = os.path.abspath(raw_path)
-                if not os.path.isfile(path):
-                    skipped.append(f"{os.path.basename(raw_path)} (not a file)")
-                    continue
-                if not path.lower().endswith(supported_exts):
-                    # On the Completed tab only .epub makes sense; non-EPUBs
-                    # are called out explicitly so the user understands why
-                    # a mixed drop didn't land.
-                    if target == "translated":
-                        skipped.append(
-                            f"{os.path.basename(path)} "
-                            f"(only EPUBs go to Library/Translated)"
-                        )
-                    else:
-                        skipped.append(
-                            f"{os.path.basename(path)} (unsupported type)"
-                        )
-                    continue
-                dest = self._import_single_file(path, target=target)
+            except (TypeError, ValueError):
+                continue
+            if not os.path.isfile(path):
+                skipped.append(f"{os.path.basename(raw_path)} (not a file)")
+                continue
+            if not path.lower().endswith(supported_exts):
+                # On the Completed tab only .epub makes sense; non-EPUBs
+                # are called out explicitly so the user understands why
+                # a mixed drop didn't land.
+                if target == "translated":
+                    skipped.append(
+                        f"{os.path.basename(path)} "
+                        f"(only EPUBs go to Library/Translated)"
+                    )
+                else:
+                    skipped.append(
+                        f"{os.path.basename(path)} (unsupported type)"
+                    )
+                continue
+            existing = os.path.join(dest_dir, os.path.basename(path))
+            if (os.path.isfile(existing) and
+                    os.path.abspath(path) != os.path.abspath(existing)):
+                collisions.append((path, existing))
+            else:
+                fresh.append(path)
+
+        collision_policy = "keep_both"
+        if collisions:
+            collision_policy = self._prompt_duplicate_policy(
+                collisions, dest_label)
+            if collision_policy is None:
+                # User cancelled — abort the whole batch silently.
+                return
+
+        def _process(path: str, policy: str) -> None:
+            try:
+                dest = self._import_single_file(
+                    path, target=target, collision_policy=policy)
                 if dest:
                     imported.append(dest)
+                elif policy == "skip":
+                    skipped.append(
+                        f"{os.path.basename(path)} (duplicate \u2014 skipped)")
             except Exception as exc:
                 logger.error("Import failed for %s: %s\n%s",
-                             raw_path, exc, traceback.format_exc())
-                errors.append(f"{os.path.basename(raw_path)}: {exc}")
+                             path, exc, traceback.format_exc())
+                errors.append(f"{os.path.basename(path)}: {exc}")
+
+        for p in fresh:
+            _process(p, "keep_both")  # policy doesn't matter, no collision
+        for src, _existing in collisions:
+            _process(src, collision_policy)
         if imported:
             QTimer.singleShot(0, self._load_books)
         if not (imported or skipped or errors):
@@ -3460,18 +3569,29 @@ class EpubLibraryDialog(QDialog):
         else:
             QMessageBox.warning(self, title, body)
 
-    def _import_single_file(self, path: str, target: str = "raw") -> str | None:
+    def _import_single_file(self, path: str, target: str = "raw",
+                             collision_policy: str = "keep_both"
+                             ) -> str | None:
         """Copy *path* into the appropriate library subfolder.
 
         *target* is either ``"raw"`` (→ ``Library/Raw`` + output-folder
         scaffold for the translator) or ``"translated"`` (→
         ``Library/Translated``, no scaffold — the file is treated as a
-        finished compiled EPUB). Name collisions append a counter suffix
-        (``name (2).epub``) so no pre-existing file is clobbered.
+        finished compiled EPUB).
 
-        Returns the destination path on success, None on failure. Raises
-        no exceptions — failures are logged and surfaced via the caller's
-        aggregated error list.
+        *collision_policy* controls what happens when a file with the
+        same basename already exists in the destination folder:
+          * ``"keep_both"`` (default, legacy behaviour): append a
+            counter suffix (``name (2).epub``) so both copies survive.
+          * ``"replace"``: overwrite the existing file.
+          * ``"skip"``: return ``None`` without copying.
+        The caller (:meth:`_import_paths_into_library`) prompts the
+        user once per batch and passes the resolved policy down so
+        every duplicate in the same drop is handled the same way.
+
+        Returns the destination path on success, ``None`` on skip /
+        failure. Raises no exceptions — failures are logged and
+        surfaced via the caller's aggregated error list.
         """
         if target == "translated":
             dest_dir = get_library_translated_dir()
@@ -3479,18 +3599,28 @@ class EpubLibraryDialog(QDialog):
             dest_dir = get_library_raw_dir()
         try:
             dest = os.path.join(dest_dir, os.path.basename(path))
-            # Don't overwrite a different file with the same name — append a
-            # counter suffix like "name (2).epub" as File Explorer does.
-            if (os.path.abspath(path) != os.path.abspath(dest)
-                    and os.path.isfile(dest)):
-                stem, ext = os.path.splitext(os.path.basename(path))
-                counter = 2
-                while True:
-                    candidate = os.path.join(dest_dir, f"{stem} ({counter}){ext}")
-                    if not os.path.isfile(candidate):
-                        dest = candidate
-                        break
-                    counter += 1
+            same_file = (os.path.abspath(path) == os.path.abspath(dest))
+            if not same_file and os.path.isfile(dest):
+                if collision_policy == "skip":
+                    return None
+                if collision_policy == "replace":
+                    # Overwrite the existing file in place. shutil.copy2
+                    # handles the overwrite atomically enough for our
+                    # needs; origins / pair entries keyed on this
+                    # basename remain valid because the basename
+                    # doesn't change.
+                    pass
+                else:
+                    # "keep_both" — counter-suffix like Explorer does.
+                    stem, ext = os.path.splitext(os.path.basename(path))
+                    counter = 2
+                    while True:
+                        candidate = os.path.join(
+                            dest_dir, f"{stem} ({counter}){ext}")
+                        if not os.path.isfile(candidate):
+                            dest = candidate
+                            break
+                        counter += 1
             if os.path.abspath(path) != os.path.abspath(dest):
                 shutil.copy2(path, dest)
             # Only raw imports feed the translator pipeline — the raw-inputs
@@ -3697,6 +3827,13 @@ class EpubLibraryDialog(QDialog):
         # we fall back to ``raw_source_path`` on the book dict below.
         raw_dest_by_book: dict[int, str] = {}
         trans_dest_by_book: dict[int, str] = {}
+        # Collected (old_abs_path, new_abs_path) pairs for every move in
+        # this run — emitted via :attr:`files_reorganized` at the end so
+        # the translator GUI can update any stale paths it's holding
+        # onto (e.g. the "Input file" line edit still pointing at
+        # ``Downloads/novel.epub`` after the raw moved into
+        # ``Library/Raw/novel.epub``).
+        path_moves: list[tuple[str, str]] = []
 
         def _unique_dest(directory: str, base_name: str) -> str:
             cand = os.path.join(directory, base_name)
@@ -3726,6 +3863,8 @@ class EpubLibraryDialog(QDialog):
                     except OSError as pe:
                         logger.debug("Update source_epub.txt failed: %s", pe)
                 raw_dest_by_book[id(book)] = os.path.basename(dest)
+                path_moves.append(
+                    (os.path.abspath(src), os.path.abspath(dest)))
                 moved_raw += 1
             except Exception as exc:
                 errors.append(f"raw:{os.path.basename(src)}: {exc}")
@@ -3737,6 +3876,8 @@ class EpubLibraryDialog(QDialog):
                 shutil.move(src, dest)
                 trans_origins[os.path.basename(dest)] = os.path.abspath(src)
                 trans_dest_by_book[id(book)] = os.path.basename(dest)
+                path_moves.append(
+                    (os.path.abspath(src), os.path.abspath(dest)))
                 moved_trans += 1
             except Exception as exc:
                 errors.append(f"translated:{os.path.basename(src)}: {exc}")
@@ -3792,6 +3933,17 @@ class EpubLibraryDialog(QDialog):
             summary += (f"\n\n{len(errors)} error"
                         f"{'s' if len(errors) != 1 else ''}:\n"
                         + "\n".join(errors[:5]))
+        # Notify listeners (the translator GUI) BEFORE the summary
+        # modal so when the user dismisses the dialog their input
+        # field already reflects the new library location — clicking
+        # Run immediately after Organize no longer points at a stale
+        # Downloads path.
+        if path_moves:
+            try:
+                self.files_reorganized.emit(list(path_moves))
+            except Exception:
+                logger.debug("files_reorganized emit failed: %s",
+                             traceback.format_exc())
         QMessageBox.information(self, "Organize Files into Library", summary)
         self._load_books()
 
@@ -3838,6 +3990,12 @@ class EpubLibraryDialog(QDialog):
         restored_raw = 0
         restored_trans = 0
         errors: list[str] = []
+        # Undo also relocates files — track ``(old_lib_path, orig_path)``
+        # pairs so we can emit :attr:`files_reorganized` at the end,
+        # mirroring the Organize path. The translator GUI uses this to
+        # rewrite any stale ``Library/Raw\x.epub`` path it's still
+        # holding back to the restored original location.
+        path_moves: list[tuple[str, str]] = []
 
         if restore_raw and raw_map:
             raw_dir = get_library_raw_dir()
@@ -3854,6 +4012,9 @@ class EpubLibraryDialog(QDialog):
                 try:
                     shutil.move(lib_file, orig_path)
                     restored_raw += 1
+                    path_moves.append(
+                        (os.path.abspath(lib_file),
+                         os.path.abspath(orig_path)))
                     # Any output folders whose source_epub.txt still points
                     # at the library copy get rewritten back to the original.
                     try:
@@ -3911,6 +4072,9 @@ class EpubLibraryDialog(QDialog):
                 try:
                     shutil.move(lib_file, orig_path)
                     restored_trans += 1
+                    path_moves.append(
+                        (os.path.abspath(lib_file),
+                         os.path.abspath(orig_path)))
                 except Exception as exc:
                     remaining[lib_name] = orig_path
                     errors.append(f"translated:{lib_name}: {exc}")
@@ -3939,6 +4103,15 @@ class EpubLibraryDialog(QDialog):
             summary += (f"\n\n{len(errors)} error"
                         f"{'s' if len(errors) != 1 else ''}:\n"
                         + "\n".join(errors[:5]))
+        # Notify listeners (the translator GUI) before the summary
+        # modal so stale input paths get rewritten to the restored
+        # originals BEFORE the user can click Run again.
+        if path_moves:
+            try:
+                self.files_reorganized.emit(list(path_moves))
+            except Exception:
+                logger.debug("files_reorganized emit failed: %s",
+                             traceback.format_exc())
         QMessageBox.information(self, "Undo Move", summary)
         self._load_books()
 
