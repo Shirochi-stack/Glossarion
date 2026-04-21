@@ -937,14 +937,19 @@ except ImportError:
     MistralClient = None
     
 # Google Vertex AI API Cloud
+# NOTE: We do NOT eagerly import vertexai here — doing so loads 1,265+ proto
+# submodules (v1 + v1beta1 descriptors) and costs ~215 MB of RAM at startup.
+# Instead, check availability with find_spec (zero cost) and import lazily
+# inside each function that actually needs it.
 try:
-    from google.cloud import aiplatform
-    from google.oauth2 import service_account
-    import vertexai
-    VERTEX_AI_AVAILABLE = True
-except ImportError:
+    import importlib.util as _ilu
+    VERTEX_AI_AVAILABLE = (
+        _ilu.find_spec('vertexai') is not None and
+        _ilu.find_spec('google.cloud.aiplatform') is not None
+    )
+    del _ilu
+except Exception:
     VERTEX_AI_AVAILABLE = False
-    print("Vertex AI SDK not installed. Install with: pip install google-cloud-aiplatform")
 
 try:
     import deepl
