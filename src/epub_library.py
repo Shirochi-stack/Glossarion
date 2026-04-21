@@ -5159,9 +5159,16 @@ class EpubLibraryDialog(QDialog):
                 _queue_library_raw_copy(b)
                 continue
             # Library entry (or any other loose file-backed card).
+            # ``Library/Translated`` cards only own the compiled .epub
+            # themselves, but if a paired raw still sits in
+            # ``Library/Raw`` we queue it too so one Delete click
+            # removes both halves of the library pair. Raws living
+            # outside ``Library/Raw`` (e.g. the user's Downloads
+            # folder) are left alone by :func:`_queue_library_raw_copy`.
             p = b.get("path", "") or ""
             if p and os.path.isfile(p):
                 _queue(b.get("name") or os.path.basename(p), p, False, b)
+            _queue_library_raw_copy(b)
         if not targets:
             QMessageBox.information(
                 self, "Delete",
