@@ -3833,6 +3833,713 @@ class _BookCard(QFrame):
 
 
 # ---------------------------------------------------------------------------
+# Scan-for-Raw dialog
+# ---------------------------------------------------------------------------
+
+class _ScanForRawDialog(QDialog):
+    """Pair every In Progress workspace to a raw source file on disk.
+
+    The user points this dialog at a directory, picks Exact or Fuzzy
+    matching (with a slider for the similarity threshold), previews
+    the candidate pairings in a table, tweaks the per-row selection
+    if they want, and clicks Apply. Each accepted pairing writes:
+
+      * ``<workspace>/source_epub.txt`` — the authoritative pointer
+        the scanner consults first, so subsequent scans resolve the
+        raw directly without going back through title matching.
+      * An entry in ``library_raw_inputs.txt`` for the resolved raw
+        so :func:`_find_raw_source_for_folder`'s registry lookup
+        picks it up even if the sidecar is lost later.
+
+    Matching heuristic:
+
+      * Exact: the workspace's normalized-key set intersects the
+        candidate raw's normalized filename stem.
+      * Fuzzy: the highest ``difflib.SequenceMatcher.ratio()`` among
+        the workspace's keys vs. the candidate stem, above the
+        user-chosen threshold. Ratios are computed against the
+        normalized key so the comparison survives Windows filename
+        sanitization quirks.
+    """
+
+    applied = Signal(int)  # number of pairings written
+
+    MATCH_EXACT = "exact"
+    MATCH_FUZZY = "fuzzy"
+
+    _SUPPORTED_EXTS = (".epub", ".txt", ".pdf", ".html", ".htm")
+
+    def __init__(self,
+                 in_progress_books: list[dict],
+                 config: dict | None = None,
+                 parent=None):
+        super().__init__(parent)
+        self._config = config or {}
+        # Copy so we don't hold live pointers into the parent dialog's
+        # state (the scanner thread is free to replace the list).
+        # We only care about workspace-backed cards — the pairing
+        # writes ``source_epub.txt`` into the output folder, so
+        # library-filed cards (which don't own a workspace) can't be
+        # paired this way and are skipped.
+        self._books: list[dict] = [
+            dict(b) for b in (in_progress_books or [])
+            if bool(b.get("output_folder"))
+            and (b.get("missing_raw_file")
+                 or not b.get("raw_source_path"))
+        ]
+        self._mode = self._config.get(
+            "epub_library_scan_raw_mode", self.MATCH_FUZZY)
+        if self._mode not in (self.MATCH_EXACT, self.MATCH_FUZZY):
+            self._mode = self.MATCH_FUZZY
+        try:
+            self._threshold = int(
+                self._config.get("epub_library_scan_raw_threshold", 70))
+        except (TypeError, ValueError):
+            self._threshold = 70
+        self._threshold = max(40, min(95, self._threshold))
+        self._scan_folder = self._config.get(
+            "epub_library_scan_raw_folder", "") or ""
+        # Extensions the user wants to scan for. Default is Auto:
+        # derive the set from each in-progress workspace's known
+        # ``workspace_kind`` (the scanner already classifies each
+        # folder as epub / txt / pdf / image / other via
+        # :func:`_detect_workspace_kind`, which is what drives the
+        # per-card extension badge). Auto mode means the scan
+        # defaults to exactly the extensions the visible missing-raw
+        # cards need — so an EPUB-only library doesn't bother
+        # hashing every TXT / PDF file in the chosen folder.
+        #
+        # The user can flip to manual mode by unchecking the Auto
+        # toggle and then toggling individual extension checkboxes.
+        # Persisted state:
+        #   * ``epub_library_scan_raw_auto``   (bool, default True)
+        #   * ``epub_library_scan_raw_exts``   (manual-mode selection)
+        valid_exts = {"epub", "txt", "pdf", "html"}
+        self._valid_exts = valid_exts
+        auto_default = True
+        try:
+            self._auto_mode = bool(self._config.get(
+                "epub_library_scan_raw_auto", auto_default))
+        except Exception:
+            self._auto_mode = auto_default
+        stored_exts = self._config.get(
+            "epub_library_scan_raw_exts", None)
+        if isinstance(stored_exts, (list, tuple, set)) and stored_exts:
+            self._manual_exts: set[str] = {
+                str(e).strip().lower().lstrip(".")
+                for e in stored_exts
+                if str(e).strip().lower().lstrip(".") in valid_exts
+            }
+        else:
+            self._manual_exts = set(valid_exts)
+        if not self._manual_exts:
+            self._manual_exts = set(valid_exts)
+        # Live selection used by :meth:`_rescan_folder`. Recomputed
+        # from ``_books`` when Auto is on; copied from
+        # ``_manual_exts`` otherwise. Seeded now so the first scan
+        # (triggered from ``__init__``) has a value to read.
+        self._selected_exts: set[str] = (
+            self._derive_auto_exts() if self._auto_mode
+            else set(self._manual_exts))
+        if not self._selected_exts:
+            # Defensive: never leave the set empty — an empty set
+            # would walk the folder but match zero files, reading
+            # to the user as a silent "no matches" even though the
+            # folder is full of candidates.
+            self._selected_exts = set(valid_exts)
+        # Candidate file index — populated by :meth:`_rescan_folder`,
+        # a list of ``(normalized_stem, absolute_path)`` tuples so the
+        # fuzzy matcher can iterate without re-scanning the folder on
+        # every slider tick.
+        self._candidates: list[tuple[str, str]] = []
+        # Current matches keyed by workspace output_folder. Each value
+        # is ``(matched_path, ratio, accepted)``. ``accepted=False``
+        # means the user un-ticked the checkbox in the preview.
+        self._matches: dict[str, dict] = {}
+        self.setWindowTitle("\U0001f50d  Scan for Raw Sources")
+        self.setMinimumSize(760, 480)
+        # Dialog background matches the rest of the Glossarion shell so
+        # child widgets (radios / checkboxes / slider / labels) don't
+        # paint on top of a default-grey / black fill. Each of those
+        # widgets also sets ``background: transparent`` in its own
+        # stylesheet below so the dialog colour shows through cleanly.
+        self.setStyleSheet("QDialog { background: #12121e; }")
+        self._setup_ui()
+        # Paint a first preview immediately if the persisted folder
+        # still exists on disk — otherwise the user lands on an empty
+        # dialog that reads as "nothing found" even though they haven't
+        # picked a folder yet.
+        if self._scan_folder and os.path.isdir(self._scan_folder):
+            QTimer.singleShot(0, self._rescan_folder)
+
+    def _derive_auto_exts(self) -> set[str]:
+        """Infer the extension set from the missing-raw workspaces.
+
+        Each in-progress workspace already carries a
+        ``workspace_kind`` (``epub`` / ``txt`` / ``pdf`` / ``image``
+        / ``other``) that drives the per-card badge. "Auto" mode
+        reuses that classification so the scan only walks the
+        extensions the visible cards actually need. An ``image``
+        kind is tolerated but doesn't map to a searchable text
+        extension, so it's ignored; ``other`` (unknown) expands to
+        every extension since we can't predict what the user will
+        bring. An empty selection falls back to the full set so the
+        scan doesn't no-op.
+        """
+        valid = self._valid_exts
+        out: set[str] = set()
+        for b in self._books:
+            kind = (b.get("workspace_kind")
+                    or b.get("type") or "").lower()
+            if kind in valid:
+                out.add(kind)
+            elif kind in ("", "other", "in_progress"):
+                # Unknown / folder-only — fall back to the full set
+                # so the scan still has a chance to pair the card.
+                out.update(valid)
+        if not out:
+            out = set(valid)
+        return out
+
+    # -- UI -----------------------------------------------------------------
+    def _setup_ui(self):
+        from PySide6.QtWidgets import (
+            QSlider, QRadioButton, QButtonGroup, QTreeWidget,
+            QTreeWidgetItem, QHeaderView, QDialogButtonBox,
+            QFileDialog, QCheckBox,
+        )
+        self._QTreeWidgetItem = QTreeWidgetItem
+        self._QFileDialog = QFileDialog
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        intro = QLabel(
+            "Pick a folder that contains your raw source files. "
+            "Glossarion will try to match each in-progress workspace "
+            "to one of those files. Matched pairings get written to "
+            "each workspace's <code>source_epub.txt</code> so future "
+            "scans resolve the raw automatically."
+        )
+        intro.setWordWrap(True)
+        intro.setTextFormat(Qt.RichText)
+        intro.setAttribute(Qt.WA_TranslucentBackground)
+        intro.setStyleSheet(
+            "color: #c8cbe0; font-size: 9.5pt; background: transparent;")
+        root.addWidget(intro)
+
+        # Folder picker row
+        folder_row = QHBoxLayout()
+        folder_row.setSpacing(6)
+        self._folder_edit = QLineEdit(self._scan_folder)
+        self._folder_edit.setPlaceholderText(
+            "Folder containing raw EPUB / TXT / PDF / HTML files \u2026")
+        self._folder_edit.setStyleSheet(
+            "background: #1e1e2e; border: 1px solid #3a3a5e; "
+            "border-radius: 4px; padding: 4px 8px; color: #e0e0e0; "
+            "font-size: 9.5pt;")
+        self._folder_edit.editingFinished.connect(self._on_folder_edit_done)
+        folder_row.addWidget(self._folder_edit, 1)
+        browse_btn = QPushButton("\U0001f4c2  Browse\u2026")
+        browse_btn.setCursor(Qt.PointingHandCursor)
+        browse_btn.setStyleSheet(
+            "QPushButton { background: #3a5a7a; color: white; "
+            "border-radius: 4px; padding: 6px 14px; font-size: 9pt; "
+            "font-weight: bold; border: none; }"
+            "QPushButton:hover { background: #4a6a8a; }")
+        browse_btn.clicked.connect(self._browse_folder)
+        folder_row.addWidget(browse_btn)
+        root.addLayout(folder_row)
+
+        # Mode + threshold row
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(6)
+        mode_lbl = QLabel("Match:")
+        mode_lbl.setAttribute(Qt.WA_TranslucentBackground)
+        mode_lbl.setStyleSheet(
+            "color: #888; font-size: 8.5pt; background: transparent;")
+        mode_row.addWidget(mode_lbl)
+        self._mode_group = QButtonGroup(self)
+        self._rb_exact = QRadioButton("Exact")
+        self._rb_fuzzy = QRadioButton("Fuzzy")
+        self._rb_exact.setAttribute(Qt.WA_TranslucentBackground)
+        self._rb_fuzzy.setAttribute(Qt.WA_TranslucentBackground)
+        radio_css = (
+            "QRadioButton { color: #c8cbe0; font-size: 9pt; spacing: 4px; "
+            "background: transparent; }"
+            "QRadioButton::indicator { width: 12px; height: 12px; }"
+        )
+        self._rb_exact.setStyleSheet(radio_css)
+        self._rb_fuzzy.setStyleSheet(radio_css)
+        self._rb_exact.setChecked(self._mode == self.MATCH_EXACT)
+        self._rb_fuzzy.setChecked(self._mode == self.MATCH_FUZZY)
+        self._mode_group.addButton(self._rb_exact)
+        self._mode_group.addButton(self._rb_fuzzy)
+        self._rb_exact.toggled.connect(self._on_mode_changed)
+        self._rb_fuzzy.toggled.connect(self._on_mode_changed)
+        mode_row.addWidget(self._rb_exact)
+        mode_row.addWidget(self._rb_fuzzy)
+
+        mode_row.addSpacing(16)
+        thr_lbl = QLabel("Similarity:")
+        thr_lbl.setAttribute(Qt.WA_TranslucentBackground)
+        thr_lbl.setStyleSheet(
+            "color: #888; font-size: 8.5pt; background: transparent;")
+        mode_row.addWidget(thr_lbl)
+        self._threshold_slider = QSlider(Qt.Horizontal)
+        self._threshold_slider.setMinimum(40)
+        self._threshold_slider.setMaximum(95)
+        self._threshold_slider.setValue(self._threshold)
+        self._threshold_slider.setTickPosition(QSlider.TicksBelow)
+        self._threshold_slider.setTickInterval(5)
+        self._threshold_slider.setFixedWidth(200)
+        self._threshold_slider.setAttribute(Qt.WA_TranslucentBackground)
+        self._threshold_slider.setStyleSheet(
+            "QSlider { background: transparent; }"
+            "QSlider::groove:horizontal { background: #2a2a3e; "
+            "height: 4px; border-radius: 2px; }"
+            "QSlider::sub-page:horizontal { background: #17a2b8; "
+            "height: 4px; border-radius: 2px; }"
+            "QSlider::add-page:horizontal { background: #2a2a3e; "
+            "height: 4px; border-radius: 2px; }"
+            "QSlider::handle:horizontal { background: #17a2b8; "
+            "width: 14px; margin: -6px 0; border-radius: 7px; "
+            "border: 1px solid #20b2cc; }")
+        self._threshold_slider.valueChanged.connect(
+            self._on_threshold_changed)
+        mode_row.addWidget(self._threshold_slider)
+        self._threshold_value_lbl = QLabel(f"{self._threshold}%")
+        self._threshold_value_lbl.setAttribute(Qt.WA_TranslucentBackground)
+        self._threshold_value_lbl.setStyleSheet(
+            "color: #c8cbe0; font-size: 9pt; font-weight: bold; "
+            "background: transparent;")
+        self._threshold_value_lbl.setFixedWidth(40)
+        mode_row.addWidget(self._threshold_value_lbl)
+
+        mode_row.addStretch()
+        root.addLayout(mode_row)
+
+        # Extension checkboxes — default to Auto (derived from each
+        # missing-raw workspace's known kind). The user can opt out
+        # of Auto to pick extensions manually via the individual
+        # checkboxes.
+        ext_row = QHBoxLayout()
+        ext_row.setSpacing(6)
+        ext_lbl = QLabel("Extensions:")
+        ext_lbl.setAttribute(Qt.WA_TranslucentBackground)
+        ext_lbl.setStyleSheet(
+            "color: #888; font-size: 8.5pt; background: transparent;")
+        ext_row.addWidget(ext_lbl)
+        ext_css = (
+            "QCheckBox { color: #c8cbe0; font-size: 9pt; spacing: 6px;"
+            " padding: 2px 6px; background: transparent; }"
+            "QCheckBox:disabled { color: #6a6d80; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; "
+            "border: 1px solid #5a9fd4; border-radius: 2px; "
+            "background-color: #1e1e2e; }"
+            "QCheckBox::indicator:checked { background-color: #17a2b8; "
+            "border-color: #20b2cc; }"
+            "QCheckBox::indicator:disabled { border-color: #3a3a5e; "
+            "background-color: #1a1a2a; }"
+            "QCheckBox::indicator:hover { border-color: #7bb3e0; }"
+        )
+        self._auto_cb = QCheckBox("Auto")
+        self._auto_cb.setToolTip(
+            "Automatically pick the extensions to scan for based on "
+            "each missing-raw card's workspace kind. Turn this off "
+            "to override with the checkboxes to the right."
+        )
+        self._auto_cb.setChecked(self._auto_mode)
+        self._auto_cb.setAttribute(Qt.WA_TranslucentBackground)
+        self._auto_cb.setStyleSheet(ext_css)
+        self._auto_cb.toggled.connect(self._on_auto_toggled)
+        ext_row.addWidget(self._auto_cb)
+        self._ext_cbs: dict[str, QCheckBox] = {}
+        for ext, label in (
+            ("epub", ".epub"),
+            ("txt",  ".txt"),
+            ("pdf",  ".pdf"),
+            ("html", ".html"),
+        ):
+            cb = QCheckBox(label)
+            cb.setChecked(ext in self._selected_exts)
+            cb.setAttribute(Qt.WA_TranslucentBackground)
+            cb.setStyleSheet(ext_css)
+            cb.toggled.connect(
+                lambda checked, e=ext: self._on_ext_toggled(e, checked))
+            self._ext_cbs[ext] = cb
+            ext_row.addWidget(cb)
+        # Auto mode disables the individual toggles since their
+        # values are derived from the books. The checkboxes still
+        # *display* the auto-derived state so the user sees which
+        # extensions will be scanned.
+        self._apply_auto_mode_ui()
+        ext_row.addStretch()
+        root.addLayout(ext_row)
+
+        # Preview table
+        self._tree = QTreeWidget()
+        self._tree.setHeaderLabels([
+            "", "Workspace", "Matched file", "Similarity"
+        ])
+        self._tree.setRootIsDecorated(False)
+        self._tree.setSelectionMode(QTreeWidget.SingleSelection)
+        self._tree.setStyleSheet(
+            "QTreeWidget { background: #1a1a2a; color: #e0e0e0; "
+            "border: 1px solid #2a2a3e; border-radius: 6px; "
+            "font-size: 9pt; }"
+            "QTreeWidget::item { padding: 4px; }"
+            "QTreeWidget::item:selected { background: #3a3a5e; }"
+            "QHeaderView::section { background: #1e1e2e; color: #b0b0c0; "
+            "padding: 4px 8px; border: none; border-bottom: "
+            "1px solid #2a2a3e; font-weight: bold; font-size: 8.5pt; }")
+        header = self._tree.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self._tree.itemChanged.connect(self._on_tree_item_changed)
+        root.addWidget(self._tree, 1)
+
+        # Status line
+        self._status_lbl = QLabel("")
+        self._status_lbl.setAttribute(Qt.WA_TranslucentBackground)
+        self._status_lbl.setStyleSheet(
+            "color: #8ab4d0; font-size: 9pt; background: transparent;")
+        root.addWidget(self._status_lbl)
+
+        # Dialog buttons
+        bbox = QDialogButtonBox(
+            QDialogButtonBox.Apply | QDialogButtonBox.Cancel)
+        self._apply_btn = bbox.button(QDialogButtonBox.Apply)
+        self._apply_btn.setText("Apply Pairings")
+        self._apply_btn.setCursor(Qt.PointingHandCursor)
+        self._apply_btn.clicked.connect(self._apply_matches)
+        bbox.rejected.connect(self.reject)
+        bbox.setStyleSheet(
+            "QDialogButtonBox { background: transparent; }"
+            "QPushButton { background: #3a5a7a; color: white; "
+            "border-radius: 4px; padding: 6px 14px; font-size: 9pt; "
+            "font-weight: bold; border: none; min-width: 120px; }"
+            "QPushButton:hover { background: #4a6a8a; }"
+            "QPushButton:disabled { background: #2a2a3e; color: #555; }")
+        root.addWidget(bbox)
+
+        # Fuzzy slider only meaningful in fuzzy mode — grey it out in
+        # exact mode so the UI reads as "similarity doesn't apply".
+        self._update_threshold_enabled()
+
+    # -- Folder + mode handlers --------------------------------------------
+    def _browse_folder(self):
+        start = self._folder_edit.text().strip() or str(Path.home())
+        if not os.path.isdir(start):
+            start = str(Path.home())
+        folder = self._QFileDialog.getExistingDirectory(
+            self, "Pick a folder containing raw source files", start)
+        if folder:
+            self._folder_edit.setText(folder)
+            self._on_folder_edit_done()
+
+    def _on_folder_edit_done(self):
+        new_folder = self._folder_edit.text().strip()
+        if new_folder == self._scan_folder:
+            return
+        self._scan_folder = new_folder
+        try:
+            self._config["epub_library_scan_raw_folder"] = new_folder
+        except Exception:
+            pass
+        self._rescan_folder()
+
+    def _on_mode_changed(self, _checked: bool):
+        mode = (self.MATCH_EXACT if self._rb_exact.isChecked()
+                else self.MATCH_FUZZY)
+        if mode == self._mode:
+            return
+        self._mode = mode
+        try:
+            self._config["epub_library_scan_raw_mode"] = mode
+        except Exception:
+            pass
+        self._update_threshold_enabled()
+        self._recompute_matches()
+
+    def _on_threshold_changed(self, value: int):
+        self._threshold = int(value)
+        self._threshold_value_lbl.setText(f"{self._threshold}%")
+        try:
+            self._config["epub_library_scan_raw_threshold"] = self._threshold
+        except Exception:
+            pass
+        if self._mode == self.MATCH_FUZZY:
+            self._recompute_matches()
+
+    def _update_threshold_enabled(self):
+        enabled = self._mode == self.MATCH_FUZZY
+        self._threshold_slider.setEnabled(enabled)
+        self._threshold_value_lbl.setEnabled(enabled)
+
+    def _on_ext_toggled(self, ext: str, checked: bool):
+        """Toggle one of the extension filters and re-scan.
+
+        No-op when Auto is on: the checkbox states are derived from
+        the missing-raw workspaces and can't be changed manually
+        without first unticking Auto. Refuses to leave the selection
+        empty in manual mode — unticking the last checkbox re-ticks
+        itself so the user can't put the dialog into a "nothing will
+        ever match" state.
+        """
+        if self._auto_mode:
+            return
+        ext = ext.lower().lstrip(".")
+        if checked:
+            self._manual_exts.add(ext)
+        else:
+            self._manual_exts.discard(ext)
+            if not self._manual_exts:
+                self._manual_exts.add(ext)
+                cb = self._ext_cbs.get(ext)
+                if cb is not None:
+                    cb.blockSignals(True)
+                    cb.setChecked(True)
+                    cb.blockSignals(False)
+                return
+        self._selected_exts = set(self._manual_exts)
+        try:
+            self._config["epub_library_scan_raw_exts"] = sorted(
+                self._manual_exts)
+        except Exception:
+            pass
+        self._rescan_folder()
+
+    def _on_auto_toggled(self, checked: bool):
+        """Flip the Auto extension mode on / off."""
+        new_value = bool(checked)
+        if new_value == self._auto_mode:
+            return
+        self._auto_mode = new_value
+        try:
+            self._config["epub_library_scan_raw_auto"] = new_value
+        except Exception:
+            pass
+        if self._auto_mode:
+            self._selected_exts = self._derive_auto_exts()
+        else:
+            self._selected_exts = set(self._manual_exts)
+        self._apply_auto_mode_ui()
+        self._rescan_folder()
+
+    def _apply_auto_mode_ui(self):
+        """Sync the extension checkboxes to the current mode.
+
+        In Auto mode the checkboxes reflect the derived set but are
+        disabled so the user can see what WILL be scanned without
+        accidentally tweaking it. In manual mode the checkboxes are
+        editable and reflect ``_manual_exts``.
+        """
+        enabled = not self._auto_mode
+        display = (self._derive_auto_exts() if self._auto_mode
+                   else self._manual_exts)
+        for ext, cb in self._ext_cbs.items():
+            cb.blockSignals(True)
+            cb.setChecked(ext in display)
+            cb.setEnabled(enabled)
+            cb.blockSignals(False)
+
+    # -- Scanning + matching -----------------------------------------------
+    def _rescan_folder(self):
+        self._candidates.clear()
+        if not self._scan_folder or not os.path.isdir(self._scan_folder):
+            self._status_lbl.setText(
+                "\u26a0 Pick a folder that exists on disk.")
+            self._matches.clear()
+            self._tree.clear()
+            self._apply_btn.setEnabled(False)
+            return
+        # Build the suffix tuple from the user's current checkbox
+        # selection. Includes both ``.html`` and ``.htm`` under the
+        # HTML checkbox since they're interchangeable on disk.
+        ext_suffixes: tuple[str, ...] = tuple(
+            f".{e}" if e != "html" else ".html"
+            for e in self._selected_exts
+        )
+        if "html" in self._selected_exts:
+            ext_suffixes = ext_suffixes + (".htm",)
+        try:
+            for root_dir, _dirs, files in os.walk(self._scan_folder):
+                for name in files:
+                    lower = name.lower()
+                    if not lower.endswith(ext_suffixes):
+                        continue
+                    # Skip registry files and dotfiles.
+                    if lower in _LIBRARY_TRACKING_FILENAMES:
+                        continue
+                    if name.startswith("."):
+                        continue
+                    stem = os.path.splitext(name)[0]
+                    key = _norm_book_key(stem)
+                    if not key:
+                        continue
+                    self._candidates.append(
+                        (key, os.path.join(root_dir, name)))
+        except (PermissionError, OSError) as exc:
+            self._status_lbl.setText(
+                f"\u26a0 Could not walk folder: {exc}")
+            return
+        self._recompute_matches()
+
+    def _workspace_keys(self, book: dict) -> list[str]:
+        keys: set[str] = set()
+        fn = book.get("folder_name") or os.path.basename(
+            book.get("output_folder") or book.get("path") or "")
+        if fn:
+            keys.add(_norm_book_key(os.path.splitext(fn)[0]))
+        md = book.get("metadata_json") or {}
+        if isinstance(md, dict):
+            for md_key in ("title", "original_title",
+                           "translated_title", "raw_title",
+                           "source_title", "english_title"):
+                val = md.get(md_key)
+                if isinstance(val, str) and val.strip():
+                    keys.add(_norm_book_key(val))
+        return [k for k in keys if k]
+
+    def _best_match(self, book: dict) -> tuple[str, float]:
+        """Return (matched_path, ratio) for *book* under the current mode.
+
+        ratio=0.0 means no match. For exact mode ratio=1.0 on hit.
+        """
+        book_keys = self._workspace_keys(book)
+        if not book_keys or not self._candidates:
+            return "", 0.0
+        if self._mode == self.MATCH_EXACT:
+            book_key_set = set(book_keys)
+            for cand_key, cand_path in self._candidates:
+                if cand_key in book_key_set:
+                    return cand_path, 1.0
+            return "", 0.0
+        # Fuzzy — take the best SequenceMatcher ratio across all
+        # candidate keys for this workspace.
+        import difflib
+        threshold = self._threshold / 100.0
+        best_path = ""
+        best_ratio = 0.0
+        for cand_key, cand_path in self._candidates:
+            for wk in book_keys:
+                ratio = difflib.SequenceMatcher(
+                    None, wk, cand_key).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_path = cand_path
+        if best_ratio >= threshold:
+            return best_path, best_ratio
+        return "", best_ratio
+
+    def _recompute_matches(self):
+        self._matches.clear()
+        for book in self._books:
+            ws_folder = book.get("output_folder") or book.get("path") or ""
+            if not ws_folder:
+                continue
+            matched_path, ratio = self._best_match(book)
+            self._matches[ws_folder] = {
+                "book": book,
+                "path": matched_path,
+                "ratio": ratio,
+                "accepted": bool(matched_path),
+            }
+        self._populate_tree()
+
+    def _populate_tree(self):
+        self._tree.blockSignals(True)
+        self._tree.clear()
+        hits = 0
+        for ws_folder, info in self._matches.items():
+            book = info["book"]
+            item = self._QTreeWidgetItem([
+                "",
+                str(book.get("name")
+                    or book.get("folder_name")
+                    or os.path.basename(ws_folder)),
+                (os.path.basename(info["path"])
+                 if info["path"] else "\u2014 no match"),
+                (f"{info['ratio'] * 100:.0f}%"
+                 if info["ratio"] > 0 else "\u2014"),
+            ])
+            item.setData(0, Qt.UserRole, ws_folder)
+            if info["path"]:
+                item.setToolTip(2, info["path"])
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(
+                    0,
+                    Qt.Checked if info["accepted"] else Qt.Unchecked)
+                hits += 1
+            else:
+                # No candidate — disable the checkbox row.
+                item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable
+                              & ~Qt.ItemIsSelectable)
+                item.setForeground(
+                    1, QApplication.palette().brush(
+                        QApplication.palette().Disabled,
+                        QApplication.palette().Text))
+            self._tree.addTopLevelItem(item)
+        self._tree.blockSignals(False)
+        self._status_lbl.setText(
+            f"{hits} of {len(self._matches)} workspace"
+            f"{'s' if len(self._matches) != 1 else ''} matched "
+            f"({'exact' if self._mode == self.MATCH_EXACT else f'fuzzy ≥ {self._threshold}%'})."
+        )
+        self._apply_btn.setEnabled(hits > 0)
+
+    def _on_tree_item_changed(self, item, column: int):
+        if column != 0:
+            return
+        ws_folder = item.data(0, Qt.UserRole)
+        if not ws_folder or ws_folder not in self._matches:
+            return
+        self._matches[ws_folder]["accepted"] = (
+            item.checkState(0) == Qt.Checked)
+
+    # -- Apply -------------------------------------------------------------
+    def _apply_matches(self):
+        written = 0
+        for ws_folder, info in self._matches.items():
+            if not info.get("accepted"):
+                continue
+            raw_path = info.get("path") or ""
+            if not raw_path or not os.path.isfile(raw_path):
+                continue
+            if not ws_folder or not os.path.isdir(ws_folder):
+                continue
+            try:
+                sidecar = os.path.join(ws_folder, "source_epub.txt")
+                with open(sidecar, "w", encoding="utf-8") as f:
+                    f.write(os.path.abspath(raw_path))
+                try:
+                    record_library_raw_input(raw_path)
+                except Exception:
+                    logger.debug(
+                        "record_library_raw_input failed for %s: %s",
+                        raw_path, traceback.format_exc())
+                written += 1
+            except OSError as exc:
+                logger.debug(
+                    "Scan-for-raw sidecar write failed for %s: %s",
+                    ws_folder, exc)
+        self.applied.emit(written)
+        QMessageBox.information(
+            self, "Scan for Raw",
+            f"Linked {written} workspace"
+            f"{'s' if written != 1 else ''} to a raw source file. "
+            "The library will refresh in a moment."
+            if written else
+            "No pairings were applied."
+        )
+        if written:
+            self.accept()
+
+
+# ---------------------------------------------------------------------------
 # Library Dialog
 # ---------------------------------------------------------------------------
 
@@ -4257,6 +4964,31 @@ class EpubLibraryDialog(QDialog):
         comp_action_row.addWidget(self._comp_organize_btn)
         self._comp_undo_btn = self._make_undo_button(kind="comp")
         comp_action_row.addWidget(self._comp_undo_btn)
+        # "Scan for Raw" lives on the Completed tab's action row.
+        # Only visible when at least one flash card has the
+        # ``missing_raw_file`` warning — there's nothing for the
+        # dialog to do when every workspace's raw is already
+        # resolvable, so we hide the button entirely until it's
+        # actionable.
+        self._scan_raw_btn = QPushButton("\U0001f50d  Scan for Raw")
+        self._scan_raw_btn.setCursor(Qt.PointingHandCursor)
+        self._scan_raw_btn.setToolTip(
+            "Walk a folder for raw source files and link each "
+            "missing-raw workspace to its match. Supports exact "
+            "filename matching and fuzzy matching (with an "
+            "adjustable similarity threshold) and defaults to the "
+            "extensions each workspace's kind implies. Writes"
+            " ``source_epub.txt`` in each matched workspace so the "
+            "scanner resolves the raw automatically on future scans."
+        )
+        self._scan_raw_btn.setStyleSheet(
+            "QPushButton { background: #17a2b8; color: white; "
+            "border-radius: 4px; padding: 6px 14px; font-size: 9pt; "
+            "font-weight: bold; border: none; }"
+            "QPushButton:hover { background: #20b2cc; }")
+        self._scan_raw_btn.clicked.connect(self._open_scan_for_raw)
+        self._scan_raw_btn.hide()
+        comp_action_row.addWidget(self._scan_raw_btn)
         # "Add Translation" mirrors the In Progress tab's Import EPUB
         # slot — it sits next to Organize / Undo so registering a
         # compiled EPUB is reachable directly from the Completed tab.
@@ -4548,6 +5280,32 @@ class EpubLibraryDialog(QDialog):
             pass
         _open_folder_in_explorer(lib)
 
+    def _open_scan_for_raw(self):
+        """Open the Scan-for-Raw dialog.
+
+        Feeds the dialog every workspace-backed card with the
+        ``missing_raw_file`` warning (In Progress AND Completed tab)
+        since a completed workspace whose compiled output still
+        points at a lost raw benefits from the pairing too. When
+        the user applies pairings the dialog emits ``applied`` with
+        the count; we trigger a library reload so the scanner picks
+        up the freshly written ``source_epub.txt`` files.
+        """
+        candidates = [
+            b for b in (
+                list(self._in_progress_books)
+                + list(self._completed_books))
+            if b.get("output_folder")
+        ]
+        dlg = _ScanForRawDialog(
+            candidates,
+            config=self._config,
+            parent=self,
+        )
+        dlg.applied.connect(lambda _n: QTimer.singleShot(
+            0, self._load_books))
+        dlg.exec()
+
     def _add_translation(self):
         """Pick compiled EPUB(s) and register them with the Completed tab.
 
@@ -4774,6 +5532,26 @@ class EpubLibraryDialog(QDialog):
             self._comp_organize_btn.setEnabled(trans_count > 0)
             self._comp_undo_btn.setText(f"\u21a9  Undo ({trans_undo})")
             self._comp_undo_btn.setEnabled(trans_undo > 0)
+        except Exception:
+            pass
+        # Toggle Scan-for-Raw visibility based on whether any visible
+        # card has the ``missing_raw_file`` warning. Hidden entirely
+        # otherwise — there's nothing actionable for the dialog to
+        # do when every workspace's raw is already resolved.
+        try:
+            missing_raw_count = sum(
+                1 for b in (
+                    list(self._in_progress_books)
+                    + list(self._completed_books))
+                if b.get("missing_raw_file"))
+            btn = getattr(self, "_scan_raw_btn", None)
+            if btn is not None:
+                if missing_raw_count > 0:
+                    btn.setText(
+                        f"\U0001f50d  Scan for Raw ({missing_raw_count})")
+                    btn.show()
+                else:
+                    btn.hide()
         except Exception:
             pass
 
