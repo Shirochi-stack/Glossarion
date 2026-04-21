@@ -865,16 +865,73 @@ def _resolve_output_roots(config: dict | None = None) -> list[str]:
     override = os.environ.get("OUTPUT_DIRECTORY") or config.get("output_directory")
     _add(override)
 
-    if platform.system() == "Windows":
-        if getattr(sys, "frozen", False):
-            default_dir = os.path.dirname(sys.executable)
-        else:
-            default_dir = os.path.dirname(os.path.abspath(__file__))
-    else:
-        default_dir = os.getcwd()
+    default_dir = _default_output_root()
     _add(default_dir)
 
     return roots
+
+
+def _default_output_root() -> str:
+    """Return the implicit default output root used when no override is set.
+
+    Mirrors the fallback rule inside :func:`_resolve_output_roots`: on
+    Windows, the frozen app's own directory (or the source file's dir
+    in dev runs); on other platforms, the current working directory.
+    Surfacing it as a standalone helper lets the "Load for translation"
+    flow compare a flash card's backing output folder against the
+    active override even when the override is empty (i.e. "use the
+    default") — the two cases are indistinguishable without this value.
+    """
+    if platform.system() == "Windows":
+        if getattr(sys, "frozen", False):
+            return os.path.dirname(sys.executable)
+        return os.path.dirname(os.path.abspath(__file__))
+    return os.getcwd()
+
+
+def _expected_output_root_for_book(book: dict) -> str:
+    """Return the output root directory a flash card's translation lives
+    under, or ``""`` when the book doesn't carry a resolvable
+    ``output_folder``.
+
+    A "output root" here is the PARENT of the workspace folder —
+    i.e. whichever of ``OUTPUT_DIRECTORY`` / the default fallback root
+    produced this card during :func:`scan_output_folders`. Library-
+    organized cards (``in_library=True``) typically have no active
+    ``output_folder`` so this helper returns ``""`` for them — the
+    caller should treat that as "no mismatch to check" rather than as
+    a real root.
+    """
+    if not isinstance(book, dict):
+        return ""
+    out = book.get("output_folder") or ""
+    if not out:
+        return ""
+    try:
+        out_abs = os.path.abspath(out)
+    except Exception:
+        return ""
+    if not os.path.isdir(out_abs):
+        return ""
+    parent = os.path.dirname(out_abs)
+    return parent if parent and os.path.isdir(parent) else ""
+
+
+def _output_paths_equal(a: str, b: str) -> bool:
+    """Case-insensitive, normalized equality for two filesystem paths.
+
+    Treats two empty strings as equal so the "no override configured"
+    state compares cleanly against itself.
+    """
+    if not a and not b:
+        return True
+    if not a or not b:
+        return False
+    try:
+        return (os.path.normcase(os.path.normpath(os.path.abspath(a)))
+                == os.path.normcase(os.path.normpath(os.path.abspath(b))))
+    except Exception:
+        return False
 
 
 # Characters Windows strips / mangles in filenames that the translator
@@ -6483,16 +6540,179 @@ class EpubLibraryDialog(QDialog):
             raise
         return path_abs
 
+    def _ensure_output_override_matches(self, books: list) -> bool:
+        """Warn the user + switch the output-directory override when it
+        doesn't match the folder a flash card's translation lives under.
+
+        Flash cards get scanned from BOTH the configured
+        ``OUTPUT_DIRECTORY`` override and the implicit default fallback
+        (see :func:`_resolve_output_roots`), so the Library surfaces
+        books whose workspaces live in either location. Loading a card
+        "for translation" without aligning the override means a
+        subsequent Run would write the new output under the current
+        override root — splitting the progress across two different
+        folders instead of resuming inside the card's existing
+        workspace. This helper prompts the user whenever that drift is
+        detected, and (on confirmation) rewrites the override in
+        ``config['output_directory']``, ``os.environ``, the live
+        ``other_settings`` UI entry, and the persisted ``config.json``
+        — matching what :func:`other_settings._on_output_dir_changed`
+        does when the user edits the field by hand.
+
+        Returns True when loading can proceed (no mismatch, or the user
+        accepted the switch); False when the user cancels so the caller
+        can abort the emit cleanly.
+        """
+        # Collect the distinct expected roots across every book. Each
+        # root corresponds to a different card-producing output
+        # location — normally one, but mixed selections can span more.
+        expected_roots: list[str] = []
+        seen_keys: set[str] = set()
+        for b in books or []:
+            root = _expected_output_root_for_book(b)
+            if not root:
+                continue
+            key = os.path.normcase(os.path.normpath(os.path.abspath(root)))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            expected_roots.append(root)
+        if not expected_roots:
+            return True
+
+        current_override = (
+            os.environ.get("OUTPUT_DIRECTORY")
+            or (self._config.get("output_directory") if self._config else "")
+            or ""
+        ).strip()
+        default_root = _default_output_root()
+        current_effective = current_override or default_root
+
+        mismatched: list[tuple[str, str]] = []
+        for b in books or []:
+            root = _expected_output_root_for_book(b)
+            if not root:
+                continue
+            if not _output_paths_equal(root, current_effective):
+                mismatched.append((b.get("name") or "", root))
+        if not mismatched:
+            return True
+
+        # Pick the target root. If the first mismatched root IS the
+        # implicit default, clear the override (empty string) so the
+        # translator falls back to the default root the same way an
+        # unset field would. Otherwise set the override to that root.
+        target_root = mismatched[0][1]
+        new_override = ("" if _output_paths_equal(target_root, default_root)
+                        else target_root)
+
+        current_label = current_override or f"{default_root}  (default)"
+        new_label = new_override or f"{default_root}  (default)"
+
+        preview: list[str] = []
+        for name, root in mismatched[:5]:
+            label = name or os.path.basename(os.path.normpath(root))
+            preview.append(f"  \u2022 {label}\n      {root}")
+        if len(mismatched) > 5:
+            preview.append(f"  \u2026 and {len(mismatched) - 5} more")
+
+        multi_root_warning = ""
+        if len(expected_roots) > 1:
+            multi_root_warning = (
+                "\n\n\u26a0 The selection spans multiple output folders; "
+                "only the first mismatched root will be applied. Load "
+                "cards from one folder at a time to avoid this."
+            )
+
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Output Folder Mismatch")
+        msg.setText(
+            "The selected translation is saved under a different folder "
+            "than the current output-folder override.\n\n"
+            f"Current override:\n  {current_label}\n\n"
+            f"Will switch to:\n  {new_label}\n\n"
+            "Mismatched books:\n"
+            + "\n".join(preview)
+            + multi_root_warning
+            + "\n\nUpdate the override so a new translation run writes "
+            "into the same folder as the existing progress?"
+        )
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        msg.setDefaultButton(QMessageBox.Yes)
+        if msg.exec() != QMessageBox.Yes:
+            return False
+
+        # Apply the new override to the in-memory config + the active
+        # process env var so the next run picks it up immediately.
+        try:
+            if self._config is not None:
+                self._config["output_directory"] = new_override
+            if new_override:
+                os.environ["OUTPUT_DIRECTORY"] = new_override
+            else:
+                os.environ.pop("OUTPUT_DIRECTORY", None)
+        except Exception:
+            logger.debug(
+                "Failed to apply output_directory override: %s",
+                traceback.format_exc(),
+            )
+
+        # Sync the Other Settings dialog's live UI entry if present —
+        # the field is bound to the same config key via
+        # ``_on_output_dir_changed``, so leaving it stale would let the
+        # user see the "old" path in the settings dialog until they
+        # next edited it. Walking the parent chain mirrors
+        # :func:`_persist_config_via_parent`'s traversal so we find
+        # whichever ancestor hosts the translator GUI's attributes.
+        try:
+            parent = self.parent() if hasattr(self, "parent") else None
+        except Exception:
+            parent = None
+        while parent is not None:
+            entry = getattr(parent, "output_dir_entry", None)
+            if entry is not None and hasattr(entry, "setText"):
+                try:
+                    entry.blockSignals(True)
+                    entry.setText(new_override)
+                    entry.blockSignals(False)
+                except Exception:
+                    logger.debug(
+                        "Failed to sync output_dir_entry: %s",
+                        traceback.format_exc(),
+                    )
+                break
+            try:
+                parent = parent.parent()
+            except Exception:
+                break
+
+        # Persist to ``config.json`` so the change survives a restart.
+        try:
+            _persist_config_via_parent(self)
+        except Exception:
+            logger.debug(
+                "Failed to persist config after override switch: %s",
+                traceback.format_exc(),
+            )
+
+        return True
+
     def _load_for_translation(self, book: dict):
         """Push the card's raw source path into the translator's input field.
 
         Emits :attr:`import_epub_requested` which :class:`TranslatorGUI`
         handles. Falls back to a warning when no raw path is available.
+        Consults :meth:`_ensure_output_override_matches` first so a
+        card whose workspace lives under a different output root than
+        the current override triggers a warning + automatic switch.
         """
         raw = book.get("raw_source_path") or book.get("path") or ""
         if not raw or not os.path.isfile(raw):
             QMessageBox.warning(self, "Load for translation",
                                 "No raw source file is available for this card.")
+            return
+        if not self._ensure_output_override_matches([book]):
             return
         try:
             self.import_epub_requested.emit(raw)
@@ -6501,7 +6721,8 @@ class EpubLibraryDialog(QDialog):
             logger.debug("Failed to emit import_epub_requested: %s",
                          traceback.format_exc())
 
-    def _load_multi_for_translation(self, paths: list):
+    def _load_multi_for_translation(self, paths: list,
+                                    books: list | None = None):
         """Push one-or-many raw source paths into the translator's input.
 
         Deduplicates by normalized path, emits ``import_epubs_requested``
@@ -6509,6 +6730,14 @@ class EpubLibraryDialog(QDialog):
         "N files selected" summary), or ``import_epub_requested`` for the
         single-file case. Every loaded path is recorded in the raw-inputs
         registry so subsequent library scans can resolve it.
+
+        When *books* is provided (the context-menu caller does so) we
+        first consult :meth:`_ensure_output_override_matches` so any
+        card whose workspace lives under a different output root than
+        the current override prompts the user to switch the override.
+        Omitted ``books`` keeps the legacy "just emit the paths"
+        behavior for any future caller that doesn't have the source
+        dicts on hand.
         """
         if not paths:
             return
@@ -6525,6 +6754,8 @@ class EpubLibraryDialog(QDialog):
         if not uniq:
             QMessageBox.warning(self, "Load for translation",
                                 "No resolvable raw source files in the selection.")
+            return
+        if books and not self._ensure_output_override_matches(books):
             return
         try:
             if len(uniq) == 1:
@@ -7894,8 +8125,16 @@ class EpubLibraryDialog(QDialog):
             load_action.setToolTip(tooltip)
             # See "NOTE" above — close over ``raw_candidates`` without a
             # default arg so Qt's ``checked`` bool can't overwrite it.
+            # Snapshot ``selected_books`` so
+            # :meth:`_ensure_output_override_matches` can consult each
+            # book's ``output_folder`` before the emit \u2014 without
+            # the dicts we'd only have paths and no way to check
+            # whether any card's workspace lives under a mismatched
+            # output root.
+            load_books_snapshot = list(selected_books)
             load_action.triggered.connect(
-                lambda: self._load_multi_for_translation(raw_candidates))
+                lambda: self._load_multi_for_translation(
+                    raw_candidates, books=load_books_snapshot))
         menu.addSeparator()
         folder_action = menu.addAction("\U0001f4c2  Open Output Folder")
         # Resolution rules:
