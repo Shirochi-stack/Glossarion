@@ -179,6 +179,95 @@ def record_library_raw_input(path: str) -> None:
         logger.debug("Could not append to %s", reg)
 
 
+def get_library_translated_inputs_file() -> str:
+    """Return ``Library/library_translated_inputs.txt`` — one path per line.
+
+    Tracks every *compiled* EPUB that has been registered with the
+    Library via drag-drop / Import but **not yet physically moved**
+    into ``Library/Translated``. Mirrors :func:`get_library_raw_inputs_file`
+    for the raw side. The scanner reads this file to surface those
+    files on the Completed tab even though they live outside the
+    library folder; Organize later moves them and prunes their entry.
+    """
+    return os.path.join(get_library_dir(), "library_translated_inputs.txt")
+
+
+def load_library_translated_inputs() -> list[str]:
+    """Return the deduplicated list of registered translated paths."""
+    path = get_library_translated_inputs_file()
+    if not os.path.isfile(path):
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                p = line.strip()
+                if not p:
+                    continue
+                key = os.path.normcase(os.path.normpath(os.path.abspath(p)))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(p)
+    except OSError:
+        return []
+    return out
+
+
+def record_library_translated_input(path: str) -> None:
+    """Append *path* to the translated-inputs registry.
+
+    No-op on failure / duplicate. Mirrors
+    :func:`record_library_raw_input` but targets the translated-side
+    registry.
+    """
+    if not path:
+        return
+    try:
+        abs_path = os.path.abspath(path)
+    except (TypeError, ValueError):
+        return
+    existing = {
+        os.path.normcase(os.path.normpath(os.path.abspath(p)))
+        for p in load_library_translated_inputs()
+    }
+    if os.path.normcase(os.path.normpath(abs_path)) in existing:
+        return
+    reg = get_library_translated_inputs_file()
+    try:
+        with open(reg, "a", encoding="utf-8") as f:
+            f.write(abs_path + "\n")
+    except OSError:
+        logger.debug("Could not append to %s", reg)
+
+
+def remove_library_translated_input(path: str) -> None:
+    """Drop *path* from the translated-inputs registry.
+
+    Called when Organize moves the file into ``Library/Translated`` —
+    the in-place registration is no longer meaningful once the
+    compiled EPUB has been promoted to the curated shelf.
+    """
+    if not path:
+        return
+    try:
+        key = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+    except (TypeError, ValueError):
+        return
+    remaining = [
+        p for p in load_library_translated_inputs()
+        if os.path.normcase(os.path.normpath(os.path.abspath(p))) != key
+    ]
+    reg = get_library_translated_inputs_file()
+    try:
+        with open(reg, "w", encoding="utf-8") as f:
+            for p in remaining:
+                f.write(p + "\n")
+    except OSError:
+        logger.debug("Could not rewrite %s", reg)
+
+
 def _origins_file() -> str:
     """Path to the library origins mapping file."""
     return os.path.join(get_library_dir(), "library_origins.txt")
@@ -1295,12 +1384,24 @@ def _find_cover_in_dir(folder: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def scan_library_completed(config: dict | None = None) -> list[dict]:
-    """Scan ``Library/Translated`` for completed EPUBs.
+    """Scan ``Library/Translated`` (and registered-in-place EPUBs) for completed books.
 
-    The Translated subfolder is a curated shelf: every EPUB inside is treated
-    as a finished work with no translation context. Before scanning we run
-    a one-time migration that moves any EPUBs still sitting in the legacy
-    Library root into ``Translated/`` so pre-refactor layouts aren't lost.
+    Two sources are merged:
+
+      1. **Physically in ``Library/Translated``** — the curated shelf.
+         Every ``.epub`` found via a recursive walk is surfaced with
+         ``in_library=True``.
+      2. **Registered in place** — paths written to
+         ``Library/library_translated_inputs.txt`` by the
+         drag-drop / Import pipeline. The file lives wherever the user
+         dropped it (Downloads, a cloud-synced folder, etc.); the
+         scanner surfaces it with ``in_library=False`` so Organize
+         can pick it up later, while the Completed tab still shows
+         the card immediately after registration. Missing entries are
+         silently dropped.
+
+    Before scanning we run the legacy migration that moves any EPUBs
+    still sitting in the legacy Library root into ``Translated/``.
     """
     # Legacy layout support — idempotent, safe to call every scan.
     _migrate_legacy_library_layout()
@@ -1351,6 +1452,38 @@ def scan_library_completed(config: dict | None = None) -> list[dict]:
 
     if os.path.isdir(library_dir):
         _walk(library_dir)
+
+    # Source 2: registered-in-place translated EPUBs. These were
+    # dropped / imported onto the Completed tab but deliberately left
+    # where they are on disk so the user can reverse the import
+    # without fishing the file back out of Library/Translated. They
+    # carry ``in_library=False`` + ``registered_translated=True`` so
+    # :meth:`_organize_into_library` picks them up as candidates to
+    # move into the curated shelf.
+    for p in load_library_translated_inputs():
+        if not p or not os.path.isfile(p):
+            continue
+        if not p.lower().endswith(".epub"):
+            continue
+        norm = os.path.normpath(os.path.abspath(p))
+        if norm in seen:
+            continue
+        seen.add(norm)
+        try:
+            stat = os.stat(p)
+        except OSError:
+            continue
+        results.append({
+            "name": os.path.splitext(os.path.basename(p))[0],
+            "path": os.path.abspath(p),
+            "size": stat.st_size,
+            "mtime": stat.st_mtime,
+            "in_library": False,
+            "registered_translated": True,
+            "type": "epub",
+            "raw_source_path": "",
+        })
+
     results.sort(key=lambda r: r["mtime"], reverse=True)
     return results
 
@@ -3142,8 +3275,10 @@ class EpubLibraryDialog(QDialog):
         self._import_btn = QPushButton("\u2795  Import EPUB")
         self._import_btn.setCursor(Qt.PointingHandCursor)
         self._import_btn.setToolTip(
-            "Copy an EPUB into Library/Raw and create a new output folder "
-            "for it so you can translate it later."
+            "Register an EPUB with the Library and scaffold a new output "
+            "folder so you can translate it later. The source file stays "
+            "exactly where it is on disk \u2014 click Organize when you're "
+            "ready to move it into Library/Raw."
         )
         self._import_btn.setStyleSheet(
             "QPushButton { background: #6c63ff; color: white; border-radius: 4px; "
@@ -3296,7 +3431,8 @@ class EpubLibraryDialog(QDialog):
         self._drop_overlay.setAlignment(Qt.AlignCenter)
         self._drop_overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._drop_overlay.setText(
-            "\U0001f4e5\n\nDrop files to import into your Library\n\n"
+            "\U0001f4e5\n\nDrop files to register them with the Library\n"
+            "(files stay where they are \u2014 click Organize to move)\n\n"
             "EPUB \u00b7 PDF \u00b7 TXT \u00b7 HTML"
         )
         self._drop_overlay.setStyleSheet(
@@ -3653,44 +3789,54 @@ class EpubLibraryDialog(QDialog):
                                    target: str = "raw"):
         """Core import pipeline used by both the file picker and drag-drop.
 
-        Copies each supported file into the library. When one or more of
-        the dropped files collides with an existing name in the
-        destination, the user is prompted once (Replace / Keep Both /
-        Skip / Cancel) and that decision is applied to every duplicate
-        in the batch. Refreshes the library once all files have been
-        processed and shows a single summary dialog at the end so batch
-        imports don't spam modal messages.
+        Both ``target`` modes now register the source file **in place**
+        on disk. Nothing is copied or moved by Import / drag-drop:
 
-        *target* selects the destination:
-          * ``"raw"`` (default): copy into ``Library/Raw`` and scaffold an
-            output folder with a ``source_epub.txt`` sidecar + empty
-            ``translation_progress.json``. Used by the "Import EPUB" button
-            and by drag-drop while the **In Progress** tab is active.
-          * ``"translated"``: copy EPUBs into ``Library/Translated`` with no
-            scaffolding (the files are already finished compiled outputs).
-            Only ``.epub`` is accepted; other types are reported as skipped.
-            Used by drag-drop while the **Completed** tab is active.
+          * ``"raw"`` (default): appends the absolute path to
+            ``Library/Raw/library_raw_inputs.txt`` and scaffolds an
+            output folder under the configured output root with a
+            ``source_epub.txt`` sidecar pointing at the original
+            location. Surfaces as a Not Started card on the In
+            Progress tab. Used by the "Import EPUB" button and by
+            drag-drop while the **In Progress** tab is active.
+          * ``"translated"``: appends the absolute path to
+            ``Library/library_translated_inputs.txt``. Surfaces as a
+            card on the Completed tab. Only ``.epub`` is accepted;
+            other types are reported as skipped. Used by drag-drop
+            while the **Completed** tab is active.
+
+        The Organize button is the deliberate move step for both
+        modes: it moves the file into ``Library/Raw`` or
+        ``Library/Translated`` and records an entry in
+        ``library_origins.txt`` so Undo Move can reverse it. Because
+        nothing is relocated during Import itself, no collision dialog
+        is shown for either target — duplicate registrations simply
+        dedupe by normalized path in the registry files.
+
+        The library is refreshed and a summary dialog is shown after
+        processing so batch imports don't spam modal messages.
         """
         if not paths:
             return
         if target == "translated":
             supported_exts = (".epub",)
-            dest_label = "Library/Translated"
+            dest_label = "Library (registered in place)"
             dest_dir = get_library_translated_dir()
         else:
             supported_exts = (".epub", ".txt", ".pdf", ".html", ".htm")
-            dest_label = "Library/Raw"
+            dest_label = "Library (registered in place)"
             dest_dir = get_library_raw_dir()
 
-        # First pass: validate each path and bucket it as
-        #   * skipped (missing / wrong type),
-        #   * fresh (no name collision; always copied), or
-        #   * colliding (same basename already in dest; policy decides).
+        # First pass: validate each path. Neither target relocates
+        # files anymore, so there's no collision bucket — everything
+        # accepted lands in ``fresh`` and runs through
+        # :meth:`_import_single_file`, which just appends to the
+        # appropriate input registry (+ scaffolds an output folder
+        # for the raw side).
         imported: list[str] = []
         skipped: list[str] = []
         errors: list[str] = []
         fresh: list[str] = []
-        collisions: list[tuple[str, str]] = []  # (src, existing_dest)
         for raw_path in paths:
             if not raw_path:
                 continue
@@ -3715,20 +3861,10 @@ class EpubLibraryDialog(QDialog):
                         f"{os.path.basename(path)} (unsupported type)"
                     )
                 continue
-            existing = os.path.join(dest_dir, os.path.basename(path))
-            if (os.path.isfile(existing) and
-                    os.path.abspath(path) != os.path.abspath(existing)):
-                collisions.append((path, existing))
-            else:
-                fresh.append(path)
+            fresh.append(path)
 
+        collisions: list[tuple[str, str]] = []  # never populated now
         collision_policy = "keep_both"
-        if collisions:
-            collision_policy = self._prompt_duplicate_policy(
-                collisions, dest_label)
-            if collision_policy is None:
-                # User cancelled — abort the whole batch silently.
-                return
 
         def _process(path: str, policy: str) -> None:
             try:
@@ -3758,13 +3894,14 @@ class EpubLibraryDialog(QDialog):
         if source == "drop":
             if imported and not errors:
                 self._show_toast(
-                    f"\u2705  Imported {len(imported)} file"
-                    f"{'s' if len(imported) != 1 else ''} into {dest_label}"
+                    f"\u2705  Registered {len(imported)} file"
+                    f"{'s' if len(imported) != 1 else ''} "
+                    f"with the Library"
                 )
             elif imported and errors:
                 self._show_toast(
-                    f"\u26a0\ufe0f  Imported {len(imported)} into {dest_label}, "
-                    f"failed {len(errors)}"
+                    f"\u26a0\ufe0f  Registered {len(imported)} with the "
+                    f"Library, failed {len(errors)}"
                 )
             elif errors:
                 self._show_toast(
@@ -3790,9 +3927,16 @@ class EpubLibraryDialog(QDialog):
         title = "Import"
         parts: list[str] = []
         if imported:
+            target_tab = (
+                "Library/Translated" if target == "translated"
+                else "Library/Raw"
+            )
             parts.append(
-                f"Imported {len(imported)} file{'s' if len(imported) != 1 else ''} "
-                f"into {dest_label}."
+                f"Registered {len(imported)} file"
+                f"{'s' if len(imported) != 1 else ''} with the "
+                f"Library \u2014 no files were moved. Click "
+                f"\u201cOrganize\u201d when you're ready to move "
+                f"them into {target_tab}."
             )
             if len(imported) <= 10:
                 parts.append("\n".join(
@@ -3811,7 +3955,7 @@ class EpubLibraryDialog(QDialog):
                 f"\n{len(errors)} error{'s' if len(errors) != 1 else ''}:"
             )
             parts.append("\n".join("  \u2022 " + e for e in errors[:5]))
-        if imported:
+        if imported and target != "translated":
             parts.append(
                 "\nRight-click any card and choose \u201cLoad for translation\u201d "
                 "when you're ready to translate."
@@ -3825,79 +3969,73 @@ class EpubLibraryDialog(QDialog):
     def _import_single_file(self, path: str, target: str = "raw",
                              collision_policy: str = "keep_both"
                              ) -> str | None:
-        """Copy *path* into the appropriate library subfolder.
+        """Register *path* with the library (raw or translated side).
 
-        *target* is either ``"raw"`` (→ ``Library/Raw`` + output-folder
-        scaffold for the translator) or ``"translated"`` (→
-        ``Library/Translated``, no scaffold — the file is treated as a
-        finished compiled EPUB).
+        Both branches now leave the source file **exactly where it is**
+        on disk. Nothing is copied or moved — the import just wires
+        the path into the library's tracking files so a card can
+        surface on the appropriate tab. Moving into ``Library/Raw`` /
+        ``Library/Translated`` is a separate, deliberate step
+        triggered by the Organize button. Both the raw and translated
+        registrations are fully reversible: Organize writes an entry
+        into ``library_origins.txt`` before relocating, and Undo Move
+        restores the file and re-adds it to the appropriate input
+        registry so the card reappears on its tab.
 
-        *collision_policy* controls what happens when a file with the
-        same basename already exists in the destination folder:
-          * ``"keep_both"`` (default, legacy behaviour): append a
-            counter suffix (``name (2).epub``) so both copies survive.
-          * ``"replace"``: overwrite the existing file.
-          * ``"skip"``: return ``None`` without copying.
-        The caller (:meth:`_import_paths_into_library`) prompts the
-        user once per batch and passes the resolved policy down so
-        every duplicate in the same drop is handled the same way.
+        Per-target wiring:
 
-        Returns the destination path on success, ``None`` on skip /
-        failure. Raises no exceptions — failures are logged and
+          * ``"raw"`` — appends the absolute path to
+            ``Library/Raw/library_raw_inputs.txt`` and scaffolds an
+            output folder under the configured output root with a
+            ``source_epub.txt`` sidecar pointing at the *original*
+            location. The In Progress tab's scanner uses these to
+            surface a Not Started card for the file.
+          * ``"translated"`` — appends the absolute path to
+            ``Library/library_translated_inputs.txt``. The Completed
+            tab's scanner includes these as ``in_library=False`` +
+            ``registered_translated=True`` cards so the user can
+            read them and the Organize button can promote them into
+            ``Library/Translated``.
+
+        *collision_policy* is accepted for backwards compatibility
+        but no longer matters — nothing is being relocated here, so
+        there's nothing to collide with. It remains in the signature
+        so future callers can still pass it without a TypeError.
+
+        Returns the *original* absolute path on success, or ``None``
+        on failure. Raises no exceptions — failures are logged and
         surfaced via the caller's aggregated error list.
         """
+        path_abs = os.path.abspath(path)
         if target == "translated":
-            dest_dir = get_library_translated_dir()
-        else:
-            dest_dir = get_library_raw_dir()
+            # ---- Translated branch: register in place.
+            try:
+                record_library_translated_input(path_abs)
+            except Exception as exc:
+                logger.error(
+                    "Translated registration failed for %s: %s\n%s",
+                    path_abs, exc, traceback.format_exc())
+                raise
+            return path_abs
+
+        # ---- Raw branch: register in place + scaffold output folder.
         try:
-            dest = os.path.join(dest_dir, os.path.basename(path))
-            same_file = (os.path.abspath(path) == os.path.abspath(dest))
-            if not same_file and os.path.isfile(dest):
-                if collision_policy == "skip":
-                    return None
-                if collision_policy == "replace":
-                    # Overwrite the existing file in place. shutil.copy2
-                    # handles the overwrite atomically enough for our
-                    # needs; origins / pair entries keyed on this
-                    # basename remain valid because the basename
-                    # doesn't change.
-                    pass
-                else:
-                    # "keep_both" — counter-suffix like Explorer does.
-                    stem, ext = os.path.splitext(os.path.basename(path))
-                    counter = 2
-                    while True:
-                        candidate = os.path.join(
-                            dest_dir, f"{stem} ({counter}){ext}")
-                        if not os.path.isfile(candidate):
-                            dest = candidate
-                            break
-                        counter += 1
-            if os.path.abspath(path) != os.path.abspath(dest):
-                shutil.copy2(path, dest)
-            # Only raw imports feed the translator pipeline — the raw-inputs
-            # registry + per-book output scaffold are meaningless (and
-            # actively misleading) for a finished compiled EPUB that's
-            # being filed under Library/Translated.
-            if target == "raw":
-                record_library_raw_input(dest)
-        except Exception as exc:
-            logger.error("Import copy failed for %s: %s\n%s",
-                         path, exc, traceback.format_exc())
-            raise
-        if target != "raw":
-            return dest
-        try:
+            record_library_raw_input(path_abs)
             roots = _resolve_output_roots(self._config)
             if roots:
                 output_root = roots[0]
-                base = os.path.splitext(os.path.basename(dest))[0]
+                base = os.path.splitext(os.path.basename(path_abs))[0]
                 output_folder = os.path.join(output_root, base)
                 os.makedirs(output_folder, exist_ok=True)
+                # ``source_epub.txt`` points at the *real* location of
+                # the raw source so the translator (and the In Progress
+                # scanner) can find it without going through
+                # Library/Raw. When the user later runs Organize, it
+                # moves the file and rewrites this sidecar to the new
+                # ``Library/Raw\…`` path.
                 sidecar = os.path.join(output_folder, "source_epub.txt")
                 with open(sidecar, "w", encoding="utf-8") as f:
-                    f.write(dest)
+                    f.write(path_abs)
                 progress_file_path = os.path.join(
                     output_folder, "translation_progress.json")
                 if not os.path.isfile(progress_file_path):
@@ -3908,10 +4046,10 @@ class EpubLibraryDialog(QDialog):
                             pf, ensure_ascii=False, indent=2,
                         )
         except Exception as exc:
-            logger.error("Output scaffold failed for %s: %s\n%s",
-                         path, exc, traceback.format_exc())
+            logger.error("Raw registration failed for %s: %s\n%s",
+                         path_abs, exc, traceback.format_exc())
             raise
-        return dest
+        return path_abs
 
     def _load_for_translation(self, book: dict):
         """Push the card's raw source path into the translator's input field.
@@ -4021,20 +4159,42 @@ class EpubLibraryDialog(QDialog):
             _queue_raw(book)
 
         # Collect compiled EPUBs that aren't already in Library/Translated.
+        # Two sources are pulled together:
+        #   * Completed-tab cards whose ``path`` points at a compiled
+        #     EPUB sitting somewhere other than ``Library/Translated``
+        #     — includes both promoted-output-folder cards and
+        #     registered-in-place translated imports.
+        #   * ``library_translated_inputs.txt`` directly, as a safety
+        #     net in case a registered entry hasn't made it into the
+        #     scan result yet (first auto-refresh still pending, etc.).
         translated_moves: list[tuple[dict, str]] = []
+        seen_trans_keys: set[str] = set()
+
+        def _queue_trans(book: dict, p: str) -> None:
+            if not p or not os.path.isfile(p):
+                return
+            if not p.lower().endswith(".epub"):
+                return  # only compiled .epub files get organized for now
+            parent = os.path.normcase(os.path.normpath(
+                os.path.abspath(os.path.dirname(p))))
+            if parent == trans_abs:
+                return
+            key = os.path.normcase(os.path.normpath(os.path.abspath(p)))
+            if key in seen_trans_keys:
+                return
+            seen_trans_keys.add(key)
+            translated_moves.append((book, p))
+
         for book in self._completed_books:
             # Skip Library entries (they already live in Library/Translated).
             if book.get("in_library"):
                 continue
-            p = book.get("path") or ""
-            if not p or not os.path.isfile(p):
-                continue
-            if not p.lower().endswith(".epub"):
-                continue  # only compiled .epub files get organized for now
-            parent = os.path.normcase(os.path.normpath(os.path.abspath(os.path.dirname(p))))
-            if parent == trans_abs:
-                continue
-            translated_moves.append((book, p))
+            _queue_trans(book, book.get("path") or "")
+        # Belt-and-suspenders: also walk the registry directly so a
+        # just-dropped file still gets organized even if the card
+        # list hasn't refreshed yet.
+        for p in load_library_translated_inputs():
+            _queue_trans({"registered_translated": True}, p)
 
         if not raw_moves and not translated_moves:
             QMessageBox.information(
@@ -4215,6 +4375,17 @@ class EpubLibraryDialog(QDialog):
                 trans_dest_by_book[id(book)] = os.path.basename(dest)
                 path_moves.append(
                     (os.path.abspath(src), os.path.abspath(dest)))
+                # If this file was in the registered-in-place
+                # translated registry, drop it now — the in-place
+                # registration is superseded by the origins entry
+                # above, which is what Undo keys on.
+                try:
+                    remove_library_translated_input(src)
+                except Exception:
+                    logger.debug(
+                        "Failed to prune translated-inputs entry for %s",
+                        src,
+                    )
                 moved_trans += 1
             except Exception as exc:
                 errors.append(f"translated:{os.path.basename(src)}: {exc}")
@@ -4496,6 +4667,18 @@ class EpubLibraryDialog(QDialog):
                     path_moves.append(
                         (os.path.abspath(lib_file),
                          os.path.abspath(dest_path)))
+                    # Re-add the restored file to the translated-
+                    # inputs registry so it reappears on the
+                    # Completed tab as a registered-in-place card.
+                    # Symmetric with how Import originally registered
+                    # the file before Organize moved it.
+                    try:
+                        record_library_translated_input(dest_path)
+                    except Exception:
+                        logger.debug(
+                            "Failed to re-register restored translated path %s",
+                            dest_path,
+                        )
                 except Exception as exc:
                     remaining[lib_name] = orig_path
                     errors.append(f"translated:{lib_name}: {exc}")
@@ -5208,11 +5391,16 @@ class EpubLibraryDialog(QDialog):
         all_not_started = all(_is_not_started(b) for _l, _p, _f, b in targets)
 
         if all_not_started:
-            proceed = self._confirm_delete_simple(targets)
+            confirmed_targets = self._confirm_delete_simple(targets)
         else:
-            proceed = self._confirm_delete_with_keyword(targets)
-        if not proceed:
+            confirmed_targets = self._confirm_delete_with_keyword(targets)
+        if not confirmed_targets:
             return
+        # The typed-keyword dialog returns the *filtered* subset the
+        # user chose to keep enabled in the checkbox list. The simple
+        # dialog always returns the full batch (Not Started cards don't
+        # offer per-target opt-out since there's nothing to lose).
+        targets = list(confirmed_targets)
 
         deleted = 0
         errors: list[str] = []
@@ -5358,10 +5546,81 @@ class EpubLibraryDialog(QDialog):
             lines.append(f"\u2026 and {len(targets) - 10} more item(s).")
         return "\n".join(lines).rstrip()
 
+    def _build_target_row_widget(
+        self, target: tuple[str, str, bool, dict], checkbox
+    ) -> QWidget:
+        """Render a single delete target as a checkbox + detail block.
+
+        The checkbox is created by the caller so it can track the
+        per-target include/exclude state; this method just owns the
+        layout and the label that sits next to it (path, size, and for
+        folders the artefact breakdown).
+        """
+        label, pth, is_folder, _book = target
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 4, 0, 4)
+        row_layout.setSpacing(8)
+
+        checkbox.setChecked(True)
+        checkbox.setStyleSheet(
+            "QCheckBox { color: #e0e0e0; spacing: 8px; }"
+            "QCheckBox::indicator { width: 16px; height: 16px; "
+            "border: 1px solid #5a9fd4; border-radius: 3px; "
+            "background: #1a1a2a; }"
+            "QCheckBox::indicator:checked { background: #5a9fd4; "
+            "border-color: #5a9fd4; }"
+            "QCheckBox::indicator:hover { border-color: #7bb3e0; }"
+        )
+        checkbox.setToolTip(
+            "Uncheck to exclude this item from the delete batch."
+        )
+        row_layout.addWidget(checkbox, 0, Qt.AlignTop)
+
+        # Text block describing what this target is and what's inside.
+        lines: list[str] = []
+        if is_folder:
+            lines.append(f"{label}  \u2014  output folder")
+            lines.append(pth)
+            contents = self._summarize_folder_contents(pth)
+            if contents:
+                lines.extend(contents)
+            else:
+                lines.append("    \u00b7 (folder is empty)")
+        else:
+            try:
+                size = os.path.getsize(pth)
+                if size >= 1024 * 1024:
+                    size_str = f"{size / (1024 * 1024):.1f} MB"
+                else:
+                    size_str = f"{size / 1024:.0f} KB"
+            except OSError:
+                size_str = "?"
+            lines.append(f"{label}  \u2014  file ({size_str})")
+            lines.append(pth)
+
+        detail = QLabel("\n".join(lines))
+        detail.setTextFormat(Qt.PlainText)
+        detail.setWordWrap(True)
+        detail.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        detail.setStyleSheet(
+            "QLabel { color: #e0e0e0; "
+            "font-family: Consolas, Menlo, monospace; font-size: 9pt; }"
+        )
+        row_layout.addWidget(detail, 1)
+        return row
+
     def _confirm_delete_simple(
         self, targets: list[tuple[str, str, bool, dict]]
-    ) -> bool:
-        """Yes / Cancel confirmation for Not-Started-only batches."""
+    ) -> list[tuple[str, str, bool, dict]] | None:
+        """Yes / Cancel confirmation for Not-Started-only batches.
+
+        Not-Started cards have no translated work on disk so the
+        simple prompt doesn't bother with per-target checkboxes; the
+        whole batch goes or nothing does. Returns the full targets
+        list on accept, ``None`` on cancel — matching the shape of
+        :meth:`_confirm_delete_with_keyword`.
+        """
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Warning)
         msg.setWindowTitle("Delete")
@@ -5373,28 +5632,40 @@ class EpubLibraryDialog(QDialog):
         )
         msg.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
         msg.setDefaultButton(QMessageBox.Cancel)
-        return msg.exec() == QMessageBox.Yes
+        if msg.exec() != QMessageBox.Yes:
+            return None
+        return list(targets)
 
     def _confirm_delete_with_keyword(
         self, targets: list[tuple[str, str, bool, dict]]
-    ) -> bool:
+    ) -> list[tuple[str, str, bool, dict]] | None:
         """Typed-keyword confirmation for in-progress / completed cards.
 
-        Shows a modal dialog with the detailed artefact summary and a
-        text field. The Delete button is disabled until the user types
-        :attr:`_DELETE_KEYWORD` (case-insensitive, leading/trailing
-        whitespace forgiven). The speed-bump is deliberately harder to
-        bypass than a Yes/No because each target wipes real translation
-        work (response HTMLs, progress JSON, images, compiled EPUBs).
+        Shows a modal dialog with a scrollable, per-target checkbox
+        list so the user can untick anything they don't actually want
+        removed (common case: keep the Library/Raw copy when
+        deleting a compiled Library/Translated entry). The Delete
+        button is disabled until:
+
+          * at least one checkbox is still ticked, AND
+          * the user types :attr:`_DELETE_KEYWORDS` (case-insensitive,
+            leading/trailing whitespace forgiven) into the entry field.
+
+        The speed-bump is deliberately harder to bypass than a Yes/No
+        because each target wipes real translation work (response
+        HTMLs, progress JSON, images, compiled EPUBs).
+
+        Returns the filtered list of targets still checked when the
+        user clicked Delete, or ``None`` if the dialog was cancelled.
         """
         from PySide6.QtWidgets import (
-            QDialog, QDialogButtonBox, QTextEdit,
+            QDialog, QDialogButtonBox, QCheckBox, QFrame,
         )
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Delete \u2014 confirmation required")
         dlg.setModal(True)
-        dlg.setMinimumWidth(560)
+        dlg.setMinimumWidth(620)
 
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(18, 16, 18, 14)
@@ -5423,30 +5694,56 @@ class EpubLibraryDialog(QDialog):
                 f"{file_count} file{'s' if file_count != 1 else ''}"
             )
         subtitle = QLabel(
-            "The following will be removed from disk ("
+            "Uncheck anything you want to keep. Everything still "
+            "checked below will be removed from disk ("
             + " + ".join(subtitle_bits) + "):"
         )
         subtitle.setStyleSheet("color: #c8cbe0; font-size: 10pt;")
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
-        detail_box = QTextEdit()
-        detail_box.setReadOnly(True)
-        detail_box.setPlainText(self._format_delete_detail(targets))
-        detail_box.setStyleSheet(
-            "QTextEdit { background: #1a1a2a; color: #e0e0e0; "
-            "border: 1px solid #3a3a5e; border-radius: 4px; "
-            "font-family: Consolas, Menlo, monospace; font-size: 9pt; "
-            "padding: 8px; }"
+        # Scrollable list of per-target rows so arbitrarily large batches
+        # (multi-select + auto-queued Library/Raw copies) don't blow the
+        # dialog off the bottom of the screen.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(
+            "QScrollArea { background: #1a1a2a; border: 1px solid #3a3a5e; "
+            "border-radius: 4px; }"
+            "QScrollBar:vertical { width: 10px; background: #12121e; }"
+            "QScrollBar::handle:vertical { background: #3a3a5e; "
+            "border-radius: 5px; min-height: 24px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical "
+            "{ height: 0; }"
         )
-        detail_box.setMinimumHeight(180)
-        detail_box.setMaximumHeight(280)
-        layout.addWidget(detail_box)
+        scroll.setMinimumHeight(220)
+        scroll.setMaximumHeight(360)
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setContentsMargins(10, 6, 10, 6)
+        inner_layout.setSpacing(2)
+
+        checkboxes: list[QCheckBox] = []
+        for idx, target in enumerate(targets):
+            if idx > 0:
+                sep = QFrame()
+                sep.setFrameShape(QFrame.HLine)
+                sep.setStyleSheet("color: #2a2a3e; background: #2a2a3e;")
+                sep.setFixedHeight(1)
+                inner_layout.addWidget(sep)
+            cb = QCheckBox()
+            checkboxes.append(cb)
+            row_widget = self._build_target_row_widget(target, cb)
+            inner_layout.addWidget(row_widget)
+        inner_layout.addStretch()
+        scroll.setWidget(inner)
+        layout.addWidget(scroll)
 
         warning = QLabel(
-            "This removes the output folder(s) recursively \u2014 "
-            "every translated chapter, progress tracker, image, and "
-            "compiled EPUB inside goes with it. This cannot be undone."
+            "This removes the checked item(s) permanently \u2014 for "
+            "output folders that's recursive: every translated chapter, "
+            "progress tracker, image, and compiled EPUB inside goes "
+            "with it. This cannot be undone."
         )
         warning.setStyleSheet(
             "color: #ffb347; font-size: 9.5pt; "
@@ -5472,9 +5769,6 @@ class EpubLibraryDialog(QDialog):
         layout.addWidget(instr)
 
         entry = QLineEdit()
-        # Placeholder shows one of the accepted keywords so the field
-        # visually nudges the user toward typing *something* without
-        # forcing either specific choice.
         entry.setPlaceholderText(self._DELETE_KEYWORDS[0].capitalize())
         entry.setStyleSheet(
             "QLineEdit { background: #1e1e2e; color: #e0e0e0; "
@@ -5498,14 +5792,22 @@ class EpubLibraryDialog(QDialog):
         delete_btn.clicked.connect(dlg.accept)
         layout.addWidget(btns)
 
-        def _on_text_changed(text: str) -> None:
-            delete_btn.setEnabled(
-                text.strip().lower() in self._DELETE_KEYWORDS
+        def _recompute_enabled(*_args) -> None:
+            keyword_ok = (
+                entry.text().strip().lower() in self._DELETE_KEYWORDS
             )
+            any_checked = any(cb.isChecked() for cb in checkboxes)
+            delete_btn.setEnabled(keyword_ok and any_checked)
 
-        entry.textChanged.connect(_on_text_changed)
+        entry.textChanged.connect(_recompute_enabled)
+        for cb in checkboxes:
+            cb.toggled.connect(_recompute_enabled)
         entry.setFocus()
-        return dlg.exec() == QDialog.Accepted
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return [
+            targets[i] for i, cb in enumerate(checkboxes) if cb.isChecked()
+        ]
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
