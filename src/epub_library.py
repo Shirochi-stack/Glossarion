@@ -5688,6 +5688,19 @@ class EpubLibraryDialog(QDialog):
         self._selected_paths_ip: set[str] = set()
         self._selected_paths_comp: set[str] = set()
         self._cover_threads: list[_CoverLoader] = []
+        # Cover-path cache: maps ``book_path \u2192 resolved_cover_path``.
+        # Populated by :meth:`_on_cover_loaded` the first time a
+        # :class:`_CoverLoader` finishes for a book. Subsequent card
+        # rebuilds (e.g. when the user flips the View size dropdown,
+        # which invalidates the per-card ``preset_key`` cache) consult
+        # this map in :meth:`_populate_grid_common` and call
+        # :meth:`_BookCard.set_cover` with the cached path instead of
+        # spawning another ``_CoverLoader`` QThread \u2014 so switching
+        # between S / M / L / XL doesn't pay an N-thread
+        # ``_extract_cover`` re-scan per card. Entries that previously
+        # resolved to no cover (empty string) are cached too so the
+        # loader doesn't re-run for known-failing books either.
+        self._cover_path_cache: dict[str, str] = {}
         # Restore persisted settings
         self._sort_mode = self._config.get('epub_library_sort', SORT_DATE)
         self._card_size = self._config.get('epub_library_card_size', SIZE_COMPACT)
@@ -8487,8 +8500,12 @@ class EpubLibraryDialog(QDialog):
                     pass
             else:
                 # Either no cached widget, a book field drifted, or
-                # the card-size / raw-titles toggle changed —
-                # rebuild and spawn a fresh cover loader.
+                # the card-size / raw-titles toggle changed \u2014
+                # rebuild. Cover resolution reuses the
+                # ``_cover_path_cache`` entry if one exists so flipping
+                # the View dropdown doesn't spawn a fresh
+                # :class:`_CoverLoader` thread per book just to re-
+                # extract the same cover from disk.
                 if cached:
                     try:
                         cached[0].setParent(None)
@@ -8500,17 +8517,28 @@ class EpubLibraryDialog(QDialog):
                 card.clicked.connect(self._on_card_clicked)
                 card.context_menu_requested.connect(self._show_context_menu)
                 card.select_requested.connect(self._on_card_select_requested)
-                loader = _CoverLoader(
-                    book["path"],
-                    file_type=book.get("type", "epub"),
-                    config=self._config,
-                    original_path=book.get("original_path"),
-                    raw_source_path=book.get("raw_source_path"),
-                    parent=self,
-                )
-                loader.finished.connect(self._on_cover_loaded)
-                self._cover_threads.append(loader)
-                loader.start()
+                cached_cover = self._cover_path_cache.get(path)
+                if cached_cover is not None:
+                    # Hit \u2014 either a resolved path we can paint now,
+                    # or an empty string that means "we already tried
+                    # this book and it has no cover". Either way we
+                    # skip the loader.
+                    if cached_cover and os.path.isfile(cached_cover):
+                        card.set_cover(cached_cover)
+                    # Empty string / missing file \u2192 leave the
+                    # fallback Halgakos icon in place.
+                else:
+                    loader = _CoverLoader(
+                        book["path"],
+                        file_type=book.get("type", "epub"),
+                        config=self._config,
+                        original_path=book.get("original_path"),
+                        raw_source_path=book.get("raw_source_path"),
+                        parent=self,
+                    )
+                    loader.finished.connect(self._on_cover_loaded)
+                    self._cover_threads.append(loader)
+                    loader.start()
             card_cache[path] = (card, sig, preset_key, show_raw_title)
             card.set_selected(path in selected_paths)
             card_list.append(card)
@@ -8625,6 +8653,12 @@ class EpubLibraryDialog(QDialog):
             c.set_selected(c.book.get("path", "") in selected)
 
     def _on_cover_loaded(self, book_path: str, cover_path: str):
+        # Cache every loader result \u2014 including empty strings for
+        # books with no cover \u2014 so a subsequent View-size change
+        # can skip the loader entirely. Without the negative cache a
+        # book that genuinely has no cover would re-spawn a loader on
+        # every size change and re-walk the folder looking for it.
+        self._cover_path_cache[book_path] = cover_path or ""
         if not cover_path:
             return
         for card in (*self._ip_cards, *self._comp_cards):

@@ -27,7 +27,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'L_Glossarion_Lite v8.5.2'  # CHANGED: Updated version
+APP_NAME = 'L_Glossarion_SuperLite v8.5.2'  # SuperLite: no EPUB reader / Chromium
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -202,8 +202,8 @@ app_files = [
 	# gRPC Gemini client
 	('grpc_gemini_client.py', '.'),
 
-	# EPUB Library & Reader
-	('epub_library.py', '.'),
+	# EPUB Library & Reader: EXCLUDED in SuperLite (saves ~152 MB — removes Chromium)
+	# ('epub_library.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -276,7 +276,7 @@ app_modules = [
 	'token_encryption',  # Encrypted token storage
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client
-	'epub_library',  # EPUB Library & Reader
+	# 'epub_library',  # EXCLUDED in SuperLite — removes Chromium WebEngine (152 MB)
 ]
 # GUI Framework
 gui_modules = [
@@ -1112,6 +1112,13 @@ excludes = [
     # It is safely optional (PLAYWRIGHT_AVAILABLE flag handles absence).
     # ============================================================================
     'playwright', 'playwright.*',
+
+    # ============================================================================
+    # QTWEBENGINE / CHROMIUM - excluded to save ~152 MB exe size.
+    # epub_library.py is not bundled in SuperLite, so this is safe.
+    # ============================================================================
+    'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore',
+    'PySide6.QtWebEngineQuick',
 ]
 
 # ============================================================================
@@ -1149,16 +1156,24 @@ a.binaries = [b for b in a.binaries if not any([
                      'msvcr110.dll', 'msvcp110.dll', 'msvcr120.dll', 'msvcp120.dll'],
     # Strip playwright binary driver (Node.js runtime, 85 MB uncompressed)
     b[0].startswith('playwright'),
+    # Strip QtWebEngine Chromium binaries (~152 MB uncompressed)
+    'Qt6WebEngineCore' in b[0],
+    'QtWebEngineProcess' in b[0],
+    b[0].startswith('PySide6\\Qt6WebEngine'),
 ])]
 
-# Remove torch and playwright data files
+# Remove torch, playwright data, and QtWebEngine data files
 a.datas = [d for d in a.datas if not any([
     'torch' in d[0].lower(),
     'torch-' in d[0],
     '.dist-info' in d[0] and 'torch' in d[0].lower(),
-    # Playwright data (JS files, node.exe, etc.)
+    # Playwright data
     d[0].startswith('playwright'),
     d[0].startswith('playwright\\'),
+    # QtWebEngine resource files (icudtl.dat, *.pak devtools)
+    'qtwebengine' in d[0].lower(),
+    d[0].startswith('PySide6\\resources\\qtwebengine'),
+    d[0] == 'PySide6\\resources\\icudtl.dat',
 ])]
 
 a.pure = [p for p in a.pure if not any([

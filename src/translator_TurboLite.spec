@@ -27,7 +27,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'L_Glossarion_Lite v8.5.2'  # CHANGED: Updated version
+APP_NAME = 'L_Glossarion_TurboLite v8.5.2'  # TurboLite: no Vertex AI
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -466,13 +466,13 @@ api_modules = [
     'grpcio_status',
     'googleapis_common_protos',
 	
-	# Google Vertex AI:
-    'google.cloud.aiplatform',
-    'google.cloud.aiplatform_v1', 
-    'google.cloud.aiplatform_v1beta1',
-    'vertexai',
-    'vertexai.generative_models',
-    'vertexai.language_models',
+	# Google Vertex AI: EXCLUDED in TurboLite (saves ~215 MB RAM at startup)
+    # 'google.cloud.aiplatform',
+    # 'google.cloud.aiplatform_v1',
+    # 'google.cloud.aiplatform_v1beta1',
+    # 'vertexai',
+    # 'vertexai.generative_models',
+    # 'vertexai.language_models',
     
     # OpenAI
     'openai',
@@ -1105,6 +1105,18 @@ excludes = [
 	'*torch*',
 	'torch*',
 	'_torch*',
+
+    # ============================================================================
+    # VERTEX AI - excluded to save ~215 MB RAM at startup and ~35 MB exe size.
+    # google-cloud-aiplatform loads v1 + v1beta1 proto descriptors eagerly.
+    # Use Gemini via google.genai (google-genai SDK) instead for Gemini models.
+    # ============================================================================
+    'vertexai', 'vertexai.*',
+    'google.cloud.aiplatform', 'google.cloud.aiplatform_v1',
+    'google.cloud.aiplatform_v1beta1',
+    'google.cloud.bigquery', 'google.cloud.bigquery.*',
+    'google.cloud.storage', 'google.cloud.storage.*',
+    'google.cloud.resource_manager', 'google.cloud.resource_manager.*',
 
     # ============================================================================
     # PLAYWRIGHT - 98 MB uncompressed bundled Node.js runtime
