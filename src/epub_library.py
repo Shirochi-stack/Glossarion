@@ -3743,8 +3743,12 @@ class _BookCard(QFrame):
         self.setStyleSheet(self._BASE_STYLE)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 6)
-        layout.setSpacing(3)
+        layout.setContentsMargins(4, 4, 4, 4)
+        # Tight inter-row spacing so the "size/badge" row and the
+        # progress pill sit closer together. QVBoxLayout applies this
+        # between every pair of widgets, including cover ↔ title, but
+        # 1 px stays visually clean and mirrors the card's balance.
+        layout.setSpacing(1)
 
         self.cover_label = QLabel()
         self.cover_label.setFixedSize(self._card_w - 8, self._cover_h)
@@ -3992,9 +3996,12 @@ class _BookCard(QFrame):
         # of empty space at the bottom where the pill would have been on
         # the In Progress tab.
         layout.addStretch()
-        reserved_h = 32 + p.get("spacing", 4)
+        # Shrunk alongside ``layout.setSpacing(1)`` / bottom-margin 4
+        # so the tighter inter-row gaps don't just migrate into a
+        # bigger empty band below the progress pill.
+        reserved_h = 24 + p.get("spacing", 4)
         if has_progress_row:
-            reserved_h += 22  # pill row height + extra inter-widget spacing
+            reserved_h += 20  # pill row height + extra inter-widget spacing
         self.setFixedHeight(self._cover_h + max_title_h + reserved_h)
 
     def set_selected(self, selected: bool):
@@ -7910,18 +7917,12 @@ class EpubLibraryDialog(QDialog):
         if viewport_w <= 0:
             viewport_w = max(0, self.width() - 40)
         # Reserve room for the vertical scrollbar. The scroll area's
-        # stylesheet fixes it to an 8 px track, but at the moment we
-        # size cards the scrollbar usually hasn't been asserted yet —
-        # it only pops in once the grid's total height overflows the
-        # viewport. Without reserving that width ahead of time the
-        # rightmost column gets clipped the instant the scrollbar
-        # appears (cards briefly fit, the scrollbar slides in, the
-        # viewport shrinks by 8 px, and the last card goes partially
-        # behind it). A 12 px reserve covers the 8 px track plus a
-        # small gutter so the last card never hugs the scrollbar
-        # edge even on the odd system where Qt renders the bar a
-        # pixel or two wider than the stylesheet requests.
-        _SCROLLBAR_RESERVE = 12
+        # stylesheet fixes it to an 8 px track and we need to subtract
+        # it ahead of time because the scrollbar only pops in once the
+        # grid's total height overflows the viewport — without the
+        # reserve the rightmost column gets clipped the instant the
+        # scrollbar appears.
+        _SCROLLBAR_RESERVE = 8
         viewport_w = max(0, viewport_w - _SCROLLBAR_RESERVE)
         cols = max(1, (viewport_w + spacing) // (preset_card_w + spacing))
         # Redistribute the leftover horizontal space across the cards
