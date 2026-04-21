@@ -4816,17 +4816,35 @@ class EpubLibraryDialog(QDialog):
                         (os.path.abspath(lib_file),
                          os.path.abspath(dest_path)))
                     # Re-add the restored file to the translated-
-                    # inputs registry so it reappears on the
-                    # Completed tab as a registered-in-place card.
-                    # Symmetric with how Import originally registered
-                    # the file before Organize moved it.
-                    try:
-                        record_library_translated_input(dest_path)
-                    except Exception:
-                        logger.debug(
-                            "Failed to re-register restored translated path %s",
-                            dest_path,
-                        )
+                    # inputs registry ONLY when the restore target
+                    # is NOT inside an active output folder.
+                    #
+                    # Rationale: the translated-inputs registry is
+                    # for orphan compiled EPUBs the user dropped
+                    # onto the Completed tab from outside any
+                    # workspace. When Undo restores a file BACK
+                    # INTO an output folder (the typical
+                    # post-Organize case), the workspace's own
+                    # scan already surfaces the book on the
+                    # appropriate tab via the output-folder row —
+                    # re-registering would add a SECOND card on
+                    # the Completed tab alongside the workspace's
+                    # In Progress card, producing the duplicate
+                    # the user just hit.
+                    dest_parent = os.path.dirname(dest_path)
+                    is_workspace_restore = bool(
+                        dest_parent
+                        and os.path.isfile(os.path.join(
+                            dest_parent, "translation_progress.json"))
+                    )
+                    if not is_workspace_restore:
+                        try:
+                            record_library_translated_input(dest_path)
+                        except Exception:
+                            logger.debug(
+                                "Failed to re-register restored translated path %s",
+                                dest_path,
+                            )
                 except Exception as exc:
                     remaining[lib_name] = orig_path
                     errors.append(f"translated:{lib_name}: {exc}")
