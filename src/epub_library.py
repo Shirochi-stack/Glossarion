@@ -7533,6 +7533,27 @@ class EpubLibraryDialog(QDialog):
             )
             if reuse:
                 card = cached[0]
+                # Always refresh the card's backing book dict, even
+                # when the signature matched and we're reusing the
+                # widget. :meth:`_card_signature` deliberately covers
+                # only the fields that affect rendering \u2014 so a
+                # late-resolved ``raw_source_path`` (e.g. the next
+                # scan finally matched the workspace to a raw in
+                # ``Library/Raw`` / the registry) wouldn't shift the
+                # signature and the cached widget would keep its
+                # OLD book dict forever. That bit the context menu:
+                # Load for translation / Reveal source file / Clear
+                # saved raw link all read ``card.book.get
+                # (\"raw_source_path\")`` directly, so they missed
+                # while the warning badge (driven by
+                # ``missing_raw_file``) already reflected the fresh
+                # resolution. Re-pointing ``card.book`` at the new
+                # dict here keeps every downstream consumer in
+                # sync without paying the widget-rebuild cost.
+                try:
+                    card.book = book
+                except Exception:
+                    pass
             else:
                 # Either no cached widget, a book field drifted, or
                 # the card-size / raw-titles toggle changed —
