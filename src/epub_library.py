@@ -27,8 +27,8 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QToolButton,
     QApplication, QMenu, QComboBox, QStackedWidget
 )
-from PySide6.QtCore import Qt, QSize, QRect, Signal, Slot, QThread, QTimer, QSizeF, QUrl
-from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform
+from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, Slot, QThread, QTimer, QSizeF, QPointF, QUrl
+from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform, QTextLayout, QTextOption
 
 # Use QWebEngineView for full CSS support (images, block layout, etc.)
 try:
@@ -1925,17 +1925,42 @@ def _fit_title_text(
     base_pt = float(base_pt)
     min_pt = min(float(min_pt), base_pt)
 
+    # Measure via ``QTextLayout`` with ``WrapAtWordBoundaryOrAnywhere``.
+    # Plain ``QFontMetrics.boundingRect(TextWordWrap)`` under-measures
+    # long Hangul / filename-style runs (it doesn't break between CJK
+    # ideographs the way QLabel's renderer actually does), so a 5-line
+    # title was being reported as "fits in 3 lines at base_pt" and the
+    # shrink loop exited immediately. ``QTextLayout`` is the same
+    # engine ``QLabel`` uses to paint word-wrapped text — when we also
+    # switch the flash-card and Book-Details renderers to
+    # ``_FittedTitleLabel`` (which paints with identical layout
+    # options), measurement and render are byte-identical.
+    _text_option = QTextOption()
+    _text_option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+    _text_option.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+
     def _height(s: str, pt_size: float) -> int:
+        if not s:
+            return 0
         f = QFont(base_font) if base_font is not None else QFont()
         f.setPointSizeF(pt_size)
         f.setBold(True)
-        fm = QFontMetrics(f)
-        rect = fm.boundingRect(
-            QRect(0, 0, avail_width, 100_000),
-            int(Qt.TextWordWrap),
-            s,
-        )
-        return rect.height()
+        layout = QTextLayout(s, f)
+        layout.setTextOption(_text_option)
+        layout.beginLayout()
+        y = 0.0
+        while True:
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(float(avail_width))
+            line.setPosition(QPointF(0.0, y))
+            y += line.height()
+        layout.endLayout()
+        # Round up so a fractional overflow of a pixel still trips the
+        # shrink loop — better to shrink an extra half-step than to let
+        # the descender of the last line get clipped.
+        return int(y + 0.999)
 
     pt = base_pt
     while pt > min_pt and _height(text, pt) > max_height:
@@ -1956,6 +1981,88 @@ def _fit_title_text(
         else:
             hi = mid - 1
     return text[:best].rstrip() + ellipsis, pt
+
+
+class _FittedTitleLabel(QWidget):
+    """Self-painting label that wraps text at *any* point if needed.
+
+    ``QLabel.setWordWrap(True)`` only breaks at Unicode word boundaries,
+    which isn't enough for long Hangul / CJK filename-style titles —
+    the renderer keeps a single long ideograph run on one line and
+    overflows horizontally. This widget paints the text using the same
+    ``QTextLayout`` + ``QTextOption.WrapAtWordBoundaryOrAnywhere`` combo
+    that :func:`_fit_title_text` uses for measurement, so the measured
+    height and the rendered height are byte-identical — the shrink
+    loop's chosen font size always lands cleanly inside the title box.
+
+    Public API mirrors the subset of QLabel that the card code needs:
+    :meth:`setText`, :meth:`setFont`, :meth:`setToolTip`,
+    :meth:`setFixedHeight`, :meth:`setAlignment`.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._text = ""
+        self._color = "#e0e0e0"
+        self._option = QTextOption()
+        self._option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self._option.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+    # -- public, QLabel-compatible API -------------------------------------
+    def setText(self, text: str) -> None:
+        self._text = text or ""
+        self.update()
+
+    def text(self) -> str:
+        return self._text
+
+    def setAlignment(self, alignment) -> None:
+        self._option.setAlignment(alignment)
+        self.update()
+
+    def setTextColor(self, color: str) -> None:
+        """Set the foreground color as a CSS-style string."""
+        self._color = color or "#e0e0e0"
+        self.update()
+
+    # -- QWidget overrides -------------------------------------------------
+    def paintEvent(self, event):
+        from PySide6.QtGui import QPainter, QColor
+        if not self._text:
+            return
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.TextAntialiasing, True)
+            painter.setFont(self.font())
+            painter.setPen(QColor(self._color))
+            layout = QTextLayout(self._text, self.font())
+            layout.setTextOption(self._option)
+            width = float(max(1, self.width()))
+            layout.beginLayout()
+            y = 0.0
+            max_h = float(self.height())
+            while True:
+                line = layout.createLine()
+                if not line.isValid():
+                    break
+                line.setLineWidth(width)
+                line.setPosition(QPointF(0.0, y))
+                if y + line.height() > max_h:
+                    # No room for another line — bail out so we don't
+                    # paint a half-clipped descender.
+                    break
+                y += line.height()
+            layout.endLayout()
+            layout.draw(painter, QPointF(0.0, 0.0))
+        finally:
+            painter.end()
+
+    def sizeHint(self) -> QSize:
+        # Enough rows for a 2-line tooltip at the current font; the card
+        # layout owns the real height via setFixedHeight anyway.
+        fm = QFontMetrics(self.font())
+        return QSize(100, fm.height() * 2)
 
 
 def _find_folder_cover(file_path: str, config: dict | None = None, original_path: str | None = None) -> str | None:
@@ -2398,14 +2505,13 @@ class _BookCard(QFrame):
         base_pt = _parse_pt(p.get("title_size", "9pt"))
         min_pt = _parse_pt(p.get("title_min_size", "6.5pt"))
         max_title_h = p.get("title_max_h", 36)
-        title_lbl = QLabel()
-        title_lbl.setWordWrap(True)
-        # Fixed (not max) height so every card’s title area is the same
-        # size — short titles leave blank space below rather than making
-        # the card itself shorter.
+        # Custom-paint widget whose wrap mode matches :func:`_fit_title_text`'s
+        # measurement, so the shrink loop's chosen font size always fits
+        # the box even for long Hangul / CJK filename-style raw titles.
+        title_lbl = _FittedTitleLabel()
+        title_lbl.setFixedWidth(self._card_w - 10)
         title_lbl.setFixedHeight(max_title_h)
         title_lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        title_lbl.setAttribute(Qt.WA_TranslucentBackground)
         title_lbl.setToolTip(full_title)
         fitted_text, fitted_pt = _fit_title_text(
             full_title,
@@ -2415,11 +2521,16 @@ class _BookCard(QFrame):
             base_font=title_lbl.font(),
             min_pt=min_pt,
         )
+        # Apply the fitted point size via ``setFont`` directly on the
+        # custom widget. The widget's paintEvent uses the same QTextLayout
+        # + WrapAtWordBoundaryOrAnywhere pipeline :func:`_fit_title_text`
+        # measures with, so measured height == rendered height.
+        title_font = QFont(title_lbl.font())
+        title_font.setPointSizeF(fitted_pt)
+        title_font.setBold(True)
+        title_lbl.setFont(title_font)
         title_lbl.setText(fitted_text)
-        title_lbl.setStyleSheet(
-            f"color: #e0e0e0; font-size: {fitted_pt:g}pt; "
-            "font-weight: bold; background: transparent;"
-        )
+        title_lbl.setTextColor("#e0e0e0")
         layout.addWidget(title_lbl)
 
         # Size + file type badge on same row. For in-progress folders the
@@ -6361,11 +6472,19 @@ class BookDetailsDialog(QDialog):
                     base_font=v_lbl.font(),
                     min_pt=7.5,
                 )
+                # Same rationale as the flash-card title: apply the fitted
+                # size via ``setFont`` so the rendered font exactly matches
+                # what :func:`_fit_title_text` measured. Raw CJK / filename
+                # titles otherwise slip past the stylesheet font-size
+                # resolver and overflow horizontally without triggering
+                # the shrink loop.
+                title_font = QFont(v_lbl.font())
+                title_font.setPointSizeF(fitted_pt)
+                title_font.setBold(True)
+                v_lbl.setFont(title_font)
                 v_lbl.setText(fitted_text)
                 v_lbl.setToolTip(str(val))
-                v_lbl.setStyleSheet(
-                    f"color: #e0e0e0; font-size: {fitted_pt:g}pt; font-weight: bold;"
-                )
+                v_lbl.setStyleSheet("color: #e0e0e0; font-weight: bold;")
             else:
                 v_lbl.setText(str(val))
                 v_lbl.setStyleSheet(

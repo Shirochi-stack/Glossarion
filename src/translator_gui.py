@@ -16157,6 +16157,7 @@ Important rules:
         """Clear all selected files"""
         self.entry_epub.clear()
         self.entry_epub.setText("No file selected")
+        self.entry_epub.setToolTip("")
         self.selected_files = []
         self.file_path = None
         self.current_file_index = 0
@@ -16370,6 +16371,9 @@ Important rules:
             display_text = f"{len(paths)} files selected ({', '.join(summary_parts)})"
             self.entry_epub.setText(display_text)
             self.file_path = processed_paths[0]  # Set first file as primary
+
+        # Refresh the tooltip (single path or multi-file listing).
+        self._update_entry_epub_tooltip()
         
         # Check if these are image files
         image_files = [p for p in processed_paths if os.path.splitext(p)[1].lower() in image_extensions]
@@ -16912,6 +16916,7 @@ Important rules:
                 self.current_file_index = 0
             except Exception:
                 pass
+            self._update_entry_epub_tooltip()
             try:
                 self.append_log(f"\U0001f4d6 Loaded from library: {os.path.basename(path)}")
             except Exception:
@@ -16976,6 +16981,7 @@ Important rules:
                     self.entry_epub.setText(f"{len(valid)} files selected ({summary})")
             except Exception:
                 pass
+            self._update_entry_epub_tooltip()
             try:
                 self.append_log(
                     f"\U0001f4d6 Loaded {len(valid)} files from library for batch translation"
@@ -16995,6 +17001,41 @@ Important rules:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Import EPUBs",
                                 f"Could not load EPUBs:\n{e}")
+
+    def _update_entry_epub_tooltip(self):
+        """Refresh the input-path tooltip from ``self.selected_files``.
+
+        When a single file is loaded the entry field already shows its
+        full path, so the tooltip simply mirrors it (still handy for
+        truncated paths on narrow windows). When multiple files are
+        loaded the field collapses to a ``"N files selected (…)"``
+        summary — the tooltip becomes the only place where the user
+        can see exactly which files are queued, so we spell out the
+        first 30 paths and append a ``"… and M more"`` counter when the
+        list is longer. 30 paths is enough to see the whole batch for
+        typical multi-select runs without blowing the tooltip off the
+        bottom of the screen.
+        """
+        try:
+            if not hasattr(self, 'entry_epub') or self.entry_epub is None:
+                return
+            files = list(getattr(self, 'selected_files', []) or [])
+            if not files:
+                self.entry_epub.setToolTip("")
+                return
+            if len(files) == 1:
+                self.entry_epub.setToolTip(files[0])
+                return
+            MAX_LINES = 30
+            lines = [f"{len(files)} files selected:"]
+            for p in files[:MAX_LINES]:
+                lines.append(f"  \u2022 {p}")
+            if len(files) > MAX_LINES:
+                lines.append(f"  \u2026 and {len(files) - MAX_LINES} more")
+            self.entry_epub.setToolTip("\n".join(lines))
+        except Exception:
+            # Tooltip is non-critical — never let it crash the GUI.
+            pass
 
     def _handle_library_files_reorganized(self, moves):
         """Library \u2192 Organize / Undo: rewrite stale input paths.
@@ -17081,6 +17122,8 @@ Important rules:
                     )
                 except Exception:
                     pass
+                # Refresh the multi-file tooltip so it lists the new paths.
+                self._update_entry_epub_tooltip()
         except Exception:
             # Never let a path-rewrite failure block the library dialog.
             pass
