@@ -1944,6 +1944,12 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 summary = _read_progress_summary(
                     progress_file, exclude_special=exclude_special
                 ) if has_progress else None
+                # Track the distinction between "parse worked, book has
+                # zero chapters" and "parse failed entirely" — the latter
+                # indicates an outdated / incompatible progress file
+                # written by an older build of the program, and the UI
+                # needs to surface that with a dedicated warning pill.
+                progress_unparseable = has_progress and summary is None
                 progress_total = summary["total"] if summary else 0
                 progress_done = summary["completed"] if summary else 0
                 failed = summary["failed"] if summary else 0
@@ -1993,20 +1999,28 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                     done = fs_done
 
                 # Workspace must prove it's a real translation candidate.
-                # Filter order:
-                #   * compiled output present                                  → keep (Completed).
-                #   * at least one chapter recorded in progress file          → keep.
-                #   * ``Library/Raw`` contains the raw source for this folder → keep
-                #     as "Not started" so freshly imported EPUBs surface even
-                #     though their progress file is a 68-byte seed.
-                #   * otherwise → skip (stray/abandoned folder).
-                if not compiled and progress_total <= 0 and not raw_in_library:
+                # Keep any folder that has at least one actionable
+                # signal: a compiled output, a progress file (even if
+                # unparseable), a resolvable raw source, or translated
+                # response files on disk. The old strict gate hid
+                # legacy workspaces whose progress file predates the
+                # current schema — those now surface with an
+                # "outdated_progress" state + warning badge so the user
+                # can see and deal with them.
+                if (not compiled and not has_progress
+                        and not raw_source_path
+                        and fs_done == 0 and not raw_in_library):
                     continue
-                # A resolvable raw source is required even for the fresh
-                # imports above; without it we can't render any meaningful
-                # content for the card.
-                if not compiled and not raw_source_path:
-                    continue
+
+                # Missing raw file flag — set when the folder has
+                # meaningful content (compiled / progress / responses)
+                # but the original raw EPUB can't be resolved. The UI
+                # surfaces this as a ``⚠ missing raw file`` badge; the
+                # card stays on whatever tab its other signals land it
+                # on (Completed when a compiled artefact exists, In
+                # Progress otherwise) instead of being hidden.
+                missing_raw_file = bool(not raw_source_path and (
+                    compiled or has_progress or fs_done > 0))
 
                 # Compute translation_state for the UI. Drives both the
                 # pill label on :class:`_BookCard` AND which tab the
@@ -2017,6 +2031,8 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 # 100 %%. Partial or zero-progress workspaces are never
                 # promoted by the presence of a stray compiled file:
                 #
+                #   * unparseable progress      → "outdated_progress"
+                #     (pinned to In Progress tab regardless of compile)
                 #   * partial progress          → "in_progress"
                 #   * no progress + no response → "not_started"
                 #   * 100 %% + compiled artefact → "completed"
@@ -2024,9 +2040,16 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 #
                 # The "ready_to_compile" state lives on the In Progress
                 # tab with a distinct pill so users know the next step
-                # is Build, not Translate.
+                # is Build, not Translate. "outdated_progress" also
+                # lives on the In Progress tab — the user explicitly
+                # asked that we NEVER promote a card whose percentage
+                # can't be parsed to the Completed tab, even if a
+                # stale compiled EPUB happens to sit next to the
+                # broken progress file.
                 fully_translated = done >= total and total > 0
-                if fully_translated:
+                if progress_unparseable:
+                    translation_state = "outdated_progress"
+                elif fully_translated:
                     if compiled:
                         translation_state = "completed"
                     else:
@@ -2039,6 +2062,16 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                     translation_state = "not_started"
                 else:
                     translation_state = "in_progress"
+
+                # Not-started + missing raw = nothing to render and
+                # nothing the user can do with the card (can't open
+                # the raw for reading, can't load it for translation,
+                # no translated output to show). Hide it entirely
+                # rather than surfacing a dead entry on the In
+                # Progress tab.
+                if (translation_state == "not_started"
+                        and missing_raw_file):
+                    continue
 
                 # Classify source kind (epub / txt / pdf / image / other) so
                 # the card can show a meaningful type badge. We prefer the
@@ -2080,7 +2113,14 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 else:
                     card_path = folder
                     card_type = "in_progress"
-                    is_in_progress = (translation_state != "completed")
+                    # Outdated-progress cards are pinned to the In
+                    # Progress tab regardless of compile state — the
+                    # user asked that we never promote a card whose
+                    # percentage we can't parse to the Completed tab.
+                    is_in_progress = (
+                        translation_state != "completed"
+                        or translation_state == "outdated_progress"
+                    )
                     try:
                         stat = os.stat(folder)
                     except OSError:
@@ -2127,6 +2167,14 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                     # duplicate compiled files so the card can show
                     # a ⚠ warning badge.
                     "compiled_conflicts": compiled_conflicts,
+                    # Warning badges the card surfaces next to the
+                    # progress pill. ``missing_raw_file`` flags a
+                    # workspace whose original source EPUB is no
+                    # longer resolvable on disk (the user moved /
+                    # deleted / renamed it). ``translation_state ==
+                    # "outdated_progress"`` implicitly surfaces its
+                    # own badge via the pill.
+                    "missing_raw_file": missing_raw_file,
                 })
     results.sort(key=lambda r: r["mtime"], reverse=True)
     return results
@@ -2146,7 +2194,12 @@ def split_output_folders_by_status(rows: list[dict]) -> tuple[list[dict], list[d
     in_progress: list[dict] = []
     for r in rows:
         state = r.get("translation_state")
-        if state == "completed":
+        if state == "outdated_progress":
+            # Pinned to In Progress regardless of compile state so
+            # the "Outdated Progress file" warning is never hidden
+            # under a Completed-tab row.
+            in_progress.append(r)
+        elif state == "completed":
             completed.append(r)
         elif state in ("in_progress", "not_started", "ready_to_compile"):
             in_progress.append(r)
@@ -2380,6 +2433,18 @@ def scan_for_epubs(config: dict | None = None) -> list[dict]:
 SORT_DATE = "date"
 SORT_NAME = "name"
 SORT_SIZE = "size"
+
+# File-format filter chips on the shared toolbar. ``FORMAT_ALL`` is the
+# default (no filter); every other value maps to either the scanned
+# row's ``type`` field (for library / compiled cards) or its
+# ``workspace_kind`` field (for in-progress folder cards). See
+# :meth:`EpubLibraryDialog._format_of_book` for the per-row mapping.
+FORMAT_ALL = "all"
+FORMAT_EPUB = "epub"
+FORMAT_TXT = "txt"
+FORMAT_PDF = "pdf"
+FORMAT_HTML = "html"
+FORMAT_IMAGE = "image"
 
 SIZE_COMPACT = "compact"
 SIZE_NORMAL = "normal"
@@ -3552,6 +3617,30 @@ class _BookCard(QFrame):
             )
             conflict_lbl.setToolTip("\n".join(tip_lines))
             info_row.addWidget(conflict_lbl)
+        # Missing-raw-file warning: the workspace still has a
+        # compiled / progress / response trail but the ORIGINAL raw
+        # source EPUB can't be resolved on disk anymore. Surface it
+        # as a ⚠ badge — the card stays on whichever tab its other
+        # signals routed it to, it just gets annotated so the user
+        # knows why reader / reveal-source actions will be limited.
+        if book.get("missing_raw_file"):
+            missing_lbl = QLabel("\u26a0 missing raw")
+            missing_lbl.setAttribute(Qt.WA_TranslucentBackground)
+            missing_lbl.setStyleSheet(
+                "color: #ff9e6d; font-size: 7pt; font-weight: bold; "
+                "background: rgba(255, 158, 109, 0.15); "
+                "border: 1px solid #ff9e6d; border-radius: 3px; "
+                "padding: 0 4px; margin-left: 2px;"
+            )
+            missing_lbl.setToolTip(
+                "The raw source file for this book can't be found on "
+                "disk \u2014 Library/Raw, source_epub.txt, and the "
+                "raw-inputs registry all came up empty. The compiled "
+                "output is still readable, but actions that need the "
+                "raw source (Reveal source, Read raw, Load for "
+                "translation) will be disabled."
+            )
+            info_row.addWidget(missing_lbl)
         info_row.addStretch()
         layout.addLayout(info_row)
 
@@ -3573,7 +3662,25 @@ class _BookCard(QFrame):
                 progress_row = QHBoxLayout()
                 progress_row.setContentsMargins(0, 0, 0, 0)
                 progress_row.setSpacing(4)
-                if state == "not_started":
+                if state == "outdated_progress":
+                    pill = QLabel("\u26a0 Outdated Progress file")
+                    pill.setToolTip(
+                        "The ``translation_progress.json`` in this "
+                        "workspace was written by an older version "
+                        "of Glossarion and can't be parsed \u2014 the "
+                        "card is pinned here so you can re-run the "
+                        "translation or remove the folder."
+                    )
+                    pill.setStyleSheet(
+                        "color: #ffb347; "
+                        "background: rgba(255, 179, 71, 0.18); "
+                        "border: 1px solid #ffb347; border-radius: 3px; "
+                        "font-size: 7pt; font-weight: bold; padding: 1px 5px;"
+                    )
+                    progress_row.addWidget(pill)
+                    ribbon_text = "OUTDATED PROGRESS"
+                    ribbon_bg = "rgba(255, 179, 71, 0.92)"
+                elif state == "not_started":
                     pill = QLabel("\U0001f195 Not started")
                     pill.setToolTip("Imported into Library/Raw, translation not started yet.")
                     pill.setStyleSheet(
@@ -3777,6 +3884,16 @@ class EpubLibraryDialog(QDialog):
         self._sort_mode = self._config.get('epub_library_sort', SORT_DATE)
         self._card_size = self._config.get('epub_library_card_size', SIZE_COMPACT)
         self._current_tab = self._config.get('epub_library_tab', 0)
+        # File-format filter (EPUB / TXT / PDF / HTML / Image / All).
+        # Persisted per-user so the chosen chip survives across
+        # library-dialog opens.
+        self._format_filter = self._config.get(
+            'epub_library_format_filter', FORMAT_ALL)
+        if self._format_filter not in {
+            FORMAT_ALL, FORMAT_EPUB, FORMAT_TXT,
+            FORMAT_PDF, FORMAT_HTML, FORMAT_IMAGE,
+        }:
+            self._format_filter = FORMAT_ALL
         # When True, every flash card renders the raw source-language title
         # instead of the (possibly translated) ``book['name']``. See
         # :func:`_card_raw_title` for the resolution rules.
@@ -3856,6 +3973,29 @@ class EpubLibraryDialog(QDialog):
             QPushButton:checked { background: #6c63ff; border-color: #7c73ff; color: #fff; }
         """)
         btn.clicked.connect(lambda: self._set_sort(mode))
+        return btn
+
+    def _make_format_btn(self, text, tooltip, fmt_key):
+        """Button factory for the file-format filter chips.
+
+        Styled like the sort chips so the grouped toolbar reads as a
+        single filter strip. Uses a teal "checked" colour to stay
+        visually distinct from the purple sort chips.
+        """
+        btn = QPushButton(text)
+        btn.setToolTip(tooltip)
+        btn.setFixedHeight(26)
+        btn.setMinimumWidth(40)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setCheckable(True)
+        btn.setChecked(fmt_key == self._format_filter)
+        btn.setStyleSheet("""
+            QPushButton { background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
+                color: #b0b0c0; font-size: 8.5pt; font-weight: bold; padding: 2px 8px; }
+            QPushButton:hover { background: #3a3a5e; color: #e0e0e0; }
+            QPushButton:checked { background: #17a2b8; border-color: #20b2cc; color: #fff; }
+        """)
+        btn.clicked.connect(lambda: self._set_format_filter(fmt_key))
         return btn
 
     def _make_size_btn(self, text, tooltip, size_key):
@@ -3938,6 +4078,22 @@ class EpubLibraryDialog(QDialog):
         ]:
             btn = self._make_sort_btn(text, tip, mode)
             self._sort_btns[mode] = btn
+            toolbar.addWidget(btn)
+        toolbar.addSpacing(16)
+        format_lbl = QLabel("Format:")
+        format_lbl.setStyleSheet("color: #888; font-size: 8.5pt;")
+        toolbar.addWidget(format_lbl)
+        self._format_btns = {}
+        for text, tip, key in [
+            ("All",  "Show every file type", FORMAT_ALL),
+            ("EPUB", "Show only EPUB books / workspaces", FORMAT_EPUB),
+            ("TXT",  "Show only TXT translations", FORMAT_TXT),
+            ("PDF",  "Show only PDF translations", FORMAT_PDF),
+            ("HTML", "Show only HTML translations", FORMAT_HTML),
+            ("IMG",  "Show only image-based (manga / comic) workspaces", FORMAT_IMAGE),
+        ]:
+            btn = self._make_format_btn(text, tip, key)
+            self._format_btns[key] = btn
             toolbar.addWidget(btn)
         toolbar.addSpacing(16)
         size_lbl = QLabel("View:")
@@ -4298,6 +4454,56 @@ class EpubLibraryDialog(QDialog):
         for k, btn in self._sort_btns.items():
             btn.setChecked(k == mode)
         self._refresh_view()
+
+    def _set_format_filter(self, fmt_key: str):
+        """Change the active file-format filter and refresh both tabs."""
+        if fmt_key == self._format_filter:
+            # Clicking the already-active chip is a no-op — keep the
+            # chip checked rather than letting Qt toggle it off and
+            # leaving the user in a transient "no filter selected"
+            # state that would still render as FORMAT_ALL.
+            btn = self._format_btns.get(fmt_key)
+            if btn is not None:
+                btn.setChecked(True)
+            return
+        self._format_filter = fmt_key
+        try:
+            self._config["epub_library_format_filter"] = fmt_key
+        except Exception:
+            pass
+        for k, btn in self._format_btns.items():
+            btn.setChecked(k == fmt_key)
+        self._refresh_view()
+
+    @staticmethod
+    def _format_of_book(book: dict) -> str:
+        """Return the FORMAT_* key that describes *book* for filtering.
+
+        Rules:
+          * In-progress folder cards are classified by their
+            ``workspace_kind`` (the scanner already resolves this from
+            the raw source extension or the folder's on-disk contents).
+          * Other cards (library entries, promoted compiled workspaces,
+            registered-in-place translated imports) are classified by
+            their ``type`` field.
+          * Unknown / other values collapse to ``FORMAT_ALL`` so they
+            never accidentally match a specific chip — the All chip
+            always shows them.
+        """
+        file_type = (book.get("type") or "").lower()
+        kind: str
+        if file_type == "in_progress":
+            kind = (book.get("workspace_kind") or "").lower()
+        else:
+            kind = file_type
+        mapping = {
+            "epub":  FORMAT_EPUB,
+            "txt":   FORMAT_TXT,
+            "pdf":   FORMAT_PDF,
+            "html":  FORMAT_HTML,
+            "image": FORMAT_IMAGE,
+        }
+        return mapping.get(kind, FORMAT_ALL)
 
     def _set_card_size(self, size_key):
         self._card_size = size_key
@@ -5775,6 +5981,11 @@ class EpubLibraryDialog(QDialog):
         query = self._search.text().strip().lower()
         if query:
             books = [b for b in books if query in str(b.get("name", "")).lower()]
+        if self._format_filter != FORMAT_ALL:
+            books = [
+                b for b in books
+                if self._format_of_book(b) == self._format_filter
+            ]
         return self._sorted_books(books)
 
     def _auto_refresh(self):
@@ -5806,6 +6017,7 @@ class EpubLibraryDialog(QDialog):
                     int(b.get("pending_chapters", 0) or 0),
                     str(b.get("translation_state", "") or ""),
                     bool(b.get("has_compiled_output", False)),
+                    bool(b.get("missing_raw_file", False)),
                     str(b.get("raw_source_path", "") or ""),
                     float(b.get("mtime", 0) or 0),
                     int(b.get("size", 0) or 0),
