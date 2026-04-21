@@ -255,6 +255,34 @@ def record_library_raw_input(path: str) -> None:
         logger.debug("Could not append to %s", reg)
 
 
+def remove_library_raw_input(path: str) -> None:
+    """Drop *path* from the raw-inputs registry.
+
+    Mirrors :func:`remove_library_translated_input` for the raw side
+    so the Delete handler can unregister a card whose backing file
+    lives outside the Library / output roots: the physical file stays
+    where the user put it, but the flash card disappears from the
+    scanner output because its registration is gone.
+    """
+    if not path:
+        return
+    try:
+        key = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+    except (TypeError, ValueError):
+        return
+    remaining = [
+        p for p in load_library_raw_inputs()
+        if os.path.normcase(os.path.normpath(os.path.abspath(p))) != key
+    ]
+    reg = get_library_raw_inputs_file()
+    try:
+        with open(reg, "w", encoding="utf-8") as f:
+            for p in remaining:
+                f.write(p + "\n")
+    except OSError:
+        logger.debug("Could not rewrite %s", reg)
+
+
 def get_library_translated_inputs_file() -> str:
     """Return ``Library/library_translated_inputs.txt`` — one path per line.
 
@@ -6288,12 +6316,16 @@ class EpubLibraryDialog(QDialog):
         # enumerate what's inside a folder target.
         targets: list[tuple[str, str, bool, dict]] = []
         seen_targets: set[str] = set()
-        # Paths that were intentionally skipped because they live
-        # outside the Library + output-root safe zones. Surfaced in
-        # the summary so the user knows why a card's backing file
-        # wasn't touched (e.g. a ``registered_translated=True`` EPUB
-        # the user dropped in from Downloads).
-        unsafe_skipped: list[str] = []
+        # (book_dict, path) pairs for cards whose backing file lives
+        # outside the Library + output-root safe zones. For those we
+        # only unregister the tracking-file entry so the flash card
+        # disappears — the physical file stays exactly where the
+        # user put it. Handled silently: no message box, no summary
+        # entry. This is the "Add Translation from Downloads" flow:
+        # the Library pointed at the file, the user clicks Delete
+        # on the card, and they just want the card gone, not the
+        # source EPUB wiped off their drive.
+        unregister_cards: list[tuple[dict, str]] = []
 
         # Safe roots for delete: anything under the Library folder
         # (covers Raw / Translated / registry files) or any configured
@@ -6340,13 +6372,11 @@ class EpubLibraryDialog(QDialog):
             # Library folder or the configured output roots. A raw
             # EPUB registered in place from Downloads, a stray compiled
             # EPUB dropped onto the Completed tab without Organize,
-            # etc. all land here and get filtered before they can be
-            # unlinked.
+            # etc. all land here — we route them to the
+            # unregister-only path so the flash card disappears but
+            # the on-disk file stays intact.
             if not _is_inside_safe_root(pth):
-                try:
-                    unsafe_skipped.append(os.path.abspath(pth))
-                except Exception:
-                    unsafe_skipped.append(str(pth))
+                unregister_cards.append((book, pth))
                 return
             key = os.path.normcase(os.path.normpath(os.path.abspath(pth)))
             if key in seen_targets:
@@ -6410,28 +6440,58 @@ class EpubLibraryDialog(QDialog):
             if p and os.path.isfile(p):
                 _queue(b.get("name") or os.path.basename(p), p, False, b)
             _queue_library_raw_copy(b)
+        # Perform silent unregistrations for unsafe cards (the "Add
+        # Translation from Downloads" flow). These operate directly on
+        # the tracking files — no confirmation, no message box, no
+        # summary line — since the physical file is left untouched.
+        def _unregister_unsafe_cards() -> int:
+            removed = 0
+            for bk, pth in unregister_cards:
+                try:
+                    if bk.get("in_library"):
+                        # A library-filed EPUB inside Library/Translated
+                        # can never reach this branch (it's inside the
+                        # safe root), so any ``in_library=True`` card
+                        # here is a raw-inputs entry — prune it.
+                        remove_library_raw_input(pth)
+                    elif bk.get("registered_translated"):
+                        remove_library_translated_input(pth)
+                    elif bk.get("type") == "in_progress":
+                        # Not-started / in-progress card whose raw
+                        # source sits outside Library/Raw: drop it
+                        # from the raw-inputs registry so the card
+                        # disappears on the next scan.
+                        remove_library_raw_input(pth)
+                    else:
+                        # Fallback: try both registries. No-op when
+                        # the path isn't in either.
+                        remove_library_raw_input(pth)
+                        remove_library_translated_input(pth)
+                    removed += 1
+                    try:
+                        self._selected_paths_ip.discard(pth)
+                        self._selected_paths_comp.discard(pth)
+                    except Exception:
+                        pass
+                except Exception:
+                    logger.debug(
+                        "Silent unregister failed for %s: %s",
+                        pth, traceback.format_exc())
+            return removed
+
         if not targets:
-            if unsafe_skipped:
-                preview = "\n".join(
-                    "  \u2022 " + p for p in unsafe_skipped[:6])
-                if len(unsafe_skipped) > 6:
-                    preview += (
-                        f"\n  \u2026 and "
-                        f"{len(unsafe_skipped) - 6} more.")
-                QMessageBox.information(
-                    self, "Delete",
-                    "Nothing was deleted \u2014 every selected item \n"
-                    "lives outside the Library folder and the \n"
-                    "configured output root(s), and Delete refuses \n"
-                    "to touch files the library didn't put there:\n\n"
-                    + preview,
-                )
-            else:
-                QMessageBox.information(
-                    self, "Delete",
-                    "Nothing to delete \u2014 none of the selected cards "
-                    "point at a file or folder on disk.",
-                )
+            # No disk deletes to perform — still honor the user's
+            # intent by unregistering any unsafe card(s) so the flash
+            # card disappears. Silent: no dialog, just refresh.
+            if unregister_cards:
+                _unregister_unsafe_cards()
+                QTimer.singleShot(0, self._load_books)
+                return
+            QMessageBox.information(
+                self, "Delete",
+                "Nothing to delete \u2014 none of the selected cards "
+                "point at a file or folder on disk.",
+            )
             return
 
         # Classify the batch. Simple prompt is only allowed when EVERY
@@ -6497,27 +6557,20 @@ class EpubLibraryDialog(QDialog):
                              pth, exc, traceback.format_exc())
                 errors.append(f"{label}: {exc}")
 
+        # Silently unregister any unsafe cards that rode along with
+        # this batch. The flash cards disappear on the next scan but
+        # the summary doesn't mention them — they're an implementation
+        # detail, not a user-facing failure.
+        _unregister_unsafe_cards()
+
         summary = f"Deleted {deleted} of {len(targets)} item" \
                   f"{'s' if len(targets) != 1 else ''}."
-        if unsafe_skipped:
-            preview = "\n".join(
-                "  \u2022 " + p for p in unsafe_skipped[:5])
-            if len(unsafe_skipped) > 5:
-                preview += (
-                    f"\n  \u2026 and {len(unsafe_skipped) - 5} more.")
-            summary += (
-                f"\n\nSkipped {len(unsafe_skipped)} item"
-                f"{'s' if len(unsafe_skipped) != 1 else ''} outside "
-                "the Library / output root(s):\n" + preview
-            )
         if errors:
             summary += (
                 f"\n\n{len(errors)} error"
                 f"{'s' if len(errors) != 1 else ''}:\n"
                 + "\n".join("  \u2022 " + e for e in errors[:5])
             )
-            QMessageBox.warning(self, "Delete", summary)
-        elif unsafe_skipped:
             QMessageBox.warning(self, "Delete", summary)
         else:
             QMessageBox.information(self, "Delete", summary)
