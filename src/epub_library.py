@@ -13561,6 +13561,20 @@ class EpubReaderDialog(QDialog):
         self._toc_list = QListWidget()
         self._toc_list.setMinimumWidth(100)
         self._toc_list.resize(220, self._toc_list.height())
+        # Word-wrap long chapter titles onto multiple lines so the TOC
+        # uses the extra vertical space instead of eliding with "\u2026".
+        # Combined with ``ElideNone``, titles that don't fit the sidebar
+        # width fall onto a second / third line (and the stylesheet
+        # below adds a row divider so wrapped entries still read as
+        # separate rows). ``Adjust`` resize mode + non-uniform item
+        # sizes lets Qt recompute each row's height when the splitter
+        # is dragged narrower or wider.
+        from PySide6.QtWidgets import QListView
+        self._toc_list.setWordWrap(True)
+        self._toc_list.setTextElideMode(Qt.ElideNone)
+        self._toc_list.setUniformItemSizes(False)
+        self._toc_list.setResizeMode(QListView.Adjust)
+        self._toc_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._toc_list.currentRowChanged.connect(self._on_chapter_selected)
         splitter.addWidget(self._toc_list)
 
@@ -14297,10 +14311,26 @@ class EpubReaderDialog(QDialog):
         self.setStyleSheet(f"QDialog {{ background: {bg}; }}")
         self._reader_stack.setStyleSheet(f"QStackedWidget {{ background: {bg}; border: none; }}")
         self._double_widget.setStyleSheet(f"background: {bg};")
+        # Row styling notes:
+        #   * Extra vertical padding (8/10 px) so a wrapped title
+        #     doesn't collide with the next row's text baseline.
+        #   * ``margin-bottom: 2px`` + a 1 px ``border-bottom``
+        #     draws a subtle divider between rows so the TOC reads
+        #     as a list of discrete entries even when the user shrinks
+        #     the sidebar enough to force wrapping.
+        #   * ``background-clip: padding-box`` keeps the rounded-
+        #     rect selection highlight inside the padding and off the
+        #     divider line.
         self._toc_list.setStyleSheet(f"""
             QListWidget {{ background: {bg}; border: none;
-                color: {fg}; font-size: 9pt; padding: 4px; }}
-            QListWidget::item {{ padding: 6px 8px; border-radius: 4px; }}
+                color: {fg}; font-size: 9pt; padding: 4px; outline: 0; }}
+            QListWidget::item {{
+                padding: 8px 10px;
+                margin-bottom: 2px;
+                border-radius: 4px;
+                border-bottom: 1px solid {border};
+                background-clip: padding-box;
+            }}
             QListWidget::item:selected {{ background: {border}; color: {t['heading']}; }}
             QListWidget::item:hover {{ background: {t['code_bg']}; }}
             QScrollBar:vertical {{ width: 8px; background: {bg}; }}
@@ -14310,6 +14340,15 @@ class EpubReaderDialog(QDialog):
             QScrollBar::handle:horizontal {{ background: {border}; border-radius: 4px; min-width: 20px; }}
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
         """)
+        # Re-layout so Qt recomputes each item's sizeHint against the
+        # new stylesheet padding + word-wrap width. Without this, an
+        # ``_apply_reader_style`` call after the TOC is populated
+        # leaves existing rows at their old height and the divider
+        # lines overlap the text of wrapped entries.
+        try:
+            self._toc_list.doItemsLayout()
+        except Exception:
+            pass
         self._toc_list.viewport().setStyleSheet(f"background: {bg};")
         self._nav_bar.setStyleSheet(f"background: {bg}; border-top: 1px solid {border};")
         self._loading_widget.setStyleSheet(f"background: {bg};")
