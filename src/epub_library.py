@@ -1069,6 +1069,48 @@ def _find_raw_source_for_folder(folder: str) -> str | None:
     return None
 
 
+def _resolve_book_output_folder(book: dict) -> str:
+    """Return the output-folder path that belongs to *book*, or ``""``.
+
+    A "real" output folder is one the translator actually wrote into —
+    i.e. the workspace holding ``translation_progress.json`` /
+    ``response_*.html`` artefacts. This helper is deliberately strict
+    about not dressing up ``Library/Translated`` (where a compiled EPUB
+    just happens to live) as an output folder, because that's never
+    what the user means when they ask for the "output folder".
+
+    Resolution order:
+
+      1. ``book['output_folder']`` — set by :func:`scan_output_folders`
+         for in-progress + promoted-compiled cards.
+      2. ``library_origins['translated']`` — for ``Library/Translated``
+         entries the stored "pre-organize" path's *parent* was the
+         original output folder; usually still on disk because organize
+         only moves the compiled EPUB out of it.
+
+    Returns ``""`` when neither resolves to an existing directory so the
+    caller can disable the button / take a different fallback instead
+    of opening the book's own containing folder (which, for library
+    entries, is ``Library/Translated`` — not what the user wants).
+    """
+    out = (book.get("output_folder") or "") if isinstance(book, dict) else ""
+    if out and os.path.isdir(out):
+        return out
+    if isinstance(book, dict) and book.get("in_library"):
+        try:
+            origins = _load_origins()
+            trans_map = origins.get("translated", {}) or {}
+            orig_path = trans_map.get(os.path.basename(book.get("path", "")))
+            if orig_path:
+                orig_folder = os.path.dirname(str(orig_path))
+                if orig_folder and os.path.isdir(orig_folder):
+                    return orig_folder
+        except Exception:
+            logger.debug("Output-folder origins lookup failed: %s",
+                         traceback.format_exc())
+    return ""
+
+
 def _find_raw_source_for_library_epub(library_epub_path: str) -> str:
     """Best-effort lookup for the raw source of a Library/Translated EPUB.
 
@@ -2557,6 +2599,13 @@ class EpubLibraryDialog(QDialog):
     # Emitted when the user triggers a multi-card "Load N for translation"
     # action. Payload is a list of absolute paths.
     import_epubs_requested = Signal(list)
+    # Emitted after an Organize / Undo Move operation relocates files on
+    # disk. Payload is a list of ``(old_abs_path, new_abs_path)`` tuples.
+    # Parents (e.g. TranslatorGUI) use it to update any stale paths in
+    # their own state — selected_files, entry_epub text, etc. — so the
+    # user doesn't end up clicking Run on a path that no longer exists
+    # after the raw was moved into Library/Raw.
+    files_reorganized = Signal(list)
 
     def __init__(self, config: dict | None = None, parent=None):
         super().__init__(parent)
@@ -4336,12 +4385,23 @@ class EpubLibraryDialog(QDialog):
                 lambda: self._load_multi_for_translation(raw_candidates))
         menu.addSeparator()
         folder_action = menu.addAction("\U0001f4c2  Open Output Folder")
-        # For in-progress cards the card "path" IS the output folder; for
-        # completed library EPUBs use the file's parent directory.
+        # Resolution rules:
+        #   * In-progress cards: the card ``path`` IS the output folder.
+        #   * Anything else: use :func:`_resolve_book_output_folder` so
+        #     Library/Translated entries fall back to the origins
+        #     registry's original output folder (mirrors the Book
+        #     Details 📁 button). Previously this branch used
+        #     ``os.path.dirname(book['path'])`` as the fallback, which
+        #     for library-organized EPUBs pointed at ``Library/
+        #     Translated`` instead of the workspace that actually
+        #     contains ``translation_progress.json`` / response_*.
+        #   * Last-resort fallback: the book's own containing folder,
+        #     same as before, so non-library files without any
+        #     registered origin still get *some* folder opened.
         if file_type == "in_progress":
             output_folder = book.get("output_folder") or book.get("path", "")
         else:
-            output_folder = (book.get("output_folder")
+            output_folder = (_resolve_book_output_folder(book)
                              or os.path.dirname(book.get("path", "")))
         folder_action.triggered.connect(lambda: _open_folder_in_explorer(output_folder))
         lib_action = menu.addAction("\U0001f4c1  Open Library Folder")
@@ -6613,41 +6673,15 @@ class BookDetailsDialog(QDialog):
     def _resolve_output_folder_target(self) -> str:
         """Return the output-folder path the 📁 button should open, or "".
 
-        Shared by both the button's enable / tooltip state and the click
-        handler so the two can't disagree. A "real" output folder is one
-        the translator actually wrote into — we refuse to dress up
-        ``Library/Translated`` (where a compiled EPUB just happens to
-        live) as an output folder, because that's never what the user
-        means when they click 📁. Resolution order:
-
-          1. ``book['output_folder']`` — ``scan_output_folders`` sets
-             this for in-progress + promoted-compiled cards.
-          2. ``library_origins['translated']`` — for Library/Translated
-             entries the stored "pre-organize" path's parent was the
-             original output folder; usually still on disk because
-             organize only moves the compiled EPUB out.
-
-        When neither resolves to an existing directory we return ``""``
-        so the caller can disable the button instead of opening the
-        book's own containing folder.
+        Thin wrapper around :func:`_resolve_book_output_folder` so the
+        enable / tooltip state and the click handler share one
+        resolver with the card context menu (the two previously drifted
+        out of sync: Book Details consulted the origins registry but
+        the context menu fell back to the book's containing folder,
+        which for library-organized entries was ``Library/Translated``
+        instead of the original output folder).
         """
-        out = self._book.get("output_folder") or ""
-        if out and os.path.isdir(out):
-            return out
-        if self._book.get("in_library"):
-            try:
-                origins = _load_origins()
-                trans_map = origins.get("translated", {}) or {}
-                orig_path = trans_map.get(os.path.basename(
-                    self._book.get("path", "")))
-                if orig_path:
-                    orig_folder = os.path.dirname(str(orig_path))
-                    if orig_folder and os.path.isdir(orig_folder):
-                        return orig_folder
-            except Exception:
-                logger.debug("Output-folder origins lookup failed: %s",
-                             traceback.format_exc())
-        return ""
+        return _resolve_book_output_folder(self._book)
 
     def _resolve_source_file_target(self) -> str:
         """Return the raw source file path the 🔗 button should reveal.
