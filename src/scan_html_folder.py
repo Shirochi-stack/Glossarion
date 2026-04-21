@@ -232,7 +232,19 @@ TRANSLATION_ARTIFACTS = {
 # AI artifact detection patterns (mirrors ContentProcessor.clean_ai_artifacts)
 AI_ARTIFACT_FIRSTLINE_PATTERNS = [
     re.compile(r'^(?:Sure|Okay|Understood|Of course|Got it|Alright|Certainly|Here\'s|Here is)\b', re.IGNORECASE),
-    re.compile(r'^(?:I\'ll|I will|Let me)\s+(?:translate|help|assist)\b', re.IGNORECASE),
+    # "I'll translate" / "Let me translate" — unambiguously AI preface
+    re.compile(r'^(?:I\'ll|I will|Let me)\s+translate\b', re.IGNORECASE),
+    # "I'll help/assist" ONLY when followed by translation-specific context.
+    # Bare "I'll help you ..." is far too common in normal prose / dialogue /
+    # chapter titles (e.g. "I'll Help You ...") and must NOT be flagged.
+    re.compile(
+        r'^(?:I\'ll|I will|Let me)\s+(?:help|assist)\s+'
+        r'(?:you\s+)?'
+        r'(?:translate|'
+        r'with\s+(?:the\s+|this\s+|your\s+)?(?:translation|text|chapter|passage|novel|korean|chinese|japanese)'
+        r')\b',
+        re.IGNORECASE
+    ),
     re.compile(r'^(?:System|Assistant|AI|User|Human|Model)\s*:', re.IGNORECASE),
     re.compile(r'^\[PART\s+\d+/\d+\]', re.IGNORECASE),
     re.compile(r'^(?:Translation note|Note|Here\'s the translation|I\'ve translated)\b', re.IGNORECASE),
