@@ -125,13 +125,89 @@ def _migrate_legacy_library_layout() -> None:
         _save_origins(origins)
 
 
+# Names of tracking / registry files that live alongside the library
+# shelves and must NEVER be mistaken for content by the scanners,
+# the Undo orphan pass, or the count helpers. Keeping these as plain
+# filenames (not paths) lets the same blocklist catch both the new
+# ``Library/*.txt`` location and any legacy copy still inside
+# ``Library/Raw`` from an earlier build.
+_LIBRARY_TRACKING_FILENAMES = frozenset({
+    "library_raw_inputs.txt",
+    "library_translated_inputs.txt",
+    "library_origins.txt",
+})
+
+
 def get_library_raw_inputs_file() -> str:
-    """Return ``Library/Raw/library_raw_inputs.txt`` — one path per line.
+    """Return ``Library/library_raw_inputs.txt`` — one path per line.
 
     Tracks every raw input file that has been run through the translator.
     The list is append-only; duplicates are collapsed on read.
+
+    Sits at the Library root (next to ``library_translated_inputs.txt``
+    and ``library_origins.txt``) rather than inside ``Library/Raw`` so
+    the content-scanning code doesn't mistake the registry for a raw
+    source file. A legacy build wrote it into ``Library/Raw``; the
+    migration below moves any surviving copy up to the root on first
+    access so existing users don't lose their registry state.
     """
-    return os.path.join(get_library_raw_dir(), "library_raw_inputs.txt")
+    new_path = os.path.join(get_library_dir(), "library_raw_inputs.txt")
+    legacy_path = os.path.join(
+        get_library_raw_dir(), "library_raw_inputs.txt")
+    try:
+        legacy_exists = os.path.isfile(legacy_path)
+        new_exists = os.path.isfile(new_path)
+        if legacy_exists and not new_exists:
+            # Promote the legacy copy to the new location.
+            try:
+                shutil.move(legacy_path, new_path)
+            except OSError:
+                # Fallback: best-effort copy + remove so the legacy
+                # path doesn't keep tripping the content scanners.
+                try:
+                    shutil.copyfile(legacy_path, new_path)
+                    os.remove(legacy_path)
+                except OSError:
+                    logger.debug(
+                        "library_raw_inputs migration failed: %s",
+                        traceback.format_exc())
+        elif legacy_exists and new_exists:
+            # Both exist — merge the legacy entries into the new file
+            # then drop the legacy copy so future scans only hit one.
+            try:
+                merged: list[str] = []
+                seen: set[str] = set()
+                for src in (new_path, legacy_path):
+                    try:
+                        with open(src, "r", encoding="utf-8") as f:
+                            for line in f:
+                                p = line.strip()
+                                if not p:
+                                    continue
+                                key = os.path.normcase(os.path.normpath(
+                                    os.path.abspath(p)))
+                                if key in seen:
+                                    continue
+                                seen.add(key)
+                                merged.append(p)
+                    except OSError:
+                        continue
+                with open(new_path, "w", encoding="utf-8") as f:
+                    for p in merged:
+                        f.write(p + "\n")
+                try:
+                    os.remove(legacy_path)
+                except OSError:
+                    pass
+            except Exception:
+                logger.debug(
+                    "library_raw_inputs merge failed: %s",
+                    traceback.format_exc())
+    except Exception:
+        logger.debug(
+            "library_raw_inputs path resolve failed: %s",
+            traceback.format_exc())
+    return new_path
 
 
 def load_library_raw_inputs() -> list[str]:
@@ -293,7 +369,20 @@ def _origins_file() -> str:
 
 
 def _load_origins() -> dict:
-    """Load the structured origins mapping (auto-upgrades the legacy format)."""
+    """Load the structured origins mapping (auto-upgrades the legacy format).
+
+    Also sanitizes the loaded mapping by dropping any entry whose key
+    is a library registry filename (``library_raw_inputs.txt``,
+    ``library_translated_inputs.txt``, ``library_origins.txt``).
+    Legacy builds placed ``library_raw_inputs.txt`` inside ``Library/Raw``
+    where the organize scan happily treated it as a raw source and wrote
+    a ghost entry into ``origins['raw']``. Undo then reported
+    ``raw:library_raw_inputs.txt: not found in Library/Raw`` on every
+    restore because the registry file had since been promoted to the
+    library root. Filtering here means any pre-existing garbage entry
+    is forgotten on first read, and the sanitized dict is flushed back
+    to disk so the next load stays clean.
+    """
     import json
     try:
         with open(_origins_file(), "r", encoding="utf-8") as f:
@@ -304,7 +393,7 @@ def _load_origins() -> dict:
         return {"version": 3, "raw": {}, "translated": {}, "pairs": {}}
     # Legacy flat mapping → promote to ``translated``.
     if "version" not in data and "raw" not in data and "translated" not in data:
-        return {"version": 3, "raw": {}, "translated": dict(data), "pairs": {}}
+        data = {"version": 3, "raw": {}, "translated": dict(data), "pairs": {}}
     data.setdefault("version", 3)
     data.setdefault("raw", {})
     data.setdefault("translated", {})
@@ -315,6 +404,34 @@ def _load_origins() -> dict:
         data["translated"] = {}
     if not isinstance(data["pairs"], dict):
         data["pairs"] = {}
+
+    # Drop tracking-file ghosts from every bucket. ``pairs`` holds raw
+    # basenames as values too, so a legacy entry pointing at the
+    # registry file must also be purged there.
+    dirty = False
+    for bucket in ("raw", "translated"):
+        sanitized = {
+            k: v for k, v in data[bucket].items()
+            if k and k.lower() not in _LIBRARY_TRACKING_FILENAMES
+        }
+        if len(sanitized) != len(data[bucket]):
+            data[bucket] = sanitized
+            dirty = True
+    sanitized_pairs = {
+        k: v for k, v in data["pairs"].items()
+        if k and k.lower() not in _LIBRARY_TRACKING_FILENAMES
+        and (not isinstance(v, str)
+             or v.lower() not in _LIBRARY_TRACKING_FILENAMES)
+    }
+    if len(sanitized_pairs) != len(data["pairs"]):
+        data["pairs"] = sanitized_pairs
+        dirty = True
+    if dirty:
+        try:
+            _save_origins(data)
+        except Exception:
+            logger.debug("origins sanitize-flush failed: %s",
+                         traceback.format_exc())
     return data
 
 
@@ -2747,6 +2864,35 @@ class _DualScannerThread(QThread):
                 if not same:
                     trans_map_mut[lib_basename] = desired_entry
                     origins_dirty = True
+                # A ``ready_to_compile`` workspace whose compiled EPUB
+                # now lives in ``Library/Translated`` is genuinely
+                # completed — the compile step already ran, the
+                # artefact just got organized out. Upgrade the
+                # in-memory state so:
+                #   * the library card stays on the Completed tab
+                #     (inheritance block below only rewrites the
+                #     library state when the workspace is
+                #     non-completed, so a "completed" ws state
+                #     keeps the library row in place)
+                #   * the workspace row doesn't show a stale
+                #     "Ready to compile" pill on the In Progress tab
+                #     (it'll be ghost-filtered out anyway, but the
+                #     state has to be right for the brief window
+                #     where both tabs still contain it).
+                #   * ``has_compiled_output`` / ``compiled_output_path``
+                #     now point at the library-filed EPUB so callers
+                #     that consult those fields resolve to the real
+                #     compiled artefact.
+                if ws.get("translation_state") == "ready_to_compile":
+                    lib_path = lr.get("path", "") or ""
+                    ws["translation_state"] = "completed"
+                    ws["is_in_progress"] = False
+                    if lib_path:
+                        ws["has_compiled_output"] = True
+                        ws["compiled_output_path"] = lib_path
+                        ws["compiled_output_kind"] = "epub"
+                        ws["has_output_epub"] = True
+                        ws["output_epub_path"] = lib_path
                 raw_src = ws.get("raw_source_path") or ""
                 if raw_src and os.path.isfile(raw_src):
                     try:
@@ -2770,6 +2916,57 @@ class _DualScannerThread(QThread):
                     logger.debug(
                         "origins auto-update failed: %s",
                         traceback.format_exc())
+
+        # Unified state upgrade: every ``ready_to_compile`` workspace
+        # whose folder is in ``organized_folders`` is actually
+        # COMPLETED — its compiled EPUB just lives in
+        # ``Library/Translated`` instead of alongside the progress
+        # file. Runs regardless of whether the link came from
+        # origins.txt, the title-key fallback, or a mix, so the
+        # "ready to compile" check now consults the library shelf
+        # uniformly via the combined ghost set.
+        #
+        # Without this upgrade, the inheritance block below would
+        # overwrite the library card's state with ``ready_to_compile``
+        # and yank it onto the In Progress tab — exactly the
+        # duplicate-card / wrong-state behaviour the user hit when
+        # organizing an EPUB in then out of Library/Translated.
+        if organized_folders:
+            trans_dir_abs = get_library_translated_dir()
+            # Build a reverse lookup from workspace folder → library
+            # path so we can populate ``compiled_output_path`` on the
+            # upgraded workspace without another disk scan.
+            folder_to_lib_path: dict[str, str] = {}
+            for lib_basename, orig_path in (trans_map or {}).items():
+                if not orig_path:
+                    continue
+                try:
+                    parent = os.path.normcase(os.path.normpath(
+                        os.path.abspath(os.path.dirname(str(orig_path)))))
+                except Exception:
+                    continue
+                candidate = os.path.join(trans_dir_abs, lib_basename)
+                if os.path.isfile(candidate):
+                    folder_to_lib_path.setdefault(parent, candidate)
+            for ws in output_rows:
+                if ws.get("translation_state") != "ready_to_compile":
+                    continue
+                ws_folder = ws.get("output_folder") or ""
+                if not ws_folder:
+                    continue
+                fk = os.path.normcase(os.path.normpath(
+                    os.path.abspath(ws_folder)))
+                if fk not in organized_folders:
+                    continue
+                ws["translation_state"] = "completed"
+                ws["is_in_progress"] = False
+                lib_path = folder_to_lib_path.get(fk, "")
+                if lib_path:
+                    ws["has_compiled_output"] = True
+                    ws["compiled_output_path"] = lib_path
+                    ws["compiled_output_kind"] = "epub"
+                    ws["has_output_epub"] = True
+                    ws["output_epub_path"] = lib_path
 
         def _is_organized_ghost(row: dict) -> bool:
             """True when *row* is an output-folder scan result whose
@@ -4130,6 +4327,58 @@ class EpubLibraryDialog(QDialog):
                 count += 1
         return count
 
+    def _build_workspace_title_index(self) -> dict:
+        """Return a ``{normalized_title_key: workspace_book_dict}`` map.
+
+        Walks both the current in-progress and completed book lists
+        (as seen by the dialog) and indexes each workspace-backed
+        entry by every candidate title we can derive — folder name,
+        raw source stem, and every ``metadata.json`` title field.
+
+        Used by :meth:`_undo_organize_prompt` to pick a restore target
+        for Library/Translated files that have no ``origins['translated']``
+        entry. Keys run through :func:`_norm_book_key` so comparisons
+        survive the NTFS filename mangling that desynchronizes the
+        on-disk stem from the metadata title (``"… Fantasy."`` vs
+        ``"… Fantasy"``).
+        """
+        index: dict[str, dict] = {}
+
+        def _ingest(book: dict) -> None:
+            ws_folder = book.get("output_folder") or ""
+            if not ws_folder:
+                return
+            keys: set[str] = set()
+            fn = book.get("folder_name") or os.path.basename(ws_folder)
+            if fn:
+                keys.add(_norm_book_key(os.path.splitext(fn)[0]))
+            raw = book.get("raw_source_path") or ""
+            if raw:
+                keys.add(_norm_book_key(
+                    os.path.splitext(os.path.basename(raw))[0]))
+            md = book.get("metadata_json") or {}
+            if isinstance(md, dict):
+                for md_key in ("title", "original_title",
+                               "translated_title", "raw_title",
+                               "source_title", "english_title"):
+                    val = md.get(md_key)
+                    if isinstance(val, str) and val.strip():
+                        keys.add(_norm_book_key(val))
+            for key in keys:
+                if key:
+                    index.setdefault(key, book)
+
+        for book in self._in_progress_books:
+            _ingest(book)
+        for book in self._completed_books:
+            # Library entries don't own a workspace — skip so a library
+            # row matching itself doesn't produce a nonsense restore
+            # target pointing back at Library/Translated.
+            if book.get("in_library"):
+                continue
+            _ingest(book)
+        return index
+
     def _update_organize_counts(self):
         """Refresh the Organize + Undo button labels with live counts.
 
@@ -4146,19 +4395,58 @@ class EpubLibraryDialog(QDialog):
         except Exception:
             raw_orig = 0
             trans_orig = 0
+        # Also count files physically sitting in the library shelves.
+        # Undo now covers orphan files (no origins entry) too, so the
+        # button must stay enabled / labelled as long as SOMETHING is
+        # restorable — not only when the origins registry has rows.
+        raw_disk = self._count_library_files(get_library_raw_dir())
+        trans_disk = self._count_library_files(
+            get_library_translated_dir(), epub_only=True)
+        raw_undo = max(raw_orig, raw_disk)
+        trans_undo = max(trans_orig, trans_disk)
         try:
             self._ip_organize_btn.setText(
                 f"\U0001f4e5  Organize ({raw_count})")
             self._ip_organize_btn.setEnabled(raw_count > 0)
-            self._ip_undo_btn.setText(f"\u21a9  Undo ({raw_orig})")
-            self._ip_undo_btn.setEnabled(raw_orig > 0)
+            self._ip_undo_btn.setText(f"\u21a9  Undo ({raw_undo})")
+            self._ip_undo_btn.setEnabled(raw_undo > 0)
             self._comp_organize_btn.setText(
                 f"\U0001f4e5  Organize ({trans_count})")
             self._comp_organize_btn.setEnabled(trans_count > 0)
-            self._comp_undo_btn.setText(f"\u21a9  Undo ({trans_orig})")
-            self._comp_undo_btn.setEnabled(trans_orig > 0)
+            self._comp_undo_btn.setText(f"\u21a9  Undo ({trans_undo})")
+            self._comp_undo_btn.setEnabled(trans_undo > 0)
         except Exception:
             pass
+
+    @staticmethod
+    def _count_library_files(folder: str,
+                             epub_only: bool = False) -> int:
+        """Count candidate restorable files sitting directly in *folder*.
+
+        ``epub_only`` restricts the count to ``.epub`` files (used for
+        Library/Translated where only compiled EPUBs are tracked);
+        other shelves include ``.txt``, ``.pdf``, and ``.html`` too.
+        Registry / tracking files (``library_*_inputs.txt``,
+        ``library_origins.txt``) are always excluded so a legacy
+        copy sitting inside ``Library/Raw`` doesn't inflate the
+        Undo counter / enable state.
+        """
+        if not folder or not os.path.isdir(folder):
+            return 0
+        exts = (".epub",) if epub_only else (
+            ".epub", ".txt", ".pdf", ".html")
+        count = 0
+        try:
+            for entry in os.scandir(folder):
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                if entry.name.lower() in _LIBRARY_TRACKING_FILENAMES:
+                    continue
+                if entry.name.lower().endswith(exts):
+                    count += 1
+        except (PermissionError, OSError):
+            return 0
+        return count
 
     def _import_epub(self):
         """Pick raw source EPUB(s), copy them into Library/Raw, and scaffold
@@ -4929,28 +5217,147 @@ class EpubLibraryDialog(QDialog):
         """Ask the user which category to undo, then reverse those moves.
 
         Prompts with three buttons: Raw, Translated, All. Each button
-        moves the affected files back to their original locations (from
-        the origins registry) and rewrites any stale ``source_epub.txt``
-        pointers.
+        moves the affected files back to their original locations — by
+        origins registry lookup when possible, otherwise falling back
+        to a best-guess workspace target derived from title matching
+        (same rules the scanner uses to dedup cross-tab duplicates).
+        Also rewrites any stale ``source_epub.txt`` pointers.
+
+        Files actually sitting in ``Library/Raw`` / ``Library/Translated``
+        are enumerated *on disk* as well as from the origins registry,
+        so orphan files dropped in through any non-organize route
+        (manual copy, legacy install with a missing origins.txt, etc.)
+        still get processed instead of being silently ignored.
         """
         origins = _load_origins()
         raw_map = dict(origins.get("raw", {}) or {})
         trans_map = dict(origins.get("translated", {}) or {})
         pair_map = dict(origins.get("pairs", {}) or {})
+
+        raw_dir = get_library_raw_dir()
+        trans_dir = get_library_translated_dir()
+
+        # Extend raw_map / trans_map with every EPUB actually on disk
+        # in the library shelves so "Undo Move" covers orphan files
+        # too. For orphans we compute a best-guess restore target via
+        # title matching against the scanned in-progress / completed
+        # workspaces; if no match lands we fall back to the library
+        # parent dir so the file lands somewhere reachable rather
+        # than just vanishing. User feedback drove this: clicking
+        # Undo on a file with no origins record used to silently do
+        # nothing, leaving the file sitting in Library/Translated
+        # forever.
+        workspace_by_key = self._build_workspace_title_index()
+
+        def _best_guess_restore(lib_path: str,
+                                default_parent: str) -> str:
+            """Pick a restore destination for *lib_path* when no origin
+            entry exists. Tries title-matched workspace first, falls
+            back to *default_parent* (the parent of the library dir,
+            i.e. where the user is likely to find the file).
+            """
+            stem = os.path.splitext(os.path.basename(lib_path))[0]
+            candidate_keys: set[str] = set()
+            k = _norm_book_key(stem)
+            if k:
+                candidate_keys.add(k)
+            try:
+                for t in _extract_epub_titles(lib_path):
+                    k = _norm_book_key(t)
+                    if k:
+                        candidate_keys.add(k)
+            except Exception:
+                logger.debug("Undo title extraction failed: %s",
+                             traceback.format_exc())
+            for k in candidate_keys:
+                ws = workspace_by_key.get(k)
+                if not ws:
+                    continue
+                ws_folder = ws.get("output_folder") or ""
+                if ws_folder and os.path.isdir(ws_folder):
+                    return os.path.join(
+                        ws_folder, os.path.basename(lib_path))
+            return os.path.join(
+                default_parent, os.path.basename(lib_path))
+
+        raw_orphans: dict[str, str] = {}
+        trans_orphans: dict[str, str] = {}
+        if os.path.isdir(raw_dir):
+            raw_default_parent = os.path.dirname(
+                os.path.normpath(raw_dir)) or os.path.expanduser("~")
+            try:
+                for entry in os.scandir(raw_dir):
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    # Never treat library registry files as content —
+                    # a legacy copy of ``library_raw_inputs.txt`` used to
+                    # live in ``Library/Raw`` and would trip the
+                    # collision prompt if surfaced as an orphan.
+                    if entry.name.lower() in _LIBRARY_TRACKING_FILENAMES:
+                        continue
+                    nl = entry.name.lower()
+                    if not (nl.endswith(".epub") or nl.endswith(".txt")
+                            or nl.endswith(".pdf") or nl.endswith(".html")):
+                        continue
+                    if entry.name in raw_map:
+                        continue
+                    raw_orphans[entry.name] = _best_guess_restore(
+                        entry.path, raw_default_parent)
+            except (PermissionError, OSError):
+                pass
+        if os.path.isdir(trans_dir):
+            trans_default_parent = os.path.dirname(
+                os.path.normpath(trans_dir)) or os.path.expanduser("~")
+            try:
+                for entry in os.scandir(trans_dir):
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    if entry.name.lower() in _LIBRARY_TRACKING_FILENAMES:
+                        continue
+                    if not entry.name.lower().endswith(".epub"):
+                        continue
+                    if entry.name in trans_map:
+                        continue
+                    trans_orphans[entry.name] = _best_guess_restore(
+                        entry.path, trans_default_parent)
+            except (PermissionError, OSError):
+                pass
+
+        # Merge orphans into the restore maps so the existing loops
+        # below process them alongside registry-backed entries.
+        raw_map.update(raw_orphans)
+        trans_map.update(trans_orphans)
+
         if not raw_map and not trans_map:
             QMessageBox.information(
                 self, "Undo Move",
-                "No previous organize operation is recorded. Nothing to undo.")
+                "No files to undo — Library/Raw and Library/Translated "
+                "are both empty and the origins registry is clean.")
             return
 
         msg = QMessageBox(self)
         msg.setWindowTitle("Undo Move")
         raw_count = len(raw_map)
         trans_count = len(trans_map)
+        orphan_note = ""
+        if raw_orphans or trans_orphans:
+            pieces = []
+            if trans_orphans:
+                pieces.append(f"{len(trans_orphans)} translated")
+            if raw_orphans:
+                pieces.append(f"{len(raw_orphans)} raw")
+            orphan_note = (
+                f"\n\n({' + '.join(pieces)} orphan file"
+                f"{'s' if (len(raw_orphans) + len(trans_orphans)) != 1 else ''} "
+                "had no origins record — these will be moved to the "
+                "best-guess matching workspace or to the Library's "
+                "parent folder.)"
+            )
         msg.setText(
             f"Which category do you want to restore to the original location?\n\n"
             f"  \u2022 Raw sources in Library/Raw: {raw_count}\n"
             f"  \u2022 Translated EPUBs in Library/Translated: {trans_count}"
+            f"{orphan_note}"
         )
         msg.setIcon(QMessageBox.Question)
         btn_raw = msg.addButton("Raw", QMessageBox.AcceptRole)
