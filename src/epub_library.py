@@ -3929,7 +3929,7 @@ class _BookCard(QFrame):
                         "color: #ffb347; "
                         "background: rgba(255, 179, 71, 0.18); "
                         "border: 1px solid #ffb347; border-radius: 3px; "
-                        "font-size: 7pt; font-weight: bold; padding: 1px 5px;"
+                        "font-size: 7pt; font-weight: bold; padding: 0 5px 2px 5px;"
                     )
                     progress_row.addWidget(pill)
                     ribbon_text = "OUTDATED PROGRESS"
@@ -3940,7 +3940,7 @@ class _BookCard(QFrame):
                     pill.setStyleSheet(
                         "color: #8ab4d0; background: rgba(138, 180, 208, 0.15); "
                         "border: 1px solid #8ab4d0; border-radius: 3px; "
-                        "font-size: 7pt; font-weight: bold; padding: 1px 5px;"
+                        "font-size: 7pt; font-weight: bold; padding: 0 5px 2px 5px;"
                     )
                     progress_row.addWidget(pill)
                     ribbon_text = "NOT STARTED"
@@ -3960,7 +3960,7 @@ class _BookCard(QFrame):
                         "color: #6ee8a0; "
                         "background: rgba(110, 232, 160, 0.16); "
                         "border: 1px solid #6ee8a0; border-radius: 3px; "
-                        "font-size: 7pt; font-weight: bold; padding: 1px 5px;"
+                        "font-size: 7pt; font-weight: bold; padding: 0 5px 2px 5px;"
                     )
                     progress_row.addWidget(pill)
                     ribbon_text = "READY TO COMPILE"
@@ -3973,7 +3973,7 @@ class _BookCard(QFrame):
                     pill.setStyleSheet(
                         "color: #ffd166; background: rgba(108, 99, 255, 0.18); "
                         "border: 1px solid #6c63ff; border-radius: 3px; "
-                        "font-size: 7pt; font-weight: bold; padding: 1px 5px;"
+                        "font-size: 7pt; font-weight: bold; padding: 0 5px 2px 5px;"
                     )
                     progress_row.addWidget(pill)
                     if total:
