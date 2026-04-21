@@ -711,6 +711,149 @@ def _resolve_output_roots(config: dict | None = None) -> list[str]:
     return []
 
 
+# Characters Windows strips / mangles in filenames that the translator
+# happily leaves in a book's ``metadata.json`` title. We remove them
+# from both sides before comparing so a title like ``"Foo: Bar."`` in
+# metadata still matches the on-disk filename ``"Foo Bar.epub"``.
+_FILENAME_STRIP_CHARS = '<>:"/\\|?*'
+
+
+# Per-process cache of EPUB title strings keyed by ``path|mtime`` so a
+# repeated scan (auto-refresh, undo, organize, …) doesn't re-open the
+# zip for every library EPUB every time.
+_EPUB_TITLES_CACHE: dict[str, tuple[str, ...]] = {}
+
+
+def _extract_epub_titles(epub_path: str) -> tuple[str, ...]:
+    """Return title-like strings embedded in *epub_path*'s OPF metadata.
+
+    Reads only the OPF (no content decode), pulling ``dc:title``,
+    ``dc:alternative``, and the ``calibre:original_title`` meta element
+    the compiler writes at build time (see ``_create_book`` in
+    ``epub_converter.py`` where the translator stores the raw source
+    title under that field). The returned tuple deliberately keeps
+    entries raw — callers pass each through :func:`_norm_book_key`
+    before using them as match keys.
+
+    Cached per ``(path, mtime)`` so repeat scans are cheap. Returns an
+    empty tuple on any failure — a missing title is never fatal for
+    the scanner.
+    """
+    if not epub_path or not os.path.isfile(epub_path):
+        return ()
+    try:
+        mtime = os.path.getmtime(epub_path)
+    except OSError:
+        mtime = 0
+    cache_key = f"{epub_path}|{mtime}"
+    cached = _EPUB_TITLES_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    titles: list[str] = []
+    try:
+        import zipfile
+        from xml.etree import ElementTree as ET
+        with zipfile.ZipFile(epub_path, "r") as zf:
+            names = zf.namelist()
+            names_set = set(names)
+            opf_path = None
+            if "META-INF/container.xml" in names_set:
+                try:
+                    container_xml = zf.read(
+                        "META-INF/container.xml").decode(
+                            "utf-8", errors="replace")
+                    ctree = ET.fromstring(container_xml)
+                    ns = {"c": "urn:oasis:names:tc:opendocument:xmlns:container"}
+                    rootfile = ctree.find(".//c:rootfile", ns)
+                    if rootfile is not None:
+                        opf_path = rootfile.get("full-path")
+                except Exception:
+                    pass
+            if not opf_path:
+                for zname in names:
+                    if zname.lower().endswith(".opf"):
+                        opf_path = zname
+                        break
+            if opf_path and opf_path in names_set:
+                opf_xml = zf.read(opf_path).decode(
+                    "utf-8", errors="replace")
+                otree = ET.fromstring(opf_xml)
+                DC = "http://purl.org/dc/elements/1.1/"
+                OPF = "http://www.idpf.org/2007/opf"
+                for tag in ("title", "alternative"):
+                    for el in otree.findall(f".//{{{DC}}}{tag}"):
+                        txt = (el.text or "").strip()
+                        if txt:
+                            titles.append(txt)
+                # Calibre-style ``<meta name="calibre:original_title"
+                # content="…"/>`` — this is how the translator stores
+                # the raw source title when compiling, so it's the
+                # single most useful signal for pairing a
+                # translated-name library EPUB back to its
+                # raw-name workspace.
+                for meta_el in otree.findall(f".//{{{OPF}}}meta"):
+                    name = meta_el.get("name") or ""
+                    if name.lower() in ("calibre:original_title",
+                                        "original_title"):
+                        content = meta_el.get("content") or ""
+                        content = content.strip()
+                        if content:
+                            titles.append(content)
+    except Exception:
+        logger.debug("OPF title extraction failed for %s: %s",
+                     epub_path, traceback.format_exc())
+    result = tuple(dict.fromkeys(titles))  # preserve order, drop dupes
+    _EPUB_TITLES_CACHE[cache_key] = result
+    return result
+
+
+def _norm_book_key(value: str) -> str:
+    """Normalize a book title/filename for cross-source comparison.
+
+    The scanner links a Library/Translated EPUB to its originating
+    workspace through several potentially-misaligned sources:
+
+      * the workspace folder name (source-language raw stem)
+      * the resolved raw source stem (also source-language)
+      * the workspace's ``metadata.json`` title fields
+        (``title`` is usually the *translated* title after compile)
+      * the library EPUB filename stem (translated title, post
+        Windows filename sanitization)
+
+    Different call-sites produce slightly different strings for the
+    same book — e.g. metadata might hold
+    ``"… Romance Fantasy."`` (trailing period) while the on-disk
+    EPUB is ``"… Romance Fantasy.epub"`` (period stripped because
+    NTFS forbids trailing dots). Normalizing through this helper
+    makes those two strings equal so the pairing succeeds.
+
+    Rules:
+      * strip characters disallowed in Windows filenames
+      * collapse whitespace runs into single spaces
+      * strip leading/trailing whitespace AND trailing periods
+        (NTFS silently drops trailing ``.``)
+      * casefold for Unicode-aware lowercase comparison
+
+    Returns ``""`` when the input doesn't contain anything meaningful
+    so callers can skip the key instead of collapsing onto the empty
+    string (which would spuriously match unrelated unnamed entries).
+    """
+    if not value:
+        return ""
+    import re as _re
+    s = str(value)
+    # Drop Windows-illegal chars so on-disk filenames and in-memory
+    # titles collapse to the same key.
+    s = s.translate({ord(c): " " for c in _FILENAME_STRIP_CHARS})
+    # Collapse whitespace runs.
+    s = _re.sub(r"\s+", " ", s)
+    # Drop trailing periods + whitespace (NTFS / FAT strip trailing
+    # dots from filenames, so a metadata title ending in ``.`` won't
+    # match the on-disk basename unless we normalize it away).
+    s = s.strip().rstrip(". \t")
+    return s.casefold()
+
+
 def _is_gallery_filename(name: str) -> bool:
     """Return True if *name* refers to the auto-generated gallery page.
 
@@ -1235,8 +1378,15 @@ def _resolve_book_source_file(book: dict) -> str:
          :func:`_find_raw_source_for_library_epub` so cards whose
          scan result predates the origins ``pairs`` entry can still
          find the matching raw.
-      3. Fall back to ``book['path']`` (the book's own file) when
-         nothing else resolves. Non-existent paths return ``""``.
+
+    Returns ``""`` when no RAW source can be resolved — the caller
+    (context menu / 🔗 button) omits / disables the action in that
+    case instead of revealing a misleading target. Previously this
+    fell back to ``book['path']``, which for ``Library/Translated``
+    entries is the *compiled* EPUB sitting inside the translated
+    shelf — so the action appeared to "work" but just opened the
+    translated subfolder (identical to the "Reveal Translated File"
+    action, which is the opposite of what the user asked for).
 
     Caches any fresh resolution back onto the book dict so repeat
     calls (and the reader's Raw toggle) skip the lookup.
@@ -1257,9 +1407,6 @@ def _resolve_book_source_file(book: dict) -> str:
         if resolved and os.path.isfile(resolved):
             book["raw_source_path"] = resolved
             return resolved
-    fallback = book.get("path", "") or ""
-    if fallback and os.path.isfile(fallback):
-        return fallback
     return ""
 
 
@@ -2476,6 +2623,154 @@ class _DualScannerThread(QThread):
                         os.path.abspath(folder)))
                 )
 
+        # Title-based workspace index as a fallback when the origins
+        # registry doesn't link a Library/Translated EPUB to its
+        # originating workspace. Pulls candidate keys from the
+        # workspace folder name, the raw source stem, AND the
+        # workspace's ``metadata.json`` title fields — so a workspace
+        # whose folder / raw source is named in the *source* language
+        # (e.g. "… RoFan Who Is …") still matches its compiled EPUB
+        # named in the *translated* language (e.g. "… Romance Fantasy")
+        # through the ``metadata_json['title']`` the translator wrote
+        # at compile time. Without this fallback the duplicate card
+        # appears on BOTH the In Progress tab (workspace row) and
+        # the Completed tab (library row) because neither the ghost
+        # filter nor the state-inheritance block below can link them.
+        #
+        # All keys pass through :func:`_norm_book_key` so Windows
+        # filename mangling (stripped trailing ``.``, case drift,
+        # whitespace collapse) can't desync the two sides of the
+        # comparison.
+        workspace_by_key: dict[str, dict] = {}
+        for ws in output_rows:
+            ws_folder = ws.get("output_folder") or ""
+            if not ws_folder:
+                continue
+            candidates: set[str] = set()
+            fn = ws.get("folder_name") or os.path.basename(ws_folder)
+            if fn:
+                candidates.add(_norm_book_key(
+                    os.path.splitext(fn)[0]))
+            raw = ws.get("raw_source_path") or ""
+            if raw:
+                candidates.add(_norm_book_key(
+                    os.path.splitext(os.path.basename(raw))[0]))
+            md = ws.get("metadata_json") or {}
+            if isinstance(md, dict):
+                for md_key in ("title", "original_title",
+                               "translated_title", "raw_title",
+                               "source_title", "english_title"):
+                    val = md.get(md_key)
+                    if isinstance(val, str) and val.strip():
+                        candidates.add(_norm_book_key(val))
+            for key in candidates:
+                if key:
+                    workspace_by_key.setdefault(key, ws)
+
+        # Library-side index keyed by the same normalization so the
+        # ghost filter + inheritance loop can consult it without
+        # recomputing per-row. Each library EPUB contributes MULTIPLE
+        # normalized keys so the pairing can land when ANY of them
+        # intersects a workspace key:
+        #   • filename stem (translated title, post NTFS sanitize)
+        #   • ``dc:title`` / ``dc:alternative`` from the EPUB OPF
+        #   • ``calibre:original_title`` meta element — the single
+        #     most useful signal for raws whose folder is named in
+        #     the source language, because the translator writes
+        #     the raw title here at compile time.
+        library_by_key: dict[str, dict] = {}
+        for lr in library_rows:
+            if not lr.get("in_library"):
+                continue
+            lib_path = lr.get("path", "") or ""
+            if not lib_path:
+                continue
+            keys: set[str] = set()
+            stem = os.path.splitext(os.path.basename(lib_path))[0]
+            k = _norm_book_key(stem)
+            if k:
+                keys.add(k)
+            for opf_title in _extract_epub_titles(lib_path):
+                k = _norm_book_key(opf_title)
+                if k:
+                    keys.add(k)
+            for k in keys:
+                library_by_key.setdefault(k, lr)
+
+        # Extend the ghost set with workspaces whose title-key
+        # matches a Library/Translated entry. The library row will
+        # represent the book (with inherited state via the block
+        # below) so the workspace-side row must drop off the In
+        # Progress tab to avoid the duplicate card.
+        #
+        # Also persist an authoritative link into ``library_origins.txt``
+        # for every pair we discover: ``translated[lib_basename] =
+        # <workspace>/<lib_basename>`` (restore target for Undo Move)
+        # and ``pairs[lib_basename] = <raw_basename>`` when the raw
+        # sits inside ``Library/Raw`` (so
+        # :func:`_find_raw_source_for_library_epub` takes the fast
+        # origins path on the next call). The user explicitly asked
+        # for origins to be updated as we discover pairings — without
+        # this, ``_undo_organize_prompt`` has nothing to undo for
+        # cards that landed in Library/Translated via any route
+        # other than the Organize button.
+        origins_dirty = False
+        if workspace_by_key and library_by_key:
+            trans_map_mut = dict(trans_map) if isinstance(trans_map, dict) else {}
+            pair_map_mut = dict(origins.get("pairs", {}) or {}) if isinstance(origins, dict) else {}
+            raw_dir_abs = os.path.normcase(os.path.normpath(
+                os.path.abspath(get_library_raw_dir())))
+            for key, ws in workspace_by_key.items():
+                lr = library_by_key.get(key)
+                if not lr:
+                    continue
+                ws_folder = ws.get("output_folder") or ""
+                if ws_folder:
+                    organized_folders.add(
+                        os.path.normcase(os.path.normpath(
+                            os.path.abspath(ws_folder)))
+                    )
+                lib_basename = os.path.basename(lr.get("path", "") or "")
+                if not lib_basename or not ws_folder:
+                    continue
+                existing_entry = trans_map_mut.get(lib_basename) or ""
+                desired_entry = os.path.join(ws_folder, lib_basename)
+                try:
+                    same = bool(existing_entry) and (
+                        os.path.normcase(os.path.normpath(
+                            os.path.abspath(existing_entry)))
+                        == os.path.normcase(os.path.normpath(
+                            os.path.abspath(desired_entry)))
+                    )
+                except Exception:
+                    same = False
+                if not same:
+                    trans_map_mut[lib_basename] = desired_entry
+                    origins_dirty = True
+                raw_src = ws.get("raw_source_path") or ""
+                if raw_src and os.path.isfile(raw_src):
+                    try:
+                        raw_parent = os.path.normcase(os.path.normpath(
+                            os.path.abspath(os.path.dirname(raw_src))))
+                    except Exception:
+                        raw_parent = ""
+                    if raw_parent == raw_dir_abs:
+                        raw_basename = os.path.basename(raw_src)
+                        if (raw_basename
+                                and pair_map_mut.get(lib_basename) != raw_basename):
+                            pair_map_mut[lib_basename] = raw_basename
+                            origins_dirty = True
+            if origins_dirty:
+                try:
+                    origins["translated"] = trans_map_mut
+                    origins["pairs"] = pair_map_mut
+                    _save_origins(origins)
+                    trans_map = trans_map_mut
+                except Exception:
+                    logger.debug(
+                        "origins auto-update failed: %s",
+                        traceback.format_exc())
+
         def _is_organized_ghost(row: dict) -> bool:
             """True when *row* is an output-folder scan result whose
             compiled EPUB has been organized into Library/Translated."""
@@ -2512,22 +2807,28 @@ class _DualScannerThread(QThread):
         # doesn't linger as a phantom in-progress card either.
         in_progress = [r for r in in_progress if not _is_organized_ghost(r)]
 
-        # Library-vs-workspace state inheritance via ``origins.txt``.
-        # NO dedupe — every card stays visible exactly once. Each
+        # Library-vs-workspace state inheritance via ``origins.txt``
+        # (primary) + filename fallback (secondary). NO dedupe —
+        # every card stays visible exactly once. Each
         # ``Library/Translated`` entry inherits the translation_state
-        # + progress numbers of its owning workspace when
-        # ``origins['translated']`` links them, regardless of whether
-        # that workspace was ghost-filtered above. That fixes the
-        # "99%% but shown as Completed" regression after organize:
-        # the ghost filter takes the workspace *row* off the In
-        # Progress list, and this block re-routes the library row
-        # (which replaces it) onto the In Progress tab while the
-        # underlying translation is still at 99 %%.
+        # + progress numbers of its owning workspace when they can
+        # be linked, regardless of whether that workspace was
+        # ghost-filtered above. That fixes:
+        #   * the "99%% but shown as Completed" regression after
+        #     organize: the ghost filter takes the workspace *row*
+        #     off the In Progress list, and this block re-routes the
+        #     library row (which replaces it) onto the In Progress
+        #     tab while the underlying translation is still at 99 %%.
+        #   * the "ready_to_compile shows up on BOTH tabs" bug: when
+        #     origins doesn't link the pair, the filename fallback
+        #     below still matches them so the library row inherits
+        #     ``ready_to_compile`` and moves to In Progress (with
+        #     the workspace row ghost-filtered above).
         #
         # ``trans_map`` maps ``library_basename → original_workspace_path``;
         # the parent dir of that path is the workspace folder. Rows
-        # without a ``trans_map`` record (drag-dropped onto the
-        # Completed tab with no organize trail) stay untouched.
+        # without a ``trans_map`` record fall through to the
+        # title-based ``workspace_by_key`` lookup built above.
         workspace_by_folder: dict[str, dict] = {}
         for ws in output_rows:
             ws_folder = ws.get("output_folder") or ""
@@ -2538,20 +2839,35 @@ class _DualScannerThread(QThread):
                     os.path.abspath(ws_folder)))
             ] = ws
 
-        if workspace_by_folder and trans_map:
+        if workspace_by_folder and (trans_map or workspace_by_key):
             for r in completed:
                 if not r.get("in_library"):
                     continue
                 lib_basename = os.path.basename(r.get("path", "") or "")
-                orig_path = trans_map.get(lib_basename)
-                if not orig_path:
-                    continue
-                orig_folder = os.path.dirname(str(orig_path))
-                if not orig_folder:
-                    continue
-                origin_key = os.path.normcase(os.path.normpath(
-                    os.path.abspath(orig_folder)))
-                ws_row = workspace_by_folder.get(origin_key)
+                ws_row = None
+                # 1. Origins-based link (authoritative).
+                if trans_map:
+                    orig_path = trans_map.get(lib_basename)
+                    if orig_path:
+                        orig_folder = os.path.dirname(str(orig_path))
+                        if orig_folder:
+                            origin_key = os.path.normcase(os.path.normpath(
+                                os.path.abspath(orig_folder)))
+                            ws_row = workspace_by_folder.get(origin_key)
+                # 2. Title-key fallback — mirrors the ghost-set
+                #    extension above so both sides of the dedup
+                #    (workspace row off In Progress, library row
+                #    moved from Completed to In Progress) kick in
+                #    for the same pair of cards. The key covers
+                #    folder name, raw source stem, and the
+                #    metadata.json title fields so raws named in the
+                #    source language still match their English-
+                #    titled compiled EPUBs.
+                if not ws_row:
+                    lib_key = _norm_book_key(
+                        os.path.splitext(lib_basename)[0])
+                    if lib_key:
+                        ws_row = workspace_by_key.get(lib_key)
                 if not ws_row:
                     continue
                 ws_state = ws_row.get("translation_state") or ""
