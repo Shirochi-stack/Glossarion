@@ -4234,10 +4234,15 @@ class _ScanForRawDialog(QDialog):
         from PySide6.QtWidgets import (
             QSlider, QRadioButton, QButtonGroup, QTreeWidget,
             QTreeWidgetItem, QHeaderView, QDialogButtonBox,
-            QFileDialog, QCheckBox,
+            QFileDialog, QCheckBox, QProgressBar,
         )
         self._QTreeWidgetItem = QTreeWidgetItem
         self._QFileDialog = QFileDialog
+        # Tracks whether a background walk / match is currently in
+        # flight so UI affordances (progress bar, placeholder row in
+        # the tree, Browse tooltip) can stay in sync without every
+        # caller having to flip them individually.
+        self._scanning = False
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
@@ -4268,15 +4273,16 @@ class _ScanForRawDialog(QDialog):
             "font-size: 9.5pt;")
         self._folder_edit.editingFinished.connect(self._on_folder_edit_done)
         folder_row.addWidget(self._folder_edit, 1)
-        browse_btn = QPushButton("\U0001f4c2  Browse\u2026")
-        browse_btn.setCursor(Qt.PointingHandCursor)
-        browse_btn.setStyleSheet(
+        self._browse_btn = QPushButton("\U0001f4c2  Browse\u2026")
+        self._browse_btn.setCursor(Qt.PointingHandCursor)
+        self._browse_btn.setStyleSheet(
             "QPushButton { background: #3a5a7a; color: white; "
             "border-radius: 4px; padding: 6px 14px; font-size: 9pt; "
             "font-weight: bold; border: none; }"
-            "QPushButton:hover { background: #4a6a8a; }")
-        browse_btn.clicked.connect(self._browse_folder)
-        folder_row.addWidget(browse_btn)
+            "QPushButton:hover { background: #4a6a8a; }"
+            "QPushButton:disabled { background: #2a2a3e; color: #6a6d80; }")
+        self._browse_btn.clicked.connect(self._browse_folder)
+        folder_row.addWidget(self._browse_btn)
         root.addLayout(folder_row)
 
         # Mode + threshold row
@@ -4437,12 +4443,34 @@ class _ScanForRawDialog(QDialog):
         self._tree.itemChanged.connect(self._on_tree_item_changed)
         root.addWidget(self._tree, 1)
 
-        # Status line
+        # Status line + indeterminate progress bar. The bar is only
+        # shown while a background scan is running so the user has a
+        # clear visual signal that work is in flight \u2014 the rest
+        # of the dialog stays interactive, but widgets that would
+        # implicitly restart the scan (Browse button, folder edit)
+        # are disabled so a rapid double-click doesn't kick off a
+        # second scan before the first finishes.
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(8)
         self._status_lbl = QLabel("")
         self._status_lbl.setAttribute(Qt.WA_TranslucentBackground)
         self._status_lbl.setStyleSheet(
             "color: #8ab4d0; font-size: 9pt; background: transparent;")
-        root.addWidget(self._status_lbl)
+        status_row.addWidget(self._status_lbl, 1)
+        self._scan_progress = QProgressBar()
+        self._scan_progress.setRange(0, 0)  # indeterminate
+        self._scan_progress.setTextVisible(False)
+        self._scan_progress.setFixedHeight(6)
+        self._scan_progress.setFixedWidth(160)
+        self._scan_progress.setStyleSheet(
+            "QProgressBar { background: #1a1a2a; border: 1px solid "
+            "#2a2a3e; border-radius: 3px; }"
+            "QProgressBar::chunk { background: #17a2b8; "
+            "border-radius: 3px; }")
+        self._scan_progress.hide()
+        status_row.addWidget(self._scan_progress, 0)
+        root.addLayout(status_row)
 
         # Dialog buttons
         bbox = QDialogButtonBox(
@@ -4465,8 +4493,72 @@ class _ScanForRawDialog(QDialog):
         # exact mode so the UI reads as "similarity doesn't apply".
         self._update_threshold_enabled()
 
+    # -- Scanning-state helper ---------------------------------------------
+    def _set_scanning_state(self, active: bool, message: str = ""):
+        """Flip every \"scan in progress\" UI affordance at once.
+
+        *active* True shows the progress bar, styles the status
+        label as a teal \"scanning\" pill, inserts a placeholder
+        row in the tree, and locks the Browse button + folder edit
+        so the user can't accidentally restart the scan while the
+        previous one is still walking the disk. *active* False
+        reverts everything and leaves the tree ready to be
+        repainted with real results.
+        """
+        active = bool(active)
+        self._scanning = active
+        if active:
+            self._scan_progress.show()
+            self._status_lbl.setText(
+                message or "\u23f3 Scanning\u2026")
+            self._status_lbl.setStyleSheet(
+                "color: #20b2cc; font-size: 9pt; font-weight: bold; "
+                "background: rgba(32, 178, 204, 0.12); "
+                "border: 1px solid #17a2b8; border-radius: 4px; "
+                "padding: 2px 8px;")
+            # Lock the inputs that would implicitly restart the
+            # scan. Mode / slider / extension toggles stay live so
+            # the user can still tweak them \u2014 those call
+            # :meth:`_rematch_only` / :meth:`_rescan_folder` which
+            # cancel the in-flight worker first.
+            if hasattr(self, "_browse_btn"):
+                self._browse_btn.setEnabled(False)
+                self._browse_btn.setToolTip(
+                    "Scan in progress \u2014 please wait\u2026")
+            self._folder_edit.setEnabled(False)
+            self._apply_btn.setEnabled(False)
+            # Show a clear placeholder row in the tree so stale
+            # results from a previous scan don't linger on screen.
+            self._tree.blockSignals(True)
+            self._tree.clear()
+            placeholder = self._QTreeWidgetItem([
+                "",
+                "\u23f3  Scanning folder\u2026",
+                "Matching workspaces against raw sources\u2026",
+                "",
+            ])
+            placeholder.setFlags(Qt.ItemIsEnabled)
+            from PySide6.QtGui import QColor
+            placeholder.setForeground(1, QColor("#20b2cc"))
+            placeholder.setForeground(2, QColor("#8ab4d0"))
+            self._tree.addTopLevelItem(placeholder)
+            self._tree.blockSignals(False)
+        else:
+            self._scan_progress.hide()
+            self._status_lbl.setStyleSheet(
+                "color: #8ab4d0; font-size: 9pt; background: transparent;")
+            if hasattr(self, "_browse_btn"):
+                self._browse_btn.setEnabled(True)
+                self._browse_btn.setToolTip("")
+            self._folder_edit.setEnabled(True)
+
     # -- Folder + mode handlers --------------------------------------------
     def _browse_folder(self):
+        # Defence-in-depth: the button is disabled while a scan is
+        # running, but guard the handler as well in case the click
+        # arrives between state transitions.
+        if getattr(self, "_scanning", False):
+            return
         start = self._folder_edit.text().strip() or str(Path.home())
         if not os.path.isdir(start):
             start = str(Path.home())
@@ -4620,17 +4712,18 @@ class _ScanForRawDialog(QDialog):
         self._candidates.clear()
         self._cancel_worker()
         if not self._scan_folder or not os.path.isdir(self._scan_folder):
+            self._set_scanning_state(False)
             self._status_lbl.setText(
                 "\u26a0 Pick a folder that exists on disk.")
             self._matches.clear()
             self._tree.clear()
             self._apply_btn.setEnabled(False)
             return
-        # Paint a "scanning…" placeholder so the UI reflects the
+        # Paint a "scanning\u2026" placeholder so the UI reflects the
         # in-flight state rather than silently showing stale rows.
-        self._status_lbl.setText(
+        self._set_scanning_state(
+            True,
             f"\u23f3 Scanning {self._scan_folder}\u2026")
-        self._apply_btn.setEnabled(False)
         self._scan_worker = _RawScanWorker(
             self._scan_folder, self._ext_suffixes(),
             _LIBRARY_TRACKING_FILENAMES,
@@ -4653,8 +4746,8 @@ class _ScanForRawDialog(QDialog):
             self._rescan_folder()
             return
         self._cancel_worker()
-        self._status_lbl.setText("\u23f3 Re-matching\u2026")
-        self._apply_btn.setEnabled(False)
+        self._set_scanning_state(
+            True, "\u23f3 Re-matching\u2026")
         self._scan_worker = _RawScanWorker(
             self._scan_folder, self._ext_suffixes(),
             _LIBRARY_TRACKING_FILENAMES,
@@ -4670,7 +4763,7 @@ class _ScanForRawDialog(QDialog):
     def _on_scan_results(self, scan_folder: str,
                          candidates: list,
                          matches: dict) -> None:
-        """Worker callback — runs on the main thread via Qt signal.
+        """Worker callback \u2014 runs on the main thread via Qt signal.
 
         The worker did both the walk and the matching, so all we
         need to do is cache candidates and paint the tree.
@@ -4679,6 +4772,10 @@ class _ScanForRawDialog(QDialog):
             return
         self._candidates = list(candidates)
         self._matches = dict(matches)
+        # Clear the scanning-state UI BEFORE painting results so the
+        # progress bar / placeholder row aren't briefly visible
+        # alongside the real rows.
+        self._set_scanning_state(False)
         self._populate_tree()
 
     def _populate_tree(self):
@@ -5188,10 +5285,14 @@ class EpubLibraryDialog(QDialog):
         # counter that reflects how many files the action would act on
         # (see :meth:`_update_organize_counts`).
         self._tabs = QTabWidget()
-        # The last tab ("Scan for Raw") is an action, not a content tab,
-        # so keep it in the third tab slot but style it like the old
-        # teal button instead of the default tab chrome.
-        self._tabs.setStyleSheet("""
+        # Base stylesheet: only the In Progress / Completed *content*
+        # tabs. The Scan-for-Raw action tab gets its teal-button
+        # styling grafted on by :meth:`_apply_tab_stylesheet` only
+        # when it's actually visible \u2014 otherwise ``QTabBar::tab:last``
+        # would match whichever tab is currently the last visible one
+        # (i.e. Completed when Scan-for-Raw is hidden) and the wrong
+        # tab would render as a button.
+        self._tabs_base_qss = """
             QTabWidget::pane { border: 1px solid #2a2a3e; border-radius: 6px;
                                 background: #12121e; top: -1px; }
             QTabBar::tab { background: #1e1e2e; color: #b0b0c0;
@@ -5202,6 +5303,11 @@ class EpubLibraryDialog(QDialog):
             QTabBar::tab:selected { background: #12121e; color: #e0e0e0;
                                      border-color: #2a2a3e; }
             QTabBar::tab:hover:!selected { background: #252540; color: #e0e0e0; }
+        """
+        # Appended only while the scan tab is visible. When hidden,
+        # ``:last`` would bleed onto Completed \u2014 so the rule must
+        # be removed, not just ignored.
+        self._tabs_scan_button_qss = """
             QTabBar::tab:last { background: #17a2b8; color: white;
                                  border: none; border-radius: 4px;
                                  padding: 6px 14px; font-size: 9pt;
@@ -5212,7 +5318,8 @@ class EpubLibraryDialog(QDialog):
                                           border: none; }
             QTabBar::tab:last:hover { background: #20b2cc; color: white;
                                        border: none; }
-        """)
+        """
+        self._tabs.setStyleSheet(self._tabs_base_qss)
 
 
         # --- In Progress tab ---
@@ -5828,6 +5935,23 @@ class EpubLibraryDialog(QDialog):
             _ingest(book)
         return index
 
+    def _apply_tab_stylesheet(self, scan_visible: bool) -> None:
+        """Attach / detach the teal-button last-tab rule on the tab bar.
+
+        ``QTabBar::tab:last`` matches whichever tab is currently the
+        last visible one, so the styling only makes sense while the
+        Scan-for-Raw tab is actually present \u2014 otherwise it would
+        bleed onto the Completed tab.
+        """
+        qss = self._tabs_base_qss
+        if scan_visible:
+            qss = qss + self._tabs_scan_button_qss
+        try:
+            if self._tabs.styleSheet() != qss:
+                self._tabs.setStyleSheet(qss)
+        except Exception:
+            pass
+
     def _update_organize_counts(self):
         """Refresh the Organize + Undo button labels with live counts.
 
@@ -5868,14 +5992,19 @@ class EpubLibraryDialog(QDialog):
             pass
         # Toggle the Scan-for-Raw TAB based on whether any visible
         # card has the ``missing_raw_file`` warning. Hidden entirely
-        # otherwise — there's nothing actionable for the dialog to
-        # do when every workspace's raw is already resolved.
+        # otherwise \u2014 there's nothing actionable for the dialog to
+        # do when every workspace's raw is already resolved. The
+        # teal-button tab styling is also attached / detached here
+        # so the Completed tab never inherits it when the scan tab is
+        # hidden (``QTabBar::tab:last`` targets whichever tab is
+        # currently the last visible one).
         try:
             missing_raw_count = sum(
                 1 for b in (
                     list(self._in_progress_books)
                     + list(self._completed_books))
                 if b.get("missing_raw_file"))
+            self._apply_tab_stylesheet(missing_raw_count > 0)
             scan_tab_index = getattr(self, "_scan_tab_index", -1)
             if scan_tab_index >= 0:
                 self._tabs.setTabText(
