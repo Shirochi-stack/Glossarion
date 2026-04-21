@@ -4086,7 +4086,10 @@ class _BookCard(QFrame):
                     )
                     progress_row.addWidget(pill)
                     ribbon_text = "READY TO COMPILE"
-                    ribbon_bg = "rgba(110, 232, 160, 0.92)"
+                    # Darker mint so the ribbon reads crisply on a
+                    # light / pale cover without blowing out the
+                    # white label text next to it.
+                    ribbon_bg = "rgba(60, 170, 110, 0.95)"
                 else:
                     pill = QLabel(f"\u23f3 {done}/{total}" if total else "\u23f3 In progress")
                     pill.setToolTip(
