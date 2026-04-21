@@ -1111,6 +1111,47 @@ def _resolve_book_output_folder(book: dict) -> str:
     return ""
 
 
+def _resolve_book_source_file(book: dict) -> str:
+    """Return the raw source file path the 🔗 button should reveal, or ``""``.
+
+    Mirrors :class:`BookDetailsDialog._resolve_source_file_target`
+    (and is used by it) so the Book Details dialog and the card
+    context menu both resolve sources through one code path:
+
+      1. ``book['raw_source_path']`` — populated by the scanner for
+         every resolvable card.
+      2. For ``Library/Translated`` entries, re-run
+         :func:`_find_raw_source_for_library_epub` so cards whose
+         scan result predates the origins ``pairs`` entry can still
+         find the matching raw.
+      3. Fall back to ``book['path']`` (the book's own file) when
+         nothing else resolves. Non-existent paths return ``""``.
+
+    Caches any fresh resolution back onto the book dict so repeat
+    calls (and the reader's Raw toggle) skip the lookup.
+    """
+    if not isinstance(book, dict):
+        return ""
+    path = book.get("raw_source_path", "") or ""
+    if path and os.path.isfile(path):
+        return path
+    if book.get("in_library"):
+        lib_path = book.get("path", "") or ""
+        try:
+            resolved = _find_raw_source_for_library_epub(lib_path)
+        except Exception:
+            resolved = ""
+            logger.debug("Source-file library lookup failed: %s",
+                         traceback.format_exc())
+        if resolved and os.path.isfile(resolved):
+            book["raw_source_path"] = resolved
+            return resolved
+    fallback = book.get("path", "") or ""
+    if fallback and os.path.isfile(fallback):
+        return fallback
+    return ""
+
+
 def _find_raw_source_for_library_epub(library_epub_path: str) -> str:
     """Best-effort lookup for the raw source of a Library/Translated EPUB.
 
@@ -4577,8 +4618,20 @@ class EpubLibraryDialog(QDialog):
             output_folder = (_resolve_book_output_folder(book)
                              or os.path.dirname(book.get("path", "")))
         folder_action.triggered.connect(lambda: _open_folder_in_explorer(output_folder))
-        lib_action = menu.addAction("\U0001f4c1  Open Library Folder")
-        lib_action.triggered.connect(lambda: _open_folder_in_explorer(get_library_dir()))
+        # Reveal the raw source file — identical to the Book Details
+        # 🔗 button. Resolves the same way (raw_source_path, then
+        # origins lookup for Library/Translated entries, then book path).
+        # The action is only added when a real source file exists on
+        # disk; when it can't be resolved (e.g. compiled EPUB with no
+        # matching raw) we omit it rather than surface a dead entry.
+        source_target = _resolve_book_source_file(book)
+        if source_target and os.path.isfile(source_target):
+            source_action = menu.addAction("\U0001f517  Reveal source file")
+            source_action.setToolTip(
+                f"Reveal source file:\n{source_target}"
+            )
+            source_action.triggered.connect(
+                lambda: _open_folder_in_explorer(source_target))
         menu.addSeparator()
         copy_path_action = menu.addAction("\U0001f4cb  Copy Path")
         copy_path_action.triggered.connect(lambda: QApplication.clipboard().setText(book["path"]))
@@ -6859,32 +6912,11 @@ class BookDetailsDialog(QDialog):
     def _resolve_source_file_target(self) -> str:
         """Return the raw source file path the 🔗 button should reveal.
 
-        Mirrors the enable / click path for the source button: consult
-        ``book['raw_source_path']`` first, then re-run
-        :func:`_find_raw_source_for_library_epub` for library entries
-        whose cached dict was built before ``origins['pairs']`` was
-        populated. Caches any fresh resolution back onto ``self._book``
-        so the reader's Raw toggle and other actions in the same dialog
-        pick it up without re-computing.
+        Thin wrapper around :func:`_resolve_book_source_file` so the
+        Book Details source button and the card context menu's "Reveal
+        source file" action share one resolution path.
         """
-        path = self._book.get("raw_source_path", "") or ""
-        if path and os.path.isfile(path):
-            return path
-        if self._book.get("in_library"):
-            lib_path = self._book.get("path", "") or ""
-            try:
-                resolved = _find_raw_source_for_library_epub(lib_path)
-            except Exception:
-                resolved = ""
-                logger.debug("Source-file library lookup failed: %s",
-                             traceback.format_exc())
-            if resolved and os.path.isfile(resolved):
-                self._book["raw_source_path"] = resolved
-                return resolved
-        fallback = self._book.get("path", "") or ""
-        if fallback and os.path.isfile(fallback):
-            return fallback
-        return ""
+        return _resolve_book_source_file(self._book)
 
     def _open_output_folder(self):
         """Open the book's output folder in the system file explorer."""
