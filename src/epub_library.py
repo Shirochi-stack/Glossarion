@@ -3836,6 +3836,110 @@ class _BookCard(QFrame):
 # Scan-for-Raw dialog
 # ---------------------------------------------------------------------------
 
+class _RawScanWorker(QThread):
+    """Walk the user-selected folder for raw source files off the UI thread.
+
+    The folder could easily be a multi-hundred-gig download archive,
+    so doing :func:`os.walk` synchronously on the main thread freezes
+    the dialog for several seconds every time the user tweaks a
+    filter. This worker runs the walk in a background ``QThread``
+    and fans per-subdirectory file classification out across a
+    :class:`concurrent.futures.ThreadPoolExecutor` so the normalization
+    pass doesn't bottleneck on the walking thread. Results are
+    emitted back to the main thread via the ``results`` signal as
+    ``(scan_folder, [(norm_stem, abs_path), …])``.
+
+    The worker is *cancellable*: calling :meth:`cancel` stops the
+    walk at the next directory boundary so a rapid extension /
+    folder toggle doesn't keep a stale scan running in the
+    background.
+    """
+
+    results = Signal(str, list)
+
+    def __init__(self, scan_folder: str, ext_suffixes: tuple[str, ...],
+                 tracking_names: frozenset, parent=None):
+        super().__init__(parent)
+        self._folder = scan_folder
+        self._suffixes = ext_suffixes
+        self._tracking = tracking_names
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def _classify(self, root_dir: str,
+                  files: list[str]) -> list[tuple[str, str]]:
+        """Filter + normalize a single directory's files (executor task).
+
+        Pure function on the inputs plus ``self._suffixes`` /
+        ``self._tracking`` — no shared mutable state, so it's safe
+        to run across multiple pool workers concurrently.
+        """
+        out: list[tuple[str, str]] = []
+        suffixes = self._suffixes
+        tracking = self._tracking
+        for name in files:
+            if self._cancelled:
+                break
+            lower = name.lower()
+            if not lower.endswith(suffixes):
+                continue
+            if lower in tracking:
+                continue
+            if name.startswith("."):
+                continue
+            stem = os.path.splitext(name)[0]
+            key = _norm_book_key(stem)
+            if not key:
+                continue
+            out.append((key, os.path.join(root_dir, name)))
+        return out
+
+    def run(self) -> None:
+        candidates: list[tuple[str, str]] = []
+        folder = self._folder
+        if not folder or not os.path.isdir(folder):
+            self.results.emit(folder, candidates)
+            return
+        try:
+            futures: list = []
+            # Keep the pool small — walking is the real bottleneck,
+            # and spawning too many threads on a typical SSD just
+            # wastes context-switches without shortening the wall
+            # time. 4 workers is enough to hide the normalization
+            # cost behind the walk I/O.
+            with ThreadPoolExecutor(
+                max_workers=4,
+                thread_name_prefix="ScanForRaw",
+            ) as executor:
+                for root_dir, _dirs, files in os.walk(folder):
+                    if self._cancelled:
+                        break
+                    if not files:
+                        continue
+                    futures.append(executor.submit(
+                        self._classify, root_dir, list(files)))
+                for fut in futures:
+                    if self._cancelled:
+                        break
+                    try:
+                        candidates.extend(fut.result())
+                    except Exception:
+                        logger.debug(
+                            "ScanForRaw classify task failed: %s",
+                            traceback.format_exc())
+        except (PermissionError, OSError) as exc:
+            logger.debug(
+                "ScanForRaw folder walk failed for %s: %s", folder, exc)
+        except Exception:
+            logger.debug(
+                "ScanForRaw worker crashed: %s", traceback.format_exc())
+        if self._cancelled:
+            return
+        self.results.emit(folder, candidates)
+
+
 class _ScanForRawDialog(QDialog):
     """Pair every In Progress workspace to a raw source file on disk.
 
@@ -3952,6 +4056,10 @@ class _ScanForRawDialog(QDialog):
         # fuzzy matcher can iterate without re-scanning the folder on
         # every slider tick.
         self._candidates: list[tuple[str, str]] = []
+        # Background worker thread that walks the scan folder.
+        # Replaced / cancelled whenever the user changes folder or
+        # extension selection so we never chew CPU on a stale scan.
+        self._scan_worker: _RawScanWorker | None = None
         # Current matches keyed by workspace output_folder. Each value
         # is ``(matched_path, ratio, accepted)``. ``accepted=False``
         # means the user un-ticked the checkbox in the preview.
@@ -4356,7 +4464,25 @@ class _ScanForRawDialog(QDialog):
 
     # -- Scanning + matching -----------------------------------------------
     def _rescan_folder(self):
+        """Kick off a background scan of the current folder.
+
+        The walk runs on a :class:`_RawScanWorker` backed by a
+        :class:`concurrent.futures.ThreadPoolExecutor` so the dialog
+        stays responsive even for huge folders. Any previously
+        running worker is cancelled first so rapid folder /
+        extension toggles don't leave multiple scans racing.
+        """
         self._candidates.clear()
+        # Cancel any in-flight scan before launching a new one —
+        # its results would be for stale settings and would either
+        # clobber the fresh matches or fire after the dialog closes.
+        if self._scan_worker is not None:
+            try:
+                self._scan_worker.cancel()
+                self._scan_worker.results.disconnect()
+            except Exception:
+                pass
+            self._scan_worker = None
         if not self._scan_folder or not os.path.isdir(self._scan_folder):
             self._status_lbl.setText(
                 "\u26a0 Pick a folder that exists on disk.")
@@ -4373,27 +4499,28 @@ class _ScanForRawDialog(QDialog):
         )
         if "html" in self._selected_exts:
             ext_suffixes = ext_suffixes + (".htm",)
-        try:
-            for root_dir, _dirs, files in os.walk(self._scan_folder):
-                for name in files:
-                    lower = name.lower()
-                    if not lower.endswith(ext_suffixes):
-                        continue
-                    # Skip registry files and dotfiles.
-                    if lower in _LIBRARY_TRACKING_FILENAMES:
-                        continue
-                    if name.startswith("."):
-                        continue
-                    stem = os.path.splitext(name)[0]
-                    key = _norm_book_key(stem)
-                    if not key:
-                        continue
-                    self._candidates.append(
-                        (key, os.path.join(root_dir, name)))
-        except (PermissionError, OSError) as exc:
-            self._status_lbl.setText(
-                f"\u26a0 Could not walk folder: {exc}")
+        # Paint a "scanning…" placeholder so the UI reflects the
+        # in-flight state rather than silently showing stale rows.
+        self._status_lbl.setText(
+            f"\u23f3 Scanning {self._scan_folder}\u2026")
+        self._apply_btn.setEnabled(False)
+        self._scan_worker = _RawScanWorker(
+            self._scan_folder, ext_suffixes,
+            _LIBRARY_TRACKING_FILENAMES, parent=self)
+        self._scan_worker.results.connect(self._on_scan_results)
+        self._scan_worker.start()
+
+    @Slot(str, list)
+    def _on_scan_results(self, scan_folder: str,
+                         candidates: list) -> None:
+        """Worker callback — runs on the main thread via Qt signal.
+
+        Ignores results whose *scan_folder* no longer matches the
+        dialog's current folder (the user switched folders mid-scan).
+        """
+        if scan_folder != self._scan_folder:
             return
+        self._candidates = list(candidates)
         self._recompute_matches()
 
     def _workspace_keys(self, book: dict) -> list[str]:
@@ -4537,6 +4664,25 @@ class _ScanForRawDialog(QDialog):
             return
         self._matches[ws_folder]["accepted"] = (
             item.checkState(0) == Qt.Checked)
+
+    # -- Qt lifecycle ------------------------------------------------------
+    def closeEvent(self, event):
+        """Cancel the background walk before the dialog is torn down.
+
+        Without this the ``QThread`` can outlive the Python object;
+        when it finally emits ``results`` it'd try to poke at a
+        deleted C++ widget and crash the interpreter.
+        """
+        if self._scan_worker is not None:
+            try:
+                self._scan_worker.cancel()
+                self._scan_worker.results.disconnect()
+                self._scan_worker.quit()
+                self._scan_worker.wait(250)
+            except Exception:
+                pass
+            self._scan_worker = None
+        super().closeEvent(event)
 
     # -- Apply -------------------------------------------------------------
     def _apply_matches(self):
