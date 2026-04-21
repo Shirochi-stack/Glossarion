@@ -3959,6 +3959,21 @@ class _RawScanWorker(QThread):
                     keys.add(_norm_book_key(val))
         return [k for k in keys if k]
 
+    # Maps a workspace's ``workspace_kind`` to the raw file
+    # extensions that are legitimately pairable with it. EPUB
+    # workspaces only ever want ``.epub`` sources; a ``.pdf``
+    # candidate with the same filename stem must NOT win just
+    # because the normalized title collides. Kinds that aren't
+    # in the map (``""``, ``"other"``, ``"in_progress"``,
+    # ``"image"``) fall back to "accept any" because we can't
+    # predict the right extension without more signal.
+    _KIND_ALLOWED_EXTS = {
+        "epub": (".epub",),
+        "txt":  (".txt",),
+        "pdf":  (".pdf",),
+        "html": (".html", ".htm"),
+    }
+
     def _compute_matches(self,
                          candidates: list[tuple[str, str]]) -> dict:
         """Return ``{output_folder: {book, path, ratio, accepted}}``.
@@ -3971,15 +3986,35 @@ class _RawScanWorker(QThread):
         matches: dict[str, dict] = {}
         mode = self._mode
         threshold = self._threshold / 100.0
-        # Pool the SequenceMatcher calls across workers too — for a
+        # Pool the SequenceMatcher calls across workers too \u2014 for a
         # big candidate set Fuzzy matching is the real hotspot.
+        kind_allowed = self._KIND_ALLOWED_EXTS
+
         def _best_for(book: dict) -> tuple[str, float]:
             book_keys = self._book_keys(book)
             if not book_keys or not candidates:
                 return "", 0.0
+            # Per-book extension gate: a workspace that advertises
+            # its own kind (EPUB / TXT / PDF / HTML) must only be
+            # paired with candidates whose extension matches. This
+            # closes the hole where a ``.pdf`` raw whose filename
+            # stem collides with an EPUB workspace's title would
+            # be auto-accepted at ratio 1.0 just because the
+            # normalized-key matched.
+            book_kind = (book.get("workspace_kind") or "").lower()
+            allowed_exts = kind_allowed.get(book_kind)
+            if allowed_exts:
+                usable = [
+                    (ck, cp) for ck, cp in candidates
+                    if cp.lower().endswith(allowed_exts)
+                ]
+            else:
+                usable = candidates
+            if not usable:
+                return "", 0.0
             if mode == _ScanForRawDialog.MATCH_EXACT:
                 book_key_set = set(book_keys)
-                for cand_key, cand_path in candidates:
+                for cand_key, cand_path in usable:
                     if self._cancelled:
                         break
                     if cand_key in book_key_set:
@@ -3988,13 +4023,13 @@ class _RawScanWorker(QThread):
             best_path = ""
             best_ratio = 0.0
             sm = difflib.SequenceMatcher()
-            for cand_key, cand_path in candidates:
+            for cand_key, cand_path in usable:
                 if self._cancelled:
                     break
                 sm.set_seq2(cand_key)
                 for wk in book_keys:
                     sm.set_seq1(wk)
-                    # Cheap length-ratio prefilter — skip candidates
+                    # Cheap length-ratio prefilter \u2014 skip candidates
                     # that can't possibly reach the threshold so we
                     # don't pay for a full ratio() call on obvious
                     # non-matches. real_quick_ratio is O(1).
@@ -7807,8 +7842,8 @@ class EpubLibraryDialog(QDialog):
             output_folder = (_resolve_book_output_folder(book)
                              or os.path.dirname(book.get("path", "")))
         folder_action.triggered.connect(lambda: _open_folder_in_explorer(output_folder))
-        # Reveal the raw source file — identical to the Book Details
-        # 🔗 button. Resolves the same way (raw_source_path, then
+        # Reveal the raw source file \u2014 identical to the Book Details
+        # \U0001f517 button. Resolves the same way (raw_source_path, then
         # origins lookup for Library/Translated entries, then book path).
         # The action is only added when a real source file exists on
         # disk; when it can't be resolved (e.g. compiled EPUB with no
@@ -7821,6 +7856,43 @@ class EpubLibraryDialog(QDialog):
             )
             source_action.triggered.connect(
                 lambda: _open_folder_in_explorer(source_target))
+        # "Clear saved raw link" \u2014 lets the user reset a bad
+        # Scan-for-Raw pairing (e.g. an EPUB workspace that got
+        # auto-paired to a ``.pdf`` via an earlier broken match).
+        # Deletes the ``source_epub.txt`` sidecar and unregisters the
+        # stale raw from the raw-inputs registry so the next library
+        # scan re-derives ``workspace_kind`` from the real folder
+        # contents. Only offered for workspace-backed cards whose
+        # sidecar actually exists on disk \u2014 a card without a
+        # saved link has nothing to clear.
+        clear_targets = [
+            b for b in selected_books
+            if self._card_has_saved_raw_link(b)
+        ]
+        if clear_targets:
+            if len(clear_targets) > 1:
+                clear_label = (
+                    f"\u2702\ufe0f  Clear saved raw link for "
+                    f"{len(clear_targets)} items")
+                clear_tip = (
+                    "Remove the saved raw-source pointer "
+                    "(source_epub.txt) from each selected "
+                    "workspace. Useful when a previous auto-scan "
+                    "matched the wrong file \u2014 the next library "
+                    "scan will re-detect the workspace kind from "
+                    "the folder contents.")
+            else:
+                clear_label = "\u2702\ufe0f  Clear saved raw link"
+                clear_tip = (
+                    "Remove this workspace's saved raw-source "
+                    "pointer (source_epub.txt). Use this if the "
+                    "auto-scan matched a .pdf to an EPUB (or any "
+                    "other wrong-kind pairing) \u2014 the library "
+                    "will re-scan with the real folder kind.")
+            clear_action = menu.addAction(clear_label)
+            clear_action.setToolTip(clear_tip)
+            clear_action.triggered.connect(
+                lambda: self._clear_saved_raw_link(clear_targets))
         # Reveal the compiled / translated EPUB itself. Resolution
         # lives in :func:`_resolve_book_translated_file` so this menu
         # action and the Book Details 📕 button share one code path.
@@ -7859,6 +7931,177 @@ class EpubLibraryDialog(QDialog):
             lambda: self._delete_books_prompt(delete_targets)
         )
         menu.exec(pos)
+
+    @staticmethod
+    def _card_has_saved_raw_link(book: dict) -> bool:
+        """Return True when the card's workspace has a ``source_epub.txt``.
+
+        Only workspace-backed cards can carry a saved raw link \u2014
+        library-filed ``.epub`` entries store their pairing in
+        ``library_origins['pairs']`` instead, so those are
+        deliberately excluded here.
+        """
+        if not isinstance(book, dict):
+            return False
+        ws_folder = book.get("output_folder") or ""
+        if not ws_folder or not os.path.isdir(ws_folder):
+            return False
+        sidecar = os.path.join(ws_folder, "source_epub.txt")
+        return os.path.isfile(sidecar)
+
+    def _clear_saved_raw_link(self, books: list):
+        """Delete the ``source_epub.txt`` sidecar(s) after confirmation.
+
+        Also unregisters the previously-pointed-at raw path from the
+        raw-inputs registry when it's no longer referenced by any
+        other workspace, so the Scan-for-Raw dialog won't try to
+        re-apply the same stale pairing on its next run. On success
+        the library is reloaded so the scanner re-derives
+        ``workspace_kind`` from the real folder contents (which
+        fixes the \"EPUB workspace wearing a PDF badge\" symptom).
+        """
+        if not books:
+            return
+        # De-dup by workspace folder and snapshot the current raw
+        # pointer so we can optionally unregister it afterwards.
+        targets: list[tuple[str, str, dict]] = []
+        seen: set[str] = set()
+        for b in books:
+            ws_folder = b.get("output_folder") or ""
+            if not ws_folder or not os.path.isdir(ws_folder):
+                continue
+            key = os.path.normcase(os.path.normpath(
+                os.path.abspath(ws_folder)))
+            if key in seen:
+                continue
+            seen.add(key)
+            sidecar = os.path.join(ws_folder, "source_epub.txt")
+            if not os.path.isfile(sidecar):
+                continue
+            try:
+                with open(sidecar, "r", encoding="utf-8") as fh:
+                    old_raw = fh.read().strip()
+            except OSError:
+                old_raw = ""
+            targets.append((ws_folder, old_raw, b))
+        if not targets:
+            return
+        # Confirmation prompt: list the affected workspace(s) and the
+        # raw path each is currently pointing at.
+        preview_lines = []
+        for ws_folder, old_raw, b in targets[:6]:
+            label = (b.get("folder_name")
+                     or os.path.basename(ws_folder)
+                     or b.get("name") or "")
+            if old_raw:
+                preview_lines.append(
+                    f"  \u2022 {label}\n      \u2192 {old_raw}")
+            else:
+                preview_lines.append(f"  \u2022 {label}")
+        if len(targets) > 6:
+            preview_lines.append(f"  \u2026 and {len(targets) - 6} more.")
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Question)
+        msg.setWindowTitle("Clear saved raw link")
+        if len(targets) == 1:
+            msg.setText(
+                "Remove the saved raw-source pointer for this "
+                "workspace?\n\n"
+                + "\n".join(preview_lines)
+                + "\n\nThe workspace folder is left untouched \u2014 "
+                "only ``source_epub.txt`` is deleted. The next "
+                "library scan will re-detect the workspace kind "
+                "from the folder contents."
+            )
+        else:
+            msg.setText(
+                f"Remove the saved raw-source pointer for "
+                f"{len(targets)} workspace"
+                f"{'s' if len(targets) != 1 else ''}?\n\n"
+                + "\n".join(preview_lines)
+                + "\n\nThe workspace folders are left untouched \u2014 "
+                "only each ``source_epub.txt`` is deleted. The next "
+                "library scan will re-detect the workspace kind "
+                "from the folder contents."
+            )
+        msg.setStandardButtons(
+            QMessageBox.Yes | QMessageBox.Cancel)
+        msg.setDefaultButton(QMessageBox.Yes)
+        if msg.exec() != QMessageBox.Yes:
+            return
+        cleared = 0
+        for ws_folder, old_raw, _b in targets:
+            sidecar = os.path.join(ws_folder, "source_epub.txt")
+            try:
+                os.remove(sidecar)
+                cleared += 1
+            except OSError as exc:
+                logger.debug(
+                    "Clear saved raw link failed for %s: %s",
+                    sidecar, exc)
+                continue
+            # Drop the now-unreferenced raw from the registry. If any
+            # OTHER workspace still points at this raw, leave the
+            # registry entry alone so that workspace doesn't lose
+            # its pairing.
+            if not old_raw:
+                continue
+            try:
+                still_referenced = False
+                roots_checked: set[str] = set()
+                for root in _resolve_output_roots(self._config):
+                    root_key = os.path.normcase(os.path.normpath(
+                        os.path.abspath(root)))
+                    if root_key in roots_checked:
+                        continue
+                    roots_checked.add(root_key)
+                    try:
+                        for entry in os.scandir(root):
+                            if not entry.is_dir(follow_symlinks=False):
+                                continue
+                            other_sidecar = os.path.join(
+                                entry.path, "source_epub.txt")
+                            if not os.path.isfile(other_sidecar):
+                                continue
+                            try:
+                                with open(other_sidecar, "r",
+                                          encoding="utf-8") as fh:
+                                    val = fh.read().strip()
+                            except OSError:
+                                continue
+                            if not val:
+                                continue
+                            try:
+                                if (os.path.normcase(
+                                        os.path.normpath(
+                                            os.path.abspath(val)))
+                                        == os.path.normcase(
+                                            os.path.normpath(
+                                                os.path.abspath(old_raw)))):
+                                    still_referenced = True
+                                    break
+                            except Exception:
+                                continue
+                    except (PermissionError, OSError):
+                        continue
+                    if still_referenced:
+                        break
+                if not still_referenced:
+                    remove_library_raw_input(old_raw)
+            except Exception:
+                logger.debug(
+                    "Raw-input unregister sweep failed: %s",
+                    traceback.format_exc())
+        if cleared:
+            # Reload so the scanner re-classifies workspace_kind from
+            # the folder contents \u2014 that's what flips the card
+            # badge back from PDF to EPUB for mis-paired entries.
+            self._load_books()
+        else:
+            QMessageBox.warning(
+                self, "Clear saved raw link",
+                "None of the selected workspaces could be updated. "
+                "Check that the folders still exist on disk.")
 
     def _delete_books_prompt(self, books: list):
         """Confirm + delete the backing file / folder for each book.
