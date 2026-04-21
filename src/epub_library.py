@@ -1652,26 +1652,37 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 if not compiled and not raw_source_path:
                     continue
 
-                # Compute translation_state for the UI. This decides whether
-                # the card shows a "Not started" pill or an "In progress"
-                # fraction in :class:`_BookCard` AND which tab it lands on.
+                # Compute translation_state for the UI. Drives both the
+                # pill label on :class:`_BookCard` AND which tab the
+                # card lands on.
                 #
-                # IMPORTANT: the done/total fraction is the authoritative
-                # signal, NOT the presence of a compiled ``.epub`` in the
-                # folder. A compiled EPUB from a previous partial run can
-                # sit next to an in-progress translation whose spine isn't
-                # fully covered yet — e.g. 58/60 with specials still
-                # pending and ``translate_special_files`` on. In that case
-                # we MUST classify as "in_progress" so the toggle actually
-                # moves the card between tabs.
-                if done >= total and total > 0:
+                # A workspace only graduates to "completed" when the
+                # translation fraction is 100 %% AND a compiled output
+                # (EPUB/PDF/TXT/HTML) is actually present on disk.
+                # Requiring the compile step closes the duplicate-card
+                # problem: a 100 %%-translated-but-not-compiled workspace
+                # used to pop up on the Completed tab alongside any
+                # Library/Translated sibling, creating two cards for
+                # the same book. Now the workspace stays on In Progress
+                # with a "Ready to compile" pill until the user
+                # actually builds the EPUB, at which point the promoted
+                # card replaces the in-progress one.
+                compiled_ok = bool(compiled)
+                fully_translated = done >= total and total > 0
+                if fully_translated and compiled_ok:
                     translation_state = "completed"
+                elif fully_translated:
+                    # All chapters translated but no compiled artifact —
+                    # the user still owes us a build. Keep the card on
+                    # In Progress so the Compile / Open-in-reader flow
+                    # is the obvious next step.
+                    translation_state = "ready_to_compile"
                 elif progress_total <= 0 and fs_done == 0:
                     # No meaningful progress data at all — trust the
                     # presence of a compiled EPUB as a "completed" signal
                     # (library import / pre-existing build). Otherwise
                     # this is a freshly scaffolded workspace.
-                    translation_state = "completed" if compiled else "not_started"
+                    translation_state = "completed" if compiled_ok else "not_started"
                 else:
                     translation_state = "in_progress"
 
@@ -1783,7 +1794,7 @@ def split_output_folders_by_status(rows: list[dict]) -> tuple[list[dict], list[d
         state = r.get("translation_state")
         if state == "completed":
             completed.append(r)
-        elif state in ("in_progress", "not_started"):
+        elif state in ("in_progress", "not_started", "ready_to_compile"):
             in_progress.append(r)
         elif r.get("has_compiled_output") or r.get("has_output_epub"):
             completed.append(r)
@@ -2850,10 +2861,8 @@ class _BookCard(QFrame):
             state = book.get("translation_state") or (
                 "in_progress" if total else "not_started"
             )
-            # 100% translated = no longer in progress. Such cards render on
-            # the Completed tab (see :func:`split_output_folders_by_status`)
-            # without any ribbon / pill so they look like regular completed
-            # entries even though the user hasn't compiled an EPUB yet.
+            # 100% translated + compiled EPUB = completed — no pill;
+            # those cards render plain on the Completed tab.
             if state == "completed":
                 pass
             else:
@@ -2873,6 +2882,32 @@ class _BookCard(QFrame):
                     progress_row.addWidget(pill)
                     ribbon_text = "NOT STARTED"
                     ribbon_bg = "rgba(138, 180, 208, 0.92)"
+                elif state == "ready_to_compile":
+                    # Every chapter has been translated, but the
+                    # user hasn't produced the final compiled EPUB
+                    # yet — the card parks on the In Progress tab
+                    # with a distinct green pill so the user knows
+                    # "Compile" is the next step, rather than
+                    # hunting for another chapter to translate.
+                    pill = QLabel(
+                        f"\u2728 Ready to compile "
+                        f"({done}/{total})" if total
+                        else "\u2728 Ready to compile"
+                    )
+                    pill.setToolTip(
+                        "All chapters translated \u2014 "
+                        "compile the final EPUB to graduate this "
+                        "card to the Completed tab."
+                    )
+                    pill.setStyleSheet(
+                        "color: #6ee8a0; "
+                        "background: rgba(110, 232, 160, 0.16); "
+                        "border: 1px solid #6ee8a0; border-radius: 3px; "
+                        "font-size: 7pt; font-weight: bold; padding: 1px 5px;"
+                    )
+                    progress_row.addWidget(pill)
+                    ribbon_text = "READY TO COMPILE"
+                    ribbon_bg = "rgba(110, 232, 160, 0.92)"
                 else:
                     pill = QLabel(f"\u23f3 {done}/{total}" if total else "\u23f3 In progress")
                     pill.setToolTip(
