@@ -1537,6 +1537,82 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
     # at 98/100 forever because two special files were skipped by design.
     exclude_special = not _resolve_translate_special_files(config)
 
+    # --- External-compile detection ------------------------------------
+    # A workspace folder with 100 %% progress but no .epub inside it is
+    # only truly "in progress" if the compiled EPUB doesn't exist
+    # *anywhere*. These lookups let the state machine below recognise
+    # three legitimate "compiled-elsewhere" cases and promote the card
+    # to ``completed`` instead of parking it on In Progress:
+    #
+    #   1. The workspace's compiled EPUB was moved into
+    #      ``Library/Translated`` by the Organize button —
+    #      ``origins['translated']`` still records the pre-organize
+    #      path; its *parent directory* was the output folder.
+    #   2. ``Library/Translated`` contains an EPUB whose basename stem
+    #      matches the workspace (physical library file).
+    #   3. ``library_translated_inputs.txt`` carries a registered-in-
+    #      place EPUB whose basename stem matches the workspace
+    #      (drag-drop onto the Completed tab without moving).
+    #
+    # Without this, a workspace at 162/162 would always show as
+    # "Ready to compile" even when the user already has a compiled
+    # translated EPUB filed on the Completed tab — the duplicate
+    # that the user hit when drag-dropping a compiled EPUB onto the
+    # Completed shelf while its workspace was still at 100 %.
+    _organized_output_folders: set[str] = set()
+    _translated_basename_stems: set[str] = set()
+    try:
+        _origins = _load_origins()
+        for orig_path in (_origins.get("translated", {}) or {}).values():
+            if not orig_path:
+                continue
+            parent = os.path.dirname(str(orig_path))
+            if parent:
+                _organized_output_folders.add(
+                    os.path.normcase(os.path.normpath(
+                        os.path.abspath(parent)))
+                )
+    except Exception:
+        logger.debug("scan_output_folders: origins lookup failed: %s",
+                     traceback.format_exc())
+    try:
+        _trans_dir = get_library_translated_dir()
+        with os.scandir(_trans_dir) as _it:
+            for entry in _it:
+                if (entry.is_file(follow_symlinks=False)
+                        and entry.name.lower().endswith(".epub")):
+                    _translated_basename_stems.add(
+                        os.path.splitext(entry.name)[0].lower())
+    except (PermissionError, OSError, FileNotFoundError):
+        pass
+    try:
+        for p in load_library_translated_inputs():
+            if p and p.lower().endswith(".epub"):
+                _translated_basename_stems.add(
+                    os.path.splitext(os.path.basename(p))[0].lower())
+    except Exception:
+        logger.debug("scan_output_folders: translated-inputs lookup failed: %s",
+                     traceback.format_exc())
+
+    def _has_external_compiled(folder_path: str,
+                               folder_basename: str,
+                               raw_src: str) -> bool:
+        """True when a compiled EPUB for *folder_path* exists elsewhere."""
+        try:
+            fp = os.path.normcase(os.path.normpath(
+                os.path.abspath(folder_path)))
+        except Exception:
+            fp = ""
+        if fp and fp in _organized_output_folders:
+            return True
+        candidates = set()
+        if folder_basename:
+            candidates.add(folder_basename.lower())
+        if raw_src:
+            candidates.add(
+                os.path.splitext(os.path.basename(raw_src))[0].lower())
+        return bool(candidates & _translated_basename_stems)
+
     results: list[dict] = []
     seen_folders: set[str] = set()
     for root in roots:
@@ -1656,18 +1732,24 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 # pill label on :class:`_BookCard` AND which tab the
                 # card lands on.
                 #
-                # A workspace only graduates to "completed" when the
-                # translation fraction is 100 %% AND a compiled output
-                # (EPUB/PDF/TXT/HTML) is actually present on disk.
-                # Requiring the compile step closes the duplicate-card
-                # problem: a 100 %%-translated-but-not-compiled workspace
-                # used to pop up on the Completed tab alongside any
-                # Library/Translated sibling, creating two cards for
-                # the same book. Now the workspace stays on In Progress
-                # with a "Ready to compile" pill until the user
-                # actually builds the EPUB, at which point the promoted
-                # card replaces the in-progress one.
-                compiled_ok = bool(compiled)
+                # A workspace graduates to "completed" when the
+                # translation fraction is 100 %% AND a compiled EPUB
+                # exists for it — either inside the workspace folder
+                # itself (normal case) OR in ``Library/Translated``,
+                # a registered-in-place translated path, or recorded
+                # in ``origins['translated']`` as having been moved
+                # from this workspace (all handled by
+                # :func:`_has_external_compiled`). Requiring the
+                # compile step closes the duplicate-card problem:
+                # a 100 %%-translated workspace used to pop up on
+                # the Completed tab alongside any
+                # Library/Translated sibling with the same basename,
+                # creating two cards for the same book. Now the
+                # workspace only shows "Ready to compile" when no
+                # compiled EPUB exists *anywhere* — the moment one
+                # is produced or imported, the card graduates.
+                compiled_ok = bool(compiled) or _has_external_compiled(
+                    folder, entry.name, raw_source_path or "")
                 fully_translated = done >= total and total > 0
                 if fully_translated and compiled_ok:
                     translation_state = "completed"
