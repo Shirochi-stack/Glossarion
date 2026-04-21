@@ -3880,8 +3880,15 @@ class _BookCard(QFrame):
         if icon_path:
             self._set_fallback_icon(icon_path)
         else:
-            self.cover_label.setText("📖")
+            self.cover_label.setText("\U0001f4d6")
         layout.addWidget(self.cover_label)
+        # Breathing room between the cover thumbnail and the title so
+        # the two don’t read as a single block. ``layout.setSpacing(1)``
+        # above keeps every OTHER inter-widget gap tight (size / pill /
+        # warning rows) — we only want the extra air right here where
+        # the image meets the text. 5 px lands comfortably between
+        # “touching” (1 px) and “floating” (8+ px).
+        layout.addSpacing(5)
 
         # Title: try to render the full name at the preset font size; shrink
         # the font (down to ``title_min_size``) if it wraps past the max
@@ -4224,6 +4231,10 @@ class _BookCard(QFrame):
         # so the tighter inter-row gaps don't just migrate into a
         # bigger empty band below the progress pill.
         reserved_h = 24 + p.get("spacing", 4)
+        # Match the ``layout.addSpacing(5)`` inserted between the cover
+        # and the title above — without this, ``setFixedHeight`` stays
+        # the same and the title box loses 5 px off its bottom.
+        reserved_h += 5
         if has_progress_row:
             reserved_h += 20  # pill row height + extra inter-widget spacing
         # Always reserve the warnings-row slot so every card lands at
@@ -4577,6 +4588,20 @@ class _RawScanWorker(QThread):
         if self._cancelled:
             return
         self.results.emit(self._folder, candidates, matches)
+
+
+class _StyledCheckDelegate:
+    """Marker module-level symbol so the real delegate can live below.
+
+    PySide6 requires importing the ``QStyledItemDelegate`` base class
+    from :mod:`PySide6.QtWidgets`, which we do lazily inside
+    :class:`_ScanForRawDialog._setup_ui` anyway to match the rest of
+    this file’s lazy-import pattern. The actual delegate is
+    constructed there via a nested helper class, keeping the import
+    footprint of this module small when ``epub_library`` is consumed
+    purely for its scanner helpers (e.g. by the Android shell).
+    """
+    pass
 
 
 class _ScanForRawDialog(QDialog):
@@ -4936,6 +4961,17 @@ class _ScanForRawDialog(QDialog):
         ])
         self._tree.setRootIsDecorated(False)
         self._tree.setSelectionMode(QTreeWidget.SingleSelection)
+        # The tree stylesheet handles background / row selection /
+        # header; the per-cell checkbox indicator is painted by a
+        # custom :class:`QStyledItemDelegate` installed below. We
+        # tried styling the indicator purely via
+        # ``QTreeView::indicator`` + an inline SVG ``image:`` URL,
+        # but Qt’s stylesheet engine doesn’t reliably resolve
+        # ``data:`` URIs in ``url()`` — the indicator rendered as a
+        # solid blue square with no “✓” glyph on Windows. Painting
+        # the indicator manually via a delegate matches
+        # :func:`_create_styled_checkbox` (same colours, same tick)
+        # byte-for-byte without the data-URL round-trip.
         self._tree.setStyleSheet(
             "QTreeWidget { background: #1a1a2a; color: #e0e0e0; "
             "border: 1px solid #2a2a3e; border-radius: 6px; "
@@ -4945,6 +4981,107 @@ class _ScanForRawDialog(QDialog):
             "QHeaderView::section { background: #1e1e2e; color: #b0b0c0; "
             "padding: 4px 8px; border: none; border-bottom: "
             "1px solid #2a2a3e; font-weight: bold; font-size: 8.5pt; }")
+        # Install the custom delegate on column 0 so the check
+        # indicator matches Other Settings. Other columns keep their
+        # default rendering.
+        from PySide6.QtWidgets import (
+            QStyledItemDelegate, QStyle, QStyleOptionViewItem,
+        )
+        from PySide6.QtGui import QColor, QPen, QBrush, QPainter
+        from PySide6.QtCore import QRect as _QRect, Qt as _Qt
+
+        class _CheckmarkDelegate(QStyledItemDelegate):
+            """Paint an Other-Settings-styled checkbox on column 0.
+
+            Draws a 14×14 rounded square with a #5a9fd4 border and
+            #2d2d2d unchecked fill / #5a9fd4 checked fill, plus a
+            white “✓” stroke inside the checked state. Rows whose
+            flags lack ``ItemIsUserCheckable`` (the “no match”
+            rows) render as an empty column so they don’t look
+            interactive. Click handling is left to the base class
+            — Qt’s default ``editorEvent`` still toggles the check
+            state on the model when the user clicks the cell.
+            """
+
+            def paint(self, painter, option, index):  # type: ignore[override]
+                if index.column() != 0:
+                    super().paint(painter, option, index)
+                    return
+                opt = QStyleOptionViewItem(option)
+                self.initStyleOption(opt, index)
+                painter.save()
+                try:
+                    # Row-level background / selection highlight
+                    # (mirrors the QTreeWidget::item:selected rule).
+                    if opt.state & QStyle.State_Selected:
+                        painter.fillRect(opt.rect, QColor("#3a3a5e"))
+                    flags = index.flags()
+                    if not (flags & _Qt.ItemIsUserCheckable):
+                        return
+                    # Read the check state through BOTH ``opt.checkState``
+                    # (populated by ``initStyleOption``) AND the raw
+                    # ``CheckStateRole`` data, normalising the value to
+                    # a plain int (``Qt.Checked`` = 2). PySide6 6.4+
+                    # ships ``Qt.CheckState`` as a strict Python enum
+                    # that doesn’t support ``int(enum_value)`` AND on
+                    # some Windows builds returns the enum from
+                    # ``data()`` while ``==`` against ``Qt.Checked``
+                    # silently yields False. Pulling ``.value`` (or
+                    # falling back to ``int()``) dodges both pitfalls,
+                    # and comparing against the literal ``2`` (the
+                    # wire value of ``Qt.Checked``) means we never
+                    # have to call ``int()`` on the enum constant
+                    # itself — which is what crashed the previous
+                    # iteration with ``TypeError: int() argument must
+                    # be a string, a bytes-like object or a real
+                    # number, not 'CheckState'``.
+                    def _cs_int(value):
+                        if value is None:
+                            return 0
+                        val = getattr(value, "value", value)
+                        try:
+                            return int(val)
+                        except (TypeError, ValueError):
+                            return 0
+                    opt_cs = _cs_int(opt.checkState)
+                    raw_cs_int = _cs_int(index.data(_Qt.CheckStateRole))
+                    # 2 == ``Qt.CheckState.Checked.value`` in every Qt
+                    # build shipped so far; safe to hardcode.
+                    is_checked = (opt_cs == 2 or raw_cs_int == 2)
+                    rect = opt.rect
+                    size = 14
+                    box_x = rect.x() + max(
+                        4, (rect.width() - size) // 2)
+                    box_y = rect.y() + max(
+                        2, (rect.height() - size) // 2)
+                    box = _QRect(box_x, box_y, size, size)
+                    painter.setRenderHint(QPainter.Antialiasing, True)
+                    hovered = bool(opt.state & QStyle.State_MouseOver)
+                    border_color = (
+                        QColor("#7bb3e0") if hovered
+                        else QColor("#5a9fd4"))
+                    painter.setPen(QPen(border_color, 1))
+                    if is_checked:
+                        painter.setBrush(QBrush(QColor("#5a9fd4")))
+                    else:
+                        painter.setBrush(QBrush(QColor("#2d2d2d")))
+                    painter.drawRoundedRect(box, 2, 2)
+                    if is_checked:
+                        painter.setBrush(_Qt.NoBrush)
+                        painter.setPen(QPen(
+                            QColor("white"), 2,
+                            _Qt.SolidLine, _Qt.RoundCap, _Qt.RoundJoin))
+                        # Classic “✓”: short leg from (3,7) to (6,10),
+                        # long leg from (6,10) to (11,4) inside the box.
+                        x = box.x()
+                        y = box.y()
+                        painter.drawLine(x + 3, y + 7, x + 6, y + 10)
+                        painter.drawLine(x + 6, y + 10, x + 11, y + 4)
+                finally:
+                    painter.restore()
+
+        self._check_delegate = _CheckmarkDelegate(self._tree)
+        self._tree.setItemDelegateForColumn(0, self._check_delegate)
         header = self._tree.header()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
