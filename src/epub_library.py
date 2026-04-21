@@ -1527,6 +1527,49 @@ def _resolve_book_source_file(book: dict) -> str:
     return ""
 
 
+def _resolve_book_translated_file(book: dict) -> str:
+    """Return the compiled / translated EPUB path to reveal, or ``""``.
+
+    Shared by :class:`EpubLibraryDialog._show_context_menu` (the
+    "Reveal Translated File" action) and :class:`BookDetailsDialog`
+    (the 📕 icon button) so the two entry points stay in lockstep.
+
+    Resolution order:
+
+      1. Library entries (``in_library=True``) whose ``path`` ends in
+         ``.epub`` — the EPUB sitting inside ``Library/Translated``
+         IS the translated artefact.
+      2. ``compiled_output_path`` set by the scanner when a workspace
+         row was either promoted-to-compiled or state-upgraded via the
+         origins/title match pass (``_DualScannerThread``).
+      3. ``output_epub_path`` legacy field — same semantics.
+      4. ``book['path']`` when it itself is an ``.epub`` on disk
+         (covers completed workspace rows whose ``path`` already
+         points at the compiled artefact).
+
+    Returns ``""`` when no resolvable translated file exists on disk
+    so the caller can omit / disable the action rather than pointing
+    at a missing target.
+    """
+    if not isinstance(book, dict):
+        return ""
+    lib_path = book.get("path", "") or ""
+    if (book.get("in_library")
+            and isinstance(lib_path, str)
+            and lib_path.lower().endswith(".epub")
+            and os.path.isfile(lib_path)):
+        return lib_path
+    for key in ("compiled_output_path", "output_epub_path"):
+        cand = book.get(key) or ""
+        if cand and os.path.isfile(cand):
+            return cand
+    if (isinstance(lib_path, str)
+            and lib_path.lower().endswith(".epub")
+            and os.path.isfile(lib_path)):
+        return lib_path
+    return ""
+
+
 def _find_raw_source_for_library_epub(library_epub_path: str) -> str:
     """Best-effort lookup for the raw source of a Library/Translated EPUB.
 
@@ -3892,6 +3935,33 @@ class EpubLibraryDialog(QDialog):
         self._raw_titles_btn.toggled.connect(self._on_raw_titles_toggled)
         toolbar.addWidget(self._raw_titles_btn)
         toolbar.addStretch()
+        # "Add Translation" lives on the shared toolbar (outside the
+        # tab widget) so the user can register a compiled EPUB from
+        # either tab without having to swap to Completed first. Uses
+        # the same import pipeline as the Completed tab's drag-drop
+        # (``target="translated"``): the chosen files are registered
+        # in place via ``library_translated_inputs.txt`` and surface
+        # on the Completed tab as ``registered_translated=True``
+        # cards. Nothing is copied or moved until the user clicks
+        # Organize.
+        self._add_translation_btn = QPushButton(
+            "\U0001f4d5  Add Translation")
+        self._add_translation_btn.setCursor(Qt.PointingHandCursor)
+        self._add_translation_btn.setToolTip(
+            "Pick one or more compiled .epub files to register with the "
+            "Library's Completed tab. Files stay where they are on disk "
+            "\u2014 same behaviour as dropping them onto the Completed "
+            "tab. Click Organize later to move them into "
+            "Library/Translated."
+        )
+        self._add_translation_btn.setStyleSheet(
+            "QPushButton { background: #3a5a7a; color: white; "
+            "border-radius: 4px; padding: 6px 14px; font-size: 9pt; "
+            "font-weight: bold; border: none; }"
+            "QPushButton:hover { background: #4a6a8a; }"
+        )
+        self._add_translation_btn.clicked.connect(self._add_translation)
+        toolbar.addWidget(self._add_translation_btn)
         self._count_label = QLabel("")
         self._count_label.setStyleSheet("color: #888; font-size: 8.5pt;")
         toolbar.addWidget(self._count_label)
@@ -3993,15 +4063,6 @@ class EpubLibraryDialog(QDialog):
         comp_action_row.addWidget(self._comp_organize_btn)
         self._comp_undo_btn = self._make_undo_button(kind="comp")
         comp_action_row.addWidget(self._comp_undo_btn)
-        self._open_library_btn = QPushButton("\U0001f4c1  Open Library Folder")
-        self._open_library_btn.setCursor(Qt.PointingHandCursor)
-        self._open_library_btn.setToolTip(f"Open {get_library_dir()} in the system file explorer.")
-        self._open_library_btn.setStyleSheet(
-            "QPushButton { background: #3a5a7a; color: white; border-radius: 4px; "
-            "padding: 6px 14px; font-size: 9pt; font-weight: bold; border: none; }"
-            "QPushButton:hover { background: #4a6a8a; }")
-        self._open_library_btn.clicked.connect(self._open_library_folder)
-        comp_action_row.addWidget(self._open_library_btn)
         comp_layout.addLayout(comp_action_row)
         self._comp_scroll = QScrollArea()
         self._comp_scroll.setWidgetResizable(True)
@@ -4016,8 +4077,8 @@ class EpubLibraryDialog(QDialog):
         comp_layout.addWidget(self._comp_scroll, 1)
         self._comp_empty_label = QLabel(
             "Your Library is empty.\n\n"
-            "Drop finished .epub files into the Library folder\n"
-            "(or use \u201cOpen Library Folder\u201d above) to see them here.")
+            "Drop finished .epub files here \u2014 or click\n"
+            "\u201cAdd Translation\u201d in the toolbar \u2014 to see them here.")
         self._comp_empty_label.setAlignment(Qt.AlignCenter)
         self._comp_empty_label.setStyleSheet("color: #555; font-size: 12pt; padding: 40px;")
         self._comp_empty_label.hide()
@@ -4209,14 +4270,34 @@ class EpubLibraryDialog(QDialog):
 
     # -- Actions ------------------------------------------------------------
 
-    def _open_library_folder(self):
-        """Open the Glossarion Library folder in the system file explorer."""
-        lib = get_library_dir()
-        try:
-            os.makedirs(lib, exist_ok=True)
-        except OSError:
-            pass
-        _open_folder_in_explorer(lib)
+    def _add_translation(self):
+        """Pick compiled EPUB(s) and register them with the Completed tab.
+
+        Mirrors the Completed tab's drag-drop flow — files stay on disk
+        where they are; the Library merely tracks them via
+        ``library_translated_inputs.txt`` and surfaces a
+        ``registered_translated=True`` card on the Completed tab. The
+        user can later promote the file(s) into ``Library/Translated``
+        via the Organize button, which is also what the drag-drop path
+        expects.
+
+        Only ``.epub`` is accepted here (same contract as the drag-drop
+        target) since non-EPUB compiled outputs aren't shelf artefacts.
+        """
+        from PySide6.QtWidgets import QFileDialog
+        start_dir = str(Path.home() / "Downloads")
+        if not os.path.isdir(start_dir):
+            start_dir = str(Path.home())
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Add translated EPUB(s) to Library",
+            start_dir,
+            "EPUB files (*.epub);;All files (*.*)",
+        )
+        if not paths:
+            return
+        self._import_paths_into_library(
+            paths, source="picker", target="translated")
 
     # -- Organize / Undo button factory + counters --------------------------
 
@@ -6089,25 +6170,11 @@ class EpubLibraryDialog(QDialog):
             )
             source_action.triggered.connect(
                 lambda: _open_folder_in_explorer(source_target))
-        # Reveal the compiled / translated EPUB itself. Resolution:
-        #   * Library-organized cards   → ``book['path']`` (the EPUB
-        #     in ``Library/Translated``).
-        #   * Completed non-library     → ``compiled_output_path`` or
-        #     ``output_epub_path`` from the scanner, falling back to
-        #     ``book['path']`` when it ends in ``.epub``.
-        #   * In-progress cards         → ``output_epub_path`` when a
-        #     compiled EPUB already exists in the output folder (the
-        #     card is "Not started / In progress" but a previous run
-        #     may have left a compiled artefact behind).
+        # Reveal the compiled / translated EPUB itself. Resolution
+        # lives in :func:`_resolve_book_translated_file` so this menu
+        # action and the Book Details 📕 button share one code path.
         # Omitted entirely when no translated EPUB exists on disk.
-        translation_target = (
-            book.get("path") if (book.get("in_library")
-                                 and str(book.get("path", "")).lower().endswith(".epub"))
-            else (book.get("compiled_output_path")
-                  or book.get("output_epub_path")
-                  or (book.get("path") if str(book.get("path", "")).lower().endswith(".epub")
-                      else ""))
-        )
+        translation_target = _resolve_book_translated_file(book)
         if translation_target and os.path.isfile(translation_target):
             translation_action = menu.addAction(
                 "\U0001f4d5  Reveal Translated File")
@@ -7722,6 +7789,21 @@ class BookDetailsDialog(QDialog):
         self._source_btn.setGraphicsEffect(self._source_btn_opacity)
         actions.addWidget(self._source_btn)
 
+        # "Reveal Translated File" — matches the card context menu's
+        # equivalent action. Uses :func:`_resolve_book_translated_file`
+        # so this button and the menu item resolve the same target.
+        self._translated_btn = QPushButton("\U0001f4d5")
+        self._translated_btn.setProperty("class", "icon-btn")
+        self._translated_btn.setToolTip("Reveal translated file")
+        self._translated_btn.setCursor(Qt.PointingHandCursor)
+        self._translated_btn.clicked.connect(self._reveal_translated)
+        self._translated_btn_opacity = QGraphicsOpacityEffect(
+            self._translated_btn)
+        self._translated_btn_opacity.setOpacity(1.0)
+        self._translated_btn.setGraphicsEffect(
+            self._translated_btn_opacity)
+        actions.addWidget(self._translated_btn)
+
         actions.addStretch()
         center.addLayout(actions)
 
@@ -8143,6 +8225,17 @@ class BookDetailsDialog(QDialog):
         self._source_btn.setToolTip(
             f"Reveal source file:\n{resolved_src}" if source_ok
             else "Source file not found on disk"
+        )
+        resolved_trans = self._resolve_translated_file_target()
+        trans_ok = bool(resolved_trans) and os.path.isfile(resolved_trans)
+        self._translated_btn.setEnabled(trans_ok)
+        self._translated_btn.setCursor(
+            Qt.PointingHandCursor if trans_ok else Qt.ForbiddenCursor)
+        self._translated_btn_opacity.setOpacity(
+            1.0 if trans_ok else 0.35)
+        self._translated_btn.setToolTip(
+            f"Reveal translated file:\n{resolved_trans}" if trans_ok
+            else "Translated file not found on disk"
         )
 
     @Slot(dict)
@@ -8839,6 +8932,15 @@ class BookDetailsDialog(QDialog):
         """
         return _resolve_book_source_file(self._book)
 
+    def _resolve_translated_file_target(self) -> str:
+        """Return the compiled translated EPUB path the 📕 button opens.
+
+        Thin wrapper around :func:`_resolve_book_translated_file` so
+        the Book Details translated button and the card context menu's
+        "Reveal Translated File" action share one resolution path.
+        """
+        return _resolve_book_translated_file(self._book)
+
     def _open_output_folder(self):
         """Open the book's output folder in the system file explorer."""
         folder = self._resolve_output_folder_target()
@@ -8848,6 +8950,12 @@ class BookDetailsDialog(QDialog):
     def _reveal_source(self):
         """Reveal the raw source file in the system file explorer."""
         path = self._resolve_source_file_target()
+        if path and os.path.isfile(path):
+            _open_folder_in_explorer(path)
+
+    def _reveal_translated(self):
+        """Reveal the compiled / translated EPUB in the file explorer."""
+        path = self._resolve_translated_file_target()
         if path and os.path.isfile(path):
             _open_folder_in_explorer(path)
 
