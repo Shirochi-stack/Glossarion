@@ -7856,15 +7856,33 @@ class EpubLibraryDialog(QDialog):
             )
             source_action.triggered.connect(
                 lambda: _open_folder_in_explorer(source_target))
+        # Reveal the compiled / translated EPUB itself. Resolution
+        # lives in :func:`_resolve_book_translated_file` so this menu
+        # action and the Book Details 📕 button share one code path.
+        # Omitted entirely when no translated EPUB exists on disk.
+        translation_target = _resolve_book_translated_file(book)
+        if translation_target and os.path.isfile(translation_target):
+            translation_action = menu.addAction(
+                "\U0001f4d5  Reveal Translated File")
+            translation_action.setToolTip(
+                f"Reveal translated file:\n{translation_target}"
+            )
+            translation_action.triggered.connect(
+                lambda: _open_folder_in_explorer(translation_target))
+        menu.addSeparator()
+        copy_path_action = menu.addAction("\U0001f4cb  Copy Path")
+        copy_path_action.triggered.connect(lambda: QApplication.clipboard().setText(book["path"]))
         # "Clear saved raw link" \u2014 lets the user reset a bad
         # Scan-for-Raw pairing (e.g. an EPUB workspace that got
         # auto-paired to a ``.pdf`` via an earlier broken match).
-        # Deletes the ``source_epub.txt`` sidecar and unregisters the
-        # stale raw from the raw-inputs registry so the next library
-        # scan re-derives ``workspace_kind`` from the real folder
-        # contents. Only offered for workspace-backed cards whose
-        # sidecar actually exists on disk \u2014 a card without a
-        # saved link has nothing to clear.
+        # Deletes the ``source_epub.txt`` sidecar and unregisters
+        # the stale raw from the raw-inputs registry so the next
+        # library scan re-derives ``workspace_kind`` from the real
+        # folder contents. Only offered for workspace-backed cards
+        # whose sidecar actually exists on disk \u2014 a card without
+        # a saved link has nothing to clear. Sits right above Delete
+        # because it's a "corrective" action in the same destructive-
+        # but-recoverable family.
         clear_targets = [
             b for b in selected_books
             if self._card_has_saved_raw_link(b)
@@ -7893,25 +7911,9 @@ class EpubLibraryDialog(QDialog):
             clear_action.setToolTip(clear_tip)
             clear_action.triggered.connect(
                 lambda: self._clear_saved_raw_link(clear_targets))
-        # Reveal the compiled / translated EPUB itself. Resolution
-        # lives in :func:`_resolve_book_translated_file` so this menu
-        # action and the Book Details 📕 button share one code path.
-        # Omitted entirely when no translated EPUB exists on disk.
-        translation_target = _resolve_book_translated_file(book)
-        if translation_target and os.path.isfile(translation_target):
-            translation_action = menu.addAction(
-                "\U0001f4d5  Reveal Translated File")
-            translation_action.setToolTip(
-                f"Reveal translated file:\n{translation_target}"
-            )
-            translation_action.triggered.connect(
-                lambda: _open_folder_in_explorer(translation_target))
-        menu.addSeparator()
-        copy_path_action = menu.addAction("\U0001f4cb  Copy Path")
-        copy_path_action.triggered.connect(lambda: QApplication.clipboard().setText(book["path"]))
-        # Delete — tab-specific semantics:
-        #   * In Progress → delete the output folder (recursive)
-        #   * Completed   → delete the .epub / compiled file
+        # Delete \u2014 tab-specific semantics:
+        #   * In Progress \u2192 delete the output folder (recursive)
+        #   * Completed   \u2192 delete the .epub / compiled file
         # Works with multi-selection too ("Delete N items"). Always asks
         # for confirmation first.
         menu.addSeparator()
@@ -7936,14 +7938,19 @@ class EpubLibraryDialog(QDialog):
     def _card_has_saved_raw_link(book: dict) -> bool:
         """Return True when the card's workspace has a ``source_epub.txt``.
 
-        Only workspace-backed cards can carry a saved raw link \u2014
-        library-filed ``.epub`` entries store their pairing in
-        ``library_origins['pairs']`` instead, so those are
-        deliberately excluded here.
+        Works for both workspace-backed cards (``output_folder``
+        present on the book dict) AND library-filed cards whose
+        compiled EPUB was organized into ``Library/Translated``
+        \u2014 the latter don't carry ``output_folder`` directly but
+        :func:`_resolve_book_output_folder` recovers it from
+        ``library_origins['translated']``. Without this path the
+        Clear action silently skipped library-filed entries while
+        working fine for every other card, which read as an
+        inconsistency even though the sidecar still existed.
         """
         if not isinstance(book, dict):
             return False
-        ws_folder = book.get("output_folder") or ""
+        ws_folder = _resolve_book_output_folder(book)
         if not ws_folder or not os.path.isdir(ws_folder):
             return False
         sidecar = os.path.join(ws_folder, "source_epub.txt")
@@ -7964,10 +7971,16 @@ class EpubLibraryDialog(QDialog):
             return
         # De-dup by workspace folder and snapshot the current raw
         # pointer so we can optionally unregister it afterwards.
+        # ``_resolve_book_output_folder`` is used here (not a raw
+        # ``book['output_folder']`` lookup) so library-filed cards
+        # whose compiled EPUB was organized into ``Library/Translated``
+        # still resolve to their originating workspace via the
+        # origins registry \u2014 otherwise the Clear action silently
+        # skipped them, which the user observed as an inconsistency.
         targets: list[tuple[str, str, dict]] = []
         seen: set[str] = set()
         for b in books:
-            ws_folder = b.get("output_folder") or ""
+            ws_folder = _resolve_book_output_folder(b)
             if not ws_folder or not os.path.isdir(ws_folder):
                 continue
             key = os.path.normcase(os.path.normpath(
