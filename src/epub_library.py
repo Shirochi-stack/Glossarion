@@ -3444,8 +3444,19 @@ class _SelectableGrid(QWidget):
 
     Emits :attr:`rubber_band_selection` once the user finishes a drag.
     Plain clicks on empty space emit :attr:`empty_clicked` so the parent
-    can clear the current selection. Clicks that land on a :class:`_BookCard`
-    child are handled by the card itself (this widget never receives those).
+    can clear the current selection.
+
+    Dragging starts from **anywhere** in the grid — including on top of
+    a :class:`_BookCard` — because the slivers of empty space between
+    cards are too narrow to reliably grab. A mouse press on a card is
+    initially handled as a normal card click (the card still emits
+    :attr:`_BookCard.select_requested` so single-click selection keeps
+    working); as soon as the pointer moves past :data:`_DRAG_THRESHOLD`,
+    the grid promotes the gesture to a rubber-band drag starting from
+    the original press location. The card's just-fired selection is
+    overwritten by the rubber-band result on mouse release (a plain
+    drag clears + replaces; Ctrl / Shift extends), so the user never
+    sees a stuck "single card selected" state after a drag.
     """
     # (list_of_books_inside_band, modifiers)
     rubber_band_selection = Signal(list, object)
@@ -3463,7 +3474,157 @@ class _SelectableGrid(QWidget):
         self._drag_origin = None
         self._drag_modifiers = None
         self._drag_started = False
+        # Filter-based press tracking for drags that start on a card.
+        # The card handles the initial press itself (so click-select
+        # still works); we watch for subsequent MouseMove on the card
+        # — via an event filter installed on every descendant — and
+        # promote the gesture to a rubber-band once it passes the
+        # drag threshold. Coords are always translated into grid-
+        # local space via :func:`QWidget.mapTo` so the band geometry
+        # matches what a press on empty space would have produced.
+        self._card_drag_origin = None
+        self._card_drag_modifiers = None
+        # Install the filter on any children that happen to exist at
+        # construction time (usually none — the grid is populated
+        # later). :meth:`childEvent` handles everything added after.
+        self._install_filter_on_descendants()
 
+    # -- event-filter plumbing ---------------------------------------------
+    def childEvent(self, event):
+        """Install the rubber-band filter on newly added descendants.
+
+        ``ChildAdded`` fires once per direct child, so we handle the
+        direct child here and recurse via :meth:`_install_filter_on_descendants`
+        to catch the card's own sub-widgets (labels, layout spacers) —
+        otherwise a press on a card's title label would slip past the
+        filter entirely and the drag-through-card gesture would feel
+        unreliable depending on exactly where the user clicked.
+        """
+        from PySide6.QtCore import QEvent
+        if event.type() == QEvent.ChildAdded:
+            child = event.child()
+            try:
+                if isinstance(child, QWidget):
+                    child.installEventFilter(self)
+                    # Recurse so labels / spacers inside cards are
+                    # covered too — a press on ``title_lbl`` otherwise
+                    # never reaches the filter because QLabel consumes
+                    # mouse events by default.
+                    for sub in child.findChildren(QWidget):
+                        try:
+                            sub.installEventFilter(self)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        super().childEvent(event)
+
+    def _install_filter_on_descendants(self):
+        for c in self.findChildren(QWidget):
+            try:
+                c.installEventFilter(self)
+            except Exception:
+                pass
+
+    def _card_ancestor(self, obj):
+        """Return the :class:`_BookCard` ancestor of *obj*, or None."""
+        if not isinstance(obj, QWidget):
+            return None
+        node = obj
+        while node is not None and node is not self:
+            if isinstance(node, _BookCard):
+                return node
+            try:
+                node = node.parent()
+            except Exception:
+                return None
+        return None
+
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent, QRect
+        card = self._card_ancestor(obj)
+        if card is None:
+            return super().eventFilter(obj, event)
+        etype = event.type()
+        if etype == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            # Record the press origin in grid-local coords but let
+            # the card keep the event so ``select_requested`` still
+            # fires for a plain click. ``mapTo`` handles the nested
+            # widget case (press on a label inside the card).
+            try:
+                self._card_drag_origin = obj.mapTo(self, event.pos())
+            except Exception:
+                self._card_drag_origin = None
+            self._card_drag_modifiers = event.modifiers()
+            self._drag_started = False
+            return False
+        if etype == QEvent.MouseMove and (event.buttons() & Qt.LeftButton):
+            if (self._card_drag_origin is not None
+                    and not self._drag_started):
+                try:
+                    current = obj.mapTo(self, event.pos())
+                except Exception:
+                    return False
+                delta = current - self._card_drag_origin
+                if abs(delta.x()) + abs(delta.y()) > self._DRAG_THRESHOLD:
+                    self._start_rubber_band(
+                        self._card_drag_origin,
+                        self._card_drag_modifiers or Qt.NoModifier)
+                    self._rubber_band.setGeometry(
+                        QRect(self._drag_origin, current).normalized())
+                    return True
+            if self._drag_started and self._rubber_band is not None:
+                try:
+                    current = obj.mapTo(self, event.pos())
+                except Exception:
+                    return False
+                self._rubber_band.setGeometry(
+                    QRect(self._drag_origin, current).normalized())
+                return True
+        if etype == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            if self._drag_started:
+                # Finalize: emit selection + reset state. Consume the
+                # release so the card's own handler doesn't also fire
+                # and re-emit ``select_requested`` for a now-stale
+                # single-card selection.
+                self._finish_rubber_band()
+                self._card_drag_origin = None
+                self._card_drag_modifiers = None
+                return True
+            self._card_drag_origin = None
+            self._card_drag_modifiers = None
+            return False
+        return super().eventFilter(obj, event)
+
+    # -- shared start / finish helpers -------------------------------------
+    def _start_rubber_band(self, origin, modifiers):
+        from PySide6.QtCore import QRect, QSize
+        from PySide6.QtWidgets import QRubberBand
+        self._drag_origin = origin
+        self._drag_modifiers = modifiers
+        self._drag_started = True
+        if self._rubber_band is None:
+            self._rubber_band = QRubberBand(QRubberBand.Rectangle, self)
+        self._rubber_band.setGeometry(QRect(origin, QSize()))
+        self._rubber_band.show()
+
+    def _finish_rubber_band(self):
+        if self._rubber_band is None or not self._drag_started:
+            return
+        rect = self._rubber_band.geometry()
+        self._rubber_band.hide()
+        books: list = []
+        for child in self.children():
+            if isinstance(child, _BookCard):
+                if rect.intersects(child.geometry()):
+                    books.append(child.book)
+        self.rubber_band_selection.emit(
+            books, self._drag_modifiers or Qt.NoModifier)
+        self._drag_origin = None
+        self._drag_modifiers = None
+        self._drag_started = False
+
+    # -- direct mouse handling (presses landing on empty grid space) ------
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._drag_origin = event.pos()
@@ -3473,33 +3634,22 @@ class _SelectableGrid(QWidget):
 
     def mouseMoveEvent(self, event):
         if self._drag_origin is not None and (event.buttons() & Qt.LeftButton):
-            from PySide6.QtCore import QRect, QSize
-            from PySide6.QtWidgets import QRubberBand
+            from PySide6.QtCore import QRect
             delta = event.pos() - self._drag_origin
             distance = abs(delta.x()) + abs(delta.y())
             if not self._drag_started and distance > self._DRAG_THRESHOLD:
-                self._drag_started = True
-                if self._rubber_band is None:
-                    self._rubber_band = QRubberBand(QRubberBand.Rectangle, self)
-                self._rubber_band.setGeometry(QRect(self._drag_origin, QSize()))
-                self._rubber_band.show()
+                self._start_rubber_band(
+                    self._drag_origin,
+                    self._drag_modifiers or Qt.NoModifier)
             if self._drag_started and self._rubber_band is not None:
-                rect = QRect(self._drag_origin, event.pos()).normalized()
-                self._rubber_band.setGeometry(rect)
+                self._rubber_band.setGeometry(
+                    QRect(self._drag_origin, event.pos()).normalized())
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         try:
             if self._drag_started and self._rubber_band is not None:
-                rect = self._rubber_band.geometry()
-                self._rubber_band.hide()
-                books: list = []
-                for child in self.children():
-                    if isinstance(child, _BookCard):
-                        if rect.intersects(child.geometry()):
-                            books.append(child.book)
-                self.rubber_band_selection.emit(
-                    books, self._drag_modifiers or Qt.NoModifier)
+                self._finish_rubber_band()
             elif (event.button() == Qt.LeftButton
                     and self._drag_origin is not None):
                 # Plain click on empty space (no drag) — let the parent
