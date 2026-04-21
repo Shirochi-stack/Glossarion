@@ -2573,6 +2573,46 @@ def _parse_pt(pt_str) -> float:
         return 9.0
 
 
+def _fit_pill_font_pt(text: str, max_width: int,
+                      base_pt: float = 7.0, min_pt: float = 5.0,
+                      step: float = 0.5,
+                      horiz_padding: int = 14,
+                      bold: bool = True,
+                      base_font: QFont | None = None) -> float:
+    """Pick a font point size that renders *text* inside *max_width* pixels.
+
+    Pills on the flash cards (“Ready to compile…”, “⚠ missing raw”,
+    “⏳ N/M”, …) live inside a fixed-width card and can easily overflow
+    horizontally at the preset’s base font size once the card shrinks
+    to Compact / Normal or the text happens to be unusually long
+    (“Ready to compile (1589/1589)” is ~140 px wide at 7 pt bold).
+    Shrinking the font in 0.5 pt increments until it fits mirrors
+    :func:`_fit_title_text`’s shrink loop and keeps the short-text
+    case rendered at full size.
+
+    *horiz_padding* covers the pill’s CSS padding (5 px left + 5 px
+    right), border (1 px × 2), and a small safety buffer so a 1-2 px
+    measurement error from ``QFontMetrics.horizontalAdvance`` doesn’t
+    let a marginal case clip on render. Falls back to *min_pt* when
+    even that doesn’t fit (callers can still truncate if needed).
+    """
+    if not text:
+        return float(base_pt)
+    max_width = max(1, int(max_width))
+    pt = float(base_pt)
+    min_pt = float(min_pt)
+    step = float(step)
+    while pt > min_pt:
+        f = QFont(base_font) if base_font is not None else QFont()
+        f.setPointSizeF(pt)
+        f.setBold(bold)
+        fm = QFontMetrics(f)
+        if fm.horizontalAdvance(text) + horiz_padding <= max_width:
+            return pt
+        pt = max(min_pt, pt - step)
+    return min_pt
+
+
 def _fit_title_text(
     text: str,
     avail_width: int,
@@ -3851,8 +3891,17 @@ class _BookCard(QFrame):
         if conflicts:
             conflict_lbl = QLabel(f"\u26a0 +{len(conflicts)}")
             conflict_lbl.setAttribute(Qt.WA_TranslucentBackground)
+            # Dynamic font size: the conflict badge usually reads
+            # “⚠ +2” / “⚠ +12” (short), but Compact / Normal cards still
+            # put it next to the size + EPUB badges, so shrink before
+            # it pushes its row past the card edge.
+            _conflict_budget = max(32, int(self._card_w / 3))
+            _conflict_pt = _fit_pill_font_pt(
+                conflict_lbl.text(), _conflict_budget,
+                base_pt=7.0, min_pt=5.5, horiz_padding=12,
+            )
             conflict_lbl.setStyleSheet(
-                "color: #ffb347; font-size: 7pt; font-weight: bold; "
+                f"color: #ffb347; font-size: {_conflict_pt}pt; font-weight: bold; "
                 "background: rgba(255, 179, 71, 0.15); "
                 "border: 1px solid #ffb347; border-radius: 3px; "
                 "padding: 0 4px; margin-left: 2px;"
@@ -3871,20 +3920,34 @@ class _BookCard(QFrame):
             )
             conflict_lbl.setToolTip("\n".join(tip_lines))
             info_row.addWidget(conflict_lbl)
+        info_row.addStretch()
+        layout.addLayout(info_row)
+
         # Missing-raw-file warning: the workspace still has a
         # compiled / progress / response trail but the ORIGINAL raw
         # source EPUB can't be resolved on disk anymore. Surface it
-        # as a ⚠ badge — the card stays on whichever tab its other
-        # signals routed it to, it just gets annotated so the user
-        # knows why reader / reveal-source actions will be limited.
-        if book.get("missing_raw_file"):
+        # as a ⚠ badge on its OWN row — stacking it beside the
+        # size / badge on ``info_row`` used to clip “⚠ missing raw”
+        # down to “⚠ …” once the card was Compact / Normal, because
+        # the size label + EPUB badge already claimed most of the
+        # row’s width.
+        has_warnings_row = bool(book.get("missing_raw_file"))
+        if has_warnings_row:
+            warnings_row = QHBoxLayout()
+            warnings_row.setContentsMargins(0, 0, 0, 0)
+            warnings_row.setSpacing(4)
             missing_lbl = QLabel("\u26a0 missing raw")
             missing_lbl.setAttribute(Qt.WA_TranslucentBackground)
+            _missing_budget = max(40, int(self._card_w - 12))
+            _missing_pt = _fit_pill_font_pt(
+                missing_lbl.text(), _missing_budget,
+                base_pt=7.0, min_pt=5.5, horiz_padding=14,
+            )
             missing_lbl.setStyleSheet(
-                "color: #ff9e6d; font-size: 7pt; font-weight: bold; "
+                f"color: #ff9e6d; font-size: {_missing_pt}pt; font-weight: bold; "
                 "background: rgba(255, 158, 109, 0.15); "
                 "border: 1px solid #ff9e6d; border-radius: 3px; "
-                "padding: 0 4px; margin-left: 2px;"
+                "padding: 0 4px;"
             )
             missing_lbl.setToolTip(
                 "The raw source file for this book can't be found on "
@@ -3894,9 +3957,9 @@ class _BookCard(QFrame):
                 "raw source (Reveal source, Read raw, Load for "
                 "translation) will be disabled."
             )
-            info_row.addWidget(missing_lbl)
-        info_row.addStretch()
-        layout.addLayout(info_row)
+            warnings_row.addWidget(missing_lbl)
+            warnings_row.addStretch()
+            layout.addLayout(warnings_row)
 
         # In-progress indicator: small status pill + overlay ribbon on the cover
         has_progress_row = False
@@ -3916,6 +3979,19 @@ class _BookCard(QFrame):
                 progress_row = QHBoxLayout()
                 progress_row.setContentsMargins(0, 0, 0, 0)
                 progress_row.setSpacing(4)
+                # Budget for the pill so :func:`_fit_pill_font_pt` can
+                # shrink a too-long label (e.g. “Ready to compile
+                # (1589/1589)”) down to a size that still fits inside
+                # the card’s fixed width. We subtract the card’s own
+                # left/right padding (8 px), the ~30 px the “NN%”
+                # label to the right takes when the “in_progress”
+                # branch shows it, and a small buffer for the row’s
+                # 4 px spacing + measurement error.
+                _needs_pct_lbl = bool(total) and state not in (
+                    "outdated_progress", "not_started", "ready_to_compile",
+                )
+                _pct_reservation = 30 if _needs_pct_lbl else 0
+                _pill_budget = max(40, int(self._card_w - 12 - _pct_reservation))
                 if state == "outdated_progress":
                     pill = QLabel("\u26a0 Outdated Progress file")
                     pill.setToolTip(
@@ -3925,11 +4001,16 @@ class _BookCard(QFrame):
                         "card is pinned here so you can re-run the "
                         "translation or remove the folder."
                     )
+                    _pill_pt = _fit_pill_font_pt(
+                        pill.text(), _pill_budget,
+                        base_pt=7.0, min_pt=5.0, horiz_padding=14,
+                    )
                     pill.setStyleSheet(
                         "color: #ffb347; "
                         "background: rgba(255, 179, 71, 0.18); "
                         "border: 1px solid #ffb347; border-radius: 3px; "
-                        "font-size: 7pt; font-weight: bold; padding: 0 5px 2px 5px;"
+                        f"font-size: {_pill_pt}pt; font-weight: bold; "
+                        "padding: 0 5px 2px 5px;"
                     )
                     progress_row.addWidget(pill)
                     ribbon_text = "OUTDATED PROGRESS"
@@ -3937,10 +4018,15 @@ class _BookCard(QFrame):
                 elif state == "not_started":
                     pill = QLabel("\U0001f195 Not started")
                     pill.setToolTip("Imported into Library/Raw, translation not started yet.")
+                    _pill_pt = _fit_pill_font_pt(
+                        pill.text(), _pill_budget,
+                        base_pt=7.0, min_pt=5.0, horiz_padding=14,
+                    )
                     pill.setStyleSheet(
                         "color: #8ab4d0; background: rgba(138, 180, 208, 0.15); "
                         "border: 1px solid #8ab4d0; border-radius: 3px; "
-                        "font-size: 7pt; font-weight: bold; padding: 0 5px 2px 5px;"
+                        f"font-size: {_pill_pt}pt; font-weight: bold; "
+                        "padding: 0 5px 2px 5px;"
                     )
                     progress_row.addWidget(pill)
                     ribbon_text = "NOT STARTED"
@@ -3956,11 +4042,16 @@ class _BookCard(QFrame):
                         "final EPUB to graduate this card to the "
                         "Completed tab."
                     )
+                    _pill_pt = _fit_pill_font_pt(
+                        pill.text(), _pill_budget,
+                        base_pt=7.0, min_pt=5.0, horiz_padding=14,
+                    )
                     pill.setStyleSheet(
                         "color: #6ee8a0; "
                         "background: rgba(110, 232, 160, 0.16); "
                         "border: 1px solid #6ee8a0; border-radius: 3px; "
-                        "font-size: 7pt; font-weight: bold; padding: 0 5px 2px 5px;"
+                        f"font-size: {_pill_pt}pt; font-weight: bold; "
+                        "padding: 0 5px 2px 5px;"
                     )
                     progress_row.addWidget(pill)
                     ribbon_text = "READY TO COMPILE"
@@ -3970,10 +4061,15 @@ class _BookCard(QFrame):
                     pill.setToolTip(
                         f"Translation in progress \u2014 {pct}% ({done}/{total} chapters)"
                     )
+                    _pill_pt = _fit_pill_font_pt(
+                        pill.text(), _pill_budget,
+                        base_pt=7.0, min_pt=5.0, horiz_padding=14,
+                    )
                     pill.setStyleSheet(
                         "color: #ffd166; background: rgba(108, 99, 255, 0.18); "
                         "border: 1px solid #6c63ff; border-radius: 3px; "
-                        "font-size: 7pt; font-weight: bold; padding: 0 5px 2px 5px;"
+                        f"font-size: {_pill_pt}pt; font-weight: bold; "
+                        "padding: 0 5px 2px 5px;"
                     )
                     progress_row.addWidget(pill)
                     if total:
@@ -4008,6 +4104,15 @@ class _BookCard(QFrame):
         reserved_h = 24 + p.get("spacing", 4)
         if has_progress_row:
             reserved_h += 20  # pill row height + extra inter-widget spacing
+        # Always reserve the warnings-row slot so every card lands at
+        # the same fixed height, whether or not it currently carries
+        # a “⚠ missing raw” badge. Without this constant, cards
+        # with and without the badge drift by the badge’s height and
+        # the grid looks ragged row-to-row. 16 px covers the badge
+        # (~12 px) + ``layout.setSpacing(1)`` + a bit of breathing
+        # room below the progress pill so the card doesn’t feel
+        # bottom-cramped.
+        reserved_h += 16
         self.setFixedHeight(self._cover_h + max_title_h + reserved_h)
 
     def set_selected(self, selected: bool):
