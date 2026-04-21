@@ -366,6 +366,35 @@ class UpdateManager(QObject):
         self._last_check_time = self.main_gui.config.get('last_update_check_time', 0)
         self._check_cache_duration = 1800  # Cache for 30 minutes
         self.selected_asset = None  # Store selected asset for download
+        self._build_variant = self._detect_build_variant()
+        print(f"[DEBUG] Detected build variant: {self._build_variant}")
+    
+    def _detect_build_variant(self) -> str:
+        """Detect which build variant is currently running from the exe filename.
+        
+        Returns one of: 'OmegaLite', 'SuperLite', 'TurboLite', 'Lite', 'NoCuda', 'Standard'
+        """
+        try:
+            if getattr(sys, 'frozen', False):
+                exe_name = os.path.basename(sys.executable).lower()
+            else:
+                # Dev mode: check APP_NAME from the running spec if available
+                exe_name = ''
+            
+            if 'omegalite' in exe_name:
+                return 'OmegaLite'
+            elif 'superlite' in exe_name:
+                return 'SuperLite'
+            elif 'turbolite' in exe_name:
+                return 'TurboLite'
+            elif 'lite' in exe_name:
+                return 'Lite'
+            elif 'nocuda' in exe_name or 'no_cuda' in exe_name or exe_name.startswith('n_'):
+                return 'NoCuda'
+            else:
+                return 'Standard'
+        except Exception:
+            return 'Lite'  # Safe default
         
         # Get version from the main GUI's __version__ variable
         if hasattr(main_gui, '__version__'):
@@ -1152,24 +1181,36 @@ class UpdateManager(QObject):
                         filename = asset['name']
                         size_mb = asset['size'] / (1024 * 1024)
                         
-                        # Identify variant type based on first letter of filename
-                        first_letter = filename[0].upper() if filename else ''
-                        if first_letter == 'G':
-                            variant_type = "Standard"
-                        elif first_letter == 'L':
+                        # Identify variant type from filename keywords
+                        fname_lower = filename.lower()
+                        if 'omegalite' in fname_lower:
+                            variant_type = "OmegaLite"
+                            variant_desc = "OpenAI-only, minimal build"
+                        elif 'superlite' in fname_lower:
+                            variant_type = "SuperLite"
+                            variant_desc = "All AI providers, no EPUB reader/PDF"
+                        elif 'turbolite' in fname_lower:
+                            variant_type = "TurboLite"
+                            variant_desc = "Full features, lower RAM usage"
+                        elif 'lite' in fname_lower and fname_lower.startswith('l_'):
                             variant_type = "Lite"
-                        elif first_letter == 'N':
-                            variant_type = "No CUDA"
+                            variant_desc = "Full features, recommended for most users"
+                        elif 'nocuda' in fname_lower or fname_lower.startswith('n_'):
+                            variant_type = "NoCuda (Manga)"
+                            variant_desc = "Full Manga translation, no CUDA required"
                         else:
-                            # Fallback: check for keywords in filename
-                            if 'lite' in filename.lower():
-                                variant_type = "Lite"
-                            elif 'cuda' in filename.lower():
-                                variant_type = "No CUDA"
-                            elif 'full' in filename.lower():
-                                variant_type = "Full"
-                            else:
+                            first_letter = filename[0].upper() if filename else ''
+                            if first_letter == 'G':
                                 variant_type = "Standard"
+                                variant_desc = ""
+                            else:
+                                variant_type = filename
+                                variant_desc = ""
+                        
+                        # Mark if this matches current running build
+                        is_current = (variant_type.replace(' (Manga)', '').replace(' ', '') ==
+                                      self._build_variant.replace(' ', ''))
+                        current_tag = " ✓ (current)" if is_current else ""
                         
                         # Add platform indicator for non-Windows files
                         if filename.lower().endswith('.dmg'):
@@ -1180,15 +1221,22 @@ class UpdateManager(QObject):
                         else:
                             platform_tag = ""
                         
-                        variant_label = f"{variant_type}{platform_tag} - {filename} ({size_mb:.1f} MB)"
+                        variant_label = f"{variant_type}{current_tag}{platform_tag} — {filename} ({size_mb:.1f} MB)"
+                        if variant_desc:
+                            variant_label += f"\n    {variant_desc}"
                         
                         rb = QRadioButton(variant_label)
                         rb.setProperty("asset_index", i)
                         self.asset_button_group.addButton(rb, i)
                         asset_layout.addWidget(rb)
                         
-                        # Select first option by default
-                        if i == 0:
+                        # Auto-select the variant matching the current running build;
+                        # fall back to first item if none match
+                        if is_current:
+                            rb.setChecked(True)
+                            self.selected_asset = asset
+                        elif i == 0:
+                            # Tentative default — may be overridden by a matching variant below
                             rb.setChecked(True)
                             self.selected_asset = asset
                     
