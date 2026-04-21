@@ -3854,6 +3854,55 @@ class EpubLibraryDialog(QDialog):
         if msg.exec() != QMessageBox.Yes:
             return
 
+        # Pre-scan for name collisions in Library/Raw and
+        # Library/Translated. If any exist, ask the user once for a
+        # single policy that applies to every duplicate in this run —
+        # mirrors the drag-drop import prompt so a name collision can
+        # no longer silently auto-rename with ``(2)`` / ``(3)``.
+        raw_collisions: list[tuple[str, str]] = []
+        for _b, src in raw_moves:
+            candidate = os.path.join(raw_dir, os.path.basename(src))
+            if (os.path.isfile(candidate)
+                    and os.path.abspath(src) != os.path.abspath(candidate)):
+                raw_collisions.append((src, candidate))
+        trans_collisions: list[tuple[str, str]] = []
+        for _b, src in translated_moves:
+            candidate = os.path.join(trans_dir, os.path.basename(src))
+            if (os.path.isfile(candidate)
+                    and os.path.abspath(src) != os.path.abspath(candidate)):
+                trans_collisions.append((src, candidate))
+        all_collisions = raw_collisions + trans_collisions
+        collision_policy = "keep_both"
+        if all_collisions:
+            # Combined dest label for the prompt so a mixed
+            # raw+translated batch reads naturally.
+            if raw_collisions and trans_collisions:
+                dest_label = "Library/Raw and Library/Translated"
+            elif raw_collisions:
+                dest_label = "Library/Raw"
+            else:
+                dest_label = "Library/Translated"
+            collision_policy = self._prompt_duplicate_policy(
+                all_collisions, dest_label)
+            if collision_policy is None:
+                # User cancelled the organize entirely.
+                return
+        # Fast-lookup set of source paths whose dest already exists,
+        # so each move loop can apply *collision_policy* while still
+        # letting non-colliding files fall through unchanged.
+        colliding_srcs = {
+            os.path.normcase(os.path.normpath(os.path.abspath(s)))
+            for s, _d in all_collisions
+        }
+
+        def _src_has_collision(src: str) -> bool:
+            try:
+                key = os.path.normcase(os.path.normpath(
+                    os.path.abspath(src)))
+            except Exception:
+                return False
+            return key in colliding_srcs
+
         origins = _load_origins()
         raw_origins = dict(origins.get("raw", {}) or {})
         trans_origins = dict(origins.get("translated", {}) or {})
@@ -3861,6 +3910,8 @@ class EpubLibraryDialog(QDialog):
 
         moved_raw = 0
         moved_trans = 0
+        skipped_raw = 0
+        skipped_trans = 0
         errors: list[str] = []
         # Per-book dest-basename trackers (keyed by ``id(book)``) so we can
         # pair translated↔raw after both moves finish. Books that only
@@ -3888,10 +3939,40 @@ class EpubLibraryDialog(QDialog):
                     return cand
                 counter += 1
 
+        def _resolve_dest(directory: str, base_name: str, src: str
+                          ) -> str | None:
+            """Pick the destination path for *src* under *collision_policy*.
+
+            Returns ``None`` when the file should be skipped (policy =
+            "skip" on a collision). For ``"replace"`` the pre-existing
+            file is removed so :func:`shutil.move` lands atomically; for
+            ``"keep_both"`` we fall through to the counter-suffix path.
+            """
+            dest = os.path.join(directory, base_name)
+            if not _src_has_collision(src):
+                return dest
+            if collision_policy == "skip":
+                return None
+            if collision_policy == "replace":
+                try:
+                    if os.path.isfile(dest):
+                        os.remove(dest)
+                except OSError as rm_exc:
+                    # Log and fall back to keep_both so the move doesn't
+                    # hard-fail just because the replace couldn't happen.
+                    logger.debug("Replace-on-organize remove failed: %s",
+                                 rm_exc)
+                    return _unique_dest(directory, base_name)
+                return dest
+            return _unique_dest(directory, base_name)
+
         # Raw sources: MOVE + update source_epub.txt pointer.
         for book, src in raw_moves:
             try:
-                dest = _unique_dest(raw_dir, os.path.basename(src))
+                dest = _resolve_dest(raw_dir, os.path.basename(src), src)
+                if dest is None:  # user chose Skip All
+                    skipped_raw += 1
+                    continue
                 shutil.move(src, dest)
                 raw_origins[os.path.basename(dest)] = os.path.abspath(src)
                 record_library_raw_input(dest)
@@ -3913,7 +3994,10 @@ class EpubLibraryDialog(QDialog):
         # Translated compiled EPUBs: MOVE into Library/Translated.
         for book, src in translated_moves:
             try:
-                dest = _unique_dest(trans_dir, os.path.basename(src))
+                dest = _resolve_dest(trans_dir, os.path.basename(src), src)
+                if dest is None:
+                    skipped_trans += 1
+                    continue
                 shutil.move(src, dest)
                 trans_origins[os.path.basename(dest)] = os.path.abspath(src)
                 trans_dest_by_book[id(book)] = os.path.basename(dest)
@@ -3969,6 +4053,12 @@ class EpubLibraryDialog(QDialog):
             summary_parts.append(
                 f"Moved {moved_trans} compiled EPUB"
                 f"{'s' if moved_trans != 1 else ''} into Library/Translated.")
+        if skipped_raw or skipped_trans:
+            total_skipped = skipped_raw + skipped_trans
+            summary_parts.append(
+                f"Skipped {total_skipped} duplicate"
+                f"{'s' if total_skipped != 1 else ''}."
+            )
         summary = "\n".join(summary_parts) or "Nothing was moved."
         if errors:
             summary += (f"\n\n{len(errors)} error"
@@ -4030,6 +4120,7 @@ class EpubLibraryDialog(QDialog):
 
         restored_raw = 0
         restored_trans = 0
+        skipped_undo = 0
         errors: list[str] = []
         # Undo also relocates files — track ``(old_lib_path, orig_path)``
         # pairs so we can emit :attr:`files_reorganized` at the end,
@@ -4037,6 +4128,70 @@ class EpubLibraryDialog(QDialog):
         # rewrite any stale ``Library/Raw\x.epub`` path it's still
         # holding back to the restored original location.
         path_moves: list[tuple[str, str]] = []
+
+        # Pre-scan for restore collisions: any library file whose
+        # original location already has a file (different contents or
+        # a replacement). Prompt once for a policy applied across the
+        # whole Undo batch so Windows' ``shutil.move`` doesn't hard-fail
+        # silently on name conflicts.
+        undo_collisions: list[tuple[str, str]] = []
+        if restore_raw:
+            raw_dir_pre = get_library_raw_dir()
+            for lib_name, orig_path in raw_map.items():
+                lib_file = os.path.join(raw_dir_pre, lib_name)
+                if (os.path.isfile(lib_file) and os.path.isfile(orig_path)
+                        and os.path.abspath(lib_file) != os.path.abspath(orig_path)):
+                    undo_collisions.append((lib_file, orig_path))
+        if restore_trans:
+            trans_dir_pre = get_library_translated_dir()
+            for lib_name, orig_path in trans_map.items():
+                lib_file = os.path.join(trans_dir_pre, lib_name)
+                if (os.path.isfile(lib_file) and os.path.isfile(orig_path)
+                        and os.path.abspath(lib_file) != os.path.abspath(orig_path)):
+                    undo_collisions.append((lib_file, orig_path))
+        undo_policy = "keep_both"
+        if undo_collisions:
+            undo_policy = self._prompt_duplicate_policy(
+                undo_collisions, "their original location")
+            if undo_policy is None:
+                # User cancelled the undo entirely.
+                return
+        colliding_orig = {
+            os.path.normcase(os.path.normpath(os.path.abspath(o)))
+            for _l, o in undo_collisions
+        }
+
+        def _resolve_undo_dest(orig_path: str) -> str | None:
+            """Pick a destination under *undo_policy* for a restored file.
+
+            Returns ``None`` when the restore should be skipped entirely.
+            """
+            key = os.path.normcase(os.path.normpath(
+                os.path.abspath(orig_path)))
+            if key not in colliding_orig:
+                return orig_path
+            if undo_policy == "skip":
+                return None
+            if undo_policy == "replace":
+                try:
+                    if os.path.isfile(orig_path):
+                        os.remove(orig_path)
+                except OSError as rm_exc:
+                    logger.debug("Replace-on-undo remove failed: %s", rm_exc)
+                    # Fall through to keep_both.
+                else:
+                    return orig_path
+            # keep_both (or replace fallback): counter-suffix in the
+            # original's parent directory like Explorer does.
+            parent = os.path.dirname(orig_path) or "."
+            base = os.path.basename(orig_path)
+            stem, ext = os.path.splitext(base)
+            counter = 2
+            while True:
+                cand = os.path.join(parent, f"{stem} ({counter}){ext}")
+                if not os.path.isfile(cand):
+                    return cand
+                counter += 1
 
         if restore_raw and raw_map:
             raw_dir = get_library_raw_dir()
@@ -4046,18 +4201,26 @@ class EpubLibraryDialog(QDialog):
                 if not os.path.isfile(lib_file):
                     errors.append(f"raw:{lib_name}: not found in Library/Raw")
                     continue
+                dest_path = _resolve_undo_dest(orig_path)
+                if dest_path is None:  # policy = skip
+                    remaining[lib_name] = orig_path
+                    skipped_undo += 1
+                    continue
                 try:
-                    os.makedirs(os.path.dirname(orig_path) or ".", exist_ok=True)
+                    os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
                 except OSError:
                     pass
                 try:
-                    shutil.move(lib_file, orig_path)
+                    shutil.move(lib_file, dest_path)
                     restored_raw += 1
                     path_moves.append(
                         (os.path.abspath(lib_file),
-                         os.path.abspath(orig_path)))
+                         os.path.abspath(dest_path)))
                     # Any output folders whose source_epub.txt still points
-                    # at the library copy get rewritten back to the original.
+                    # at the library copy get rewritten to where the raw
+                    # actually landed (``dest_path`` — may be the original
+                    # location or a ``(2)``-suffixed sibling when Keep Both
+                    # was chosen on a collision).
                     try:
                         for root in _resolve_output_roots(self._config):
                             try:
@@ -4076,7 +4239,7 @@ class EpubLibraryDialog(QDialog):
                                             os.path.normcase(os.path.normpath(lib_file))):
                                         try:
                                             with open(sidecar, "w", encoding="utf-8") as f:
-                                                f.write(orig_path)
+                                                f.write(dest_path)
                                         except OSError:
                                             pass
                             except (PermissionError, OSError):
@@ -4106,16 +4269,21 @@ class EpubLibraryDialog(QDialog):
                 if not os.path.isfile(lib_file):
                     errors.append(f"translated:{lib_name}: not found in Library/Translated")
                     continue
+                dest_path = _resolve_undo_dest(orig_path)
+                if dest_path is None:  # policy = skip
+                    remaining[lib_name] = orig_path
+                    skipped_undo += 1
+                    continue
                 try:
-                    os.makedirs(os.path.dirname(orig_path) or ".", exist_ok=True)
+                    os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
                 except OSError:
                     pass
                 try:
-                    shutil.move(lib_file, orig_path)
+                    shutil.move(lib_file, dest_path)
                     restored_trans += 1
                     path_moves.append(
                         (os.path.abspath(lib_file),
-                         os.path.abspath(orig_path)))
+                         os.path.abspath(dest_path)))
                 except Exception as exc:
                     remaining[lib_name] = orig_path
                     errors.append(f"translated:{lib_name}: {exc}")
@@ -4139,6 +4307,11 @@ class EpubLibraryDialog(QDialog):
         if restore_trans:
             summary_parts.append(
                 f"Translated restored: {restored_trans}/{len(trans_map) if trans_map else 0}")
+        if skipped_undo:
+            summary_parts.append(
+                f"Skipped {skipped_undo} duplicate"
+                f"{'s' if skipped_undo != 1 else ''} at the original location."
+            )
         summary = "\n".join(summary_parts) or "Nothing was restored."
         if errors:
             summary += (f"\n\n{len(errors)} error"
