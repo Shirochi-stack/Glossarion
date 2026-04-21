@@ -7894,12 +7894,59 @@ class EpubLibraryDialog(QDialog):
         )
 
         preset = _SIZE_PRESETS[self._card_size]
-        preset_key = self._card_size
-        card_w = preset["card_w"]
+        preset_card_w = preset["card_w"]
         spacing = preset["spacing"]
         grid_layout.setHorizontalSpacing(spacing)
         grid_layout.setVerticalSpacing(spacing + 2)
-        cols = max(1, (self.width() - 40) // (card_w + spacing))
+        # Prefer the grid container's own width — that's exactly the
+        # surface cards lay out on. Falling back to the dialog width
+        # minus a fudge factor covers the first paint when the grid
+        # hasn't been sized yet.
+        grid_widget = grid_layout.parentWidget()
+        try:
+            viewport_w = int(grid_widget.width()) if grid_widget else 0
+        except Exception:
+            viewport_w = 0
+        if viewport_w <= 0:
+            viewport_w = max(0, self.width() - 40)
+        # Reserve room for the vertical scrollbar. The scroll area's
+        # stylesheet fixes it to an 8 px track, but at the moment we
+        # size cards the scrollbar usually hasn't been asserted yet —
+        # it only pops in once the grid's total height overflows the
+        # viewport. Without reserving that width ahead of time the
+        # rightmost column gets clipped the instant the scrollbar
+        # appears (cards briefly fit, the scrollbar slides in, the
+        # viewport shrinks by 8 px, and the last card goes partially
+        # behind it). A 12 px reserve covers the 8 px track plus a
+        # small gutter so the last card never hugs the scrollbar
+        # edge even on the odd system where Qt renders the bar a
+        # pixel or two wider than the stylesheet requests.
+        _SCROLLBAR_RESERVE = 12
+        viewport_w = max(0, viewport_w - _SCROLLBAR_RESERVE)
+        cols = max(1, (viewport_w + spacing) // (preset_card_w + spacing))
+        # Redistribute the leftover horizontal space across the cards
+        # themselves so the grid fills the viewport instead of leaving
+        # a dead column to the right. Each card grows by up to
+        # ``(viewport_w - cols*preset_card_w - (cols-1)*spacing) //
+        # cols`` pixels, never shrinks below the preset minimum, and
+        # caps a few pixels tight of the raw math to stay inside the
+        # viewport even when Qt's QGridLayout rounds fractional widths
+        # up. The resulting ``card_w`` is propagated through a shallow
+        # preset copy so :class:`_BookCard` renders at the new width
+        # (cover + title labels + fitted title font all derive from
+        # ``preset['card_w']``).
+        inner_w = max(preset_card_w * cols,
+                      viewport_w - (cols - 1) * spacing)
+        card_w = max(preset_card_w, inner_w // cols)
+        if card_w != preset_card_w:
+            preset = dict(preset)
+            preset["card_w"] = card_w
+        # Include the effective card width in the cache key so a
+        # window resize that changes the expansion factor forces
+        # dependent cards to rebuild with the new width. Otherwise
+        # the cache would keep serving cards sized for the previous
+        # viewport and the new space would re-appear as a dead column.
+        preset_key = (self._card_size, card_w)
 
         show_raw_title = bool(getattr(self, "_show_raw_titles", False))
         for idx, book in enumerate(books):
