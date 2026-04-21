@@ -5188,6 +5188,9 @@ class EpubLibraryDialog(QDialog):
         # counter that reflects how many files the action would act on
         # (see :meth:`_update_organize_counts`).
         self._tabs = QTabWidget()
+        # The last tab ("Scan for Raw") is an action, not a content tab,
+        # so keep it in the third tab slot but style it like the old
+        # teal button instead of the default tab chrome.
         self._tabs.setStyleSheet("""
             QTabWidget::pane { border: 1px solid #2a2a3e; border-radius: 6px;
                                 background: #12121e; top: -1px; }
@@ -5199,6 +5202,16 @@ class EpubLibraryDialog(QDialog):
             QTabBar::tab:selected { background: #12121e; color: #e0e0e0;
                                      border-color: #2a2a3e; }
             QTabBar::tab:hover:!selected { background: #252540; color: #e0e0e0; }
+            QTabBar::tab:last { background: #17a2b8; color: white;
+                                 border: none; border-radius: 4px;
+                                 padding: 6px 14px; font-size: 9pt;
+                                 font-weight: bold; margin-left: 8px;
+                                 margin-right: 2px; margin-top: 2px;
+                                 margin-bottom: 2px; min-width: 0; }
+            QTabBar::tab:last:selected { background: #17a2b8; color: white;
+                                          border: none; }
+            QTabBar::tab:last:hover { background: #20b2cc; color: white;
+                                       border: none; }
         """)
 
 
@@ -5326,10 +5339,27 @@ class EpubLibraryDialog(QDialog):
 
         self._tabs.addTab(self._ip_tab, "\u23f3  In Progress")
         self._tabs.addTab(self._comp_tab, "\u2705  Completed")
+        # "Scan for Raw" needs to read as a real third tab after
+        # Completed, not a corner widget. This placeholder page is
+        # never meant to stay selected: :meth:`_on_tab_changed`
+        # immediately snaps back to the previous content tab and
+        # opens the dialog instead.
+        self._scan_tab = QWidget()
+        self._scan_tab.setStyleSheet("background: #12121e;")
+        self._scan_tab_index = self._tabs.addTab(
+            self._scan_tab, "\U0001f50d  Scan for Raw")
         try:
-            self._tabs.setCurrentIndex(int(self._current_tab) or 0)
+            self._tabs.setTabVisible(self._scan_tab_index, False)
+        except AttributeError:
+            self._tabs.setTabEnabled(self._scan_tab_index, False)
+        try:
+            initial_idx = int(self._current_tab) or 0
         except (TypeError, ValueError):
-            self._tabs.setCurrentIndex(0)
+            initial_idx = 0
+        if initial_idx == self._scan_tab_index or initial_idx < 0:
+            initial_idx = 0
+        self._tabs.setCurrentIndex(initial_idx)
+        self._prev_content_tab = initial_idx
         self._tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self._tabs, 1)
 
@@ -5555,6 +5585,19 @@ class EpubLibraryDialog(QDialog):
         return sorted(books, key=lambda b: b["mtime"], reverse=True)
 
     def _on_tab_changed(self, index: int):
+        scan_tab_index = getattr(self, "_scan_tab_index", -1)
+        if index == scan_tab_index:
+            fallback = getattr(self, "_prev_content_tab", 0)
+            if fallback == scan_tab_index or fallback < 0:
+                fallback = 0
+            # Defer both actions so the clicked tab visibly behaves as
+            # a tab item, but the dialog still opens without leaving
+            # the QTabWidget parked on an empty placeholder page.
+            QTimer.singleShot(
+                0, lambda fb=fallback: self._tabs.setCurrentIndex(fb))
+            QTimer.singleShot(0, self._open_scan_for_raw)
+            return
+        self._prev_content_tab = index
         self._current_tab = index
         self._config["epub_library_tab"] = index
 
@@ -5823,7 +5866,7 @@ class EpubLibraryDialog(QDialog):
             self._comp_undo_btn.setEnabled(trans_undo > 0)
         except Exception:
             pass
-        # Toggle Scan-for-Raw visibility based on whether any visible
+        # Toggle the Scan-for-Raw TAB based on whether any visible
         # card has the ``missing_raw_file`` warning. Hidden entirely
         # otherwise — there's nothing actionable for the dialog to
         # do when every workspace's raw is already resolved.
@@ -5833,14 +5876,24 @@ class EpubLibraryDialog(QDialog):
                     list(self._in_progress_books)
                     + list(self._completed_books))
                 if b.get("missing_raw_file"))
-            btn = getattr(self, "_scan_raw_btn", None)
-            if btn is not None:
-                if missing_raw_count > 0:
-                    btn.setText(
-                        f"\U0001f50d  Scan for Raw ({missing_raw_count})")
-                    btn.show()
-                else:
-                    btn.hide()
+            scan_tab_index = getattr(self, "_scan_tab_index", -1)
+            if scan_tab_index >= 0:
+                self._tabs.setTabText(
+                    scan_tab_index,
+                    (f"\U0001f50d  Scan for Raw ({missing_raw_count})"
+                     if missing_raw_count > 0
+                     else "\U0001f50d  Scan for Raw"))
+                if missing_raw_count <= 0:
+                    fallback = getattr(self, "_prev_content_tab", 0)
+                    if (self._tabs.currentIndex() == scan_tab_index
+                            and fallback != scan_tab_index):
+                        self._tabs.setCurrentIndex(max(0, fallback))
+                try:
+                    self._tabs.setTabVisible(
+                        scan_tab_index, missing_raw_count > 0)
+                except AttributeError:
+                    self._tabs.setTabEnabled(
+                        scan_tab_index, missing_raw_count > 0)
         except Exception:
             pass
 
