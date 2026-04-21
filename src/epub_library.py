@@ -797,25 +797,46 @@ def _open_folder_in_explorer(path: str):
 # ---------------------------------------------------------------------------
 
 def _resolve_output_roots(config: dict | None = None) -> list[str]:
-    """Return the directory the translator writes output folders into.
+    """Return every directory the translator may have written output folders into.
 
-    When the OUTPUT_DIRECTORY override is configured (env or
-    ``config['output_directory']``) it is used *strictly* — the default dir is
-    NOT also scanned. This matches the user expectation that turning on an
-    output override in Other Settings points the in-progress reader at that
-    path alone. When no override is set, only the default directory (app dir
-    on Windows, CWD elsewhere) is used.
+    Both the configured override (``OUTPUT_DIRECTORY`` env var or
+    ``config['output_directory']``) AND the default fallback location
+    (app dir on Windows, CWD elsewhere) are returned when they exist
+    on disk, so the In Progress + Completed tabs surface flash cards
+    from either path in the same scan. Results are de-duplicated by
+    normalized absolute path so an override pointing at the same dir
+    as the fallback doesn't produce two scan passes.
+
+    Previously this helper treated the override as *strict* — when
+    set, the fallback was excluded. Users reported losing access to
+    older workspaces still sitting in the fallback location after
+    setting an override, so the helper now unions the two.
     """
     config = config or {}
+    roots: list[str] = []
+    seen: set[str] = set()
+
+    def _add(candidate: str) -> None:
+        if not candidate:
+            return
+        try:
+            abs_p = os.path.abspath(candidate)
+        except (TypeError, ValueError):
+            return
+        if not os.path.isdir(abs_p):
+            return
+        key = os.path.normcase(os.path.normpath(abs_p))
+        if key in seen:
+            return
+        seen.add(key)
+        roots.append(abs_p)
+
+    # Override first so it wins priority when both locations hold the
+    # same workspace basename (the scanner dedups workspaces by
+    # folder-level key, first-seen wins in :func:`scan_output_folders`).
     override = os.environ.get("OUTPUT_DIRECTORY") or config.get("output_directory")
-    if override:
-        override_abs = os.path.abspath(override)
-        if os.path.isdir(override_abs):
-            return [override_abs]
-        # Override is set but points at a missing directory — still treat it
-        # as strict (return no roots) rather than silently falling back to
-        # the default, which would violate user expectations.
-        return []
+    _add(override)
+
     if platform.system() == "Windows":
         if getattr(sys, "frozen", False):
             default_dir = os.path.dirname(sys.executable)
@@ -823,9 +844,9 @@ def _resolve_output_roots(config: dict | None = None) -> list[str]:
             default_dir = os.path.dirname(os.path.abspath(__file__))
     else:
         default_dir = os.getcwd()
-    if os.path.isdir(default_dir):
-        return [os.path.abspath(default_dir)]
-    return []
+    _add(default_dir)
+
+    return roots
 
 
 # Characters Windows strips / mangles in filenames that the translator
@@ -3935,33 +3956,22 @@ class EpubLibraryDialog(QDialog):
         self._raw_titles_btn.toggled.connect(self._on_raw_titles_toggled)
         toolbar.addWidget(self._raw_titles_btn)
         toolbar.addStretch()
-        # "Add Translation" lives on the shared toolbar (outside the
-        # tab widget) so the user can register a compiled EPUB from
-        # either tab without having to swap to Completed first. Uses
-        # the same import pipeline as the Completed tab's drag-drop
-        # (``target="translated"``): the chosen files are registered
-        # in place via ``library_translated_inputs.txt`` and surface
-        # on the Completed tab as ``registered_translated=True``
-        # cards. Nothing is copied or moved until the user clicks
-        # Organize.
-        self._add_translation_btn = QPushButton(
-            "\U0001f4d5  Add Translation")
-        self._add_translation_btn.setCursor(Qt.PointingHandCursor)
-        self._add_translation_btn.setToolTip(
-            "Pick one or more compiled .epub files to register with the "
-            "Library's Completed tab. Files stay where they are on disk "
-            "\u2014 same behaviour as dropping them onto the Completed "
-            "tab. Click Organize later to move them into "
-            "Library/Translated."
-        )
-        self._add_translation_btn.setStyleSheet(
+        # "Open Library Folder" lives on the shared toolbar above the
+        # tabs so it's reachable from either tab without having to
+        # swap over to Completed first.
+        self._open_library_btn = QPushButton(
+            "\U0001f4c1  Open Library Folder")
+        self._open_library_btn.setCursor(Qt.PointingHandCursor)
+        self._open_library_btn.setToolTip(
+            f"Open {get_library_dir()} in the system file explorer.")
+        self._open_library_btn.setStyleSheet(
             "QPushButton { background: #3a5a7a; color: white; "
             "border-radius: 4px; padding: 6px 14px; font-size: 9pt; "
             "font-weight: bold; border: none; }"
             "QPushButton:hover { background: #4a6a8a; }"
         )
-        self._add_translation_btn.clicked.connect(self._add_translation)
-        toolbar.addWidget(self._add_translation_btn)
+        self._open_library_btn.clicked.connect(self._open_library_folder)
+        toolbar.addWidget(self._open_library_btn)
         self._count_label = QLabel("")
         self._count_label.setStyleSheet("color: #888; font-size: 8.5pt;")
         toolbar.addWidget(self._count_label)
@@ -4063,6 +4073,31 @@ class EpubLibraryDialog(QDialog):
         comp_action_row.addWidget(self._comp_organize_btn)
         self._comp_undo_btn = self._make_undo_button(kind="comp")
         comp_action_row.addWidget(self._comp_undo_btn)
+        # "Add Translation" mirrors the In Progress tab's Import EPUB
+        # slot — it sits next to Organize / Undo so registering a
+        # compiled EPUB is reachable directly from the Completed tab.
+        # Uses the same import pipeline as the Completed tab's
+        # drag-drop (``target="translated"``): files are registered in
+        # place via ``library_translated_inputs.txt`` and surface as
+        # ``registered_translated=True`` cards. Nothing is moved until
+        # Organize fires.
+        self._add_translation_btn = QPushButton(
+            "\U0001f4d5  Add Translation")
+        self._add_translation_btn.setCursor(Qt.PointingHandCursor)
+        self._add_translation_btn.setToolTip(
+            "Pick one or more compiled .epub files to register with "
+            "the Library's Completed tab. Files stay where they are "
+            "on disk \u2014 same behaviour as dropping them onto "
+            "this tab. Click Organize later to move them into "
+            "Library/Translated."
+        )
+        self._add_translation_btn.setStyleSheet(
+            "QPushButton { background: #6c63ff; color: white; "
+            "border-radius: 4px; padding: 6px 14px; font-size: 9pt; "
+            "font-weight: bold; border: none; }"
+            "QPushButton:hover { background: #8078ff; }")
+        self._add_translation_btn.clicked.connect(self._add_translation)
+        comp_action_row.addWidget(self._add_translation_btn)
         comp_layout.addLayout(comp_action_row)
         self._comp_scroll = QScrollArea()
         self._comp_scroll.setWidgetResizable(True)
@@ -4078,7 +4113,7 @@ class EpubLibraryDialog(QDialog):
         self._comp_empty_label = QLabel(
             "Your Library is empty.\n\n"
             "Drop finished .epub files here \u2014 or click\n"
-            "\u201cAdd Translation\u201d in the toolbar \u2014 to see them here.")
+            "\u201cAdd Translation\u201d above \u2014 to see them here.")
         self._comp_empty_label.setAlignment(Qt.AlignCenter)
         self._comp_empty_label.setStyleSheet("color: #555; font-size: 12pt; padding: 40px;")
         self._comp_empty_label.hide()
@@ -4269,6 +4304,15 @@ class EpubLibraryDialog(QDialog):
         self._config["epub_library_tab"] = index
 
     # -- Actions ------------------------------------------------------------
+
+    def _open_library_folder(self):
+        """Open the Glossarion Library folder in the system file explorer."""
+        lib = get_library_dir()
+        try:
+            os.makedirs(lib, exist_ok=True)
+        except OSError:
+            pass
+        _open_folder_in_explorer(lib)
 
     def _add_translation(self):
         """Pick compiled EPUB(s) and register them with the Completed tab.
@@ -6244,8 +6288,66 @@ class EpubLibraryDialog(QDialog):
         # enumerate what's inside a folder target.
         targets: list[tuple[str, str, bool, dict]] = []
         seen_targets: set[str] = set()
+        # Paths that were intentionally skipped because they live
+        # outside the Library + output-root safe zones. Surfaced in
+        # the summary so the user knows why a card's backing file
+        # wasn't touched (e.g. a ``registered_translated=True`` EPUB
+        # the user dropped in from Downloads).
+        unsafe_skipped: list[str] = []
+
+        # Safe roots for delete: anything under the Library folder
+        # (covers Raw / Translated / registry files) or any configured
+        # output root. A path outside ALL of these is considered
+        # off-limits — a user-owned file from Downloads or wherever,
+        # which ``Delete`` must never touch because Glossarion didn't
+        # put it there. Computed once per prompt to keep the queue
+        # loop cheap.
+        safe_roots: list[str] = []
+        try:
+            lib_abs = os.path.normcase(os.path.normpath(
+                os.path.abspath(get_library_dir())))
+            if lib_abs:
+                safe_roots.append(lib_abs)
+        except Exception:
+            logger.debug("Library dir resolve failed: %s",
+                         traceback.format_exc())
+        try:
+            for root in _resolve_output_roots(self._config):
+                r = os.path.normcase(os.path.normpath(
+                    os.path.abspath(root)))
+                if r and r not in safe_roots:
+                    safe_roots.append(r)
+        except Exception:
+            logger.debug("Output roots resolve failed: %s",
+                         traceback.format_exc())
+
+        def _is_inside_safe_root(pth: str) -> bool:
+            """True when *pth* is inside Library/ or an output root."""
+            if not pth or not safe_roots:
+                return False
+            try:
+                key = os.path.normcase(os.path.normpath(
+                    os.path.abspath(pth)))
+            except Exception:
+                return False
+            for root in safe_roots:
+                if key == root or key.startswith(root + os.sep):
+                    return True
+            return False
 
         def _queue(label: str, pth: str, is_folder: bool, book: dict) -> None:
+            # Hard safety gate: Delete must never reach outside the
+            # Library folder or the configured output roots. A raw
+            # EPUB registered in place from Downloads, a stray compiled
+            # EPUB dropped onto the Completed tab without Organize,
+            # etc. all land here and get filtered before they can be
+            # unlinked.
+            if not _is_inside_safe_root(pth):
+                try:
+                    unsafe_skipped.append(os.path.abspath(pth))
+                except Exception:
+                    unsafe_skipped.append(str(pth))
+                return
             key = os.path.normcase(os.path.normpath(os.path.abspath(pth)))
             if key in seen_targets:
                 return
@@ -6309,11 +6411,27 @@ class EpubLibraryDialog(QDialog):
                 _queue(b.get("name") or os.path.basename(p), p, False, b)
             _queue_library_raw_copy(b)
         if not targets:
-            QMessageBox.information(
-                self, "Delete",
-                "Nothing to delete \u2014 none of the selected cards "
-                "point at a file or folder on disk.",
-            )
+            if unsafe_skipped:
+                preview = "\n".join(
+                    "  \u2022 " + p for p in unsafe_skipped[:6])
+                if len(unsafe_skipped) > 6:
+                    preview += (
+                        f"\n  \u2026 and "
+                        f"{len(unsafe_skipped) - 6} more.")
+                QMessageBox.information(
+                    self, "Delete",
+                    "Nothing was deleted \u2014 every selected item \n"
+                    "lives outside the Library folder and the \n"
+                    "configured output root(s), and Delete refuses \n"
+                    "to touch files the library didn't put there:\n\n"
+                    + preview,
+                )
+            else:
+                QMessageBox.information(
+                    self, "Delete",
+                    "Nothing to delete \u2014 none of the selected cards "
+                    "point at a file or folder on disk.",
+                )
             return
 
         # Classify the batch. Simple prompt is only allowed when EVERY
@@ -6381,12 +6499,25 @@ class EpubLibraryDialog(QDialog):
 
         summary = f"Deleted {deleted} of {len(targets)} item" \
                   f"{'s' if len(targets) != 1 else ''}."
+        if unsafe_skipped:
+            preview = "\n".join(
+                "  \u2022 " + p for p in unsafe_skipped[:5])
+            if len(unsafe_skipped) > 5:
+                preview += (
+                    f"\n  \u2026 and {len(unsafe_skipped) - 5} more.")
+            summary += (
+                f"\n\nSkipped {len(unsafe_skipped)} item"
+                f"{'s' if len(unsafe_skipped) != 1 else ''} outside "
+                "the Library / output root(s):\n" + preview
+            )
         if errors:
             summary += (
                 f"\n\n{len(errors)} error"
                 f"{'s' if len(errors) != 1 else ''}:\n"
                 + "\n".join("  \u2022 " + e for e in errors[:5])
             )
+            QMessageBox.warning(self, "Delete", summary)
+        elif unsafe_skipped:
             QMessageBox.warning(self, "Delete", summary)
         else:
             QMessageBox.information(self, "Delete", summary)
