@@ -5201,44 +5201,6 @@ class EpubLibraryDialog(QDialog):
             QTabBar::tab:hover:!selected { background: #252540; color: #e0e0e0; }
         """)
 
-        # "Scan for Raw" as a corner widget on the tab bar so it sits
-        # directly next to the tabs — visible from either tab without
-        # needing to switch. Only shown when at least one flash card
-        # has the ``missing_raw_file`` warning; hidden otherwise by
-        # :meth:`_update_organize_counts`.
-        self._scan_raw_btn = QPushButton("\U0001f50d  Scan for Raw")
-        self._scan_raw_btn.setCursor(Qt.PointingHandCursor)
-        self._scan_raw_btn.setToolTip(
-            "Walk a folder for raw source files and link each "
-            "missing-raw workspace to its match. Supports exact "
-            "filename matching and fuzzy matching (with an "
-            "adjustable similarity threshold) and defaults to the "
-            "extensions each workspace's kind implies. Writes"
-            " ``source_epub.txt`` in each matched workspace so the "
-            "scanner resolves the raw automatically on future scans."
-        )
-        self._scan_raw_btn.setStyleSheet(
-            "QPushButton { background: #17a2b8; color: white; "
-            "border-radius: 4px; padding: 4px 12px; font-size: 9pt; "
-            "font-weight: bold; border: none; }"
-            "QPushButton:hover { background: #20b2cc; }")
-        self._scan_raw_btn.setFixedHeight(28)
-        self._scan_raw_btn.clicked.connect(self._open_scan_for_raw)
-        self._scan_raw_btn.hide()
-        # Wrap the button in a QWidget with vertical margins so it
-        # doesn't crowd the bottom of the tab bar (corner widgets
-        # otherwise sit flush against the tab strip's baseline and
-        # the button's hover border would bleed into the tab-bar
-        # underline). Placed on the LEFT corner so it reads as
-        # sitting next to the In Progress / Completed tab labels
-        # rather than floating at the far-right edge of the dialog.
-        from PySide6.QtWidgets import QWidget as _QWidget
-        scan_corner = _QWidget()
-        scan_corner_layout = QHBoxLayout(scan_corner)
-        scan_corner_layout.setContentsMargins(6, 4, 8, 6)
-        scan_corner_layout.setSpacing(0)
-        scan_corner_layout.addWidget(self._scan_raw_btn)
-        self._tabs.setCornerWidget(scan_corner, Qt.TopLeftCorner)
 
         # --- In Progress tab ---
         self._ip_tab = QWidget()
@@ -7171,6 +7133,38 @@ class EpubLibraryDialog(QDialog):
         self._refresh_view()
         self._update_organize_counts()
 
+    @staticmethod
+    def _card_signature(book: dict) -> tuple:
+        """Return a hashable signature of the card-rendering inputs.
+
+        Used by :meth:`_populate_grid_common` to decide whether a
+        cached :class:`_BookCard` for a given path is still valid,
+        or needs to be rebuilt because the underlying book changed
+        (progress advanced, missing-raw badge appeared, etc.).
+
+        Only fields that :class:`_BookCard.__init__` actually reads
+        are included — a stable signature means filter toggles can
+        reuse the existing widget without a :func:`_fit_title_text`
+        shrink loop or a fresh :class:`_CoverLoader` thread per card.
+        """
+        return (
+            book.get("path", "") or "",
+            book.get("name", "") or "",
+            int(book.get("completed_chapters", 0) or 0),
+            int(book.get("total_chapters", 0) or 0),
+            int(book.get("failed_chapters", 0) or 0),
+            int(book.get("pending_chapters", 0) or 0),
+            str(book.get("translation_state", "") or ""),
+            bool(book.get("is_in_progress", False)),
+            bool(book.get("missing_raw_file", False)),
+            bool(book.get("has_compiled_output", False)),
+            str(book.get("workspace_kind", "") or ""),
+            str(book.get("type", "") or ""),
+            float(book.get("mtime", 0) or 0),
+            int(book.get("size", 0) or 0),
+            len(book.get("compiled_conflicts") or []),
+        )
+
     def _populate_grid_common(
         self,
         books: list[dict],
@@ -7180,27 +7174,79 @@ class EpubLibraryDialog(QDialog):
         empty_label: QLabel,
         count_word: str,
         selected_paths: set[str] | None = None,
+        card_cache: dict | None = None,
+        full_books: list[dict] | None = None,
     ):
-        """Shared render pipeline used by both tabs."""
+        """Shared render pipeline used by both tabs.
+
+        Cards are cached per path in *card_cache* (one dict per tab,
+        owned by the dialog). Each entry maps ``path → (card,
+        signature, preset_key, show_raw_title)`` so the next call can
+        tell at a glance whether the cached widget is still valid.
+        Valid cards are detached from the grid (not deleted), re-laid
+        out in the new order, and re-shown. Only new / stale entries
+        pay the full ``_BookCard`` construction cost (title-fit loop +
+        cover-loader thread spawn).
+
+        *books* is the list that actually renders (already sorted /
+        search-filtered / format-filtered). *full_books* is the raw
+        scan result for this tab — used to distinguish "filtered
+        out" from "genuinely gone" so a Format chip toggle never
+        deletes cards it's about to need again on the next click.
+        Callers that don't pass *full_books* fall back to the
+        previous behaviour (any path not in *books* is treated as
+        gone).
+        """
         selected_paths = selected_paths if selected_paths is not None else set()
-        # Prune the selection set of paths that no longer exist in this
-        # scan result — otherwise organize / undo / delete operations can
-        # leave stale entries that silently skew "Load N for translation".
-        current_paths = {b.get("path", "") for b in books}
-        selected_paths &= current_paths
-        for card in card_list:
+        card_cache = card_cache if card_cache is not None else {}
+        visible_paths = {b.get("path", "") for b in books}
+        # "Known" paths for the underlying data. When the caller
+        # hands us the full unfiltered list we use it; otherwise we
+        # assume ``books`` IS the full set (back-compat behaviour).
+        full_paths = (
+            {b.get("path", "") for b in full_books}
+            if full_books is not None else visible_paths)
+        # Prune the selection set of paths that no longer exist in
+        # the scan result (NOT the filtered view) so switching
+        # Format chips doesn't silently wipe a multi-selection that
+        # only some of whose cards match the current filter.
+        selected_paths &= full_paths
+
+        # Detach every cached card from the grid before we rebuild it.
+        # Detaching (``setParent(None)``) is cheap and preserves the
+        # widget for reuse; deleting is what makes filter toggles
+        # slow, so we only delete cards whose path is gone from the
+        # underlying scan result — filter misses stay in the cache
+        # so the next toggle can re-use them without another
+        # ``_BookCard`` constructor pass.
+        for path, cached in list(card_cache.items()):
+            cached_card = cached[0]
             try:
-                card.setParent(None)
-                card.deleteLater()
+                grid_layout.removeWidget(cached_card)
+                cached_card.setParent(None)
+                cached_card.hide()
             except Exception:
                 pass
-        card_list.clear()
 
+        for stale_path in [p for p in card_cache if p not in full_paths]:
+            try:
+                cached_card = card_cache[stale_path][0]
+                cached_card.setParent(None)
+                cached_card.deleteLater()
+            except Exception:
+                pass
+            del card_cache[stale_path]
+
+        # Also clear stragglers the grid might still hold (e.g.
+        # widgets we never tracked, or layout items left over from
+        # a size-preset change).
         while grid_layout.count():
             item = grid_layout.takeAt(0)
             w = item.widget()
-            if w:
+            if w and w not in (c[0] for c in card_cache.values()):
                 w.setParent(None)
+
+        card_list.clear()
 
         if not books:
             empty_label.show()
@@ -7213,6 +7259,7 @@ class EpubLibraryDialog(QDialog):
         )
 
         preset = _SIZE_PRESETS[self._card_size]
+        preset_key = self._card_size
         card_w = preset["card_w"]
         spacing = preset["spacing"]
         grid_layout.setHorizontalSpacing(spacing)
@@ -7221,29 +7268,49 @@ class EpubLibraryDialog(QDialog):
 
         show_raw_title = bool(getattr(self, "_show_raw_titles", False))
         for idx, book in enumerate(books):
-            card = _BookCard(book, preset=preset, show_raw_title=show_raw_title)
-            card.clicked.connect(self._on_card_clicked)
-            card.context_menu_requested.connect(self._show_context_menu)
-            card.select_requested.connect(self._on_card_select_requested)
-            # Re-apply previous selection state from the tab's selection set
-            # so auto-refresh doesn't wipe the user's multi-card selection.
-            if book.get("path", "") in selected_paths:
-                card.set_selected(True)
+            path = book.get("path", "") or ""
+            sig = self._card_signature(book)
+            cached = card_cache.get(path)
+            reuse = bool(
+                cached
+                and cached[1] == sig
+                and cached[2] == preset_key
+                and cached[3] == show_raw_title
+            )
+            if reuse:
+                card = cached[0]
+            else:
+                # Either no cached widget, a book field drifted, or
+                # the card-size / raw-titles toggle changed —
+                # rebuild and spawn a fresh cover loader.
+                if cached:
+                    try:
+                        cached[0].setParent(None)
+                        cached[0].deleteLater()
+                    except Exception:
+                        pass
+                card = _BookCard(
+                    book, preset=preset, show_raw_title=show_raw_title)
+                card.clicked.connect(self._on_card_clicked)
+                card.context_menu_requested.connect(self._show_context_menu)
+                card.select_requested.connect(self._on_card_select_requested)
+                loader = _CoverLoader(
+                    book["path"],
+                    file_type=book.get("type", "epub"),
+                    config=self._config,
+                    original_path=book.get("original_path"),
+                    raw_source_path=book.get("raw_source_path"),
+                    parent=self,
+                )
+                loader.finished.connect(self._on_cover_loaded)
+                self._cover_threads.append(loader)
+                loader.start()
+            card_cache[path] = (card, sig, preset_key, show_raw_title)
+            card.set_selected(path in selected_paths)
             card_list.append(card)
             row, col = divmod(idx, cols)
             grid_layout.addWidget(card, row, col, Qt.AlignTop | Qt.AlignLeft)
-
-            loader = _CoverLoader(
-                book["path"],
-                file_type=book.get("type", "epub"),
-                config=self._config,
-                original_path=book.get("original_path"),
-                raw_source_path=book.get("raw_source_path"),
-                parent=self,
-            )
-            loader.finished.connect(self._on_cover_loaded)
-            self._cover_threads.append(loader)
-            loader.start()
+            card.show()
 
         for c in range(grid_layout.columnCount()):
             grid_layout.setColumnStretch(c, 0)
@@ -7260,17 +7327,30 @@ class EpubLibraryDialog(QDialog):
         grid_layout.setRowStretch(last_row, 1)
 
     def _populate_in_progress(self, books: list[dict]):
+        if not hasattr(self, "_ip_card_cache"):
+            self._ip_card_cache: dict = {}
         self._populate_grid_common(
             books, self._ip_grid_layout, self._ip_cards,
             self._ip_count_label, self._ip_empty_label, "novel",
             selected_paths=self._selected_paths_ip,
+            card_cache=self._ip_card_cache,
+            # Pass the full unfiltered scan result so the cache's
+            # stale-entry sweep only removes cards whose underlying
+            # book is genuinely gone. Filter misses stay in the
+            # cache, so toggling Format / search is an O(visible)
+            # detach + re-add pass instead of a full rebuild.
+            full_books=self._in_progress_books,
         )
 
     def _populate_completed(self, books: list[dict]):
+        if not hasattr(self, "_comp_card_cache"):
+            self._comp_card_cache: dict = {}
         self._populate_grid_common(
             books, self._comp_grid_layout, self._comp_cards,
             self._comp_count_label, self._comp_empty_label, "book",
             selected_paths=self._selected_paths_comp,
+            card_cache=self._comp_card_cache,
+            full_books=self._completed_books,
         )
 
     def _active_selection(self) -> tuple[set[str], list[_BookCard]]:
