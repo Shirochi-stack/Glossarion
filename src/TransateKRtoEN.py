@@ -5115,7 +5115,7 @@ class BatchTranslationProcessor:
                     result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
                     return result, chunk_idx, raw_obj, is_truncated, finish_reason
                 else:
-                    raise Exception(f"Empty result for chunk {chunk_idx}/{total_chunks}")
+                    raise Exception(f"Empty result for chunk {chunk_idx}/{total_chunks} (finish_reason={finish_reason!r})")
             
             # Use ThreadPoolExecutor to process chunks in parallel
             # Use same batch size as chapter-level parallelism
@@ -8220,6 +8220,17 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         except Exception:
                             pass
                         print(f"⚠️ API returned None — treating as empty response (finish_reason={recovered_finish!r})")
+                        # Best-effort: save a failed-request file so the payload is visible for debugging
+                        try:
+                            if hasattr(client, '_save_failed_request'):
+                                client._save_failed_request(
+                                    messages,
+                                    f"API returned None (finish_reason={recovered_finish!r})",
+                                    context or 'translation',
+                                    None,
+                                )
+                        except Exception:
+                            pass
                         return ("", recovered_finish, None)  # 3-tuple: callers unpack (result, finish_reason, raw_obj)
                     # If api_result is a tuple (e.g. (text, finish_reason)) expand it
                     # with raw_obj so callers get (text, finish_reason, raw_obj).
