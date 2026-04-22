@@ -5971,11 +5971,28 @@ class UnifiedClient:
                                 except Exception as e:
                                     print(f"❌ Fallback key retry failed: {e}")
                     
+                    # Retry transient empty responses (finish_reason='error') before giving up.
+                    # Safety-filter empties go straight to finalize — retrying won't help.
+                    if finish_reason == 'error' and not is_likely_safety_filter and attempt < internal_retries - 1:
+                        # Exponential backoff: 10s → 20s → 40s → 80s, cap 120s, +jitter
+                        _base = min(10 * (2 ** min(attempt, 3)), 120)
+                        _delay = _base + random.uniform(0, 5)
+                        print(
+                            f"⚠️ Empty response (finish_reason='error') on attempt {attempt + 1}/{internal_retries} "
+                            f"— likely transient server error, retrying in {_delay:.1f}s..."
+                        )
+                        self._last_retry_error_type = 'empty_error_response'
+                        if not self._sleep_with_cancel(_delay, 0.5):
+                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                        continue  # restart the for-loop attempt
+
+
                     # Finalize empty handling
                     req_type = 'image' if image_data else 'text'
                     # Attach usage info for transparency even on empty/safety-filtered results
                     self._attach_usage_to_last_payload(usage)
                     return self._finalize_empty_response(messages, context, response, extracted_content or "", finish_reason, getattr(self, 'client_type', 'unknown'), req_type, start_time)
+
                                 
                 # Track success
                 self._track_stats(context, True, None, time.time() - start_time)
