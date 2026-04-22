@@ -3290,7 +3290,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v8.5.5 - Ready to use!")
+        self.append_log("🚀 Glossarion v8.5.6 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -21083,7 +21083,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v8.5.5...")
+    print("🚀 Starting Glossarion v8.5.6...")
     
     # Initialize splash screen
     splash_manager = None
