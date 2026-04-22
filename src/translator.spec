@@ -27,7 +27,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'Glossarion v8.5.4' 
+APP_NAME = 'Glossarion v8.5.4'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -72,12 +72,19 @@ print(f"  GTK_FOLDER env var: {gtk_folder}")
 print(f"  Checking candidates: {msys2_bin_candidates}")
 print(f"  Selected MSYS2 bin: {msys2_bin}")
 
-# Add MSYS2 DLLs for WeasyPrint (PDF generation)
-if msys2_bin and os.path.exists(msys2_bin):  # Enabled in Lite
+if msys2_bin and os.path.exists(msys2_bin):
     dll_list = glob.glob(os.path.join(msys2_bin, '*.dll'))
-    for dll in dll_list:
-        binaries.append((dll, '.'))
-    print(f"  Added {len(dll_list)} MSYS2 DLLs for WeasyPrint")
+    print(f"  Found {len(dll_list)} DLL files in {msys2_bin}")
+    if dll_list:
+        # Print first few DLLs for verification
+        print(f"  Sample DLLs: {[os.path.basename(d) for d in dll_list[:5]]}")
+        for dll in dll_list:
+            binaries.append((dll, '.'))
+        print(f"  Added {len(dll_list)} MSYS2 DLLs for WeasyPrint")
+    else:
+        print(f"  WARNING: No DLLs found in {msys2_bin}")
+else:
+    print(f"  WARNING: No MSYS2 directory found in any candidate location")
 
 # Collect data files from packages that need them
 for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
@@ -195,8 +202,8 @@ app_files = [
 	# gRPC Gemini client
 	('grpc_gemini_client.py', '.'),
 
-	# EPUB Library & Reader: EXCLUDED in Lite (saves ~152 MB ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â removes Chromium)
-	('epub_library.py', '.'),  # EPUB Library reader GUI (uses Chromium/QtWebEngine)
+	# EPUB Library & Reader
+	('epub_library.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -269,7 +276,7 @@ app_modules = [
 	'token_encryption',  # Encrypted token storage
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client
-	'epub_library',  # EPUB Library reader GUI
+	'epub_library',  # EPUB Library & Reader
 ]
 # GUI Framework
 gui_modules = [
@@ -288,12 +295,6 @@ gui_modules = [
     'ttkbootstrap.colorutils',
     'ttkbootstrap.themes.standard',
     'ttkbootstrap.themes.user',
-    # QtWebEngine Ã¢â‚¬â€ required by epub_library.py (EPUB reader GUI / Chromium renderer)
-    # epub_library.py is a data file so PyInstaller won't scan its imports automatically.
-    'PySide6.QtWebEngineWidgets',
-    'PySide6.QtWebEngineCore',
-    'PySide6.QtWebEngineQuick',
-    'PySide6.QtWebChannel',
 ]
 
 # EPUB/HTML Processing
@@ -466,8 +467,12 @@ api_modules = [
     'googleapis_common_protos',
 	
 	# Google Vertex AI:
-    # NOTE: aiplatform_v1 and aiplatform_v1beta1 are omitted ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â they are
-    # auto-generated proto stub trees (~60 MB packed) stripped in a.pure below.
+    # NOTE: We deliberately omit 'google.cloud.aiplatform_v1' and
+    # 'google.cloud.aiplatform_v1beta1' from hiddenimports.
+    # Those are auto-generated protobuf stub trees (~60 MB packed) for every
+    # Vertex AI API endpoint. Glossarion only needs vertexai.init() and
+    # vertexai.generative_models — not the full proto surface.
+    # They are stripped post-analysis in the a.pure filter block below.
     'google.cloud.aiplatform',
     'vertexai',
     'vertexai.generative_models',
@@ -1089,53 +1094,10 @@ excludes = [
 
     # ============================================================================
     # PLAYWRIGHT - 98 MB uncompressed bundled Node.js runtime
+    # authza_auth.py uses playwright for Z.AI OAuth browser automation.
+    # It is safely optional (PLAYWRIGHT_AVAILABLE flag handles absence).
     # ============================================================================
     'playwright', 'playwright.*',
-    # QtWebEngine kept in Lite -- epub_library.py (EPUB reader GUI) requires it.
-
-
-
-
-
-
-
-    # WeasyPrint + PDF stack: kept in Lite (PDF generation supported)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    'pyhanko', 'pyhanko.*',
-    'pyhanko_certvalidator', 'pyhanko_certvalidator.*',
-    'uritools',        # pyhanko dependency
-    'qrcode', 'qrcode.*',
-    'barcode', 'barcode.*',
-
-    # ============================================================================
-    # UNUSED PYTHON PACKAGES ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Lite
-    # ============================================================================
-    'pygments', 'pygments.*',    # syntax highlighter (~3.6 MB)
-    'redis', 'redis.*',          # Redis client (~1.3 MB)
-    'rich', 'rich.*',            # terminal pretty-printer (~1 MB)
-    'ttkbootstrap', 'ttkbootstrap.*',  # legacy tkinter theme, not used
-    # NOTE: setuptools/pkg_resources/distutils are NOT in excludes because
-    # PyInstaller's hook-distutils.py aliases them internally and crashes if
-    # they are pre-excluded. They are stripped via a.pure filter instead.
 ]
 
 # ============================================================================
@@ -1172,76 +1134,17 @@ a.binaries = [b for b in a.binaries if not any([
     b[0].lower() in ['msvcr90.dll', 'msvcp90.dll', 'msvcr100.dll', 'msvcp100.dll',
                      'msvcr110.dll', 'msvcp110.dll', 'msvcr120.dll', 'msvcp120.dll'],
     # Strip playwright binary driver (Node.js runtime, 85 MB uncompressed)
-    # QtWebEngine binaries kept -- epub_library.py EPUB reader requires Chromium
-
-
-
-    # (Qt6WebEngine filter removed -- epub_library.py EPUB reader needs it)
-    # pymupdf kept -- PDF rendering supported in Lite
-
-
-
-
-    # ---- Lite: unused PySide6 components ----
-    # Software OpenGL fallback (~20 MB) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â hardware-accelerated path is used
-    b[0].lower() == 'pyside6\\opengl32sw.dll' or b[0].lower() == 'opengl32sw.dll',
-    # FFmpeg codecs ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬  no video playback in the app (~17 MB)
-    'avcodec-' in b[0],
-    'avformat-' in b[0],
-    'avutil-' in b[0],
-    'swresample-' in b[0],
-    # Qt Quick / QML sub-modules safe to strip.
-    # Qt6Quick.dll, Qt6QuickWidgets.dll, Qt6Qml.dll and Qt6QmlModels.dll are KEPT
-    # because Qt6WebEngineWidgets.dll and Qt6WebEngineCore.dll link against them.
-    b[0] in ('PySide6\\Qt6QmlWorkerScript.dll', 'Qt6QmlWorkerScript.dll'),
-    b[0] in ('PySide6\\Qt6QmlMeta.dll',         'Qt6QmlMeta.dll'),
-    b[0] in ('PySide6\\Qt6QuickParticles.dll',   'Qt6QuickParticles.dll'),
-    # Qt Pdf -- no PDF viewer needed (~5 MB)
-    b[0] == 'PySide6\\Qt6Pdf.dll' or b[0] == 'Qt6Pdf.dll',
-    # Qt6OpenGL kept -- Qt6WebEngineCore.dll depends on it at runtime
-    # Qt Multimedia -- no audio/video playback (~1 MB)
-    'Qt6Multimedia' in b[0],
-    # Qt Quick Controls / Shapes / Templates (WebEngine does not use these)
-    'Qt6QuickControls' in b[0],
-    'Qt6QuickShapes' in b[0],
-    'Qt6QuickTemplates' in b[0],
-    'Qt6QuickDialogs' in b[0],
-    'Qt6VirtualKeyboard' in b[0],
-    'Qt6Charts' in b[0],
-    'Qt6DataVisualization' in b[0],
-    'Qt6Location' in b[0],
-    # Qt6Positioning kept -- Qt6WebEngineCore.dll depends on it for geolocation
-    'Qt6RemoteObjects' in b[0],
-    'Qt6Sensors' in b[0],
-    'Qt6SerialBus' in b[0],
-    'Qt6SerialPort' in b[0],
-    'Qt6Sql' in b[0],
-    'Qt6Test' in b[0],
-    'Qt6TextToSpeech' in b[0],
-    'Qt6WebSockets' in b[0],
-    'Qt6Xml' in b[0],
+    b[0].startswith('playwright'),
 ])]
 
-# Remove torch, playwright data, QtWebEngine/WeasyPrint/PDF data files
+# Remove torch and playwright data files
 a.datas = [d for d in a.datas if not any([
     'torch' in d[0].lower(),
     'torch-' in d[0],
     '.dist-info' in d[0] and 'torch' in d[0].lower(),
-    # Playwright data
+    # Playwright data (JS files, node.exe, etc.)
     d[0].startswith('playwright'),
     d[0].startswith('playwright\\'),
-    # QtWebEngine resources kept -- epub_library.py requires them
-
-
-
-    # pymupdf data kept -- PDF rendering supported in Lite
-
-    # PySide6 translations (~6.6 MB) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â UI locale files not needed
-    d[0].startswith('PySide6\\translations'),
-    d[0].startswith('PySide6/translations'),
-    # PySide6 QML plugins ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â not needed without Qt Quick
-    d[0].startswith('PySide6\\qml'),
-    d[0].startswith('PySide6/qml'),
 ])]
 
 a.pure = [p for p in a.pure if not any([
@@ -1250,30 +1153,15 @@ a.pure = [p for p in a.pure if not any([
     '_torchcodec' in str(p),
     # Playwright Python modules
     str(p[0]).startswith('playwright'),
-    # google-cloud-aiplatform: aiplatform_v1 is NO LONGER stripped ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â it is a runtime dep of google.cloud.aiplatform
-    # PDF stack kept in Lite
-
-
-
-
-
-
-    str(p[0]).startswith('pyhanko'),
-    str(p[0]).startswith('pyhanko_certvalidator'),
-    str(p[0]).startswith('uritools'),          # pyhanko dep
-    str(p[0]).startswith('barcode'),           # pyhanko dep
-    str(p[0]).startswith('qrcode'),            # pyhanko dep
-    # ---- Lite: unused Python packages ----
-    str(p[0]).startswith('pygments'),          # syntax highlighter (~3.6 MB)
-    str(p[0]).startswith('redis'),             # Redis client (~1.3 MB)
-    str(p[0]).startswith('rich'),              # terminal pretty-printer (~1 MB)
-    str(p[0]).startswith('ttkbootstrap'),      # old tkinter theme, not used (~0.8 MB)
-    str(p[0]).startswith('tkinter'),           # tkinter itself
-    str(p[0]).startswith('_tkinter'),
-    # NOTE: setuptools / pkg_resources / distutils are intentionally NOT stripped
-    # here. PyInstaller injects pyi_rth_pkgres.py as a runtime hook which imports
-    # pkg_resources unconditionally before any user code runs ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ stripping it
-    # causes "No module named 'pkg_resources'" and the exe won't launch.
+    # ----------------------------------------------------------------
+    # google-cloud-aiplatform: aiplatform_v1 is NO LONGER stripped � it is a runtime dep of google.cloud.aiplatform
+    # Glossarion uses vertexai.generative_models (Content/Part) and
+    # vertexai.init() only. The v1/v1beta1 auto-generated protobuf stub
+    # trees cover every Vertex AI API endpoint and are never imported
+    # at runtime. Strip them here because they are collected transitively
+    # even when excluded from hiddenimports.
+    # ----------------------------------------------------------------
+    # Also strip other heavy google.cloud sub-packages not needed at runtime:
 ])]
 
 # ============================================================================
