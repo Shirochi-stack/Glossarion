@@ -5780,9 +5780,10 @@ class UnifiedClient:
                 }
                 
                 # Save payload with retry reason
-                # On internal retries (500 errors), add that info too
+                # On internal retries, label with the actual error type that caused the retry
                 if attempt > 0:
-                    internal_retry_reason = f"500_error_attempt_{attempt}"
+                    _retry_label = getattr(self, '_last_retry_error_type', '500_error')
+                    internal_retry_reason = f"{_retry_label}_attempt_{attempt}"
                     if retry_reason:
                         combined_reason = f"{retry_reason}_{internal_retry_reason}"
                     else:
@@ -6198,6 +6199,7 @@ class UnifiedClient:
                         # For rate limit errors, continue retrying without counting against max retries
                         # Reset attempt counter to avoid exhausting retries on rate limits
                         attempt = max(0, attempt - 1)  # Don't count rate limit waits against retry budget
+                        self._last_retry_error_type = '429_rate_limit'
                         continue  # Retry the attempt
                     else:
                         # Always back off at least once even when indefinite retry is disabled
@@ -6206,6 +6208,7 @@ class UnifiedClient:
                         print(f"⚠️ Rate limited, sleeping {wait_time}s (single-key, indefinite retry disabled, rate-limit retry #{rate_limit_retry_count}/{internal_retries})")
                         if not self._sleep_with_cancel(wait_time, 0.5):
                             raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                        self._last_retry_error_type = '429_rate_limit'
                         # Allow normal retry budget to proceed
                         continue
                 
@@ -6310,6 +6313,7 @@ class UnifiedClient:
                             time.sleep(0.5)  # Check every 0.5 seconds
                         print(f"🔄 Server error retry: Backoff completed, initiating retry attempt...")
                         time.sleep(1)  # Brief pause after backoff for retry stability
+                        self._last_retry_error_type = f'{http_status or 500}_server_error'
                         continue  # Retry the attempt
                     else:
                         print(f"❌ Server error ({http_status or 'API error'}) - exhausted {internal_retries} retries")
@@ -6330,6 +6334,7 @@ class UnifiedClient:
                             time.sleep(0.5)
                         print(f"🔄 Timeout error retry: Backoff completed, initiating retry attempt...")
                         time.sleep(0.1)  # Brief pause after backoff for retry stability
+                        self._last_retry_error_type = 'network_timeout'
                         continue  # Retry the attempt
                     else:
                         print(f"❌ Network/timeout error - exhausted {internal_retries} retries")
