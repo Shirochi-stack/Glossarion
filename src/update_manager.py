@@ -1185,7 +1185,7 @@ class UpdateManager(QObject):
                         fname_lower = filename.lower()
                         if 'omegalite' in fname_lower:
                             variant_type = "OmegaLite"
-                            variant_desc = "OpenAI-only, minimal build"
+                            variant_desc = "No Vertex, minimal build"
                         elif 'superlite' in fname_lower:
                             variant_type = "SuperLite"
                             variant_desc = "All AI providers, no EPUB reader/PDF"
