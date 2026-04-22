@@ -1106,6 +1106,31 @@ excludes = [
     'pydyf', 'pydyf.*',
     'zopfli', 'zopfli.*',
     'brotli',
+
+    # ============================================================================
+    # PDF STACK — SuperLite has no PDF output or viewing
+    # ============================================================================
+    'pymupdf', 'pymupdf.*', 'fitz', 'fitz.*',
+    'reportlab', 'reportlab.*',
+    'fontTools', 'fontTools.*',
+    'pypdf', 'pypdf.*',
+    'pdfminer', 'pdfminer.*',
+    'pyhanko', 'pyhanko.*',
+    'pyhanko_certvalidator', 'pyhanko_certvalidator.*',
+    'uritools',        # pyhanko dependency
+    'qrcode', 'qrcode.*',
+    'barcode', 'barcode.*',
+
+    # ============================================================================
+    # UNUSED PYTHON PACKAGES — SuperLite
+    # ============================================================================
+    'pygments', 'pygments.*',    # syntax highlighter (~3.6 MB)
+    'redis', 'redis.*',          # Redis client (~1.3 MB)
+    'rich', 'rich.*',            # terminal pretty-printer (~1 MB)
+    'ttkbootstrap', 'ttkbootstrap.*',  # legacy tkinter theme, not used
+    # NOTE: setuptools/pkg_resources/distutils are NOT in excludes because
+    # PyInstaller's hook-distutils.py aliases them internally and crashes if
+    # they are pre-excluded. They are stripped via a.pure filter instead.
 ]
 
 # ============================================================================
@@ -1147,14 +1172,53 @@ a.binaries = [b for b in a.binaries if not any([
     'Qt6WebEngineCore' in b[0],
     'QtWebEngineProcess' in b[0],
     b[0].startswith('PySide6\\Qt6WebEngine'),
-    # Strip pymupdf — PDF rendering, not needed without WeasyPrint
+    # Strip pymupdf — PDF rendering, not needed in SuperLite
     b[0].startswith('pymupdf\\'),
     b[0].startswith('pymupdf/'),
     'mupdfcpp' in b[0],
     '_mupdf' in b[0],
+    # ---- SuperLite: unused PySide6 components ----
+    # Software OpenGL fallback (~20 MB) — hardware-accelerated path is used
+    b[0].lower() == 'pyside6\\opengl32sw.dll' or b[0].lower() == 'opengl32sw.dll',
+    # FFmpeg codecs — no video playback in the app (~17 MB)
+    'avcodec-' in b[0],
+    'avformat-' in b[0],
+    'avutil-' in b[0],
+    'swresample-' in b[0],
+    # Qt Quick / QML engine — not used (~11 MB)
+    'Qt6Quick' in b[0],
+    'Qt6Qml' in b[0],
+    'Qt6QmlMeta' in b[0],
+    'Qt6QmlModels' in b[0],
+    'Qt6QmlWorker' in b[0],
+    # Qt Pdf — no PDF viewer in SuperLite (~5 MB)
+    b[0] == 'PySide6\\Qt6Pdf.dll' or b[0] == 'Qt6Pdf.dll',
+    # Qt OpenGL module — only needed for OpenGL widgets, app uses software rendering
+    b[0] == 'PySide6\\Qt6OpenGL.dll' or b[0] == 'Qt6OpenGL.dll',
+    # Qt Multimedia — no audio/video playback (~1 MB)
+    'Qt6Multimedia' in b[0],
+    # Qt Quick Controls / Shapes / Templates
+    'Qt6QuickControls' in b[0],
+    'Qt6QuickShapes' in b[0],
+    'Qt6QuickTemplates' in b[0],
+    'Qt6QuickDialogs' in b[0],
+    'Qt6VirtualKeyboard' in b[0],
+    'Qt6Charts' in b[0],
+    'Qt6DataVisualization' in b[0],
+    'Qt6Location' in b[0],
+    'Qt6Positioning' in b[0],
+    'Qt6RemoteObjects' in b[0],
+    'Qt6Sensors' in b[0],
+    'Qt6SerialBus' in b[0],
+    'Qt6SerialPort' in b[0],
+    'Qt6Sql' in b[0],
+    'Qt6Test' in b[0],
+    'Qt6TextToSpeech' in b[0],
+    'Qt6WebSockets' in b[0],
+    'Qt6Xml' in b[0],
 ])]
 
-# Remove torch, playwright data, and QtWebEngine/WeasyPrint data files
+# Remove torch, playwright data, QtWebEngine/WeasyPrint/PDF data files
 a.datas = [d for d in a.datas if not any([
     'torch' in d[0].lower(),
     'torch-' in d[0],
@@ -1168,6 +1232,12 @@ a.datas = [d for d in a.datas if not any([
     d[0] == 'PySide6\\resources\\icudtl.dat',
     # pymupdf data
     d[0].startswith('pymupdf'),
+    # PySide6 translations (~6.6 MB) — UI locale files not needed
+    d[0].startswith('PySide6\\translations'),
+    d[0].startswith('PySide6/translations'),
+    # PySide6 QML plugins — not needed without Qt Quick
+    d[0].startswith('PySide6\\qml'),
+    d[0].startswith('PySide6/qml'),
 ])]
 
 a.pure = [p for p in a.pure if not any([
@@ -1182,6 +1252,28 @@ a.pure = [p for p in a.pure if not any([
     str(p[0]).startswith('google.cloud.bigquery'),
     str(p[0]).startswith('google.cloud.resourcemanager_v3'),
     str(p[0]).startswith('google.cloud.vision_v1'),
+    # ---- SuperLite: PDF stack (not used, WeasyPrint excluded) ----
+    str(p[0]).startswith('pymupdf'),
+    str(p[0]).startswith('fitz'),
+    str(p[0]).startswith('reportlab'),
+    str(p[0]).startswith('fontTools'),
+    str(p[0]).startswith('pypdf'),
+    str(p[0]).startswith('pdfminer'),
+    str(p[0]).startswith('pyhanko'),
+    str(p[0]).startswith('pyhanko_certvalidator'),
+    str(p[0]).startswith('uritools'),          # pyhanko dep
+    str(p[0]).startswith('barcode'),           # pyhanko dep
+    str(p[0]).startswith('qrcode'),            # pyhanko dep
+    # ---- SuperLite: unused Python packages ----
+    str(p[0]).startswith('pygments'),          # syntax highlighter (~3.6 MB)
+    str(p[0]).startswith('redis'),             # Redis client (~1.3 MB)
+    str(p[0]).startswith('rich'),              # terminal pretty-printer (~1 MB)
+    str(p[0]).startswith('ttkbootstrap'),      # old tkinter theme, not used (~0.8 MB)
+    str(p[0]).startswith('tkinter'),           # tkinter itself
+    str(p[0]).startswith('_tkinter'),
+    str(p[0]).startswith('setuptools'),        # dev packaging tool (~1.8 MB)
+    str(p[0]).startswith('pkg_resources'),     # setuptools companion
+    str(p[0]).startswith('distutils'),
 ])]
 
 # ============================================================================
