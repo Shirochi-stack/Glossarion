@@ -6561,7 +6561,22 @@ class UnifiedClient:
                         time.sleep(0.5)
                     continue  # Retry the attempt
 
-                    
+        # Safety net: for-loop exhausted all attempts without hitting an explicit return.
+        # This should never happen (each exception handler returns or raises on the last
+        # attempt), but if a new code path introduces a fallthrough, this prevents
+        # _send_internal from returning implicit None and crashing the caller.
+        print(f"⚠️ _send_internal: retry loop exhausted without explicit return — returning empty fallback")
+        try:
+            self._save_failed_request(
+                messages,
+                "_send_internal loop fallthrough (implicit None bug)",
+                context or 'translation',
+                None,
+            )
+        except Exception:
+            pass
+        return "", "error"
+
     def _retry_with_main_key(self, messages, temperature, max_tokens,
                             max_completion_tokens=None, context=None,
                             request_id=None, image_data=None) -> Optional[Tuple[str, Optional[str]]]: 
