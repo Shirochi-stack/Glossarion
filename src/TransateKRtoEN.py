@@ -4471,7 +4471,7 @@ class BatchTranslationProcessor:
                         # Only log if not during graceful stop (about to be cancelled)
                         graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                         if not graceful_stop_active:
-                            print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.3f}s for Chapter {actual_num}")
+                            print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.5f}s for Chapter {actual_num}")
                         
                         # Interruptible sleep - check stop flag every 0.1 seconds
                         elapsed = 0
