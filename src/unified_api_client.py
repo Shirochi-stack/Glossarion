@@ -6217,6 +6217,7 @@ class UnifiedClient:
                         # Reset attempt counter to avoid exhausting retries on rate limits
                         attempt = max(0, attempt - 1)  # Don't count rate limit waits against retry budget
                         self._last_retry_error_type = '429_rate_limit'
+                        self._last_loop_exception = e  # store for safety-net payload
                         continue  # Retry the attempt
                     else:
                         # Always back off at least once even when indefinite retry is disabled
@@ -6226,6 +6227,7 @@ class UnifiedClient:
                         if not self._sleep_with_cancel(wait_time, 0.5):
                             raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                         self._last_retry_error_type = '429_rate_limit'
+                        self._last_loop_exception = e  # store for safety-net payload
                         # Allow normal retry budget to proceed
                         continue
                 
@@ -6587,11 +6589,17 @@ class UnifiedClient:
         # This should never happen (each exception handler returns or raises on the last
         # attempt), but if a new code path introduces a fallthrough, this prevents
         # _send_internal from returning implicit None and crashing the caller.
-        print(f"⚠️ _send_internal: retry loop exhausted without explicit return — returning empty fallback")
+        _loop_exc = getattr(self, '_last_loop_exception', None)
+        _exc_label = (
+            f"Retry loop exhausted (last error: {_loop_exc})"
+            if _loop_exc
+            else "_send_internal loop fallthrough"
+        )
+        print(f"⚠️ _send_internal: retry loop exhausted — {_exc_label}")
         try:
             self._save_failed_request(
                 messages,
-                "_send_internal loop fallthrough (implicit None bug)",
+                _loop_exc if _loop_exc else _exc_label,
                 context or 'translation',
                 None,
             )
