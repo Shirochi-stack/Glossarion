@@ -8203,14 +8203,20 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 # Unpack the tuple (now includes raw_obj)
                 if len(result) == 3:
                     api_result, api_time, raw_obj = result
-                    # Store raw_obj as an attribute for later retrieval
-                    if hasattr(api_result, '__class__'):
-                        # If api_result is a tuple, return a new tuple with raw_obj
-                        if isinstance(api_result, tuple):
-                            return (*api_result, raw_obj)
-                        else:
-                            # Store as attribute for retrieval
-                            api_result._raw_obj = raw_obj
+                    # If the API client returned None, raise immediately so the chapter
+                    # retry/failure path fires correctly (callers unpack as a 3-tuple,
+                    # so returning bare None would just cause a TypeError one level up).
+                    if api_result is None:
+                        raise UnifiedClientError("API returned no response (None)", error_type="empty_response")
+                    # If api_result is a tuple (e.g. (text, finish_reason)) expand it
+                    # with raw_obj so callers get (text, finish_reason, raw_obj).
+                    if isinstance(api_result, tuple):
+                        return (*api_result, raw_obj)
+                    # For any other object type, attach raw_obj as an attribute.
+                    try:
+                        api_result._raw_obj = raw_obj
+                    except AttributeError:
+                        pass  # Immutable built-in types (str, int, …) can't hold attributes
                 else:
                     # Backward compatibility for old format
                     api_result, api_time = result

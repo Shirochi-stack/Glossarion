@@ -7951,24 +7951,33 @@ class UnifiedClient:
             print(f"   ⚠️ [Gemini] Specialized extraction failed, trying generic methods...")
         
         # ========== ENHANCED OPENAI HANDLING ==========
-        elif provider == 'openai':
-            print(f"   🔍 [OpenAI] Attempting specialized extraction...")
+        # All OpenAI-SDK-compatible providers share the same choices[0].finish_reason /
+        # message.content response shape.  Listing only 'openai' here meant that Chutes,
+        # Groq, OpenRouter, DeepSeek, etc. fell through to the generic extractor which
+        # never reads finish_reason — so truncation ('length') was silently ignored.
+        _OPENAI_COMPAT_PROVIDERS = {
+            'openai', 'chutes', 'groq', 'openrouter', 'fireworks', 'deepseek',
+            'xai', 'nvidia', 'za', 'electronhub', 'zhipu', 'gemini-openai',
+            'together', 'yi', 'qwen', 'moonshot', 'mistral',
+        }
+        elif provider in _OPENAI_COMPAT_PROVIDERS:
+            print(f"   🔍 [{provider}] Attempting OpenAI-compat extraction...")
             
             # Check if it's an OpenAI ChatCompletion object
             if hasattr(response, 'choices') and response.choices is not None:
                 choices_count = self._safe_len(response.choices, "openai_response_choices")
-                print(f"   🔍 [OpenAI] Found choices attribute, {choices_count} choices")
+                print(f"   🔍 [{provider}] Found choices attribute, {choices_count} choices")
                 
                 if response.choices:
                     choice = response.choices[0]
                     
                     # Log choice details
-                    print(f"   🔍 [OpenAI] Choice type: {type(choice)}")
+                    print(f"   🔍 [{provider}] Choice type: {type(choice)}")
                     
                     # Get finish reason
                     if hasattr(choice, 'finish_reason'):
                         finish_reason = choice.finish_reason
-                        print(f"   🔍 [OpenAI] Finish reason: {finish_reason}")
+                        print(f"   🔍 [{provider}] Finish reason: {finish_reason}")
                         
                         # Normalize finish reasons
                         if finish_reason == 'max_tokens':
@@ -7979,11 +7988,11 @@ class UnifiedClient:
                     # Extract message content
                     if hasattr(choice, 'message'):
                         message = choice.message
-                        print(f"   🔍 [OpenAI] Message type: {type(message)}")
+                        print(f"   🔍 [{provider}] Message type: {type(message)}")
                         
                         # Check for refusal first
                         if hasattr(message, 'refusal') and message.refusal:
-                            print(f"   🚫 [OpenAI] Message was refused: {message.refusal}")
+                            print(f"   🚫 [{provider}] Message was refused: {message.refusal}")
                             return f"[REFUSED]: {message.refusal}", 'content_filter'
                         
                         # Try to get content
@@ -7992,49 +8001,49 @@ class UnifiedClient:
                             
                             # Handle None content
                             if content is None:
-                                print(f"   ⚠️ [OpenAI] message.content is None")
+                                print(f"   ⚠️ [{provider}] message.content is None")
                                 
                                 # Check if it's a function call instead
                                 if hasattr(message, 'function_call'):
-                                    print(f"   🔍 [OpenAI] Found function_call instead of content")
+                                    print(f"   🔍 [{provider}] Found function_call instead of content")
                                     return "", 'function_call'
                                 elif hasattr(message, 'tool_calls'):
-                                    print(f"   🔍 [OpenAI] Found tool_calls instead of content")
+                                    print(f"   🔍 [{provider}] Found tool_calls instead of content")
                                     return "", 'tool_call'
                                 else:
-                                    print(f"   ⚠️ [OpenAI] No content, refusal, or function calls found")
+                                    print(f"   ⚠️ [{provider}] No content, refusal, or function calls found")
                                     return "", finish_reason or 'error'
                             
                             # Handle empty string content
                             elif content == "":
-                                print(f"   ⚠️ [OpenAI] message.content is empty string")
+                                print(f"   ⚠️ [{provider}] message.content is empty string")
                                 if finish_reason == 'length':
-                                    print(f"   ⚠️ [OpenAI] Empty due to length limit (tokens too low)")
+                                    print(f"   ⚠️ [{provider}] Empty due to length limit (tokens too low)")
                                 return "", finish_reason or 'error'
                             
                             # Valid content found
                             else:
-                                print(f"   ✅ [OpenAI] Got content: {len(content)} chars")
+                                print(f"   ✅ [{provider}] Got content: {len(content)} chars")
                                 return content, finish_reason
                         
                         # Try alternative attributes
                         elif hasattr(message, 'text'):
-                            print(f"   🔍 [OpenAI] Trying message.text...")
+                            print(f"   🔍 [{provider}] Trying message.text...")
                             if message.text:
-                                print(f"   ✅ [OpenAI] Got text: {len(message.text)} chars")
+                                print(f"   ✅ [{provider}] Got text: {len(message.text)} chars")
                                 return message.text, finish_reason
                         
                         # Try dict access if message is dict-like
                         elif hasattr(message, 'get'):
                             content = message.get('content') or message.get('text')
                             if content:
-                                print(f"   ✅ [OpenAI] Got content via dict access: {len(content)} chars")
+                                print(f"   ✅ [{provider}] Got content via dict access: {len(content)} chars")
                                 return content, finish_reason
                         
                         # Log all available attributes for debugging
-                        print(f"   ⚠️ [OpenAI] Message attributes: {[attr for attr in dir(message) if not attr.startswith('_')]}")
+                        print(f"   ⚠️ [{provider}] Message attributes: {[attr for attr in dir(message) if not attr.startswith('_')]}")
                 else:
-                    print(f"   ⚠️ [OpenAI] Empty choices array")
+                    print(f"   ⚠️ [{provider}] Empty choices array")
                     
                     # Check if there's metadata about why it's empty
                     if hasattr(response, 'model'):
@@ -8044,8 +8053,8 @@ class UnifiedClient:
                     if hasattr(response, 'usage'):
                         print(f"   Token usage: {response.usage}")
             
-            # If OpenAI extraction failed, continue to generic methods
-            print(f"   ⚠️ [OpenAI] Specialized extraction failed, trying generic methods...")
+            # If extraction failed, continue to generic methods
+            print(f"   ⚠️ [{provider}] Specialized extraction failed, trying generic methods...")
         
         # ========== GENERIC EXTRACTION METHODS ==========
         
