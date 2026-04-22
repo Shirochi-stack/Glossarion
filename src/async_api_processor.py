@@ -3341,7 +3341,7 @@ class AsyncProcessingDialog:
         env_vars['HIDE_IMAGE_TRANSLATION_LABEL'] = "1" if _val(self.gui.hide_image_translation_label_var, False) else "0"
         
         # Advanced settings
-        env_vars['REINFORCEMENT_FREQUENCY'] = _val(self.gui.reinforcement_freq_var, 0)
+
         env_vars['RESET_FAILED_CHAPTERS'] = "1" if _val(getattr(self.gui, 'reset_failed_chapters_var', None), False) else "0"
         env_vars['DUPLICATE_LOOKBACK_CHAPTERS'] = _val(self.gui.duplicate_lookback_var, 0)
         env_vars['DUPLICATE_DETECTION_MODE'] = _val(self.gui.duplicate_detection_mode_var, '')

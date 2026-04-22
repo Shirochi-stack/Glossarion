@@ -2363,9 +2363,7 @@ class UnifiedClient:
             'empty_results': 0  # Add this for completeness
         }
         
-        # Pattern recognition attributes
-        self.pattern_counts = {}  # Track pattern frequencies for reinforcement
-        self.last_pattern = None  # Track last seen pattern
+
         
         # Call reset_stats if it exists (from first init)
         if hasattr(self, 'reset_stats'):
@@ -5759,8 +5757,7 @@ class UnifiedClient:
                 except (PermissionError, OSError):
                     pass
                 
-                # Apply reinforcement
-                messages = self._apply_pure_reinforcement(messages)
+
                 
                 # Get file names - now unique per request AND attempt
                 payload_name, response_name = self._get_file_names(messages, context=self.context)
@@ -7497,39 +7494,7 @@ class UnifiedClient:
         
         # logger.info(f"Reset conversation state for new context: {new_context}")
     
-    def _apply_pure_reinforcement(self, messages):
-        """Apply PURE frequency-based reinforcement pattern"""
-        
-        # DISABLE in batch mode
-        #if os.getenv('BATCH_TRANSLATION', '0') == '1':
-        #    return messages
-        
-        # Skip if not enough messages
-        if self.conversation_message_count < 4:
-            return messages
-        
-        # Create pattern from last 2 user messages
-        if len(messages) >= 2:
-            pattern = []
-            for msg in messages[-2:]:
-                if msg.get('role') == 'user':
-                    content = msg['content']
-                    pattern.append(len(content))
-            
-            if len(pattern) >= 2:
-                pattern_key = f"reinforcement_{pattern[0]}_{pattern[1]}"
-                
-                # MICROSECOND LOCK: When modifying pattern_counts
-                with self._model_lock:
-                    self.pattern_counts[pattern_key] = self.pattern_counts.get(pattern_key, 0) + 1
-                    count = self.pattern_counts[pattern_key]
-                
-                # Just track patterns, NO PROMPT INJECTION
-                if count >= 3:
-                    logger.info(f"Pattern {pattern_key} detected (count: {count})")
-                    # NO [PATTERN REINFORCEMENT ACTIVE] - KEEP IT GONE
-        
-        return messages
+
     
     def _validate_and_clean_messages(self, messages):
         """Validate and clean messages, removing None entries and fixing content issues"""

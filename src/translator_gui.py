@@ -3052,7 +3052,7 @@ Recent translations to summarize:
             # New: max tokens for rolling summary generation
             # -1 means: use the main MAX_OUTPUT_TOKENS value
             ('rolling_summary_max_tokens_var', 'rolling_summary_max_tokens', '-1'),
-            ('reinforcement_freq_var', 'reinforcement_frequency', '10'),
+
             ('max_retry_tokens_var', 'max_retry_tokens', '-1'),
             ('truncation_retry_attempts_var', 'truncation_retry_attempts', '1'),
             # Char-ratio truncation (silent truncation detector)
@@ -12016,7 +12016,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ADD_ADDITIONAL_GLOSSARY': "1" if self.config.get('add_additional_glossary', False) else "0",
             'ADDITIONAL_GLOSSARY_PATH': self.config.get('additional_glossary_path', ''),
             'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var else "0",
-            'REINFORCEMENT_FREQUENCY': str(self.reinforcement_freq_var),
+
             'BREAK_SPLIT_COUNT': str(self.break_split_count_var) if hasattr(self, 'break_split_count_var') and self.break_split_count_var else '',
             'RETRY_TRUNCATED': "1" if self.retry_truncated_var else "0",
             'MAX_RETRY_TOKENS': str(resolved_max_retry_tokens),
@@ -19686,7 +19686,7 @@ Important rules:
                 ('thread_submission_delay', ['thread_delay_entry'], 0.1, lambda v: safe_float(v, 0.1)),
                 ('translation_temperature', ['trans_temp'], 0.3, lambda v: safe_float(v, 0.3)),
                 ('translation_history_limit', ['trans_history'], 2, lambda v: safe_int(v, 2)),
-                ('reinforcement_frequency', ['reinforcement_freq_var'], 10, lambda v: safe_int(v, 10)),
+
                 ('break_split_count', ['break_split_count_var'], '', str),
                 ('duplicate_lookback_chapters', ['duplicate_lookback_var'], 5, lambda v: safe_int(v, 5)),
 
@@ -20730,7 +20730,7 @@ Important rules:
                 # QA/meta preferences
                 ('QA_AUTO_SEARCH_OUTPUT', '1' if getattr(self, 'qa_auto_search_output_var', True) else '0'),
                 ('INDEFINITE_RATE_LIMIT_RETRY', '1' if getattr(self, 'indefinite_rate_limit_retry_var', False) else '0'),
-                ('REINFORCEMENT_FREQUENCY', str(getattr(self, 'reinforcement_freq_var', '10'))),
+
                 # Post-translation scanning phase
                 ('SCAN_PHASE_ENABLED', '1' if getattr(self, 'scan_phase_enabled_var', False) else '0'),
                 ('SCAN_PHASE_MODE', getattr(self, 'scan_phase_mode_var', 'quick-scan')),

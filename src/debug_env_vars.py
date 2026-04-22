@@ -223,7 +223,6 @@ def print_env_var_status():
     qa_meta_vars = {
 'QA_AUTO_SEARCH_OUTPUT': 'QA auto-search output folder',
         'INDEFINITE_RATE_LIMIT_RETRY': 'Indefinite rate limit retries',
-        'REINFORCEMENT_FREQUENCY': 'Prompt reinforcement frequency',
         'SCAN_PHASE_ENABLED': 'Enable post-translation scanning phase',
         'SCAN_PHASE_MODE': 'Scanning mode (quick-scan/aggressive/ai-hunter/custom)',
     }

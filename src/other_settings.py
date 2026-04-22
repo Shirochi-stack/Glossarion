@@ -7094,26 +7094,7 @@ def _create_processing_options_section(self, parent):
     chunk_prompt_desc.setContentsMargins(0, 0, 0, 15)
     right_v.addWidget(chunk_prompt_desc)
     
-    # Message Reinforcement option
-    reinforce_w = QWidget()
-    reinforce_h = QHBoxLayout(reinforce_w)
-    reinforce_h.setContentsMargins(0, 0, 0, 0)
-    reinforce_h.addWidget(QLabel("Prompt Reinforcement:"))
-    reinforce_edit = QLineEdit()
-    reinforce_edit.setFixedWidth(60)
-    try:
-        reinforce_edit.setText(str(self.reinforcement_freq_var))
-    except Exception:
-        pass
-    def _on_reinforce_changed(text):
-        try:
-            self.reinforcement_freq_var = text
-        except Exception:
-            pass
-    reinforce_edit.textChanged.connect(_on_reinforce_changed)
-    reinforce_h.addWidget(reinforce_edit)
-    reinforce_h.addStretch()
-    right_v.addWidget(reinforce_w)
+
     
     # Break Split Count option
     break_split_w = QWidget()
