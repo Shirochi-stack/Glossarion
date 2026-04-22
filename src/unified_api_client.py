@@ -9808,12 +9808,20 @@ class UnifiedClient:
                         Returns True if a text chunk was appended."""
                         nonlocal result_text, image_data, thought_chunk_count
                         nonlocal thinking_started, thinking_ended, thought_log_buf, log_buf, got_first_text
-                        # Image
+                        # Image — log each part with its size so we can diagnose
+                        # whether multiple parts are identical copies or distinct outputs.
                         if getattr(part, 'inline_data', None) is not None:
                             if hasattr(part.inline_data, 'data'):
-                                image_data = part.inline_data.data
+                                is_first = image_data is None
+                                new_data = part.inline_data.data
                                 mime_type = getattr(part.inline_data, 'mime_type', 'image/png')
-                                print(f"   🖼️ Extracted image from Vertex AI response (mime_type: {mime_type})")
+                                size_kb = len(new_data) / 1024 if new_data else 0
+                                if is_first:
+                                    print(f"   🖼️ Extracted image from Vertex AI response (mime_type: {mime_type}, size: {size_kb:.1f} KB)")
+                                else:
+                                    same = (new_data == image_data)
+                                    print(f"   🖼️ Additional image part #{'' if same else '!'} (mime_type: {mime_type}, size: {size_kb:.1f} KB, {'identical' if same else 'DIFFERENT'})")
+                                image_data = new_data  # keep last (highest quality if they differ)
                             return False
                         text = getattr(part, 'text', '') or ''
                         if not text:
