@@ -7819,6 +7819,14 @@ class UnifiedClient:
                     self._debug_log(f"   ⚠️ No raw_response found")
                     return "", 'error'
         
+        # All OpenAI-SDK-compatible providers share the same choices[0].finish_reason /
+        # message.content response shape. Must be defined before the if/elif chain.
+        _OPENAI_COMPAT_PROVIDERS = {
+            'openai', 'chutes', 'groq', 'openrouter', 'fireworks', 'deepseek',
+            'xai', 'nvidia', 'za', 'electronhub', 'zhipu', 'gemini-openai',
+            'together', 'yi', 'qwen', 'moonshot', 'mistral',
+        }
+
         # ========== GEMINI-SPECIFIC HANDLING ==========
         if provider == 'gemini':
             self._debug_log(f"   🔍 [Gemini] Attempting specialized extraction...")
@@ -7951,15 +7959,6 @@ class UnifiedClient:
             print(f"   ⚠️ [Gemini] Specialized extraction failed, trying generic methods...")
         
         # ========== ENHANCED OPENAI HANDLING ==========
-        # All OpenAI-SDK-compatible providers share the same choices[0].finish_reason /
-        # message.content response shape.  Listing only 'openai' here meant that Chutes,
-        # Groq, OpenRouter, DeepSeek, etc. fell through to the generic extractor which
-        # never reads finish_reason — so truncation ('length') was silently ignored.
-        _OPENAI_COMPAT_PROVIDERS = {
-            'openai', 'chutes', 'groq', 'openrouter', 'fireworks', 'deepseek',
-            'xai', 'nvidia', 'za', 'electronhub', 'zhipu', 'gemini-openai',
-            'together', 'yi', 'qwen', 'moonshot', 'mistral',
-        }
         elif provider in _OPENAI_COMPAT_PROVIDERS:
             print(f"   🔍 [{provider}] Attempting OpenAI-compat extraction...")
             
