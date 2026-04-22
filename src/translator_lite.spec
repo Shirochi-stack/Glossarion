@@ -1,4 +1,4 @@
-# -*- mode: python ; coding: utf-8 -*-
+﻿# -*- mode: python ; coding: utf-8 -*-
 """
 Glossarion Lite v8.5.5 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, and AI Hunter
@@ -72,12 +72,12 @@ print(f"  GTK_FOLDER env var: {gtk_folder}")
 print(f"  Checking candidates: {msys2_bin_candidates}")
 print(f"  Selected MSYS2 bin: {msys2_bin}")
 
-# Lite: WeasyPrint (PDF) is excluded, so MSYS2 GTK DLLs are NOT collected.
-if False and msys2_bin and os.path.exists(msys2_bin):  # Disabled in Lite
+# Add MSYS2 DLLs for WeasyPrint (PDF generation)
+if msys2_bin and os.path.exists(msys2_bin):  # Enabled in Lite
     dll_list = glob.glob(os.path.join(msys2_bin, '*.dll'))
     for dll in dll_list:
         binaries.append((dll, '.'))
-print("  Lite: skipping MSYS2 DLL collection (WeasyPrint excluded)")
+    print(f"  Added {len(dll_list)} MSYS2 DLLs for WeasyPrint")
 
 # Collect data files from packages that need them
 for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
@@ -195,7 +195,7 @@ app_files = [
 	# gRPC Gemini client
 	('grpc_gemini_client.py', '.'),
 
-	# EPUB Library & Reader: EXCLUDED in Lite (saves ~152 MB — removes Chromium)
+	# EPUB Library & Reader: EXCLUDED in Lite (saves ~152 MB â€” removes Chromium)
 	# ('epub_library.py', '.'),
 ]
 # Add application files to datas
@@ -269,7 +269,7 @@ app_modules = [
 	'token_encryption',  # Encrypted token storage
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client
-	# 'epub_library',  # EXCLUDED in Lite — removes Chromium WebEngine (152 MB)
+	# 'epub_library',  # EXCLUDED in Lite â€” removes Chromium WebEngine (152 MB)
 ]
 # GUI Framework
 gui_modules = [
@@ -460,7 +460,7 @@ api_modules = [
     'googleapis_common_protos',
 	
 	# Google Vertex AI:
-    # NOTE: aiplatform_v1 and aiplatform_v1beta1 are omitted — they are
+    # NOTE: aiplatform_v1 and aiplatform_v1beta1 are omitted â€” they are
     # auto-generated proto stub trees (~60 MB packed) stripped in a.pure below.
     
     # OpenAI
@@ -1090,20 +1090,20 @@ excludes = [
     'PySide6.QtWebEngineQuick',
 
     # ============================================================================
-    # WEASYPRINT + GTK/Cairo/Pango stack - excluded in Lite.
-    # PDF generation is not needed; this also drops the MSYS2 DLL payload.
-    # ============================================================================
-    'weasyprint', 'weasyprint.*',
-    'cairocffi', 'cairocffi.*',
-    'cairosvg', 'cairosvg.*',
-    'tinycss2', 'tinycss2.*',
-    'cssselect2', 'cssselect2.*',
-    'pydyf', 'pydyf.*',
-    'zopfli', 'zopfli.*',
-    'brotli',
+    # WeasyPrint + PDF stack kept in Lite
+
+
+
+
+
+
+
+
+
+
 
     # ============================================================================
-    # PDF STACK — Lite has no PDF output or viewing
+    # PDF STACK â€” Lite has no PDF output or viewing
     # ============================================================================
     'pymupdf', 'pymupdf.*', 'fitz', 'fitz.*',
     'reportlab', 'reportlab.*',
@@ -1117,7 +1117,7 @@ excludes = [
     'barcode', 'barcode.*',
 
     # ============================================================================
-    # UNUSED PYTHON PACKAGES — Lite
+    # UNUSED PYTHON PACKAGES â€” Lite
     # ============================================================================
     'pygments', 'pygments.*',    # syntax highlighter (~3.6 MB)
     'redis', 'redis.*',          # Redis client (~1.3 MB)
@@ -1178,30 +1178,30 @@ a.binaries = [b for b in a.binaries if not any([
     'Qt6WebEngineCore' in b[0],
     'QtWebEngineProcess' in b[0],
     b[0].startswith('PySide6\\Qt6WebEngine'),
-    # Strip pymupdf — PDF rendering, not needed in Lite
+    # Strip pymupdf â€” PDF rendering, not needed in Lite
     b[0].startswith('pymupdf\\'),
     b[0].startswith('pymupdf/'),
     'mupdfcpp' in b[0],
     '_mupdf' in b[0],
     # ---- Lite: unused PySide6 components ----
-    # Software OpenGL fallback (~20 MB) — hardware-accelerated path is used
+    # Software OpenGL fallback (~20 MB) â€” hardware-accelerated path is used
     b[0].lower() == 'pyside6\\opengl32sw.dll' or b[0].lower() == 'opengl32sw.dll',
-    # FFmpeg codecs — no video playback in the app (~17 MB)
+    # FFmpeg codecs â€” no video playback in the app (~17 MB)
     'avcodec-' in b[0],
     'avformat-' in b[0],
     'avutil-' in b[0],
     'swresample-' in b[0],
-    # Qt Quick / QML engine — not used (~11 MB)
+    # Qt Quick / QML engine â€” not used (~11 MB)
     'Qt6Quick' in b[0],
     'Qt6Qml' in b[0],
     'Qt6QmlMeta' in b[0],
     'Qt6QmlModels' in b[0],
     'Qt6QmlWorker' in b[0],
-    # Qt Pdf — no PDF viewer in Lite (~5 MB)
+    # Qt Pdf â€” no PDF viewer in Lite (~5 MB)
     b[0] == 'PySide6\\Qt6Pdf.dll' or b[0] == 'Qt6Pdf.dll',
-    # Qt OpenGL module — only needed for OpenGL widgets, app uses software rendering
+    # Qt OpenGL module â€” only needed for OpenGL widgets, app uses software rendering
     b[0] == 'PySide6\\Qt6OpenGL.dll' or b[0] == 'Qt6OpenGL.dll',
-    # Qt Multimedia — no audio/video playback (~1 MB)
+    # Qt Multimedia â€” no audio/video playback (~1 MB)
     'Qt6Multimedia' in b[0],
     # Qt Quick Controls / Shapes / Templates
     'Qt6QuickControls' in b[0],
@@ -1238,10 +1238,10 @@ a.datas = [d for d in a.datas if not any([
     d[0] == 'PySide6\\resources\\icudtl.dat',
     # pymupdf data
     d[0].startswith('pymupdf'),
-    # PySide6 translations (~6.6 MB) — UI locale files not needed
+    # PySide6 translations (~6.6 MB) â€” UI locale files not needed
     d[0].startswith('PySide6\\translations'),
     d[0].startswith('PySide6/translations'),
-    # PySide6 QML plugins — not needed without Qt Quick
+    # PySide6 QML plugins â€” not needed without Qt Quick
     d[0].startswith('PySide6\\qml'),
     d[0].startswith('PySide6/qml'),
 ])]
@@ -1279,7 +1279,7 @@ a.pure = [p for p in a.pure if not any([
     str(p[0]).startswith('_tkinter'),
     # NOTE: setuptools / pkg_resources / distutils are intentionally NOT stripped
     # here. PyInstaller injects pyi_rth_pkgres.py as a runtime hook which imports
-    # pkg_resources unconditionally before any user code runs → stripping it
+    # pkg_resources unconditionally before any user code runs â†’ stripping it
     # causes "No module named 'pkg_resources'" and the exe won't launch.
 ])]
 
