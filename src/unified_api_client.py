@@ -9544,8 +9544,8 @@ class UnifiedClient:
                 
                 # Check if image output mode is enabled
                 enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
-                # Force enable for gemini-3-pro-image model (with or without -preview suffix)
-                if "gemini-3-pro-image" in self.model.lower():
+                # Force enable for any Gemini image-generating model (matches native path logic)
+                if "image-preview" in self.model.lower() or "imagen" in self.model.lower():
                     enable_image_output = True
                     if not self._is_stop_requested():
                         print(f"🎨 Image output mode enabled for {self.model}")
@@ -9630,9 +9630,10 @@ class UnifiedClient:
                 _supports_thinking_vertex = self._supports_thinking()
                 _is_gemini_3_vertex = self._is_gemini_3_model()
                 _model_lower_vertex = (model_name or "").lower()
-                # Gemini 3 image-preview supports thinking; only skip for legacy image models
-                _skip_thinking_for_image = enable_image_output and not (_is_gemini_3_vertex and 'image-preview' in _model_lower_vertex)
-                if _supports_thinking_vertex and not _skip_thinking_for_image:
+                # Only gemini-3-pro-image-preview rejects thinking_level on Vertex;
+                # gemini-3.1-flash-image-preview and non-image models support it fine.
+                _vertex_pro_image = enable_image_output and 'gemini-3-pro-image-preview' in _model_lower_vertex
+                if _supports_thinking_vertex and not _vertex_pro_image:
                     # Thinking budget (Gemini 2.x)
                     try:
                         _thinking_budget_v = int(os.getenv("THINKING_BUDGET", "-1"))
@@ -13421,17 +13422,11 @@ class UnifiedClient:
         
         model_lower = self.model.lower()
         
-        # Gemini 3 image-preview models DO support thinking (it's built-in and cannot be disabled).
-        # Only exclude legacy Imagen models and non-Gemini-3 image endpoints.
+        # Image generation models don't support thinking parameters
         if 'image' in model_lower:
-            # Allow Gemini 3 image models through (image-preview suffix)
-            if 'image-preview' in model_lower and self._is_gemini_3_model():
-                pass  # fall through to Gemini 3 check below
-            else:
-                # Old Imagen standalone models, early image-generation endpoints
-                return False
+            return False
         
-        # Check for Gemini 3.0 series (supports thinking level: minimal / high)
+        # Check for Gemini 3.0 series (supports thinking level)
         if self._is_gemini_3_model():
             return True
             
