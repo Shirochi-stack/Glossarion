@@ -668,9 +668,9 @@ api_modules = [
     'googleapis_common_protos',
 	
 	# Google Vertex AI:
+    # NOTE: aiplatform_v1 and aiplatform_v1beta1 are omitted — they are
+    # auto-generated proto stub trees (~60 MB packed) stripped in a.pure below.
     'google.cloud.aiplatform',
-    'google.cloud.aiplatform_v1', 
-    'google.cloud.aiplatform_v1beta1',
     'vertexai',
     'vertexai.generative_models',
     'vertexai.language_models',
@@ -738,29 +738,6 @@ api_modules = [
     'anyio._core._eventloop',
     'anyio.streams',
     'anyio.streams.memory',
-	
-	# POE API Wrapper (add these at the end)
-    'poe_api_wrapper',
-    'poe_api_wrapper.api',
-    'poe_api_wrapper.client',
-    'poe_api_wrapper.models',
-    'poe_api_wrapper.utils',
-    'ballyregan',
-    'ballyregan.proxies',
-    
-    # WebSocket support for POE
-    'websocket',
-    'websocket._core',
-    'websocket._app',
-    'websocket._url',
-    'websocket._http',
-    'websocket._logging',
-    'websocket._socket',
-    'websocket._ssl_compat',
-    'websocket._abnf',
-    'websocket._handshake',
-    'websocket._exceptions',
-    'websockets',
 ]
 
 # Text Processing & NLP
@@ -1336,6 +1313,15 @@ print("  + Transformers preserved")
 print("  + Ultralytics preserved")
 print("  + ONNX Runtime CPU preserved")
 print("  + All other ML libraries preserved")
+
+# Strip google-cloud-aiplatform proto stubs (~60 MB packed, not needed at runtime)
+# NOTE: vision_v1 is kept here — NoCuda uses Google Cloud Vision for manga OCR.
+a.pure = [p for p in a.pure if not any([
+    str(p[0]).startswith('google.cloud.aiplatform_v1'),
+    str(p[0]).startswith('google.cloud.aiplatform.v1'),
+    str(p[0]).startswith('google.cloud.bigquery'),
+    str(p[0]).startswith('google.cloud.resourcemanager_v3'),
+])]
 
 # ============================================================================
 # PYZ (Python Zip archive)

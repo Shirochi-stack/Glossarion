@@ -150,11 +150,11 @@ def get_model_options() -> List[str]:
         "wizardlm-70b", "wizardlm-13b",
         "openchat-3.5",
         
-        # For POE, prefix with 'poe/'
-        "poe/gpt-4", "poe/gpt-4o", "poe/gpt-4.5", "poe/gpt-4.1",
-        "poe/claude-3-opus", "poe/claude-4-opus", "poe/claude-3-sonnet", "poe/claude-4-sonnet",
-        "poe/claude", "poe/Assistant",
-        "poe/gemini-2.5-flash", "poe/gemini-2.5-pro",
+        # For POE, prefix with 'poe/' (NO LONGER WORKS)
+       # "poe/gpt-4", "poe/gpt-4o", "poe/gpt-4.5", "poe/gpt-4.1",
+       # "poe/claude-3-opus", "poe/claude-4-opus", "poe/claude-3-sonnet", "poe/claude-4-sonnet",
+       # "poe/claude", "poe/Assistant",
+       # "poe/gemini-2.5-flash", "poe/gemini-2.5-pro",
         
         # For OR, prefix with 'or/'
         "or/openrouter/free",

@@ -467,9 +467,13 @@ api_modules = [
     'googleapis_common_protos',
 	
 	# Google Vertex AI:
+    # NOTE: We deliberately omit 'google.cloud.aiplatform_v1' and
+    # 'google.cloud.aiplatform_v1beta1' from hiddenimports.
+    # Those are auto-generated protobuf stub trees (~60 MB packed) for every
+    # Vertex AI API endpoint. Glossarion only needs vertexai.init() and
+    # vertexai.generative_models — not the full proto surface.
+    # They are stripped post-analysis in the a.pure filter block below.
     'google.cloud.aiplatform',
-    'google.cloud.aiplatform_v1', 
-    'google.cloud.aiplatform_v1beta1',
     'vertexai',
     'vertexai.generative_models',
     'vertexai.language_models',
@@ -537,29 +541,6 @@ api_modules = [
     'anyio._core._eventloop',
     'anyio.streams',
     'anyio.streams.memory',
-	
-	# POE API Wrapper (add these at the end)
-    'poe_api_wrapper',
-    'poe_api_wrapper.api',
-    'poe_api_wrapper.client',
-    'poe_api_wrapper.models',
-    'poe_api_wrapper.utils',
-    'ballyregan',
-    'ballyregan.proxies',
-    
-    # WebSocket support for POE
-    'websocket',
-    'websocket._core',
-    'websocket._app',
-    'websocket._url',
-    'websocket._http',
-    'websocket._logging',
-    'websocket._socket',
-    'websocket._ssl_compat',
-    'websocket._abnf',
-    'websocket._handshake',
-    'websocket._exceptions',
-    'websockets',
 ]
 
 # Text Processing & NLP
@@ -1167,6 +1148,20 @@ a.pure = [p for p in a.pure if not any([
     '_torchcodec' in str(p),
     # Playwright Python modules
     str(p[0]).startswith('playwright'),
+    # ----------------------------------------------------------------
+    # google-cloud-aiplatform proto stubs (~60 MB packed, 0 MB needed)
+    # Glossarion uses vertexai.generative_models (Content/Part) and
+    # vertexai.init() only. The v1/v1beta1 auto-generated protobuf stub
+    # trees cover every Vertex AI API endpoint and are never imported
+    # at runtime. Strip them here because they are collected transitively
+    # even when excluded from hiddenimports.
+    # ----------------------------------------------------------------
+    str(p[0]).startswith('google.cloud.aiplatform_v1'),   # v1 + v1beta1
+    str(p[0]).startswith('google.cloud.aiplatform.v1'),   # alternate path
+    # Also strip other heavy google.cloud sub-packages not needed at runtime:
+    str(p[0]).startswith('google.cloud.bigquery'),
+    str(p[0]).startswith('google.cloud.resourcemanager_v3'),
+    str(p[0]).startswith('google.cloud.vision_v1'),
 ])]
 
 # ============================================================================

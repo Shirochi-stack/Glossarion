@@ -20,7 +20,7 @@ anthropic
 mistralai
 cohere
 tiktoken
-poe-api-wrapper
+#poe-api-wrapper
 #ballyregan
 google-genai
 google-cloud-aiplatform
