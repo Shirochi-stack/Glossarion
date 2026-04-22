@@ -8203,11 +8203,24 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 # Unpack the tuple (now includes raw_obj)
                 if len(result) == 3:
                     api_result, api_time, raw_obj = result
-                    # If the API client returned None, raise immediately so the chapter
-                    # retry/failure path fires correctly (callers unpack as a 3-tuple,
-                    # so returning bare None would just cause a TypeError one level up).
+                    # None from client.send() is an empty response — could be prohibited
+                    # content, a safety block, or a real truncation.  Recover finish_reason
+                    # from the already-captured raw_obj / last UnifiedResponse so the normal
+                    # empty-response pipeline (safety filter, truncation retry, etc.) fires.
                     if api_result is None:
-                        raise UnifiedClientError("API returned no response (None)", error_type="empty_response")
+                        recovered_finish = 'error'
+                        try:
+                            if hasattr(client, 'get_last_response_object'):
+                                resp_obj = client.get_last_response_object()
+                                if resp_obj and hasattr(resp_obj, 'finish_reason') and resp_obj.finish_reason:
+                                    recovered_finish = resp_obj.finish_reason
+                            # raw_obj is resp_obj.raw_content_object; check it as a fallback
+                            if recovered_finish == 'error' and raw_obj and hasattr(raw_obj, 'finish_reason') and raw_obj.finish_reason:
+                                recovered_finish = raw_obj.finish_reason
+                        except Exception:
+                            pass
+                        print(f"⚠️ API returned None — treating as empty response (finish_reason={recovered_finish!r})")
+                        return ("", recovered_finish)
                     # If api_result is a tuple (e.g. (text, finish_reason)) expand it
                     # with raw_obj so callers get (text, finish_reason, raw_obj).
                     if isinstance(api_result, tuple):
