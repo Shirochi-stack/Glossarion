@@ -80,7 +80,7 @@ if False and msys2_bin and os.path.exists(msys2_bin):  # Disabled in TurboLite
 print("  TurboLite: skipping MSYS2 DLL collection (WeasyPrint excluded)")
 
 # Collect data files from packages that need them
-for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
+for package in ['langdetect', 'certifi', 'tiktoken_ext', 'chardet', 'charset_normalizer']:
     try:
         data, bins, hidden = collect_all(package)
         datas.extend(data)

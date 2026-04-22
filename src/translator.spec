@@ -87,7 +87,7 @@ else:
     print(f"  WARNING: No MSYS2 directory found in any candidate location")
 
 # Collect data files from packages that need them
-for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
+for package in ['langdetect', 'certifi', 'tiktoken_ext', 'chardet', 'charset_normalizer']:
     try:
         data, bins, hidden = collect_all(package)
         datas.extend(data)
@@ -1100,6 +1100,7 @@ excludes = [
     # It is safely optional (PLAYWRIGHT_AVAILABLE flag handles absence).
     # ============================================================================
     'playwright', 'playwright.*',
+    'fastavro', 'fastavro.*',
 ]
 
 # ============================================================================

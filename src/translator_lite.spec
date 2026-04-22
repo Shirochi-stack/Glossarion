@@ -80,7 +80,7 @@ if msys2_bin and os.path.exists(msys2_bin):  # Enabled in Lite
     print(f"  Added {len(dll_list)} MSYS2 DLLs for WeasyPrint")
 
 # Collect data files from packages that need them
-for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
+for package in ['langdetect', 'certifi', 'tiktoken_ext', 'chardet', 'charset_normalizer']:
     try:
         data, bins, hidden = collect_all(package)
         datas.extend(data)
