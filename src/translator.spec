@@ -288,6 +288,12 @@ gui_modules = [
     'ttkbootstrap.colorutils',
     'ttkbootstrap.themes.standard',
     'ttkbootstrap.themes.user',
+    # QtWebEngine — required by epub_library.py (EPUB reader GUI / Chromium renderer)
+    # epub_library.py is a data file so PyInstaller won't scan its imports automatically.
+    'PySide6.QtWebEngineWidgets',
+    'PySide6.QtWebEngineCore',
+    'PySide6.QtWebEngineQuick',
+    'PySide6.QtWebChannel',
 ]
 
 # EPUB/HTML Processing
