@@ -13646,8 +13646,8 @@ class UnifiedClient:
         
         # Check if image output mode is enabled
         enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
-        # Force enable for gemini-3-pro-image model (with or without -preview suffix)
-        if "gemini-3-pro-image" in model_lower:
+        # Force enable for any Gemini image-generating model (image-preview, imagen, etc.)
+        if "image-preview" in model_lower or "imagen" in model_lower:
             enable_image_output = True
             if not self._is_stop_requested():
                 print(f"🎨 Image output mode enabled for {self.model}")
