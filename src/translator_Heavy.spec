@@ -1174,9 +1174,6 @@ a = Analysis(
 
 # Strip google-cloud-aiplatform proto stubs (~60 MB packed, not needed at runtime)
 a.pure = [p for p in a.pure if not any([
-    str(p[0]).startswith('google.cloud.bigquery'),
-    str(p[0]).startswith('google.cloud.resourcemanager_v3'),
-    str(p[0]).startswith('google.cloud.vision_v1'),
 ])]
 
 # ============================================================================

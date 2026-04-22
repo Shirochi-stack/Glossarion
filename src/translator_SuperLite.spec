@@ -1246,9 +1246,6 @@ a.pure = [p for p in a.pure if not any([
     # Playwright Python modules
     str(p[0]).startswith('playwright'),
     # google-cloud-aiplatform: aiplatform_v1 is NO LONGER stripped — it is a runtime dep of google.cloud.aiplatform
-    str(p[0]).startswith('google.cloud.bigquery'),
-    str(p[0]).startswith('google.cloud.resourcemanager_v3'),
-    str(p[0]).startswith('google.cloud.vision_v1'),
     # ---- SuperLite: PDF stack (not used, WeasyPrint excluded) ----
     str(p[0]).startswith('pymupdf'),
     str(p[0]).startswith('fitz'),

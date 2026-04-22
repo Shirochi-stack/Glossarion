@@ -1162,9 +1162,6 @@ a.pure = [p for p in a.pure if not any([
     # even when excluded from hiddenimports.
     # ----------------------------------------------------------------
     # Also strip other heavy google.cloud sub-packages not needed at runtime:
-    str(p[0]).startswith('google.cloud.bigquery'),
-    str(p[0]).startswith('google.cloud.resourcemanager_v3'),
-    str(p[0]).startswith('google.cloud.vision_v1'),
 ])]
 
 # ============================================================================
