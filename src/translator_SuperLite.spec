@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion Lite v8.5.3 - PyInstaller Specification File
+Glossarion Lite v8.5.4 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, and AI Hunter
 """
 
@@ -27,7 +27,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'L_Glossarion_SuperLite v8.5.3'  # SuperLite: no EPUB reader / Chromium
+APP_NAME = 'L_Glossarion_SuperLite v8.5.4'  # SuperLite: no EPUB reader / Chromium
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -195,8 +195,8 @@ app_files = [
 	# gRPC Gemini client
 	('grpc_gemini_client.py', '.'),
 
-	# EPUB Library & Reader: EXCLUDED in SuperLite (saves ~152 MB — removes Chromium)
-	# ('epub_library.py', '.'),
+	# EPUB Library & Reader: EXCLUDED in SuperLite (saves ~152 MB â€” removes Chromium)
+	('epub_library.py', '.'),  # EPUB Library reader GUI (uses Chromium/QtWebEngine)
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -269,7 +269,7 @@ app_modules = [
 	'token_encryption',  # Encrypted token storage
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client
-	# 'epub_library',  # EXCLUDED in SuperLite — removes Chromium WebEngine (152 MB)
+	'epub_library',  # EPUB Library reader GUI
 ]
 # GUI Framework
 gui_modules = [
@@ -460,7 +460,7 @@ api_modules = [
     'googleapis_common_protos',
 	
 	# Google Vertex AI:
-    # NOTE: aiplatform_v1 and aiplatform_v1beta1 are omitted — they are
+    # NOTE: aiplatform_v1 and aiplatform_v1beta1 are omitted â€” they are
     # auto-generated proto stub trees (~60 MB packed) stripped in a.pure below.
     'google.cloud.aiplatform',
     'vertexai',
@@ -1085,13 +1085,13 @@ excludes = [
     # PLAYWRIGHT - 98 MB uncompressed bundled Node.js runtime
     # ============================================================================
     'playwright', 'playwright.*',
+    # QtWebEngine kept in SuperLite -- epub_library.py (EPUB reader GUI) requires it.
 
-    # ============================================================================
-    # QTWEBENGINE / CHROMIUM - excluded to save ~152 MB exe size.
-    # epub_library.py is not bundled in SuperLite, so this is safe.
-    # ============================================================================
-    'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore',
-    'PySide6.QtWebEngineQuick',
+
+
+
+
+
 
     # ============================================================================
     # WEASYPRINT + GTK/Cairo/Pango stack - excluded in SuperLite.
@@ -1107,7 +1107,7 @@ excludes = [
     'brotli',
 
     # ============================================================================
-    # PDF STACK — SuperLite has no PDF output or viewing
+    # PDF STACK â€” SuperLite has no PDF output or viewing
     # ============================================================================
     'pymupdf', 'pymupdf.*', 'fitz', 'fitz.*',
     'reportlab', 'reportlab.*',
@@ -1121,7 +1121,7 @@ excludes = [
     'barcode', 'barcode.*',
 
     # ============================================================================
-    # UNUSED PYTHON PACKAGES — SuperLite
+    # UNUSED PYTHON PACKAGES â€” SuperLite
     # ============================================================================
     'pygments', 'pygments.*',    # syntax highlighter (~3.6 MB)
     'redis', 'redis.*',          # Redis client (~1.3 MB)
@@ -1166,35 +1166,35 @@ a.binaries = [b for b in a.binaries if not any([
     b[0].lower() in ['msvcr90.dll', 'msvcp90.dll', 'msvcr100.dll', 'msvcp100.dll',
                      'msvcr110.dll', 'msvcp110.dll', 'msvcr120.dll', 'msvcp120.dll'],
     # Strip playwright binary driver (Node.js runtime, 85 MB uncompressed)
-    b[0].startswith('playwright'),
-    # Strip QtWebEngine Chromium binaries (~152 MB uncompressed)
-    'Qt6WebEngineCore' in b[0],
-    'QtWebEngineProcess' in b[0],
-    b[0].startswith('PySide6\\Qt6WebEngine'),
-    # Strip pymupdf — PDF rendering, not needed in SuperLite
+    # QtWebEngine binaries kept -- epub_library.py EPUB reader requires Chromium
+
+
+
+    # (Qt6WebEngine filter removed -- epub_library.py EPUB reader needs it)
+    # Strip pymupdf â€” PDF rendering, not needed in SuperLite
     b[0].startswith('pymupdf\\'),
     b[0].startswith('pymupdf/'),
     'mupdfcpp' in b[0],
     '_mupdf' in b[0],
     # ---- SuperLite: unused PySide6 components ----
-    # Software OpenGL fallback (~20 MB) — hardware-accelerated path is used
+    # Software OpenGL fallback (~20 MB) â€” hardware-accelerated path is used
     b[0].lower() == 'pyside6\\opengl32sw.dll' or b[0].lower() == 'opengl32sw.dll',
-    # FFmpeg codecs — no video playback in the app (~17 MB)
+    # FFmpeg codecs â€” no video playback in the app (~17 MB)
     'avcodec-' in b[0],
     'avformat-' in b[0],
     'avutil-' in b[0],
     'swresample-' in b[0],
-    # Qt Quick / QML engine — not used (~11 MB)
+    # Qt Quick / QML engine â€” not used (~11 MB)
     'Qt6Quick' in b[0],
     'Qt6Qml' in b[0],
     'Qt6QmlMeta' in b[0],
     'Qt6QmlModels' in b[0],
     'Qt6QmlWorker' in b[0],
-    # Qt Pdf — no PDF viewer in SuperLite (~5 MB)
+    # Qt Pdf â€” no PDF viewer in SuperLite (~5 MB)
     b[0] == 'PySide6\\Qt6Pdf.dll' or b[0] == 'Qt6Pdf.dll',
-    # Qt OpenGL module — only needed for OpenGL widgets, app uses software rendering
+    # Qt OpenGL module â€” only needed for OpenGL widgets, app uses software rendering
     b[0] == 'PySide6\\Qt6OpenGL.dll' or b[0] == 'Qt6OpenGL.dll',
-    # Qt Multimedia — no audio/video playback (~1 MB)
+    # Qt Multimedia â€” no audio/video playback (~1 MB)
     'Qt6Multimedia' in b[0],
     # Qt Quick Controls / Shapes / Templates
     'Qt6QuickControls' in b[0],
@@ -1225,16 +1225,16 @@ a.datas = [d for d in a.datas if not any([
     # Playwright data
     d[0].startswith('playwright'),
     d[0].startswith('playwright\\'),
-    # QtWebEngine resource files (icudtl.dat, *.pak devtools)
-    'qtwebengine' in d[0].lower(),
-    d[0].startswith('PySide6\\resources\\qtwebengine'),
-    d[0] == 'PySide6\\resources\\icudtl.dat',
+    # QtWebEngine resources kept -- epub_library.py requires them
+
+
+
     # pymupdf data
     d[0].startswith('pymupdf'),
-    # PySide6 translations (~6.6 MB) — UI locale files not needed
+    # PySide6 translations (~6.6 MB) â€” UI locale files not needed
     d[0].startswith('PySide6\\translations'),
     d[0].startswith('PySide6/translations'),
-    # PySide6 QML plugins — not needed without Qt Quick
+    # PySide6 QML plugins â€” not needed without Qt Quick
     d[0].startswith('PySide6\\qml'),
     d[0].startswith('PySide6/qml'),
 ])]
@@ -1245,7 +1245,7 @@ a.pure = [p for p in a.pure if not any([
     '_torchcodec' in str(p),
     # Playwright Python modules
     str(p[0]).startswith('playwright'),
-    # google-cloud-aiplatform: aiplatform_v1 is NO LONGER stripped � it is a runtime dep of google.cloud.aiplatform
+    # google-cloud-aiplatform: aiplatform_v1 is NO LONGER stripped — it is a runtime dep of google.cloud.aiplatform
     # ---- SuperLite: PDF stack (not used, WeasyPrint excluded) ----
     str(p[0]).startswith('pymupdf'),
     str(p[0]).startswith('fitz'),
@@ -1267,7 +1267,7 @@ a.pure = [p for p in a.pure if not any([
     str(p[0]).startswith('_tkinter'),
     # NOTE: setuptools / pkg_resources / distutils are intentionally NOT stripped
     # here. PyInstaller injects pyi_rth_pkgres.py as a runtime hook which imports
-    # pkg_resources unconditionally before any user code runs → stripping it
+    # pkg_resources unconditionally before any user code runs â†’ stripping it
     # causes "No module named 'pkg_resources'" and the exe won't launch.
 ])]
 
