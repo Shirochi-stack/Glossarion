@@ -1154,15 +1154,13 @@ a.pure = [p for p in a.pure if not any([
     # Playwright Python modules
     str(p[0]).startswith('playwright'),
     # ----------------------------------------------------------------
-    # google-cloud-aiplatform proto stubs (~60 MB packed, 0 MB needed)
+    # google-cloud-aiplatform: aiplatform_v1 is NO LONGER stripped — it is a runtime dep of google.cloud.aiplatform
     # Glossarion uses vertexai.generative_models (Content/Part) and
     # vertexai.init() only. The v1/v1beta1 auto-generated protobuf stub
     # trees cover every Vertex AI API endpoint and are never imported
     # at runtime. Strip them here because they are collected transitively
     # even when excluded from hiddenimports.
     # ----------------------------------------------------------------
-    str(p[0]).startswith('google.cloud.aiplatform_v1'),   # v1 + v1beta1
-    str(p[0]).startswith('google.cloud.aiplatform.v1'),   # alternate path
     # Also strip other heavy google.cloud sub-packages not needed at runtime:
     str(p[0]).startswith('google.cloud.bigquery'),
     str(p[0]).startswith('google.cloud.resourcemanager_v3'),

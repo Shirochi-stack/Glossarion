@@ -989,9 +989,7 @@ a.pure = [p for p in a.pure if not any([
     'torch' in str(p).lower(),
     'pytorch' in str(p).lower(),
     '_torchcodec' in str(p),
-    # google-cloud-aiplatform proto stubs (~60 MB packed, not needed at runtime)
-    str(p[0]).startswith('google.cloud.aiplatform_v1'),
-    str(p[0]).startswith('google.cloud.aiplatform.v1'),
+    # google-cloud-aiplatform: aiplatform_v1 is NO LONGER stripped — it is a runtime dep of google.cloud.aiplatform
     str(p[0]).startswith('google.cloud.bigquery'),
     str(p[0]).startswith('google.cloud.resourcemanager_v3'),
     str(p[0]).startswith('google.cloud.vision_v1'),

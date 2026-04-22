@@ -9142,6 +9142,12 @@ class UnifiedClient:
 
     def _send_vertex_model_garden(self, messages, temperature=0.7, max_tokens=None, stop_sequences=None, response_name=None):
         """Send request to Vertex AI Model Garden models (including Claude)"""
+        import json
+        import os
+        import re
+        import traceback
+        import logging
+
         response = None
         try:
             from google.cloud import aiplatform
@@ -9149,11 +9155,6 @@ class UnifiedClient:
             from google.auth.transport.requests import Request
             import google.auth.transport.requests
             import vertexai
-            import json
-            import os
-            import re
-            import traceback
-            import logging
             
             # Get logger
             logger = logging.getLogger(__name__)

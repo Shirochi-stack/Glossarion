@@ -1321,8 +1321,6 @@ print("  + All other ML libraries preserved")
 # Strip google-cloud-aiplatform proto stubs (~60 MB packed, not needed at runtime)
 # NOTE: vision_v1 is kept here — NoCuda uses Google Cloud Vision for manga OCR.
 a.pure = [p for p in a.pure if not any([
-    str(p[0]).startswith('google.cloud.aiplatform_v1'),
-    str(p[0]).startswith('google.cloud.aiplatform.v1'),
     str(p[0]).startswith('google.cloud.bigquery'),
     str(p[0]).startswith('google.cloud.resourcemanager_v3'),
 ])]
