@@ -8220,7 +8220,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         except Exception:
                             pass
                         print(f"⚠️ API returned None — treating as empty response (finish_reason={recovered_finish!r})")
-                        return ("", recovered_finish)
+                        return ("", recovered_finish, None)  # 3-tuple: callers unpack (result, finish_reason, raw_obj)
                     # If api_result is a tuple (e.g. (text, finish_reason)) expand it
                     # with raw_obj so callers get (text, finish_reason, raw_obj).
                     if isinstance(api_result, tuple):

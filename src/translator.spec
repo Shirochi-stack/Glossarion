@@ -1,15 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
 Glossarion v8.5.4 - PyInstaller Specification File
-Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
+Enhanced Translation Tool with QA Scanner, and AI Hunter
 """
 
 import sys
 import os
 
 # Fix DLL search path for WeasyPrint during build
-if os.name == 'nt' and os.path.exists(r'C:\msys64\mingw64\bin'):
-    os.environ['PATH'] = r'C:\msys64\mingw64\bin' + os.pathsep + os.environ.get('PATH', '')
+# Check GTK_FOLDER env var first (set by CI), then fallback to common locations
+gtk_folder = os.environ.get('GTK_FOLDER', '')
+msys2_paths = [
+    os.path.join(gtk_folder, 'bin') if gtk_folder else '',
+    r'C:\msys64\mingw64\bin',
+    r'D:\a\_temp\msys64\mingw64\bin',
+]
+for msys_path in msys2_paths:
+    if msys_path and os.path.exists(msys_path):
+        os.environ['PATH'] = msys_path + os.pathsep + os.environ.get('PATH', '')
+        print(f"  Added {msys_path} to PATH for WeasyPrint")
+        break
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
 
@@ -17,7 +27,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'Glossarion v8.5.4'  # CHANGED: Updated version
+APP_NAME = 'Glossarion v8.5.4' 
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -39,26 +49,35 @@ binaries = []
 hiddenimports = []
 
 # Add custom DLL and CPP files
-binaries.extend([
-    ('libgcc_s_seh-1.dll', '.'),
-    ('libonnx_inpainter.dll', '.'),
-    ('onnx_inpainter.dll', '.'),
-    ('libstdc++-6.dll', '.'),
-    ('libwinpthread-1.dll', '.'),
-    ('onnxruntime.dll', '.'),
-    ('onnxruntime_providers_shared.dll', '.'),
-    ('onnx_inpainter.cpp', '.'),
-    ('vfcompat.dll', '.'),
-    ('appverifUI.dll', '.')
-])
+binaries.extend([])
 
 # Add MSYS2 DLLs for WeasyPrint (PDF generation with formatting and images)
 import glob
-msys2_bin = r'C:\msys64\mingw64\bin'
-if os.path.exists(msys2_bin):
-    for dll in glob.glob(os.path.join(msys2_bin, '*.dll')):
+
+# Find MSYS2 bin directory - check env var first, then common locations
+gtk_folder = os.environ.get('GTK_FOLDER', '')
+msys2_bin_candidates = [
+    os.path.join(gtk_folder, 'bin') if gtk_folder else '',
+    r'C:\msys64\mingw64\bin',
+    r'D:\a\_temp\msys64\mingw64\bin',
+]
+
+msys2_bin = None
+for candidate in msys2_bin_candidates:
+    if candidate and os.path.exists(candidate):
+        msys2_bin = candidate
+        break
+
+print(f"  GTK_FOLDER env var: {gtk_folder}")
+print(f"  Checking candidates: {msys2_bin_candidates}")
+print(f"  Selected MSYS2 bin: {msys2_bin}")
+
+# Add MSYS2 DLLs for WeasyPrint (PDF generation)
+if msys2_bin and os.path.exists(msys2_bin):  # Enabled in Lite
+    dll_list = glob.glob(os.path.join(msys2_bin, '*.dll'))
+    for dll in dll_list:
         binaries.append((dll, '.'))
-    print(f"  Added {len(glob.glob(os.path.join(msys2_bin, '*.dll')))} MSYS2 DLLs for WeasyPrint")
+    print(f"  Added {len(dll_list)} MSYS2 DLLs for WeasyPrint")
 
 # Collect data files from packages that need them
 for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
@@ -77,11 +96,6 @@ for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'charde
 # Main application files
 
 # Main application files
-# Add icons and images to data
-datas.append(('Halgakos.ico', '.'))
-datas.append(('Halgakos_NoChibi.png', '.'))
-datas.append(('WhereIsMyOutput.png', '.'))
-
 app_files = [
     # Core GUI
     ('translator_gui.py', '.'),
@@ -129,12 +143,6 @@ app_files = [
     # AI Hunter Enhanced
     ('ai_hunter_enhanced.py', '.'),
     
-    # Manga Translation modules
-    ('manga_translator.py', '.'),
-    ('manga_integration.py', '.'),
-    ('manga_settings_dialog.py', '.'),
-    ('manga_image_preview.py', '.'),
-    
     # Dialog animations
     ('dialog_animations.py', '.'),
     
@@ -157,6 +165,7 @@ app_files = [
     ('review_generator.py', '.'),
     
     # Resources
+    ('Halgakos.ico', '.'),
 	
 	('enhanced_text_extractor.py', '.'),	
 	('pdf_extractor.py', '.'),
@@ -165,16 +174,11 @@ app_files = [
 	
 	('multi_api_key_manager.py', '.'),
 	('individual_endpoint_dialog.py', '.'),
-	('bubble_detector.py', '.'),
-
-	('local_inpainter.py', '.'),	
-	
-	('ocr_manager.py', '.'),
 	('model_options.py', '.'),
 	('hyphen_textwrap.py', '.'),
 	
-	# Image Rendering
-	('ImageRenderer.py', '.'),
+	# Duplicate detection
+	('duplicate_detection_config.py', '.'),
 
 	# Environment variable size limit workaround
 	('large_env.py', '.'),
@@ -191,8 +195,8 @@ app_files = [
 	# gRPC Gemini client
 	('grpc_gemini_client.py', '.'),
 
-	# EPUB Library & Reader
-	('epub_library.py', '.'),
+	# EPUB Library & Reader: EXCLUDED in Lite (saves ~152 MB Ã¢â‚¬â€ removes Chromium)
+	('epub_library.py', '.'),  # EPUB Library reader GUI (uses Chromium/QtWebEngine)
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -200,20 +204,6 @@ datas.append(('memory_usage_reporter.py', '.'))
 datas.append(('tqdm_safety.py', '.'))
 datas.append(('debug_env_vars.py', '.'))
 datas.append(('enable_debug_mode.py', '.'))
-
-# MAT Inpainting Support - Add MAT architecture directories
-from PyInstaller.utils.hooks import collect_all
-try:
-    # Collect MAT model architecture directories
-    from pathlib import Path
-    mat_dirs = ['torch_utils', 'dnnlib', 'networks']
-    for mat_dir in mat_dirs:
-        mat_path = Path(mat_dir)
-        if mat_path.exists() and mat_path.is_dir():
-            datas.append((str(mat_path), mat_dir))
-            print(f"  Added MAT directory: {mat_dir}")
-except Exception as e:
-    print(f"  Warning: Could not add MAT directories: {e}")
 
 # ============================================================================
 # HIDDEN IMPORTS (Organized by category)
@@ -251,10 +241,6 @@ app_modules = [
     'dpi_setup',
     'other_settings',      # Other Settings module
     'ai_hunter_enhanced',  # AI Hunter Enhanced module
-    'manga_translator',    # Manga translator module
-    'manga_integration',   # Manga GUI integration
-    'manga_settings_dialog',
-    'manga_image_preview', # Manga image preview widget
     'dialog_animations',   # Dialog fade animations
     'spinning',            # Spinning icon helper
     'rotatable_label',     # Rotatable label widget
@@ -273,12 +259,9 @@ app_modules = [
 	'pdf_extraction_manager',
 	'multi_api_key_manager.py',
 	'individual_endpoint_dialog.py',
-	'bubble_detector', 
-	'local_inpainter',  	
-	'ocr_manager',
 	'model_options',
 	'hyphen_textwrap',
-	'ImageRenderer',
+	'duplicate_detection_config',
 	'large_env',
 	'authgpt_auth',  # ChatGPT subscription OAuth
 	'authgem_auth',  # Gemini subscription OAuth
@@ -286,17 +269,8 @@ app_modules = [
 	'token_encryption',  # Encrypted token storage
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client
-	'epub_library',  # EPUB Library & Reader
-	
-	# MAT Inpainting Support
-	'torch_utils',
-	'dnnlib',
-	'dnnlib.util',
-	'networks',
-	'networks.mat',
-	
+	'epub_library',  # EPUB Library reader GUI
 ]
-
 # GUI Framework
 gui_modules = [
     # TTKBootstrap
@@ -411,8 +385,6 @@ image_modules = [
     'PIL.FtexImagePlugin',
     
     'olefile',
-    'cv2',  # OpenCV for manga processing
-    'numpy',  # Required for OpenCV and image processing
 ]
 
 # AI/API Clients (Including Google Cloud Vision)
@@ -444,15 +416,8 @@ api_modules = [
     'google.rpc',
     'google.type',
     
-    # Azure Computer Vision (for manga OCR) - New Image Analysis API
+    # Azure (for Azure OpenAI endpoints - NOT Computer Vision)
     'azure',
-    'azure.ai',
-    'azure.ai.vision',
-    'azure.ai.vision.imageanalysis',
-    'azure.ai.vision.imageanalysis.models',
-    'azure.ai.vision.imageanalysis._client',
-    'azure.ai.vision.imageanalysis._operations',
-    'azure.ai.vision.imageanalysis._version',
     'azure.core',
     'azure.core.credentials',
     'azure.core.exceptions',
@@ -469,14 +434,6 @@ api_modules = [
     'isodate',  # Required by Azure
     'oauthlib',  # May be required for Azure auth
     'requests_oauthlib',  # May be required for Azure auth
-    
-    # Google Cloud Vision (for manga OCR)
-    'google.cloud',
-    'google.cloud.vision',
-    'google.cloud.vision_v1',
-    'google.cloud.vision_v1.types',
-    'google.cloud.vision_v1.services',
-    'google.cloud.vision_v1.services.image_annotator',
 	
 	# Google Cloud Translate
 	'google.cloud.translate',
@@ -503,7 +460,7 @@ api_modules = [
     'googleapis_common_protos',
 	
 	# Google Vertex AI:
-    # NOTE: aiplatform_v1 and aiplatform_v1beta1 are omitted — they are
+    # NOTE: aiplatform_v1 and aiplatform_v1beta1 are omitted Ã¢â‚¬â€ they are
     # auto-generated proto stub trees (~60 MB packed) stripped in a.pure below.
     'google.cloud.aiplatform',
     'vertexai',
@@ -906,6 +863,7 @@ utility_modules = [
     'cryptography.hazmat.primitives.hashes',
     'cryptography.hazmat.backends',
     'cryptography.hazmat.backends.openssl',
+	'numpy',
 ]
 
 # Encoding support
@@ -1003,6 +961,7 @@ excludes = [
     # Multiple OpenCV versions (~150MB) - MAJOR ADDITION
     'opencv-contrib-python',
     'opencv-python',  # Keep opencv-python-headless only
+	'cv2',
     'cv2.contrib',
     
     # Scientific Computing (Optional)
@@ -1010,12 +969,21 @@ excludes = [
     'pandas', 'pandas.*',
     'scikit-image', 'skimage', 'skimage.*',
     'sklearn', 'sklearn.*',
+    
+    # Silent truncation detection deps (optional, too heavy for lite build ~100MB)
+    'sentence_transformers', 'sentence_transformers.*',
+    'deep_translator', 'deep_translator.*',
+    'scikit-learn',
+    
+	# Remove AVIF support if not needed (7MB)
     'PIL._avif',
     'pillow.libs',
+    
+    # Remove PDF support if not needed (5MB)
     'pypdfium2', 'pypdfium2.*',
     'pypdfium2_raw',
 	
-	# Scientific/Data formats
+	# Scientific/Data formats (15MB savings)
     'h5py', 'h5py.*',
     'tables', 'tables.*',
     
@@ -1039,7 +1007,6 @@ excludes = [
     'docstring_parser.numpydoc',  # This is pulling in numpy incorrectly
     'numpy.doc',
     'numpy.conftest',
-    
     # ============================================================================
     # CUDA & GPU LIBRARIES
     # ============================================================================
@@ -1092,6 +1059,8 @@ excludes = [
     # ADDITIONAL HEAVY PACKAGES FROM YOUR ENVIRONMENT
     # ============================================================================
     'modelscope', 'modelscope.*',
+    # Argos Translate (exclude from lite)
+    'argostranslate', 'argostranslate.*',
     'aistudio-sdk',
     'bce-python-sdk',
     'briefcase',
@@ -1105,12 +1074,62 @@ excludes = [
 	'polars', 'polars.*',
 	'pyarrow', 'pyarrow.*',
     'scipy', 'scipy.*',
-    'scipy.libs'
+    'scipy.libs',
 	
 	# Force exclude ALL torch variants
 	'*torch*',
 	'torch*',
 	'_torch*',
+
+    # ============================================================================
+    # PLAYWRIGHT - 98 MB uncompressed bundled Node.js runtime
+    # ============================================================================
+    'playwright', 'playwright.*',
+    # QtWebEngine kept in Lite -- epub_library.py (EPUB reader GUI) requires it.
+
+
+
+
+
+
+
+    # WeasyPrint + PDF stack: kept in Lite (PDF generation supported)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    'pyhanko', 'pyhanko.*',
+    'pyhanko_certvalidator', 'pyhanko_certvalidator.*',
+    'uritools',        # pyhanko dependency
+    'qrcode', 'qrcode.*',
+    'barcode', 'barcode.*',
+
+    # ============================================================================
+    # UNUSED PYTHON PACKAGES Ã¢â‚¬â€ Lite
+    # ============================================================================
+    'pygments', 'pygments.*',    # syntax highlighter (~3.6 MB)
+    'redis', 'redis.*',          # Redis client (~1.3 MB)
+    'rich', 'rich.*',            # terminal pretty-printer (~1 MB)
+    'ttkbootstrap', 'ttkbootstrap.*',  # legacy tkinter theme, not used
+    # NOTE: setuptools/pkg_resources/distutils are NOT in excludes because
+    # PyInstaller's hook-distutils.py aliases them internally and crashes if
+    # they are pre-excluded. They are stripped via a.pure filter instead.
 ]
 
 # ============================================================================
@@ -1146,22 +1165,111 @@ a.binaries = [b for b in a.binaries if not any([
     # Remove conflicting MSVC runtime DLLs (keep only system ones)
     b[0].lower() in ['msvcr90.dll', 'msvcp90.dll', 'msvcr100.dll', 'msvcp100.dll',
                      'msvcr110.dll', 'msvcp110.dll', 'msvcr120.dll', 'msvcp120.dll'],
+    # Strip playwright binary driver (Node.js runtime, 85 MB uncompressed)
+    # QtWebEngine binaries kept -- epub_library.py EPUB reader requires Chromium
+
+
+
+    # (Qt6WebEngine filter removed -- epub_library.py EPUB reader needs it)
+    # pymupdf kept -- PDF rendering supported in Lite
+
+
+
+
+    # ---- Lite: unused PySide6 components ----
+    # Software OpenGL fallback (~20 MB) Ã¢â‚¬â€ hardware-accelerated path is used
+    b[0].lower() == 'pyside6\\opengl32sw.dll' or b[0].lower() == 'opengl32sw.dll',
+    # FFmpeg codecs Ã¢â‚¬â€ no video playback in the app (~17 MB)
+    'avcodec-' in b[0],
+    'avformat-' in b[0],
+    'avutil-' in b[0],
+    'swresample-' in b[0],
+    # Qt Quick / QML engine Ã¢â‚¬â€ not used (~11 MB)
+    'Qt6Quick' in b[0],
+    'Qt6Qml' in b[0],
+    'Qt6QmlMeta' in b[0],
+    'Qt6QmlModels' in b[0],
+    'Qt6QmlWorker' in b[0],
+    # Qt Pdf Ã¢â‚¬â€ no PDF viewer in Lite (~5 MB)
+    b[0] == 'PySide6\\Qt6Pdf.dll' or b[0] == 'Qt6Pdf.dll',
+    # Qt OpenGL module Ã¢â‚¬â€ only needed for OpenGL widgets, app uses software rendering
+    b[0] == 'PySide6\\Qt6OpenGL.dll' or b[0] == 'Qt6OpenGL.dll',
+    # Qt Multimedia Ã¢â‚¬â€ no audio/video playback (~1 MB)
+    'Qt6Multimedia' in b[0],
+    # Qt Quick Controls / Shapes / Templates
+    'Qt6QuickControls' in b[0],
+    'Qt6QuickShapes' in b[0],
+    'Qt6QuickTemplates' in b[0],
+    'Qt6QuickDialogs' in b[0],
+    'Qt6VirtualKeyboard' in b[0],
+    'Qt6Charts' in b[0],
+    'Qt6DataVisualization' in b[0],
+    'Qt6Location' in b[0],
+    'Qt6Positioning' in b[0],
+    'Qt6RemoteObjects' in b[0],
+    'Qt6Sensors' in b[0],
+    'Qt6SerialBus' in b[0],
+    'Qt6SerialPort' in b[0],
+    'Qt6Sql' in b[0],
+    'Qt6Test' in b[0],
+    'Qt6TextToSpeech' in b[0],
+    'Qt6WebSockets' in b[0],
+    'Qt6Xml' in b[0],
 ])]
 
-# Remove torch only
+# Remove torch, playwright data, QtWebEngine/WeasyPrint/PDF data files
 a.datas = [d for d in a.datas if not any([
     'torch' in d[0].lower(),
     'torch-' in d[0],
     '.dist-info' in d[0] and 'torch' in d[0].lower(),
+    # Playwright data
+    d[0].startswith('playwright'),
+    d[0].startswith('playwright\\'),
+    # QtWebEngine resources kept -- epub_library.py requires them
+
+
+
+    # pymupdf data kept -- PDF rendering supported in Lite
+
+    # PySide6 translations (~6.6 MB) Ã¢â‚¬â€ UI locale files not needed
+    d[0].startswith('PySide6\\translations'),
+    d[0].startswith('PySide6/translations'),
+    # PySide6 QML plugins Ã¢â‚¬â€ not needed without Qt Quick
+    d[0].startswith('PySide6\\qml'),
+    d[0].startswith('PySide6/qml'),
 ])]
 
 a.pure = [p for p in a.pure if not any([
     'torch' in str(p).lower(),
     'pytorch' in str(p).lower(),
     '_torchcodec' in str(p),
-    # google-cloud-aiplatform: aiplatform_v1 is NO LONGER stripped � it is a runtime dep of google.cloud.aiplatform
-])]
+    # Playwright Python modules
+    str(p[0]).startswith('playwright'),
+    # google-cloud-aiplatform: aiplatform_v1 is NO LONGER stripped â€” it is a runtime dep of google.cloud.aiplatform
+    # PDF stack kept in Lite
 
+
+
+
+
+
+    str(p[0]).startswith('pyhanko'),
+    str(p[0]).startswith('pyhanko_certvalidator'),
+    str(p[0]).startswith('uritools'),          # pyhanko dep
+    str(p[0]).startswith('barcode'),           # pyhanko dep
+    str(p[0]).startswith('qrcode'),            # pyhanko dep
+    # ---- Lite: unused Python packages ----
+    str(p[0]).startswith('pygments'),          # syntax highlighter (~3.6 MB)
+    str(p[0]).startswith('redis'),             # Redis client (~1.3 MB)
+    str(p[0]).startswith('rich'),              # terminal pretty-printer (~1 MB)
+    str(p[0]).startswith('ttkbootstrap'),      # old tkinter theme, not used (~0.8 MB)
+    str(p[0]).startswith('tkinter'),           # tkinter itself
+    str(p[0]).startswith('_tkinter'),
+    # NOTE: setuptools / pkg_resources / distutils are intentionally NOT stripped
+    # here. PyInstaller injects pyi_rth_pkgres.py as a runtime hook which imports
+    # pkg_resources unconditionally before any user code runs Ã¢â€ â€™ stripping it
+    # causes "No module named 'pkg_resources'" and the exe won't launch.
+])]
 
 # ============================================================================
 # PYZ (Python Zip archive)

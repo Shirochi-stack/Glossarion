@@ -1185,45 +1185,30 @@ class UpdateManager(QObject):
                         fname_lower = filename.lower()
                         if 'omegalite' in fname_lower:
                             variant_type = "OmegaLite"
-                            variant_desc = "No Vertex, minimal build"
                         elif 'superlite' in fname_lower:
                             variant_type = "SuperLite"
-                            variant_desc = "All AI providers, no EPUB reader/PDF"
                         elif 'turbolite' in fname_lower:
                             variant_type = "TurboLite"
-                            variant_desc = "Full features, lower RAM usage"
                         elif 'lite' in fname_lower and fname_lower.startswith('l_'):
                             variant_type = "Lite"
-                            variant_desc = "Full features, recommended for most users"
                         elif 'nocuda' in fname_lower or fname_lower.startswith('n_'):
                             variant_type = "NoCuda (Manga)"
-                            variant_desc = "Full Manga translation, no CUDA required"
                         else:
                             first_letter = filename[0].upper() if filename else ''
-                            if first_letter == 'G':
-                                variant_type = "Standard"
-                                variant_desc = ""
-                            else:
-                                variant_type = filename
-                                variant_desc = ""
-                        
+                            variant_type = "Standard" if first_letter == 'G' else filename
+
                         # Mark if this matches current running build
                         is_current = (variant_type.replace(' (Manga)', '').replace(' ', '') ==
                                       self._build_variant.replace(' ', ''))
                         current_tag = " ✓ (current)" if is_current else ""
-                        
+
                         # Add platform indicator for non-Windows files
                         if filename.lower().endswith('.dmg'):
-                            if 'intel' in filename.lower():
-                                platform_tag = " [macOS Intel]"
-                            else:
-                                platform_tag = " [macOS]"
+                            platform_tag = " [macOS Intel]" if 'intel' in filename.lower() else " [macOS]"
                         else:
                             platform_tag = ""
-                        
+
                         variant_label = f"{variant_type}{current_tag}{platform_tag} — {filename} ({size_mb:.1f} MB)"
-                        if variant_desc:
-                            variant_label += f"\n    {variant_desc}"
                         
                         rb = QRadioButton(variant_label)
                         rb.setProperty("asset_index", i)
