@@ -1185,18 +1185,19 @@ a.binaries = [b for b in a.binaries if not any([
     # ---- Lite: unused PySide6 components ----
     # Software OpenGL fallback (~20 MB) Ã¢â‚¬â€ hardware-accelerated path is used
     b[0].lower() == 'pyside6\\opengl32sw.dll' or b[0].lower() == 'opengl32sw.dll',
-    # FFmpeg codecs Ã¢â‚¬â€ no video playback in the app (~17 MB)
+    # FFmpeg codecs Ã¢â‚¬â€  no video playback in the app (~17 MB)
     'avcodec-' in b[0],
     'avformat-' in b[0],
     'avutil-' in b[0],
     'swresample-' in b[0],
-    # Qt Quick / QML engine Ã¢â‚¬â€ not used (~11 MB)
-    'Qt6Quick' in b[0],
-    'Qt6Qml' in b[0],
+    # Qt Quick / QML engine — not used (~11 MB)
+    # NOTE: 'Qt6Quick' would also match Qt6WebEngineQuick.dll — guard against that
+    ('Qt6Quick' in b[0] and 'WebEngine' not in b[0]),
+    ('Qt6Qml' in b[0] and 'WebEngine' not in b[0]),
     'Qt6QmlMeta' in b[0],
     'Qt6QmlModels' in b[0],
     'Qt6QmlWorker' in b[0],
-    # Qt Pdf Ã¢â‚¬â€ no PDF viewer in Lite (~5 MB)
+    # Qt Pdf Ã¢â‚¬â€  no PDF viewer in Lite (~5 MB)
     b[0] == 'PySide6\\Qt6Pdf.dll' or b[0] == 'Qt6Pdf.dll',
     # Qt OpenGL module Ã¢â‚¬â€ only needed for OpenGL widgets, app uses software rendering
     b[0] == 'PySide6\\Qt6OpenGL.dll' or b[0] == 'Qt6OpenGL.dll',
