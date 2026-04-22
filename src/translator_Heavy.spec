@@ -1108,6 +1108,12 @@ hiddenimports = list(set(hiddenimports))
 # ============================================================================
 
 excludes = [
+    # POE / websocket-client (no longer needed; imports guarded by try/except)
+    'poe_api_wrapper', 'poe_api_wrapper.*',
+    'ballyregan', 'ballyregan.*',
+    'websocket', 'websocket.*',
+    'websockets',
+
     # Testing frameworks (but NOT unittest - needed by PyTorch)
     'pytest', 'nose',
     # Development tools

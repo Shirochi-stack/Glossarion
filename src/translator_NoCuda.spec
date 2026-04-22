@@ -1114,7 +1114,12 @@ hiddenimports.extend(encoding_modules)
 hiddenimports = list(set(hiddenimports))
 
 excludes = [
-    
+    # POE / websocket-client (no longer needed; imports guarded by try/except)
+    'poe_api_wrapper', 'poe_api_wrapper.*',
+    'ballyregan', 'ballyregan.*',
+    'websocket', 'websocket.*',
+    'websockets',
+
     # CUDA-specific ONNX
     'onnxruntime-gpu',
     'onnxruntime_gpu',
