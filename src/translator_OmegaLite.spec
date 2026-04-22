@@ -27,7 +27,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'L_Glossarion_SuperLite v8.5.3'  # SuperLite: no EPUB reader / Chromium
+APP_NAME = 'L_Glossarion_OmegaLite v8.5.3'  # OmegaLite: no EPUB reader / Chromium
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -72,12 +72,12 @@ print(f"  GTK_FOLDER env var: {gtk_folder}")
 print(f"  Checking candidates: {msys2_bin_candidates}")
 print(f"  Selected MSYS2 bin: {msys2_bin}")
 
-# SuperLite: WeasyPrint (PDF) is excluded, so MSYS2 GTK DLLs are NOT collected.
-if False and msys2_bin and os.path.exists(msys2_bin):  # Disabled in SuperLite
+# OmegaLite: WeasyPrint (PDF) is excluded, so MSYS2 GTK DLLs are NOT collected.
+if False and msys2_bin and os.path.exists(msys2_bin):  # Disabled in OmegaLite
     dll_list = glob.glob(os.path.join(msys2_bin, '*.dll'))
     for dll in dll_list:
         binaries.append((dll, '.'))
-print("  SuperLite: skipping MSYS2 DLL collection (WeasyPrint excluded)")
+print("  OmegaLite: skipping MSYS2 DLL collection (WeasyPrint excluded)")
 
 # Collect data files from packages that need them
 for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
@@ -195,7 +195,7 @@ app_files = [
 	# gRPC Gemini client
 	('grpc_gemini_client.py', '.'),
 
-	# EPUB Library & Reader: EXCLUDED in SuperLite (saves ~152 MB — removes Chromium)
+	# EPUB Library & Reader: EXCLUDED in OmegaLite (saves ~152 MB — removes Chromium)
 	# ('epub_library.py', '.'),
 ]
 # Add application files to datas
@@ -269,7 +269,7 @@ app_modules = [
 	'token_encryption',  # Encrypted token storage
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client
-	# 'epub_library',  # EXCLUDED in SuperLite — removes Chromium WebEngine (152 MB)
+	# 'epub_library',  # EXCLUDED in OmegaLite — removes Chromium WebEngine (152 MB)
 ]
 # GUI Framework
 gui_modules = [
@@ -1084,13 +1084,13 @@ excludes = [
 
     # ============================================================================
     # QTWEBENGINE / CHROMIUM - excluded to save ~152 MB exe size.
-    # epub_library.py is not bundled in SuperLite, so this is safe.
+    # epub_library.py is not bundled in OmegaLite, so this is safe.
     # ============================================================================
     'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore',
     'PySide6.QtWebEngineQuick',
 
     # ============================================================================
-    # WEASYPRINT + GTK/Cairo/Pango stack - excluded in SuperLite.
+    # WEASYPRINT + GTK/Cairo/Pango stack - excluded in OmegaLite.
     # PDF generation is not needed; this also drops the MSYS2 DLL payload.
     # ============================================================================
     'weasyprint', 'weasyprint.*',
@@ -1103,7 +1103,7 @@ excludes = [
     'brotli',
 
     # ============================================================================
-    # PDF STACK — SuperLite has no PDF output or viewing
+    # PDF STACK — OmegaLite has no PDF output or viewing
     # ============================================================================
     'pymupdf', 'pymupdf.*', 'fitz', 'fitz.*',
     'reportlab', 'reportlab.*',
@@ -1117,7 +1117,7 @@ excludes = [
     'barcode', 'barcode.*',
 
     # ============================================================================
-    # UNUSED PYTHON PACKAGES — SuperLite
+    # UNUSED PYTHON PACKAGES — OmegaLite
     # ============================================================================
     'pygments', 'pygments.*',    # syntax highlighter (~3.6 MB)
     'redis', 'redis.*',          # Redis client (~1.3 MB)
@@ -1178,12 +1178,12 @@ a.binaries = [b for b in a.binaries if not any([
     'Qt6WebEngineCore' in b[0],
     'QtWebEngineProcess' in b[0],
     b[0].startswith('PySide6\\Qt6WebEngine'),
-    # Strip pymupdf — PDF rendering, not needed in SuperLite
+    # Strip pymupdf — PDF rendering, not needed in OmegaLite
     b[0].startswith('pymupdf\\'),
     b[0].startswith('pymupdf/'),
     'mupdfcpp' in b[0],
     '_mupdf' in b[0],
-    # ---- SuperLite: unused PySide6 components ----
+    # ---- OmegaLite: unused PySide6 components ----
     # Software OpenGL fallback (~20 MB) — hardware-accelerated path is used
     b[0].lower() == 'pyside6\\opengl32sw.dll' or b[0].lower() == 'opengl32sw.dll',
     # FFmpeg codecs — no video playback in the app (~17 MB)
@@ -1197,7 +1197,7 @@ a.binaries = [b for b in a.binaries if not any([
     'Qt6QmlMeta' in b[0],
     'Qt6QmlModels' in b[0],
     'Qt6QmlWorker' in b[0],
-    # Qt Pdf — no PDF viewer in SuperLite (~5 MB)
+    # Qt Pdf — no PDF viewer in OmegaLite (~5 MB)
     b[0] == 'PySide6\\Qt6Pdf.dll' or b[0] == 'Qt6Pdf.dll',
     # Qt OpenGL module — only needed for OpenGL widgets, app uses software rendering
     b[0] == 'PySide6\\Qt6OpenGL.dll' or b[0] == 'Qt6OpenGL.dll',
@@ -1258,7 +1258,7 @@ a.pure = [p for p in a.pure if not any([
     str(p[0]).startswith('google.cloud.resourcemanager'),
     str(p[0]).startswith('google.cloud.bigquery'),
     str(p[0]).startswith('vertexai'),
-    # ---- SuperLite: PDF stack (not used, WeasyPrint excluded) ----
+    # ---- OmegaLite: PDF stack (not used, WeasyPrint excluded) ----
     str(p[0]).startswith('pymupdf'),
     str(p[0]).startswith('fitz'),
     str(p[0]).startswith('reportlab'),
@@ -1270,7 +1270,7 @@ a.pure = [p for p in a.pure if not any([
     str(p[0]).startswith('uritools'),          # pyhanko dep
     str(p[0]).startswith('barcode'),           # pyhanko dep
     str(p[0]).startswith('qrcode'),            # pyhanko dep
-    # ---- SuperLite: unused Python packages ----
+    # ---- OmegaLite: unused Python packages ----
     str(p[0]).startswith('pygments'),          # syntax highlighter (~3.6 MB)
     str(p[0]).startswith('redis'),             # Redis client (~1.3 MB)
     str(p[0]).startswith('rich'),              # terminal pretty-printer (~1 MB)

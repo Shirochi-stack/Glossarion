@@ -58,6 +58,7 @@ def get_model_options() -> List[str]:
         "vertex/gemini-3.1-pro-preview",
         "vertex/gemini-3.1-flash-lite-preview",
         "vertex/gemini-3-flash-preview",
+        "vertex/gemini-3.1-flash-image-preview",
         "vertex/gemini-3-pro-image-preview",
 
         # Chute AI
