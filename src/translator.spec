@@ -195,7 +195,7 @@ app_files = [
 	# gRPC Gemini client
 	('grpc_gemini_client.py', '.'),
 
-	# EPUB Library & Reader: EXCLUDED in Lite (saves ~152 MB ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â removes Chromium)
+	# EPUB Library & Reader: EXCLUDED in Lite (saves ~152 MB ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â removes Chromium)
 	('epub_library.py', '.'),  # EPUB Library reader GUI (uses Chromium/QtWebEngine)
 ]
 # Add application files to datas
@@ -288,7 +288,7 @@ gui_modules = [
     'ttkbootstrap.colorutils',
     'ttkbootstrap.themes.standard',
     'ttkbootstrap.themes.user',
-    # QtWebEngine â€” required by epub_library.py (EPUB reader GUI / Chromium renderer)
+    # QtWebEngine Ã¢â‚¬â€ required by epub_library.py (EPUB reader GUI / Chromium renderer)
     # epub_library.py is a data file so PyInstaller won't scan its imports automatically.
     'PySide6.QtWebEngineWidgets',
     'PySide6.QtWebEngineCore',
@@ -466,7 +466,7 @@ api_modules = [
     'googleapis_common_protos',
 	
 	# Google Vertex AI:
-    # NOTE: aiplatform_v1 and aiplatform_v1beta1 are omitted ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â they are
+    # NOTE: aiplatform_v1 and aiplatform_v1beta1 are omitted ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â they are
     # auto-generated proto stub trees (~60 MB packed) stripped in a.pure below.
     'google.cloud.aiplatform',
     'vertexai',
@@ -1127,7 +1127,7 @@ excludes = [
     'barcode', 'barcode.*',
 
     # ============================================================================
-    # UNUSED PYTHON PACKAGES ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Lite
+    # UNUSED PYTHON PACKAGES ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Lite
     # ============================================================================
     'pygments', 'pygments.*',    # syntax highlighter (~3.6 MB)
     'redis', 'redis.*',          # Redis client (~1.3 MB)
@@ -1183,27 +1183,25 @@ a.binaries = [b for b in a.binaries if not any([
 
 
     # ---- Lite: unused PySide6 components ----
-    # Software OpenGL fallback (~20 MB) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â hardware-accelerated path is used
+    # Software OpenGL fallback (~20 MB) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â hardware-accelerated path is used
     b[0].lower() == 'pyside6\\opengl32sw.dll' or b[0].lower() == 'opengl32sw.dll',
-    # FFmpeg codecs ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬  no video playback in the app (~17 MB)
+    # FFmpeg codecs ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬  no video playback in the app (~17 MB)
     'avcodec-' in b[0],
     'avformat-' in b[0],
     'avutil-' in b[0],
     'swresample-' in b[0],
-    # Qt Quick / QML engine â€” not used (~11 MB)
-    # NOTE: 'Qt6Quick' would also match Qt6WebEngineQuick.dll â€” guard against that
-    ('Qt6Quick' in b[0] and 'WebEngine' not in b[0]),
-    ('Qt6Qml' in b[0] and 'WebEngine' not in b[0]),
-    'Qt6QmlMeta' in b[0],
-    'Qt6QmlModels' in b[0],
-    'Qt6QmlWorker' in b[0],
-    # Qt Pdf ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬  no PDF viewer in Lite (~5 MB)
+    # Qt Quick / QML sub-modules safe to strip.
+    # Qt6Quick.dll, Qt6QuickWidgets.dll, Qt6Qml.dll and Qt6QmlModels.dll are KEPT
+    # because Qt6WebEngineWidgets.dll and Qt6WebEngineCore.dll link against them.
+    b[0] in ('PySide6\\Qt6QmlWorkerScript.dll', 'Qt6QmlWorkerScript.dll'),
+    b[0] in ('PySide6\\Qt6QmlMeta.dll',         'Qt6QmlMeta.dll'),
+    b[0] in ('PySide6\\Qt6QuickParticles.dll',   'Qt6QuickParticles.dll'),
+    # Qt Pdf -- no PDF viewer needed (~5 MB)
     b[0] == 'PySide6\\Qt6Pdf.dll' or b[0] == 'Qt6Pdf.dll',
-    # Qt OpenGL module ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â only needed for OpenGL widgets, app uses software rendering
     # Qt6OpenGL kept -- Qt6WebEngineCore.dll depends on it at runtime
-    # Qt Multimedia ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no audio/video playback (~1 MB)
+    # Qt Multimedia -- no audio/video playback (~1 MB)
     'Qt6Multimedia' in b[0],
-    # Qt Quick Controls / Shapes / Templates
+    # Qt Quick Controls / Shapes / Templates (WebEngine does not use these)
     'Qt6QuickControls' in b[0],
     'Qt6QuickShapes' in b[0],
     'Qt6QuickTemplates' in b[0],
@@ -1238,10 +1236,10 @@ a.datas = [d for d in a.datas if not any([
 
     # pymupdf data kept -- PDF rendering supported in Lite
 
-    # PySide6 translations (~6.6 MB) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â UI locale files not needed
+    # PySide6 translations (~6.6 MB) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â UI locale files not needed
     d[0].startswith('PySide6\\translations'),
     d[0].startswith('PySide6/translations'),
-    # PySide6 QML plugins ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â not needed without Qt Quick
+    # PySide6 QML plugins ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â not needed without Qt Quick
     d[0].startswith('PySide6\\qml'),
     d[0].startswith('PySide6/qml'),
 ])]
@@ -1252,7 +1250,7 @@ a.pure = [p for p in a.pure if not any([
     '_torchcodec' in str(p),
     # Playwright Python modules
     str(p[0]).startswith('playwright'),
-    # google-cloud-aiplatform: aiplatform_v1 is NO LONGER stripped Ã¢â‚¬â€ it is a runtime dep of google.cloud.aiplatform
+    # google-cloud-aiplatform: aiplatform_v1 is NO LONGER stripped ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â it is a runtime dep of google.cloud.aiplatform
     # PDF stack kept in Lite
 
 
@@ -1274,7 +1272,7 @@ a.pure = [p for p in a.pure if not any([
     str(p[0]).startswith('_tkinter'),
     # NOTE: setuptools / pkg_resources / distutils are intentionally NOT stripped
     # here. PyInstaller injects pyi_rth_pkgres.py as a runtime hook which imports
-    # pkg_resources unconditionally before any user code runs ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ stripping it
+    # pkg_resources unconditionally before any user code runs ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ stripping it
     # causes "No module named 'pkg_resources'" and the exe won't launch.
 ])]
 
