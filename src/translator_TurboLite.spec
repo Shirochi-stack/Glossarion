@@ -1,6 +1,6 @@
-# -*- mode: python ; coding: utf-8 -*-
+﻿# -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion Lite v8.5.4 - PyInstaller Specification File
+Glossarion TurboLite v8.5.4 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, and AI Hunter
 """
 
@@ -27,7 +27,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'L_Glossarion_Lite v8.5.4'  # Lite: no EPUB reader / Chromium
+APP_NAME = 'L_Glossarion_TurboLite v8.5.4'  # Turbo Lite: no EPUB reader / Chromium / PDF / Vertex
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -72,12 +72,12 @@ print(f"  GTK_FOLDER env var: {gtk_folder}")
 print(f"  Checking candidates: {msys2_bin_candidates}")
 print(f"  Selected MSYS2 bin: {msys2_bin}")
 
-# Lite: WeasyPrint (PDF) is excluded, so MSYS2 GTK DLLs are NOT collected.
-if False and msys2_bin and os.path.exists(msys2_bin):  # Disabled in Lite
+# TurboLite: WeasyPrint (PDF) is excluded, so MSYS2 GTK DLLs are NOT collected.
+if False and msys2_bin and os.path.exists(msys2_bin):  # Disabled in TurboLite
     dll_list = glob.glob(os.path.join(msys2_bin, '*.dll'))
     for dll in dll_list:
         binaries.append((dll, '.'))
-print("  Lite: skipping MSYS2 DLL collection (WeasyPrint excluded)")
+print("  TurboLite: skipping MSYS2 DLL collection (WeasyPrint excluded)")
 
 # Collect data files from packages that need them
 for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
@@ -195,7 +195,7 @@ app_files = [
 	# gRPC Gemini client
 	('grpc_gemini_client.py', '.'),
 
-	# EPUB Library & Reader: EXCLUDED in Lite (saves ~152 MB — removes Chromium)
+	# EPUB Library & Reader: EXCLUDED in TurboLite (saves ~152 MB — removes Chromium)
 	# ('epub_library.py', '.'),
 ]
 # Add application files to datas
@@ -269,7 +269,7 @@ app_modules = [
 	'token_encryption',  # Encrypted token storage
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client
-	# 'epub_library',  # EXCLUDED in Lite — removes Chromium WebEngine (152 MB)
+	# 'epub_library',  # EXCLUDED in TurboLite — removes Chromium WebEngine (152 MB)
 ]
 # GUI Framework
 gui_modules = [
@@ -1084,13 +1084,13 @@ excludes = [
 
     # ============================================================================
     # QTWEBENGINE / CHROMIUM - excluded to save ~152 MB exe size.
-    # epub_library.py is not bundled in Lite, so this is safe.
+    # epub_library.py is not bundled in TurboLite, so this is safe.
     # ============================================================================
     'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore',
     'PySide6.QtWebEngineQuick',
 
     # ============================================================================
-    # WEASYPRINT + GTK/Cairo/Pango stack - excluded in Lite.
+    # WEASYPRINT + GTK/Cairo/Pango stack - excluded in TurboLite.
     # PDF generation is not needed; this also drops the MSYS2 DLL payload.
     # ============================================================================
     'weasyprint', 'weasyprint.*',
@@ -1103,7 +1103,7 @@ excludes = [
     'brotli',
 
     # ============================================================================
-    # PDF STACK — Lite has no PDF output or viewing
+    # PDF STACK — TurboLite has no PDF output or viewing
     # ============================================================================
     'pymupdf', 'pymupdf.*', 'fitz', 'fitz.*',
     'reportlab', 'reportlab.*',
@@ -1117,7 +1117,7 @@ excludes = [
     'barcode', 'barcode.*',
 
     # ============================================================================
-    # UNUSED PYTHON PACKAGES — Lite
+    # UNUSED PYTHON PACKAGES — TurboLite
     # ============================================================================
     'pygments', 'pygments.*',    # syntax highlighter (~3.6 MB)
     'redis', 'redis.*',          # Redis client (~1.3 MB)
@@ -1128,15 +1128,15 @@ excludes = [
     # they are pre-excluded. They are stripped via a.pure filter instead.
 
     # ============================================================================
-    # Vertex AI kept in Lite (removed from TurboLite only)
-
-
-
-
-
-
-
-
+    # VERTEX AI / GOOGLE CLOUD AIPLATFORM - TurboLite: intentionally excluded
+    # Most users use Gemini/OpenAI directly; the full dep chain is ~60 MB.
+    # ============================================================================
+    'google.cloud.aiplatform', 'google.cloud.aiplatform.*',
+    'google.cloud.aiplatform_v1', 'google.cloud.aiplatform_v1.*',
+    'google.cloud.resourcemanager', 'google.cloud.resourcemanager.*',
+    'google.cloud.resourcemanager_v3', 'google.cloud.resourcemanager_v3.*',
+    'google.cloud.bigquery', 'google.cloud.bigquery.*',
+    'vertexai', 'vertexai.*',
 ]
 
 # ============================================================================
@@ -1178,12 +1178,12 @@ a.binaries = [b for b in a.binaries if not any([
     'Qt6WebEngineCore' in b[0],
     'QtWebEngineProcess' in b[0],
     b[0].startswith('PySide6\\Qt6WebEngine'),
-    # Strip pymupdf — PDF rendering, not needed in Lite
+    # Strip pymupdf — PDF rendering, not needed in TurboLite
     b[0].startswith('pymupdf\\'),
     b[0].startswith('pymupdf/'),
     'mupdfcpp' in b[0],
     '_mupdf' in b[0],
-    # ---- Lite: unused PySide6 components ----
+    # ---- TurboLite: unused PySide6 components ----
     # Software OpenGL fallback (~20 MB) — hardware-accelerated path is used
     b[0].lower() == 'pyside6\\opengl32sw.dll' or b[0].lower() == 'opengl32sw.dll',
     # FFmpeg codecs — no video playback in the app (~17 MB)
@@ -1197,7 +1197,7 @@ a.binaries = [b for b in a.binaries if not any([
     'Qt6QmlMeta' in b[0],
     'Qt6QmlModels' in b[0],
     'Qt6QmlWorker' in b[0],
-    # Qt Pdf — no PDF viewer in Lite (~5 MB)
+    # Qt Pdf — no PDF viewer in TurboLite (~5 MB)
     b[0] == 'PySide6\\Qt6Pdf.dll' or b[0] == 'Qt6Pdf.dll',
     # Qt OpenGL module — only needed for OpenGL widgets, app uses software rendering
     b[0] == 'PySide6\\Qt6OpenGL.dll' or b[0] == 'Qt6OpenGL.dll',
@@ -1252,13 +1252,13 @@ a.pure = [p for p in a.pure if not any([
     '_torchcodec' in str(p),
     # Playwright Python modules
     str(p[0]).startswith('playwright'),
-    # Vertex AI kept in Lite (stripped from TurboLite only)
-
-
-
-
-
-    # ---- Lite: PDF stack (not used, WeasyPrint excluded) ----
+    # ---- TurboLite: strip entire Vertex AI / aiplatform stack (~60 MB) ----
+    # Most users don't use Vertex Model Garden on TurboLite.
+    str(p[0]).startswith('google.cloud.aiplatform'),
+    str(p[0]).startswith('google.cloud.resourcemanager'),
+    str(p[0]).startswith('google.cloud.bigquery'),
+    str(p[0]).startswith('vertexai'),
+    # ---- TurboLite: PDF stack (not used, WeasyPrint excluded) ----
     str(p[0]).startswith('pymupdf'),
     str(p[0]).startswith('fitz'),
     str(p[0]).startswith('reportlab'),
@@ -1270,7 +1270,7 @@ a.pure = [p for p in a.pure if not any([
     str(p[0]).startswith('uritools'),          # pyhanko dep
     str(p[0]).startswith('barcode'),           # pyhanko dep
     str(p[0]).startswith('qrcode'),            # pyhanko dep
-    # ---- Lite: unused Python packages ----
+    # ---- TurboLite: unused Python packages ----
     str(p[0]).startswith('pygments'),          # syntax highlighter (~3.6 MB)
     str(p[0]).startswith('redis'),             # Redis client (~1.3 MB)
     str(p[0]).startswith('rich'),              # terminal pretty-printer (~1 MB)

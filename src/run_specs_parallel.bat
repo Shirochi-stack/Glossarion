@@ -4,6 +4,7 @@ echo Running spec files sequentially with PyInstaller...
 echo.
 echo Building 3 variants...
 
+pyinstaller --clean translator_TurboLite.spec
 pyinstaller --clean translator_lite.spec
 pyinstaller --clean translator.spec
 pyinstaller --clean translator_NoCuda.spec
