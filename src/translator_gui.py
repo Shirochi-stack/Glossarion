@@ -1150,7 +1150,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 128000
         self.proc = self.glossary_proc = None
-        __version__ = "8.5.2"
+        __version__ = "8.5.3"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1225,7 +1225,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.5.2')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.5.3')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -1374,7 +1374,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.skip_metadata_thinking_var = self.config.get('skip_metadata_thinking', True)
         self.skip_toc_thinking_var = self.config.get('skip_toc_thinking', False)
         self.lightweight_thinking_level_var = self.config.get('lightweight_thinking_level', 1)
-        self.thread_delay_var = str(self.config.get('thread_submission_delay', 0.1))
+        self.thread_delay_var = str(self.config.get('thread_submission_delay', 0.0001))
         _raw_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "off")
         if _raw_artifacts == "0": _raw_artifacts = "off"
         elif _raw_artifacts == "1": _raw_artifacts = "medium"
@@ -3290,7 +3290,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v8.5.2 - Ready to use!")
+        self.append_log("🚀 Glossarion v8.5.3 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -5836,7 +5836,7 @@ Recent translations to summarize:
         self.frame.addWidget(api_delay_label, 4, 0, Qt.AlignLeft)
         
         self.delay_entry = QLineEdit()
-        self.delay_entry.setText(str(self.config.get('delay', 2)))
+        self.delay_entry.setText(str(self.config.get('delay', 5)))
         self.delay_entry.setMaximumWidth(80)
         self.frame.addWidget(self.delay_entry, 4, 1, Qt.AlignLeft)
 
@@ -11983,7 +11983,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'MODEL': self.model_var,
             'CONTEXTUAL': '1' if self.contextual_var else '0',
             'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
-            'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.1',
+            'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.0001',
             'MAX_OUTPUT_TOKENS': str(current_max_tokens),
             'API_KEY': api_key,
             'OPENAI_API_KEY': api_key,
@@ -13464,7 +13464,7 @@ Important rules:
                     'OPENROUTER_USE_HTTP_ONLY': '1' if self.openrouter_http_only_var else '0',
                     'GLOSSARY_DUPLICATE_KEY_MODE': 'skip',  # Always use skip mode for new format
                     'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
-                    'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.1',
+                    'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.0001',
                     'CONTEXTUAL': '1' if self.contextual_var else '0',
                     'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
                     
@@ -19682,8 +19682,8 @@ Important rules:
                 ('use_spine_order', ['use_spine_order_checkbox'], False, bool),
                 
                 # Numeric settings
-                ('delay', ['delay_entry'], 2.0, lambda v: safe_float(v, 2.0)),
-                ('thread_submission_delay', ['thread_delay_entry'], 0.1, lambda v: safe_float(v, 0.1)),
+                ('delay', ['delay_entry'], 5.0, lambda v: safe_float(v, 5.0)),
+                ('thread_submission_delay', ['thread_delay_entry'], 0.0001, lambda v: safe_float(v, 0.0001)),
                 ('translation_temperature', ['trans_temp'], 0.3, lambda v: safe_float(v, 0.3)),
                 ('translation_history_limit', ['trans_history'], 2, lambda v: safe_int(v, 2)),
 
@@ -21081,7 +21081,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v8.5.2...")
+    print("🚀 Starting Glossarion v8.5.3...")
     
     # Initialize splash screen
     splash_manager = None
