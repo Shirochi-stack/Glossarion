@@ -1112,7 +1112,6 @@ excludes = [
     'poe_api_wrapper', 'poe_api_wrapper.*',
     'ballyregan', 'ballyregan.*',
     'websocket', 'websocket.*',
-    'websockets',
 
     # Testing frameworks (but NOT unittest - needed by PyTorch)
     'pytest', 'nose',

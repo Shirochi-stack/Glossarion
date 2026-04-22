@@ -9158,25 +9158,11 @@ class UnifiedClient:
             # Get logger
             logger = logging.getLogger(__name__)
             
-            # Import or define UnifiedClientError
-            try:
-                # Try to import from the module if it exists
-                from unified_api_client import UnifiedClientError, UnifiedResponse
-            except ImportError:
-                # Define them locally if import fails
-                class UnifiedClientError(Exception):
-                    def __init__(self, message, error_type=None):
-                        super().__init__(message)
-                        self.error_type = error_type
-                
-                from dataclasses import dataclass
-                @dataclass
-                class UnifiedResponse:
-                    content: str
-                    usage: dict = None
-                    finish_reason: str = 'stop'
-                    raw_response: object = None
-            
+            # UnifiedClientError and UnifiedResponse are defined at module level;
+            # do NOT re-import/redefine them here — doing so makes Python treat
+            # them as local variables for the entire function scope, causing
+            # UnboundLocalError in the outer except clause when an import above fails.
+
             # Import your global stop check function
             try:
                 from TranslateKRtoEN import is_stop_requested

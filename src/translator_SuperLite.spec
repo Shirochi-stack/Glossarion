@@ -915,7 +915,6 @@ excludes = [
     'poe_api_wrapper', 'poe_api_wrapper.*',
     'ballyregan', 'ballyregan.*',
     'websocket', 'websocket.*',
-    'websockets',
 
     # ============================================================================
     # MACHINE LEARNING & AI FRAMEWORKS (MAJOR SIZE REDUCTION)
