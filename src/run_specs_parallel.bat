@@ -1,20 +1,22 @@
 @echo off
 echo Running spec files sequentially with PyInstaller...
+echo.
+echo [1/3] Building TurboLite (smallest - no Vertex AI, no EPUB reader, no PDF)...
+pyinstaller --clean translator_TurboLite.spec
 
 echo.
-echo Building 3 variants...
-
-pyinstaller --clean translator_TurboLite.spec
+echo [2/3] Building Lite (Vertex AI, no EPUB reader, no PDF)...
 pyinstaller --clean translator_lite.spec
-pyinstaller --clean translator.spec
-pyinstaller --clean translator_NoCuda.spec
 
+echo.
+echo [3/3] Building NoCuda (full Manga build)...
+pyinstaller --clean translator_NoCuda.spec
 
 echo.
 echo Done!
-echo Excluded: translator_Heavy.spec
+echo Excluded: translator.spec (Standard/bloat), translator_Heavy.spec
 echo.
-echo Lite variant sizes:
-echo   SuperLite  = Lite minus EPUB Library reader GUI/Chromium  (~228 MB)
-echo   OmegaLite  = OpenAI-only, no PDF gen, no EPUB Library reader GUI  (~50-80 MB est.)
-echo   NOTE: EPUB translation/processing is fully retained in ALL builds.
+echo Package structure (smallest to largest):
+echo   TurboLite  = no Vertex AI, no EPUB reader, no PDF
+echo   Lite       = Vertex AI included, no EPUB reader, no PDF
+echo   NoCuda     = full Manga translation build
