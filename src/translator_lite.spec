@@ -1,4 +1,4 @@
-﻿# -*- mode: python ; coding: utf-8 -*-
+# -*- mode: python ; coding: utf-8 -*-
 """
 Glossarion Lite v8.5.5 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, and AI Hunter
@@ -945,6 +945,8 @@ excludes = [
     'onnxruntime.capi', 'onnxruntime.capi.*',
     'onnxruntime.tools', 'onnxruntime.transformers',
     'onnxruntime.backend', 'onnxruntime.backend.*',
+    'onnxruntime_extensions', 'onnxruntime_extensions.*',
+    'onnxruntime_extensions', 'onnxruntime_extensions.*',
     
     # OCR Libraries (~300MB) - MAJOR ADDITION
     'easyocr', 'easyocr.*',
