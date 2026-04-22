@@ -1271,9 +1271,10 @@ a.pure = [p for p in a.pure if not any([
     str(p[0]).startswith('ttkbootstrap'),      # old tkinter theme, not used (~0.8 MB)
     str(p[0]).startswith('tkinter'),           # tkinter itself
     str(p[0]).startswith('_tkinter'),
-    str(p[0]).startswith('setuptools'),        # dev packaging tool (~1.8 MB)
-    str(p[0]).startswith('pkg_resources'),     # setuptools companion
-    str(p[0]).startswith('distutils'),
+    # NOTE: setuptools / pkg_resources / distutils are intentionally NOT stripped
+    # here. PyInstaller injects pyi_rth_pkgres.py as a runtime hook which imports
+    # pkg_resources unconditionally before any user code runs → stripping it
+    # causes "No module named 'pkg_resources'" and the exe won't launch.
 ])]
 
 # ============================================================================
