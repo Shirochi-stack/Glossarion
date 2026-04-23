@@ -105,7 +105,20 @@ def _preempt_temp_dir_warning():
     return
 
 
-def _sweep_size_capped_dir(folder: str, max_bytes: int) -> None:
+def _fmt_bytes(n: int) -> str:
+    """Pretty-print a byte count for log lines (KB/MB/GB)."""
+    try:
+        n = float(n)
+    except Exception:
+        return f"{n} B"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(n) < 1024.0:
+            return f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} PB"
+
+
+def _sweep_size_capped_dir(folder: str, max_bytes: int, label: str = "") -> tuple:
     """Cap a debug/cache directory's total size by deleting oldest files first.
 
     Walks ``folder`` recursively, sums the size of every file, and if the
@@ -113,12 +126,19 @@ def _sweep_size_capped_dir(folder: str, max_bytes: int) -> None:
     we're back under the cap. Then removes any empty subdirectories left
     behind so the tree doesn't turn into a forest of empty folders.
 
+    Prints a single ``[CLEANUP]`` summary line to stdout whenever anything
+    is actually deleted (or when the folder is already at/over cap but we
+    couldn't free any files because they were all in use).
+
     Best-effort: silently skips anything we can't stat or remove (files
     held open by another running instance, permission errors, etc.).
+
+    Returns ``(removed_count, bytes_freed, total_before, total_after)``
+    so callers can produce higher-level summaries.
     """
     try:
         if not folder or not os.path.isdir(folder):
-            return
+            return (0, 0, 0, 0)
 
         entries = []  # list[(mtime, size, path)]
         total = 0
@@ -132,35 +152,63 @@ def _sweep_size_capped_dir(folder: str, max_bytes: int) -> None:
                 entries.append((st.st_mtime, st.st_size, fp))
                 total += st.st_size
 
+        total_before = total
+        tag = label or folder
+
         if total <= max_bytes:
-            return
+            # Nothing to do; don't spam the console for under-cap folders.
+            return (0, 0, total_before, total)
 
         # Oldest first — delete until we're back under the cap.
         entries.sort(key=lambda e: e[0])
+        removed = 0
+        freed = 0
+        skipped = 0
         for _mtime, size, path in entries:
             if total <= max_bytes:
                 break
             try:
                 os.remove(path)
                 total -= size
+                freed += size
+                removed += 1
             except Exception:
+                skipped += 1
                 # File held open, permission issue, etc. Skip.
                 pass
 
         # Prune empty subdirectories (bottom-up), keep the root itself.
+        pruned = 0
         for root, dirs, files in os.walk(folder, topdown=False, followlinks=False):
             if os.path.abspath(root) == os.path.abspath(folder):
                 continue
             try:
                 if not os.listdir(root):
                     os.rmdir(root)
+                    pruned += 1
             except Exception:
                 pass
+
+        try:
+            msg = (
+                f"[CLEANUP] {tag}: removed {removed} file(s), freed "
+                f"{_fmt_bytes(freed)} ({_fmt_bytes(total_before)} → {_fmt_bytes(total)}, "
+                f"cap {_fmt_bytes(max_bytes)})"
+            )
+            if skipped:
+                msg += f"; {skipped} file(s) in use"
+            if pruned:
+                msg += f"; pruned {pruned} empty dir(s)"
+            print(msg)
+        except Exception:
+            pass
+
+        return (removed, freed, total_before, total)
     except Exception:
-        pass
+        return (0, 0, 0, 0)
 
 
-def _sweep_large_caches(max_bytes: int = 500 * 1024 * 1024) -> None:
+def _sweep_large_caches(max_bytes: int = 500 * 1024 * 1024, phase: str = "startup") -> None:
     """Enforce a per-folder size cap on app-local debug caches.
 
     Targets:
@@ -179,6 +227,11 @@ def _sweep_large_caches(max_bytes: int = 500 * 1024 * 1024) -> None:
     directory and dedupe by absolute path, since the resolution logic in
     the writers above depends on which one happens to be writable at the
     moment the first dump is saved.
+
+    ``phase`` is just a label for log output (``startup`` or ``exit``).
+    When anything is actually deleted, each folder produces a
+    ``[CLEANUP] <folder>: removed N file(s), freed X MB (...)`` line and
+    a final ``[CLEANUP] <phase>: total removed ... freed ...`` summary.
     """
     try:
         # Candidate roots: exe dir (frozen), script dir (dev), and CWD.
@@ -207,7 +260,7 @@ def _sweep_large_caches(max_bytes: int = 500 * 1024 * 1024) -> None:
             pass
 
         seen = set()
-        targets = []
+        targets = []  # list[(label, path)]
         for r in roots:
             if not r:
                 continue
@@ -217,15 +270,66 @@ def _sweep_large_caches(max_bytes: int = 500 * 1024 * 1024) -> None:
                 if key in seen:
                     continue
                 seen.add(key)
-                targets.append(p)
+                targets.append((sub, p))
         if fallback_payloads:
             key = os.path.normcase(os.path.abspath(fallback_payloads))
             if key not in seen:
                 seen.add(key)
-                targets.append(fallback_payloads)
+                targets.append(("Payloads (tmp fallback)", fallback_payloads))
 
-        for t in targets:
-            _sweep_size_capped_dir(t, max_bytes)
+        total_removed = 0
+        total_freed = 0
+        for label, t in targets:
+            try:
+                removed, freed, _before, _after = _sweep_size_capped_dir(t, max_bytes, label=label)
+                total_removed += removed
+                total_freed += freed
+            except Exception:
+                pass
+
+        if total_removed:
+            try:
+                print(
+                    f"[CLEANUP] {phase}: total removed {total_removed} file(s), "
+                    f"freed {_fmt_bytes(total_freed)} across {len(targets)} folder(s)"
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _log_mei_cleanup_on_exit():
+    """Log the current PyInstaller `_MEIPASS` at exit.
+
+    We don't delete it ourselves (that's the bootloader's job and doing
+    it from Python causes the "Failed to remove temporary directory"
+    dialog). This just tells the user which path the bootloader is
+    about to try to clean up, so it's visible in their CMD log.
+    """
+    try:
+        if not getattr(sys, "frozen", False):
+            return
+        temp_dir = getattr(sys, "_MEIPASS", None)
+        if not temp_dir:
+            return
+        size = 0
+        try:
+            for root, _dirs, files in os.walk(temp_dir, followlinks=False):
+                for fn in files:
+                    try:
+                        size += os.path.getsize(os.path.join(root, fn))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            print(
+                f"[CLEANUP] exit: handing off _MEIPASS cleanup to PyInstaller "
+                f"bootloader — {temp_dir} ({_fmt_bytes(size)})"
+            )
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -421,20 +525,25 @@ if '--run-pdf-extraction' in sys.argv:
 
 
 # Enforce a 500 MB cap on app-local debug caches (Payloads/, http_requests/).
-# Runs once at startup regardless of frozen vs dev, since both layouts write
-# to these folders. See `_sweep_large_caches` for rationale and resolution
-# order. Runs at startup only — never touches files at shutdown, so it can
-# never interfere with the PyInstaller bootloader's own `_MEIPASS` cleanup.
+# Runs at startup and again at exit. Both runs log a [CLEANUP] line per
+# folder when anything is actually deleted. See `_sweep_large_caches` for
+# rationale and resolution order.
 try:
-    _sweep_large_caches()
+    _sweep_large_caches(phase="startup")
+except Exception:
+    pass
+try:
+    atexit.register(_sweep_large_caches, phase="exit")
 except Exception:
     pass
 
-# NOTE: we no longer register `_preempt_temp_dir_warning` as an atexit
-# handler — it is a no-op now, see its docstring. The PyInstaller `_MEI*`
-# temp directory is cleaned up by the bootloader itself on a successful
-# exit; `shutdown_utils.force_shutdown` makes sure our own child processes
-# are dead first so the bootloader's cleanup actually succeeds.
+# Log (but don't touch) `_MEIPASS` at exit so the user sees in their CMD
+# which temp dir the PyInstaller bootloader is about to clean up.
+# `_preempt_temp_dir_warning` is a no-op now — see its docstring.
+try:
+    atexit.register(_log_mei_cleanup_on_exit)
+except Exception:
+    pass
     
 # Manga translation support (optional)
 try:
