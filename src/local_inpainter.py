@@ -1178,13 +1178,25 @@ class LocalInpainter:
         
         # Compute a reasonable base timeout from image size.
         # ONNX/PyTorch inference can legitimately take 30-120s+ on CPU for large images.
+        # Honor INPAINT_TIMEOUT env var for testing: set to 0 (or any non-positive
+        # value) to effectively disable the timeout (uses a 24h ceiling instead).
         try:
-            h, w = image.shape[:2]
-            pixels = h * w
-            # ~60s base for small images (<1MP), scale up for larger ones
-            base_timeout = max(60.0, 60.0 * (pixels / 1_000_000))
-            # Cap at 5 minutes per attempt
-            base_timeout = min(base_timeout, 300.0)
+            _env_to = os.environ.get('INPAINT_TIMEOUT', '').strip()
+            if _env_to:
+                _parsed = float(_env_to)
+                if _parsed <= 0:
+                    base_timeout = 86400.0  # 24h — effectively "no timeout"
+                    logger.info("⏱️ INPAINT_TIMEOUT disabled — using 24h ceiling per attempt")
+                else:
+                    base_timeout = _parsed
+                    logger.info(f"⏱️ INPAINT_TIMEOUT override: {base_timeout:.0f}s per attempt")
+            else:
+                h, w = image.shape[:2]
+                pixels = h * w
+                # ~60s base for small images (<1MP), scale up for larger ones
+                base_timeout = max(60.0, 60.0 * (pixels / 1_000_000))
+                # Cap at 5 minutes per attempt
+                base_timeout = min(base_timeout, 300.0)
         except Exception:
             base_timeout = 120.0
         
@@ -2483,7 +2495,14 @@ class LocalInpainter:
 
             device = 'cuda' if (self.use_gpu and TORCH_AVAILABLE and torch is not None
                                  and torch.cuda.is_available()) else 'cpu'
-            dtype = 'fp16' if device.startswith('cuda') else 'fp32'
+            # Upstream's reference inference (infer_pixelhacker.py) uses fp32;
+            # fp16 causes dtype mismatches between the time_embedding's fp32
+            # input tensor and the fp16 linear weights. Stay in fp32 unless
+            # the user explicitly opts into fp16 via an env var.
+            if os.environ.get('PIXELHACKER_FP16', '').lower() in ('1', 'true', 'yes'):
+                dtype = 'fp16' if device.startswith('cuda') else 'fp32'
+            else:
+                dtype = 'fp32'
             logger.info(
                 f"🎨 Initializing PixelHacker on {device} ({dtype}); this may take "
                 f"a while on first use while upstream code is fetched"
