@@ -55,6 +55,10 @@ _REQUIRED_MODULES = [
     ('accelerate', 'accelerate'),
     ('einops', 'einops'),
     ('yaml', 'PyYAML'),
+    # omegaconf is imported directly inside upstream's PixelHacker.py
+    # (inject_gla_into_tf2dmodel). We can't patch that out without forking
+    # the vendored code, so make it a hard requirement.
+    ('omegaconf', 'omegaconf'),
     # Flash Linear Attention — core of the GLA block. Pinned to 0.1 by upstream.
     ('fla', 'fla==0.1'),
 ]
@@ -174,6 +178,33 @@ class PixelHackerRunner:
 
         import torch
         from diffusers import DDIMScheduler, AutoencoderKL  # noqa: F401
+
+        # ---- Workaround for fla on CPU ------------------------------
+        # fla.utils.custom_device_ctx does `device_torch_lib.device(index)`,
+        # where device_torch_lib == torch.cpu when no CUDA is available.
+        # `torch.cpu.device` does not exist (only `torch.cuda.device` does),
+        # which crashes inside ChunkGLAFunction.apply. Patch both torch.cpu
+        # itself and fla's helper to use a no-op context manager on CPU.
+        import contextlib
+        if not hasattr(torch.cpu, 'device'):
+            def _cpu_device_nullctx(*_a, **_kw):
+                return contextlib.nullcontext()
+            torch.cpu.device = _cpu_device_nullctx  # type: ignore[attr-defined]
+        try:
+            import fla.utils as _fla_utils  # type: ignore
+            _orig_custom_device_ctx = getattr(_fla_utils, 'custom_device_ctx', None)
+
+            def _patched_custom_device_ctx(index):
+                try:
+                    return _orig_custom_device_ctx(index)  # type: ignore[misc]
+                except Exception:
+                    return contextlib.nullcontext()
+
+            if _orig_custom_device_ctx is not None:
+                _fla_utils.custom_device_ctx = _patched_custom_device_ctx
+        except Exception:
+            # If fla isn't importable here we've already failed the dep check.
+            pass
 
         # Import from the now-available upstream module.
         # `utils.py` provides build_model + build_vae + load_cfg.

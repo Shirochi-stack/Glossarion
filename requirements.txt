@@ -109,6 +109,7 @@ torchvision==0.25.0+cpu
 onnxruntime
 networks
 flash-linear-attention
+omegaconf
 triton-windows
 diffusers
 safetensors
