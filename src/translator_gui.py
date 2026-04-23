@@ -40,10 +40,14 @@ if getattr(sys, 'frozen', False):
         except (AttributeError, OSError):
             pass
     
-    # Suppress PyInstaller temp directory cleanup warning
-    # The temp directory will be cleaned up by Windows automatically
-    import atexit
-    atexit.unregister = lambda *args, **kwargs: None  # Disable atexit cleanup
+    # NOTE: we used to monkey-patch `atexit.unregister` here in an attempt to
+    # suppress the PyInstaller "Failed to remove temporary directory" dialog.
+    # That was a no-op (it replaced `unregister`, not `register`) and the
+    # dialog is not produced by any Python atexit handler anyway — it comes
+    # from PyInstaller's C bootloader after our interpreter has already
+    # exited, so it cannot be suppressed from Python. Left here as a warning
+    # to future maintainers: don't try to rmtree `sys._MEIPASS` from inside
+    # the frozen process, it only makes the bootloader's own cleanup fail.
 
 # --- Helper utilities to quiet PyInstaller temp-dir warnings & stray children ---
 def _kill_child_process_tree(timeout=1.5):
@@ -80,16 +84,148 @@ def _kill_child_process_tree(timeout=1.5):
 
 
 def _preempt_temp_dir_warning():
-    """Best-effort suppression of PyInstaller temp-dir warning by removing locks early."""
+    """Intentional no-op.
+
+    Previously this tried to kill children and `shutil.rmtree(sys._MEIPASS)`
+    in the hope of suppressing PyInstaller's
+        "Failed to remove temporary directory: ..._MEIxxxxxx"
+    dialog. In practice it caused the dialog: DLLs from `_MEIPASS` are still
+    mapped into this process while we run, so the tree only partially
+    deletes; the bootloader then walks the half-deleted tree after we exit,
+    trips on the still-mapped files, and shows the warning.
+
+    See `shutdown_utils._cleanup_pyinstaller_temp_dir` for the same
+    rationale. Children are still killed through the normal shutdown path
+    (`_kill_child_process_tree` / `shutdown_utils.force_shutdown`), which is
+    all that's actually needed.
+
+    Stale `_MEIxxxxxx` directories from previous crashed runs are swept at
+    startup by `_sweep_stale_mei_payloads`.
+    """
+    return
+
+
+def _sweep_size_capped_dir(folder: str, max_bytes: int) -> None:
+    """Cap a debug/cache directory's total size by deleting oldest files first.
+
+    Walks ``folder`` recursively, sums the size of every file, and if the
+    total exceeds ``max_bytes`` deletes files in ascending mtime order until
+    we're back under the cap. Then removes any empty subdirectories left
+    behind so the tree doesn't turn into a forest of empty folders.
+
+    Best-effort: silently skips anything we can't stat or remove (files
+    held open by another running instance, permission errors, etc.).
+    """
     try:
-        if not getattr(sys, "frozen", False):
+        if not folder or not os.path.isdir(folder):
             return
-        # Kill any lingering children first so _MEIPASS can be removed
-        _kill_child_process_tree()
-        # Manually clear the extracted temp dir; ignore failures
-        temp_dir = getattr(sys, "_MEIPASS", None)
-        if temp_dir and os.path.isdir(temp_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        entries = []  # list[(mtime, size, path)]
+        total = 0
+        for root, _dirs, files in os.walk(folder, followlinks=False):
+            for fn in files:
+                fp = os.path.join(root, fn)
+                try:
+                    st = os.stat(fp)
+                except Exception:
+                    continue
+                entries.append((st.st_mtime, st.st_size, fp))
+                total += st.st_size
+
+        if total <= max_bytes:
+            return
+
+        # Oldest first — delete until we're back under the cap.
+        entries.sort(key=lambda e: e[0])
+        for _mtime, size, path in entries:
+            if total <= max_bytes:
+                break
+            try:
+                os.remove(path)
+                total -= size
+            except Exception:
+                # File held open, permission issue, etc. Skip.
+                pass
+
+        # Prune empty subdirectories (bottom-up), keep the root itself.
+        for root, dirs, files in os.walk(folder, topdown=False, followlinks=False):
+            if os.path.abspath(root) == os.path.abspath(folder):
+                continue
+            try:
+                if not os.listdir(root):
+                    os.rmdir(root)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _sweep_large_caches(max_bytes: int = 500 * 1024 * 1024) -> None:
+    """Enforce a per-folder size cap on app-local debug caches.
+
+    Targets:
+      * ``Payloads/`` — API request/response dumps written by
+        ``unified_api_client._payloads_dir`` (resolved against CWD with a
+        temp-dir fallback).
+      * ``http_requests/`` — raw HTTP traces written by
+        ``http_logger.enable_detailed_http_logging`` (resolved against the
+        script/exe directory).
+
+    Each folder is independently capped at ``max_bytes`` (default 500 MB)
+    by deleting oldest files first. These folders grow without bound
+    otherwise because the debug dumps are append-only.
+
+    Resolution is best-effort: we check both CWD and the executable/script
+    directory and dedupe by absolute path, since the resolution logic in
+    the writers above depends on which one happens to be writable at the
+    moment the first dump is saved.
+    """
+    try:
+        # Candidate roots: exe dir (frozen), script dir (dev), and CWD.
+        roots = []
+        try:
+            if getattr(sys, "frozen", False) and hasattr(sys, "executable"):
+                roots.append(os.path.dirname(os.path.abspath(sys.executable)))
+        except Exception:
+            pass
+        try:
+            roots.append(os.path.dirname(os.path.abspath(__file__)))
+        except Exception:
+            pass
+        try:
+            roots.append(os.path.abspath(os.getcwd()))
+        except Exception:
+            pass
+
+        # Also check the tempdir fallback used by _payloads_dir() in
+        # unified_api_client.py when CWD isn't writable.
+        fallback_payloads = None
+        try:
+            import tempfile
+            fallback_payloads = os.path.join(tempfile.gettempdir(), "Glossarion_Payloads")
+        except Exception:
+            pass
+
+        seen = set()
+        targets = []
+        for r in roots:
+            if not r:
+                continue
+            for sub in ("Payloads", "http_requests"):
+                p = os.path.abspath(os.path.join(r, sub))
+                key = os.path.normcase(p)
+                if key in seen:
+                    continue
+                seen.add(key)
+                targets.append(p)
+        if fallback_payloads:
+            key = os.path.normcase(os.path.abspath(fallback_payloads))
+            if key not in seen:
+                seen.add(key)
+                targets.append(fallback_payloads)
+
+        for t in targets:
+            _sweep_size_capped_dir(t, max_bytes)
     except Exception:
         pass
 
@@ -284,14 +420,21 @@ if '--run-pdf-extraction' in sys.argv:
         sys.exit(0)
 
 
-# The frozen check can stay here for other purposes
-if getattr(sys, 'frozen', False):
-    # Any other frozen-specific setup
-    try:
-        import atexit
-        atexit.register(_preempt_temp_dir_warning)
-    except Exception:
-        pass
+# Enforce a 500 MB cap on app-local debug caches (Payloads/, http_requests/).
+# Runs once at startup regardless of frozen vs dev, since both layouts write
+# to these folders. See `_sweep_large_caches` for rationale and resolution
+# order. Runs at startup only — never touches files at shutdown, so it can
+# never interfere with the PyInstaller bootloader's own `_MEIPASS` cleanup.
+try:
+    _sweep_large_caches()
+except Exception:
+    pass
+
+# NOTE: we no longer register `_preempt_temp_dir_warning` as an atexit
+# handler — it is a no-op now, see its docstring. The PyInstaller `_MEI*`
+# temp directory is cleaned up by the bootloader itself on a successful
+# exit; `shutdown_utils.force_shutdown` makes sure our own child processes
+# are dead first so the bootloader's cleanup actually succeeds.
     
 # Manga translation support (optional)
 try:
@@ -2431,13 +2574,8 @@ Text to analyze:
                     except Exception:
                         pass
 
-            # Sweep any remaining children (e.g., helper workers) to avoid temp-dir locks
-            try:
-                _kill_child_process_tree()
-            except Exception:
-                pass
-
-            # Generic child-process sweep to release any remaining _MEIPASS locks
+            # Sweep any remaining children (helper workers, Qt subprocesses)
+            # so their handles to DLLs under _MEIPASS drop before we exit.
             try:
                 _kill_child_process_tree()
             except Exception:

@@ -48,6 +48,19 @@ def _terminate_multiprocessing_children(timeout: float = 1.5) -> None:
                 p.join(timeout=timeout)
             except Exception:
                 pass
+        # Anything still alive after terminate/join: hard kill so it can
+        # release file handles to DLLs under _MEIPASS before the bootloader
+        # tries to clean the temp directory.
+        for p in children:
+            try:
+                if p.is_alive():
+                    if hasattr(p, "kill"):
+                        p.kill()
+                    else:
+                        p.terminate()
+                    p.join(timeout=timeout)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -96,6 +109,13 @@ def _ensure_safe_tempdir() -> None:
 
 
 def _terminate_psutil_children(timeout: float = 1.5) -> None:
+    """Terminate every descendant of the current process.
+
+    Any grandchild that still has DLLs from `_MEIPASS` mapped will cause the
+    PyInstaller bootloader's final `rmtree` to fail and pop the
+    "Failed to remove temporary directory" dialog, so we err on the side of
+    killing aggressively and then waiting for handles to drop.
+    """
     try:
         import psutil
         parent = psutil.Process(os.getpid())
@@ -114,6 +134,13 @@ def _terminate_psutil_children(timeout: float = 1.5) -> None:
                 proc.kill()
             except Exception:
                 pass
+        # Re-check after kill to make sure handles to _MEIPASS DLLs are gone.
+        try:
+            still = [p for p in alive if p.is_running()]
+            if still:
+                psutil.wait_procs(still, timeout=timeout)
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -134,31 +161,25 @@ def _taskkill_self_tree() -> None:
 
 
 def _cleanup_pyinstaller_temp_dir(retries: int = 4, delay: float = 0.2) -> None:
-    """Best-effort cleanup of PyInstaller temp dir to avoid warning popups."""
-    try:
-        if not getattr(sys, "frozen", False):
-            return
-        temp_dir = getattr(sys, "_MEIPASS", None)
-        if not temp_dir or not os.path.isdir(temp_dir):
-            return
+    """Intentional no-op.
 
-        def _onerror(func, path, _exc):
-            try:
-                os.chmod(path, 0o700)
-                func(path)
-            except Exception:
-                pass
+    Previously this tried to `shutil.rmtree(sys._MEIPASS)` from inside the
+    frozen child process. That is actively harmful: DLLs/PYDs loaded from
+    `_MEIPASS` are still mapped into this process, so the tree ends up only
+    partially deleted. The PyInstaller bootloader then runs its own cleanup
+    after we exit, walks the half-deleted tree, fails on the mapped files,
+    and shows the
 
-        for _ in range(max(1, retries)):
-            try:
-                shutil.rmtree(temp_dir, onerror=_onerror)
-                if not os.path.exists(temp_dir):
-                    return
-            except Exception:
-                pass
-            time.sleep(delay)
-    except Exception:
-        pass
+        "Failed to remove temporary directory: ...\\_MEIxxxxxx"
+
+    warning dialog. There is no way to suppress that dialog from Python
+    because the bootloader shows it *after* our interpreter is already gone.
+
+    The correct fix is to leave `_MEIPASS` alone and make sure every child
+    process is dead (so its mapped DLLs get unmapped) before we exit. Then
+    the bootloader's own cleanup succeeds and no dialog is ever shown.
+    """
+    return
 
 
 def force_shutdown(exit_code: int = 0, cleanup_fns: Optional[Iterable[Callable[[], None]]] = None) -> None:
@@ -166,13 +187,21 @@ def force_shutdown(exit_code: int = 0, cleanup_fns: Optional[Iterable[Callable[[
     Best-effort cleanup then forcefully exit the current process.
     Terminates child processes (multiprocessing + psutil if available) and
     falls back to taskkill on Windows to ensure no background process remains.
+
+    Ordering note: children must be terminated BEFORE we exit so that any
+    DLLs they loaded from PyInstaller's `_MEIPASS` are unmapped. Otherwise
+    the bootloader's final temp-dir cleanup pops a warning dialog.
+    We deliberately do NOT touch `_MEIPASS` from Python; see
+    `_cleanup_pyinstaller_temp_dir` for the rationale.
     """
     code = _normalize_exit_code(exit_code)
     _ensure_safe_tempdir()
     _run_cleanup_fns(cleanup_fns)
-    _cleanup_pyinstaller_temp_dir()
+    # Kill descendants first so their handles to _MEIPASS drop before the
+    # bootloader tries to rmtree it after we return.
     _terminate_multiprocessing_children()
     _terminate_psutil_children()
+    _cleanup_pyinstaller_temp_dir()  # no-op, kept for backwards compatibility
     _taskkill_self_tree()
     try:
         os._exit(code)
