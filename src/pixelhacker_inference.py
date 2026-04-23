@@ -45,15 +45,64 @@ class PixelHackerUnavailableError(RuntimeError):
     """Raised when PixelHacker cannot be set up (e.g. offline, missing deps)."""
 
 
-def _check_diffusers() -> None:
-    try:
-        import diffusers  # noqa: F401
-        import torch  # noqa: F401
-    except ImportError as e:
+# Modules the upstream code imports at load time. Checked up-front so the user
+# gets ONE actionable install command instead of a game of dependency
+# whack-a-mole.
+_REQUIRED_MODULES = [
+    ('torch', 'torch'),
+    ('diffusers', 'diffusers>=0.30.2'),
+    ('transformers', 'transformers>=4.40'),
+    ('accelerate', 'accelerate'),
+    ('einops', 'einops'),
+    ('yaml', 'PyYAML'),
+    # Flash Linear Attention — core of the GLA block. Pinned to 0.1 by upstream.
+    ('fla', 'fla==0.1'),
+]
+# These are conditionally required by `fla` depending on the code path it hits
+# on your hardware. On Windows they're notoriously hard to install; we DON'T
+# fail up front on them, but we do warn so the user knows what to reach for
+# if they hit a later error.
+_OPTIONAL_MODULES = [
+    ('triton', 'triton (on Windows: `pip install triton-windows`)'),
+    ('flash_attn', 'flash-attn==2.5.8 (needs CUDA toolkit + compiler)'),
+]
+
+
+def _check_dependencies() -> None:
+    import importlib
+    missing = []
+    for mod, pip_spec in _REQUIRED_MODULES:
+        try:
+            importlib.import_module(mod)
+        except ImportError:
+            missing.append(pip_spec)
+
+    if missing:
+        install_cmd = 'pip install ' + ' '.join(f"'{s}'" for s in missing)
         raise PixelHackerUnavailableError(
-            "PixelHacker requires the 'diffusers' and 'torch' libraries. "
-            "Install with:\n    pip install 'diffusers>=0.30.2' 'transformers>=4.40' accelerate"
-        ) from e
+            "PixelHacker is missing required Python packages:\n"
+            f"    {', '.join(m[0] for m in _REQUIRED_MODULES if m[1] in missing)}\n\n"
+            "Install them with:\n"
+            f"    {install_cmd}\n\n"
+            "Heads-up: on Windows you may ALSO need 'triton-windows' and "
+            "'flash-attn' for PixelHacker's GLA blocks to run, which require "
+            "a working CUDA toolchain. If you don't want to deal with that, "
+            "stick with 'anime_onnx' — it's faster and works out of the box."
+        )
+
+    # Just log (don't raise) for the optional/hardware-tied ones.
+    for mod, hint in _OPTIONAL_MODULES:
+        try:
+            importlib.import_module(mod)
+        except ImportError:
+            logger.info(
+                f"[PixelHacker] Optional dep '{mod}' not installed. If you hit "
+                f"an error about it later, install: {hint}"
+            )
+
+
+# Back-compat alias; older code paths call _check_diffusers().
+_check_diffusers = _check_dependencies
 
 
 def _download_upstream_file(rel_path: str, dest: Path) -> None:
@@ -79,7 +128,7 @@ def ensure_pixelhacker_available() -> Path:
     Returns the path to the upstream directory and adds it to sys.path.
     Raises PixelHackerUnavailableError on failure.
     """
-    _check_diffusers()
+    _check_dependencies()
     _UPSTREAM_DIR.mkdir(parents=True, exist_ok=True)
 
     # Ensure each required file is present. We intentionally don't checksum

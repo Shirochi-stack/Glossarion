@@ -107,6 +107,9 @@ replicate
 torch==2.10.0+cpu
 torchvision==0.25.0+cpu
 onnxruntime
+networks
+flash-linear-attention
+triton-windows
 diffusers
 safetensors
 transformers
