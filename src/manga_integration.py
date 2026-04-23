@@ -8544,51 +8544,91 @@ class MangaTranslationTab(QObject):
             from local_inpainter import LocalInpainter
             # Temporarily create instance just to check cache (doesn't load model)
             temp_inp = LocalInpainter()
-            model_path = temp_inp.get_cached_model_path(model_type)
-            
-            # Update status labels before download
-            if not (model_path and os.path.exists(model_path)):
-                # Get model display name from the constants
-                model_name = model_type.upper()
-                if model_type in ['anime_onnx', 'aot_onnx', 'lama_onnx']:
-                    model_name = f"Optimized {model_type.split('_')[0].upper()}"
-                elif model_type == 'sd_local':
-                    model_name = "Stable Diffusion"
-                
-                if hasattr(self, 'local_model_status_label'):
-                    self.local_model_status_label.setText(f"📥 Downloading {model_name} model...")
-                    self.local_model_status_label.setStyleSheet("color: #4a9eff;")
-                    try:
-                        # Force immediate repaint so the user sees the status before blocking work
-                        self.local_model_status_label.repaint()
-                        from PySide6.QtWidgets import QApplication as _QApp
-                        _QApp.processEvents()
-                    except Exception:
-                        pass
-                
-                try:
-                    model_path = temp_inp.download_jit_model(model_type)
-                except Exception as e:
-                    if hasattr(self, 'local_model_status_label'):
-                        self.local_model_status_label.setText(f"Download failed: {str(e)}")
-                        self.local_model_status_label.setStyleSheet("color: red;")
-                    QMessageBox.critical(self.dialog, "Download Error", str(e))
-                    return
-            
-            if model_path and os.path.exists(model_path):
-                # Use downloaded/cached model
-                self.local_model_entry.setText(model_path)
-                self.local_model_path_value = model_path
-                # Save path and immediately try to load
-                self.main_gui.config[f'manga_{model_type}_model_path'] = model_path
+            cached_path = temp_inp.get_cached_model_path(model_type)
+
+            # Fast path: already cached — just auto-load without touching the net.
+            if cached_path and os.path.exists(cached_path):
+                self.local_model_entry.setText(cached_path)
+                self.local_model_path_value = cached_path
+                self.main_gui.config[f'manga_{model_type}_model_path'] = cached_path
                 self._save_rendering_settings()
-                self._try_load_model(model_type, model_path, show_completion_dialog=True)
-            else:
-                if hasattr(self, 'local_model_status_label'):
-                    self.local_model_status_label.setText("❌ Failed to download model")
-                    self.local_model_status_label.setStyleSheet("color: red;")
+                self._try_load_model(model_type, cached_path, show_completion_dialog=True)
+                return
+
+            # Slow path: needs a network fetch. Run it on a background thread
+            # so the GUI doesn't freeze — this matters especially for large
+            # multi-file models like PixelHacker (~1.1 GB across two files).
+            model_name = model_type.upper()
+            if model_type in ['anime_onnx', 'aot_onnx', 'lama_onnx']:
+                model_name = f"Optimized {model_type.split('_')[0].upper()}"
+            elif model_type == 'sd_local':
+                model_name = "Stable Diffusion"
+            elif model_type == 'pixelhacker':
+                model_name = "PixelHacker (model + VAE, ~1.1 GB)"
+
+            if hasattr(self, 'local_model_status_label'):
+                self.local_model_status_label.setText(f"📥 Downloading {model_name}...")
+                self.local_model_status_label.setStyleSheet("color: #4a9eff;")
+
+            # Guard: don't kick off a second concurrent download if one is
+            # already running for this dialog instance.
+            if getattr(self, '_model_download_in_progress', False):
+                QMessageBox.information(
+                    self.dialog, "Download in progress",
+                    "Another model download is already running. Please wait."
+                )
+                return
+            self._model_download_in_progress = True
+
+            import threading
+            from PySide6.QtCore import QTimer
+
+            dl_result = {'path': None, 'error': None, 'done': False}
+
+            def _dl_worker():
+                try:
+                    dl_result['path'] = temp_inp.download_jit_model(model_type)
+                except Exception as worker_err:
+                    dl_result['error'] = str(worker_err)
+                finally:
+                    dl_result['done'] = True
+
+            thread = threading.Thread(target=_dl_worker, daemon=True)
+            thread.start()
+
+            poll_timer = QTimer(self.dialog)
+
+            def _finalize():
+                poll_timer.stop()
+                self._model_download_in_progress = False
+                err = dl_result['error']
+                path = dl_result['path']
+                if err:
+                    if hasattr(self, 'local_model_status_label'):
+                        self.local_model_status_label.setText(f"Download failed: {err}")
+                        self.local_model_status_label.setStyleSheet("color: red;")
+                    QMessageBox.critical(self.dialog, "Download Error", err)
+                    return
+                if path and os.path.exists(path):
+                    self.local_model_entry.setText(path)
+                    self.local_model_path_value = path
+                    self.main_gui.config[f'manga_{model_type}_model_path'] = path
+                    self._save_rendering_settings()
+                    self._try_load_model(model_type, path, show_completion_dialog=True)
+                else:
+                    if hasattr(self, 'local_model_status_label'):
+                        self.local_model_status_label.setText("❌ Failed to download model")
+                        self.local_model_status_label.setStyleSheet("color: red;")
+
+            def _check_done():
+                if dl_result['done']:
+                    _finalize()
+
+            poll_timer.timeout.connect(_check_done)
+            poll_timer.start(150)  # light, keeps GUI responsive
             return
         except Exception as e:
+            self._model_download_in_progress = False
             QMessageBox.critical(self.dialog, "Error", str(e))
             return
         
