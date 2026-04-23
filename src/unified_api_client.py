@@ -8436,14 +8436,18 @@ class UnifiedClient:
         """Save request payload for debugging with retry reason tracking
         
         Automatically organizes:
-        - Image payloads to Payloads/image/ folder
-        - Safety configs to Payloads/safety_configs/ folder
+        - Image payloads (vision input OR image-generation output) to
+          ``Payloads/image/`` folder.
+        - Safety configs to ``Payloads/safety_configs/`` folder.
         """
         if _PAYLOADS_DISABLED:
             return
         
-        # Check if this payload contains images
-        has_images = self._payload_has_images(messages)
+        # Route to Payloads/image/ for both vision-input *and* image-output
+        # (text→image) requests. Previously this only checked the input
+        # messages, so text-to-image generation requests ended up in
+        # Payloads/translation/ next to actual translation dumps.
+        has_images = self._is_image_request(messages)
         
         # Determine base directory based on content
         if has_images:
@@ -8801,6 +8805,69 @@ class UnifiedClient:
         except Exception as e:
             print(f"Failed to attach usage to payload: {e}")
 
+
+    def _is_image_request(self, messages, context: Optional[str] = None) -> bool:
+        """Return True if this request should be filed under ``Payloads/image/``.
+
+        An "image request" is anything where the bytes on the wire are
+        image-related — either the **input** contains images (vision/OCR)
+        or the **output** will be an image (text→image generation). Both
+        cases should be kept out of ``Payloads/translation/`` so the
+        translation dumps stay small and easy to diff.
+
+        Detection:
+          * Input contains base64 image parts (``_payload_has_images``).
+          * ``ENABLE_IMAGE_OUTPUT_MODE=1`` in env (GUI image-gen toggle).
+          * Model name matches a known image-generating family
+            (``gemini-*-image-preview``, ``gemini-3-pro-image``, ``imagen``,
+            ``dall-e``, ``gpt-image``, ``stability``, ``flux``, ``sdxl``).
+          * Caller/thread context is image-shaped (``image``,
+            ``image_translation``, ``image_generation``, or the thread
+            name contains "Image").
+        """
+        try:
+            if self._payload_has_images(messages):
+                return True
+        except Exception:
+            pass
+        try:
+            if os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1":
+                return True
+        except Exception:
+            pass
+        try:
+            model_lower = (getattr(self, "model", "") or "").lower()
+            image_model_markers = (
+                "image-preview",
+                "gemini-3-pro-image",
+                "imagen",
+                "dall-e",
+                "gpt-image",
+                "stability",
+                "stable-diffusion",
+                "flux",
+                "sdxl",
+            )
+            for marker in image_model_markers:
+                if marker in model_lower:
+                    return True
+        except Exception:
+            pass
+        try:
+            ctx = context if context is not None else getattr(self, "context", None)
+            if isinstance(ctx, str) and ctx:
+                cl = ctx.lower()
+                if cl in ("image", "image_translation", "image_generation", "imagegen"):
+                    return True
+        except Exception:
+            pass
+        try:
+            tname = threading.current_thread().name or ""
+            if "Image" in tname or "image_gen" in tname.lower():
+                return True
+        except Exception:
+            pass
+        return False
 
     def _payload_has_images(self, messages) -> bool:
         """Check if a payload contains base64 image data
@@ -13547,8 +13614,10 @@ class UnifiedClient:
         import re
         response_name = re.sub(r'[<>:\"/\\|?*]', '_', str(response_name))
         
-        # Check if this is an image request by inspecting config_data
-        has_images = "IMAGE" in config_data.get('type', '')
+        # Check if this is an image request by inspecting config_data or
+        # falling back to the unified detector (covers text→image paths
+        # where the caller didn't tag the config type).
+        has_images = "IMAGE" in config_data.get('type', '') or self._is_image_request([])
         
         # Use image directory if it's an image request, otherwise use normal thread directory
         if has_images:
