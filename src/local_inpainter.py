@@ -160,6 +160,39 @@ LAMA_JIT_MODELS = {
         'md5': 'de31ffa5ba26916b8ea35319f6c12151ff9654d4261bccf0583a69bb095315f9',
         'name': 'Anime/Manga ONNX (Dynamic)',
         'is_onnx': True  # Flag to indicate this is ONNX
+    },
+    # PixelHacker (CVPR 2025) — diffusion-based, SOTA on Places2/CelebA-HQ/FFHQ.
+    # Requires the SD-VAE + diffusers library. Full inference is much slower
+    # than LaMa (~3-10s per call on GPU) but can recover complex backgrounds.
+    'pixelhacker': {
+        'repo_id': 'hustvl/PixelHacker',
+        'filename': 'ft_places2/diffusion_pytorch_model.bin',
+        'md5': None,
+        'name': 'PixelHacker (Places2 fine-tune)',
+        'requires_vae': True,
+        'vae_key': 'pixelhacker_vae',
+        'requires_diffusers': True
+    },
+    # Auxiliary VAE weights for PixelHacker. Downloaded automatically alongside
+    # 'pixelhacker' via the cascade logic in LocalInpainter.download_jit_model.
+    'pixelhacker_vae': {
+        'repo_id': 'hustvl/PixelHacker',
+        'filename': 'vae/diffusion_pytorch_model.bin',
+        'md5': None,
+        'name': 'PixelHacker VAE'
+    },
+    # MangaInpainting (Xie et al., SIGGRAPH 2021). Weights live on Google Drive
+    # and the model requires an auxiliary line-drawing input plus a ScreenVAE,
+    # so it is NOT a drop-in replacement for the other methods here. Exposed in
+    # the dropdown for awareness; the download button shows an informational
+    # dialog with manual-install instructions rather than fetching anything.
+    'mangainpaint': {
+        'manual_only': True,
+        'name': 'Seamless Manga Inpainting (SIGGRAPH 2021)',
+        'repo_url': 'https://github.com/msxie92/MangaInpainting',
+        'weights_url': 'https://drive.google.com/file/d/1YeVwaNfchLhy3lAA7jOLBP-W23onjy8S/view?usp=sharing',
+        'screenvae_url': 'https://drive.google.com/file/d/1QaXqR4KWl_lxntSy32QpQpXb-1-EP7_L/view',
+        'line_extractor_url': 'https://github.com/ljsabc/MangaLineExtraction'
     }
 }
 
@@ -629,6 +662,13 @@ class LocalInpainter:
         'anime': ('Anime/Manga Inpainting', FFCInpaintModel),
         'anime_onnx': ('Anime ONNX (Fast)', FFCInpaintModel),
         'lama_official': ('Official LaMa', FFCInpaintModel),
+        # Diffusion-based; the model class is handled via a custom loader path
+        # (pixelhacker_inference.PixelHackerPipeline). FFCInpaintModel is a
+        # placeholder here only to keep downstream callers that look up the
+        # class pair from raising; it is never actually instantiated.
+        'pixelhacker': ('PixelHacker (Diffusion)', FFCInpaintModel),
+        # Dropdown-only entry. load_model() returns False with a helpful log.
+        'mangainpaint': ('MangaInpainting (Manual Install)', FFCInpaintModel),
     }
     
     def __init__(self, config_path="config.json", enable_worker_process=None):
@@ -694,6 +734,9 @@ class LocalInpainter:
         self.use_onnx = False
         self.is_jit_model = False
         self.pad_mod = 8
+        # PixelHacker keeps its model state in a dedicated runner so it doesn't
+        # collide with the generic self.model flow used by LaMa/MAT/AOT.
+        self.pixelhacker_runner = None
         
         # Multiprocessing worker (to avoid UI freeze on init/inference)
         try:
@@ -2166,12 +2209,35 @@ class LocalInpainter:
         if cached and os.path.exists(cached):
             if hasattr(self, 'progress_queue'):
                 self.progress_queue.put(('model_file_status', '✅ Model found in cache'))
+            # Even if the primary file is cached, make sure cascade dependencies
+            # (e.g. the PixelHacker VAE) are also present; this is cheap if they
+            # are already downloaded.
+            try:
+                info = LAMA_JIT_MODELS.get(method, {})
+                if info.get('requires_vae') and info.get('vae_key'):
+                    self.download_jit_model(info['vae_key'])
+            except Exception as cascade_err:
+                logger.warning(f"Cascade VAE download check failed: {cascade_err}")
             return cached
             
         # Not cached, need to download
         try:
             if method in LAMA_JIT_MODELS:
                 model_info = LAMA_JIT_MODELS[method]
+
+                # Manual-install methods (e.g. MangaInpainting) can't be fetched
+                # automatically. Surface the instructional info via the log and
+                # return None so the UI can show a helpful dialog.
+                if model_info.get('manual_only'):
+                    msg = (
+                        f"{model_info.get('name', method)} requires manual "
+                        f"installation. See: {model_info.get('repo_url', '')}"
+                    )
+                    logger.warning(msg)
+                    if hasattr(self, 'progress_queue'):
+                        self.progress_queue.put(('model_file_status', f'ℹ️ {msg}'))
+                    return None
+
                 logger.info(f"📥 Downloading {model_info['name']}...")
                 if hasattr(self, 'progress_queue'):
                     self.progress_queue.put(('model_file_status', f"📥 Downloading {model_info['name']}..."))
@@ -2212,6 +2278,18 @@ class LocalInpainter:
                 
                 if hasattr(self, 'progress_queue'):
                     self.progress_queue.put(('model_file_status', '✅ Download complete'))
+
+                # Cascade: fetch any declared VAE dependency after the main model.
+                if model_info.get('requires_vae') and model_info.get('vae_key'):
+                    try:
+                        logger.info(
+                            f"⚙️ {model_info['name']} needs an auxiliary VAE; "
+                            f"fetching {model_info['vae_key']}..."
+                        )
+                        self.download_jit_model(model_info['vae_key'])
+                    except Exception as cascade_err:
+                        logger.warning(f"VAE cascade download failed: {cascade_err}")
+
                 return model_path
             else:
                 error_msg = f"No JIT model available for {method}"
@@ -2357,6 +2435,85 @@ class LocalInpainter:
         # Return immediately to keep GUI responsive
         return None
     
+    def _load_pixelhacker(self, model_path: str) -> bool:
+        """Load PixelHacker weights + auxiliary VAE via the vendored runner.
+
+        Returns True on success. On failure, logs a clear message and returns
+        False so the UI can show an appropriate error without crashing.
+        """
+        try:
+            # Resolve the auxiliary VAE path. We expect it to have been
+            # downloaded alongside the main weights (see download_jit_model's
+            # cascade logic).
+            vae_info = LAMA_JIT_MODELS.get('pixelhacker_vae', {})
+            vae_filename = vae_info.get('filename')
+            if not vae_filename:
+                logger.error("PixelHacker VAE info missing from LAMA_JIT_MODELS")
+                return False
+            vae_path = os.path.join(CACHE_DIR, vae_filename)
+            if not os.path.exists(vae_path):
+                logger.info(
+                    "PixelHacker VAE not cached; downloading "
+                    "(one-time, ~300 MB)..."
+                )
+                dl = self.download_jit_model('pixelhacker_vae')
+                if dl and os.path.exists(dl):
+                    vae_path = dl
+                else:
+                    logger.error(
+                        "Could not obtain PixelHacker VAE weights; aborting load"
+                    )
+                    return False
+
+            if not os.path.exists(model_path):
+                logger.error(f"PixelHacker weight file not found: {model_path}")
+                return False
+
+            # Lazy import to avoid paying the cost at startup.
+            try:
+                from pixelhacker_inference import (
+                    PixelHackerRunner,
+                    PixelHackerUnavailableError,
+                )
+            except Exception as imp_err:
+                logger.error(
+                    f"Could not import pixelhacker_inference helper: {imp_err}"
+                )
+                return False
+
+            device = 'cuda' if (self.use_gpu and TORCH_AVAILABLE and torch is not None
+                                 and torch.cuda.is_available()) else 'cpu'
+            dtype = 'fp16' if device.startswith('cuda') else 'fp32'
+            logger.info(
+                f"🎨 Initializing PixelHacker on {device} ({dtype}); this may take "
+                f"a while on first use while upstream code is fetched"
+            )
+
+            try:
+                runner = PixelHackerRunner(
+                    model_weight_path=model_path,
+                    vae_weight_path=vae_path,
+                    device=device,
+                    dtype=dtype,
+                )
+            except PixelHackerUnavailableError as un:
+                logger.error(str(un))
+                return False
+            except Exception as build_err:
+                logger.error(f"Failed to build PixelHacker runner: {build_err}")
+                logger.error(traceback.format_exc())
+                return False
+
+            # Stash the runner separately from self.model (which is an nn.Module
+            # elsewhere) so the rest of the loading pipeline stays uncontaminated.
+            self.pixelhacker_runner = runner
+            self.model = None
+            return True
+        except Exception as outer:
+            logger.error(f"Unexpected error loading PixelHacker: {outer}")
+            logger.error(traceback.format_exc())
+            return False
+
     def load_model(self, method, model_path, force_reload=False):
         """Load model - supports both JIT and checkpoint files with ONNX conversion"""
         try:
@@ -2448,6 +2605,39 @@ class LocalInpainter:
                 # Only log when we're actually going to load
                 logger.info(f"📥 Loading {method} from {model_path}")
             # else: model is loaded and current, no logging needed
+
+            # ---- PixelHacker (diffusion) ----------------------------------
+            # Handled before the generic file-type detection because PixelHacker
+            # weights are .bin files that must NOT be fed to torch.jit.load or
+            # onnxruntime.
+            if str(method).lower() == 'pixelhacker':
+                ok = self._load_pixelhacker(model_path)
+                if ok:
+                    self.model_loaded = True
+                    self.current_method = 'pixelhacker'
+                    self.use_onnx = False
+                    self.is_jit_model = False
+                    try:
+                        self.config[f'{method}_model_path'] = model_path
+                        self.config[f'manga_{method}_model_path'] = model_path
+                        self._save_config()
+                    except Exception:
+                        pass
+                return ok
+
+            # ---- MangaInpainting (manual install only) --------------------
+            # The upstream model needs a line-drawing + ScreenVAE auxiliary
+            # pipeline that isn't wired up here. Fail fast with instructions.
+            if str(method).lower() == 'mangainpaint':
+                logger.error(
+                    "MangaInpainting (Xie et al., SIGGRAPH 2021) is not a drop-in "
+                    "replacement: it requires a line-drawing extractor and a "
+                    "ScreenVAE, which are not integrated into Glossarion. See: "
+                    "https://github.com/msxie92/MangaInpainting for manual setup. "
+                    "For manga text removal we recommend 'anime_onnx' instead."
+                )
+                self.model_loaded = False
+                return False
 
             # Normalize path and enforce expected extension for certain methods
             try:
@@ -2933,6 +3123,13 @@ class LocalInpainter:
             except Exception:
                 pass
 
+            # Release PixelHacker runner (if any)
+            try:
+                if getattr(self, 'pixelhacker_runner', None) is not None:
+                    self.pixelhacker_runner = None
+            except Exception:
+                pass
+
             # Drop bubble detector reference (not the global cache)
             try:
                 self.bubble_detector = None
@@ -3180,7 +3377,29 @@ class LocalInpainter:
         if not self.model_loaded:
             self._log("No model loaded", "error")
             return image
-        
+
+        # ---- PixelHacker branch ----------------------------------------
+        # Runs before the HD / tiling paths; PixelHacker internally resizes
+        # to 512x512, so tiling doesn't help and would fragment context.
+        if str(self.current_method or '').lower() == 'pixelhacker':
+            runner = getattr(self, 'pixelhacker_runner', None)
+            if runner is None:
+                self._log("PixelHacker runner missing; returning original image", "error")
+                return image
+            try:
+                if len(mask.shape) == 3:
+                    mask_gray = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                else:
+                    mask_gray = mask
+                # Input arrives in BGR from OpenCV; PixelHacker is an RGB model.
+                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                out_rgb = runner.inpaint(image_rgb, mask_gray)
+                return cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
+            except Exception as ph_err:
+                self._log(f"PixelHacker inpainting failed: {ph_err}", "error")
+                logger.error(traceback.format_exc())
+                return image
+
         try:
             # Store original dimensions
             orig_h, orig_w = image.shape[:2]

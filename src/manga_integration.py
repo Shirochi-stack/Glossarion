@@ -4394,7 +4394,12 @@ class MangaTranslationTab(QObject):
 
         self.local_model_type_value = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')
         local_model_combo = QComboBox()
-        local_model_combo.addItems(['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local'])
+        local_model_combo.addItems([
+            'aot', 'aot_onnx', 'lama', 'lama_onnx',
+            'anime', 'anime_onnx', 'mat',
+            'pixelhacker', 'mangainpaint',
+            'ollama', 'sd_local',
+        ])
         local_model_combo.setCurrentText(self.local_model_type_value)
         local_model_combo.setMinimumWidth(120)
         local_model_combo.setMaximumWidth(120)
@@ -4415,6 +4420,8 @@ class MangaTranslationTab(QObject):
             'anime': 'Anime/Manga Inpainting',
             'anime_onnx': 'Anime ONNX (Fast/Optimized)',
             'lama_onnx': 'LaMa ONNX (Optimized)',
+            'pixelhacker': 'PixelHacker (Diffusion, SOTA, slow)',
+            'mangainpaint': 'MangaInpainting (Manual install only)',
         }
         self.model_desc_label = QLabel(model_desc.get(self.local_model_type_value, ''))
         desc_font = QFont('Arial', 8)
@@ -8118,6 +8125,8 @@ class MangaTranslationTab(QObject):
             'anime': 'Anime/Manga Inpainting',
             'anime_onnx': 'Anime ONNX (Fast/Optimized)',
             'lama_onnx': 'LaMa ONNX (Optimized)',
+            'pixelhacker': 'PixelHacker (Diffusion, SOTA, slow)',
+            'mangainpaint': 'MangaInpainting (Manual install only)',
         }
         self.model_desc_label.setText(model_desc.get(model_type, ''))
         
@@ -8151,9 +8160,9 @@ class MangaTranslationTab(QObject):
         model_type = self.local_model_type_value
         
         if model_type == 'sd_local':
-            filter_str = "Model files (*.safetensors *.pt *.pth *.ckpt *.onnx);;SafeTensors (*.safetensors);;Checkpoint files (*.ckpt);;PyTorch models (*.pt *.pth);;ONNX models (*.onnx);;All files (*.*)"
+            filter_str = "Model files (*.safetensors *.pt *.pth *.ckpt *.onnx *.bin);;SafeTensors (*.safetensors);;Checkpoint files (*.ckpt);;PyTorch models (*.pt *.pth *.bin);;ONNX models (*.onnx);;All files (*.*)"
         else:
-            filter_str = "Model files (*.safetensors *.pt *.pth *.ckpt *.onnx);;SafeTensors (*.safetensors);;Checkpoint files (*.ckpt);;PyTorch models (*.pt *.pth);;ONNX models (*.onnx);;All files (*.*)"
+            filter_str = "Model files (*.safetensors *.pt *.pth *.ckpt *.onnx *.bin);;SafeTensors (*.safetensors);;Checkpoint files (*.ckpt);;PyTorch models (*.pt *.pth *.bin);;ONNX models (*.onnx);;All files (*.*)"
         
         path, _ = QFileDialog.getOpenFileName(
             self.dialog,
@@ -8485,6 +8494,26 @@ class MangaTranslationTab(QObject):
         from PySide6.QtCore import QTimer
         
         model_type = self.local_model_type_value
+
+        # MangaInpainting cannot be auto-downloaded (weights on Google Drive +
+        # aux models + requires line-drawing input). Show an informational
+        # dialog instead of attempting a fetch.
+        if model_type == 'mangainpaint':
+            QMessageBox.information(
+                self.dialog,
+                "MangaInpainting — Manual Setup Required",
+                "MangaInpainting (Xie et al., SIGGRAPH 2021) can't be installed "
+                "automatically because:\n\n"
+                "• Weights are hosted on Google Drive (not HuggingFace)\n"
+                "• It also needs a ScreenVAE and a line-drawing extractor\n"
+                "• It requires line-drawing input that isn't produced by the "
+                "current pipeline\n\n"
+                "For manga text removal, 'anime_onnx' is the recommended "
+                "option.\n\nReference links:\n"
+                "• https://github.com/msxie92/MangaInpainting\n"
+                "• https://github.com/ljsabc/MangaLineExtraction"
+            )
+            return
         
         # Guard: if config has a .json path (e.g., credentials), clear it before downloading
         try:
@@ -8793,7 +8822,30 @@ class MangaTranslationTab(QObject):
                         "• Get from HuggingFace\n"
                         "• Requires significant VRAM (4-8GB)\n"
                         "• Best quality but slowest\n"
-                        "• Can use custom prompts"
+                        "• Can use custom prompts",
+
+            'pixelhacker': "PixelHacker (Diffusion):\n\n"
+                           "• Diffusion-based inpainter from HUST + VIVO AI Lab\n"
+                           "• SOTA on Places2, CelebA-HQ and FFHQ benchmarks\n"
+                           "• Auto-downloads from HuggingFace hustvl/PixelHacker\n"
+                           "• Requires an auxiliary SD-VAE (downloaded automatically)\n"
+                           "• Requires 'diffusers >= 0.30.2' + 'transformers'\n"
+                           "• File size: ~800MB model + ~300MB VAE\n"
+                           "• VRAM: ~2GB fp16 / ~3GB fp32 at 512x512\n"
+                           "• Inference ~3-10s per call (much slower than LaMa)\n\n"
+                           "⚠️ Best for complex scenes. For flat manga text "
+                           "backgrounds, 'anime_onnx' is typically faster and "
+                           "equally good.",
+
+            'mangainpaint': "Seamless Manga Inpainting (SIGGRAPH 2021):\n\n"
+                            "• Manual install only — not integrated\n"
+                            "• Needs 3 models: inpainter + ScreenVAE + line extractor\n"
+                            "• Requires an extra line-drawing input per image\n"
+                            "• Weights hosted on Google Drive (not HuggingFace)\n\n"
+                            "Reference:\n"
+                            "• github.com/msxie92/MangaInpainting\n"
+                            "• github.com/ljsabc/MangaLineExtraction\n\n"
+                            "For manga text removal, use 'anime_onnx' instead."
         }
         
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
