@@ -4394,12 +4394,7 @@ class MangaTranslationTab(QObject):
 
         self.local_model_type_value = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')
         local_model_combo = QComboBox()
-        local_model_combo.addItems([
-            'aot', 'aot_onnx', 'lama', 'lama_onnx',
-            'anime', 'anime_onnx', 'mat',
-            'pixelhacker', 'mangainpaint',
-            'ollama', 'sd_local',
-        ])
+        local_model_combo.addItems(['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local'])
         local_model_combo.setCurrentText(self.local_model_type_value)
         local_model_combo.setMinimumWidth(120)
         local_model_combo.setMaximumWidth(120)
@@ -4420,8 +4415,6 @@ class MangaTranslationTab(QObject):
             'anime': 'Anime/Manga Inpainting',
             'anime_onnx': 'Anime ONNX (Fast/Optimized)',
             'lama_onnx': 'LaMa ONNX (Optimized)',
-            'pixelhacker': 'PixelHacker (Diffusion, SOTA, slow)',
-            'mangainpaint': 'MangaInpainting (Manual install only)',
         }
         self.model_desc_label = QLabel(model_desc.get(self.local_model_type_value, ''))
         desc_font = QFont('Arial', 8)
@@ -8125,8 +8118,6 @@ class MangaTranslationTab(QObject):
             'anime': 'Anime/Manga Inpainting',
             'anime_onnx': 'Anime ONNX (Fast/Optimized)',
             'lama_onnx': 'LaMa ONNX (Optimized)',
-            'pixelhacker': 'PixelHacker (Diffusion, SOTA, slow)',
-            'mangainpaint': 'MangaInpainting (Manual install only)',
         }
         self.model_desc_label.setText(model_desc.get(model_type, ''))
         
@@ -8160,9 +8151,9 @@ class MangaTranslationTab(QObject):
         model_type = self.local_model_type_value
         
         if model_type == 'sd_local':
-            filter_str = "Model files (*.safetensors *.pt *.pth *.ckpt *.onnx *.bin);;SafeTensors (*.safetensors);;Checkpoint files (*.ckpt);;PyTorch models (*.pt *.pth *.bin);;ONNX models (*.onnx);;All files (*.*)"
+            filter_str = "Model files (*.safetensors *.pt *.pth *.ckpt *.onnx);;SafeTensors (*.safetensors);;Checkpoint files (*.ckpt);;PyTorch models (*.pt *.pth);;ONNX models (*.onnx);;All files (*.*)"
         else:
-            filter_str = "Model files (*.safetensors *.pt *.pth *.ckpt *.onnx *.bin);;SafeTensors (*.safetensors);;Checkpoint files (*.ckpt);;PyTorch models (*.pt *.pth *.bin);;ONNX models (*.onnx);;All files (*.*)"
+            filter_str = "Model files (*.safetensors *.pt *.pth *.ckpt *.onnx);;SafeTensors (*.safetensors);;Checkpoint files (*.ckpt);;PyTorch models (*.pt *.pth);;ONNX models (*.onnx);;All files (*.*)"
         
         path, _ = QFileDialog.getOpenFileName(
             self.dialog,
@@ -8494,26 +8485,6 @@ class MangaTranslationTab(QObject):
         from PySide6.QtCore import QTimer
         
         model_type = self.local_model_type_value
-
-        # MangaInpainting cannot be auto-downloaded (weights on Google Drive +
-        # aux models + requires line-drawing input). Show an informational
-        # dialog instead of attempting a fetch.
-        if model_type == 'mangainpaint':
-            QMessageBox.information(
-                self.dialog,
-                "MangaInpainting — Manual Setup Required",
-                "MangaInpainting (Xie et al., SIGGRAPH 2021) can't be installed "
-                "automatically because:\n\n"
-                "• Weights are hosted on Google Drive (not HuggingFace)\n"
-                "• It also needs a ScreenVAE and a line-drawing extractor\n"
-                "• It requires line-drawing input that isn't produced by the "
-                "current pipeline\n\n"
-                "For manga text removal, 'anime_onnx' is the recommended "
-                "option.\n\nReference links:\n"
-                "• https://github.com/msxie92/MangaInpainting\n"
-                "• https://github.com/ljsabc/MangaLineExtraction"
-            )
-            return
         
         # Guard: if config has a .json path (e.g., credentials), clear it before downloading
         try:
@@ -8544,208 +8515,51 @@ class MangaTranslationTab(QObject):
             from local_inpainter import LocalInpainter
             # Temporarily create instance just to check cache (doesn't load model)
             temp_inp = LocalInpainter()
-            cached_path = temp_inp.get_cached_model_path(model_type)
-
-            # Fast path: already cached — just auto-load without touching the net.
-            if cached_path and os.path.exists(cached_path):
-                self.local_model_entry.setText(cached_path)
-                self.local_model_path_value = cached_path
-                self.main_gui.config[f'manga_{model_type}_model_path'] = cached_path
-                self._save_rendering_settings()
-                self._try_load_model(model_type, cached_path, show_completion_dialog=True)
-                return
-
-            # Slow path: needs a network fetch. Run it on a background thread
-            # so the GUI doesn't freeze — this matters especially for large
-            # multi-file models like PixelHacker (~1.1 GB across two files).
-            model_name = model_type.upper()
-            if model_type in ['anime_onnx', 'aot_onnx', 'lama_onnx']:
-                model_name = f"Optimized {model_type.split('_')[0].upper()}"
-            elif model_type == 'sd_local':
-                model_name = "Stable Diffusion"
-            elif model_type == 'pixelhacker':
-                model_name = "PixelHacker (model + VAE, ~1.1 GB)"
-
-            if hasattr(self, 'local_model_status_label'):
-                self.local_model_status_label.setText(f"📥 Downloading {model_name}...")
-                self.local_model_status_label.setStyleSheet("color: #4a9eff;")
-                # Force an immediate repaint so the user sees the initial status
-                # before the worker thread spins up.
-                try:
-                    self.local_model_status_label.repaint()
-                    from PySide6.QtWidgets import QApplication as _QApp
-                    _QApp.processEvents()
-                except Exception:
-                    pass
-
-            # Guard: don't kick off a second concurrent download if one is
-            # already running for this dialog instance.
-            if getattr(self, '_model_download_in_progress', False):
-                QMessageBox.information(
-                    self.dialog, "Download in progress",
-                    "Another model download is already running. Please wait."
-                )
-                return
-            self._model_download_in_progress = True
-
-            import threading
-            import time as _dl_time
-            from queue import Queue as _DLQueue, Empty as _DLEmpty
-            from PySide6.QtCore import QTimer
-
-            # Wire up a progress queue so LocalInpainter.download_jit_model can
-            # push status strings back to us while the download runs on the
-            # worker thread. See local_inpainter.download_jit_model for the
-            # ('model_file_status', text) contract.
-            temp_inp.progress_queue = _DLQueue()
-
-            # Snapshot the cache dir BEFORE the download starts so our watcher
-            # can find the "growing file" without false positives from older
-            # cached models.
-            try:
-                from local_inpainter import CACHE_DIR as _CACHE_DIR
-            except Exception:
-                _CACHE_DIR = os.path.expanduser('~/.cache/inpainting')
-
-            def _snapshot_sizes(root):
-                seen = {}
-                try:
-                    for dp, _dn, fn in os.walk(root):
-                        for f in fn:
-                            p = os.path.join(dp, f)
-                            try:
-                                seen[p] = os.path.getsize(p)
-                            except OSError:
-                                pass
-                except Exception:
-                    pass
-                return seen
-
-            pre_sizes = _snapshot_sizes(_CACHE_DIR)
-
-            dl_result = {
-                'path': None,
-                'error': None,
-                'done': False,
-                'last_status': f"📥 Downloading {model_name}...",
-                'started_at': _dl_time.time(),
-                'live_bytes': 0,
-                'live_file': None,
-            }
-
-            def _dl_worker():
-                try:
-                    dl_result['path'] = temp_inp.download_jit_model(model_type)
-                except Exception as worker_err:
-                    dl_result['error'] = str(worker_err)
-                finally:
-                    dl_result['done'] = True
-
-            thread = threading.Thread(target=_dl_worker, daemon=True)
-            thread.start()
-
-            # Lightweight file-size watcher. Finds whichever file under the
-            # cache dir is currently growing the fastest and reports its size.
-            # Catches HF's .incomplete/.lock-style temp files too.
-            def _watch_loop():
-                while not dl_result['done']:
+            model_path = temp_inp.get_cached_model_path(model_type)
+            
+            # Update status labels before download
+            if not (model_path and os.path.exists(model_path)):
+                # Get model display name from the constants
+                model_name = model_type.upper()
+                if model_type in ['anime_onnx', 'aot_onnx', 'lama_onnx']:
+                    model_name = f"Optimized {model_type.split('_')[0].upper()}"
+                elif model_type == 'sd_local':
+                    model_name = "Stable Diffusion"
+                
+                if hasattr(self, 'local_model_status_label'):
+                    self.local_model_status_label.setText(f"📥 Downloading {model_name} model...")
+                    self.local_model_status_label.setStyleSheet("color: #4a9eff;")
                     try:
-                        cur = _snapshot_sizes(_CACHE_DIR)
-                        best_path = None
-                        best_size = 0
-                        for p, sz in cur.items():
-                            delta = sz - pre_sizes.get(p, 0)
-                            if delta > best_size and sz > 1024 * 1024:
-                                best_size = delta
-                                best_path = p
-                        if best_path:
-                            dl_result['live_bytes'] = best_size
-                            dl_result['live_file'] = os.path.basename(best_path)
+                        # Force immediate repaint so the user sees the status before blocking work
+                        self.local_model_status_label.repaint()
+                        from PySide6.QtWidgets import QApplication as _QApp
+                        _QApp.processEvents()
                     except Exception:
                         pass
-                    _dl_time.sleep(0.5)
-
-            threading.Thread(target=_watch_loop, daemon=True).start()
-
-            poll_timer = QTimer(self.dialog)
-
-            def _drain_queue():
-                """Pop any fresh status messages from the worker."""
-                changed = False
+                
                 try:
-                    while True:
-                        msg = temp_inp.progress_queue.get_nowait()
-                        # Messages are (kind, payload...); we only care about
-                        # string status updates here.
-                        if isinstance(msg, tuple) and len(msg) >= 2:
-                            text = str(msg[1])
-                            dl_result['last_status'] = text
-                            changed = True
-                except _DLEmpty:
-                    pass
-                except Exception:
-                    pass
-                return changed
-
-            def _tick():
-                # Always drain new status lines so the label stays fresh.
-                _drain_queue()
-                if hasattr(self, 'local_model_status_label'):
-                    elapsed = int(_dl_time.time() - dl_result['started_at'])
-                    bytes_dl = dl_result['live_bytes']
-                    # Compose: <status>  (<elapsed>s — <MB> MB)
-                    parts = [dl_result['last_status']]
-                    extras = []
-                    if elapsed > 1:
-                        extras.append(f"{elapsed}s")
-                    if bytes_dl > 1024 * 1024:
-                        mb = bytes_dl / (1024 * 1024)
-                        if elapsed > 0:
-                            rate = mb / elapsed
-                            extras.append(f"{mb:.1f} MB @ {rate:.1f} MB/s")
-                        else:
-                            extras.append(f"{mb:.1f} MB")
-                    if extras:
-                        parts.append("  (" + " — ".join(extras) + ")")
-                    self.local_model_status_label.setText("".join(parts))
-                    self.local_model_status_label.setStyleSheet("color: #4a9eff;")
-                if dl_result['done']:
-                    _finalize()
-
-            def _finalize():
-                poll_timer.stop()
-                # Drain any last-mile messages (e.g. the final '✅ Download complete').
-                _drain_queue()
-                self._model_download_in_progress = False
-                err = dl_result['error']
-                path = dl_result['path']
-                if err:
+                    model_path = temp_inp.download_jit_model(model_type)
+                except Exception as e:
                     if hasattr(self, 'local_model_status_label'):
-                        self.local_model_status_label.setText(f"Download failed: {err}")
+                        self.local_model_status_label.setText(f"Download failed: {str(e)}")
                         self.local_model_status_label.setStyleSheet("color: red;")
-                    QMessageBox.critical(self.dialog, "Download Error", err)
+                    QMessageBox.critical(self.dialog, "Download Error", str(e))
                     return
-                if path and os.path.exists(path):
-                    if hasattr(self, 'local_model_status_label'):
-                        self.local_model_status_label.setText("✅ Download complete")
-                        self.local_model_status_label.setStyleSheet("color: green;")
-                    self.local_model_entry.setText(path)
-                    self.local_model_path_value = path
-                    self.main_gui.config[f'manga_{model_type}_model_path'] = path
-                    self._save_rendering_settings()
-                    self._try_load_model(model_type, path, show_completion_dialog=True)
-                else:
-                    if hasattr(self, 'local_model_status_label'):
-                        self.local_model_status_label.setText("❌ Failed to download model")
-                        self.local_model_status_label.setStyleSheet("color: red;")
-
-            poll_timer.timeout.connect(_tick)
-            # 250 ms keeps the elapsed-counter readable without hammering the
-            # event loop; the worker-thread I/O is unaffected.
-            poll_timer.start(250)
+            
+            if model_path and os.path.exists(model_path):
+                # Use downloaded/cached model
+                self.local_model_entry.setText(model_path)
+                self.local_model_path_value = model_path
+                # Save path and immediately try to load
+                self.main_gui.config[f'manga_{model_type}_model_path'] = model_path
+                self._save_rendering_settings()
+                self._try_load_model(model_type, model_path, show_completion_dialog=True)
+            else:
+                if hasattr(self, 'local_model_status_label'):
+                    self.local_model_status_label.setText("❌ Failed to download model")
+                    self.local_model_status_label.setStyleSheet("color: red;")
             return
         except Exception as e:
-            self._model_download_in_progress = False
             QMessageBox.critical(self.dialog, "Error", str(e))
             return
         
@@ -8979,30 +8793,7 @@ class MangaTranslationTab(QObject):
                         "• Get from HuggingFace\n"
                         "• Requires significant VRAM (4-8GB)\n"
                         "• Best quality but slowest\n"
-                        "• Can use custom prompts",
-
-            'pixelhacker': "PixelHacker (Diffusion):\n\n"
-                           "• Diffusion-based inpainter from HUST + VIVO AI Lab\n"
-                           "• SOTA on Places2, CelebA-HQ and FFHQ benchmarks\n"
-                           "• Auto-downloads from HuggingFace hustvl/PixelHacker\n"
-                           "• Requires an auxiliary SD-VAE (downloaded automatically)\n"
-                           "• Requires 'diffusers >= 0.30.2' + 'transformers'\n"
-                           "• File size: ~800MB model + ~300MB VAE\n"
-                           "• VRAM: ~2GB fp16 / ~3GB fp32 at 512x512\n"
-                           "• Inference ~3-10s per call (much slower than LaMa)\n\n"
-                           "⚠️ Best for complex scenes. For flat manga text "
-                           "backgrounds, 'anime_onnx' is typically faster and "
-                           "equally good.",
-
-            'mangainpaint': "Seamless Manga Inpainting (SIGGRAPH 2021):\n\n"
-                            "• Manual install only — not integrated\n"
-                            "• Needs 3 models: inpainter + ScreenVAE + line extractor\n"
-                            "• Requires an extra line-drawing input per image\n"
-                            "• Weights hosted on Google Drive (not HuggingFace)\n\n"
-                            "Reference:\n"
-                            "• github.com/msxie92/MangaInpainting\n"
-                            "• github.com/ljsabc/MangaLineExtraction\n\n"
-                            "For manga text removal, use 'anime_onnx' instead."
+                        "• Can use custom prompts"
         }
         
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
