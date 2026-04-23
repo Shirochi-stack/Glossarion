@@ -128,8 +128,23 @@ class PixelHackerRunner:
 
         # Import from the now-available upstream module.
         # `utils.py` provides build_model + build_vae + load_cfg.
+        import utils as _ph_utils  # type: ignore
         from utils import load_cfg, build_model, build_vae  # type: ignore
         from pipeline import PixelHacker_Pipeline  # type: ignore
+
+        # The upstream `load_cfg` only needs `omegaconf` when it's handed a
+        # Python dict (it wraps it in an OmegaConf DictConfig). All downstream
+        # consumers access it with plain dict-style keys (`cfg['data']['image_size']`
+        # etc.), so a plain dict works just as well. Patch the function to
+        # drop the omegaconf dependency entirely.
+        _orig_load_cfg = _ph_utils.load_cfg
+
+        def _patched_load_cfg(cfg):
+            if isinstance(cfg, dict):
+                return cfg
+            return _orig_load_cfg(cfg)
+
+        _ph_utils.load_cfg = _patched_load_cfg
 
         torch_dtype = {
             "fp16": torch.float16,

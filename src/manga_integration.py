@@ -8569,6 +8569,14 @@ class MangaTranslationTab(QObject):
             if hasattr(self, 'local_model_status_label'):
                 self.local_model_status_label.setText(f"📥 Downloading {model_name}...")
                 self.local_model_status_label.setStyleSheet("color: #4a9eff;")
+                # Force an immediate repaint so the user sees the initial status
+                # before the worker thread spins up.
+                try:
+                    self.local_model_status_label.repaint()
+                    from PySide6.QtWidgets import QApplication as _QApp
+                    _QApp.processEvents()
+                except Exception:
+                    pass
 
             # Guard: don't kick off a second concurrent download if one is
             # already running for this dialog instance.
@@ -8581,9 +8589,49 @@ class MangaTranslationTab(QObject):
             self._model_download_in_progress = True
 
             import threading
+            import time as _dl_time
+            from queue import Queue as _DLQueue, Empty as _DLEmpty
             from PySide6.QtCore import QTimer
 
-            dl_result = {'path': None, 'error': None, 'done': False}
+            # Wire up a progress queue so LocalInpainter.download_jit_model can
+            # push status strings back to us while the download runs on the
+            # worker thread. See local_inpainter.download_jit_model for the
+            # ('model_file_status', text) contract.
+            temp_inp.progress_queue = _DLQueue()
+
+            # Snapshot the cache dir BEFORE the download starts so our watcher
+            # can find the "growing file" without false positives from older
+            # cached models.
+            try:
+                from local_inpainter import CACHE_DIR as _CACHE_DIR
+            except Exception:
+                _CACHE_DIR = os.path.expanduser('~/.cache/inpainting')
+
+            def _snapshot_sizes(root):
+                seen = {}
+                try:
+                    for dp, _dn, fn in os.walk(root):
+                        for f in fn:
+                            p = os.path.join(dp, f)
+                            try:
+                                seen[p] = os.path.getsize(p)
+                            except OSError:
+                                pass
+                except Exception:
+                    pass
+                return seen
+
+            pre_sizes = _snapshot_sizes(_CACHE_DIR)
+
+            dl_result = {
+                'path': None,
+                'error': None,
+                'done': False,
+                'last_status': f"📥 Downloading {model_name}...",
+                'started_at': _dl_time.time(),
+                'live_bytes': 0,
+                'live_file': None,
+            }
 
             def _dl_worker():
                 try:
@@ -8596,10 +8644,78 @@ class MangaTranslationTab(QObject):
             thread = threading.Thread(target=_dl_worker, daemon=True)
             thread.start()
 
+            # Lightweight file-size watcher. Finds whichever file under the
+            # cache dir is currently growing the fastest and reports its size.
+            # Catches HF's .incomplete/.lock-style temp files too.
+            def _watch_loop():
+                while not dl_result['done']:
+                    try:
+                        cur = _snapshot_sizes(_CACHE_DIR)
+                        best_path = None
+                        best_size = 0
+                        for p, sz in cur.items():
+                            delta = sz - pre_sizes.get(p, 0)
+                            if delta > best_size and sz > 1024 * 1024:
+                                best_size = delta
+                                best_path = p
+                        if best_path:
+                            dl_result['live_bytes'] = best_size
+                            dl_result['live_file'] = os.path.basename(best_path)
+                    except Exception:
+                        pass
+                    _dl_time.sleep(0.5)
+
+            threading.Thread(target=_watch_loop, daemon=True).start()
+
             poll_timer = QTimer(self.dialog)
+
+            def _drain_queue():
+                """Pop any fresh status messages from the worker."""
+                changed = False
+                try:
+                    while True:
+                        msg = temp_inp.progress_queue.get_nowait()
+                        # Messages are (kind, payload...); we only care about
+                        # string status updates here.
+                        if isinstance(msg, tuple) and len(msg) >= 2:
+                            text = str(msg[1])
+                            dl_result['last_status'] = text
+                            changed = True
+                except _DLEmpty:
+                    pass
+                except Exception:
+                    pass
+                return changed
+
+            def _tick():
+                # Always drain new status lines so the label stays fresh.
+                _drain_queue()
+                if hasattr(self, 'local_model_status_label'):
+                    elapsed = int(_dl_time.time() - dl_result['started_at'])
+                    bytes_dl = dl_result['live_bytes']
+                    # Compose: <status>  (<elapsed>s — <MB> MB)
+                    parts = [dl_result['last_status']]
+                    extras = []
+                    if elapsed > 1:
+                        extras.append(f"{elapsed}s")
+                    if bytes_dl > 1024 * 1024:
+                        mb = bytes_dl / (1024 * 1024)
+                        if elapsed > 0:
+                            rate = mb / elapsed
+                            extras.append(f"{mb:.1f} MB @ {rate:.1f} MB/s")
+                        else:
+                            extras.append(f"{mb:.1f} MB")
+                    if extras:
+                        parts.append("  (" + " — ".join(extras) + ")")
+                    self.local_model_status_label.setText("".join(parts))
+                    self.local_model_status_label.setStyleSheet("color: #4a9eff;")
+                if dl_result['done']:
+                    _finalize()
 
             def _finalize():
                 poll_timer.stop()
+                # Drain any last-mile messages (e.g. the final '✅ Download complete').
+                _drain_queue()
                 self._model_download_in_progress = False
                 err = dl_result['error']
                 path = dl_result['path']
@@ -8610,6 +8726,9 @@ class MangaTranslationTab(QObject):
                     QMessageBox.critical(self.dialog, "Download Error", err)
                     return
                 if path and os.path.exists(path):
+                    if hasattr(self, 'local_model_status_label'):
+                        self.local_model_status_label.setText("✅ Download complete")
+                        self.local_model_status_label.setStyleSheet("color: green;")
                     self.local_model_entry.setText(path)
                     self.local_model_path_value = path
                     self.main_gui.config[f'manga_{model_type}_model_path'] = path
@@ -8620,12 +8739,10 @@ class MangaTranslationTab(QObject):
                         self.local_model_status_label.setText("❌ Failed to download model")
                         self.local_model_status_label.setStyleSheet("color: red;")
 
-            def _check_done():
-                if dl_result['done']:
-                    _finalize()
-
-            poll_timer.timeout.connect(_check_done)
-            poll_timer.start(150)  # light, keeps GUI responsive
+            poll_timer.timeout.connect(_tick)
+            # 250 ms keeps the elapsed-counter readable without hammering the
+            # event loop; the worker-thread I/O is unaffected.
+            poll_timer.start(250)
             return
         except Exception as e:
             self._model_download_in_progress = False
