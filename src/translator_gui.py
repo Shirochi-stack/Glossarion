@@ -208,7 +208,7 @@ def _sweep_size_capped_dir(folder: str, max_bytes: int, label: str = "") -> tupl
         return (0, 0, 0, 0)
 
 
-def _sweep_large_caches(max_bytes: int = 500 * 1024 * 1024, phase: str = "startup") -> None:
+def _sweep_large_caches(max_bytes: int = 400 * 1024 * 1024, phase: str = "startup") -> None:
     """Enforce a per-folder size cap on app-local debug caches.
 
     Targets:
@@ -219,7 +219,7 @@ def _sweep_large_caches(max_bytes: int = 500 * 1024 * 1024, phase: str = "startu
         ``http_logger.enable_detailed_http_logging`` (resolved against the
         script/exe directory).
 
-    Each folder is independently capped at ``max_bytes`` (default 500 MB)
+    Each folder is independently capped at ``max_bytes`` (default 400 MB)
     by deleting oldest files first. These folders grow without bound
     otherwise because the debug dumps are append-only.
 
@@ -524,7 +524,7 @@ if '--run-pdf-extraction' in sys.argv:
         sys.exit(0)
 
 
-# Enforce a 500 MB cap on app-local debug caches (Payloads/, http_requests/).
+# Enforce a 400 MB cap on app-local debug caches (Payloads/, http_requests/).
 # Runs at startup and again at exit. Both runs log a [CLEANUP] line per
 # folder when anything is actually deleted. See `_sweep_large_caches` for
 # rationale and resolution order.
@@ -537,9 +537,19 @@ try:
 except Exception:
     pass
 
-# Log (but don't touch) `_MEIPASS` at exit so the user sees in their CMD
-# which temp dir the PyInstaller bootloader is about to clean up.
-# `_preempt_temp_dir_warning` is a no-op now — see its docstring.
+# Log `_MEIPASS` at startup so users can see where PyInstaller extracted
+# the onefile payload this run (useful when diagnosing the "Failed to
+# remove temporary directory" dialog). Registered as an atexit fallback
+# too, but the authoritative exit log is emitted explicitly from
+# `closeEvent` because `shutdown_utils.force_shutdown` calls `os._exit`
+# which skips atexit handlers.
+if getattr(sys, "frozen", False):
+    try:
+        _mei = getattr(sys, "_MEIPASS", None)
+        if _mei:
+            print(f"[CLEANUP] startup: _MEIPASS = {_mei}")
+    except Exception:
+        pass
 try:
     atexit.register(_log_mei_cleanup_on_exit)
 except Exception:
@@ -2460,7 +2470,19 @@ Text to analyze:
             print("[CLOSE] Close event handling completed")
             
             # Use immediate hard exit to prevent lingering background processes (especially for .exe)
-            # This is safer than relying on Python shutdown which waits for non-daemon threads
+            # This is safer than relying on Python shutdown which waits for non-daemon threads.
+            # NOTE: force_shutdown() ends with os._exit(), which SKIPS atexit handlers.
+            # Run the [CLEANUP] logging hooks explicitly here so they always fire
+            # on the normal close path (the atexit registration is a fallback for
+            # exit paths that don't go through force_shutdown).
+            try:
+                _sweep_large_caches(phase="exit")
+            except Exception:
+                pass
+            try:
+                _log_mei_cleanup_on_exit()
+            except Exception:
+                pass
             try:
                 from shutdown_utils import force_shutdown
                 force_shutdown(0)
