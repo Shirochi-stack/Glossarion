@@ -9759,13 +9759,13 @@ class UnifiedClient:
                 
                 # Check if image output mode is enabled
                 enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
-                # Force enable for any Gemini image-generating model (matches native path logic)
-                if "image-preview" in self.model.lower() or "imagen" in self.model.lower():
+                # Force enable for any model whose name contains "image"
+                if "image" in self.model.lower():
                     enable_image_output = True
                     if not self._is_stop_requested():
-                        print(f"🎨 Image output mode enabled for {self.model}")
+                        print(f"\ud83c\udfa8 Image output mode auto-enabled for {self.model}")
                 elif enable_image_output and not self._is_stop_requested():
-                    print(f"🎨 Image output mode enabled for {model_name}")
+                    print(f"\ud83c\udfa8 Image output mode enabled for {model_name}")
                 
                 # Log configuration (consolidate all info in one log)
                 if not self._is_stop_requested():
@@ -13883,13 +13883,13 @@ class UnifiedClient:
         
         # Check if image output mode is enabled
         enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
-        # Force enable for any Gemini image-generating model (image-preview, imagen, etc.)
-        if "image-preview" in model_lower or "imagen" in model_lower:
+        # Force enable for any model whose name contains "image"
+        if "image" in model_lower:
             enable_image_output = True
             if not self._is_stop_requested():
-                print(f"🎨 Image output mode enabled for {self.model}")
+                print(f"\ud83c\udfa8 Image output mode auto-enabled for {self.model}")
         elif enable_image_output and not self._is_stop_requested():
-            print(f"🎨 Image output mode enabled for {self.model}")
+            print(f"\ud83c\udfa8 Image output mode enabled for {self.model}")
         
         # Check if this model supports thinking
         supports_thinking = self._supports_thinking()
@@ -16423,15 +16423,23 @@ class UnifiedClient:
                     #     # Together AI handles safety differently - no moderation parameter
                     #     logger.info(f"🔓 Safety settings note: {provider} doesn't support moderation parameter")
                     
-                    # Check if image output mode is enabled
+                    # Check if image/video output mode is enabled
                     enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
-                    # Force enable for gemini-3-pro-image model (with or without -preview suffix)
-                    if "gemini-3-pro-image" in effective_model.lower():
+                    enable_video_output = os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
+                    _em_lower = effective_model.lower()
+                    # Force enable for any model whose name contains "image"
+                    if "image" in _em_lower:
                         enable_image_output = True
                         if not self._is_stop_requested():
-                            print(f"🎨 Image output mode enabled for {effective_model}")
+                            print(f"\ud83c\udfa8 Image output mode auto-enabled for {effective_model}")
                     elif enable_image_output and not self._is_stop_requested():
-                        print(f"🎨 Image output mode enabled for {effective_model}")
+                        print(f"\ud83c\udfa8 Image output mode enabled for {effective_model}")
+                    # Force enable video for any model whose name contains "video"
+                    if "video" in _em_lower:
+                        enable_video_output = True
+                        enable_image_output = False  # mutually exclusive
+                        if not self._is_stop_requested():
+                            print(f"\ud83c\udfac Video output mode auto-enabled for {effective_model}")
                     
                     # Add image output config if enabled (for compatible models)
                     if enable_image_output:
@@ -18149,10 +18157,15 @@ class UnifiedClient:
             )
     
     def _send_openai(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
-        """Send request to OpenAI API with proper token parameter handling"""
+        """Send request to OpenAI API with proper token parameter handling.
+
+        GPT image-generation models (gpt-image-1, dall-e-3, dall-e-2, etc.) are
+        intercepted here and routed to _send_openai_images_api which calls
+        POST /v1/images/generations instead of /v1/chat/completions.
+        """
         # CRITICAL: Check if individual endpoint is applied first
-        if (hasattr(self, '_individual_endpoint_applied') and self._individual_endpoint_applied and 
-            hasattr(self, 'openai_client') and self.openai_client):
+        if (hasattr(self, '_individual_endpoint_applied') and self._individual_endpoint_applied and
+                hasattr(self, 'openai_client') and self.openai_client):
             individual_base_url = getattr(self.openai_client, 'base_url', None)
             if individual_base_url:
                 base_url = str(individual_base_url).rstrip('/')
@@ -18162,21 +18175,179 @@ class UnifiedClient:
             # Fallback to global custom endpoint logic
             custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
             use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
-            
             if custom_base_url and use_custom_endpoint:
                 base_url = custom_base_url
             else:
                 base_url = 'https://api.openai.com/v1'
-        
+
+        # Detect image-generation model by name OR by ENABLE_IMAGE_OUTPUT_MODE flag
+        model_lower = (self.model or '').lower()
+        _image_in_name = 'image' in model_lower
+        _image_flag    = os.getenv('ENABLE_IMAGE_OUTPUT_MODE', '0') == '1'
+        if _image_in_name or _image_flag:
+            if not self._is_stop_requested():
+                reason = 'model name' if _image_in_name else 'ENABLE_IMAGE_OUTPUT_MODE flag'
+                print(f"\ud83d\uddbc\ufe0f [OpenAI] Image generation detected ({reason}) – routing to images API")
+            return self._send_openai_images_api(
+                messages=messages,
+                base_url=base_url,
+                response_name=response_name,
+            )
+
         # For OpenAI, we need to handle max_completion_tokens properly
         return self._send_openai_compatible(
             messages=messages,
-            temperature=temperature, 
+            temperature=temperature,
             max_tokens=max_tokens if not max_completion_tokens else max_completion_tokens,
             base_url=base_url,
             response_name=response_name,
             provider="openai"
         )
+
+    def _send_openai_images_api(self, messages, base_url, response_name) -> UnifiedResponse:
+        """Call POST /v1/images/generations for GPT image models (gpt-image-1, dall-e-3, etc.).
+
+        Extracts the text prompt from the last user message and sends it to the
+        OpenAI images generation endpoint, returning the image URL as the response.
+        """
+        import requests as _req
+
+        model_lower = (self.model or '').lower()
+
+        # Strip any routing prefix (nan/, eh/, etc.) – keep bare model name
+        effective_model = self.model or 'gpt-image-1'
+        for pfx in ('nan/', 'eh/', 'or/', 'fireworks/', 'chutes/'):
+            if effective_model.lower().startswith(pfx):
+                effective_model = effective_model[len(pfx):]
+                break
+
+        # Extract prompt from last user message
+        prompt = ''
+        for msg in reversed(messages):
+            if msg.get('role') == 'user':
+                content = msg.get('content', '')
+                if isinstance(content, str):
+                    prompt = content
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get('type') == 'text':
+                            prompt = part.get('text', '')
+                            break
+                break
+        if not prompt:
+            # Fall back to system message content
+            for msg in messages:
+                if msg.get('role') == 'system':
+                    prompt = msg.get('content', '') or ''
+                    break
+        if not prompt:
+            prompt = 'Generate an image'
+
+        # Model-specific defaults
+        # gpt-image-1 supports: 1024x1024, 1536x1024, 1024x1536, auto
+        # dall-e-3:             1024x1024, 1792x1024, 1024x1792
+        # dall-e-2:             256x256, 512x512, 1024x1024
+        if 'dall-e-2' in model_lower:
+            default_size = '1024x1024'
+        elif 'dall-e-3' in model_lower:
+            default_size = '1024x1024'
+        else:  # gpt-image-1 and others
+            default_size = 'auto'
+
+        image_size    = os.getenv('OPENAI_IMAGE_SIZE', default_size)
+        image_quality = os.getenv('OPENAI_IMAGE_QUALITY', 'standard')  # standard | hd (dall-e-3)
+        image_n       = int(os.getenv('OPENAI_IMAGE_N', '1'))
+        resp_format   = 'url'  # always request URL so output is a plain string
+
+        url = f"{base_url.rstrip('/')}/images/generations"
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type':  'application/json',
+        }
+        payload: dict = {
+            'model':           effective_model,
+            'prompt':          prompt,
+            'n':               image_n,
+            'response_format': resp_format,
+        }
+        # size='auto' is only valid for gpt-image-1; omit for dall-e models if still default
+        if image_size != 'auto':
+            payload['size'] = image_size
+        elif 'dall-e' in model_lower:
+            payload['size'] = '1024x1024'
+        else:
+            payload['size'] = image_size
+
+        # quality parameter (dall-e-3 / gpt-image-1)
+        if 'dall-e-2' not in model_lower:
+            payload['quality'] = image_quality
+
+        max_retries = self._get_max_retries()
+        for attempt in range(max_retries):
+            try:
+                if self._is_stop_requested():
+                    raise UnifiedClientError('Operation cancelled by user', error_type='cancelled')
+                if not self._is_stop_requested():
+                    print(f"\ud83d\uddbc\ufe0f [OpenAI Images] {effective_model} | size={payload.get('size','auto')} | n={image_n}")
+
+                resp = _req.post(url, json=payload, headers=headers, timeout=180)
+
+                if resp.status_code == 429:
+                    wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                    print(f"\u23f3 [OpenAI Images] Rate-limited, retrying in {wait:.1f}s\u2026")
+                    time.sleep(wait)
+                    continue
+
+                if resp.status_code not in (200, 201):
+                    err = resp.text[:500]
+                    try:
+                        err = resp.json().get('error', {}).get('message', err)
+                    except Exception:
+                        pass
+                    raise UnifiedClientError(
+                        f'OpenAI Images API error ({resp.status_code}): {err}',
+                        error_type='api_error',
+                    )
+
+                data = resp.json()
+                items = data.get('data', [])
+                if not items:
+                    raise UnifiedClientError(
+                        'OpenAI Images API returned no data items',
+                        error_type='api_error',
+                    )
+
+                # Collect all image URLs (or b64) into a newline-separated string
+                urls = []
+                for item in items:
+                    img_url = item.get('url') or item.get('b64_json', '')
+                    if img_url:
+                        urls.append(img_url)
+                content_out = '\n'.join(urls) if urls else str(items[0])
+
+                if not self._is_stop_requested():
+                    print(f"\u2705 [OpenAI Images] Generated {len(urls)} image(s)")
+
+                return UnifiedResponse(
+                    content=content_out,
+                    finish_reason='stop',
+                    usage=None,
+                    raw_response=data,
+                )
+
+            except UnifiedClientError:
+                raise
+            except Exception as exc:
+                print(f"\ud83d\uded1 [OpenAI Images] attempt {attempt+1}: {exc}")
+                if attempt < max_retries - 1:
+                    time.sleep(min(2 ** attempt + random.uniform(0, 1), 30))
+                else:
+                    raise UnifiedClientError(
+                        f'OpenAI Images API failed after {max_retries} attempts: {exc}',
+                        error_type='api_error',
+                    )
+
+        raise UnifiedClientError('OpenAI Images API: all retries exhausted', error_type='api_error')
 
     def _send_authgpt(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request via ChatGPT backend API using OAuth subscription tokens.

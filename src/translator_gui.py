@@ -3175,18 +3175,18 @@ Recent translations to summarize:
     def _get_allowed_image_output_mode(self):
         """Check if image output mode should be enabled based on dependencies.
         Returns '1' if allowed and enabled, '0' otherwise.
-        Rule: Requires image translation ON, unless using gemini-3-pro-image-preview model."""
+        Auto-enables for any model whose name contains 'image'."""
         try:
-            # Check if user wants it enabled
-            if not getattr(self, 'enable_image_output_mode_var', False):
-                return '0'
+            model = str(getattr(self, 'model_var', '')).lower()
+            # Auto-force on for models with 'image' in name
+            if 'image' in model:
+                return '1'
             # Video mode takes priority – never both at once
             if getattr(self, 'enable_video_output_mode_var', False):
                 return '0'
-            # Check model exception
-            model = str(getattr(self, 'model_var', '')).lower()
-            if 'image-preview' in model or 'imagen' in model:
-                return '1'  # Special model allows it without image translation
+            # Check if user wants it enabled
+            if not getattr(self, 'enable_image_output_mode_var', False):
+                return '0'
             # Otherwise requires image translation to be enabled
             if getattr(self, 'enable_image_translation_var', False):
                 return '1'
@@ -3197,12 +3197,16 @@ Recent translations to summarize:
     def _get_allowed_video_output_mode(self):
         """Check if video output mode should be enabled based on dependencies.
         Returns '1' if allowed and enabled, '0' otherwise.
-        Rule: Mutually exclusive with image output mode."""
+        Auto-enables for any model whose name contains 'video'."""
         try:
-            if not getattr(self, 'enable_video_output_mode_var', False):
-                return '0'
+            model = str(getattr(self, 'model_var', '')).lower()
+            # Auto-force on for models with 'video' in name
+            if 'video' in model:
+                return '1'
             # Image mode takes priority if somehow both are on
             if getattr(self, 'enable_image_output_mode_var', False):
+                return '0'
+            if not getattr(self, 'enable_video_output_mode_var', False):
                 return '0'
             return '1'
         except Exception:

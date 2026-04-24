@@ -213,6 +213,14 @@ def get_model_options() -> List[str]:
         "authgem/gemini-2.0-flash", "authgem/gemini-2.0-flash-lite",
         "authgem/gemini-3.1-pro-preview", "authgem/gemini-3.1-flash-lite-preview", "authgem/gemini-3-flash-preview",
 
+        # nano-gpt provider models
+        "nan/deepseek/deepseek-v4-flash", "nan/deepseek/deepseek-v4-flash:thinking", "nan/deepseek/deepseek-v4-pro",
+        "nan/deepseek/deepseek-v4-pro:thinking", "nan/TEE/kimi-k2.6", "nan/TEE/glm-5.1", "nan/TEE/glm-5.1-thinking",
+        "nan/moonshotai/kimi-k2.6:thinking","nan/moonshotai/kimi-k2.6","nan/anthropic/claude-opus-4.7", "nan/anthropic/claude-opus-4.7:thinking",
+        "nan/qwen-3.6-plus", "nan/google/gemini-pro-latest","nan/google/gemini-flash-latest", "nan/google/gemini-flash-lite-latest", "nan/anthropic/claude-haiku-latest",
+        "nan/anthropic/claude-opus-latest", "nan/openai/gpt-latest", "nan/gpt-image-2", "nan/nano-banana-2-fast", "nan/nano-banana-2","nan/kling-v3-4k", "nan/bytedance-seedance-2-0", "nan/wan-2.7-video", "nan/veo3-1-lite-video",
+        
+
         # AuthGem – Gemini-cli via Google OAuth (Uses Vertex AI)
         "authgem-vertex/gemini-2.5-flash", "authgem-vertex/gemini-2.5-flash-lite",
         "authgem-vertex/gemini-2.5-pro",
