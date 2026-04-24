@@ -11350,9 +11350,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.append_log(f"🖼️ Processing image: {os.path.basename(image_path)}")
             self.append_log(f"🤖 Using model: {model}")
             # Ensure image output mode/env reflect current settings before client call
+            # Use _get_allowed_image_output_mode() so generative models (gpt-image-*, etc.)
+            # auto-force ENABLE_IMAGE_OUTPUT_MODE=1 regardless of the toggle state.
             try:
-                enable_image_output_env = '1' if getattr(self, 'enable_image_output_mode_var', False) else '0'
-                os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = enable_image_output_env
+                os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = self._get_allowed_image_output_mode()
                 os.environ['IMAGE_OUTPUT_RESOLUTION'] = str(getattr(self, 'image_output_resolution_var', '1K')).upper()
             except Exception:
                 pass
