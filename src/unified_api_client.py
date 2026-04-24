@@ -227,6 +227,11 @@ _api_watchdog_last_context = None
 _api_watchdog_last_model = None
 _api_watchdog_entries = {}
 
+# Per-key API call delay tracking (module-level, thread-safe)
+# Maps (api_key, model) -> last_call_timestamp; used to enforce per-key cooldown
+_fallback_key_last_used: dict = {}
+_fallback_key_lock = threading.Lock()
+
 def _parse_error_json(error_str: str) -> Dict:
     """Extract JSON payload from an AuthGPT error string like 'AuthGPT: 429 – {...}'.
 
@@ -7015,9 +7020,39 @@ class UnifiedClient:
                 fallback_azure_api_version = fb.get('azure_api_version')
                 use_individual_endpoint = fb.get('use_individual_endpoint', False)
                 
+                if fb.get('enabled') is False:
+                    print(f"[FALLBACK DIRECT {idx+1}] Disabled, skipping")
+                    continue
+                
                 if not fallback_key or not fallback_model:
                     print(f"[FALLBACK DIRECT {idx+1}] Invalid key data, skipping")
                     continue
+                
+                # --- Per-key API call delay enforcement ---
+                shuffle_mode = os.getenv('FALLBACK_KEY_SHUFFLE', '0') == '1'
+                _key_id = (fallback_key or '', fallback_model or '')
+                _api_call_delay = 0.0
+                try:
+                    raw_delay = fb.get('api_call_delay', 0.0)
+                    _api_call_delay = float(raw_delay) if raw_delay not in (None, '') else 0.0
+                except Exception:
+                    _api_call_delay = 0.0
+                
+                if _api_call_delay > 0:
+                    with _fallback_key_lock:
+                        _last_used = _fallback_key_last_used.get(_key_id, 0.0)
+                    _elapsed = time.time() - _last_used
+                    _remaining = _api_call_delay - _elapsed
+                    if _remaining > 0:
+                        if shuffle_mode:
+                            # Shuffle: skip this key if it's still on cooldown
+                            print(f"[FALLBACK DIRECT {idx+1}] ⏩ {fallback_model} on API delay cooldown ({_remaining:.1f}s left) — shuffling to next key")
+                            continue
+                        else:
+                            # Wait: enforce the delay before using this key
+                            print(f"[FALLBACK DIRECT {idx+1}] ⏳ Waiting {_remaining:.1f}s for {fallback_model} API delay...")
+                            time.sleep(_remaining)
+                # ------------------------------------------
                 
                 print(f"[FALLBACK DIRECT {idx+1}/{max_attempts}] Trying {fallback_model}")
                 
@@ -7182,6 +7217,9 @@ class UnifiedClient:
                             print(f"✅ Fallback key {idx+1} succeeded! Got {len(content)} chars")
                             # Mark that a fallback key was used
                             self._used_fallback_key = True
+                            # Record the call time for per-key delay tracking
+                            with _fallback_key_lock:
+                                _fallback_key_last_used[_key_id] = time.time()
                             return content, finish_reason
                         else:
                             if finish_reason in ['content_filter', 'error', 'cancelled']:

@@ -12197,6 +12197,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['USE_FALLBACK_KEYS'] = '1'
             else:
                 os.environ['USE_FALLBACK_KEYS'] = '0'
+            os.environ['FALLBACK_KEY_SHUFFLE'] = '1' if self.config.get('fallback_key_shuffle', False) else '0'
             if self.config.get('use_glossary_keys', False):
                 os.environ['USE_GLOSSARY_KEYS'] = '1'
             else:
@@ -12366,6 +12367,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_MAX_SENTENCES': str(self.config.get('glossary_max_sentences', 200)),
             'USE_FALLBACK_KEYS': '1' if self.config.get('use_fallback_keys', False) else '0',
             'USE_MAIN_KEY_FALLBACK': '1' if self.config.get('use_main_key_fallback', True) else '0',
+            'FALLBACK_KEY_SHUFFLE': '1' if self.config.get('fallback_key_shuffle', False) else '0',
             'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
             'USE_GLOSSARY_KEYS': '1' if self.config.get('use_glossary_keys', False) else '0',
             'GLOSSARY_API_KEYS': json.dumps(self.config.get('glossary_keys', [])),
@@ -13779,6 +13781,7 @@ Important rules:
                     'GLOSSARY_SKIP_IDENTICAL_ENTRIES': '1' if getattr(self, 'glossary_skip_identical_entries_var', True) else '0',
                     'USE_MAIN_KEY_FALLBACK': '1' if self.config.get('use_main_key_fallback', True) else '0',
                     'USE_FALLBACK_KEYS': '1' if getattr(self, 'use_fallback_keys_var', False) else '0',
+                    'FALLBACK_KEY_SHUFFLE': '1' if self.config.get('fallback_key_shuffle', False) else '0',
                     # Ensure fallback key pool is available to UnifiedClient (parity with translation path)
                     'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
                     'USE_GLOSSARY_KEYS': '1' if getattr(self, 'use_glossary_keys_var', False) else '0',

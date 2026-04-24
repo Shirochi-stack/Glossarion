@@ -74,6 +74,7 @@ def get_model_options() -> List[str]:
         "chutes/moonshotai/Kimi-K2.6-TEE",
         
         # DeepSeek Models
+        "DeepSeek-V4-Flash", "DeepSeek-V4-Pro",
         "deepseek-chat","deepseek-reasoner", "deepseek-coder", "deepseek-coder-33b-instruct",
         
         # Mistral Models

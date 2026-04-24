@@ -129,7 +129,7 @@ class APIKeyEntry:
     def __init__(self, api_key: str, model: str, cooldown: int = 60, enabled: bool = True, 
                  google_credentials: str = None, azure_endpoint: str = None, google_region: str = None,
                  azure_api_version: str = None, use_individual_endpoint: bool = False, individual_output_token_limit: Optional[int] = None,
-                 individual_key_temperature: Optional[float] = None):
+                 individual_key_temperature: Optional[float] = None, api_call_delay: float = 0.0):
         self.api_key = api_key
         self.model = model
         self.cooldown = cooldown
@@ -159,6 +159,12 @@ class APIKeyEntry:
                 self.individual_key_temperature = None
         except (ValueError, TypeError):
             self.individual_key_temperature = None
+        # Per-key API call delay (overrides global SEND_INTERVAL_SECONDS when > 0)
+        try:
+            v = float(api_call_delay) if api_call_delay not in (None, "") else 0.0
+            self.api_call_delay = v if v >= 0 else 0.0
+        except (ValueError, TypeError):
+            self.api_call_delay = 0.0
         self.last_error_time = None
         self.error_count = 0
         self.success_count = 0
@@ -222,6 +228,7 @@ class APIKeyEntry:
             'use_individual_endpoint': self.use_individual_endpoint,
             'individual_output_token_limit': self.individual_output_token_limit,
             'individual_key_temperature': self.individual_key_temperature,
+            'api_call_delay': getattr(self, 'api_call_delay', 0.0),
             # Persist times used and test results
             'times_used': getattr(self, 'times_used', 0),
             'last_test_result': getattr(self, 'last_test_result', None),
@@ -299,7 +306,8 @@ class APIKeyPool:
                     azure_api_version=key_data.get('azure_api_version'),
                     use_individual_endpoint=key_data.get('use_individual_endpoint', False),
                     individual_output_token_limit=key_data.get('individual_output_token_limit'),
-                    individual_key_temperature=key_data.get('individual_key_temperature')
+                    individual_key_temperature=key_data.get('individual_key_temperature'),
+                    api_call_delay=key_data.get('api_call_delay', 0.0)
                 )
                 # Load saved test results and usage counter
                 entry.times_used = key_data.get('times_used', 0)
@@ -1557,6 +1565,9 @@ class MultiAPIKeyDialog(QDialog):
             # Save main-key-fallback toggle (persist in config)
             if hasattr(self, 'use_main_key_fallback_checkbox'):
                 self.translator_gui.config['use_main_key_fallback'] = self.use_main_key_fallback_checkbox.isChecked()
+            # Save fallback key shuffle toggle
+            if hasattr(self, 'fallback_key_shuffle_checkbox'):
+                self.translator_gui.config['fallback_key_shuffle'] = self.fallback_key_shuffle_checkbox.isChecked()
             # Update the parent GUI's variable to stay in sync
             if hasattr(self.translator_gui, 'use_fallback_keys_var'):
                 try:
@@ -1998,6 +2009,13 @@ class MultiAPIKeyDialog(QDialog):
         self.use_main_key_fallback_checkbox.setChecked(self.use_main_key_fallback_var)
         fallback_frame_layout.addWidget(self.use_main_key_fallback_checkbox)
         
+        # Toggle: fallback key shuffle (skip cooling-down keys instead of waiting)
+        self.fallback_key_shuffle_var = self.translator_gui.config.get('fallback_key_shuffle', False)
+        self.fallback_key_shuffle_checkbox = self._create_styled_checkbox(
+            "Fallback Key Shuffle (skip keys on API delay cooldown, try next available)")
+        self.fallback_key_shuffle_checkbox.setChecked(self.fallback_key_shuffle_var)
+        fallback_frame_layout.addWidget(self.fallback_key_shuffle_checkbox)
+        
         # Add fallback key section - store reference for opacity effect
         self.add_fallback_frame = QWidget()
         add_fallback_grid = QGridLayout(self.add_fallback_frame)
@@ -2165,15 +2183,16 @@ class MultiAPIKeyDialog(QDialog):
         # Right side: TreeWidget with drag and drop
         self.fallback_tree = QTreeWidget()
         # Add explicit column for per-key output token limit
-        self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Status', 'Success', 'Errors', 'Times Used'])
+        self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', 'Success', 'Errors', 'Times Used'])
         self.fallback_tree.setColumnWidth(0, 125)  # API Key
         self.fallback_tree.setColumnWidth(1, 220)  # Model
         self.fallback_tree.setColumnWidth(2, 105)  # Output Limit
         self.fallback_tree.setColumnWidth(3, 100)  # Temperature
-        self.fallback_tree.setColumnWidth(4, 100)  # Status
-        self.fallback_tree.setColumnWidth(5, 75)   # Success
-        self.fallback_tree.setColumnWidth(6, 55)   # Errors
-        self.fallback_tree.setColumnWidth(7, 80)   # Times Used
+        self.fallback_tree.setColumnWidth(4, 90)   # API Delay
+        self.fallback_tree.setColumnWidth(5, 100)  # Status
+        self.fallback_tree.setColumnWidth(6, 75)   # Success
+        self.fallback_tree.setColumnWidth(7, 55)   # Errors
+        self.fallback_tree.setColumnWidth(8, 80)   # Times Used
         
         # Set header font to match multi-key tree
         fb_header = self.fallback_tree.header()
@@ -2341,6 +2360,15 @@ class MultiAPIKeyDialog(QDialog):
         set_temp_action.triggered.connect(self._set_fallback_key_temperature_for_selected)
         clear_temp_action = menu.addAction("Clear Key Temperature")
         clear_temp_action.triggered.connect(self._clear_fallback_key_temperature_for_selected)
+        
+        # Per-key API call delay options for fallback keys
+        if selected_count > 1:
+            set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
+        else:
+            set_delay_action = menu.addAction("Set API Call Delay")
+        set_delay_action.triggered.connect(self._set_fallback_api_call_delay_for_selected)
+        clear_delay_action = menu.addAction("Clear API Call Delay")
+        clear_delay_action.triggered.connect(self._clear_fallback_api_call_delay_for_selected)
         
         menu.addSeparator()
         
@@ -2516,10 +2544,18 @@ class MultiAPIKeyDialog(QDialog):
                 status = "Enabled"
                 color = Qt.gray
             
+            # Determine per-key API call delay display value
+            try:
+                raw_delay = key_data.get('api_call_delay')
+                per_key_delay = float(raw_delay) if raw_delay not in (None, "") else 0.0
+            except Exception:
+                per_key_delay = 0.0
+            delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
+            
             # Insert into tree (with Success and Errors columns matching multi-key tree)
             success_count = int(key_data.get('success_count', 0))
             error_count = int(key_data.get('error_count', 0))
-            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, status, str(success_count), str(error_count), str(times_used)])
+            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
             # Apply status-based coloring (consistent with multi-key tree)
             for col in range(item.columnCount()):
                 item.setForeground(col, color)
@@ -2534,6 +2570,10 @@ class MultiAPIKeyDialog(QDialog):
                 tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
             else:
                 tooltip_parts.append("Using global temperature")
+            if per_key_delay > 0:
+                tooltip_parts.append(f"API Call Delay: {per_key_delay}s (overrides global SEND_INTERVAL_SECONDS)")
+            else:
+                tooltip_parts.append("Using global API call delay (SEND_INTERVAL_SECONDS)")
             tooltip = "\n".join(tooltip_parts)
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
@@ -2591,6 +2631,7 @@ class MultiAPIKeyDialog(QDialog):
             'use_individual_endpoint': use_individual_endpoint,
             'individual_output_token_limit': individual_output_token_limit,
             'individual_key_temperature': individual_key_temperature,
+            'api_call_delay': 0.0,
             'times_used': 0
         })
         
@@ -3259,6 +3300,50 @@ class MultiAPIKeyDialog(QDialog):
         self._load_fallback_keys()
         self._show_status(f"Cleared fallback key temperature for {len(selected_indices)} key(s)")
     
+    def _set_fallback_api_call_delay_for_selected(self):
+        """Set per-key API call delay for selected fallback keys"""
+        from PySide6.QtWidgets import QInputDialog
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
+        default_val = 0.0
+        for idx in selected_indices:
+            if 0 <= idx < len(fallback_keys):
+                v = fallback_keys[idx].get('api_call_delay', 0.0) or 0.0
+                if v > 0:
+                    default_val = float(v)
+                    break
+        value, ok = QInputDialog.getDouble(
+            self, "Set API Call Delay",
+            "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+            default_val, 0.0, 3600.0, 1
+        )
+        if ok:
+            for idx in selected_indices:
+                if 0 <= idx < len(fallback_keys):
+                    fallback_keys[idx]['api_call_delay'] = value if value > 0 else 0.0
+            self.translator_gui.config['fallback_keys'] = fallback_keys
+            self.translator_gui.save_config(show_message=False)
+            self._load_fallback_keys()
+            self._show_fallback_status(f"Set API call delay to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
+
+    def _clear_fallback_api_call_delay_for_selected(self):
+        """Clear per-key API call delay for selected fallback keys"""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(fallback_keys):
+                fallback_keys[idx]['api_call_delay'] = 0.0
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_fallback_keys()
+        self._show_fallback_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
+    
     def _toggle_fallback_individual_endpoint(self, fallback_index, enabled):
         """Quick toggle individual endpoint on/off for fallback key"""
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
@@ -3478,17 +3563,18 @@ class MultiAPIKeyDialog(QDialog):
         # Right side: TreeWidget with drag and drop support
         self.tree = QTreeWidget()
         # Add explicit column for per-key output token limit
-        self.tree.setHeaderLabels(['API Key', 'Model', 'Cooldown', 'Output Limit', 'Temperature', 'Status', 'Success', 'Errors', 'Times Used'])
+        self.tree.setHeaderLabels(['API Key', 'Model', 'Cooldown', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', 'Success', 'Errors', 'Times Used'])
         # Adjusted column widths: balanced distribution
-        self.tree.setColumnWidth(0, 125)  # API Key (decreased from 140)
+        self.tree.setColumnWidth(0, 125)  # API Key
         self.tree.setColumnWidth(1, 220)  # Model
         self.tree.setColumnWidth(2, 70)   # Cooldown
         self.tree.setColumnWidth(3, 105)  # Output Limit
-        self.tree.setColumnWidth(4, 100)   # Temperature
-        self.tree.setColumnWidth(5, 100)  # Status
-        self.tree.setColumnWidth(6, 75)   # Success
-        self.tree.setColumnWidth(7, 55)   # Errors
-        self.tree.setColumnWidth(8, 80)   # Times Used
+        self.tree.setColumnWidth(4, 100)  # Temperature
+        self.tree.setColumnWidth(5, 90)   # API Delay
+        self.tree.setColumnWidth(6, 100)  # Status
+        self.tree.setColumnWidth(7, 75)   # Success
+        self.tree.setColumnWidth(8, 55)   # Errors
+        self.tree.setColumnWidth(9, 80)   # Times Used
         
         # Set header font
         header = self.tree.header()
@@ -3841,6 +3927,7 @@ class MultiAPIKeyDialog(QDialog):
         # Column 1 = Model (editable)
         # Column 2 = Output Limit (editable)
         # Column 3 = Temp (editable)
+        # Column 4 = API Delay (editable)
         if column == 1:
             old_value = item.text(1)
             new_value, ok = self._show_model_edit_dialog(old_value)
@@ -3887,6 +3974,25 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.save_config(show_message=False)
                 self._load_fallback_keys()
                 self._show_fallback_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
+        elif column == 4:  # API Delay column
+            from PySide6.QtWidgets import QInputDialog
+            current = fallback_keys[index].get('api_call_delay') or 0.0
+            try:
+                current = float(current)
+            except (ValueError, TypeError):
+                current = 0.0
+            value, ok = QInputDialog.getDouble(
+                self, "Edit API Call Delay",
+                "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+                current, 0.0, 3600.0, 1
+            )
+            if ok:
+                fallback_keys[index]['api_call_delay'] = value if value > 0 else 0.0
+                self.translator_gui.config['fallback_keys'] = fallback_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_fallback_keys()
+                self._show_fallback_status(f"Updated API delay to: {value if value > 0 else 'global'}")
+
 
     def _refresh_key_list(self):
         """Refresh the key list display preserving test results and highlighting key #1"""
@@ -3929,6 +4035,13 @@ class MultiAPIKeyDialog(QDialog):
                 temp_str = str(per_key_temp)
             else:
                 temp_str = "global"
+            
+            # Determine per-key API call delay display value
+            per_key_delay = getattr(key, 'api_call_delay', 0.0)
+            if per_key_delay and per_key_delay > 0:
+                delay_str = str(per_key_delay)
+            else:
+                delay_str = "global"
             
             # Position indicator (not currently shown in a column, but kept for potential future use)
             position = f"#{i+1}"
@@ -3982,6 +4095,7 @@ class MultiAPIKeyDialog(QDialog):
                 f"{key.cooldown}s",
                 output_limit_str,
                 temp_str,
+                delay_str,
                 status,
                 str(key.success_count),
                 str(key.error_count),
@@ -3998,6 +4112,10 @@ class MultiAPIKeyDialog(QDialog):
                 tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
             else:
                 tooltip_parts.append("Using global temperature")
+            if per_key_delay and per_key_delay > 0:
+                tooltip_parts.append(f"API Call Delay: {per_key_delay}s (overrides global SEND_INTERVAL_SECONDS)")
+            else:
+                tooltip_parts.append("Using global API call delay (SEND_INTERVAL_SECONDS)")
             tooltip = "\n".join(tooltip_parts)
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
@@ -4066,6 +4184,7 @@ class MultiAPIKeyDialog(QDialog):
         # Column 2 = Cooldown (editable)
         # Column 3 = Output Limit (editable)
         # Column 4 = Temp (editable)
+        # Column 5 = API Delay (editable)
         if column == 1:  # Model column
             # Create inline editor for model
             old_value = item.text(1)
@@ -4110,6 +4229,18 @@ class MultiAPIKeyDialog(QDialog):
                     key.individual_key_temperature = value
                 self._refresh_key_list()
                 self._show_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
+        elif column == 5:  # API Delay column
+            from PySide6.QtWidgets import QInputDialog
+            current = getattr(key, 'api_call_delay', 0.0) or 0.0
+            value, ok = QInputDialog.getDouble(
+                self, "Edit API Call Delay",
+                "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+                current, 0.0, 3600.0, 1
+            )
+            if ok:
+                key.api_call_delay = value if value > 0 else 0.0
+                self._refresh_key_list()
+                self._show_status(f"Updated API delay to: {value if value > 0 else 'global'}")
     
     def _show_model_edit_dialog(self, current_value):
         """Show dialog for editing model name"""
@@ -4213,6 +4344,15 @@ class MultiAPIKeyDialog(QDialog):
         set_temp_action.triggered.connect(self._set_key_temperature_for_selected)
         clear_temp_action = menu.addAction("Clear Key Temperature")
         clear_temp_action.triggered.connect(self._clear_key_temperature_for_selected)
+        
+        # Per-key API call delay options
+        if selected_count > 1:
+            set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
+        else:
+            set_delay_action = menu.addAction("Set API Call Delay")
+        set_delay_action.triggered.connect(self._set_api_call_delay_for_selected)
+        clear_delay_action = menu.addAction("Clear API Call Delay")
+        clear_delay_action.triggered.connect(self._clear_api_call_delay_for_selected)
         
         menu.addSeparator()
         
@@ -4345,6 +4485,44 @@ class MultiAPIKeyDialog(QDialog):
                 self.key_pool.keys[idx].individual_key_temperature = None
         self._refresh_key_list()
         self._show_status(f"Cleared key temperature for {len(selected_indices)} key(s)")
+    
+    def _set_api_call_delay_for_selected(self):
+        """Set per-key API call delay for selected multi-key entries"""
+        from PySide6.QtWidgets import QInputDialog
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+        selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+        default_val = 0.0
+        for idx in selected_indices:
+            if 0 <= idx < len(self.key_pool.keys):
+                v = getattr(self.key_pool.keys[idx], 'api_call_delay', 0.0)
+                if v and v > 0:
+                    default_val = v
+                    break
+        value, ok = QInputDialog.getDouble(
+            self, "Set API Call Delay",
+            "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+            default_val, 0.0, 3600.0, 1
+        )
+        if ok:
+            for idx in selected_indices:
+                if 0 <= idx < len(self.key_pool.keys):
+                    self.key_pool.keys[idx].api_call_delay = value if value > 0 else 0.0
+            self._refresh_key_list()
+            self._show_status(f"Set API call delay to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
+
+    def _clear_api_call_delay_for_selected(self):
+        """Clear per-key API call delay for selected multi-key entries"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+        selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(self.key_pool.keys):
+                self.key_pool.keys[idx].api_call_delay = 0.0
+        self._refresh_key_list()
+        self._show_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
     
     def _change_model_for_selected(self):
         """Change model for all selected entries"""
@@ -4785,15 +4963,16 @@ class MultiAPIKeyDialog(QDialog):
         
         # Right side: TreeWidget with drag and drop
         self.glossary_tree = QTreeWidget()
-        self.glossary_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Status', 'Success', 'Errors', 'Times Used'])
+        self.glossary_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', 'Success', 'Errors', 'Times Used'])
         self.glossary_tree.setColumnWidth(0, 125)
         self.glossary_tree.setColumnWidth(1, 220)
         self.glossary_tree.setColumnWidth(2, 105)
         self.glossary_tree.setColumnWidth(3, 100)
-        self.glossary_tree.setColumnWidth(4, 100)
-        self.glossary_tree.setColumnWidth(5, 75)
-        self.glossary_tree.setColumnWidth(6, 55)
-        self.glossary_tree.setColumnWidth(7, 80)
+        self.glossary_tree.setColumnWidth(4, 90)
+        self.glossary_tree.setColumnWidth(5, 100)
+        self.glossary_tree.setColumnWidth(6, 75)
+        self.glossary_tree.setColumnWidth(7, 55)
+        self.glossary_tree.setColumnWidth(8, 80)
         
         gl_header = self.glossary_tree.header()
         gl_header_font = QFont()
@@ -4914,9 +5093,17 @@ class MultiAPIKeyDialog(QDialog):
                 status = "Enabled"
                 color = Qt.gray
             
+            # Determine per-key API call delay display value
+            try:
+                raw_delay = key_data.get('api_call_delay')
+                per_key_delay = float(raw_delay) if raw_delay not in (None, "") else 0.0
+            except Exception:
+                per_key_delay = 0.0
+            delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
+            
             success_count = int(key_data.get('success_count', 0))
             error_count = int(key_data.get('error_count', 0))
-            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, status, str(success_count), str(error_count), str(times_used)])
+            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
             for col in range(item.columnCount()):
                 item.setForeground(col, color)
             
@@ -4930,6 +5117,10 @@ class MultiAPIKeyDialog(QDialog):
                 tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
             else:
                 tooltip_parts.append("Using global temperature")
+            if per_key_delay > 0:
+                tooltip_parts.append(f"API Call Delay: {per_key_delay}s (overrides global SEND_INTERVAL_SECONDS)")
+            else:
+                tooltip_parts.append("Using global API call delay (SEND_INTERVAL_SECONDS)")
             tooltip = "\n".join(tooltip_parts)
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
@@ -4985,6 +5176,7 @@ class MultiAPIKeyDialog(QDialog):
             'use_individual_endpoint': use_individual_endpoint,
             'individual_output_token_limit': individual_output_token_limit,
             'individual_key_temperature': individual_key_temperature,
+            'api_call_delay': 0.0,
             'times_used': 0
         })
         
@@ -5517,6 +5709,15 @@ class MultiAPIKeyDialog(QDialog):
         clear_temp_action = menu.addAction("Clear Key Temperature")
         clear_temp_action.triggered.connect(self._clear_glossary_key_temperature_for_selected)
         
+        # Per-key API call delay options for glossary keys
+        if selected_count > 1:
+            set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
+        else:
+            set_delay_action = menu.addAction("Set API Call Delay")
+        set_delay_action.triggered.connect(self._set_glossary_api_call_delay_for_selected)
+        clear_delay_action = menu.addAction("Clear API Call Delay")
+        clear_delay_action.triggered.connect(self._clear_glossary_api_call_delay_for_selected)
+        
         menu.addSeparator()
         
         test_action = menu.addAction("Test")
@@ -5628,9 +5829,7 @@ class MultiAPIKeyDialog(QDialog):
         if index >= len(glossary_keys):
             return
         
-        # Column 1 = Model (editable)
-        # Column 2 = Output Limit (editable)
-        # Column 3 = Temp (editable)
+        # Column 1 = Model, 2 = Output Limit, 3 = Temp, 4 = API Delay
         if column == 1:
             old_value = item.text(1)
             new_value, ok = self._show_model_edit_dialog(old_value)
@@ -5677,6 +5876,25 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.save_config(show_message=False)
                 self._load_glossary_keys()
                 self._show_glossary_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
+        elif column == 4:  # API Delay column
+            from PySide6.QtWidgets import QInputDialog
+            current = glossary_keys[index].get('api_call_delay') or 0.0
+            try:
+                current = float(current)
+            except (ValueError, TypeError):
+                current = 0.0
+            value, ok = QInputDialog.getDouble(
+                self, "Edit API Call Delay",
+                "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+                current, 0.0, 3600.0, 1
+            )
+            if ok:
+                glossary_keys[index]['api_call_delay'] = value if value > 0 else 0.0
+                self.translator_gui.config['glossary_keys'] = glossary_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_glossary_keys()
+                self._show_glossary_status(f"Updated API delay to: {value if value > 0 else 'global'}")
+
 
     def _show_glossary_status(self, message: str):
         """Show status message in the glossary section."""
@@ -5839,6 +6057,50 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
         self._show_glossary_status(f"Cleared glossary key temperature for {len(selected_indices)} key(s)")
+    
+    def _set_glossary_api_call_delay_for_selected(self):
+        """Set per-key API call delay for selected glossary keys"""
+        from PySide6.QtWidgets import QInputDialog
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        default_val = 0.0
+        for idx in selected_indices:
+            if 0 <= idx < len(glossary_keys):
+                v = glossary_keys[idx].get('api_call_delay', 0.0) or 0.0
+                if v > 0:
+                    default_val = float(v)
+                    break
+        value, ok = QInputDialog.getDouble(
+            self, "Set API Call Delay",
+            "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+            default_val, 0.0, 3600.0, 1
+        )
+        if ok:
+            for idx in selected_indices:
+                if 0 <= idx < len(glossary_keys):
+                    glossary_keys[idx]['api_call_delay'] = value if value > 0 else 0.0
+            self.translator_gui.config['glossary_keys'] = glossary_keys
+            self.translator_gui.save_config(show_message=False)
+            self._load_glossary_keys()
+            self._show_glossary_status(f"Set API call delay to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
+
+    def _clear_glossary_api_call_delay_for_selected(self):
+        """Clear per-key API call delay for selected glossary keys"""
+        selected = self.glossary_tree.selectedItems()
+        if not selected:
+            return
+        glossary_keys = self.translator_gui.config.get('glossary_keys', [])
+        selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(glossary_keys):
+                glossary_keys[idx]['api_call_delay'] = 0.0
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
     
     def _toggle_glossary_individual_endpoint(self, glossary_index, enabled):
         """Quick toggle individual endpoint on/off for glossary key"""
@@ -6118,15 +6380,16 @@ class MultiAPIKeyDialog(QDialog):
         
         # Right side: TreeWidget with drag and drop
         self.qa_scan_tree = QTreeWidget()
-        self.qa_scan_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Status', 'Success', 'Errors', 'Times Used'])
+        self.qa_scan_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', 'Success', 'Errors', 'Times Used'])
         self.qa_scan_tree.setColumnWidth(0, 125)
         self.qa_scan_tree.setColumnWidth(1, 220)
         self.qa_scan_tree.setColumnWidth(2, 105)
         self.qa_scan_tree.setColumnWidth(3, 100)
-        self.qa_scan_tree.setColumnWidth(4, 100)
-        self.qa_scan_tree.setColumnWidth(5, 75)
-        self.qa_scan_tree.setColumnWidth(6, 55)
-        self.qa_scan_tree.setColumnWidth(7, 80)
+        self.qa_scan_tree.setColumnWidth(4, 90)
+        self.qa_scan_tree.setColumnWidth(5, 100)
+        self.qa_scan_tree.setColumnWidth(6, 75)
+        self.qa_scan_tree.setColumnWidth(7, 55)
+        self.qa_scan_tree.setColumnWidth(8, 80)
         
         qs_header = self.qa_scan_tree.header()
         qs_header_font = QFont()
@@ -6247,9 +6510,17 @@ class MultiAPIKeyDialog(QDialog):
                 status = "Enabled"
                 color = Qt.gray
             
+            # Determine per-key API call delay display value
+            try:
+                raw_delay = key_data.get('api_call_delay')
+                per_key_delay = float(raw_delay) if raw_delay not in (None, "") else 0.0
+            except Exception:
+                per_key_delay = 0.0
+            delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
+            
             success_count = int(key_data.get('success_count', 0))
             error_count = int(key_data.get('error_count', 0))
-            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, status, str(success_count), str(error_count), str(times_used)])
+            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
             for col in range(item.columnCount()):
                 item.setForeground(col, color)
             
@@ -6263,6 +6534,10 @@ class MultiAPIKeyDialog(QDialog):
                 tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
             else:
                 tooltip_parts.append("Using global temperature")
+            if per_key_delay > 0:
+                tooltip_parts.append(f"API Call Delay: {per_key_delay}s (overrides global SEND_INTERVAL_SECONDS)")
+            else:
+                tooltip_parts.append("Using global API call delay (SEND_INTERVAL_SECONDS)")
             tooltip = "\n".join(tooltip_parts)
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
@@ -6316,6 +6591,7 @@ class MultiAPIKeyDialog(QDialog):
             'use_individual_endpoint': use_individual_endpoint,
             'individual_output_token_limit': individual_output_token_limit,
             'individual_key_temperature': individual_key_temperature,
+            'api_call_delay': 0.0,
             'times_used': 0
         })
         
@@ -6844,6 +7120,15 @@ class MultiAPIKeyDialog(QDialog):
         clear_temp_action = menu.addAction("Clear Key Temperature")
         clear_temp_action.triggered.connect(self._clear_qa_scan_key_temperature_for_selected)
         
+        # Per-key API call delay options for QA scan keys
+        if selected_count > 1:
+            set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
+        else:
+            set_delay_action = menu.addAction("Set API Call Delay")
+        set_delay_action.triggered.connect(self._set_qa_scan_api_call_delay_for_selected)
+        clear_delay_action = menu.addAction("Clear API Call Delay")
+        clear_delay_action.triggered.connect(self._clear_qa_scan_api_call_delay_for_selected)
+        
         menu.addSeparator()
         
         test_action = menu.addAction("Test")
@@ -7001,6 +7286,25 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.save_config(show_message=False)
                 self._load_qa_scan_keys()
                 self._show_qa_scan_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
+        elif column == 4:  # API Delay column
+            from PySide6.QtWidgets import QInputDialog
+            current = qa_scan_keys[index].get('api_call_delay') or 0.0
+            try:
+                current = float(current)
+            except (ValueError, TypeError):
+                current = 0.0
+            value, ok = QInputDialog.getDouble(
+                self, "Edit API Call Delay",
+                "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+                current, 0.0, 3600.0, 1
+            )
+            if ok:
+                qa_scan_keys[index]['api_call_delay'] = value if value > 0 else 0.0
+                self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_qa_scan_keys()
+                self._show_qa_scan_status(f"Updated API delay to: {value if value > 0 else 'global'}")
+
 
     def _show_qa_scan_status(self, message: str):
         """Show status message in the QA scan section."""
@@ -7163,6 +7467,50 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_qa_scan_keys()
         self._show_qa_scan_status(f"Cleared QA scan key temperature for {len(selected_indices)} key(s)")
+    
+    def _set_qa_scan_api_call_delay_for_selected(self):
+        """Set per-key API call delay for selected QA scan keys"""
+        from PySide6.QtWidgets import QInputDialog
+        selected = self.qa_scan_tree.selectedItems()
+        if not selected:
+            return
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
+        default_val = 0.0
+        for idx in selected_indices:
+            if 0 <= idx < len(qa_scan_keys):
+                v = qa_scan_keys[idx].get('api_call_delay', 0.0) or 0.0
+                if v > 0:
+                    default_val = float(v)
+                    break
+        value, ok = QInputDialog.getDouble(
+            self, "Set API Call Delay",
+            "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+            default_val, 0.0, 3600.0, 1
+        )
+        if ok:
+            for idx in selected_indices:
+                if 0 <= idx < len(qa_scan_keys):
+                    qa_scan_keys[idx]['api_call_delay'] = value if value > 0 else 0.0
+            self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+            self.translator_gui.save_config(show_message=False)
+            self._load_qa_scan_keys()
+            self._show_qa_scan_status(f"Set API call delay to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
+
+    def _clear_qa_scan_api_call_delay_for_selected(self):
+        """Clear per-key API call delay for selected QA scan keys"""
+        selected = self.qa_scan_tree.selectedItems()
+        if not selected:
+            return
+        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
+        selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(qa_scan_keys):
+                qa_scan_keys[idx]['api_call_delay'] = 0.0
+        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_qa_scan_keys()
+        self._show_qa_scan_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
     
     def _toggle_qa_scan_individual_endpoint(self, qa_scan_index, enabled):
         """Quick toggle individual endpoint on/off for QA scan key"""
