@@ -8820,19 +8820,6 @@ def _create_image_translation_section(self, parent):
     video_output_cb.toggled.connect(_on_video_output_toggle)
     left_v.addWidget(video_output_cb)
 
-    # Apply initial mutual-exclusion disable state (deferred so widgets are fully rendered)
-    def _init_output_toggle_states():
-        try:
-            img_on = bool(getattr(self, 'enable_image_output_mode_var', False))
-            vid_on = bool(getattr(self, 'enable_video_output_mode_var', False))
-            # If image is on, video is disabled; if video is on, image is disabled
-            _apply_output_toggle_disable_style(video_output_cb, not img_on)
-            _apply_output_toggle_disable_style(image_output_cb, not vid_on)
-        except Exception:
-            pass
-    from PySide6.QtCore import QTimer as _QT2
-    _QT2.singleShot(0, _init_output_toggle_states)
-
     video_output_desc = QLabel(
         "Route nan/ requests to the video generation endpoint (/api/generate-video). "
         "Polls until the video URL is returned. Mutually exclusive with Image Only Output Mode."
@@ -8850,30 +8837,18 @@ def _create_image_translation_section(self, parent):
     def _update_output_mode_controls_state():
         """Enable/disable image & video output controls based on image translation toggle."""
         try:
-            from PySide6.QtWidgets import QLabel as _QLabel
             enabled = bool(getattr(self, 'enable_image_translation_var', False))
 
-            # Checkbox text color (Qt's QCheckBox:disabled only works when no inline style overrides it)
-            cb_text_color = "color: white;" if enabled else "color: #666666;"
-            # The white ✓ checkmark QLabel overlay inside _create_styled_checkbox is immune to
-            # setEnabled() — it has a hardcoded color: white stylesheet. We must gray it explicitly.
-            checkmark_color = (
-                "QLabel { color: white; background: transparent; font-weight: bold; font-size: 11px; }"
-                if enabled else
-                "QLabel { color: #444444; background: transparent; font-weight: bold; font-size: 11px; }"
-            )
+            img_on = bool(getattr(self, 'enable_image_output_mode_var', False))
+            vid_on = bool(getattr(self, 'enable_video_output_mode_var', False))
 
-            for cb in (
-                getattr(self, 'image_output_cb', None),
-                getattr(self, 'video_output_cb', None),
-            ):
-                if cb:
-                    cb.setEnabled(enabled)
-                    cb.setStyleSheet(cb_text_color)
-                    # Gray/restore the ✓ checkmark overlay QLabel
-                    for child in cb.findChildren(_QLabel):
-                        if child.text() == "✓":
-                            child.setStyleSheet(checkmark_color)
+            img_cb = getattr(self, 'image_output_cb', None)
+            vid_cb = getattr(self, 'video_output_cb', None)
+
+            if img_cb:
+                _apply_output_toggle_disable_style(img_cb, enabled and not vid_on)
+            if vid_cb:
+                _apply_output_toggle_disable_style(vid_cb, enabled and not img_on)
 
             # Resolution row widget
             rw = getattr(self, 'image_output_resolution_w', None)
