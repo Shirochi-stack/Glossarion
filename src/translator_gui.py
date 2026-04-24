@@ -10681,18 +10681,35 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.append_log(f"\n\u2705 Generation complete!")
             self.append_log(f"\ud83d\udd17 Result: {result_text}")
 
-            # Save result to a file
+            # Check if it's a generated media sentinel
+            import re, shutil
+            match = re.search(r'\[GENERATED_IMAGE:(.+?)\]', result_text)
+            
             try:
                 import datetime, pathlib
                 ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
                 safe_model = model.replace('/', '_').replace('\\', '_')
-                fname = f"generated_{safe_model}_{ts}.txt"
+                
                 # Try Desktop first, then CWD
                 desktop = pathlib.Path.home() / 'Desktop'
                 out_dir = desktop if desktop.is_dir() else pathlib.Path.cwd()
-                out_path = out_dir / fname
-                out_path.write_text(result_text, encoding='utf-8')
-                self.append_log(f"\ud83d\udcc4 Saved to: {out_path}")
+                
+                if match:
+                    # It's a media file, move the file directly to the desktop
+                    generated_media_path = match.group(1)
+                    if os.path.exists(generated_media_path):
+                        _, ext = os.path.splitext(generated_media_path)
+                        fname = f"generated_{safe_model}_{ts}{ext}"
+                        out_path = out_dir / fname
+                        shutil.move(generated_media_path, str(out_path))
+                        self.append_log(f"\ud83d\udcc4 Media saved to: {out_path}")
+                        result_text = str(out_path)
+                else:
+                    # Standard text response, save as .txt
+                    fname = f"generated_{safe_model}_{ts}.txt"
+                    out_path = out_dir / fname
+                    out_path.write_text(result_text, encoding='utf-8')
+                    self.append_log(f"\ud83d\udcc4 Saved to: {out_path}")
             except Exception as save_err:
                 self.append_log(f"\u26a0\ufe0f Could not save result file: {save_err}")
 
@@ -11859,7 +11876,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         if match:
                             generated_image_path = match.group(1)
                             if os.path.exists(generated_image_path):
-                                self.append_log(f"✅ Generated image saved: {os.path.basename(generated_image_path)}")
+                                # Move the generated file to the actual output folder with the proper name
+                                import shutil
+                                _, ext = os.path.splitext(generated_image_path)
+                                final_media_name = f"response_{file_index:03d}_{base_name}{ext}"
+                                final_media_path = os.path.join(output_dir, final_media_name)
+                                os.makedirs(output_dir, exist_ok=True)
+                                shutil.move(generated_image_path, final_media_path)
+                                generated_image_path = final_media_path
+                                
+                                self.append_log(f"✅ Generated media saved directly as: {final_media_name}")
                                 
                                 # Track this image for CBZ compilation
                                 if not hasattr(self, 'generated_images'):

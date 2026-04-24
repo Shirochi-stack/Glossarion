@@ -6272,11 +6272,8 @@ class UnifiedClient:
                                     with urllib.request.urlopen(req) as response_stream, open(out_path, 'wb') as out_file:
                                         out_file.write(response_stream.read())
                                         
-                                    # Return an HTML tag embedding the local file
-                                    if ext == '.mp4':
-                                        extracted_content = f'<video controls autoplay loop src="file:///{out_path.replace(chr(92), "/")}"></video>'
-                                    else:
-                                        extracted_content = f'<img src="file:///{out_path.replace(chr(92), "/")}"/>'
+                                    # Return sentinel for GUI to intercept and prevent HTML creation
+                                    extracted_content = f'[GENERATED_IMAGE:{out_path}]'
                                         
                                 elif is_base64:
                                     header, b64data = extracted_content_str.split(',', 1) if ',' in extracted_content_str else ('data:image/png;base64', extracted_content_str)
@@ -6293,10 +6290,8 @@ class UnifiedClient:
                                     with open(out_path, 'wb') as f:
                                         f.write(base64.b64decode(b64data))
                                         
-                                    if mime.startswith('video/'):
-                                        extracted_content = f'<video controls autoplay loop src="file:///{out_path.replace(chr(92), "/")}"></video>'
-                                    else:
-                                        extracted_content = f'<img src="file:///{out_path.replace(chr(92), "/")}"/>'
+                                    # Return sentinel for GUI to intercept and prevent HTML creation
+                                    extracted_content = f'[GENERATED_IMAGE:{out_path}]'
                                 print(f"✅ Media successfully intercepted and saved.")
                             except Exception as e:
                                 print(f"⚠️ Failed to intercept/download media: {e}")
