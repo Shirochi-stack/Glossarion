@@ -8685,6 +8685,25 @@ def _create_image_translation_section(self, parent):
     left_v.addWidget(hide_desc)
     
     # ── Image Only Output Mode ─────────────────────────────────────────────
+
+    # Shared helper: visually enable/disable one of the two output-mode checkboxes.
+    # Must handle the ✓ QLabel child overlay (hardcoded color: white — immune to setEnabled).
+    def _apply_output_toggle_disable_style(cb, enabled):
+        try:
+            from PySide6.QtWidgets import QLabel as _QL
+            cb.setEnabled(enabled)
+            cb.setStyleSheet("color: white;" if enabled else "color: #666666;")
+            checkmark_css = (
+                "QLabel { color: white; background: transparent; font-weight: bold; font-size: 11px; }"
+                if enabled else
+                "QLabel { color: #444444; background: transparent; font-weight: bold; font-size: 11px; }"
+            )
+            for child in cb.findChildren(_QL):
+                if child.text() == "✓":
+                    child.setStyleSheet(checkmark_css)
+        except Exception:
+            pass
+
     image_output_cb = self._create_styled_checkbox("Enable Image Only Output Mode")
     self.image_output_cb = image_output_cb  # store ref for enable/disable
     try:
@@ -8704,13 +8723,15 @@ def _create_image_translation_section(self, parent):
         try:
             self.enable_image_output_mode_var = bool(checked)
             self.config['enable_image_output_mode'] = bool(checked)
-            # Mutual exclusion: enabling Image disables Video
-            if checked and bool(getattr(self, 'enable_video_output_mode_var', False)):
+            # Mutual exclusion: enabling Image unchecks + DISABLES Video
+            if checked:
                 self.enable_video_output_mode_var = False
                 self.config['enable_video_output_mode'] = False
                 video_output_cb.blockSignals(True)
                 video_output_cb.setChecked(False)
                 video_output_cb.blockSignals(False)
+            # Image ON → video disabled; Image OFF → video enabled
+            _apply_output_toggle_disable_style(video_output_cb, not checked)
         except Exception:
             pass
 
@@ -8784,18 +8805,33 @@ def _create_image_translation_section(self, parent):
         try:
             self.enable_video_output_mode_var = bool(checked)
             self.config['enable_video_output_mode'] = bool(checked)
-            # Mutual exclusion: enabling Video disables Image
-            if checked and bool(getattr(self, 'enable_image_output_mode_var', False)):
+            # Mutual exclusion: enabling Video unchecks + DISABLES Image
+            if checked:
                 self.enable_image_output_mode_var = False
                 self.config['enable_image_output_mode'] = False
                 image_output_cb.blockSignals(True)
                 image_output_cb.setChecked(False)
                 image_output_cb.blockSignals(False)
+            # Video ON → image disabled; Video OFF → image enabled
+            _apply_output_toggle_disable_style(image_output_cb, not checked)
         except Exception:
             pass
 
     video_output_cb.toggled.connect(_on_video_output_toggle)
     left_v.addWidget(video_output_cb)
+
+    # Apply initial mutual-exclusion disable state (deferred so widgets are fully rendered)
+    def _init_output_toggle_states():
+        try:
+            img_on = bool(getattr(self, 'enable_image_output_mode_var', False))
+            vid_on = bool(getattr(self, 'enable_video_output_mode_var', False))
+            # If image is on, video is disabled; if video is on, image is disabled
+            _apply_output_toggle_disable_style(video_output_cb, not img_on)
+            _apply_output_toggle_disable_style(image_output_cb, not vid_on)
+        except Exception:
+            pass
+    from PySide6.QtCore import QTimer as _QT2
+    _QT2.singleShot(0, _init_output_toggle_states)
 
     video_output_desc = QLabel(
         "Route nan/ requests to the video generation endpoint (/api/generate-video). "
