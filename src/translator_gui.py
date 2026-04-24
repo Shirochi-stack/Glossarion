@@ -3172,14 +3172,31 @@ Recent translations to summarize:
 {translations}
         """
     
+    # Named model aliases that should be treated as image / video generators
+    # even though the word 'image'/'video' doesn't appear in the model name.
+    _IMAGE_MODEL_ALIASES = ('nano-banana',)
+    _VIDEO_MODEL_ALIASES = ('seedance', 'kling')
+
+    @classmethod
+    def _model_is_image_gen(cls, model_name: str) -> bool:
+        """Return True when model_name indicates an image-generation model."""
+        m = model_name.lower()
+        return 'image' in m or any(a in m for a in cls._IMAGE_MODEL_ALIASES)
+
+    @classmethod
+    def _model_is_video_gen(cls, model_name: str) -> bool:
+        """Return True when model_name indicates a video-generation model."""
+        m = model_name.lower()
+        return 'video' in m or any(a in m for a in cls._VIDEO_MODEL_ALIASES)
+
     def _get_allowed_image_output_mode(self):
         """Check if image output mode should be enabled based on dependencies.
         Returns '1' if allowed and enabled, '0' otherwise.
-        Auto-enables for any model whose name contains 'image'."""
+        Auto-enables for any model whose name indicates image generation."""
         try:
-            model = str(getattr(self, 'model_var', '')).lower()
-            # Auto-force on for models with 'image' in name
-            if 'image' in model:
+            model = str(getattr(self, 'model_var', ''))
+            # Auto-force on for image-gen models
+            if self._model_is_image_gen(model):
                 return '1'
             # Video mode takes priority – never both at once
             if getattr(self, 'enable_video_output_mode_var', False):
@@ -3190,18 +3207,18 @@ Recent translations to summarize:
             # Otherwise requires image translation to be enabled
             if getattr(self, 'enable_image_translation_var', False):
                 return '1'
-            return '0'  # Not allowed
+            return '0'
         except Exception:
             return '0'
 
     def _get_allowed_video_output_mode(self):
         """Check if video output mode should be enabled based on dependencies.
         Returns '1' if allowed and enabled, '0' otherwise.
-        Auto-enables for any model whose name contains 'video'."""
+        Auto-enables for any model whose name indicates video generation."""
         try:
-            model = str(getattr(self, 'model_var', '')).lower()
-            # Auto-force on for models with 'video' in name
-            if 'video' in model:
+            model = str(getattr(self, 'model_var', ''))
+            # Auto-force on for video-gen models
+            if self._model_is_video_gen(model):
                 return '1'
             # Image mode takes priority if somehow both are on
             if getattr(self, 'enable_image_output_mode_var', False):
@@ -3211,6 +3228,7 @@ Recent translations to summarize:
             return '1'
         except Exception:
             return '0'
+
     
     def _init_variables(self):
         """Initialize all configuration variables"""
@@ -8472,11 +8490,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
             QMessageBox.warning(self, "Process Running", "Please wait for glossary extraction to complete.")
             return
         
-        # Check if file is selected
+        # Check if file is selected (skip for image/video generation models)
+        _async_model = str(getattr(self, 'model_var', ''))
+        _is_generative_async = self._model_is_image_gen(_async_model) or self._model_is_video_gen(_async_model)
         if not hasattr(self, 'file_path') or not self.file_path:
-            self.append_log("⚠️ Please select a file before opening async processing.")
-            QMessageBox.warning(self, "No File Selected", "Please select an EPUB or TXT file first.")
-            return
+            if not _is_generative_async:
+                self.append_log("⚠️ Please select a file before opening async processing.")
+                QMessageBox.warning(self, "No File Selected", "Please select an EPUB or TXT file first.")
+                return
+
         
         try:
             # Lazy import the async processor
@@ -10228,8 +10250,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             return
         
         # Check if files are selected
-        _model_name_lower = str(getattr(self, 'model_var', '')).lower()
-        _is_generative_model = 'image' in _model_name_lower or 'video' in _model_name_lower
+        _model_name = str(getattr(self, 'model_var', ''))
+        _is_generative_model = self._model_is_image_gen(_model_name) or self._model_is_video_gen(_model_name)
 
         if not hasattr(self, 'selected_files') or not self.selected_files:
             file_path = self.entry_epub.text().strip()
@@ -10814,15 +10836,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # ====================================================
 
             # ── Generative-only mode (no input file) ───────────────────────
-            # When the model name contains 'image' or 'video' and no real file
+            # When the model indicates image or video generation and no real file
             # was selected, skip the normal file loop and fire a single API call
             # using the system-prompt / translation-chunk-prompt as the user prompt.
-            _active_model_lower = str(getattr(self, 'model_var', '')).lower()
+            _active_model = str(getattr(self, 'model_var', ''))
             _is_gen_mode = (
                 len(self.selected_files) == 1
                 and self.selected_files[0] == "__generative_mode__"
             ) or (
-                ('image' in _active_model_lower or 'video' in _active_model_lower)
+                (self._model_is_image_gen(_active_model) or self._model_is_video_gen(_active_model))
                 and not any(
                     os.path.exists(p) for p in (self.selected_files or [])
                     if p != "__generative_mode__"

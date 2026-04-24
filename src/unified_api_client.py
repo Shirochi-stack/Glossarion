@@ -2161,7 +2161,37 @@ class UnifiedClient:
         except Exception:
             pass
         return int(os.getenv('MAX_RETRIES', '3'))
-    
+
+    # -------------------------------------------------------------------------
+    # Model-capability helpers
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _is_image_gen_model(model_name: str) -> bool:
+        """Return True if *model_name* should be treated as an image-generation model.
+
+        Matches:
+          - Any name containing "image" (e.g. gpt-image-1, gemini-3-pro-image-preview)
+          - nano-banana (NanoGPT image model)
+        """
+        m = model_name.lower()
+        # Named aliases that don't contain 'image'
+        _IMAGE_ALIASES = ('nano-banana',)
+        return 'image' in m or any(alias in m for alias in _IMAGE_ALIASES)
+
+    @staticmethod
+    def _is_video_gen_model(model_name: str) -> bool:
+        """Return True if *model_name* should be treated as a video-generation model.
+
+        Matches:
+          - Any name containing "video" (e.g. veo2-video, wan-video)
+          - seedance  (ByteDance video model)
+          - kling     (Kuaishou video model)
+        """
+        m = model_name.lower()
+        _VIDEO_ALIASES = ('seedance', 'kling')
+        return 'video' in m or any(alias in m for alias in _VIDEO_ALIASES)
+
     # Class-level cancellation flag for all instances
     _global_cancelled = False
     _global_cancel_lock = threading.RLock()
@@ -9759,8 +9789,8 @@ class UnifiedClient:
                 
                 # Check if image output mode is enabled
                 enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
-                # Force enable for any model whose name contains "image"
-                if "image" in self.model.lower():
+                # Force enable for any model whose name indicates image generation
+                if self._is_image_gen_model(self.model):
                     enable_image_output = True
                     if not self._is_stop_requested():
                         print(f"\ud83c\udfa8 Image output mode auto-enabled for {self.model}")
@@ -13883,8 +13913,8 @@ class UnifiedClient:
         
         # Check if image output mode is enabled
         enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
-        # Force enable for any model whose name contains "image"
-        if "image" in model_lower:
+        # Force enable for any model whose name indicates image generation
+        if self._is_image_gen_model(self.model):
             enable_image_output = True
             if not self._is_stop_requested():
                 print(f"\ud83c\udfa8 Image output mode auto-enabled for {self.model}")
@@ -16426,16 +16456,15 @@ class UnifiedClient:
                     # Check if image/video output mode is enabled
                     enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
                     enable_video_output = os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
-                    _em_lower = effective_model.lower()
-                    # Force enable for any model whose name contains "image"
-                    if "image" in _em_lower:
+                    # Force enable for any model whose name indicates image generation
+                    if self._is_image_gen_model(effective_model):
                         enable_image_output = True
                         if not self._is_stop_requested():
                             print(f"\ud83c\udfa8 Image output mode auto-enabled for {effective_model}")
                     elif enable_image_output and not self._is_stop_requested():
                         print(f"\ud83c\udfa8 Image output mode enabled for {effective_model}")
-                    # Force enable video for any model whose name contains "video"
-                    if "video" in _em_lower:
+                    # Force enable video for any model whose name indicates video generation
+                    if self._is_video_gen_model(effective_model):
                         enable_video_output = True
                         enable_image_output = False  # mutually exclusive
                         if not self._is_stop_requested():
@@ -18181,8 +18210,7 @@ class UnifiedClient:
                 base_url = 'https://api.openai.com/v1'
 
         # Detect image-generation model by name OR by ENABLE_IMAGE_OUTPUT_MODE flag
-        model_lower = (self.model or '').lower()
-        _image_in_name = 'image' in model_lower
+        _image_in_name = self._is_image_gen_model(self.model or '')
         _image_flag    = os.getenv('ENABLE_IMAGE_OUTPUT_MODE', '0') == '1'
         if _image_in_name or _image_flag:
             if not self._is_stop_requested():
