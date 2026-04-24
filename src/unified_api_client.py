@@ -5164,7 +5164,8 @@ class UnifiedClient:
 
         elif self.client_type == 'nanogpt':
             # NanoGPT uses OpenAI-compatible chat endpoint or native image/video endpoints
-            logger.info("NanoGPT will route to chat/image/video endpoint based on output mode")
+            # NanoGPT routes internally within its send method
+            pass
 
         elif self.client_type == 'chutes':
             # chutes uses OpenAI-compatible endpoint

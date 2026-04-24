@@ -3597,7 +3597,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v8.5.6 - Ready to use!")
+        self.append_log("🚀 Glossarion v8.5.7 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -10261,7 +10261,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # use a synthetic sentinel so the rest of the pipeline works
                     self.selected_files = ["__generative_mode__"]
                     self.append_log(
-                        f"\ud83c\udfa8 Generative model detected ({_model_name}) – "
+                        f"\ud83c\udfa8 Generative model detected ({_model_name_lower}) – "
                         "running without an input file."
                     )
                 else:
@@ -10456,10 +10456,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['BATCH_HEADER_PROMPT'] = self.config.get('batch_header_prompt', '').replace('{target_lang}', _output_lang)
                 os.environ['OUTPUT_LANGUAGE'] = _output_lang
                 
-                # Push critical output-mode env vars so the client picks them up
-                os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = self._get_allowed_image_output_mode()
-                os.environ['ENABLE_VIDEO_OUTPUT_MODE'] = self._get_allowed_video_output_mode()
-                
                 # ===== PRE-TRANSLATION GLOSSARY EXTRACTION (Balanced/Full modes) =====
                 auto_glossary_mode = self.config.get('auto_glossary_mode', None)
                 if auto_glossary_mode is None:
@@ -10630,27 +10626,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.append_log(f"\ud83c\udfa8 Generative mode: sending prompt to {model}\u2026")
 
             # Build the user prompt from available config fields
-            # For generative mode without an input file, prefer the system prompt
-            # since translation_chunk_prompt contains chunking placeholders.
             user_prompt = ''
-            
-            # 1. Try system prompt first
-            system_prompt_val = str(getattr(self, 'system_prompt', '') or self.config.get('system_prompt', '')).strip()
-            if system_prompt_val:
-                user_prompt = system_prompt_val
-
-            # 2. Then try image chunk prompt
-            if not user_prompt:
-                val = getattr(self, 'image_chunk_prompt', '') or self.config.get('image_chunk_prompt', '')
+            for attr in ('translation_chunk_prompt', 'image_chunk_prompt'):
+                val = getattr(self, attr, '') or self.config.get(attr, '')
                 if val and val.strip():
                     user_prompt = val.strip()
-
-            # 3. Lastly fallback to translation chunk prompt
+                    break
             if not user_prompt:
-                val = getattr(self, 'translation_chunk_prompt', '') or self.config.get('translation_chunk_prompt', '')
-                if val and val.strip():
-                    user_prompt = val.strip()
-                    
+                # Fall back to system prompt
+                user_prompt = str(getattr(self, 'system_prompt', '') or self.config.get('system_prompt', '')).strip()
             if not user_prompt:
                 user_prompt = 'Generate content'
 
@@ -10687,16 +10671,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
             client = UnifiedClient(
                 model=model,
                 api_key=api_key,
-            )
-
-            content, finish_reason = client.send(
-                messages,
                 temperature=temperature,
                 max_tokens=int(getattr(self, 'max_output_tokens', 4096) or 4096),
-                context='generative_output',
             )
 
-            result_text = (content or '').strip()
+            response = client.send(messages, response_name='generative_output')
+            result_text = (response.content or '').strip()
 
             self.append_log(f"\n\u2705 Generation complete!")
             self.append_log(f"\ud83d\udd17 Result: {result_text}")
@@ -10707,50 +10687,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
                 safe_model = model.replace('/', '_').replace('\\', '_')
                 fname = f"generated_{safe_model}_{ts}.txt"
-                # Try to get output override from GUI or config
-                out_dir_str = ""
-                if hasattr(self, 'entry_output_dir') and hasattr(self.entry_output_dir, 'text'):
-                    out_dir_str = self.entry_output_dir.text().strip()
-                elif hasattr(self, 'output_dir') and self.output_dir:
-                    out_dir_str = self.output_dir
-                elif hasattr(self, 'config') and self.config.get('output_dir'):
-                    out_dir_str = self.config.get('output_dir')
-
-                if not out_dir_str or not os.path.isdir(out_dir_str):
-                    out_dir = pathlib.Path.cwd()
-                else:
-                    out_dir = pathlib.Path(out_dir_str)
-                    
-                # Intercept video/image URL
-                media_url = None
-                if result_text.startswith("http"):
-                    media_url = result_text
-                else:
-                    import re
-                    url_match = re.search(r'https?://[^\s]+', result_text)
-                    if url_match:
-                        media_url = url_match.group(0)
-
-                if media_url and ("video" in model.lower() or "kling" in model.lower() or "image" in model.lower() or "dall-e" in model.lower() or "nanogpt" in model.lower()):
-                    ext = ".mp4" if ("mp4" in media_url.lower() or "video" in model.lower() or "kling" in model.lower() or "nanogpt" in model.lower()) else ".png"
-                    if ".png" in media_url.lower(): ext = ".png"
-                    elif ".jpg" in media_url.lower() or ".jpeg" in media_url.lower(): ext = ".jpg"
-                    elif ".webp" in media_url.lower(): ext = ".webp"
-                    
-                    fname = f"generated_{safe_model}_{ts}{ext}"
-                    out_path = out_dir / fname
-                    
-                    self.append_log(f"\ud83d\udce5 Intercepting and downloading media from URL...")
-                    import urllib.request
-                    req = urllib.request.Request(media_url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req) as response, open(out_path, 'wb') as out_file:
-                        out_file.write(response.read())
-                    self.append_log(f"\ud83d\udcc4 Saved media to: {out_path}")
-                else:
-                    fname = f"generated_{safe_model}_{ts}.txt"
-                    out_path = out_dir / fname
-                    out_path.write_text(result_text, encoding='utf-8')
-                    self.append_log(f"\ud83d\udcc4 Saved to: {out_path}")
+                # Try Desktop first, then CWD
+                desktop = pathlib.Path.home() / 'Desktop'
+                out_dir = desktop if desktop.is_dir() else pathlib.Path.cwd()
+                out_path = out_dir / fname
+                out_path.write_text(result_text, encoding='utf-8')
+                self.append_log(f"\ud83d\udcc4 Saved to: {out_path}")
             except Exception as save_err:
                 self.append_log(f"\u26a0\ufe0f Could not save result file: {save_err}")
 
@@ -21621,7 +21563,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v8.5.6...")
+    print("🚀 Starting Glossarion v8.5.7...")
     
     # Initialize splash screen
     splash_manager = None
