@@ -2739,7 +2739,6 @@ class UnifiedClient:
                     tls.use_individual_endpoint = getattr(key, 'use_individual_endpoint', False)
                     tls.output_token_limit = getattr(key, 'individual_output_token_limit', None)
                     tls.individual_key_temperature = getattr(key, 'individual_key_temperature', None)
-                    tls.api_call_delay = getattr(key, 'api_call_delay', 0.0) or 0.0
                     tls.initialized = True
                     tls.last_rotation = time.time()
                     
@@ -5662,9 +5661,8 @@ class UnifiedClient:
             # Attach usage info to the last payload for this thread
             self._attach_usage_to_last_payload(usage)
             
-            # Update stagger reference + per-key cooldown timestamp
+            # Update stagger reference to end-of-call so next call waits from HERE
             self._update_stagger_timestamp()
-            self._record_per_key_call_time()
             
             return extracted_content, finish_reason
 
@@ -6157,9 +6155,8 @@ class UnifiedClient:
                 except Exception:
                     pass
                 
-                # Update stagger reference + per-key cooldown timestamp
+                # Update stagger reference to end-of-call so next call waits from HERE
                 self._update_stagger_timestamp()
-                self._record_per_key_call_time()
                 
                 return extracted_content, finish_reason
                 
@@ -11015,74 +11012,12 @@ class UnifiedClient:
 
         return ""
 
-    def _enforce_per_key_delay(self):
-        """Enforce the per-key api_call_delay cooldown.
-
-        After the previous call to THIS key finished, we must wait at least
-        api_call_delay seconds before firing again.  This is independent of
-        the global SEND_INTERVAL_SECONDS stagger — it is a simple per-key
-        rate-limit, not a queue slot.
-        """
-        tls = self._get_thread_local_client()
-        per_key_delay = getattr(tls, 'api_call_delay', 0.0) or 0.0
-        if per_key_delay <= 0:
-            return
-
-        _key_id = (getattr(tls, 'api_key', '') or '', getattr(tls, 'model', '') or '')
-
-        # Ensure class-level tracking structures exist
-        if not hasattr(self.__class__, '_per_key_last_call'):
-            self.__class__._per_key_last_call = {}
-            self.__class__._per_key_cooldown_lock = threading.Lock()
-
-        with self.__class__._per_key_cooldown_lock:
-            last_call = self.__class__._per_key_last_call.get(_key_id, 0.0)
-
-        elapsed = time.time() - last_call
-        remaining = per_key_delay - elapsed
-
-        if remaining <= 0:
-            return
-
-        thread_name = threading.current_thread().name
-        model = getattr(tls, 'model', '?')
-        self._debug_log(f"⏳ [{thread_name}] Per-key cooldown: waiting {remaining:.1f}s before reusing {model}")
-
-        elapsed_sleep = 0.0
-        step = 0.1
-        while elapsed_sleep < remaining:
-            if os.environ.get('GRACEFUL_STOP') == '1':
-                raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
-            if self._is_stop_requested() or getattr(self, '_cancelled', False):
-                self._cancelled = True
-                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-            dt = min(step, remaining - elapsed_sleep)
-            time.sleep(dt)
-            elapsed_sleep += dt
-
-    def _record_per_key_call_time(self):
-        """Record the end-of-call timestamp for the current key's cooldown tracking."""
-        try:
-            tls = self._get_thread_local_client()
-            per_key_delay = getattr(tls, 'api_call_delay', 0.0) or 0.0
-            if per_key_delay <= 0:
-                return
-            _key_id = (getattr(tls, 'api_key', '') or '', getattr(tls, 'model', '') or '')
-            if not hasattr(self.__class__, '_per_key_last_call'):
-                self.__class__._per_key_last_call = {}
-                self.__class__._per_key_cooldown_lock = threading.Lock()
-            with self.__class__._per_key_cooldown_lock:
-                self.__class__._per_key_last_call[_key_id] = time.time()
-        except Exception:
-            pass
-
     def _apply_api_call_stagger(self):
-        """Stagger API calls to prevent simultaneous requests (global rate limiter).
-
-        Uses the global SEND_INTERVAL_SECONDS to space out concurrent threads.
-        Per-key cooldowns are handled separately by _enforce_per_key_delay().
+        """Stagger API calls to prevent simultaneous requests.
 
         IMPORTANT: If GRACEFUL_STOP is active, we must NOT start new API calls.
+        This function is called right before sending, so it's the last safe place
+        to stop queued work without interrupting already in-flight requests.
         """
         # If graceful stop is active, do not proceed to send new calls.
         try:
@@ -11094,35 +11029,46 @@ class UnifiedClient:
             pass
 
         api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-
+        
         if api_delay <= 0:
             return
-
+        
         thread_name = threading.current_thread().name
-
+        
         # Initialize class-level tracking if needed
         if not hasattr(self.__class__, '_last_api_call_start'):
             self.__class__._last_api_call_start = 0
             self.__class__._api_stagger_lock = threading.Lock()
-
-        # Reserve a time slot inside the lock, sleep OUTSIDE
+        
+        # Calculate wait time and reserve slot inside the lock, then sleep OUTSIDE
+        # the lock. Previously the sleep was inside the lock, which blocked
+        # _update_stagger_timestamp for threads that had already received their
+        # API response, causing conversion+saving to be deferred in bulk.
         sleep_time = 0.0
         with self.__class__._api_stagger_lock:
             current_time = time.time()
+            
+            # Calculate next available slot (ensures exact intervals)
             next_available = self.__class__._last_api_call_start + api_delay
+            
             if current_time < next_available:
+                # Reserve this slot
                 self.__class__._last_api_call_start = next_available
+                
                 try:
                     sleep_time = max(0.0, float(next_available - current_time))
                 except Exception:
                     sleep_time = float(api_delay)
             else:
+                # This thread gets to go immediately
                 self.__class__._last_api_call_start = current_time
-
+        # Lock released — sleep outside lock (interruptible)
+        
         if sleep_time > 0:
-            tls = self._get_thread_local_client()
+            # Log queued status before sleeping
             if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
                 try:
+                    tls = self._get_thread_local_client()
                     _label = getattr(tls, 'current_request_label', None) or 'request'
                     _ctx = getattr(tls, 'current_request_context', None) or 'translation'
                 except Exception:
@@ -11132,6 +11078,7 @@ class UnifiedClient:
             elapsed = 0.0
             step = 0.1
             while elapsed < sleep_time:
+                # If graceful stop toggles on during stagger, do not start this call.
                 if os.environ.get('GRACEFUL_STOP') == '1':
                     raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
                 if self._is_stop_requested() or getattr(self, '_cancelled', False):
@@ -11140,10 +11087,11 @@ class UnifiedClient:
                 dt = min(step, sleep_time - elapsed)
                 time.sleep(dt)
                 elapsed += dt
-        else:
-            tls = self._get_thread_local_client()
-
-        # Post-sleep log (skip for authgem/gemini/vertex — they emit their own)
+        
+        # Log stagger status — shows queued+delay or immediate in-progress
+        # (Skip for authgem, native gemini, and vertex/ providers — they emit
+        # this after their own config summary so the "API call in progress"
+        # line appears at the end of the per-request log block.)
         _model_lower = getattr(self, 'model', '').lower()
         _is_authgem = _model_lower.startswith('authgem')
         _is_native_gemini = _model_lower.startswith('gemini')
@@ -11153,6 +11101,7 @@ class UnifiedClient:
         )
         if not _is_authgem and not _is_native_gemini and not _is_vertex and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
             try:
+                tls = self._get_thread_local_client()
                 label = getattr(tls, 'current_request_label', None) or 'request'
                 ctx = getattr(tls, 'current_request_context', None) or 'translation'
             except Exception:
@@ -11160,24 +11109,26 @@ class UnifiedClient:
                 ctx = 'translation'
             _think = self._get_thinking_status_label()
             if sleep_time > 0:
+                # Thread had to wait — show queued log before sleep already happened, now confirm in-progress
                 if sleep_time > api_delay + 0.5:
                     self._debug_log(f"⏳ [{thread_name}] {label} API call in progress (queued {sleep_time:.1f}s){_think}")
                 else:
                     self._debug_log(f"⏳ [{thread_name}] {label} API call in progress{_think}")
             else:
+                # No wait needed — goes immediately
                 self._debug_log(f"📤 [{thread_name}] {label} ({ctx}) API call in progress{_think}")
 
+
     def _update_stagger_timestamp(self):
-        """Push the global stagger reference to now (end of call) so the next call
-        waits SEND_INTERVAL_SECONDS from when this call FINISHED, not started.
-        Per-key cooldown is recorded separately via _record_per_key_call_time()."""
+        """Push stagger reference to now (end of call) so the next call
+        waits SEND_INTERVAL_SECONDS from when this call FINISHED,
+        not from when it started."""
         try:
             if hasattr(self.__class__, '_api_stagger_lock'):
                 with self.__class__._api_stagger_lock:
                     self.__class__._last_api_call_start = time.time()
         except Exception:
             pass
-
 
     def _sleep_with_cancel(self, duration: float, interval: float = 0.1) -> bool:
         """Sleep in small increments, aborting if stop/cancel is requested."""
@@ -12476,10 +12427,6 @@ class UnifiedClient:
         """
         # Bind current run id to this thread so transport logs can be suppressed for stale runs.
         _set_thread_run_id_from_env()
-
-        # Enforce per-key cooldown BEFORE the global stagger so the delay is
-        # measured from the END of the previous call to this specific key.
-        self._enforce_per_key_delay()
 
         self._apply_api_call_stagger()
 
