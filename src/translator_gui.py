@@ -4825,6 +4825,14 @@ Recent translations to summarize:
             <li><b>groq/openai/gpt-oss-120b</b> - GPT OSS 120B via Groq</li>
         </ul>
         
+        <h4>NanoGPT (nan/)</h4>
+        <p>Access high-quality models and generative AI through NanoGPT</p>
+        <ul>
+            <li><b>nan/gpt-image-2</b> - GPT Image Generative Model</li>
+            <li><b>nan/deepseek/deepseek-v4-flash</b> - DeepSeek V4 Flash via NanoGPT</li>
+            <li><b>nan/openai/gpt-latest</b> - GPT Latest via NanoGPT</li>
+        </ul>
+        
         <h4>ChatGPT Subscription (authgpt/)</h4>
         <p>Use your ChatGPT Plus/Pro subscription directly — no API key needed</p>
         <ul>
@@ -18382,6 +18390,7 @@ Important rules:
                 ("🤖", "antigravity/", "Cloud Code", "Local proxy (localhost)", "#181830", "#a0a0f0"),
                 ("🟢", "nd/", "NVIDIA", "NVIDIA Integrate models", "#142014", "#60d060"),
                 ("🇨🇳", "za/", "Zhipu Intl.", "GLM international endpoint", "#1e2030", "#60c0e0"),
+                ("🌌", "nan/", "NanoGPT", "Generative & text models", "#1a1025", "#c084fc"),
             ]
             
             pfx_w = QWidget()
