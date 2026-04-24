@@ -10228,12 +10228,25 @@ If you see multiple p-b cookies, use the one with the longest value."""
             return
         
         # Check if files are selected
+        _model_name_lower = str(getattr(self, 'model_var', '')).lower()
+        _is_generative_model = 'image' in _model_name_lower or 'video' in _model_name_lower
+
         if not hasattr(self, 'selected_files') or not self.selected_files:
             file_path = self.entry_epub.text().strip()
             if not file_path or file_path.startswith("No file selected") or "files selected" in file_path:
-                QMessageBox.critical(self, "Error", "Please select file(s) to translate.")
-                return
-            self.selected_files = [file_path]
+                if _is_generative_model:
+                    # Image/video generation models don't need an input file;
+                    # use a synthetic sentinel so the rest of the pipeline works
+                    self.selected_files = ["__generative_mode__"]
+                    self.append_log(
+                        f"\ud83c\udfa8 Generative model detected ({_model_name_lower}) – "
+                        "running without an input file."
+                    )
+                else:
+                    QMessageBox.critical(self, "Error", "Please select file(s) to translate.")
+                    return
+            else:
+                self.selected_files = [file_path]
             
             # Auto-clear glossary if file doesn't match (works for both manual and auto-loaded)
             if self.manual_glossary_path:
@@ -10575,8 +10588,103 @@ If you see multiple p-b cookies, use the one with the longest value."""
         
         self.append_log("🟡 Thread started...")
 
+    def _run_generative_prompt_mode(self):
+        """Run a single image/video generation call when no input file was provided.
+
+        The user prompt is taken from:
+          1. The 'translation_chunk_prompt' config value (the main prompt field), or
+          2. The system prompt, or
+          3. A sensible fallback.
+
+        The result (image URL, video URL, or generated text) is logged to the
+        GUI and also saved to a timestamped .txt file next to the executable.
+        """
+        try:
+            model = str(getattr(self, 'model_var', '')).strip()
+            self.append_log(f"\ud83c\udfa8 Generative mode: sending prompt to {model}\u2026")
+
+            # Build the user prompt from available config fields
+            user_prompt = ''
+            for attr in ('translation_chunk_prompt', 'image_chunk_prompt'):
+                val = getattr(self, attr, '') or self.config.get(attr, '')
+                if val and val.strip():
+                    user_prompt = val.strip()
+                    break
+            if not user_prompt:
+                # Fall back to system prompt
+                user_prompt = str(getattr(self, 'system_prompt', '') or self.config.get('system_prompt', '')).strip()
+            if not user_prompt:
+                user_prompt = 'Generate content'
+
+            system_prompt = str(
+                getattr(self, 'system_prompt', '') or self.config.get('system_prompt', '')
+            ).strip()
+
+            messages = []
+            if system_prompt and system_prompt != user_prompt:
+                messages.append({'role': 'system', 'content': system_prompt})
+            messages.append({'role': 'user', 'content': user_prompt})
+
+            self.append_log(f"\ud83d\udcdd Prompt: {user_prompt[:200]}{'...' if len(user_prompt) > 200 else ''}")
+
+            # Push critical output-mode env vars so the client picks them up
+            os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = self._get_allowed_image_output_mode()
+            os.environ['ENABLE_VIDEO_OUTPUT_MODE'] = self._get_allowed_video_output_mode()
+
+            # Instantiate a UnifiedClient for this call
+            from unified_api_client import UnifiedClient
+            try:
+                api_key = self.api_key_entry.text().strip()
+            except Exception:
+                api_key = str(getattr(self, 'api_key_var', '') or '').strip()
+            if api_key:
+                os.environ['OPENAI_API_KEY'] = api_key
+
+            try:
+                temperature = float(self.trans_temp.text())
+            except Exception:
+                temperature = 1.0
+
+
+            client = UnifiedClient(
+                model=model,
+                api_key=api_key,
+                temperature=temperature,
+                max_tokens=int(getattr(self, 'max_output_tokens', 4096) or 4096),
+            )
+
+            response = client.send(messages, response_name='generative_output')
+            result_text = (response.content or '').strip()
+
+            self.append_log(f"\n\u2705 Generation complete!")
+            self.append_log(f"\ud83d\udd17 Result: {result_text}")
+
+            # Save result to a file
+            try:
+                import datetime, pathlib
+                ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                safe_model = model.replace('/', '_').replace('\\', '_')
+                fname = f"generated_{safe_model}_{ts}.txt"
+                # Try Desktop first, then CWD
+                desktop = pathlib.Path.home() / 'Desktop'
+                out_dir = desktop if desktop.is_dir() else pathlib.Path.cwd()
+                out_path = out_dir / fname
+                out_path.write_text(result_text, encoding='utf-8')
+                self.append_log(f"\ud83d\udcc4 Saved to: {out_path}")
+            except Exception as save_err:
+                self.append_log(f"\u26a0\ufe0f Could not save result file: {save_err}")
+
+            return True
+
+        except Exception as exc:
+            import traceback
+            self.append_log(f"\u274c Generative mode error: {exc}")
+            self.append_log(traceback.format_exc())
+            return False
+
     def run_translation_direct(self):
         """Run translation directly - handles multiple files and different file types"""
+
         try:
             # AUTO-SWITCH PROFILE BASED ON EXTRACTION MODE
             # Check if profile name contains BeautifulSoup or html2text
@@ -10704,6 +10812,25 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.selected_files = self._get_opf_file_order(self.selected_files)
             self.append_log(f"📚 Processing {original_file_count} files in reading order")
             # ====================================================
+
+            # ── Generative-only mode (no input file) ───────────────────────
+            # When the model name contains 'image' or 'video' and no real file
+            # was selected, skip the normal file loop and fire a single API call
+            # using the system-prompt / translation-chunk-prompt as the user prompt.
+            _active_model_lower = str(getattr(self, 'model_var', '')).lower()
+            _is_gen_mode = (
+                len(self.selected_files) == 1
+                and self.selected_files[0] == "__generative_mode__"
+            ) or (
+                ('image' in _active_model_lower or 'video' in _active_model_lower)
+                and not any(
+                    os.path.exists(p) for p in (self.selected_files or [])
+                    if p != "__generative_mode__"
+                )
+            )
+
+            if _is_gen_mode:
+                return self._run_generative_prompt_mode()
 
             # Process each file
             total_files = len(self.selected_files)
