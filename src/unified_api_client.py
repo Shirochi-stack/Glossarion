@@ -52,6 +52,8 @@ Supported models and their prefixes (Updated July 2025):
 - AuthGem-Vertex: authgem-vertex/* (e.g., authgem-vertex/gemini-2.5-flash) – Gemini via Google OAuth + Vertex AI
 - Z.AI: za/* (e.g., za/glm-4-plus) – Zhipu AI via API key
 - AuthZA: authza/* (e.g., authza/glm-4-plus) – Zhipu AI via pseudo-OAuth key capture
+- NanoGPT: nan/* (e.g., nan/gpt-5.2, nan/veo2-video) – nano-gpt.com API
+  Routes to chat/image/video endpoint based on ENABLE_IMAGE_OUTPUT_MODE / ENABLE_VIDEO_OUTPUT_MODE
 
 ELECTRONHUB SUPPORT:
 ElectronHub is an API aggregator that provides access to multiple models.
@@ -1812,6 +1814,8 @@ class UnifiedClient:
         'za/': 'za',
         'authza/': 'authza',
         'authza': 'authza',
+        'nan/': 'nanogpt',
+        'nan': 'nanogpt',
     }
     
     # Model-specific constraints
@@ -5127,6 +5131,10 @@ class UnifiedClient:
                 logger.info("ElectronHub will use OpenAI SDK for API calls")
             else:
                 logger.info("ElectronHub will use HTTP API for API calls")
+
+        elif self.client_type == 'nanogpt':
+            # NanoGPT uses OpenAI-compatible chat endpoint or native image/video endpoints
+            logger.info("NanoGPT will route to chat/image/video endpoint based on output mode")
 
         elif self.client_type == 'chutes':
             # chutes uses OpenAI-compatible endpoint
@@ -12628,6 +12636,7 @@ class UnifiedClient:
             'antigravity': self._send_antigravity,  # Antigravity Cloud Code proxy
             'za': self._send_openai_provider_router,  # Z.AI via API key
             'authza': self._send_authza,  # Z.AI via pseudo-OAuth key capture
+            'nanogpt': self._send_nanogpt,  # NanoGPT (nano-gpt.com) – chat/image/video
         }
         
         # IMPORTANT: Use actual_provider for routing, not client_type
@@ -19084,6 +19093,270 @@ class UnifiedClient:
             return int(m.group(1))
         return None
 
+    # =========================================================================
+    # NanoGPT (nano-gpt.com) – chat / image / video endpoint routing
+    # =========================================================================
+
+    def _send_nanogpt(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Route a request to nano-gpt.com.
+
+        * Default  → POST /api/v1/chat/completions  (OpenAI-compatible)
+        * ENABLE_IMAGE_OUTPUT_MODE=1 → POST /api/v1/images/generations
+        * ENABLE_VIDEO_OUTPUT_MODE=1 → POST /api/generate-video  (async/poll)
+        """
+        base_url = (os.getenv("NANOGPT_API_URL", "https://nano-gpt.com")).rstrip("/")
+        api_key = self.api_key or ""
+
+        # Strip the nan/ routing prefix so the bare model name is sent to the API
+        effective_model = self.model or ""
+        if effective_model.lower().startswith("nan/"):
+            effective_model = effective_model[4:]
+
+        enable_video_output = os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
+        enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
+
+        if enable_video_output:
+            return self._send_nanogpt_video(
+                messages, effective_model, base_url, api_key, response_name
+            )
+        elif enable_image_output:
+            return self._send_nanogpt_image(
+                messages, effective_model, base_url, api_key, response_name
+            )
+        else:
+            # Use the OpenAI-compatible chat completions path
+            return self._send_openai_compatible(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                base_url=f"{base_url}/api/v1",
+                response_name=response_name,
+                provider="nanogpt",
+            )
+
+    def _send_nanogpt_image(self, messages, model, base_url, api_key, response_name) -> UnifiedResponse:
+        """POST /api/v1/images/generations on nano-gpt.com."""
+        import requests as _req
+
+        # Extract the text prompt from messages (last user message wins)
+        prompt = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    prompt = content
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            prompt = part.get("text", "")
+                            break
+                break
+
+        if not prompt:
+            prompt = "Generate an image"
+
+        image_size = os.getenv("NANOGPT_IMAGE_SIZE", "1024x1024")
+        url = f"{base_url}/api/v1/images/generations"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "size": image_size,
+            "response_format": "url",
+        }
+
+        max_retries = self._get_max_retries()
+        for attempt in range(max_retries):
+            try:
+                if self._is_stop_requested():
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                if not self._is_stop_requested():
+                    print(f"🖼️ [NanoGPT] Generating image via {url} (model={model})")
+                resp = _req.post(url, json=payload, headers=headers, timeout=120)
+                if resp.status_code not in (200, 201):
+                    err = resp.text[:400]
+                    try:
+                        err = resp.json().get("error", {}).get("message", err)
+                    except Exception:
+                        pass
+                    if resp.status_code == 429:
+                        wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                        print(f"⏳ [NanoGPT] Rate-limited, retrying in {wait:.1f}s…")
+                        time.sleep(wait)
+                        continue
+                    raise UnifiedClientError(
+                        f"NanoGPT image API error ({resp.status_code}): {err}",
+                        error_type="api_error",
+                    )
+                data = resp.json()
+                # Standard DALL-E-style response: data["data"][0]["url"]
+                image_url = ""
+                items = data.get("data", [])
+                if items and isinstance(items, list):
+                    image_url = items[0].get("url", "") or items[0].get("b64_json", "")
+                if not image_url:
+                    image_url = data.get("url", "")
+                if not self._is_stop_requested():
+                    print(f"✅ [NanoGPT] Image generated: {image_url[:80]}…")
+                return UnifiedResponse(
+                    content=image_url,
+                    finish_reason="stop",
+                    usage=None,
+                    raw_response=data,
+                )
+            except UnifiedClientError:
+                raise
+            except Exception as e:
+                err_str = str(e)
+                print(f"🛑 [NanoGPT] Image generation error (attempt {attempt+1}): {err_str}")
+                if attempt < max_retries - 1:
+                    time.sleep(min(2 ** attempt + random.uniform(0, 1), 30))
+                else:
+                    raise UnifiedClientError(
+                        f"NanoGPT image generation failed after {max_retries} attempts: {err_str}",
+                        error_type="api_error",
+                    )
+        raise UnifiedClientError("NanoGPT image: all retries exhausted", error_type="api_error")
+
+    def _send_nanogpt_video(self, messages, model, base_url, api_key, response_name) -> UnifiedResponse:
+        """POST /api/generate-video on nano-gpt.com, then poll until COMPLETED.
+
+        The video API is async – we submit a job and poll GET /api/video/status
+        every 5 s until the video is ready or the operation is cancelled.
+        """
+        import requests as _req
+
+        # Extract text prompt from messages
+        prompt = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    prompt = content
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            prompt = part.get("text", "")
+                            break
+                break
+
+        if not prompt:
+            prompt = "Generate a video"
+
+        duration     = os.getenv("NANOGPT_VIDEO_DURATION", "5s")
+        aspect_ratio = os.getenv("NANOGPT_VIDEO_ASPECT_RATIO", "16:9")
+
+        gen_url    = f"{base_url}/api/generate-video"
+        status_url = f"{base_url}/api/video/status"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type":  "application/json",
+        }
+        payload = {
+            "model":        model,
+            "prompt":       prompt,
+            "duration":     duration,
+            "aspect_ratio": aspect_ratio,
+        }
+
+        # ── Submit the job ──────────────────────────────────────────────────
+        if not self._is_stop_requested():
+            print(f"🎬 [NanoGPT] Submitting video job (model={model}, duration={duration})")
+        try:
+            resp = _req.post(gen_url, json=payload, headers=headers, timeout=60)
+            if resp.status_code not in (200, 201, 202):
+                err = resp.text[:400]
+                try:
+                    err = resp.json().get("error", {}).get("message", err)
+                except Exception:
+                    pass
+                raise UnifiedClientError(
+                    f"NanoGPT video submit error ({resp.status_code}): {err}",
+                    error_type="api_error",
+                )
+            init_data = resp.json()
+        except UnifiedClientError:
+            raise
+        except Exception as e:
+            raise UnifiedClientError(
+                f"NanoGPT video submit failed: {e}",
+                error_type="api_error",
+            )
+
+        run_id = init_data.get("runId") or init_data.get("id")
+        if not run_id:
+            raise UnifiedClientError(
+                f"NanoGPT video: no runId in response: {str(init_data)[:200]}",
+                error_type="api_error",
+            )
+        if not self._is_stop_requested():
+            print(f"   ✅ Job accepted – runId={run_id} | status: {init_data.get('status','?')}")
+
+        # ── Poll for completion ─────────────────────────────────────────────
+        max_attempts = 120   # 120 × 5 s = ~10 minutes
+        poll_interval = 5    # seconds
+        for attempt in range(max_attempts):
+            if self._is_stop_requested():
+                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+            time.sleep(poll_interval)
+            try:
+                status_resp = _req.get(
+                    status_url,
+                    params={"requestId": run_id},
+                    headers=headers,
+                    timeout=30,
+                )
+                if status_resp.status_code != 200:
+                    print(f"   ⚠️ [NanoGPT] Poll {attempt+1}: HTTP {status_resp.status_code} – retrying…")
+                    continue
+                status_data = status_resp.json()
+                inner = status_data.get("data") or status_data
+                status = (inner.get("status") or "").upper()
+                if not self._is_stop_requested():
+                    print(f"   🔄 [NanoGPT] Poll {attempt+1}/{max_attempts}: status={status}")
+                if status == "COMPLETED":
+                    # Try to extract the video URL from the response
+                    video_url = ""
+                    try:
+                        video_url = inner["output"]["video"]["url"]
+                    except (KeyError, TypeError):
+                        pass
+                    if not video_url:
+                        # Fallback locations
+                        video_url = (
+                            inner.get("videoUrl")
+                            or inner.get("url")
+                            or inner.get("output", {}).get("url", "")
+                        )
+                    if not video_url:
+                        video_url = str(inner)
+                    if not self._is_stop_requested():
+                        print(f"✅ [NanoGPT] Video ready: {video_url[:80]}…")
+                    return UnifiedResponse(
+                        content=video_url,
+                        finish_reason="stop",
+                        usage=None,
+                        raw_response=status_data,
+                    )
+                elif status == "FAILED":
+                    error_msg = inner.get("error") or inner.get("message") or "Video generation failed"
+                    raise UnifiedClientError(
+                        f"NanoGPT video generation FAILED: {error_msg}",
+                        error_type="api_error",
+                    )
+            except UnifiedClientError:
+                raise
+            except Exception as e:
+                print(f"   ⚠️ [NanoGPT] Poll {attempt+1} exception: {e}")
+
+        raise UnifiedClientError(
+            f"NanoGPT video generation timed out after {max_attempts * poll_interval}s (runId={run_id})",
+            error_type="api_error",
+        )
+
     def _send_openai_provider_router(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Generic router for many OpenAI-compatible providers to reduce wrapper duplication."""
         # Re-apply per-key individual endpoint (if any) before routing, so routing can't override it.
@@ -19138,6 +19411,7 @@ class UnifiedClient:
             'bigscience': "https://api.together.xyz/v1",  # Together AI fallback
             'meta': "https://api.together.xyz/v1",  # Together AI fallback
             'za': lambda: os.getenv("ZA_API_URL", "https://api.z.ai/api/paas/v4"),
+            'nanogpt': lambda: os.getenv("NANOGPT_API_URL", "https://nano-gpt.com") + "/api/v1",
         }
         
         # Get base URL from mapping

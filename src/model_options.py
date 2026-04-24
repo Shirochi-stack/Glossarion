@@ -13,7 +13,7 @@ def get_model_options() -> List[str]:
         # - GPT-4o/4o-mini/4-turbo/4.1/3.5-turbo retired from ChatGPT Feb 13 2026; 4o still on API but legacy
         # - GPT-5.1 retiring March 11 2026, removed
         # - GPT-5.4 released March 5 2026, GPT-5.3 Instant released March 3 2026
-        "gpt-5.4", "gpt-5.4-pro",
+        "gpt-5.5","gpt-5.4", "gpt-5.4-pro",
         "gpt-5.3-chat-latest", "gpt-5.3-codex", "gpt-5.3-codex-spark",
         "gpt-5.2", "gpt-5.2-pro", "gpt-5.2-chat-latest",
         "gpt-5-mini","gpt-5","gpt-5-nano", "gpt-5-chat-latest", "gpt-5-codex", "gpt-5-pro", "gpt-5-pro-2025-10-06",
@@ -202,7 +202,7 @@ def get_model_options() -> List[str]:
         # AuthGPT – ChatGPT subscription via OAuth (Codex Responses endpoint)
         # Only models supported by /backend-api/codex/responses are listed.
         # GPT-5.1 retiring March 11 2026, removed. GPT-5.4 released March 5 2026.
-        "authgpt/gpt-5.4", "authgpt/gpt-5.4-pro",
+        "authgpt/gpt-5.5","authgpt/gpt-5.4", "authgpt/gpt-5.4-pro",
         "authgpt/gpt-5.3-codex", "authgpt/gpt-5.3-codex-spark",
         "authgpt/gpt-5.2", "authgpt/gpt-5.2-codex",
         "authgpt/gpt-5",

@@ -8681,34 +8681,49 @@ def _create_image_translation_section(self, parent):
     hide_desc.setContentsMargins(20, 0, 0, 10)
     left_v.addWidget(hide_desc)
     
-    # Enable Image Output Mode
-    image_output_cb = self._create_styled_checkbox("Enable Image Output Mode")
+    # ── Image Only Output Mode ─────────────────────────────────────────────
+    image_output_cb = self._create_styled_checkbox("Enable Image Only Output Mode")
     try:
         image_output_cb.setChecked(bool(self.enable_image_output_mode_var))
     except Exception:
         pass
+
+    # Initialize video output mode variable if not present
+    if not hasattr(self, 'enable_video_output_mode_var'):
+        self.enable_video_output_mode_var = self.config.get('enable_video_output_mode', False)
+
+    # Forward-declare video checkbox so the mutual-exclusion callbacks can reference it
+    video_output_cb = self._create_styled_checkbox("Enable Video Only Output Mode")
+
     def _on_image_output_toggle(checked):
         try:
             self.enable_image_output_mode_var = bool(checked)
-            # Save to config
             self.config['enable_image_output_mode'] = bool(checked)
+            # Mutual exclusion: enabling Image disables Video
+            if checked and bool(getattr(self, 'enable_video_output_mode_var', False)):
+                self.enable_video_output_mode_var = False
+                self.config['enable_video_output_mode'] = False
+                video_output_cb.blockSignals(True)
+                video_output_cb.setChecked(False)
+                video_output_cb.blockSignals(False)
         except Exception:
             pass
+
     image_output_cb.toggled.connect(_on_image_output_toggle)
     left_v.addWidget(image_output_cb)
-    
-    image_output_desc = QLabel("Request image output from vision models (e.g. gemini-3-pro-image-preview)")
+
+    image_output_desc = QLabel("Request image output from vision models (e.g. gemini-3-pro-image-preview) / nan/ image endpoint")
     image_output_desc.setStyleSheet("color: gray; font-size: 10pt;")
     image_output_desc.setContentsMargins(20, 0, 0, 5)
     left_v.addWidget(image_output_desc)
-    
+
     # Image Output Resolution dropdown
     resolution_w = QWidget()
     resolution_h = QHBoxLayout(resolution_w)
     resolution_h.setContentsMargins(20, 0, 0, 0)
     resolution_h.setSpacing(8)
     resolution_h.addWidget(QLabel("Output Resolution:"))
-    
+
     resolution_combo = QComboBox()
     resolution_combo.addItems(["1K", "2K", "4K"])
     resolution_combo.setFixedWidth(80)
@@ -8722,18 +8737,18 @@ def _create_image_translation_section(self, parent):
     """)
     self._add_combobox_arrow(resolution_combo)
     self._disable_combobox_mousewheel(resolution_combo)
-    
+
     # Initialize variable if not exists
     if not hasattr(self, 'image_output_resolution_var'):
         self.image_output_resolution_var = self.config.get('image_output_resolution', '1K')
-    
+
     try:
         idx = resolution_combo.findText(self.image_output_resolution_var)
         if idx >= 0:
             resolution_combo.setCurrentIndex(idx)
     except Exception:
         pass
-    
+
     def _on_resolution_changed(text):
         try:
             self.image_output_resolution_var = text
@@ -8742,13 +8757,45 @@ def _create_image_translation_section(self, parent):
     resolution_combo.currentTextChanged.connect(_on_resolution_changed)
     resolution_h.addWidget(resolution_combo)
     resolution_h.addStretch()
-    
+
     left_v.addWidget(resolution_w)
-    
+
     resolution_desc = QLabel("Higher resolution = better quality but slower generation")
     resolution_desc.setStyleSheet("color: gray; font-size: 10pt;")
     resolution_desc.setContentsMargins(40, 0, 0, 10)
     left_v.addWidget(resolution_desc)
+
+    # ── Video Only Output Mode ─────────────────────────────────────────────
+    try:
+        video_output_cb.setChecked(bool(self.enable_video_output_mode_var))
+    except Exception:
+        pass
+
+    def _on_video_output_toggle(checked):
+        try:
+            self.enable_video_output_mode_var = bool(checked)
+            self.config['enable_video_output_mode'] = bool(checked)
+            # Mutual exclusion: enabling Video disables Image
+            if checked and bool(getattr(self, 'enable_image_output_mode_var', False)):
+                self.enable_image_output_mode_var = False
+                self.config['enable_image_output_mode'] = False
+                image_output_cb.blockSignals(True)
+                image_output_cb.setChecked(False)
+                image_output_cb.blockSignals(False)
+        except Exception:
+            pass
+
+    video_output_cb.toggled.connect(_on_video_output_toggle)
+    left_v.addWidget(video_output_cb)
+
+    video_output_desc = QLabel(
+        "Route nan/ requests to the video generation endpoint (/api/generate-video). "
+        "Polls until the video URL is returned. Mutually exclusive with Image Only Output Mode."
+    )
+    video_output_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    video_output_desc.setContentsMargins(20, 0, 0, 10)
+    video_output_desc.setWordWrap(True)
+    left_v.addWidget(video_output_desc)
     
     left_v.addSpacing(10)
     

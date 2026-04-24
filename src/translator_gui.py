@@ -3180,17 +3180,31 @@ Recent translations to summarize:
             # Check if user wants it enabled
             if not getattr(self, 'enable_image_output_mode_var', False):
                 return '0'
-            
+            # Video mode takes priority – never both at once
+            if getattr(self, 'enable_video_output_mode_var', False):
+                return '0'
             # Check model exception
             model = str(getattr(self, 'model_var', '')).lower()
             if 'image-preview' in model or 'imagen' in model:
                 return '1'  # Special model allows it without image translation
-            
             # Otherwise requires image translation to be enabled
             if getattr(self, 'enable_image_translation_var', False):
                 return '1'
-            
             return '0'  # Not allowed
+        except Exception:
+            return '0'
+
+    def _get_allowed_video_output_mode(self):
+        """Check if video output mode should be enabled based on dependencies.
+        Returns '1' if allowed and enabled, '0' otherwise.
+        Rule: Mutually exclusive with image output mode."""
+        try:
+            if not getattr(self, 'enable_video_output_mode_var', False):
+                return '0'
+            # Image mode takes priority if somehow both are on
+            if getattr(self, 'enable_image_output_mode_var', False):
+                return '0'
+            return '1'
         except Exception:
             return '0'
     
@@ -3295,6 +3309,7 @@ Recent translations to summarize:
             ('disable_gemini_safety_var', 'disable_gemini_safety', True),
             ('single_api_image_chunks_var', 'single_api_image_chunks', False),
             ('enable_image_output_mode_var', 'enable_image_output_mode', False),
+            ('enable_video_output_mode_var', 'enable_video_output_mode', False),
             ('enable_streaming_var', 'enable_streaming', False),
             # Preserve streaming logs during batch mode; must be initialized here so save_config
             # keeps the user's choice even if the Other Settings dialog is never opened.
@@ -4954,7 +4969,7 @@ Recent translations to summarize:
         self.frame.addWidget(model_label, 1, 0, Qt.AlignLeft)
         
         # Get default model and model list
-        default_model = self.config.get('model', 'authgpt/gpt-5.4')
+        default_model = self.config.get('model', 'authgpt/gpt-5.5')
         self.model_var = default_model
         # Use custom model list from config if saved, otherwise default catalog
         models = self.config.get('custom_model_list', None)
@@ -20063,6 +20078,7 @@ Important rules:
                 ('advanced_watermark_removal', ['advanced_watermark_removal_var'], False, bool),
                 # Image output mode
                 ('enable_image_output_mode', ['enable_image_output_mode_var'], False, bool),
+                ('enable_video_output_mode', ['enable_video_output_mode_var'], False, bool),
                 ('image_output_resolution', ['image_output_resolution_var'], '1K', str),
                 ('compression_factor', ['compression_factor_var'], 3.0, float),
                 ('image_chunk_overlap', ['image_chunk_overlap_var'], 1.0, lambda v: safe_float(v, 1.0)),
@@ -21061,6 +21077,7 @@ Important rules:
                 ('ENABLE_WATERMARK_REMOVAL', '1' if getattr(self, 'enable_watermark_removal_var', True) else '0'),
                 ('SAVE_CLEANED_IMAGES', '1' if getattr(self, 'save_cleaned_images_var', False) else '0'),
                 ('ENABLE_IMAGE_OUTPUT_MODE', self._get_allowed_image_output_mode()),
+                ('ENABLE_VIDEO_OUTPUT_MODE', self._get_allowed_video_output_mode()),
                 # Normalize to uppercase so validation in unified_api_client accepts 1K/2K/4K
                 ('IMAGE_OUTPUT_RESOLUTION', str(getattr(self, 'image_output_resolution_var', '1K')).upper()),
 
