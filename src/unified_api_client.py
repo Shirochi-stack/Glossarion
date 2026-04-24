@@ -1152,6 +1152,13 @@ class UnifiedClient:
             with self._temp_model_lock:
                 yield
     def _get_send_interval(self) -> float:
+        # Per-key delay wins over the global GUI setting when explicitly set
+        try:
+            per_key = getattr(self, '_per_key_api_delay', None)
+            if per_key is not None:
+                return float(per_key)
+        except Exception:
+            pass
         try:
             return float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
         except Exception:
@@ -2739,6 +2746,7 @@ class UnifiedClient:
                     tls.use_individual_endpoint = getattr(key, 'use_individual_endpoint', False)
                     tls.output_token_limit = getattr(key, 'individual_output_token_limit', None)
                     tls.individual_key_temperature = getattr(key, 'individual_key_temperature', None)
+                    tls.api_call_delay = getattr(key, 'api_call_delay', 0.0)
                     tls.initialized = True
                     tls.last_rotation = time.time()
                     
@@ -2755,6 +2763,9 @@ class UnifiedClient:
                         self.current_key_google_region = tls.google_region
                         self.current_key_use_individual_endpoint = tls.use_individual_endpoint
                         self.current_key_output_token_limit = getattr(tls, 'output_token_limit', None)
+                    # Apply per-key delay: > 0 overrides global, 0 means use global
+                    _key_delay = getattr(tls, 'api_call_delay', 0.0) or 0.0
+                    self._per_key_api_delay = _key_delay if _key_delay > 0 else None
                     
                     # Log key assignment - FIX: Add None check for api_key
                     if self.api_key and len(self.api_key) > 12:
@@ -2787,6 +2798,7 @@ class UnifiedClient:
                         tls.azure_api_version = None
                         tls.google_region = None
                         tls.use_individual_endpoint = False
+                        tls.api_call_delay = 0.0
                         tls.initialized = True
                         tls.last_rotation = time.time()
                         with self._model_lock:
@@ -2794,6 +2806,8 @@ class UnifiedClient:
                             self.model = self.original_model
                             self.key_identifier = "Main Key (fallback)"
                             self.current_key_index = -1
+                        # No per-key delay when using main GUI key
+                        self._per_key_api_delay = None
                         self._setup_client()
                         return
                     else:
@@ -2813,6 +2827,9 @@ class UnifiedClient:
                         self.current_key_google_region = getattr(tls, 'google_region', None)
                         self.current_key_use_individual_endpoint = getattr(tls, 'use_individual_endpoint', False)
                         self.current_key_output_token_limit = getattr(tls, 'output_token_limit', None)
+                    # Restore per-key delay from thread-local (handles rotation without re-entering lock)
+                    _key_delay = getattr(tls, 'api_call_delay', 0.0) or 0.0
+                    self._per_key_api_delay = _key_delay if _key_delay > 0 else None
         
         # Single key mode
         elif not tls.initialized:
@@ -7087,6 +7104,12 @@ class UnifiedClient:
                     # This flag tells _send_internal to NOT attempt fallback keys if it hits prohibited content
                     temp_client._is_retry_client = True
                     
+                    # Propagate per-key delay so _apply_api_call_stagger / _get_send_interval
+                    # use it instead of the global SEND_INTERVAL_SECONDS env var.
+                    # A value of 0.0 means "use global", so we only set it when > 0.
+                    if _api_call_delay > 0:
+                        temp_client._per_key_api_delay = _api_call_delay
+                    
                     # CRITICAL: Disable retries for fallback keys - they should only try once
                     temp_client._max_retries = 0
                     temp_client.max_retries = 0
@@ -7361,6 +7384,16 @@ class UnifiedClient:
                     
                     # CRITICAL: Mark this client as a retry client BEFORE setup to prevent recursive fallback
                     temp_client._is_retry_client = True
+                    
+                    # Propagate per-key delay so _apply_api_call_stagger / _get_send_interval
+                    # use it instead of the global SEND_INTERVAL_SECONDS env var.
+                    try:
+                        _gk_raw_delay = gk.get('api_call_delay', 0.0)
+                        _gk_api_delay = float(_gk_raw_delay) if _gk_raw_delay not in (None, '') else 0.0
+                    except Exception:
+                        _gk_api_delay = 0.0
+                    if _gk_api_delay > 0:
+                        temp_client._per_key_api_delay = _gk_api_delay
                     
                     # CRITICAL: Disable retries for glossary keys - they should only try once
                     temp_client._max_retries = 1
@@ -11028,7 +11061,12 @@ class UnifiedClient:
         except Exception:
             pass
 
-        api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+        # Per-key delay wins over the global GUI setting when explicitly set on this client
+        try:
+            per_key = getattr(self, '_per_key_api_delay', None)
+            api_delay = float(per_key) if per_key is not None else float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+        except Exception:
+            api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
         
         if api_delay <= 0:
             return
