@@ -8624,6 +8624,9 @@ def _create_image_translation_section(self, parent):
             # Enforce image output dependency when image translation changes
             if hasattr(self, '_enforce_image_output_dependency'):
                 self._enforce_image_output_dependency()
+            # Sync enabled state of image/video output controls
+            if hasattr(self, '_update_output_mode_controls_state'):
+                self._update_output_mode_controls_state()
         except Exception:
             pass
     enable_cb.toggled.connect(_on_enable_image_toggle)
@@ -8683,6 +8686,7 @@ def _create_image_translation_section(self, parent):
     
     # ── Image Only Output Mode ─────────────────────────────────────────────
     image_output_cb = self._create_styled_checkbox("Enable Image Only Output Mode")
+    self.image_output_cb = image_output_cb  # store ref for enable/disable
     try:
         image_output_cb.setChecked(bool(self.enable_image_output_mode_var))
     except Exception:
@@ -8694,6 +8698,7 @@ def _create_image_translation_section(self, parent):
 
     # Forward-declare video checkbox so the mutual-exclusion callbacks can reference it
     video_output_cb = self._create_styled_checkbox("Enable Video Only Output Mode")
+    self.video_output_cb = video_output_cb  # store ref for enable/disable
 
     def _on_image_output_toggle(checked):
         try:
@@ -8715,6 +8720,7 @@ def _create_image_translation_section(self, parent):
     image_output_desc = QLabel("Request image output from vision models (e.g. gemini-3-pro-image-preview) / nan/ image endpoint")
     image_output_desc.setStyleSheet("color: gray; font-size: 10pt;")
     image_output_desc.setContentsMargins(20, 0, 0, 5)
+    self.image_output_desc_label = image_output_desc  # store ref
     left_v.addWidget(image_output_desc)
 
     # Image Output Resolution dropdown
@@ -8763,6 +8769,7 @@ def _create_image_translation_section(self, parent):
     resolution_desc = QLabel("Higher resolution = better quality but slower generation")
     resolution_desc.setStyleSheet("color: gray; font-size: 10pt;")
     resolution_desc.setContentsMargins(40, 0, 0, 10)
+    self.image_resolution_desc_label = resolution_desc  # store ref
     left_v.addWidget(resolution_desc)
 
     # ── Video Only Output Mode ─────────────────────────────────────────────
@@ -8795,7 +8802,41 @@ def _create_image_translation_section(self, parent):
     video_output_desc.setStyleSheet("color: gray; font-size: 10pt;")
     video_output_desc.setContentsMargins(20, 0, 0, 10)
     video_output_desc.setWordWrap(True)
+    self.video_output_desc_label = video_output_desc  # store ref
     left_v.addWidget(video_output_desc)
+
+    # store resolution widget ref
+    self.image_output_resolution_w = resolution_w
+
+    # ── helper: sync enabled state of output-mode controls ─────────────────
+    def _update_output_mode_controls_state():
+        """Enable/disable image & video output controls based on image translation toggle."""
+        try:
+            image_on = bool(getattr(self, 'enable_image_translation_var', False))
+            enabled  = image_on
+            gray     = "#808080"
+
+            for widget in (
+                getattr(self, 'image_output_cb', None),
+                getattr(self, 'video_output_cb', None),
+                getattr(self, 'image_output_resolution_w', None),
+            ):
+                if widget:
+                    widget.setEnabled(enabled)
+
+            for label, base_style in (
+                (getattr(self, 'image_output_desc_label', None),    "color: gray; font-size: 10pt;"),
+                (getattr(self, 'video_output_desc_label', None),    "color: gray; font-size: 10pt;"),
+                (getattr(self, 'image_resolution_desc_label', None), "color: gray; font-size: 10pt;"),
+            ):
+                if label:
+                    label.setStyleSheet(base_style if enabled else f"color: {gray}; font-size: 10pt;")
+        except Exception:
+            pass
+
+    self._update_output_mode_controls_state = _update_output_mode_controls_state
+    # Run once on creation to match current image-translation state
+    _update_output_mode_controls_state()
     
     left_v.addSpacing(10)
     

@@ -11814,8 +11814,45 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 if response_content:
                     self.append_log(f"✅ Received translation from API")
                     
-                    # Check if this is a generated image response
+                    # ── Decode data:image/...;base64, responses (gpt-image-2, etc.) ──────
+                    if response_content.startswith("data:image/"):
+                        try:
+                            # Parse   data:<mime>;base64,<data>
+                            header, b64data = response_content.split(",", 1)
+                            # Determine extension from mime type
+                            mime = header.split(";")[0].split(":")[1].lower()  # e.g. image/png
+                            ext  = mime.split("/")[-1]  # png / jpeg / webp …
+                            if ext == "jpeg":
+                                ext = "jpg"
+
+                            # Build output path next to other translated images
+                            os.makedirs(output_dir, exist_ok=True)
+                            base_name = os.path.splitext(image_name)[0]
+                            generated_image_path = os.path.join(output_dir, f"{base_name}_generated.{ext}")
+
+                            import base64 as _b64
+                            with open(generated_image_path, "wb") as _f:
+                                _f.write(_b64.b64decode(b64data))
+
+                            self.append_log(f"✅ Generated image decoded and saved: {os.path.basename(generated_image_path)}")
+
+                            # Track for CBZ compilation
+                            if not hasattr(self, 'generated_images'):
+                                self.generated_images = []
+                            self.generated_images.append(generated_image_path)
+
+                            self.image_progress_manager.update(image_path, content_hash, output_file=generated_image_path, status="completed")
+
+                            self.append_log(f"💾 Image saved to: {generated_image_path}")
+                            self.append_log(f"📁 Output directory: {output_dir}")
+                            return True
+                        except Exception as _dec_err:
+                            self.append_log(f"⚠️ Failed to decode base64 image: {_dec_err} — saving as text")
+                            # Fall through to normal text handling below
+
+                    # Check if this is a generated image response (Gemini-style sentinel)
                     if response_content.startswith("[GENERATED_IMAGE:"):
+
                         # Extract the image path
                         import re
                         match = re.search(r'\[GENERATED_IMAGE:(.+?)\]', response_content)
