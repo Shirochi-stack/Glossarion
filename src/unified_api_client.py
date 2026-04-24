@@ -19352,6 +19352,7 @@ class UnifiedClient:
                 base_url=f"{base_url}/api/v1",
                 response_name=response_name,
                 provider="nanogpt",
+                model_override=effective_model,
             )
 
     def _send_nanogpt_image(self, messages, model, base_url, api_key, response_name) -> UnifiedResponse:
