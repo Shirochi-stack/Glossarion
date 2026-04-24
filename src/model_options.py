@@ -36,7 +36,7 @@ def get_model_options() -> List[str]:
         "gemma-2-27b-it", "gemma-2-9b-it", "gemma-2-2b-it",
         
         # Anthropic Claude Models
-        "claude-opus-4-6", "claude-opus-4-5-20251101", "claude-opus-4-1-20250805", "claude-opus-4-20250514", "claude-sonnet-4-6", 
+        "claude-opus-4-7","claude-opus-4-6", "claude-opus-4-5-20251101", "claude-opus-4-1-20250805", "claude-opus-4-20250514", "claude-sonnet-4-6", 
         "claude-sonnet-4-5", "claude-sonnet-4-20250514", "claude-haiku-4-5-20251001",
         "claude-3-haiku-20240307",       
         
@@ -73,8 +73,8 @@ def get_model_options() -> List[str]:
         "chutes/zai-org/GLM-4.6-TEE", "chutes/zai-org/GLM-4.7-TEE",
         "chutes/moonshotai/Kimi-K2.6-TEE",
         
-        # DeepSeek Models
-        "DeepSeek-V4-Flash", "DeepSeek-V4-Pro",
+        # DeepSeek Models (api.deepseek.com)
+        "deepseek-v4-flash", "deepseek-v4-pro",
         "deepseek-chat","deepseek-reasoner", "deepseek-coder", "deepseek-coder-33b-instruct",
         
         # Mistral Models

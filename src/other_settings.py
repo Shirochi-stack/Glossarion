@@ -2659,7 +2659,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(sep_stream)
 
     # GPT-5/OpenAI Reasoning Toggle
-    gpt5_title = QLabel("GPT-5 Thinking (OpenRouter/OpenAI-style)")
+    gpt5_title = QLabel("GPT-5 / DeepSeek V4 Thinking (OpenRouter/OpenAI-style)")
     gpt5_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
     section_v.addWidget(gpt5_title)
     
@@ -2741,7 +2741,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(gpt_row2)
     
     # Store reference to description label for enable/disable
-    self.gpt_desc_label = QLabel("Controls GPT-5 and OpenRouter reasoning.\nProvide Tokens to force a max token budget for other models,\n GPT-5 uses Effort (none/low/medium/high/xhigh).")
+    self.gpt_desc_label = QLabel("Controls GPT-5, OpenRouter, and DeepSeek V4 reasoning.\nProvide Tokens to force a max token budget for other models,\n GPT-5 uses Effort (none/low/medium/high/xhigh).\n DeepSeek V4 maps: low/medium/high→high, xhigh→max.")
     self.gpt_desc_label.setStyleSheet("color: gray; font-size: 10pt;")
     self.gpt_desc_label.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(self.gpt_desc_label)
@@ -2916,7 +2916,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(deepseek_desc)
 
     # Anthropic Extended Thinking
-    anthropic_title = QLabel("Anthropic Extended Thinking")
+    anthropic_title = QLabel("Anthropic Extended Thinking (Opus 4.6/4.7, Sonnet 4.6)")
     anthropic_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
     section_v.addWidget(anthropic_title)
 
@@ -3004,7 +3004,7 @@ def _create_response_handling_section(self, parent):
     self.anthropic_effort_label = QLabel("Effort:")
     anthropic_h2.addWidget(self.anthropic_effort_label)
     self.anthropic_effort_combo = QComboBox()
-    self.anthropic_effort_combo.addItems(["low", "medium", "high"])
+    self.anthropic_effort_combo.addItems(["low", "medium", "high", "xhigh", "max"])
     self.anthropic_effort_combo.setFixedWidth(100)
     self.anthropic_effort_combo.setStyleSheet("""
         QComboBox::down-arrow {
@@ -3034,7 +3034,7 @@ def _create_response_handling_section(self, parent):
     anthropic_h2.addStretch()
     section_v.addWidget(anthropic_row2)
 
-    self.anthropic_desc_label = QLabel("Extended thinking for Claude models. Budget sets thinking token limit.\nAdaptive thinking uses effort level instead of fixed budget.\nOpus 4.6 always uses adaptive; Sonnet 4.6 optionally supports it.")
+    self.anthropic_desc_label = QLabel("Extended thinking for Claude models. Budget sets thinking token limit.\nAdaptive thinking uses effort level instead of fixed budget.\nOpus 4.6/4.7 and Sonnet 4.6 always use adaptive; other models use budget.\nEffort (low/medium/high/xhigh/max) — Opus 4.7 supports all five levels.")
     self.anthropic_desc_label.setStyleSheet("color: gray; font-size: 10pt;")
     self.anthropic_desc_label.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(self.anthropic_desc_label)

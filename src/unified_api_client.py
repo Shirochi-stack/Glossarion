@@ -11032,11 +11032,15 @@ class UnifiedClient:
             if os.getenv('ENABLE_ANTHROPIC_THINKING', '0') != '1':
                 return ""
             force_adaptive = os.getenv('ANTHROPIC_FORCE_ADAPTIVE', '0') == '1'
-            is_opus_46 = ('opus-4-6' in model_lower) or ('opus-4.6' in model_lower)
-            if is_opus_46 or force_adaptive:
-                effort = (os.getenv('ANTHROPIC_EFFORT', 'medium') or 'medium').strip().lower()
-                if effort not in ('low', 'medium', 'high'):
-                    effort = 'medium'
+            is_adaptive_model = (
+                'opus-4-6' in model_lower or 'opus-4.6' in model_lower
+                or 'opus-4-7' in model_lower or 'opus-4.7' in model_lower
+                or 'sonnet-4-6' in model_lower or 'sonnet-4.6' in model_lower
+            )
+            if is_adaptive_model or force_adaptive:
+                effort = (os.getenv('ANTHROPIC_EFFORT', 'high') or 'high').strip().lower()
+                if effort not in ('low', 'medium', 'high', 'xhigh', 'max'):
+                    effort = 'high'
                 return f" (extended thinking: adaptive, effort={effort})"
             try:
                 budget = int(os.getenv('ANTHROPIC_THINKING_BUDGET', '10000'))
@@ -12310,7 +12314,13 @@ class UnifiedClient:
                 
                 model_lower = (self.model or '').lower()
                 force_adaptive = os.getenv('ANTHROPIC_FORCE_ADAPTIVE', '0') == '1'
-                is_opus_46 = 'opus-4-6' in model_lower or 'opus-4.6' in model_lower
+                # Models that use adaptive thinking with output_config effort:
+                # opus-4-6 (only supports adaptive), opus-4-7, sonnet-4-6
+                is_adaptive_model = (
+                    'opus-4-6' in model_lower or 'opus-4.6' in model_lower
+                    or 'opus-4-7' in model_lower or 'opus-4.7' in model_lower
+                    or 'sonnet-4-6' in model_lower or 'sonnet-4.6' in model_lower
+                )
                 
                 # Check if model is cached as not supporting adaptive thinking
                 adaptive_blocked = False
@@ -12322,20 +12332,21 @@ class UnifiedClient:
                     pass
                 
                 # Determine thinking mode:
-                # - opus 4.6: always adaptive (only mode it supports)
+                # - opus-4-6 / opus-4-7 / sonnet-4-6: always adaptive
                 # - force_adaptive toggle: adaptive for all models
                 # - default: enabled with budget_tokens
                 # - adaptive_blocked: model doesn't support adaptive, fall through to standard
-                use_adaptive = (is_opus_46 or force_adaptive) and not adaptive_blocked
-                if adaptive_blocked and (is_opus_46 or force_adaptive):
+                use_adaptive = (is_adaptive_model or force_adaptive) and not adaptive_blocked
+                if adaptive_blocked and (is_adaptive_model or force_adaptive):
                     print(f"🧠 Adaptive thinking not supported on {self.model}, using standard extended thinking")
                 
                 if use_adaptive:
                     data["thinking"] = {"type": "adaptive"}
-                    # Add effort level via output_config
-                    effort = os.getenv('ANTHROPIC_EFFORT', 'medium').lower()
-                    if effort in ('low', 'medium', 'high'):
-                        data["output_config"] = {"effort": effort}
+                    # Add effort level via output_config (low/medium/high/xhigh/max)
+                    effort = (os.getenv('ANTHROPIC_EFFORT', 'high') or 'high').lower()
+                    if effort not in ('low', 'medium', 'high', 'xhigh', 'max'):
+                        effort = 'high'
+                    data["output_config"] = {"effort": effort}
                     orig_temp = data.get("temperature")
                     data["temperature"] = 1
                     print(f"🧠 Anthropic adaptive thinking: effort={effort} (temperature overridden to 1 for compatibility)")
@@ -16311,11 +16322,16 @@ class UnifiedClient:
                         except Exception:
                             pass
 
-                    # DeepSeek thinking via extra_body
-                    # (per DeepSeek docs: extra_body={\"thinking\":{\"type\":\"enabled\"}})
+                    # DeepSeek thinking / reasoning_effort
+                    # - deepseek-v4-flash / deepseek-v4-pro: BOTH top-level params (per official docs):
+                    #     "thinking": {"type": "enabled"}  AND  "reasoning_effort": "high"|"max"
+                    #   Effort mapping: GPT_EFFORT xhigh→"max", everything else→"high"
+                    # - Older DeepSeek models: only extra_body={"thinking":{"type":"enabled"}}
                     if provider == 'deepseek' or is_chutes_thinking_endpoint:
                         try:
                             enable_ds = enable_ds_env
+                            _em_lower = (effective_model or '').lower()
+                            _is_ds_v4 = _em_lower in ('deepseek-v4-flash', 'deepseek-v4-pro')
 
                             # Log once per-thread per (model,state) so users can tell if it is applied,
                             # without spamming the console for every chunk.
@@ -16331,16 +16347,31 @@ class UnifiedClient:
                                     except Exception:
                                         tname = "unknown-thread"
                                     label = "Chutes" if is_chutes_thinking_endpoint else "DeepSeek"
-                                    self._debug_log(
-                                        f"🧠 [{label}:{tname}] thinking={'ENABLED' if enable_ds else 'DISABLED'} (model={effective_model})"
-                                    )
+                                    if _is_ds_v4 and enable_ds:
+                                        _ds_effort_raw = (os.getenv('GPT_EFFORT', 'high') or 'high').lower()
+                                        _ds_effort = 'max' if _ds_effort_raw == 'xhigh' else 'high'
+                                        self._debug_log(
+                                            f"🧠 [{label}:{tname}] thinking=ENABLED + reasoning_effort={_ds_effort} (raw={_ds_effort_raw}) (model={effective_model})"
+                                        )
+                                    else:
+                                        self._debug_log(
+                                            f"🧠 [{label}:{tname}] thinking={'ENABLED' if enable_ds else 'DISABLED'} (model={effective_model})"
+                                        )
                             except Exception:
                                 pass
 
                             if enable_ds:
-                                extra_body["thinking"] = {"type": "enabled"}
+                                if _is_ds_v4:
+                                    # V4: both thinking toggle AND reasoning_effort as top-level params
+                                    _ds_effort_raw = (os.getenv('GPT_EFFORT', 'high') or 'high').lower()
+                                    _ds_effort = 'max' if _ds_effort_raw == 'xhigh' else 'high'
+                                    extra_body["thinking"] = {"type": "enabled"}
+                                    extra_body["reasoning_effort"] = _ds_effort
+                                else:
+                                    extra_body["thinking"] = {"type": "enabled"}
                         except Exception:
                             pass
+
                     
                     # Gemini OpenAI-compatible endpoint: inject thinking_config via extra_body
                     # NOTE: reasoning_effort and thinking_config CANNOT be used together;
