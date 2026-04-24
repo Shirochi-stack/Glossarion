@@ -10261,7 +10261,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # use a synthetic sentinel so the rest of the pipeline works
                     self.selected_files = ["__generative_mode__"]
                     self.append_log(
-                        f"\ud83c\udfa8 Generative model detected ({_model_name_lower}) – "
+                        f"\ud83c\udfa8 Generative model detected ({_model_name}) – "
                         "running without an input file."
                     )
                 else:
@@ -10673,14 +10673,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 api_key=api_key,
             )
 
-            response = client.send(
+            content, finish_reason = client.send(
                 messages,
                 temperature=temperature,
                 max_tokens=int(getattr(self, 'max_output_tokens', 4096) or 4096),
-                response_name='generative_output',
+                context='generative_output',
             )
 
-            result_text = (response.content or '').strip()
+            result_text = (content or '').strip()
 
             self.append_log(f"\n\u2705 Generation complete!")
             self.append_log(f"\ud83d\udd17 Result: {result_text}")
