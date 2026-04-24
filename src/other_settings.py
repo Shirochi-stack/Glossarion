@@ -8814,25 +8814,38 @@ def _create_image_translation_section(self, parent):
     def _update_output_mode_controls_state():
         """Enable/disable image & video output controls based on image translation toggle."""
         try:
+            from PySide6.QtWidgets import QLabel as _QLabel
             enabled = bool(getattr(self, 'enable_image_translation_var', False))
-            cb_color    = "color: white;"    if enabled else "color: #606060;"
-            label_color = "color: gray; font-size: 10pt;" if enabled else "color: #505050; font-size: 10pt;"
 
-            # Checkboxes — setEnabled + explicit text color (custom overlay doesn't auto-gray)
+            # Checkbox text color (Qt's QCheckBox:disabled only works when no inline style overrides it)
+            cb_text_color = "color: white;" if enabled else "color: #666666;"
+            # The white ✓ checkmark QLabel overlay inside _create_styled_checkbox is immune to
+            # setEnabled() — it has a hardcoded color: white stylesheet. We must gray it explicitly.
+            checkmark_color = (
+                "QLabel { color: white; background: transparent; font-weight: bold; font-size: 11px; }"
+                if enabled else
+                "QLabel { color: #444444; background: transparent; font-weight: bold; font-size: 11px; }"
+            )
+
             for cb in (
                 getattr(self, 'image_output_cb', None),
                 getattr(self, 'video_output_cb', None),
             ):
                 if cb:
                     cb.setEnabled(enabled)
-                    cb.setStyleSheet(cb_color)
+                    cb.setStyleSheet(cb_text_color)
+                    # Gray/restore the ✓ checkmark overlay QLabel
+                    for child in cb.findChildren(_QLabel):
+                        if child.text() == "✓":
+                            child.setStyleSheet(checkmark_color)
 
             # Resolution row widget
             rw = getattr(self, 'image_output_resolution_w', None)
             if rw:
                 rw.setEnabled(enabled)
 
-            # Description labels AND the resolution row label
+            # Description/resolution labels — QLabel has no :disabled pseudo-state so set explicitly
+            label_color = "color: gray; font-size: 10pt;" if enabled else "color: #505050; font-size: 10pt;"
             for lbl in (
                 getattr(self, 'image_output_desc_label', None),
                 getattr(self, 'video_output_desc_label', None),

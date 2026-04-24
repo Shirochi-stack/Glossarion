@@ -19469,10 +19469,11 @@ class UnifiedClient:
         aspect_ratio = os.getenv("NANOGPT_VIDEO_ASPECT_RATIO", "16:9")
 
         gen_url    = f"{base_url}/api/generate-video"
-        status_url = f"{base_url}/api/video/status"
+        # Poll URL per NanoGPT spec: /api/generate-video/status?runId=...&modelSlug=...
+        status_url = f"{base_url}/api/generate-video/status"
         headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type":  "application/json",
+            "x-api-key":    api_key,        # NanoGPT uses x-api-key, not Bearer
+            "Content-Type": "application/json",
         }
         payload = {
             "model":        model,
@@ -19522,10 +19523,13 @@ class UnifiedClient:
                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
             time.sleep(poll_interval)
             try:
+                # NanoGPT spec: GET /api/generate-video/status?runId=...&modelSlug=...
+                # modelSlug is the model name without the 'nan/' prefix
+                model_slug = model.split("/", 1)[-1] if "/" in model else model
                 status_resp = _req.get(
                     status_url,
-                    params={"requestId": run_id},
-                    headers=headers,
+                    params={"runId": run_id, "modelSlug": model_slug},
+                    headers={"x-api-key": api_key},
                     timeout=30,
                 )
                 if status_resp.status_code != 200:
