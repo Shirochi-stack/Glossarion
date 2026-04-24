@@ -10456,6 +10456,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['BATCH_HEADER_PROMPT'] = self.config.get('batch_header_prompt', '').replace('{target_lang}', _output_lang)
                 os.environ['OUTPUT_LANGUAGE'] = _output_lang
                 
+                # Push critical output-mode env vars so the client picks them up
+                os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = self._get_allowed_image_output_mode()
+                os.environ['ENABLE_VIDEO_OUTPUT_MODE'] = self._get_allowed_video_output_mode()
+                
                 # ===== PRE-TRANSLATION GLOSSARY EXTRACTION (Balanced/Full modes) =====
                 auto_glossary_mode = self.config.get('auto_glossary_mode', None)
                 if auto_glossary_mode is None:
@@ -10703,12 +10707,50 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
                 safe_model = model.replace('/', '_').replace('\\', '_')
                 fname = f"generated_{safe_model}_{ts}.txt"
-                # Try Desktop first, then CWD
-                desktop = pathlib.Path.home() / 'Desktop'
-                out_dir = desktop if desktop.is_dir() else pathlib.Path.cwd()
-                out_path = out_dir / fname
-                out_path.write_text(result_text, encoding='utf-8')
-                self.append_log(f"\ud83d\udcc4 Saved to: {out_path}")
+                # Try to get output override from GUI or config
+                out_dir_str = ""
+                if hasattr(self, 'entry_output_dir') and hasattr(self.entry_output_dir, 'text'):
+                    out_dir_str = self.entry_output_dir.text().strip()
+                elif hasattr(self, 'output_dir') and self.output_dir:
+                    out_dir_str = self.output_dir
+                elif hasattr(self, 'config') and self.config.get('output_dir'):
+                    out_dir_str = self.config.get('output_dir')
+
+                if not out_dir_str or not os.path.isdir(out_dir_str):
+                    out_dir = pathlib.Path.cwd()
+                else:
+                    out_dir = pathlib.Path(out_dir_str)
+                    
+                # Intercept video/image URL
+                media_url = None
+                if result_text.startswith("http"):
+                    media_url = result_text
+                else:
+                    import re
+                    url_match = re.search(r'https?://[^\s]+', result_text)
+                    if url_match:
+                        media_url = url_match.group(0)
+
+                if media_url and ("video" in model.lower() or "kling" in model.lower() or "image" in model.lower() or "dall-e" in model.lower() or "nanogpt" in model.lower()):
+                    ext = ".mp4" if ("mp4" in media_url.lower() or "video" in model.lower() or "kling" in model.lower() or "nanogpt" in model.lower()) else ".png"
+                    if ".png" in media_url.lower(): ext = ".png"
+                    elif ".jpg" in media_url.lower() or ".jpeg" in media_url.lower(): ext = ".jpg"
+                    elif ".webp" in media_url.lower(): ext = ".webp"
+                    
+                    fname = f"generated_{safe_model}_{ts}{ext}"
+                    out_path = out_dir / fname
+                    
+                    self.append_log(f"\ud83d\udce5 Intercepting and downloading media from URL...")
+                    import urllib.request
+                    req = urllib.request.Request(media_url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req) as response, open(out_path, 'wb') as out_file:
+                        out_file.write(response.read())
+                    self.append_log(f"\ud83d\udcc4 Saved media to: {out_path}")
+                else:
+                    fname = f"generated_{safe_model}_{ts}.txt"
+                    out_path = out_dir / fname
+                    out_path.write_text(result_text, encoding='utf-8')
+                    self.append_log(f"\ud83d\udcc4 Saved to: {out_path}")
             except Exception as save_err:
                 self.append_log(f"\u26a0\ufe0f Could not save result file: {save_err}")
 
