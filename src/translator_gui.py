@@ -11370,10 +11370,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 'eh/gemini-2.5-flash', 'eh/gemini-1.5-flash', 'eh/gpt-4o' # ElectronHub variants
             ]
             
-            model_lower = model.lower()
-            if not any(vm in model_lower for vm in [m.lower() for m in vision_models]):
-                self.append_log(f"⚠️ Model '{model}' may not support vision. Trying anyway...")
-            
             # Check for stop before API initialization
             if self.stop_requested:
                 self.append_log("⏹️ Image translation cancelled before API initialization")
