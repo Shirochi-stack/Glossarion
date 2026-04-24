@@ -10671,11 +10671,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
             client = UnifiedClient(
                 model=model,
                 api_key=api_key,
-                temperature=temperature,
-                max_tokens=int(getattr(self, 'max_output_tokens', 4096) or 4096),
             )
 
-            response = client.send(messages, response_name='generative_output')
+            response = client.send(
+                messages,
+                temperature=temperature,
+                max_tokens=int(getattr(self, 'max_output_tokens', 4096) or 4096),
+                response_name='generative_output',
+            )
+
             result_text = (response.content or '').strip()
 
             self.append_log(f"\n\u2705 Generation complete!")
