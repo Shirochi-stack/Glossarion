@@ -10626,15 +10626,27 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.append_log(f"\ud83c\udfa8 Generative mode: sending prompt to {model}\u2026")
 
             # Build the user prompt from available config fields
+            # For generative mode without an input file, prefer the system prompt
+            # since translation_chunk_prompt contains chunking placeholders.
             user_prompt = ''
-            for attr in ('translation_chunk_prompt', 'image_chunk_prompt'):
-                val = getattr(self, attr, '') or self.config.get(attr, '')
+            
+            # 1. Try system prompt first
+            system_prompt_val = str(getattr(self, 'system_prompt', '') or self.config.get('system_prompt', '')).strip()
+            if system_prompt_val:
+                user_prompt = system_prompt_val
+
+            # 2. Then try image chunk prompt
+            if not user_prompt:
+                val = getattr(self, 'image_chunk_prompt', '') or self.config.get('image_chunk_prompt', '')
                 if val and val.strip():
                     user_prompt = val.strip()
-                    break
+
+            # 3. Lastly fallback to translation chunk prompt
             if not user_prompt:
-                # Fall back to system prompt
-                user_prompt = str(getattr(self, 'system_prompt', '') or self.config.get('system_prompt', '')).strip()
+                val = getattr(self, 'translation_chunk_prompt', '') or self.config.get('translation_chunk_prompt', '')
+                if val and val.strip():
+                    user_prompt = val.strip()
+                    
             if not user_prompt:
                 user_prompt = 'Generate content'
 
