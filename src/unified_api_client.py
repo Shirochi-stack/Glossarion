@@ -6230,6 +6230,70 @@ class UnifiedClient:
                 # Update stagger reference to end-of-call so next call waits from HERE
                 self._update_stagger_timestamp()
                 
+                # INTERCEPT GENERATIVE MEDIA (URL / Base64) AND DOWNLOAD LOCALLY
+                if extracted_content:
+                    extracted_content_str = str(extracted_content).strip()
+                    is_image_mode = os.environ.get('ENABLE_IMAGE_OUTPUT_MODE') == '1'
+                    is_video_mode = os.environ.get('ENABLE_VIDEO_OUTPUT_MODE') == '1'
+                    
+                    if is_image_mode or is_video_mode:
+                        is_url = extracted_content_str.startswith('http') and ('fal.media' in extracted_content_str or 'nano-gpt.com' in extracted_content_str or 'chutes.ai' in extracted_content_str or extracted_content_str.endswith(('.png', '.jpg', '.jpeg', '.webp', '.mp4', '.gif')))
+                        is_base64 = extracted_content_str.startswith('data:image') or extracted_content_str.startswith('data:video') or (';base64,' in extracted_content_str[:100])
+                        
+                        if is_url or is_base64:
+                            try:
+                                import urllib.request, uuid, mimetypes, base64, pathlib
+                                
+                                # Decide output directory (try config output directory, then CWD/Generated_Media)
+                                out_dir_base = os.environ.get('OUTPUT_DIRECTORY', '')
+                                if not out_dir_base:
+                                    out_dir_base = os.path.join(os.getcwd(), 'Generated_Media')
+                                os.makedirs(out_dir_base, exist_ok=True)
+                                
+                                if is_url:
+                                    ext = '.mp4' if '.mp4' in extracted_content_str else '.png' if '.png' in extracted_content_str else '.jpg' if '.jpg' in extracted_content_str else '.bin'
+                                    if is_video_mode and ext == '.bin':
+                                        ext = '.mp4'
+                                    elif is_image_mode and ext == '.bin':
+                                        ext = '.png'
+                                        
+                                    filename = f"generated_media_{uuid.uuid4().hex[:8]}{ext}"
+                                    out_path = os.path.join(out_dir_base, filename)
+                                    
+                                    print(f"📥 Intercepting media URL... Downloading to: {out_path}")
+                                    req = urllib.request.Request(extracted_content_str, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+                                    with urllib.request.urlopen(req) as response_stream, open(out_path, 'wb') as out_file:
+                                        out_file.write(response_stream.read())
+                                        
+                                    # Return an HTML tag embedding the local file
+                                    if ext == '.mp4':
+                                        extracted_content = f'<video controls autoplay loop src="file:///{out_path.replace(chr(92), "/")}"></video>'
+                                    else:
+                                        extracted_content = f'<img src="file:///{out_path.replace(chr(92), "/")}"/>'
+                                        
+                                elif is_base64:
+                                    header, b64data = extracted_content_str.split(',', 1) if ',' in extracted_content_str else ('data:image/png;base64', extracted_content_str)
+                                    mime = 'image/png'
+                                    if ':' in header and ';' in header:
+                                        mime = header.split(';')[0].split(':')[1] or mime
+                                    ext = mimetypes.guess_extension(mime) or '.png'
+                                    if ext == '.jpe': ext = '.jpg'
+                                    
+                                    filename = f"generated_media_{uuid.uuid4().hex[:8]}{ext}"
+                                    out_path = os.path.join(out_dir_base, filename)
+                                    
+                                    print(f"📥 Intercepting Base64 media... Decoding to: {out_path}")
+                                    with open(out_path, 'wb') as f:
+                                        f.write(base64.b64decode(b64data))
+                                        
+                                    if mime.startswith('video/'):
+                                        extracted_content = f'<video controls autoplay loop src="file:///{out_path.replace(chr(92), "/")}"></video>'
+                                    else:
+                                        extracted_content = f'<img src="file:///{out_path.replace(chr(92), "/")}"/>'
+                                print(f"✅ Media successfully intercepted and saved.")
+                            except Exception as e:
+                                print(f"⚠️ Failed to intercept/download media: {e}")
+                
                 return extracted_content, finish_reason
                 
             except UnifiedClientError as e:
