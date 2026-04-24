@@ -4624,6 +4624,13 @@ class UnifiedClient:
                                                 tls.individual_key_temperature = float(qk_temp)
                                             except Exception:
                                                 pass
+                                        # Apply per-key API call delay
+                                        try:
+                                            qk_raw_delay = qk_data.get('api_call_delay', 0.0)
+                                            qk_delay = float(qk_raw_delay) if qk_raw_delay not in (None, '') else 0.0
+                                            self._per_key_api_delay = qk_delay if qk_delay > 0 else None
+                                        except Exception:
+                                            self._per_key_api_delay = None
                                     self._setup_client()
                                     _qa_scan_overridden = True
                                     try:
@@ -4755,6 +4762,13 @@ class UnifiedClient:
                                                 tls.individual_key_temperature = float(gk_temp)
                                             except Exception:
                                                 pass
+                                        # Apply per-key API call delay
+                                        try:
+                                            gk_raw_delay = gk_data.get('api_call_delay', 0.0)
+                                            gk_delay = float(gk_raw_delay) if gk_raw_delay not in (None, '') else 0.0
+                                            self._per_key_api_delay = gk_delay if gk_delay > 0 else None
+                                        except Exception:
+                                            self._per_key_api_delay = None
                                     # Re-initialize client for new model/key
                                     self._setup_client()
                                     _glossary_overridden = True
@@ -4892,6 +4906,8 @@ class UnifiedClient:
                     self._api_key_pool = _original_instance_pool
                 elif '_api_key_pool' in self.__dict__:
                     del self._api_key_pool
+                # Clear per-key delay so it doesn't leak into subsequent non-pool calls
+                self._per_key_api_delay = None
                 self._setup_client()
             if watchdog_started:
                 _api_watchdog_finished(watchdog_context, model=getattr(self, 'model', None), request_id=request_id if 'request_id' in locals() else None)
