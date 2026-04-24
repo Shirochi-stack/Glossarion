@@ -18215,7 +18215,7 @@ class UnifiedClient:
         if _image_in_name or _image_flag:
             if not self._is_stop_requested():
                 reason = 'model name' if _image_in_name else 'ENABLE_IMAGE_OUTPUT_MODE flag'
-                print(f"\ud83d\uddbc\ufe0f [OpenAI] Image generation detected ({reason}) – routing to images API")
+                print(f"\U0001f5bc\ufe0f [OpenAI] Image generation detected ({reason}) \u2013 routing to images API")
             return self._send_openai_images_api(
                 messages=messages,
                 base_url=base_url,
@@ -18271,21 +18271,35 @@ class UnifiedClient:
         if not prompt:
             prompt = 'Generate an image'
 
-        # Model-specific defaults
-        # gpt-image-1 supports: 1024x1024, 1536x1024, 1024x1536, auto
-        # dall-e-3:             1024x1024, 1792x1024, 1024x1792
-        # dall-e-2:             256x256, 512x512, 1024x1024
-        if 'dall-e-2' in model_lower:
+        # ── Model family detection ──────────────────────────────────────────
+        # GPT-image series (gpt-image-1, gpt-image-2, …):
+        #   • Does NOT accept response_format — omit it entirely
+        #   • Always returns b64_json output
+        #   • quality: low | medium | high | auto
+        #   • size: WxH (multiples of 16) or 'auto'
+        # DALL-E series:
+        #   • Accepts response_format = url | b64_json
+        #   • dall-e-3 quality: standard | hd
+        # ───────────────────────────────────────────────────────────────────
+        is_gpt_image = 'gpt-image' in model_lower
+        is_dalle2    = 'dall-e-2'  in model_lower
+        is_dalle3    = 'dall-e-3'  in model_lower
+        is_dalle     = is_dalle2 or is_dalle3
+
+        if is_dalle:
             default_size = '1024x1024'
-        elif 'dall-e-3' in model_lower:
-            default_size = '1024x1024'
-        else:  # gpt-image-1 and others
+        else:
             default_size = 'auto'
 
-        image_size    = os.getenv('OPENAI_IMAGE_SIZE', default_size)
-        image_quality = os.getenv('OPENAI_IMAGE_QUALITY', 'standard')  # standard | hd (dall-e-3)
-        image_n       = int(os.getenv('OPENAI_IMAGE_N', '1'))
-        resp_format   = 'url'  # always request URL so output is a plain string
+        image_size = os.getenv('OPENAI_IMAGE_SIZE', default_size)
+        image_n    = int(os.getenv('OPENAI_IMAGE_N', '1'))
+
+        if is_gpt_image:
+            image_quality = os.getenv('OPENAI_IMAGE_QUALITY', 'auto')      # low|medium|high|auto
+        elif is_dalle3:
+            image_quality = os.getenv('OPENAI_IMAGE_QUALITY', 'standard')  # standard|hd
+        else:
+            image_quality = None  # dall-e-2 has no quality param
 
         url = f"{base_url.rstrip('/')}/images/generations"
         headers = {
@@ -18293,22 +18307,26 @@ class UnifiedClient:
             'Content-Type':  'application/json',
         }
         payload: dict = {
-            'model':           effective_model,
-            'prompt':          prompt,
-            'n':               image_n,
-            'response_format': resp_format,
+            'model':  effective_model,
+            'prompt': prompt,
+            'n':      image_n,
         }
-        # size='auto' is only valid for gpt-image-1; omit for dall-e models if still default
-        if image_size != 'auto':
-            payload['size'] = image_size
-        elif 'dall-e' in model_lower:
-            payload['size'] = '1024x1024'
-        else:
-            payload['size'] = image_size
 
-        # quality parameter (dall-e-3 / gpt-image-1)
-        if 'dall-e-2' not in model_lower:
+        # size
+        if image_size and image_size != 'auto':
+            payload['size'] = image_size
+        elif is_gpt_image:
+            payload['size'] = 'auto'
+        elif is_dalle:
+            payload['size'] = '1024x1024'
+
+        # quality
+        if image_quality:
             payload['quality'] = image_quality
+
+        # response_format: ONLY for DALL-E; GPT-image series rejects this parameter
+        if is_dalle:
+            payload['response_format'] = 'url'
 
         max_retries = self._get_max_retries()
         for attempt in range(max_retries):
@@ -18316,7 +18334,7 @@ class UnifiedClient:
                 if self._is_stop_requested():
                     raise UnifiedClientError('Operation cancelled by user', error_type='cancelled')
                 if not self._is_stop_requested():
-                    print(f"\ud83d\uddbc\ufe0f [OpenAI Images] {effective_model} | size={payload.get('size','auto')} | n={image_n}")
+                    print(f"\U0001f5bc\ufe0f [OpenAI Images] {effective_model} | size={payload.get('size','auto')} | n={image_n}")
 
                 resp = _req.post(url, json=payload, headers=headers, timeout=180)
 
@@ -18345,12 +18363,14 @@ class UnifiedClient:
                         error_type='api_error',
                     )
 
-                # Collect all image URLs (or b64) into a newline-separated string
+                # GPT-image returns b64_json; DALL-E returns url
                 urls = []
                 for item in items:
-                    img_url = item.get('url') or item.get('b64_json', '')
-                    if img_url:
-                        urls.append(img_url)
+                    if item.get('url'):
+                        urls.append(item['url'])
+                    elif item.get('b64_json'):
+                        b64 = item['b64_json']
+                        urls.append(f'data:image/png;base64,{b64}')
                 content_out = '\n'.join(urls) if urls else str(items[0])
 
                 if not self._is_stop_requested():
