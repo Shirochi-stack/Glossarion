@@ -6237,7 +6237,7 @@ class UnifiedClient:
                     is_video_mode = os.environ.get('ENABLE_VIDEO_OUTPUT_MODE') == '1'
                     
                     if is_image_mode or is_video_mode:
-                        is_url = extracted_content_str.startswith('http') and ('fal.media' in extracted_content_str or 'nano-gpt.com' in extracted_content_str or 'chutes.ai' in extracted_content_str or extracted_content_str.endswith(('.png', '.jpg', '.jpeg', '.webp', '.mp4', '.gif')))
+                        is_url = extracted_content_str.startswith('http') and (' ' not in extracted_content_str)
                         is_base64 = extracted_content_str.startswith('data:image') or extracted_content_str.startswith('data:video') or (';base64,' in extracted_content_str[:100])
                         
                         if is_url or is_base64:
@@ -6251,7 +6251,14 @@ class UnifiedClient:
                                 os.makedirs(out_dir_base, exist_ok=True)
                                 
                                 if is_url:
-                                    ext = '.mp4' if '.mp4' in extracted_content_str else '.png' if '.png' in extracted_content_str else '.jpg' if '.jpg' in extracted_content_str else '.bin'
+                                    ext = '.bin'
+                                    clean_url = extracted_content_str.split('?')[0].lower()
+                                    if clean_url.endswith('.mp4'): ext = '.mp4'
+                                    elif clean_url.endswith('.png'): ext = '.png'
+                                    elif clean_url.endswith(('.jpg', '.jpeg')): ext = '.jpg'
+                                    elif clean_url.endswith('.webp'): ext = '.webp'
+                                    elif clean_url.endswith('.gif'): ext = '.gif'
+                                    
                                     if is_video_mode and ext == '.bin':
                                         ext = '.mp4'
                                     elif is_image_mode and ext == '.bin':
