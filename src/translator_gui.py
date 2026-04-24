@@ -1626,6 +1626,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.gpt_effort_var = self.config.get('gpt_effort', 'medium')
         # NEW: DeepSeek thinking (OpenAI-compatible extra_body)
         self.enable_deepseek_thinking_var = self.config.get('enable_deepseek_thinking', True)
+        self.deepseek_effort_var = self.config.get('deepseek_effort', 'high')
         # NEW: Anthropic extended/adaptive thinking
         self.enable_anthropic_thinking_var = self.config.get('enable_anthropic_thinking', False)
         self.anthropic_thinking_budget_var = str(self.config.get('anthropic_thinking_budget', '10000'))
@@ -12427,6 +12428,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GPT_EFFORT': self.gpt_effort_var,
             # DeepSeek thinking (DeepSeek OpenAI-compatible API)
             'ENABLE_DEEPSEEK_THINKING': "1" if getattr(self, 'enable_deepseek_thinking_var', True) else "0",
+            'DEEPSEEK_EFFORT': getattr(self, 'deepseek_effort_var', 'high'),
             # Anthropic extended/adaptive thinking
             'ENABLE_ANTHROPIC_THINKING': "1" if getattr(self, 'enable_anthropic_thinking_var', False) else "0",
             'ANTHROPIC_THINKING_BUDGET': str(self.anthropic_thinking_budget_var) if getattr(self, 'enable_anthropic_thinking_var', False) else '0',
@@ -12696,6 +12698,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['GPT_EFFORT'] = self.gpt_effort_var
                 # DeepSeek thinking
                 os.environ['ENABLE_DEEPSEEK_THINKING'] = "1" if getattr(self, 'enable_deepseek_thinking_var', True) else "0"
+                os.environ['DEEPSEEK_EFFORT'] = getattr(self, 'deepseek_effort_var', 'high')
                 # Anthropic extended/adaptive thinking
                 os.environ['ENABLE_ANTHROPIC_THINKING'] = "1" if getattr(self, 'enable_anthropic_thinking_var', False) else "0"
                 os.environ['ANTHROPIC_THINKING_BUDGET'] = str(self.anthropic_thinking_budget_var) if getattr(self, 'enable_anthropic_thinking_var', False) else '0'
@@ -20080,6 +20083,7 @@ Important rules:
                 ('gpt_reasoning_tokens', ['gpt_reasoning_tokens_var'], 0, lambda v: int(v) if str(v).lstrip('-').isdigit() else 0),
                 ('gpt_effort', ['gpt_effort_var'], 'auto', str),
                 ('enable_deepseek_thinking', ['enable_deepseek_thinking_var'], True, bool),
+                ('deepseek_effort', ['deepseek_effort_var'], 'high', str),
                 # Anthropic extended/adaptive thinking
                 ('enable_anthropic_thinking', ['enable_anthropic_thinking_var'], False, bool),
                 ('anthropic_thinking_budget', ['anthropic_thinking_budget_var'], 10000, lambda v: int(v) if str(v).lstrip('-').isdigit() else 10000),

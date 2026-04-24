@@ -2898,22 +2898,69 @@ def _create_response_handling_section(self, parent):
     except Exception:
         deepseek_cb.setChecked(True)
 
+    deepseek_h.addWidget(deepseek_cb)
+    deepseek_h.addSpacing(20)
+
+    # Effort label + combo (V4 models only, but harmless to send for others)
+    self.deepseek_effort_label = QLabel("Effort (V4):")
+    deepseek_h.addWidget(self.deepseek_effort_label)
+    self.deepseek_effort_combo = QComboBox()
+    self.deepseek_effort_combo.addItems(["high", "max"])
+    self.deepseek_effort_combo.setFixedWidth(90)
+    self.deepseek_effort_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(self.deepseek_effort_combo)
+    self._disable_combobox_mousewheel(self.deepseek_effort_combo)
+    try:
+        _ds_effort_val = getattr(self, 'deepseek_effort_var', os.environ.get('DEEPSEEK_EFFORT', 'high'))
+        _ds_idx = self.deepseek_effort_combo.findText(_ds_effort_val)
+        if _ds_idx >= 0:
+            self.deepseek_effort_combo.setCurrentIndex(_ds_idx)
+    except Exception:
+        pass
+
+    def _on_deepseek_effort_changed(text):
+        try:
+            self.deepseek_effort_var = text
+            os.environ['DEEPSEEK_EFFORT'] = text
+        except Exception:
+            pass
+    self.deepseek_effort_combo.currentTextChanged.connect(_on_deepseek_effort_changed)
+    deepseek_h.addWidget(self.deepseek_effort_combo)
+    deepseek_h.addStretch()
+    section_v.addWidget(deepseek_row)
+
     def _on_deepseek_thinking_toggle(checked):
         try:
             self.enable_deepseek_thinking_var = bool(checked)
             os.environ['ENABLE_DEEPSEEK_THINKING'] = '1' if self.enable_deepseek_thinking_var else '0'
+            # Enable/disable the effort combo with the toggle
+            _color = "" if checked else "color: #808080;"
+            self.deepseek_effort_label.setEnabled(checked)
+            self.deepseek_effort_label.setStyleSheet(_color)
+            self.deepseek_effort_combo.setEnabled(checked)
         except Exception:
             pass
 
     deepseek_cb.toggled.connect(_on_deepseek_thinking_toggle)
-    deepseek_h.addWidget(deepseek_cb)
-    deepseek_h.addStretch()
-    section_v.addWidget(deepseek_row)
 
-    deepseek_desc = QLabel("Adds extra_body={thinking:{type:enabled}} for DeepSeek OpenAI-compatible requests.\nEnables reasoning_content when supported.")
+    # Apply initial enabled state
+    _ds_initially_enabled = bool(getattr(self, 'enable_deepseek_thinking_var', True))
+    self.deepseek_effort_label.setEnabled(_ds_initially_enabled)
+    self.deepseek_effort_label.setStyleSheet("" if _ds_initially_enabled else "color: #808080;")
+    self.deepseek_effort_combo.setEnabled(_ds_initially_enabled)
+
+    deepseek_desc = QLabel("Adds thinking:{type:enabled} for DeepSeek OpenAI-compatible requests.\nEnables reasoning_content when supported.\nV4 models (deepseek-v4-flash/pro) also send reasoning_effort (high/max).")
     deepseek_desc.setStyleSheet("color: gray; font-size: 10pt;")
     deepseek_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(deepseek_desc)
+
 
     # Anthropic Extended Thinking
     anthropic_title = QLabel("Anthropic Extended Thinking (Opus 4.6/4.7, Sonnet 4.6)")

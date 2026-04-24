@@ -16325,7 +16325,7 @@ class UnifiedClient:
                     # DeepSeek thinking / reasoning_effort
                     # - deepseek-v4-flash / deepseek-v4-pro: BOTH top-level params (per official docs):
                     #     "thinking": {"type": "enabled"}  AND  "reasoning_effort": "high"|"max"
-                    #   Effort mapping: GPT_EFFORT xhigh→"max", everything else→"high"
+                    #   Controlled by DEEPSEEK_EFFORT env var (high/max, default high)
                     # - Older DeepSeek models: only extra_body={"thinking":{"type":"enabled"}}
                     if provider == 'deepseek' or is_chutes_thinking_endpoint:
                         try:
@@ -16348,10 +16348,11 @@ class UnifiedClient:
                                         tname = "unknown-thread"
                                     label = "Chutes" if is_chutes_thinking_endpoint else "DeepSeek"
                                     if _is_ds_v4 and enable_ds:
-                                        _ds_effort_raw = (os.getenv('GPT_EFFORT', 'high') or 'high').lower()
-                                        _ds_effort = 'max' if _ds_effort_raw == 'xhigh' else 'high'
+                                        _ds_effort = (os.getenv('DEEPSEEK_EFFORT', 'high') or 'high').lower()
+                                        if _ds_effort not in ('high', 'max'):
+                                            _ds_effort = 'high'
                                         self._debug_log(
-                                            f"🧠 [{label}:{tname}] thinking=ENABLED + reasoning_effort={_ds_effort} (raw={_ds_effort_raw}) (model={effective_model})"
+                                            f"🧠 [{label}:{tname}] thinking=ENABLED + reasoning_effort={_ds_effort} (model={effective_model})"
                                         )
                                     else:
                                         self._debug_log(
@@ -16363,8 +16364,9 @@ class UnifiedClient:
                             if enable_ds:
                                 if _is_ds_v4:
                                     # V4: both thinking toggle AND reasoning_effort as top-level params
-                                    _ds_effort_raw = (os.getenv('GPT_EFFORT', 'high') or 'high').lower()
-                                    _ds_effort = 'max' if _ds_effort_raw == 'xhigh' else 'high'
+                                    _ds_effort = (os.getenv('DEEPSEEK_EFFORT', 'high') or 'high').lower()
+                                    if _ds_effort not in ('high', 'max'):
+                                        _ds_effort = 'high'
                                     extra_body["thinking"] = {"type": "enabled"}
                                     extra_body["reasoning_effort"] = _ds_effort
                                 else:
