@@ -8728,7 +8728,9 @@ def _create_image_translation_section(self, parent):
     resolution_h = QHBoxLayout(resolution_w)
     resolution_h.setContentsMargins(20, 0, 0, 0)
     resolution_h.setSpacing(8)
-    resolution_h.addWidget(QLabel("Output Resolution:"))
+    _res_label = QLabel("Output Resolution:")
+    self.image_output_resolution_label = _res_label  # store ref
+    resolution_h.addWidget(_res_label)
 
     resolution_combo = QComboBox()
     resolution_combo.addItems(["1K", "2K", "4K"])
@@ -8812,31 +8814,41 @@ def _create_image_translation_section(self, parent):
     def _update_output_mode_controls_state():
         """Enable/disable image & video output controls based on image translation toggle."""
         try:
-            image_on = bool(getattr(self, 'enable_image_translation_var', False))
-            enabled  = image_on
-            gray     = "#808080"
+            enabled = bool(getattr(self, 'enable_image_translation_var', False))
+            cb_color    = "color: white;"    if enabled else "color: #606060;"
+            label_color = "color: gray; font-size: 10pt;" if enabled else "color: #505050; font-size: 10pt;"
 
-            for widget in (
+            # Checkboxes — setEnabled + explicit text color (custom overlay doesn't auto-gray)
+            for cb in (
                 getattr(self, 'image_output_cb', None),
                 getattr(self, 'video_output_cb', None),
-                getattr(self, 'image_output_resolution_w', None),
             ):
-                if widget:
-                    widget.setEnabled(enabled)
+                if cb:
+                    cb.setEnabled(enabled)
+                    cb.setStyleSheet(cb_color)
 
-            for label, base_style in (
-                (getattr(self, 'image_output_desc_label', None),    "color: gray; font-size: 10pt;"),
-                (getattr(self, 'video_output_desc_label', None),    "color: gray; font-size: 10pt;"),
-                (getattr(self, 'image_resolution_desc_label', None), "color: gray; font-size: 10pt;"),
+            # Resolution row widget
+            rw = getattr(self, 'image_output_resolution_w', None)
+            if rw:
+                rw.setEnabled(enabled)
+
+            # Description labels AND the resolution row label
+            for lbl in (
+                getattr(self, 'image_output_desc_label', None),
+                getattr(self, 'video_output_desc_label', None),
+                getattr(self, 'image_resolution_desc_label', None),
+                getattr(self, 'image_output_resolution_label', None),
             ):
-                if label:
-                    label.setStyleSheet(base_style if enabled else f"color: {gray}; font-size: 10pt;")
+                if lbl:
+                    lbl.setStyleSheet(label_color)
         except Exception:
             pass
 
     self._update_output_mode_controls_state = _update_output_mode_controls_state
-    # Run once on creation to match current image-translation state
-    _update_output_mode_controls_state()
+    # Defer initial call via QTimer so widgets are fully rendered before styling applies
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(0, _update_output_mode_controls_state)
+
     
     left_v.addSpacing(10)
     
