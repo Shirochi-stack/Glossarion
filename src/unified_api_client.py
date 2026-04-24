@@ -16092,7 +16092,7 @@ class UnifiedClient:
         
         # Use OpenAI SDK for providers known to work well with it
         sdk_compatible = ['openai', 'deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq', 
-                         'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu']
+                         'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu', 'nanogpt']
         
         # Allow forcing HTTP-only for OpenRouter via toggle (default: disabled)
         openrouter_http_only = os.getenv('OPENROUTER_USE_HTTP_ONLY', '0') == '1'
