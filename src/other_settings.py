@@ -8825,10 +8825,69 @@ def _create_image_translation_section(self, parent):
         "Polls until the video URL is returned. Mutually exclusive with Image Only Output Mode."
     )
     video_output_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    video_output_desc.setContentsMargins(20, 0, 0, 10)
+    video_output_desc.setContentsMargins(20, 0, 0, 5)
     video_output_desc.setWordWrap(True)
     self.video_output_desc_label = video_output_desc  # store ref
     left_v.addWidget(video_output_desc)
+
+    # Video Duration dropdown
+    duration_w = QWidget()
+    duration_h = QHBoxLayout(duration_w)
+    duration_h.setContentsMargins(20, 0, 0, 0)
+    duration_h.setSpacing(8)
+    _dur_label = QLabel("Video Duration:")
+    self.video_duration_label = _dur_label  # store ref for enable/disable
+    duration_h.addWidget(_dur_label)
+
+    duration_combo = QComboBox()
+    duration_combo.addItems(["5", "10", "15", "20", "30", "60"])
+    duration_combo.setFixedWidth(80)
+    duration_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(duration_combo)
+    self._disable_combobox_mousewheel(duration_combo)
+
+    # Initialize variable if not exists
+    if not hasattr(self, 'nanogpt_video_duration_var'):
+        self.nanogpt_video_duration_var = self.config.get('nanogpt_video_duration', '5')
+
+    try:
+        idx = duration_combo.findText(str(self.nanogpt_video_duration_var))
+        if idx >= 0:
+            duration_combo.setCurrentIndex(idx)
+        else:
+            duration_combo.setCurrentText(str(self.nanogpt_video_duration_var))
+    except Exception:
+        pass
+
+    def _on_duration_changed(text):
+        try:
+            self.nanogpt_video_duration_var = text
+        except Exception:
+            pass
+    duration_combo.currentTextChanged.connect(_on_duration_changed)
+    duration_h.addWidget(duration_combo)
+
+    _dur_unit = QLabel("seconds")
+    _dur_unit.setStyleSheet("color: gray;")
+    self.video_duration_unit_label = _dur_unit
+    duration_h.addWidget(_dur_unit)
+    duration_h.addStretch()
+
+    self.video_duration_w = duration_w  # store ref for enable/disable
+    left_v.addWidget(duration_w)
+
+    duration_desc = QLabel("Duration of generated video clips (depends on model support)")
+    duration_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    duration_desc.setContentsMargins(40, 0, 0, 10)
+    self.video_duration_desc_label = duration_desc  # store ref
+    left_v.addWidget(duration_desc)
 
     # store resolution widget ref
     self.image_output_resolution_w = resolution_w
@@ -8855,6 +8914,11 @@ def _create_image_translation_section(self, parent):
             if rw:
                 rw.setEnabled(enabled)
 
+            # Video duration row widget
+            dw = getattr(self, 'video_duration_w', None)
+            if dw:
+                dw.setEnabled(enabled)
+
             # Description/resolution labels — QLabel has no :disabled pseudo-state so set explicitly
             label_color = "color: gray; font-size: 10pt;" if enabled else "color: #505050; font-size: 10pt;"
             for lbl in (
@@ -8862,6 +8926,8 @@ def _create_image_translation_section(self, parent):
                 getattr(self, 'video_output_desc_label', None),
                 getattr(self, 'image_resolution_desc_label', None),
                 getattr(self, 'image_output_resolution_label', None),
+                getattr(self, 'video_duration_desc_label', None),
+                getattr(self, 'video_duration_label', None),
             ):
                 if lbl:
                     lbl.setStyleSheet(label_color)
