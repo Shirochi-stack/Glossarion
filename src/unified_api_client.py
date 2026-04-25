@@ -19637,7 +19637,10 @@ class UnifiedClient:
                         break
                 meta = {}
                 if dur:
-                    meta["videoDuration"] = dur
+                    try:
+                        meta["videoDuration"] = str(round(float(dur)))
+                    except (ValueError, TypeError):
+                        meta["videoDuration"] = dur
                 if w and h:
                     meta["videoResolution"] = f"{w}x{h}"
                 if meta:
@@ -19704,7 +19707,7 @@ class UnifiedClient:
                     timescale = struct.unpack(">I", moov[idx + 24:idx + 28])[0]
                     dur_raw   = struct.unpack(">Q", moov[idx + 28:idx + 36])[0]
                 if timescale > 0:
-                    dur_str = f"{dur_raw / timescale:.2f}"
+                    dur_str = str(round(dur_raw / timescale))
 
             # Parse tkhd inside moov for resolution
             res_str = ""
@@ -19782,10 +19785,34 @@ class UnifiedClient:
         # videoDuration / videoResolution without us embedding the huge file.
         source_video = os.getenv("NANOGPT_SOURCE_VIDEO_PATH", "")
         if source_video and os.path.isfile(source_video):
+            fsize = os.path.getsize(source_video)
+            print(f"   🎞️ Source video: {source_video} ({fsize / 1024:.0f} KB)")
             meta = self._probe_video_metadata(source_video)
             if meta:
-                payload.update(meta)
-                print(f"   🎞️ Source video metadata: {meta}")
+                # Sanity-check parsed values — reject obviously wrong metadata
+                dur_val = meta.get("videoDuration", "")
+                if dur_val:
+                    try:
+                        dur_f = float(dur_val)
+                        if dur_f <= 0 or dur_f > 86400:  # > 24 hours → parsing error
+                            print(f"   ⚠️ Ignoring unreasonable videoDuration={dur_val}s")
+                            meta.pop("videoDuration", None)
+                    except ValueError:
+                        meta.pop("videoDuration", None)
+                res_val = meta.get("videoResolution", "")
+                if res_val:
+                    try:
+                        rw, rh = res_val.split("x")
+                        if int(rw) > 16384 or int(rh) > 16384:
+                            print(f"   ⚠️ Ignoring unreasonable videoResolution={res_val}")
+                            meta.pop("videoResolution", None)
+                    except (ValueError, AttributeError):
+                        meta.pop("videoResolution", None)
+                if meta:
+                    payload.update(meta)
+                    print(f"   🎞️ Source video metadata: {meta}")
+                else:
+                    print(f"   ⚠️ No valid metadata extracted from source video")
 
         # ── Submit the job ──────────────────────────────────────────────────
         if not self._is_stop_requested():

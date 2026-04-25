@@ -8900,7 +8900,7 @@ def _create_image_translation_section(self, parent):
 
     vid_res_combo = QComboBox()
     vid_res_combo.addItems(["360p", "480p", "720p", "1080p"])
-    vid_res_combo.setFixedWidth(80)
+    vid_res_combo.setFixedWidth(100)
     vid_res_combo.setStyleSheet("""
         QComboBox::down-arrow {
             image: none;
