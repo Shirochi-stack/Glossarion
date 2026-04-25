@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion TurboLite v8.5.7 - PyInstaller Specification File
+Glossarion TurboLite v8.5.8 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, and AI Hunter
 """
 
@@ -27,7 +27,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'L_Glossarion_TurboLite v8.5.7'  # Turbo Lite: no EPUB reader / Chromium / PDF / Vertex
+APP_NAME = 'L_Glossarion_TurboLite v8.5.8'  # Turbo Lite: no EPUB reader / Chromium / PDF / Vertex
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
