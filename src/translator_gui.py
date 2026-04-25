@@ -2117,7 +2117,7 @@ Text to analyze:
             "Universal": (
                 "You are a professional novel translator. You MUST translate the following text to {target_lang}.\n"
                 "- You MUST output ONLY in {target_lang}. No other languages are permitted.\n"
-                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, <img>, etc.\n"
+                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, <img>, <ruby>, etc.\n"
                 "{split_marker_instruction}\n"
                 "- Preserve any Markdown formatting (headers, bold, italic, lists, etc.) if present.\n"
                 "- If the text does not contain HTML tags, use line breaks for proper formatting as expected of a novel.\n"
@@ -2137,7 +2137,7 @@ Text to analyze:
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Korean quotation marks (\" \", ' ', 「」, 『』) as-is without converting to English quotes.\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory.\n"
-                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
+                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, <ruby>, etc.\n"
                 "{split_marker_instruction}\n"
             ),
             "Japanese_BeautifulSoup": (
@@ -2153,7 +2153,7 @@ Text to analyze:
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
-                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
+                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, <ruby>, etc.\n"
                 "{split_marker_instruction}\n"
             ),
             "Chinese_BeautifulSoup": (
@@ -2168,7 +2168,7 @@ Text to analyze:
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
-                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
+                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, <ruby>, etc.\n"
                 "{split_marker_instruction}\n"
             ),
             "Korean_html2text": (
@@ -2186,7 +2186,7 @@ Text to analyze:
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory. When you see [생활관], write [Dormitory]. Do not write [생활관] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
                 "- Use line breaks for proper formatting as expected of a novel.\n"
                 "- Preserve all Markdown present.\n"
-                "- Preserve any image tags exactly as they appear.\n"
+                "- Preserve any HTML <img> tags and furigana <ruby> tags exactly as they appear (e.g. <ruby>体力<rp>(</rp><rt>HP</rt><rp>)</rp></ruby>). Do not add or preserve any other HTML tags.\n"
                 "{split_marker_instruction}\n"
             ),
             "Japanese_html2text": (
@@ -2204,7 +2204,7 @@ Text to analyze:
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Use line breaks for proper formatting as expected of a novel.\n"
                 "- Preserve all Markdown present.\n"
-                "- Preserve any image tags exactly as they appear.\n"
+                "- Preserve any HTML <img> tags and furigana <ruby> tags exactly as they appear (e.g. <ruby>体力<rp>(</rp><rt>HP</rt><rp>)</rp></ruby>). Do not add or preserve any other HTML tags.\n"
                 "{split_marker_instruction}\n"
             ),
             "Chinese_html2text": (
@@ -2221,7 +2221,7 @@ Text to analyze:
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Use line breaks for proper formatting as expected of a novel.\n"
                 "- Preserve all Markdown present.\n"
-                "- Preserve any image tags exactly as they appear.\n"
+                "- Preserve any HTML <img> tags and furigana <ruby> tags exactly as they appear (e.g. <ruby>体力<rp>(</rp><rt>HP</rt><rp>)</rp></ruby>). Do not add or preserve any other HTML tags.\n"
                 "{split_marker_instruction}\n"
             ),
             "Manga_JP": (
