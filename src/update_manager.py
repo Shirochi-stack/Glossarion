@@ -406,6 +406,41 @@ class UpdateManager(QObject):
                 return 'Standard'
         except Exception:
             return 'Lite'  # Safe default
+
+    @staticmethod
+    def _detect_platform() -> str:
+        """Detect the current operating system.
+        
+        Returns one of: 'windows', 'macos', 'linux'
+        """
+        if sys.platform == 'win32':
+            return 'windows'
+        elif sys.platform == 'darwin':
+            return 'macos'
+        else:
+            return 'linux'
+
+    @staticmethod
+    def _asset_platform(asset_name: str) -> str:
+        """Determine which platform a release asset targets from its filename.
+        
+        Returns one of: 'windows', 'macos', 'linux', 'unknown'
+        """
+        name_lower = asset_name.lower()
+        if name_lower.endswith('.exe'):
+            return 'windows'
+        elif name_lower.endswith('.dmg'):
+            return 'macos'
+        elif name_lower.endswith(('.appimage', '.deb', '.rpm', '.tar.gz')):
+            return 'linux'
+        # Check for platform keywords in filename
+        if 'macos' in name_lower or 'darwin' in name_lower or 'osx' in name_lower:
+            return 'macos'
+        if 'linux' in name_lower:
+            return 'linux'
+        if 'windows' in name_lower or 'win' in name_lower:
+            return 'windows'
+        return 'unknown'
     
     def _load_halgakos_pixmap(self, logical_size: int = 72):
         """Load Halgakos icon with HiDPI scaling."""
@@ -1156,13 +1191,25 @@ class UpdateManager(QObject):
         
         if release_to_check:
             # Get downloadable files from the first/latest release (.exe for Windows, .dmg for macOS)
-            exe_assets = [a for a in release_to_check.get('assets', []) 
-                         if a['name'].lower().endswith(('.exe', '.dmg'))]
+            all_installable = [a for a in release_to_check.get('assets', []) 
+                               if a['name'].lower().endswith(('.exe', '.dmg', '.appimage', '.deb', '.tar.gz'))]
+
+            # Partition into same-platform and cross-platform assets
+            current_platform = self._detect_platform()
+            native_assets = [a for a in all_installable
+                             if self._asset_platform(a['name']) == current_platform]
+            cross_assets  = [a for a in all_installable
+                             if self._asset_platform(a['name']) != current_platform]
+            # Show native first, then cross-platform (disabled)
+            exe_assets = native_assets  # only native are selectable
             
-            print(f"[DEBUG] Found {len(exe_assets)} downloadable files in release {release_to_check.get('tag_name')}")
+            print(f"[DEBUG] Found {len(all_installable)} downloadable files "
+                  f"({len(native_assets)} native {current_platform}, "
+                  f"{len(cross_assets)} cross-platform) "
+                  f"in release {release_to_check.get('tag_name')}")
             
             # Show selection UI if there are downloadable files
-            if exe_assets:
+            if all_installable:
                 # Determine the title based on whether there are multiple variants
                 if len(exe_assets) > 1:
                     frame_title = "Select Version to Download"
@@ -1174,12 +1221,16 @@ class UpdateManager(QObject):
                 asset_layout = QVBoxLayout()
                 asset_layout.setContentsMargins(10, 10, 10, 10)
                 
-                if len(exe_assets) > 1:
-                    # Multiple exe files - show radio buttons to choose
+                if len(all_installable) > 1:
+                    # Multiple files - show radio buttons to choose
                     self.asset_button_group = QButtonGroup()
-                    for i, asset in enumerate(exe_assets):
+                    first_native_set = False  # track whether we set a default
+
+                    for i, asset in enumerate(all_installable):
                         filename = asset['name']
                         size_mb = asset['size'] / (1024 * 1024)
+                        asset_plat = self._asset_platform(filename)
+                        is_native = (asset_plat == current_platform)
                         
                         # Identify variant type from filename keywords
                         fname_lower = filename.lower()
@@ -1189,7 +1240,7 @@ class UpdateManager(QObject):
                             variant_type = "SuperLite"
                         elif 'turbolite' in fname_lower:
                             variant_type = "TurboLite"
-                        elif 'lite' in fname_lower and fname_lower.startswith('l_'):
+                        elif 'lite' in fname_lower and (fname_lower.startswith('l_') or fname_lower.endswith('.dmg')):
                             variant_type = "Lite"
                         elif 'nocuda' in fname_lower or fname_lower.startswith('n_'):
                             variant_type = "NoCuda (Manga)"
@@ -1197,14 +1248,21 @@ class UpdateManager(QObject):
                             first_letter = filename[0].upper() if filename else ''
                             variant_type = "Standard" if first_letter == 'G' else filename
 
-                        # Mark if this matches current running build
-                        is_current = (variant_type.replace(' (Manga)', '').replace(' ', '') ==
-                                      self._build_variant.replace(' ', ''))
+                        # Mark if this matches current running build (variant + platform)
+                        is_current = (
+                            is_native and
+                            variant_type.replace(' (Manga)', '').replace(' ', '') ==
+                            self._build_variant.replace(' ', '')
+                        )
                         current_tag = " ✓ (current)" if is_current else ""
 
-                        # Add platform indicator for non-Windows files
-                        if filename.lower().endswith('.dmg'):
-                            platform_tag = " [macOS Intel]" if 'intel' in filename.lower() else " [macOS]"
+                        # Add platform indicator
+                        if asset_plat == 'macos':
+                            platform_tag = " [macOS Intel]" if 'intel' in fname_lower else " [macOS]"
+                        elif asset_plat == 'linux':
+                            platform_tag = " [Linux]"
+                        elif asset_plat == 'windows' and current_platform != 'windows':
+                            platform_tag = " [Windows]"
                         else:
                             platform_tag = ""
 
@@ -1214,27 +1272,34 @@ class UpdateManager(QObject):
                         rb.setProperty("asset_index", i)
                         self.asset_button_group.addButton(rb, i)
                         asset_layout.addWidget(rb)
+
+                        # Disable cross-platform assets so user can't accidentally select them
+                        if not is_native:
+                            rb.setEnabled(False)
+                            rb.setToolTip(f"This build is for {asset_plat.replace('macos','macOS').replace('windows','Windows').replace('linux','Linux')} — not your current platform")
                         
-                        # Auto-select the variant matching the current running build;
-                        # fall back to first item if none match
+                        # Auto-select: exact variant match on current platform wins;
+                        # otherwise first native asset is the default
                         if is_current:
                             rb.setChecked(True)
                             self.selected_asset = asset
-                        elif i == 0:
-                            # Tentative default — may be overridden by a matching variant below
+                        elif is_native and not first_native_set:
+                            # Tentative default — may be overridden by an exact variant match
                             rb.setChecked(True)
                             self.selected_asset = asset
+                            first_native_set = True
                     
                     # Add listener for selection changes
                     def on_asset_change(button_id):
-                        self.selected_asset = exe_assets[button_id]
+                        self.selected_asset = all_installable[button_id]
                     
                     self.asset_button_group.idClicked.connect(on_asset_change)
                 else:
-                    # Only one exe file - just show it and set it as selected
-                    self.selected_asset = exe_assets[0]
-                    filename = exe_assets[0]['name']
-                    size_mb = exe_assets[0]['size'] / (1024 * 1024)
+                    # Only one installable file - just show it and set it as selected
+                    asset = all_installable[0]
+                    self.selected_asset = asset
+                    filename = asset['name']
+                    size_mb = asset['size'] / (1024 * 1024)
                     asset_label = QLabel(f"{filename} ({size_mb:.1f} MB)")
                     asset_layout.addWidget(asset_label)
                 
