@@ -1551,7 +1551,9 @@ class RetranslationMixin:
             }
         """)
         # Start hidden; periodic timer will show when file exists
-        glossary_progress_btn.setVisible(bool(_find_glossary_progress_file()))
+        # In multi-file mode, always show since dialog now lists all EPUBs
+        _is_multi_file_mode = bool(parent_dialog and hasattr(parent_dialog, '_epub_files_in_dialog') and len(getattr(parent_dialog, '_epub_files_in_dialog', [])) > 1)
+        glossary_progress_btn.setVisible(bool(_find_glossary_progress_file()) or _is_multi_file_mode)
         if _find_glossary_progress_file():
             glossary_progress_btn.setToolTip(f"View glossary extraction progress\n{_find_glossary_progress_file()}")
         def _find_gp_for_file(fp):
@@ -2108,7 +2110,7 @@ class RetranslationMixin:
             return panel, _refresh
         
         def _show_glossary_progress():
-            """Show glossary extraction progress for all EPUBs with progress files."""
+            """Show glossary extraction progress for all EPUBs (with or without progress files)."""
             try:
                 # Reuse cached dialog if it still exists
                 _cached = getattr(dialog, '_glossary_progress_dialog', None)
@@ -2136,23 +2138,27 @@ class RetranslationMixin:
                 if not all_files:
                     all_files = [file_path]
                 
-                # Filter to those with glossary progress files
-                files_with_gp = []
+                # Build entries for ALL EPUBs — gp_path is None when no progress file exists
+                all_file_entries = []
                 for fp in all_files:
                     gp = _find_gp_for_file(fp)
                     if gp and os.path.isfile(gp):
-                        files_with_gp.append((fp, gp))
+                        all_file_entries.append((fp, gp))
+                    else:
+                        all_file_entries.append((fp, None))
                 
-                if not files_with_gp:
+                # Hide button only when no EPUB has progress at all AND it's single-file mode
+                has_any_progress = any(gp is not None for _, gp in all_file_entries)
+                if not has_any_progress and len(all_file_entries) <= 1:
                     glossary_progress_btn.setVisible(False)
                     return
                 
                 # Create dialog
                 gp_dialog = QDialog(dialog)
                 gp_dialog.setAttribute(Qt.WA_DeleteOnClose, False)
-                n_files = len(files_with_gp)
+                n_files = len(all_file_entries)
                 if n_files == 1:
-                    gp_dialog.setWindowTitle(f"Glossary Extraction Progress — {os.path.basename(files_with_gp[0][0])}")
+                    gp_dialog.setWindowTitle(f"Glossary Extraction Progress — {os.path.basename(all_file_entries[0][0])}")
                 else:
                     gp_dialog.setWindowTitle(f"Glossary Extraction Progress — {n_files} files")
                 gp_dialog.setWindowModality(Qt.NonModal)
@@ -2184,10 +2190,67 @@ class RetranslationMixin:
                 # Build panels and collect refresh functions
                 all_refresh_funcs = []
                 
+                def _build_gp_empty_panel(fp, parent_widget):
+                    """Build a placeholder panel for an EPUB without glossary progress yet.
+                    Returns (panel_widget, refresh_func) — refresh auto-upgrades to full panel."""
+                    epub_base = os.path.splitext(os.path.basename(fp))[0]
+                    
+                    panel = QWidget(parent_widget)
+                    p_layout = QVBoxLayout(panel)
+                    p_layout.setContentsMargins(12, 20, 12, 20)
+                    
+                    empty_icon = QLabel("📊")
+                    empty_icon.setAlignment(Qt.AlignCenter)
+                    empty_icon.setStyleSheet("font-size: 36pt;")
+                    p_layout.addWidget(empty_icon)
+                    
+                    empty_label = QLabel(f"No glossary extraction progress found for:\n{epub_base}")
+                    empty_label.setAlignment(Qt.AlignCenter)
+                    empty_label.setStyleSheet("color: #7a8a9e; font-size: 11pt;")
+                    empty_label.setWordWrap(True)
+                    p_layout.addWidget(empty_label)
+                    
+                    hint_label = QLabel("Run glossary extraction to see progress here.")
+                    hint_label.setAlignment(Qt.AlignCenter)
+                    hint_label.setStyleSheet("color: #555; font-size: 9pt; font-style: italic;")
+                    p_layout.addWidget(hint_label)
+                    
+                    p_layout.addStretch()
+                    
+                    # State container for upgrade tracking
+                    _state = {'upgraded': False}
+                    
+                    def _empty_refresh():
+                        """Check if a progress file appeared and upgrade the panel in-place."""
+                        if _state['upgraded']:
+                            return
+                        gp = _find_gp_for_file(fp)
+                        if gp and os.path.isfile(gp):
+                            _state['upgraded'] = True
+                            # Clear placeholder content
+                            while p_layout.count():
+                                item = p_layout.takeAt(0)
+                                if item and item.widget():
+                                    item.widget().deleteLater()
+                            # Build the real panel content inside this existing panel
+                            real_panel, real_refresh = _build_gp_panel(fp, gp, panel)
+                            p_layout.addWidget(real_panel)
+                            # Replace this refresh func in the parent list
+                            try:
+                                idx = all_refresh_funcs.index(_empty_refresh)
+                                all_refresh_funcs[idx] = real_refresh
+                            except ValueError:
+                                all_refresh_funcs.append(real_refresh)
+                    
+                    return panel, _empty_refresh
+                
                 if n_files == 1:
                     # Single file — no tabs needed
-                    fp, gp = files_with_gp[0]
-                    panel, refresh_fn = _build_gp_panel(fp, gp, gp_dialog)
+                    fp, gp = all_file_entries[0]
+                    if gp:
+                        panel, refresh_fn = _build_gp_panel(fp, gp, gp_dialog)
+                    else:
+                        panel, refresh_fn = _build_gp_empty_panel(fp, gp_dialog)
                     gp_main_layout.addWidget(panel)
                     all_refresh_funcs.append(refresh_fn)
                 
@@ -2218,9 +2281,12 @@ class RetranslationMixin:
                         }
                         QTabBar::tab:hover { background-color: #40916c; }
                     """)
-                    for fp, gp in files_with_gp:
+                    for fp, gp in all_file_entries:
                         epub_base = os.path.splitext(os.path.basename(fp))[0]
-                        panel, refresh_fn = _build_gp_panel(fp, gp, notebook)
+                        if gp:
+                            panel, refresh_fn = _build_gp_panel(fp, gp, notebook)
+                        else:
+                            panel, refresh_fn = _build_gp_empty_panel(fp, notebook)
                         notebook.addTab(panel, epub_base)
                         all_refresh_funcs.append(refresh_fn)
                     gp_main_layout.addWidget(notebook)
@@ -2267,9 +2333,12 @@ class RetranslationMixin:
                     
                     stack = QStackedWidget()
                     
-                    for fp, gp in files_with_gp:
+                    for fp, gp in all_file_entries:
                         epub_base = os.path.splitext(os.path.basename(fp))[0]
-                        panel, refresh_fn = _build_gp_panel(fp, gp, stack)
+                        if gp:
+                            panel, refresh_fn = _build_gp_panel(fp, gp, stack)
+                        else:
+                            panel, refresh_fn = _build_gp_empty_panel(fp, stack)
                         stack.addWidget(panel)
                         combo.addItem(epub_base)
                         all_refresh_funcs.append(refresh_fn)
@@ -2342,14 +2411,19 @@ class RetranslationMixin:
                     all_epubs = [file_path]
                 
                 any_exists = any(_find_gp_for_file(fp) for fp in all_epubs)
-                glossary_progress_btn.setVisible(any_exists)
+                is_multi = len(all_epubs) > 1
+                # In multi-file mode, always show button (dialog shows all EPUBs);
+                # in single-file mode, only show when a progress file exists.
+                glossary_progress_btn.setVisible(any_exists or is_multi)
                 if any_exists:
                     count = sum(1 for fp in all_epubs if _find_gp_for_file(fp))
                     if count == 1:
                         gp = next((_find_gp_for_file(fp) for fp in all_epubs if _find_gp_for_file(fp)), None)
                         glossary_progress_btn.setToolTip(f"View glossary extraction progress\n{gp}")
                     else:
-                        glossary_progress_btn.setToolTip(f"View glossary extraction progress ({count} files)")
+                        glossary_progress_btn.setToolTip(f"View glossary extraction progress ({count}/{len(all_epubs)} files)")
+                elif is_multi:
+                    glossary_progress_btn.setToolTip(f"View glossary extraction progress ({len(all_epubs)} files)")
             except RuntimeError:
                 # Widget was deleted
                 _gp_vis_timer.stop()
