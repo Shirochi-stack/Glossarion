@@ -3389,6 +3389,7 @@ Recent translations to summarize:
             ('image_chunk_height_var', 'image_chunk_height', '1500'),
             ('image_output_resolution_var', 'image_output_resolution', '1K'),
             ('nanogpt_video_duration_var', 'nanogpt_video_duration', '60'),
+            ('nanogpt_video_resolution_var', 'nanogpt_video_resolution', '720p'),
             ('chunk_timeout_var', 'chunk_timeout', '1800'),
             ('timeout_retry_attempts_var', 'timeout_retry_attempts', '2'),
             ('batch_size_var', 'batch_size', '3'),
@@ -10688,6 +10689,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = self._get_allowed_image_output_mode()
             os.environ['ENABLE_VIDEO_OUTPUT_MODE'] = self._get_allowed_video_output_mode()
             os.environ['NANOGPT_VIDEO_DURATION'] = str(getattr(self, 'nanogpt_video_duration_var', '60')) + 's'
+            os.environ['NANOGPT_VIDEO_RESOLUTION'] = str(getattr(self, 'nanogpt_video_resolution_var', '720p'))
 
             # Instantiate a UnifiedClient for this call
             from unified_api_client import UnifiedClient
@@ -20340,6 +20342,7 @@ Important rules:
                 ('enable_video_output_mode', ['enable_video_output_mode_var'], False, bool),
                 ('image_output_resolution', ['image_output_resolution_var'], '1K', str),
                 ('nanogpt_video_duration', ['nanogpt_video_duration_var'], '60', str),
+                ('nanogpt_video_resolution', ['nanogpt_video_resolution_var'], '720p', str),
                 ('compression_factor', ['compression_factor_var'], 3.0, float),
                 ('image_chunk_overlap', ['image_chunk_overlap_var'], 1.0, lambda v: safe_float(v, 1.0)),
 
@@ -21341,6 +21344,7 @@ Important rules:
                 # Normalize to uppercase so validation in unified_api_client accepts 1K/2K/4K
                 ('IMAGE_OUTPUT_RESOLUTION', str(getattr(self, 'image_output_resolution_var', '1K')).upper()),
                 ('NANOGPT_VIDEO_DURATION', str(getattr(self, 'nanogpt_video_duration_var', '60')) + 's'),
+                ('NANOGPT_VIDEO_RESOLUTION', str(getattr(self, 'nanogpt_video_resolution_var', '720p'))),
 
                 # Prompts
                 ('TRANSLATION_CHUNK_PROMPT', str(getattr(self, 'translation_chunk_prompt', ''))),

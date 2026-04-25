@@ -19711,6 +19711,7 @@ class UnifiedClient:
 
         duration     = os.getenv("NANOGPT_VIDEO_DURATION", "60s")
         aspect_ratio = os.getenv("NANOGPT_VIDEO_ASPECT_RATIO", "16:9")
+        resolution   = os.getenv("NANOGPT_VIDEO_RESOLUTION", "720p")
 
         gen_url    = f"{base_url}/api/generate-video"
         # Poll URL per NanoGPT spec: /api/generate-video/status?runId=...&modelSlug=...
@@ -19724,6 +19725,7 @@ class UnifiedClient:
             "prompt":       prompt,
             "duration":     duration,
             "aspect_ratio": aspect_ratio,
+            "resolution":   resolution,
         }
 
         # If there's a source video file, extract its metadata so the API has

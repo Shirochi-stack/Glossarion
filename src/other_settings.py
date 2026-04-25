@@ -8889,6 +8889,60 @@ def _create_image_translation_section(self, parent):
     self.video_duration_desc_label = duration_desc  # store ref
     left_v.addWidget(duration_desc)
 
+    # Video Resolution dropdown
+    vid_res_w = QWidget()
+    vid_res_h = QHBoxLayout(vid_res_w)
+    vid_res_h.setContentsMargins(20, 0, 0, 0)
+    vid_res_h.setSpacing(8)
+    _vid_res_label = QLabel("Video Resolution:")
+    self.video_resolution_label = _vid_res_label  # store ref for enable/disable
+    vid_res_h.addWidget(_vid_res_label)
+
+    vid_res_combo = QComboBox()
+    vid_res_combo.addItems(["360p", "480p", "720p", "1080p"])
+    vid_res_combo.setFixedWidth(80)
+    vid_res_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(vid_res_combo)
+    self._disable_combobox_mousewheel(vid_res_combo)
+
+    # Initialize variable if not exists
+    if not hasattr(self, 'nanogpt_video_resolution_var'):
+        self.nanogpt_video_resolution_var = self.config.get('nanogpt_video_resolution', '720p')
+
+    try:
+        idx = vid_res_combo.findText(str(self.nanogpt_video_resolution_var))
+        if idx >= 0:
+            vid_res_combo.setCurrentIndex(idx)
+        else:
+            vid_res_combo.setCurrentText(str(self.nanogpt_video_resolution_var))
+    except Exception:
+        pass
+
+    def _on_vid_res_changed(text):
+        try:
+            self.nanogpt_video_resolution_var = text
+        except Exception:
+            pass
+    vid_res_combo.currentTextChanged.connect(_on_vid_res_changed)
+    vid_res_h.addWidget(vid_res_combo)
+    vid_res_h.addStretch()
+
+    self.video_resolution_w = vid_res_w  # store ref for enable/disable
+    left_v.addWidget(vid_res_w)
+
+    vid_res_desc = QLabel("Output resolution for generated videos (depends on model support)")
+    vid_res_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    vid_res_desc.setContentsMargins(40, 0, 0, 10)
+    self.video_resolution_desc_label = vid_res_desc  # store ref
+    left_v.addWidget(vid_res_desc)
+
     # store resolution widget ref
     self.image_output_resolution_w = resolution_w
 
@@ -8919,6 +8973,11 @@ def _create_image_translation_section(self, parent):
             if dw:
                 dw.setEnabled(enabled)
 
+            # Video resolution row widget
+            vrw = getattr(self, 'video_resolution_w', None)
+            if vrw:
+                vrw.setEnabled(enabled)
+
             # Description/resolution labels — QLabel has no :disabled pseudo-state so set explicitly
             label_color = "color: gray; font-size: 10pt;" if enabled else "color: #505050; font-size: 10pt;"
             for lbl in (
@@ -8928,6 +8987,8 @@ def _create_image_translation_section(self, parent):
                 getattr(self, 'image_output_resolution_label', None),
                 getattr(self, 'video_duration_desc_label', None),
                 getattr(self, 'video_duration_label', None),
+                getattr(self, 'video_resolution_desc_label', None),
+                getattr(self, 'video_resolution_label', None),
             ):
                 if lbl:
                     lbl.setStyleSheet(label_color)
