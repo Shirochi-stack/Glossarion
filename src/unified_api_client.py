@@ -2510,7 +2510,19 @@ class UnifiedClient:
                     
                     print(f"[DEBUG] ✅ This instance has multi-key mode ENABLED")
                 else:
-                    print(f"[DEBUG] ❌ No keys found in config, staying in single-key mode")
+                    # No multi-keys, but glossary keys may still be configured separately
+                    _has_glossary_keys = bool(getattr(self.__class__, '_glossary_key_pool', None) and
+                                              getattr(self.__class__._glossary_key_pool, 'keys', None))
+                    if not _has_glossary_keys:
+                        try:
+                            with self.__class__._in_memory_glossary_keys_lock:
+                                _has_glossary_keys = bool(self.__class__._in_memory_glossary_keys)
+                        except Exception:
+                            pass
+                    if _has_glossary_keys:
+                        print(f"[DEBUG] No multi-keys configured, but glossary keys are active")
+                    else:
+                        print(f"[DEBUG] ❌ No keys found in config, staying in single-key mode")
                     self._multi_key_mode = False
             except Exception as e:
                 print(f"Failed to load multi-key config: {e}")
