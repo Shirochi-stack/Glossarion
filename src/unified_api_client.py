@@ -6014,12 +6014,10 @@ class UnifiedClient:
                                             return content, fr
                                 except Exception:
                                     pass
-                        else:
-                            # Single-key mode: try glossary keys first if context is glossary, then regular fallback keys
+                        
+                        # Try glossary keys if context is glossary (independent of multi-key mode toggle)
+                        if not getattr(self, '_is_retry_client', False):
                             use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
-                            use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
-                            
-                            # Try glossary keys first if context is glossary
                             if use_glossary_keys and context == 'glossary':
                                 print(f"[GLOSSARY DIRECT] Safety filter detected - trying glossary keys")
                                 try:
@@ -6034,8 +6032,10 @@ class UnifiedClient:
                                 except Exception as e:
                                     print(f"❌ Glossary key retry failed: {e}")
                             
+                            # Try fallback keys directly (independent of multi-key mode toggle)
+                            use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
                             if use_fallback_keys:
-                                print(f"[FALLBACK DIRECT] Safety filter detected in empty response - trying fallback keys")
+                                print(f"[FALLBACK DIRECT] Safety filter detected - trying fallback keys")
                                 try:
                                     retry_res = self._try_fallback_keys_direct(
                                         messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data
@@ -6406,14 +6406,12 @@ class UnifiedClient:
                                 res_content, res_fr = retry_res
                                 if res_content and res_content.strip():
                                     return res_content, res_fr
-                    else:
-                        # Single-key mode: Try glossary keys first if context is glossary, then regular fallback keys
-                        use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
-                        use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
-                        
-                        # Try glossary keys first if context is glossary
-                        if use_glossary_keys and context == 'glossary':
-                            print(f"[GLOSSARY DIRECT] Using glossary keys for prohibited content retry")
+                    
+                    # Try glossary keys if context is glossary (independent of multi-key mode toggle)
+                    use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
+                    if use_glossary_keys and context == 'glossary':
+                        print(f"[GLOSSARY DIRECT] Using glossary keys for prohibited content retry")
+                        try:
                             retry_res = self._try_glossary_keys_direct(
                                 messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data
                             )
@@ -6421,10 +6419,14 @@ class UnifiedClient:
                                 res_content, res_fr = retry_res
                                 if res_content and res_content.strip():
                                     return res_content, res_fr
-                        
-                        if use_fallback_keys:
-                            print(f"[FALLBACK DIRECT] Using fallback keys")
-                            # Try fallback keys directly without retrying main key
+                        except Exception as e:
+                            print(f"❌ Glossary key retry failed: {e}")
+                    
+                    # Try fallback keys directly (independent of multi-key mode toggle)
+                    use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+                    if use_fallback_keys:
+                        print(f"[FALLBACK DIRECT] Using fallback keys for prohibited content retry")
+                        try:
                             retry_res = self._try_fallback_keys_direct(
                                 messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data
                             )
@@ -6432,9 +6434,8 @@ class UnifiedClient:
                                 res_content, res_fr = retry_res
                                 if res_content and res_content.strip():
                                     return res_content, res_fr
-                        
-                        if not use_glossary_keys and not use_fallback_keys:
-                            print(f"[SINGLE-KEY MODE] No glossary or fallback keys available - no retry")
+                        except Exception as e:
+                            print(f"❌ Fallback key retry failed: {e}")
                     
                     # Fallthrough: record and return generic fallback
                     self._save_failed_request(messages, e, context)
