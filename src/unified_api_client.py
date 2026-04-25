@@ -19604,7 +19604,7 @@ class UnifiedClient:
         if not prompt:
             prompt = "Generate a video"
 
-        duration     = os.getenv("NANOGPT_VIDEO_DURATION", "5s")
+        duration     = os.getenv("NANOGPT_VIDEO_DURATION", "60s")
         aspect_ratio = os.getenv("NANOGPT_VIDEO_ASPECT_RATIO", "16:9")
 
         gen_url    = f"{base_url}/api/generate-video"

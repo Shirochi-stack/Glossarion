@@ -8855,7 +8855,7 @@ def _create_image_translation_section(self, parent):
 
     # Initialize variable if not exists
     if not hasattr(self, 'nanogpt_video_duration_var'):
-        self.nanogpt_video_duration_var = self.config.get('nanogpt_video_duration', '5')
+        self.nanogpt_video_duration_var = self.config.get('nanogpt_video_duration', '60')
 
     try:
         idx = duration_combo.findText(str(self.nanogpt_video_duration_var))
