@@ -19596,6 +19596,93 @@ class UnifiedClient:
                     )
         raise UnifiedClientError("NanoGPT image: all retries exhausted", error_type="api_error")
 
+    @staticmethod
+    def _probe_video_metadata(filepath: str) -> dict:
+        """Extract videoDuration and videoResolution from a local video file.
+
+        Tries ffprobe first (fast, accurate). Falls back to a lightweight
+        struct-based MP4 header parse if ffprobe is not available.
+        Returns a dict like {"videoDuration": "5.2", "videoResolution": "1280x720"}
+        or {} on failure.
+        """
+        import subprocess, json as _json
+
+        # ── Try ffprobe ────────────────────────────────────────────────────
+        try:
+            cmd = [
+                "ffprobe", "-v", "quiet",
+                "-print_format", "json",
+                "-show_format", "-show_streams",
+                filepath,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                info = _json.loads(result.stdout)
+                dur = info.get("format", {}).get("duration", "")
+                w = h = ""
+                for s in info.get("streams", []):
+                    if s.get("codec_type") == "video":
+                        w = str(s.get("width", ""))
+                        h = str(s.get("height", ""))
+                        if not dur:
+                            dur = str(s.get("duration", ""))
+                        break
+                meta = {}
+                if dur:
+                    meta["videoDuration"] = dur
+                if w and h:
+                    meta["videoResolution"] = f"{w}x{h}"
+                if meta:
+                    return meta
+        except FileNotFoundError:
+            pass  # ffprobe not installed — fall through
+        except Exception as e:
+            print(f"   ⚠️ ffprobe failed: {e}")
+
+        # ── Fallback: lightweight MP4 box parser ───────────────────────────
+        try:
+            import struct
+            with open(filepath, "rb") as f:
+                data = f.read(64 * 1024)  # read first 64 KB for moov/mvhd
+            # Search for 'mvhd' box to get duration
+            idx = data.find(b"mvhd")
+            dur_str = ""
+            if idx >= 0:
+                ver = data[idx + 4]
+                if ver == 0:
+                    timescale = struct.unpack(">I", data[idx + 16:idx + 20])[0]
+                    dur_raw = struct.unpack(">I", data[idx + 20:idx + 24])[0]
+                else:
+                    timescale = struct.unpack(">I", data[idx + 24:idx + 28])[0]
+                    dur_raw = struct.unpack(">Q", data[idx + 28:idx + 36])[0]
+                if timescale > 0:
+                    dur_str = f"{dur_raw / timescale:.2f}"
+            # Search for 'tkhd' box to get resolution
+            res_str = ""
+            idx2 = data.find(b"tkhd")
+            if idx2 >= 0:
+                ver2 = data[idx2 + 4]
+                if ver2 == 0:
+                    w = struct.unpack(">I", data[idx2 + 76:idx2 + 80])[0] >> 16
+                    h = struct.unpack(">I", data[idx2 + 80:idx2 + 84])[0] >> 16
+                else:
+                    w = struct.unpack(">I", data[idx2 + 88:idx2 + 92])[0] >> 16
+                    h = struct.unpack(">I", data[idx2 + 92:idx2 + 96])[0] >> 16
+                if w > 0 and h > 0:
+                    res_str = f"{w}x{h}"
+            meta = {}
+            if dur_str:
+                meta["videoDuration"] = dur_str
+            if res_str:
+                meta["videoResolution"] = res_str
+            if meta:
+                print(f"   ℹ️ Parsed MP4 headers locally (ffprobe unavailable)")
+                return meta
+        except Exception as e:
+            print(f"   ⚠️ MP4 header parse failed: {e}")
+
+        return {}
+
     def _send_nanogpt_video(self, messages, model, base_url, api_key, response_name) -> UnifiedResponse:
         """POST /api/generate-video on nano-gpt.com, then poll until COMPLETED.
 
@@ -19604,9 +19691,9 @@ class UnifiedClient:
         """
         import requests as _req
 
-        # Extract text prompt and any source media data URL from messages
+        # Extract text prompt from messages (ignore image_url parts — video source
+        # is too large for JSON; we extract metadata from the local file instead)
         prompt = ""
-        source_data_url = None
         for msg in reversed(messages):
             if msg.get("role") == "user":
                 content = msg.get("content", "")
@@ -19614,15 +19701,9 @@ class UnifiedClient:
                     prompt = content
                 elif isinstance(content, list):
                     for part in content:
-                        if isinstance(part, dict):
-                            if part.get("type") == "text":
-                                prompt = part.get("text", "")
-                            elif part.get("type") == "image_url":
-                                # Extract the data URL (could be image or video source)
-                                url_obj = part.get("image_url", {})
-                                url_val = url_obj.get("url", "") if isinstance(url_obj, dict) else str(url_obj)
-                                if url_val.startswith("data:"):
-                                    source_data_url = url_val
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            prompt = part.get("text", "")
+                            break
                 break
 
         if not prompt:
@@ -19644,15 +19725,22 @@ class UnifiedClient:
             "duration":     duration,
             "aspect_ratio": aspect_ratio,
         }
-        # If a source media file was provided (video-to-video / extend), include it
-        if source_data_url:
-            payload["sourceUrl"] = source_data_url
-            print(f"   🎞️ Including source media in payload ({len(source_data_url)} chars)")
+
+        # If there's a source video file, extract its metadata so the API has
+        # videoDuration / videoResolution without us embedding the huge file.
+        source_video = os.getenv("NANOGPT_SOURCE_VIDEO_PATH", "")
+        if source_video and os.path.isfile(source_video):
+            meta = self._probe_video_metadata(source_video)
+            if meta:
+                payload.update(meta)
+                print(f"   🎞️ Source video metadata: {meta}")
 
         # ── Submit the job ──────────────────────────────────────────────────
         if not self._is_stop_requested():
             print(f"🎬 [NanoGPT] Submitting video job (model={model}, duration={duration})")
-            print(f"   📤 Payload: {payload}")
+            # Log payload without the massive base64 sourceUrl
+            log_payload = {k: (f"{v[:60]}…({len(v)} chars)" if k == "sourceUrl" and isinstance(v, str) and len(v) > 60 else v) for k, v in payload.items()}
+            print(f"   📤 Payload: {log_payload}")
         try:
             resp = _req.post(gen_url, json=payload, headers=headers, timeout=60)
             if resp.status_code not in (200, 201, 202):

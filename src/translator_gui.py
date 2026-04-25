@@ -11411,6 +11411,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
             try:
                 os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = self._get_allowed_image_output_mode()
                 os.environ['IMAGE_OUTPUT_RESOLUTION'] = str(getattr(self, 'image_output_resolution_var', '1K')).upper()
+                # Tell the video API where the source file is so it can probe metadata
+                _video_exts = {'.mp4', '.mov', '.avi', '.mkv', '.webm'}
+                if os.path.splitext(image_path)[1].lower() in _video_exts:
+                    os.environ['NANOGPT_SOURCE_VIDEO_PATH'] = image_path
+                else:
+                    os.environ.pop('NANOGPT_SOURCE_VIDEO_PATH', None)
             except Exception:
                 pass
             
