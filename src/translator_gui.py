@@ -4847,6 +4847,15 @@ Recent translations to summarize:
             <li><b>nan/openai/gpt-latest</b> - GPT Latest via NanoGPT</li>
         </ul>
         
+        <h4>SambaNova Cloud (sam/)</h4>
+        <p>Access models through SambaNova Cloud API (OpenAI-compatible)</p>
+        <ul>
+            <li><b>sam/DeepSeek-V3.2</b> - DeepSeek V3.2 via SambaNova</li>
+            <li><b>sam/Meta-Llama-3.3-70B-Instruct</b> - Llama 3.3 70B</li>
+            <li><b>sam/Llama-4-Maverick-17B-128E-Instruct</b> - Llama 4 Maverick</li>
+            <li><b>sam/gpt-oss-120b</b> - GPT OSS 120B via SambaNova</li>
+        </ul>
+        
         <h4>ChatGPT Subscription (authgpt/)</h4>
         <p>Use your ChatGPT Plus/Pro subscription directly — no API key needed</p>
         <ul>
