@@ -138,8 +138,15 @@ def fix_empty_attr_tags(text: str) -> str:
         return f"&lt;{tag} {' '.join(names)}/&gt;"
 
     # Paired form first so the inner content of a paired tag isn't partially
-    # consumed by the self-closing pattern.
-    text = EMPTY_ATTR_TAG_PAIR_RE.sub(_repl_pair, text)
+    # consumed by the self-closing pattern.  Loop because nested empty-attr
+    # tags (e.g. <breeding lv.2=""><monsterization grant="" lv.1="">
+    # </monsterization></breeding>) can leave inner tags unprocessed after
+    # the outer match is rewritten — the body of the outer match contained
+    # the inner tag, and a single pass only touches the outermost pair.
+    for _ in range(20):  # safety cap to prevent infinite loops
+        text, n = EMPTY_ATTR_TAG_PAIR_RE.subn(_repl_pair, text)
+        if n == 0:
+            break
     text = EMPTY_ATTR_TAG_SELF_RE.sub(_repl_self, text)
     return text
 
