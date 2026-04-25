@@ -6304,9 +6304,22 @@ class UnifiedClient:
                                     out_path = os.path.join(out_dir_base, filename)
                                     
                                     print(f"📥 Intercepting media URL... Downloading to: {out_path}")
-                                    req = urllib.request.Request(extracted_content_str, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-                                    with urllib.request.urlopen(req) as response_stream, open(out_path, 'wb') as out_file:
-                                        out_file.write(response_stream.read())
+                                    import time as _dl_time
+                                    _max_dl_attempts = 3
+                                    for _dl_attempt in range(1, _max_dl_attempts + 1):
+                                        try:
+                                            req = urllib.request.Request(extracted_content_str, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+                                            with urllib.request.urlopen(req, timeout=60) as response_stream, open(out_path, 'wb') as out_file:
+                                                out_file.write(response_stream.read())
+                                            break  # success
+                                        except Exception as _dl_err:
+                                            if _dl_attempt < _max_dl_attempts:
+                                                _wait = 3 * _dl_attempt
+                                                print(f"   ⚠️ Download attempt {_dl_attempt}/{_max_dl_attempts} failed: {_dl_err}")
+                                                print(f"   🔄 Retrying in {_wait}s...")
+                                                _dl_time.sleep(_wait)
+                                            else:
+                                                raise  # re-raise on final attempt
                                         
                                     # Return sentinel for GUI to intercept and prevent HTML creation
                                     extracted_content = f'[GENERATED_IMAGE:{out_path}]'
