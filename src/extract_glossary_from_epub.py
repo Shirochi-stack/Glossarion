@@ -324,16 +324,51 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             except Exception as e:
                 result_queue.put(e)
         # Apply submission delay shared across glossary batch threads to space out API launches.
-        # Use the larger of explicit thread submission delay and SEND_INTERVAL_SECONDS so
-        # glossary logs respect the configured stagger even before UnifiedClient runs.
+        # Priority: per-key api_call_delay from glossary keys > global SEND_INTERVAL_SECONDS
         try:
             thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", os.getenv("THREAD_SUBMISSION_DELAY", "0.1")))
         except Exception:
             thread_delay = 0.1
+
+        # Check for per-key delay from glossary pool first
+        _per_key_delay = None
         try:
-            api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+            # 1. Check if the client already has a per-key delay set
+            _per_key_delay = getattr(client, '_per_key_api_delay', None)
         except Exception:
-            api_delay = 2.0
+            pass
+        if _per_key_delay is None:
+            # 2. Check glossary key pool entries for individual api_call_delay
+            try:
+                _gk_pool = getattr(UnifiedClient, '_glossary_key_pool', None)
+                if _gk_pool and hasattr(_gk_pool, 'keys') and _gk_pool.keys:
+                    for _gk in _gk_pool.keys:
+                        _gk_d = getattr(_gk, 'api_call_delay', 0.0) or 0.0
+                        if _gk_d > 0:
+                            _per_key_delay = _gk_d
+                            break
+            except Exception:
+                pass
+        if _per_key_delay is None:
+            # 3. Check in-memory glossary keys (raw dict list)
+            try:
+                _im_gk = getattr(UnifiedClient, '_in_memory_glossary_keys', None)
+                if _im_gk:
+                    for _gk_dict in _im_gk:
+                        _gk_d = float(_gk_dict.get('api_call_delay', 0)) if _gk_dict.get('api_call_delay') not in (None, '') else 0.0
+                        if _gk_d > 0:
+                            _per_key_delay = _gk_d
+                            break
+            except Exception:
+                pass
+
+        if _per_key_delay is not None and _per_key_delay > 0:
+            api_delay = float(_per_key_delay)
+        else:
+            try:
+                api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+            except Exception:
+                api_delay = 2.0
 
         enforce_delay = max(thread_delay, api_delay)
 
@@ -471,9 +506,10 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                                 print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
                     
                     # Add staggered delay before retry
-                    # Use SEND_INTERVAL_SECONDS as base, random from half to full
+                    # Prefer per-key delay from glossary keys, fall back to SEND_INTERVAL_SECONDS
                     import random
-                    base_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                    _retry_per_key = getattr(client, '_per_key_api_delay', None)
+                    base_delay = float(_retry_per_key) if _retry_per_key and float(_retry_per_key) > 0 else float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
                     retry_delay = random.uniform(base_delay / 2, base_delay)
                     print(f"   ⏳ Waiting {retry_delay:.1f}s before retry...")
                     time.sleep(retry_delay)
@@ -4105,9 +4141,32 @@ def main(log_callback=None, stop_callback=None):
             print(f"   Aggressive mode: keeps {batch_size} parallel calls and auto-refills")
         print(f"📑 Note: Glossary extraction uses a simplified batching process for API calls.")
     
-    #API call delay
-    api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-    print(f"⏱️  API call delay: {api_delay} seconds")
+    #API call delay — show effective delay (per-key > global)
+    _display_delay = None
+    try:
+        _gk_pool = getattr(UnifiedClient, '_glossary_key_pool', None)
+        if _gk_pool and hasattr(_gk_pool, 'keys') and _gk_pool.keys:
+            for _gk in _gk_pool.keys:
+                _gk_d = getattr(_gk, 'api_call_delay', 0.0) or 0.0
+                if _gk_d > 0:
+                    _display_delay = _gk_d
+                    break
+    except Exception:
+        pass
+    if _display_delay is None:
+        try:
+            _im_gk = getattr(UnifiedClient, '_in_memory_glossary_keys', None)
+            if _im_gk:
+                for _gk_dict in _im_gk:
+                    _gk_d = float(_gk_dict.get('api_call_delay', 0)) if _gk_dict.get('api_call_delay') not in (None, '') else 0.0
+                    if _gk_d > 0:
+                        _display_delay = _gk_d
+                        break
+        except Exception:
+            pass
+    api_delay = float(_display_delay) if _display_delay else float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+    _delay_source = "per-key" if _display_delay else "global"
+    print(f"⏱️  API call delay: {api_delay} seconds ({_delay_source})")
     
     # Get compression factor from environment (glossary-specific with fallback)
     compression_factor = float(os.getenv("GLOSSARY_COMPRESSION_FACTOR", os.getenv("COMPRESSION_FACTOR", "1.0")))
