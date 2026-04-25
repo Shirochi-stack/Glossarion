@@ -10750,8 +10750,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
         except Exception as exc:
             self.append_log(f"\u274c Generative mode error: {exc}")
-            # Don't dump traceback for user-initiated cancellations
-            if 'cancelled' not in str(exc).lower() and 'canceled' not in str(exc).lower():
+            # Don't dump traceback for user-initiated cancellations / stops
+            exc_lower = str(exc).lower()
+            if not any(k in exc_lower for k in ('cancelled', 'canceled', 'graceful stop', 'stop requested')):
                 import traceback
                 self.append_log(traceback.format_exc())
             return False
