@@ -10732,15 +10732,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 out_dir = desktop if desktop.is_dir() else pathlib.Path.cwd()
                 
                 if match:
-                    # It's a media file, move the file directly to the desktop
+                    # It's a media file — already saved in Generated_Media, just log it
                     generated_media_path = match.group(1)
                     if os.path.exists(generated_media_path):
-                        _, ext = os.path.splitext(generated_media_path)
-                        fname = f"generated_{safe_model}_{ts}{ext}"
-                        out_path = out_dir / fname
-                        shutil.move(generated_media_path, str(out_path))
-                        self.append_log(f"\ud83d\udcc4 Media saved to: {out_path}")
-                        result_text = str(out_path)
+                        self.append_log(f"\ud83d\udcc4 Media saved to: {generated_media_path}")
+                        result_text = generated_media_path
                 else:
                     # Standard text response, save as .txt
                     fname = f"generated_{safe_model}_{ts}.txt"
