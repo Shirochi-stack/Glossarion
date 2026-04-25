@@ -7734,7 +7734,7 @@ class UnifiedClient:
         
     def _prepare_image_messages(self, messages: List[Dict[str, Any]], image_data: Any) -> List[Dict[str, Any]]:
         """
-        Helper method to prepare messages with embedded image for providers that accept image_url parts
+        Helper method to prepare messages with embedded image/video for providers that accept image_url parts
         """
         embedded_messages = []
         # Prepare base64 string
@@ -7746,7 +7746,24 @@ class UnifiedClient:
         except Exception:
             b64 = str(image_data)
         
-        image_part = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+        # Detect MIME type from magic bytes (raw data only)
+        mime = "image/jpeg"  # default fallback
+        raw = image_data if isinstance(image_data, (bytes, bytearray)) else None
+        if raw:
+            if raw[:4] == b'\x00\x00\x00\x18' or raw[:4] == b'\x00\x00\x00\x1c' or raw[4:8] == b'ftyp':
+                mime = "video/mp4"
+            elif raw[:4] == b'\x1a\x45\xdf\xa3':
+                mime = "video/webm"
+            elif raw[:4] == b'RIFF' and raw[8:12] == b'AVI ':
+                mime = "video/x-msvideo"
+            elif raw[:8] == b'\x89PNG\r\n\x1a\n':
+                mime = "image/png"
+            elif raw[:3] == b'GIF':
+                mime = "image/gif"
+            elif raw[:4] == b'RIFF' and raw[8:12] == b'WEBP':
+                mime = "image/webp"
+        
+        image_part = {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
         
         for msg in messages:
             if msg.get('role') == 'user':
@@ -19587,8 +19604,9 @@ class UnifiedClient:
         """
         import requests as _req
 
-        # Extract text prompt from messages
+        # Extract text prompt and any source media data URL from messages
         prompt = ""
+        source_data_url = None
         for msg in reversed(messages):
             if msg.get("role") == "user":
                 content = msg.get("content", "")
@@ -19596,9 +19614,15 @@ class UnifiedClient:
                     prompt = content
                 elif isinstance(content, list):
                     for part in content:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            prompt = part.get("text", "")
-                            break
+                        if isinstance(part, dict):
+                            if part.get("type") == "text":
+                                prompt = part.get("text", "")
+                            elif part.get("type") == "image_url":
+                                # Extract the data URL (could be image or video source)
+                                url_obj = part.get("image_url", {})
+                                url_val = url_obj.get("url", "") if isinstance(url_obj, dict) else str(url_obj)
+                                if url_val.startswith("data:"):
+                                    source_data_url = url_val
                 break
 
         if not prompt:
@@ -19620,6 +19644,10 @@ class UnifiedClient:
             "duration":     duration,
             "aspect_ratio": aspect_ratio,
         }
+        # If a source media file was provided (video-to-video / extend), include it
+        if source_data_url:
+            payload["sourceUrl"] = source_data_url
+            print(f"   🎞️ Including source media in payload ({len(source_data_url)} chars)")
 
         # ── Submit the job ──────────────────────────────────────────────────
         if not self._is_stop_requested():
