@@ -3675,6 +3675,24 @@ class _CoverLoader(QThread):
     def run(self):
         if self._file_type == "epub":
             cover = _extract_cover(self._file_path)
+            # Fallback 1: try the raw source EPUB (e.g. compiled EPUB in
+            # Library/Translated may lack an embedded cover, but the
+            # original raw EPUB typically has one).
+            if not cover and self._raw_source_path:
+                if (self._raw_source_path.lower().endswith(".epub")
+                        and os.path.isfile(self._raw_source_path)):
+                    cover = _extract_cover(self._raw_source_path)
+            # Fallback 2: cover image sitting alongside the EPUB
+            # (e.g. output folder with cover.jpg or images/ subfolder).
+            if not cover:
+                parent_dir = os.path.dirname(self._file_path)
+                if parent_dir and os.path.isdir(parent_dir):
+                    cover = _find_cover_in_dir(parent_dir)
+            # Fallback 3: broader search via original_path / output roots.
+            if not cover:
+                cover = _find_folder_cover(
+                    self._file_path, config=self._config,
+                    original_path=self._original_path)
         elif self._file_type == "in_progress":
             # For an in-progress card the "path" is the output folder itself.
             cover = None
@@ -8690,16 +8708,23 @@ class EpubLibraryDialog(QDialog):
                 card.context_menu_requested.connect(self._show_context_menu)
                 card.select_requested.connect(self._on_card_select_requested)
                 cached_cover = self._cover_path_cache.get(path)
+                run_loader = False
                 if cached_cover is not None:
-                    # Hit \u2014 either a resolved path we can paint now,
+                    # Hit — either a resolved path we can paint now,
                     # or an empty string that means "we already tried
-                    # this book and it has no cover". Either way we
-                    # skip the loader.
+                    # this book and it has no cover".
                     if cached_cover and os.path.isfile(cached_cover):
                         card.set_cover(cached_cover)
-                    # Empty string / missing file \u2192 leave the
-                    # fallback Halgakos icon in place.
+                    elif not cached_cover and book.get("type", "epub") in ("epub", "in_progress"):
+                        # Negative cache for epub/in_progress — retry
+                        # because raw_source_path may have appeared
+                        # since the last attempt and the disk-level
+                        # extract_cover cache makes re-runs cheap.
+                        run_loader = True
+                    # else: non-epub with empty cover — leave Halgakos.
                 else:
+                    run_loader = True
+                if run_loader:
                     loader = _CoverLoader(
                         book["path"],
                         file_type=book.get("type", "epub"),
