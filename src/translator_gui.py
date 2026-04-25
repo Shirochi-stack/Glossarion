@@ -10646,18 +10646,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.append_log(f"\ud83c\udfa8 Generative mode: sending prompt to {model}\u2026")
 
             # Build the user prompt from available config fields.
-            # Priority: system prompt (the user's actual descriptive prompt) first,
-            # then image_chunk_prompt, then translation_chunk_prompt only if it
-            # doesn't look like a chunk template (contains {chunk_html} etc.).
-            system_prompt = str(
-                getattr(self, 'system_prompt', '') or self.config.get('system_prompt', '')
-            ).strip()
+            # The system prompt lives in the prompt_text QTextEdit widget.
+            system_prompt = ''
+            try:
+                system_prompt = self.prompt_text.toPlainText().strip()
+            except Exception:
+                pass
+            if not system_prompt:
+                system_prompt = str(self.config.get('system_prompt', '') or '').strip()
 
             user_prompt = ''
             # 1. Prefer system prompt — it's the actual descriptive prompt the user wrote
             if system_prompt:
                 user_prompt = system_prompt
-            # 2. Try image-specific chunk prompt
+            # 2. Try image-specific chunk prompt (only if not a template)
             if not user_prompt:
                 val = getattr(self, 'image_chunk_prompt', '') or self.config.get('image_chunk_prompt', '')
                 if val and val.strip() and '{chunk_html}' not in val and '{chunk_idx}' not in val:
@@ -10667,8 +10669,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 val = getattr(self, 'translation_chunk_prompt', '') or self.config.get('translation_chunk_prompt', '')
                 if val and val.strip() and '{chunk_html}' not in val and '{chunk_idx}' not in val:
                     user_prompt = val.strip()
+
             if not user_prompt:
-                user_prompt = 'Generate content'
+                raise RuntimeError(
+                    "No prompt found for generative mode. "
+                    "Please enter a system prompt before running."
+                )
 
             messages = []
             if system_prompt and system_prompt != user_prompt:
