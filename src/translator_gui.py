@@ -10281,7 +10281,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # use a synthetic sentinel so the rest of the pipeline works
                     self.selected_files = ["__generative_mode__"]
                     self.append_log(
-                        f"\ud83c\udfa8 Generative model detected ({_model_name_lower}) – "
+                        f"\ud83c\udfa8 Generative model detected ({_model_name}) – "
                         "running without an input file."
                     )
                 else:
