@@ -1143,8 +1143,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'Glossarion Lite',
         'CFBundleDisplayName': 'Glossarion Lite',
-        'CFBundleVersion': '8.5.4',
-        'CFBundleShortVersionString': '8.5.4',
+        'CFBundleVersion': '8.5.8',
+        'CFBundleShortVersionString': '8.5.8',
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '10.15.0',
     },
