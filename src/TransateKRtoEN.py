@@ -5612,6 +5612,13 @@ class BatchTranslationProcessor:
             elif os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', '0') == '1' and chapter.get('enhanced_extraction', False):
                 cleaned = _fix_empty_attr_tags_bs(cleaned)
             
+            # Escape non-standard HTML tags (e.g. <concept>, <luck>) to HTML
+            # entities so they render as visible text instead of being silently
+            # swallowed by browsers. Only for BeautifulSoup mode; the html2text
+            # path already has its own escape pass inside convert_enhanced_text_to_html().
+            if not chapter.get('enhanced_extraction', False):
+                cleaned = _escape_invalid_html_tags(cleaned)
+            
             # Post-process: Add spaces between letters and numbers for subword tokenization bug
             _ns_mode = os.getenv('NUMBER_SPACING_TOKEN_FIX', '0')
             if _ns_mode in ('1', '2') and isinstance(cleaned, str):
@@ -6256,6 +6263,10 @@ class BatchTranslationProcessor:
                     cleaned = _fix_empty_attr_tags_bs(cleaned)
                 elif os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', '0') == '1' and enhanced_group_check:
                     cleaned = _fix_empty_attr_tags_bs(cleaned)
+                
+                # Escape non-standard HTML tags for BS-mode merged groups
+                if not enhanced_group_check:
+                    cleaned = _escape_invalid_html_tags(cleaned)
                 
                 # Post-process: Add spaces between letters and numbers for subword tokenization bug
                 _ns_mode = os.getenv('NUMBER_SPACING_TOKEN_FIX', '0')
@@ -9079,6 +9090,107 @@ def _fix_img_p_nesting(html):
         return str(soup)
     except Exception:
         return html
+
+
+# =====================================================
+# INVALID HTML TAG ESCAPING (BeautifulSoup mode)
+# =====================================================
+# Known HTML tag names that should NOT be escaped. Mirrors the set used
+# by epub_converter.py's _escape_plaintext_angle_brackets() so the
+# translation post-process and the EPUB compilation stay in sync.
+_KNOWN_HTML_TAGS = frozenset({
+    'html','head','body','title','meta','link','style','script','noscript',
+    'p','div','span','br','hr','img','a','h1','h2','h3','h4','h5','h6',
+    'ul','ol','li','dl','dt','dd',
+    'pre','code','em','strong','b','i','u','s','strike','del','ins','mark','small','sub','sup',
+    'table','thead','tbody','tfoot','tr','td','th','caption','col','colgroup',
+    'blockquote','q','cite',
+    'section','article','header','footer','nav','main','aside','details','summary',
+    'figure','figcaption',
+    'form','input','button','select','option','textarea','label','fieldset','legend',
+    'iframe','canvas','svg','math',
+    'video','audio','source','track','embed','object','param',
+    'map','area',
+    'center', 'font', 'base',
+    # EPUB / Ruby / misc
+    'ruby','rt','rp','wbr','picture','image',
+})
+
+
+def _escape_invalid_html_tags(html_text: str) -> str:
+    """Escape non-standard HTML tags in translated output to HTML entities.
+
+    When the LLM returns translated HTML containing tags like <concept>,
+    <luck>, <System:Alert>, browsers silently swallow them and their
+    content becomes invisible. This function converts such tags to
+    ``&lt;concept&gt;`` so they render as visible text.
+
+    Standard HTML tags (p, div, span, h1-h6, img, a, …) are kept as-is.
+    Closing tags, tags with ``=`` attributes, and ``!/``?-prefixed
+    declarations are also preserved.
+
+    This mirrors the logic in epub_converter.py's
+    ``_escape_plaintext_angle_brackets()`` but runs during translation
+    post-processing so the saved .html files are already clean.
+    """
+    if not html_text or not isinstance(html_text, str):
+        return html_text or ""
+
+    import re as _re
+
+    def _repl(m):
+        inner = m.group(1)
+        stripped = inner.strip()
+
+        # Keep closing tags, declarations, processing instructions
+        if stripped.startswith(('/', '!', '?')):
+            return m.group(0)
+
+        # Keep tags that have real HTML attributes (contain '=')
+        if '=' in inner:
+            return m.group(0)
+
+        # Extract the tag name (first token)
+        tokens = stripped.split()
+        if not tokens:
+            return m.group(0)
+
+        first = tokens[0].lower()
+        # Handle self-closing like <br/>
+        if first.endswith('/'):
+            first = first[:-1]
+
+        # Recognised HTML/SVG/EPUB tag → keep
+        if first in _KNOWN_HTML_TAGS:
+            return m.group(0)
+
+        # Everything else is a non-standard / story tag → escape
+        return '&lt;' + inner + '&gt;'
+
+    # Pass 1: normal angle brackets  <...>
+    html_text = _re.sub(r'<([^<>]+)>', _repl, html_text)
+
+    # Pass 2: hybrid case where closing bracket is already an entity  <...&gt;
+    def _repl_gt(m):
+        inner = m.group(1)
+        stripped = inner.strip()
+        if stripped.startswith(('/', '!', '?')):
+            return m.group(0)
+        if '=' in inner:
+            return m.group(0)
+        tokens = stripped.split()
+        if not tokens:
+            return m.group(0)
+        first = tokens[0].lower()
+        if first.endswith('/'):
+            first = first[:-1]
+        if first in _KNOWN_HTML_TAGS:
+            return m.group(0)
+        return '&lt;' + inner + '&gt;'
+
+    html_text = _re.sub(r'<([^<>]+)&gt;', _repl_gt, html_text)
+
+    return html_text
 
 
 def convert_enhanced_text_to_html(plain_text, chapter_info=None):
@@ -14116,6 +14228,13 @@ def main(log_callback=None, stop_callback=None):
                 cleaned = _fix_empty_attr_tags_bs(cleaned)
             elif os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', '0') == '1' and c.get('enhanced_extraction', False):
                 cleaned = _fix_empty_attr_tags_bs(cleaned)
+
+            # Escape non-standard HTML tags (e.g. <concept>, <luck>) to HTML
+            # entities so they render as visible text instead of being silently
+            # swallowed by browsers. Only for BeautifulSoup mode; the html2text
+            # path already has its own escape pass inside convert_enhanced_text_to_html().
+            if not c.get('enhanced_extraction', False):
+                cleaned = _escape_invalid_html_tags(cleaned)
 
             # Post-process: Add spaces between letters and numbers for subword tokenization bug
             _ns_mode = os.getenv('NUMBER_SPACING_TOKEN_FIX', '0')
