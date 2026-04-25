@@ -19624,6 +19624,7 @@ class UnifiedClient:
         # ── Submit the job ──────────────────────────────────────────────────
         if not self._is_stop_requested():
             print(f"🎬 [NanoGPT] Submitting video job (model={model}, duration={duration})")
+            print(f"   📤 Payload: {payload}")
         try:
             resp = _req.post(gen_url, json=payload, headers=headers, timeout=60)
             if resp.status_code not in (200, 201, 202):
@@ -19704,7 +19705,21 @@ class UnifiedClient:
                         raw_response=status_data,
                     )
                 elif status == "FAILED":
-                    error_msg = inner.get("error") or inner.get("message") or "Video generation failed"
+                    # Extract error message from various possible response shapes
+                    error_msg = "Video generation failed"
+                    try:
+                        err_field = inner.get("error")
+                        if isinstance(err_field, dict):
+                            error_msg = err_field.get("message") or err_field.get("error") or str(err_field)
+                        elif isinstance(err_field, str) and err_field:
+                            error_msg = err_field
+                        elif inner.get("message"):
+                            error_msg = inner["message"]
+                    except Exception:
+                        pass
+                    # Dump full response for debugging
+                    print(f"   ❌ [NanoGPT] Video FAILED – full response: {str(status_data)[:500]}")
+                    print(f"   📤 [NanoGPT] Original payload was: {payload}")
                     raise UnifiedClientError(
                         f"NanoGPT video generation FAILED: {error_msg}",
                         error_type="api_error",
