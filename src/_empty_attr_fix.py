@@ -110,6 +110,29 @@ def _should_rewrite(tag: str, names: list[str]) -> bool:
     return tag.lower() not in _STANDARD_HTML_TAGS
 
 
+
+# ---------------------------------------------------------------------------
+# Mangled closing-tag pattern
+# ---------------------------------------------------------------------------
+# Some LLMs tokenize ``</p>`` poorly, merging the closing tag into the
+# previous tag's attribute space:
+#
+#     <br <="" p=""/>    ← should be  <br></p>
+#     <br <="" p="">     ← should be  <br></p>
+#
+# The ``<=""`` is the remnant of ``</`` and the next attr name (``p``) is
+# the closing tag name.  No real HTML attribute is ever named ``<``, so
+# this signature is unambiguous.
+_MANGLED_CLOSE_RE = re.compile(
+    r'<(' + _TAG_NAME + r')'           # (1) opening tag name
+    r'([^>]*?)'                         # (2) any real attrs before the mangled part
+    r'\s+<=\s*(?:""|\'\')\s+'           # mangled < attr  (the broken "</" )
+    r'(' + _TAG_NAME + r')\s*=\s*(?:""|\'\')'  # (3) closing tag name
+    r'\s*/?>',                          # close /> or >
+    re.DOTALL | re.IGNORECASE,
+)
+
+
 def fix_empty_attr_tags(text: str) -> str:
     """Rewrite empty-attribute tags into visible ``&lt;tag …&gt;`` text.
 
@@ -117,11 +140,28 @@ def fix_empty_attr_tags(text: str) -> str:
     are handled, in either double- or single-quoted flavour, with any
     amount of whitespace around ``=``.
 
+    Also reconstructs mangled closing tags where the LLM tokenizer merged
+    ``</tag>`` into the previous element's attribute list, e.g.
+    ``<br <="" p=""/>`` → ``<br></p>``.
+
     Leaves unrelated HTML alone.
     """
     if not isinstance(text, str) or not text:
         return text
 
+    # --- Pre-pass: reconstruct mangled closing tags ----------------------
+    # Must run BEFORE the normal empty-attr rewrite, otherwise the normal
+    # pass would escape the tag to ``&lt;br < p/&gt;`` (garbage text).
+    def _repl_mangled_close(m: re.Match) -> str:
+        tag = m.group(1)
+        real_attrs = (m.group(2) or '').strip()
+        close_tag = m.group(3)
+        opener = f'<{tag} {real_attrs}>' if real_attrs else f'<{tag}>'
+        return f'{opener}</{close_tag}>'
+
+    text = _MANGLED_CLOSE_RE.sub(_repl_mangled_close, text)
+
+    # --- Normal empty-attr rewrite ---------------------------------------
     def _repl_pair(m: re.Match) -> str:
         tag = m.group(1)
         names = _attr_names(m.group(2))
@@ -140,9 +180,9 @@ def fix_empty_attr_tags(text: str) -> str:
     # Paired form first so the inner content of a paired tag isn't partially
     # consumed by the self-closing pattern.  Loop because nested empty-attr
     # tags (e.g. <breeding lv.2=""><monsterization grant="" lv.1="">
-    # </monsterization></breeding>) can leave inner tags unprocessed after
-    # the outer match is rewritten — the body of the outer match contained
-    # the inner tag, and a single pass only touches the outermost pair.
+    # </monsterization></breeding>) leave inner tags unprocessed after the
+    # outer match is rewritten — the body of the outer match contained the
+    # inner tag, and a single pass only touches the outermost pair.
     for _ in range(20):  # safety cap to prevent infinite loops
         text, n = EMPTY_ATTR_TAG_PAIR_RE.subn(_repl_pair, text)
         if n == 0:
