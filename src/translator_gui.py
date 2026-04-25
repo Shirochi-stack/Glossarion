@@ -19070,6 +19070,7 @@ Important rules:
                     _map_key = tuple(sorted(mapping.items()))
                     if getattr(self, '_last_automap_multilog_key', None) != _map_key:
                         self._last_automap_multilog_key = _map_key
+                        self._last_automap_no_match_logged = False  # Reset so future "no matches" can log once
                         self.append_log(f"📑 Auto-mapped glossaries for {assigned}/{len(epubs)} EPUB(s)")
                         # Show a short preview of mappings
                         try:
@@ -19081,7 +19082,10 @@ Important rules:
                         except Exception:
                             pass
                 else:
-                    self.append_log("📑 Auto-map glossaries: no matches found")
+                    # Deduplicate: only log "no matches" once until a successful map resets the flag
+                    if not getattr(self, '_last_automap_no_match_logged', False):
+                        self.append_log("📑 Auto-map glossaries: no matches found")
+                        self._last_automap_no_match_logged = True
         except Exception:
             pass
 
