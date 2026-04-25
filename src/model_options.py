@@ -220,6 +220,11 @@ def get_model_options() -> List[str]:
         "nan/qwen-3.6-plus", "nan/google/gemini-pro-latest","nan/google/gemini-flash-latest", "nan/google/gemini-flash-lite-latest", "nan/anthropic/claude-haiku-latest",
         "nan/anthropic/claude-opus-latest", "nan/openai/gpt-latest", "nan/gpt-image-2", "nan/nano-banana-2-fast", "nan/nano-banana-2","nan/kling-v3-4k", "nan/bytedance-seedance-2-0", "nan/wan-2.7-video", "nan/veo3-1-lite-video", "nan/grok-imagine-video-extend", "nan/grok-imagine-video-edit",
         
+        # SambaNova Cloud (api.sambanova.ai)
+        "sam/DeepSeek-R1-Distill-Llama-70B", "sam/DeepSeek-V3.1-cb", "sam/DeepSeek-V3.1", "sam/DeepSeek-V3.2",
+        "sam/gemma-3-12b-it", "sam/gpt-oss-120b",
+        "sam/Llama-4-Maverick-17B-128E-Instruct", "sam/Meta-Llama-3.3-70B-Instruct",
+        "sam/MiniMax-M2.5",
 
         # AuthGem – Gemini-cli via Google OAuth (Uses Vertex AI)
         "authgem-vertex/gemini-2.5-flash", "authgem-vertex/gemini-2.5-flash-lite",
