@@ -19601,11 +19601,11 @@ class UnifiedClient:
         """Extract videoDuration and videoResolution from a local video file.
 
         Tries ffprobe first (fast, accurate). Falls back to a lightweight
-        struct-based MP4 header parse if ffprobe is not available.
+        struct-based MP4 box-walk parser if ffprobe is not available.
         Returns a dict like {"videoDuration": "5.2", "videoResolution": "1280x720"}
         or {} on failure.
         """
-        import subprocess, json as _json
+        import subprocess, json as _json, sys
 
         # ── Try ffprobe ────────────────────────────────────────────────────
         try:
@@ -19615,7 +19615,15 @@ class UnifiedClient:
                 "-show_format", "-show_streams",
                 filepath,
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            # On Windows, prevent ffprobe from opening a visible console window
+            kwargs = {"capture_output": True, "text": True, "timeout": 30}
+            if sys.platform == "win32":
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                si.wShowWindow = 0  # SW_HIDE
+                kwargs["startupinfo"] = si
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            result = subprocess.run(cmd, **kwargs)
             if result.returncode == 0:
                 info = _json.loads(result.stdout)
                 dur = info.get("format", {}).get("duration", "")
@@ -19639,37 +19647,79 @@ class UnifiedClient:
         except Exception as e:
             print(f"   ⚠️ ffprobe failed: {e}")
 
-        # ── Fallback: lightweight MP4 box parser ───────────────────────────
+        # ── Fallback: proper MP4 box-walk parser ───────────────────────────
+        # Walk the top-level ISO BMFF boxes to locate the 'moov' container,
+        # then search inside it for 'mvhd' (duration/timescale) and 'tkhd'
+        # (width/height).  This avoids false positives from scanning raw
+        # media data bytes.
         try:
             import struct
+
+            def _find_moov(f, file_size):
+                """Walk top-level boxes and return the raw bytes of 'moov'."""
+                pos = 0
+                while pos < file_size:
+                    f.seek(pos)
+                    header = f.read(8)
+                    if len(header) < 8:
+                        break
+                    box_size = struct.unpack(">I", header[:4])[0]
+                    box_type = header[4:8]
+                    if box_size == 1:  # 64-bit extended size
+                        ext = f.read(8)
+                        if len(ext) < 8:
+                            break
+                        box_size = struct.unpack(">Q", ext)[0]
+                    elif box_size == 0:  # box extends to EOF
+                        box_size = file_size - pos
+                    if box_size < 8:
+                        break  # malformed
+                    if box_type == b"moov":
+                        # Read the moov payload (everything after the 8-byte header)
+                        payload_size = box_size - 8
+                        if payload_size > 50 * 1024 * 1024:  # sanity cap 50 MB
+                            break
+                        f.seek(pos + 8)
+                        return f.read(payload_size)
+                    pos += box_size
+                return None
+
             with open(filepath, "rb") as f:
-                data = f.read(64 * 1024)  # read first 64 KB for moov/mvhd
-            # Search for 'mvhd' box to get duration
-            idx = data.find(b"mvhd")
+                file_size = f.seek(0, 2)
+                f.seek(0)
+                moov = _find_moov(f, file_size)
+
+            if not moov:
+                return {}
+
+            # Parse mvhd inside moov
             dur_str = ""
+            idx = moov.find(b"mvhd")
             if idx >= 0:
-                ver = data[idx + 4]
+                ver = moov[idx + 4]
                 if ver == 0:
-                    timescale = struct.unpack(">I", data[idx + 16:idx + 20])[0]
-                    dur_raw = struct.unpack(">I", data[idx + 20:idx + 24])[0]
+                    timescale = struct.unpack(">I", moov[idx + 16:idx + 20])[0]
+                    dur_raw   = struct.unpack(">I", moov[idx + 20:idx + 24])[0]
                 else:
-                    timescale = struct.unpack(">I", data[idx + 24:idx + 28])[0]
-                    dur_raw = struct.unpack(">Q", data[idx + 28:idx + 36])[0]
+                    timescale = struct.unpack(">I", moov[idx + 24:idx + 28])[0]
+                    dur_raw   = struct.unpack(">Q", moov[idx + 28:idx + 36])[0]
                 if timescale > 0:
                     dur_str = f"{dur_raw / timescale:.2f}"
-            # Search for 'tkhd' box to get resolution
+
+            # Parse tkhd inside moov for resolution
             res_str = ""
-            idx2 = data.find(b"tkhd")
+            idx2 = moov.find(b"tkhd")
             if idx2 >= 0:
-                ver2 = data[idx2 + 4]
+                ver2 = moov[idx2 + 4]
                 if ver2 == 0:
-                    w = struct.unpack(">I", data[idx2 + 76:idx2 + 80])[0] >> 16
-                    h = struct.unpack(">I", data[idx2 + 80:idx2 + 84])[0] >> 16
+                    w = struct.unpack(">I", moov[idx2 + 76:idx2 + 80])[0] >> 16
+                    h = struct.unpack(">I", moov[idx2 + 80:idx2 + 84])[0] >> 16
                 else:
-                    w = struct.unpack(">I", data[idx2 + 88:idx2 + 92])[0] >> 16
-                    h = struct.unpack(">I", data[idx2 + 92:idx2 + 96])[0] >> 16
+                    w = struct.unpack(">I", moov[idx2 + 88:idx2 + 92])[0] >> 16
+                    h = struct.unpack(">I", moov[idx2 + 92:idx2 + 96])[0] >> 16
                 if w > 0 and h > 0:
                     res_str = f"{w}x{h}"
+
             meta = {}
             if dur_str:
                 meta["videoDuration"] = dur_str
