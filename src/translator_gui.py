@@ -10753,9 +10753,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
             return True
 
         except Exception as exc:
-            import traceback
             self.append_log(f"\u274c Generative mode error: {exc}")
-            self.append_log(traceback.format_exc())
+            # Don't dump traceback for user-initiated cancellations
+            if 'cancelled' not in str(exc).lower() and 'canceled' not in str(exc).lower():
+                import traceback
+                self.append_log(traceback.format_exc())
             return False
 
     def run_translation_direct(self):
