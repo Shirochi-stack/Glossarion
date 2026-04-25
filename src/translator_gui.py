@@ -3175,7 +3175,7 @@ Recent translations to summarize:
     # Named model aliases that should be treated as image / video generators
     # even though the word 'image'/'video' doesn't appear in the model name.
     _IMAGE_MODEL_ALIASES = ('nano-banana',)
-    _VIDEO_MODEL_ALIASES = ('seedance', 'kling')
+    _VIDEO_MODEL_ALIASES = ('seedance', 'kling', 'pixverse')
 
     @classmethod
     def _model_is_image_gen(cls, model_name: str) -> bool:
@@ -3188,6 +3188,18 @@ Recent translations to summarize:
         """Return True when model_name indicates a video-generation model."""
         m = model_name.lower()
         return 'video' in m or any(a in m for a in cls._VIDEO_MODEL_ALIASES)
+
+    def _is_generative_output_mode(self) -> bool:
+        """Return True when an image/video output-only toggle is active.
+
+        This complements the model-name heuristics so that generative
+        routing also triggers when the user manually enables an output
+        mode toggle for a model whose name doesn't contain 'image'/'video'.
+        """
+        return (
+            getattr(self, 'enable_image_output_mode_var', False)
+            or getattr(self, 'enable_video_output_mode_var', False)
+        )
 
     def _get_allowed_image_output_mode(self):
         """Check if image output mode should be enabled based on dependencies.
@@ -8500,7 +8512,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         
         # Check if file is selected (skip for image/video generation models)
         _async_model = str(getattr(self, 'model_var', ''))
-        _is_generative_async = self._model_is_image_gen(_async_model) or self._model_is_video_gen(_async_model)
+        _is_generative_async = self._model_is_image_gen(_async_model) or self._model_is_video_gen(_async_model) or self._is_generative_output_mode()
         if not hasattr(self, 'file_path') or not self.file_path:
             if not _is_generative_async:
                 self.append_log("⚠️ Please select a file before opening async processing.")
@@ -10259,7 +10271,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         
         # Check if files are selected
         _model_name = str(getattr(self, 'model_var', ''))
-        _is_generative_model = self._model_is_image_gen(_model_name) or self._model_is_video_gen(_model_name)
+        _is_generative_model = self._model_is_image_gen(_model_name) or self._model_is_video_gen(_model_name) or self._is_generative_output_mode()
 
         if not hasattr(self, 'selected_files') or not self.selected_files:
             file_path = self.entry_epub.text().strip()
@@ -10633,22 +10645,30 @@ If you see multiple p-b cookies, use the one with the longest value."""
             model = str(getattr(self, 'model_var', '')).strip()
             self.append_log(f"\ud83c\udfa8 Generative mode: sending prompt to {model}\u2026")
 
-            # Build the user prompt from available config fields
-            user_prompt = ''
-            for attr in ('translation_chunk_prompt', 'image_chunk_prompt'):
-                val = getattr(self, attr, '') or self.config.get(attr, '')
-                if val and val.strip():
-                    user_prompt = val.strip()
-                    break
-            if not user_prompt:
-                # Fall back to system prompt
-                user_prompt = str(getattr(self, 'system_prompt', '') or self.config.get('system_prompt', '')).strip()
-            if not user_prompt:
-                user_prompt = 'Generate content'
-
+            # Build the user prompt from available config fields.
+            # Priority: system prompt (the user's actual descriptive prompt) first,
+            # then image_chunk_prompt, then translation_chunk_prompt only if it
+            # doesn't look like a chunk template (contains {chunk_html} etc.).
             system_prompt = str(
                 getattr(self, 'system_prompt', '') or self.config.get('system_prompt', '')
             ).strip()
+
+            user_prompt = ''
+            # 1. Prefer system prompt — it's the actual descriptive prompt the user wrote
+            if system_prompt:
+                user_prompt = system_prompt
+            # 2. Try image-specific chunk prompt
+            if not user_prompt:
+                val = getattr(self, 'image_chunk_prompt', '') or self.config.get('image_chunk_prompt', '')
+                if val and val.strip() and '{chunk_html}' not in val and '{chunk_idx}' not in val:
+                    user_prompt = val.strip()
+            # 3. Try translation chunk prompt only if it's not a template
+            if not user_prompt:
+                val = getattr(self, 'translation_chunk_prompt', '') or self.config.get('translation_chunk_prompt', '')
+                if val and val.strip() and '{chunk_html}' not in val and '{chunk_idx}' not in val:
+                    user_prompt = val.strip()
+            if not user_prompt:
+                user_prompt = 'Generate content'
 
             messages = []
             if system_prompt and system_prompt != user_prompt:
@@ -10675,16 +10695,17 @@ If you see multiple p-b cookies, use the one with the longest value."""
             except Exception:
                 temperature = 1.0
 
-
             client = UnifiedClient(
-                model=model,
                 api_key=api_key,
+                model=model,
+            )
+
+            result_text, _finish = client.send(
+                messages,
                 temperature=temperature,
                 max_tokens=int(getattr(self, 'max_output_tokens', 4096) or 4096),
             )
-
-            response = client.send(messages, response_name='generative_output')
-            result_text = (response.content or '').strip()
+            result_text = (result_text or '').strip()
 
             self.append_log(f"\n\u2705 Generation complete!")
             self.append_log(f"\ud83d\udd17 Result: {result_text}")
@@ -10869,7 +10890,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 len(self.selected_files) == 1
                 and self.selected_files[0] == "__generative_mode__"
             ) or (
-                (self._model_is_image_gen(_active_model) or self._model_is_video_gen(_active_model))
+                (self._model_is_image_gen(_active_model) or self._model_is_video_gen(_active_model) or self._is_generative_output_mode())
                 and not any(
                     os.path.exists(p) for p in (self.selected_files or [])
                     if p != "__generative_mode__"
