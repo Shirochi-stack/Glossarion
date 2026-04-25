@@ -10726,11 +10726,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 import datetime, pathlib
                 ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
                 safe_model = model.replace('/', '_').replace('\\', '_')
-                
-                # Try Desktop first, then CWD
-                desktop = pathlib.Path.home() / 'Desktop'
-                out_dir = desktop if desktop.is_dir() else pathlib.Path.cwd()
-                
+
+                # All generative output goes to Generated_Media
+                out_dir = pathlib.Path(os.path.dirname(os.path.abspath(__file__))) / 'Generated_Media'
+                out_dir.mkdir(parents=True, exist_ok=True)
+
                 if match:
                     # It's a media file — already saved in Generated_Media, just log it
                     generated_media_path = match.group(1)
