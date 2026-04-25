@@ -7913,12 +7913,9 @@ class MultiAPIKeyDialog(QDialog):
         self._refresh_key_list()
         QApplication.processEvents()  # Force UI update
         
-        # Ensure UnifiedClient uses the same shared pool instance
-        try:
-            from unified_api_client import UnifiedClient
-            UnifiedClient._api_key_pool = self.key_pool
-        except Exception:
-            pass
+        # NOTE: Do NOT set UnifiedClient._api_key_pool here — it contaminates
+        # the class-level pool reference even when multi-key mode is disabled.
+        # Individual key tests create their own UnifiedClient instances.
         
         # Run all tests in parallel using executor
         self._test_results = []
@@ -7960,12 +7957,9 @@ class MultiAPIKeyDialog(QDialog):
         self._refresh_key_list()
         QApplication.processEvents()  # Force UI update
         
-        # Ensure UnifiedClient uses the same shared pool instance
-        try:
-            from unified_api_client import UnifiedClient
-            UnifiedClient._api_key_pool = self.key_pool
-        except Exception:
-            pass
+        # NOTE: Do NOT set UnifiedClient._api_key_pool here — it contaminates
+        # the class-level pool reference even when multi-key mode is disabled.
+        # Individual key tests create their own UnifiedClient instances.
         
         # Run all tests in parallel using executor
         self._test_results = []

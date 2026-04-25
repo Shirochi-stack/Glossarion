@@ -1977,6 +1977,9 @@ class UnifiedClient:
         """Clear in-memory multi-key configuration."""
         with cls._in_memory_multi_keys_lock:
             cls._in_memory_multi_keys = None
+        # Also clear the class-level pool so stale references don't leak
+        # into context overrides (glossary/QA) that temporarily enable _multi_key_mode
+        cls._api_key_pool = None
 
     # In-memory glossary-key configuration (mirrors multi-key pattern)
     _in_memory_glossary_keys = None
@@ -2706,6 +2709,9 @@ class UnifiedClient:
         
         # Multi-key mode
         if self._multi_key_mode:
+            # Safety: if multi-key mode is enabled but no pool is available, skip rotation
+            if not self._api_key_pool or not getattr(self._api_key_pool, 'keys', None):
+                return
             # Check if we need to rotate
             should_rotate = False
             
@@ -5525,7 +5531,11 @@ class UnifiedClient:
 
         try:
             if getattr(self, '_multi_key_mode', False) and not self._is_stop_requested():
-                logger.info(f"✅ Initialized {self.client_type} client for model: {log_model} (multi-key)")
+                # Distinguish between real multi-key mode and glossary/QA pool overrides
+                _is_glossary_pool = (self._api_key_pool is getattr(self.__class__, '_glossary_key_pool', None))
+                _is_qa_pool = (self._api_key_pool is getattr(self.__class__, '_qa_scan_key_pool', None))
+                _pool_label = "(glossary-key)" if _is_glossary_pool else "(qa-key)" if _is_qa_pool else "(multi-key)"
+                logger.info(f"✅ Initialized {self.client_type} client for model: {log_model} {_pool_label}")
             elif log_model != model_snapshot and not self._is_stop_requested():
                 logger.info(f"✅ Initialized {self.client_type} client for model: {log_model}")
             elif not self._is_stop_requested():
