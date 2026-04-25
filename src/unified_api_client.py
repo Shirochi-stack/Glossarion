@@ -19814,11 +19814,24 @@ class UnifiedClient:
                 else:
                     print(f"   ⚠️ No valid metadata extracted from source video")
 
+            # Include the actual video data as a base64 data URL (API requires it).
+            # Cap at 15 MB to avoid 413 — larger files would need a hosted URL.
+            MAX_VIDEO_DATA_SIZE = 15 * 1024 * 1024
+            if fsize <= MAX_VIDEO_DATA_SIZE:
+                import base64, mimetypes
+                mime = mimetypes.guess_type(source_video)[0] or "video/mp4"
+                with open(source_video, "rb") as vf:
+                    b64 = base64.b64encode(vf.read()).decode("ascii")
+                payload["videoDataUrl"] = f"data:{mime};base64,{b64}"
+                print(f"   📎 Attached videoDataUrl ({fsize / 1024:.0f} KB, {mime})")
+            else:
+                print(f"   ⚠️ Source video too large for inline data URL ({fsize / 1024 / 1024:.1f} MB > 15 MB)")
+
         # ── Submit the job ──────────────────────────────────────────────────
         if not self._is_stop_requested():
             print(f"🎬 [NanoGPT] Submitting video job (model={model}, duration={duration})")
-            # Log payload without the massive base64 sourceUrl
-            log_payload = {k: (f"{v[:60]}…({len(v)} chars)" if k == "sourceUrl" and isinstance(v, str) and len(v) > 60 else v) for k, v in payload.items()}
+            # Log payload without the massive base64 videoDataUrl
+            log_payload = {k: (f"{v[:60]}…({len(v)} chars)" if k == "videoDataUrl" and isinstance(v, str) and len(v) > 60 else v) for k, v in payload.items()}
             print(f"   📤 Payload: {log_payload}")
         try:
             resp = _req.post(gen_url, json=payload, headers=headers, timeout=60)
