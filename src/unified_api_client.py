@@ -54,6 +54,7 @@ Supported models and their prefixes (Updated July 2025):
 - AuthZA: authza/* (e.g., authza/glm-4-plus) – Zhipu AI via pseudo-OAuth key capture
 - NanoGPT: nan/* (e.g., nan/gpt-5.2, nan/veo2-video) – nano-gpt.com API
   Routes to chat/image/video endpoint based on ENABLE_IMAGE_OUTPUT_MODE / ENABLE_VIDEO_OUTPUT_MODE
+- SambaNova: sam/* (e.g., sam/Meta-Llama-3.1-8B-Instruct) – SambaNova Cloud API
 
 ELECTRONHUB SUPPORT:
 ElectronHub is an API aggregator that provides access to multiple models.
@@ -97,6 +98,7 @@ Environment Variables:
 - AUTHGPT_TOKEN_FILE: Custom path for OAuth token storage (default: ~/.glossarion/authgpt_tokens.json)
 - AUTHGEM_TOKEN_FILE: Custom path for AuthGem OAuth token storage (default: ~/.glossarion/authgem_tokens.json)
 - GROQ_API_URL: Custom Groq endpoint (default: https://api.groq.com/openai/v1) - Do NOT include /chat/completions
+- SAMBANOVA_API_URL: Custom SambaNova endpoint (default: https://api.sambanova.ai/v1)
 - FIREWORKS_API_URL: Custom Fireworks AI endpoint (default: https://api.fireworks.ai/inference/v1)
 - DISABLE_GEMINI_SAFETY: Set to "true" to disable Gemini safety filters (respects GUI toggle)
 - XAI_API_URL: Custom xAI endpoint (default: https://api.x.ai/v1)
@@ -1816,6 +1818,8 @@ class UnifiedClient:
         'authza': 'authza',
         'nan/': 'nanogpt',
         'nan': 'nanogpt',
+        'sam/': 'sambanova',
+        'sam': 'sambanova',
     }
     
     # Model-specific constraints
@@ -5253,6 +5257,14 @@ class UnifiedClient:
                 base_url = os.getenv("FIREWORKS_API_URL", "https://api.fireworks.ai/inference/v1")
                 logger.info(f"Fireworks will use endpoint: {base_url}")
         
+        elif self.client_type == 'sambanova':
+            # SambaNova uses OpenAI-compatible endpoint
+            if openai is None:
+                logger.info("SambaNova will use HTTP API")
+            else:
+                base_url = os.getenv("SAMBANOVA_API_URL", "https://api.sambanova.ai/v1")
+                logger.info(f"SambaNova will use endpoint: {base_url}")
+
         elif self.client_type == 'xai':
             # xAI (Grok) uses OpenAI-compatible endpoint
             if openai is not None:
@@ -5397,6 +5409,19 @@ class UnifiedClient:
                     )
                 logger.info(f"Fireworks client configured with endpoint: {base_url}")
         
+        elif self.client_type == 'sambanova':
+            if openai is not None:
+                if base_url is None:
+                    base_url = os.getenv("SAMBANOVA_API_URL", "https://api.sambanova.ai/v1")
+
+                # MICROSECOND LOCK for SambaNova client
+                with self._model_lock:
+                    self.openai_client = openai.OpenAI(
+                        api_key=api_key_snapshot,
+                        base_url=base_url
+                    )
+                logger.info(f"SambaNova client configured with endpoint: {base_url}")
+
         elif self.client_type == 'xai':
             if openai is not None:
                 if base_url is None:
@@ -5483,7 +5508,8 @@ class UnifiedClient:
                                   'sensenova', 'internlm', 'tii', 'microsoft', 
                                   'azure', 'google', 'alephalpha', 'databricks', 
                                   'huggingface', 'salesforce', 'bigscience', 'meta',
-                                  'electronhub', 'poe', 'openrouter', 'chutes', 'za']:
+                                  'electronhub', 'poe', 'openrouter', 'chutes', 'za',
+                                  'sambanova']:
             # These providers will use HTTP API or OpenAI-compatible endpoints
             # No client initialization needed here
             logger.info(f"{self.client_type} will use HTTP API or compatible endpoint")
@@ -12835,6 +12861,7 @@ class UnifiedClient:
             'za': self._send_openai_provider_router,  # Z.AI via API key
             'authza': self._send_authza,  # Z.AI via pseudo-OAuth key capture
             'nanogpt': self._send_nanogpt,  # NanoGPT (nano-gpt.com) – chat/image/video
+            'sambanova': self._send_openai_provider_router,  # SambaNova Cloud API
         }
         
         # IMPORTANT: Use actual_provider for routing, not client_type
@@ -16068,6 +16095,9 @@ class UnifiedClient:
         elif provider == 'za':
             if effective_model.startswith('za/'):
                 effective_model = effective_model[3:]
+        elif provider == 'sambanova':
+            if effective_model.startswith('sam/'):
+                effective_model = effective_model[4:]  # Remove 'sam/' prefix
         
         # CUSTOM ENDPOINT OVERRIDE - Check if enabled and override base_url
         use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
@@ -20010,6 +20040,7 @@ class UnifiedClient:
             'meta': "https://api.together.xyz/v1",  # Together AI fallback
             'za': lambda: os.getenv("ZA_API_URL", "https://api.z.ai/api/paas/v4"),
             'nanogpt': lambda: os.getenv("NANOGPT_API_URL", "https://nano-gpt.com") + "/api/v1",
+            'sambanova': lambda: os.getenv("SAMBANOVA_API_URL", "https://api.sambanova.ai/v1"),
         }
         
         # Get base URL from mapping

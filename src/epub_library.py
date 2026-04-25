@@ -15348,6 +15348,43 @@ class EpubReaderDialog(QDialog):
 
             soup = BeautifulSoup(html_content, "html.parser")
 
+            # Pre-pass: split <p> tags that contain multiple <img> tags
+            # into separate <p> tags, one per image. Without this, the
+            # full-page-img wrapper grabs the parent <p> and both images
+            # end up in one column, clipping the second image.
+            #   Before: <p><img/><br/><img/></p>
+            #   After:  <p><img/></p><p><img/></p>
+            for p_tag in soup.find_all('p'):
+                imgs_in_p = p_tag.find_all('img', recursive=False)
+                if len(imgs_in_p) < 2:
+                    continue
+                # Collect all children, split into groups at each <img>.
+                # Each group becomes its own <p>.
+                groups = []
+                current_group = []
+                for child in list(p_tag.children):
+                    child.extract()
+                    if child.name == 'img':
+                        # Start a new group for each image
+                        if current_group:
+                            groups.append(current_group)
+                            current_group = []
+                        current_group.append(child)
+                    elif child.name == 'br':
+                        # Drop <br/> separators between images
+                        continue
+                    else:
+                        current_group.append(child)
+                if current_group:
+                    groups.append(current_group)
+                # Replace original <p> with split groups
+                for group in reversed(groups):
+                    new_p = soup.new_tag('p')
+                    for el in group:
+                        new_p.append(el)
+                    p_tag.insert_after(new_p)
+                p_tag.decompose()
+
             for img_tag in soup.find_all("img"):
                 src = img_tag.get("src", "")
                 if not src:
@@ -15489,7 +15526,7 @@ class EpubReaderDialog(QDialog):
                 f"  void c.offsetHeight;"
                 f"  c.style.transition = _t || 'transform 0.3s ease';"
                 f"  /* Clean up whitespace between consecutive full-page images */"
-                f"  var colH = window.innerHeight - 20;"
+
                 f"  var imgs = c.querySelectorAll('.full-page-img');"
                 f"  imgs.forEach(function(el) {{"
                 f"    var next = el.nextSibling;"
@@ -15498,11 +15535,7 @@ class EpubReaderDialog(QDialog):
                 f"      next = next.nextSibling;"
                 f"      toRemove.parentNode.removeChild(toRemove);"
                 f"    }}"
-                f"    /* Force each full-page image container to exactly fill */"
-                f"    /* one column so the browser never stacks two images. */"
-                f"    el.style.height = colH + 'px';"
-                f"    el.style.minHeight = colH + 'px';"
-                f"    el.style.maxHeight = colH + 'px';"
+
                 f"  }});"
                 f"}}"
                 f"document.addEventListener('DOMContentLoaded', _setupColumns);"
