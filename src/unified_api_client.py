@@ -4673,6 +4673,9 @@ class UnifiedClient:
                                             self._per_key_api_delay = None
                                     self._setup_client()
                                     _qa_scan_overridden = True
+                                    # Tell _send_internal to skip _ensure_thread_client
+                                    # (we already selected the key — re-rotating would overwrite it)
+                                    self._skip_next_ensure_thread = True
                                     try:
                                         tls = self._get_thread_local_client()
                                         tls.api_key = key_entry.api_key
@@ -4684,6 +4687,7 @@ class UnifiedClient:
                                         tls.azure_api_version = getattr(self, 'current_key_azure_api_version', None)
                                         tls.google_region = getattr(self, 'current_key_google_region', None)
                                         tls.use_individual_endpoint = getattr(self, 'current_key_use_individual_endpoint', False)
+                                        tls.api_call_delay = getattr(key_entry, 'api_call_delay', 0.0)
                                         tls.initialized = True
                                         tls.last_rotation = time.time()
                                         tls.request_count = 0
@@ -4812,6 +4816,9 @@ class UnifiedClient:
                                     # Re-initialize client for new model/key
                                     self._setup_client()
                                     _glossary_overridden = True
+                                    # Tell _send_internal to skip _ensure_thread_client
+                                    # (we already selected the key — re-rotating would overwrite it)
+                                    self._skip_next_ensure_thread = True
                                     # Populate thread-local state so _setup_for_multi_key_thread
                                     # won't re-select a different key from the pool
                                     try:
@@ -4825,6 +4832,7 @@ class UnifiedClient:
                                         tls.azure_api_version = getattr(self, 'current_key_azure_api_version', None)
                                         tls.google_region = getattr(self, 'current_key_google_region', None)
                                         tls.use_individual_endpoint = getattr(self, 'current_key_use_individual_endpoint', False)
+                                        tls.api_call_delay = getattr(key_entry, 'api_call_delay', 0.0)
                                         tls.initialized = True
                                         tls.last_rotation = time.time()
                                         tls.request_count = 0
@@ -4948,6 +4956,7 @@ class UnifiedClient:
                     del self._api_key_pool
                 # Clear per-key delay so it doesn't leak into subsequent non-pool calls
                 self._per_key_api_delay = None
+                self._skip_next_ensure_thread = False
                 self._setup_client()
             if watchdog_started:
                 _api_watchdog_finished(watchdog_context, model=getattr(self, 'model', None), request_id=request_id if 'request_id' in locals() else None)
@@ -5662,7 +5671,12 @@ class UnifiedClient:
         
         # Always ensure per-request key assignment/rotation for multi-key mode
         # This guarantees forced rotation when rotation_frequency == 1
-        if getattr(self, '_multi_key_mode', False):
+        # BUT skip if the caller (glossary/QA override in send()) already configured
+        # the key — re-rotating would overwrite the selected key and its per-key delay.
+        _skip_ensure = getattr(self, '_skip_next_ensure_thread', False)
+        if _skip_ensure:
+            self._skip_next_ensure_thread = False
+        if getattr(self, '_multi_key_mode', False) and not _skip_ensure:
             try:
                 self._ensure_thread_client()
                 # Update watchdog entry with the actual per-thread model (after key selection)
