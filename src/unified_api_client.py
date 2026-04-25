@@ -6842,6 +6842,7 @@ class UnifiedClient:
                             'google_region': fb.get('google_region'),
                             'azure_api_version': fb.get('azure_api_version'),
                             'use_individual_endpoint': fb.get('use_individual_endpoint', False),
+                            'api_call_delay': fb.get('api_call_delay', 0.0),
                             'label': 'FALLBACK KEY'
                         })
                 except Exception as e:
@@ -6873,6 +6874,30 @@ class UnifiedClient:
                 # Watchdog retry tracking for fallback keys
                 _api_watchdog_record_retry(request_id, idx + 1, reason=f"fallback_{label}")
 
+                # --- Per-key API call delay enforcement ---
+                shuffle_mode = os.getenv('FALLBACK_KEY_SHUFFLE', '0') == '1'
+                _key_id = (fallback_key or '', fallback_model or '')
+                _api_call_delay = 0.0
+                try:
+                    raw_delay = fallback_data.get('api_call_delay', 0.0)
+                    _api_call_delay = float(raw_delay) if raw_delay not in (None, '') else 0.0
+                except Exception:
+                    _api_call_delay = 0.0
+                
+                if _api_call_delay > 0:
+                    with _fallback_key_lock:
+                        _last_used = _fallback_key_last_used.get(_key_id, 0.0)
+                    _elapsed = time.time() - _last_used
+                    _remaining = _api_call_delay - _elapsed
+                    if _remaining > 0:
+                        if shuffle_mode:
+                            print(f"{log_prefix} ⏩ {fallback_model} on API delay cooldown ({_remaining:.1f}s left) — shuffling to next key")
+                            continue
+                        else:
+                            print(f"{log_prefix} ⏳ Waiting {_remaining:.1f}s for {fallback_model} API delay...")
+                            time.sleep(_remaining)
+                # ------------------------------------------
+
                 print(f"{log_prefix} Trying {fallback_model}")
                 
                 try:
@@ -6898,6 +6923,11 @@ class UnifiedClient:
                         tls_fb.max_retries_override = 1
                     except Exception:
                         pass
+                    
+                    # Propagate per-key delay so _apply_api_call_stagger / _get_send_interval
+                    # use it instead of the global SEND_INTERVAL_SECONDS env var.
+                    if _api_call_delay > 0:
+                        temp_client._per_key_api_delay = _api_call_delay
                     
                     # Set key-specific credentials for the temp client
                     if fallback_google_creds:
@@ -7042,6 +7072,10 @@ class UnifiedClient:
                         if content and self._safe_len(content, "main_key_retry_content") > 0:
                             print(f"{log_prefix} ✅ SUCCESS! Got content of length: {len(content)}, finish_reason={finish_reason}")
                             self._save_response(content, response_name)
+                            # Record the call time for per-key delay tracking
+                            if _api_call_delay > 0:
+                                with _fallback_key_lock:
+                                    _fallback_key_last_used[_key_id] = time.time()
                             return content, finish_reason
                         else:
                             print(f"[{label} {idx+1}] ❌ Content empty or null")
