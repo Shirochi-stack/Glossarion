@@ -10923,7 +10923,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             
             # Check if we're processing multiple images - if so, create a combined output folder
             image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
-            image_files = [f for f in self.selected_files if os.path.splitext(f)[1].lower() in image_extensions]
+            video_extensions = {'.mp4', '.mov', '.avi', '.mkv', '.webm'}
+            media_extensions = image_extensions | video_extensions
+            image_files = [f for f in self.selected_files if os.path.splitext(f)[1].lower() in media_extensions]
             
             combined_image_output_dir = None
             if len(image_files) > 1:
@@ -10995,8 +10997,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 ext = os.path.splitext(file_path)[1].lower()
                 
                 try:
-                    if ext in image_extensions:
-                        # Process as image with combined output directory if applicable
+                    if ext in media_extensions:
+                        # Process as image/video with combined output directory if applicable
                         if self._process_image_file(file_path, combined_image_output_dir):
                             successful += 1
                         else:
@@ -11343,10 +11345,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Update progress to "in_progress"
             self.image_progress_manager.update(image_path, content_hash, status="in_progress")
             
-            # Check if image translation is enabled (always allow for direct image file input)
-            _direct_image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.svg', '.ico', '.heic', '.heif', '.avif', '.jxl'}
-            _is_direct_image = os.path.splitext(image_path)[1].lower() in _direct_image_exts
-            if not _is_direct_image and (not hasattr(self, 'enable_image_translation_var') or not self.enable_image_translation_var):
+            # Check if image translation is enabled (always allow for direct image/video file input)
+            _direct_media_exts = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.svg', '.ico', '.heic', '.heif', '.avif', '.jxl',
+                                  '.mp4', '.mov', '.avi', '.mkv', '.webm'}
+            _is_direct_media = os.path.splitext(image_path)[1].lower() in _direct_media_exts
+            if not _is_direct_media and (not hasattr(self, 'enable_image_translation_var') or not self.enable_image_translation_var):
                 self.append_log(f"⚠️ Image translation not enabled. Enable it in settings to translate images.")
                 return False
             

@@ -2659,7 +2659,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(sep_stream)
 
     # GPT-5/OpenAI Reasoning Toggle
-    gpt5_title = QLabel("GPT-5 / DeepSeek V4 Thinking (OpenRouter/OpenAI-style)")
+    gpt5_title = QLabel("GPT-5 (OpenRouter/OpenAI-style)")
     gpt5_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
     section_v.addWidget(gpt5_title)
     
