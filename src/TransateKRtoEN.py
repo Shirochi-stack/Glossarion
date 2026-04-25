@@ -9210,7 +9210,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     # Allowed tags (a, img, svg, picture, figure) are kept as real HTML.
     # Logs a warning when the AI returned non-allowed angle-bracket content.
     # -------------------------------------------------------------------------
-    _ALLOWED_TAGS = ("a", "img", "svg", "picture", "figure")
+    _ALLOWED_TAGS = ("a", "img", "svg", "picture", "figure", "ruby", "rt", "rp", "rb", "rtc")
     _HTML_TAG_NAMES = frozenset({
         'b','i','u','s','em','strong','span','div','p','br','hr','pre','code',
         'h1','h2','h3','h4','h5','h6','ul','ol','li','dl','dt','dd',
@@ -9219,7 +9219,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
         'header','footer','nav','main','section','article','aside',
         'form','input','button','select','option','textarea','label',
         'script','style','link','meta','head','body','html',
-        'center','font','strike','ruby','rt','wbr','details','summary',
+        'center','font','strike','ruby','rt','rp','rb','rtc','wbr','details','summary',
     })
     _escape_fired = [False]
 
@@ -9293,9 +9293,27 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             _h.protect_links  = True
             _h.single_line_break = os.getenv('ENHANCED_SINGLE_LINE_BREAK', '0') == '1'
 
+            # Protect <ruby>...</ruby> from the html2text strip pass
+            _ruby_stash_pre = {}
+            _ruby_ctr_pre = [0]
+            def _stash_ruby_pre(m):
+                key = f"\u2997RUBY_PRE{_ruby_ctr_pre[0]}\u2998"
+                _ruby_stash_pre[key] = m.group(0)
+                _ruby_ctr_pre[0] += 1
+                return key
+            _ruby_safe = re.sub(
+                r'<ruby(?:\s[^>]*)?>.*?</ruby>',
+                _stash_ruby_pre, plain_text,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+
             # Wrap in a minimal HTML shell so html2text processes it correctly
-            _wrapped = f'<div>{plain_text}</div>'
+            _wrapped = f'<div>{_ruby_safe}</div>'
             _stripped = _h.handle(_wrapped).strip()
+
+            # Restore ruby placeholders in the stripped output
+            for _rk, _rv in _ruby_stash_pre.items():
+                _stripped = _stripped.replace(_rk, _rv)
 
             if _stripped != plain_text.strip():
                 pass  # Warning already logged by escape pass above
@@ -9385,7 +9403,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                 # above on narrative-in-angle-brackets -- would be wrongly
                 # decoded back to ``<Picture this scene: ...>``.
                 html = re.sub(
-                    r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:img|svg|picture|figure|figcaption)(?:\s*/|\s[^&]*=[^&]*)?)|(?:(?:image|source|area|map|canvas)\s[^&]*=[^&]*))&gt;',
+                    r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area|ruby|rt|rp|rb|rtc)(?:\s.*?)?)|(?:(?:img|svg|picture|figure|figcaption|ruby|rt|rp|rb|rtc)(?:\s*/|\s[^&]*=[^&]*)?)|(?:(?:image|source|area|map|canvas)\s[^&]*=[^&]*))&gt;',
                     r'<\1>',
                     html,
                     flags=re.IGNORECASE | re.DOTALL
@@ -9462,7 +9480,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             # ``=``-based attribute syntax -- so prose like ``&lt;Picture
             # this scene...&gt;`` isn't wrongly decoded back to a raw tag.
             html = re.sub(
-                r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area)(?:\s.*?)?)|(?:(?:img|svg|picture|figure|figcaption)(?:\s*/|\s[^&]*=[^&]*)?)|(?:(?:image|source|area|map|canvas)\s[^&]*=[^&]*))&gt;',
+                r'&lt;((?:/(?:img|svg|picture|figure|figcaption|image|source|canvas|map|area|ruby|rt|rp|rb|rtc)(?:\s.*?)?)|(?:(?:img|svg|picture|figure|figcaption|ruby|rt|rp|rb|rtc)(?:\s*/|\s[^&]*=[^&]*)?)|(?:(?:image|source|area|map|canvas)\s[^&]*=[^&]*))&gt;',
                 r'<\1>',
                 html,
                 flags=re.IGNORECASE | re.DOTALL

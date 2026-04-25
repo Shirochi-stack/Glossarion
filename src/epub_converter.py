@@ -850,6 +850,7 @@ class XHTMLConverter:
                         'iframe','canvas','svg','math',
                         'video','audio','source','track','embed','object','param',
                         'map','area',
+                        'ruby','rt','rp','rb','rtc',
                         'center', 'font', 'base'
                     }
                     if first in known:
@@ -890,6 +891,7 @@ class XHTMLConverter:
                         'iframe','canvas','svg','math',
                         'video','audio','source','track','embed','object','param',
                         'map','area',
+                        'ruby','rt','rp','rb','rtc',
                         'center', 'font', 'base'
                     }
                     if first in known:

@@ -389,6 +389,42 @@ class EnhancedTextExtractor:
         """
         return fix_empty_attr_tags(text)
     
+    # Furigana / Ruby tag protection
+    # html2text strips <ruby>, <rt>, <rp> tags and flattens their content.
+    # We protect entire <ruby>...</ruby> blocks as unique placeholders before
+    # html2text runs, then restore them to raw HTML afterwards so the AI
+    # prompt (and downstream HTML output) retains the furigana markup.
+    _RUBY_PLACEHOLDER_PREFIX = '\u2997RUBY'   # ⦗RUBY
+    _RUBY_PLACEHOLDER_SUFFIX = '\u2998'        # ⦘
+    _ruby_stash: dict  # populated per-call
+
+    def _protect_ruby_tags(self, text: str) -> str:
+        """Replace <ruby>...</ruby> blocks with unique placeholders."""
+        self._ruby_stash = {}
+        import re as _re
+        _counter = [0]
+
+        def _stash(m):
+            key = f"{self._RUBY_PLACEHOLDER_PREFIX}{_counter[0]}{self._RUBY_PLACEHOLDER_SUFFIX}"
+            self._ruby_stash[key] = m.group(0)
+            _counter[0] += 1
+            return key
+
+        # Match <ruby>...</ruby> (non-greedy, may contain nested rt/rp/rb/rtc)
+        text = _re.sub(
+            r'<ruby(?:\s[^>]*)?>.*?</ruby>',
+            _stash,
+            text,
+            flags=_re.DOTALL | _re.IGNORECASE,
+        )
+        return text
+
+    def _restore_ruby_tags(self, text: str) -> str:
+        """Restore ruby placeholders back to their original HTML."""
+        for key, original in getattr(self, '_ruby_stash', {}).items():
+            text = text.replace(key, original)
+        return text
+    
     def _preprocess_html_for_quotes(self, html_content: str) -> str:
         """Pre-process HTML to protect quotes from conversion"""
         def protect_quotes_in_text(match):
@@ -671,6 +707,9 @@ class EnhancedTextExtractor:
             if os.getenv('FIX_EMPTY_ATTR_TAGS_EXTRACT', '0') == '1':
                 content_to_convert = self._protect_empty_attr_tags(content_to_convert)
             
+            # Protect <ruby>...</ruby> blocks from html2text stripping
+            content_to_convert = self._protect_ruby_tags(content_to_convert)
+            
             # Convert to text with error handling
             try:
                 clean_text = self.h2t.handle(content_to_convert)
@@ -708,6 +747,9 @@ class EnhancedTextExtractor:
             
             # Restore CJK angle brackets as raw < > for the AI prompt
             clean_text = self._restore_cjk_angle_brackets(clean_text)
+            
+            # Restore ruby/furigana placeholders back to HTML
+            clean_text = self._restore_ruby_tags(clean_text)
             
             # Remove markdown duplicate headers if enabled
             # Pattern: "Title Text\n\n# Title Text" - remove the plain text line before markdown header
