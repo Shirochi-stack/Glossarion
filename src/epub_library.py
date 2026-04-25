@@ -8466,6 +8466,12 @@ class EpubLibraryDialog(QDialog):
         self._hide_loading()
         self._refresh_view()
         self._update_organize_counts()
+        # Schedule a deferred re-layout so the grid sees the widget's
+        # real dimensions after Qt finishes processing the pending
+        # show / layout events. Without this the initial column count
+        # is computed from a stale/zero width and the cards don't fill
+        # the viewport until the user triggers a manual resize.
+        QTimer.singleShot(0, self._refresh_view)
 
     @staticmethod
     def _card_signature(book: dict) -> tuple:
@@ -8711,17 +8717,17 @@ class EpubLibraryDialog(QDialog):
                 run_loader = False
                 if cached_cover is not None:
                     # Hit — either a resolved path we can paint now,
-                    # or an empty string that means "we already tried
-                    # this book and it has no cover".
-                    if cached_cover and os.path.isfile(cached_cover):
+                    # or an empty/sentinel string meaning no cover.
+                    if cached_cover and cached_cover != "_none_" and os.path.isfile(cached_cover):
                         card.set_cover(cached_cover)
-                    elif not cached_cover and book.get("type", "epub") in ("epub", "in_progress"):
-                        # Negative cache for epub/in_progress — retry
-                        # because raw_source_path may have appeared
-                        # since the last attempt and the disk-level
-                        # extract_cover cache makes re-runs cheap.
+                    elif cached_cover == "" and book.get("type", "epub") in ("epub", "in_progress"):
+                        # First-pass negative cache — retry once because
+                        # raw_source_path may have appeared since the
+                        # last attempt. Mark as "_none_" so we don't
+                        # retry again if this attempt also fails.
+                        self._cover_path_cache[path] = "_none_"
                         run_loader = True
-                    # else: non-epub with empty cover — leave Halgakos.
+                    # else: "_none_" sentinel or non-epub — permanent.
                 else:
                     run_loader = True
                 if run_loader:
@@ -8856,12 +8862,15 @@ class EpubLibraryDialog(QDialog):
             c.set_selected(c.book.get("path", "") in selected)
 
     def _on_cover_loaded(self, book_path: str, cover_path: str):
-        # Cache every loader result \u2014 including empty strings for
-        # books with no cover \u2014 so a subsequent View-size change
-        # can skip the loader entirely. Without the negative cache a
-        # book that genuinely has no cover would re-spawn a loader on
-        # every size change and re-walk the folder looking for it.
-        self._cover_path_cache[book_path] = cover_path or ""
+        # Cache every loader result — including empty strings for
+        # books with no cover — so a subsequent View-size change
+        # can skip the loader entirely. When the cache holds the
+        # "_none_" retry sentinel and the loader still came back
+        # empty, keep the sentinel so we don't re-retry forever.
+        if cover_path:
+            self._cover_path_cache[book_path] = cover_path
+        elif self._cover_path_cache.get(book_path) != "_none_":
+            self._cover_path_cache[book_path] = ""
         if not cover_path:
             return
         for card in (*self._ip_cards, *self._comp_cards):
