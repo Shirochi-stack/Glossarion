@@ -18963,7 +18963,7 @@ class UnifiedClient:
         max_retries = self._get_max_retries()
         last_error = None
         label = f"AuthCD{acct_label}" if 'acct_label' in dir() and acct_label else "AuthCD"
-        print(f"\ud83d\udd10 {label}: Sending request via Anthropic Messages API (model={actual_model})")
+        print(f"\U0001f510 {label}: Sending request via Anthropic Messages API (model={actual_model})")
 
         for attempt in range(max_retries):
             if self._is_stop_requested():
@@ -19016,7 +19016,7 @@ class UnifiedClient:
 
                 # On 401, try refreshing the token once
                 if "401" in error_str and attempt == 0:
-                    print("\ud83d\udd04 AuthCD: 401 received, attempting token refresh\u2026")
+                    print("\U0001f504 AuthCD: 401 received, attempting token refresh\u2026")
                     try:
                         access_token = store.get_valid_access_token(auto_login=True)
                         continue

@@ -111,7 +111,12 @@ def exchange_code_for_tokens(auth_code: str, code_verifier: str) -> Dict:
         "code_verifier": code_verifier,
     }
     logger.info("AuthCD token exchange")
-    resp = requests.post(CLAUDE_TOKEN_URL, json=payload, timeout=30)
+    _headers = {
+        "User-Agent": _CLAUDE_CODE_USER_AGENT,
+        "anthropic-beta": _CLAUDE_CODE_BETA_FLAGS,
+        "x-app": "cli",
+    }
+    resp = requests.post(CLAUDE_TOKEN_URL, json=payload, headers=_headers, timeout=30)
     if resp.status_code >= 400:
         try:
             err_body = resp.json()
@@ -133,7 +138,12 @@ def refresh_access_token(refresh_token: str) -> Dict:
         "client_id": CLAUDE_CLIENT_ID,
         "refresh_token": refresh_token,
     }
-    resp = requests.post(CLAUDE_TOKEN_URL, json=payload, timeout=30)
+    _headers = {
+        "User-Agent": _CLAUDE_CODE_USER_AGENT,
+        "anthropic-beta": _CLAUDE_CODE_BETA_FLAGS,
+        "x-app": "cli",
+    }
+    resp = requests.post(CLAUDE_TOKEN_URL, json=payload, headers=_headers, timeout=30)
     resp.raise_for_status()
     data = resp.json()
     data["expires_at"] = time.time() + data.get("expires_in", 3600)
@@ -424,10 +434,49 @@ class AuthCDTokenStore:
                     "You can obtain these by running the OAuth flow locally first."
                 )
 
-            print("🔄 AuthCD: No valid token found – starting browser login…")
-            new_tokens = run_oauth_flow()
-            self.save_tokens(new_tokens)
-            return new_tokens["access_token"]
+            # Use Claude Code CLI for login (opens browser automatically)
+            import shutil, subprocess
+            claude_bin = shutil.which("claude")
+            if not claude_bin:
+                raise RuntimeError(
+                    "AuthCD: Claude Code CLI is required for login.\n"
+                    "Install it with: npm install -g @anthropic-ai/claude-code\n"
+                    "Then click the Claude Login button or restart translation."
+                )
+
+            print("\U0001f504 AuthCD: No valid token found \u2013 opening browser for login\u2026")
+            try:
+                if os.name == 'nt':
+                    proc = subprocess.Popen(
+                        [claude_bin, "auth", "login"],
+                        creationflags=subprocess.CREATE_NEW_CONSOLE,
+                    )
+                else:
+                    proc = subprocess.Popen([claude_bin, "auth", "login"])
+                proc.wait(timeout=180)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                raise RuntimeError("AuthCD: Login timed out (3 min).")
+            except Exception as exc:
+                raise RuntimeError(f"AuthCD: Failed to run 'claude auth login': {exc}")
+
+            # Load the newly created credentials
+            import time as _time
+            cred_path = os.path.join(os.path.expanduser("~"), ".claude", ".credentials.json")
+            for _ in range(10):
+                _time.sleep(1)
+                if os.path.isfile(cred_path):
+                    break
+
+            cc_creds = _load_claude_code_credentials()
+            if cc_creds and cc_creds.get("access_token"):
+                self.save_tokens(cc_creds)
+                return cc_creds["access_token"]
+
+            raise RuntimeError(
+                "AuthCD: Login completed but no credentials found.\n"
+                "Try running 'claude auth login' manually in a terminal."
+            )
 
     @property
     def has_tokens(self) -> bool:
