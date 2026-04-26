@@ -2110,6 +2110,13 @@ Text to analyze:
         except ImportError:
             print("Metadata translation UI not available")
         
+        # ── MTool Bridge Watcher ──────────────────────────────────────
+        # Polls for bridge_config.json from MTool's Glossarion Bridge
+        self._mtool_bridge_last_ts = 0
+        self._mtool_bridge_timer = QTimer(self)
+        self._mtool_bridge_timer.timeout.connect(self._check_mtool_bridge)
+        self._mtool_bridge_timer.start(3000)  # Check every 3 seconds
+        
         # Default prompts
         self.default_translation_chunk_prompt = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned.\n{chunk_html}"
         self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned. {context}"
@@ -2750,6 +2757,53 @@ Text to analyze:
         except Exception as e:
             print(f"[CLEANUP] Error stopping operations: {e}")
         
+    # ── MTool Bridge Watcher ──────────────────────────────────────────
+    def _check_mtool_bridge(self):
+        """Poll for bridge_config.json from MTool's Glossarion Bridge."""
+        try:
+            bridge_dir = os.path.join(os.path.expanduser("~"), ".glossarion_mtool_bridge")
+            config_path = os.path.join(bridge_dir, "bridge_config.json")
+            
+            if not os.path.isfile(config_path):
+                return
+            
+            import json
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            
+            ts = config.get("timestamp", 0)
+            if ts <= self._mtool_bridge_last_ts:
+                return  # Already processed this export
+            
+            self._mtool_bridge_last_ts = ts
+            export_path = config.get("exportPath", "")
+            line_count = config.get("lineCount", 0)
+            
+            if not export_path or not os.path.isfile(export_path):
+                return
+            
+            # Update input file path
+            if hasattr(self, 'entry_epub'):
+                self.entry_epub.setText(export_path)
+            
+            # Log the event
+            msg = f"📡 MTool Bridge: Received {line_count} lines from MTool"
+            self.append_log(msg)
+            self.append_log(f"   → Input path set to: {export_path}")
+            
+            # Write acknowledgment back so bridge panel can see it
+            ack_path = os.path.join(bridge_dir, "bridge_ack.json")
+            import json as _json
+            with open(ack_path, "w", encoding="utf-8") as f:
+                _json.dump({
+                    "timestamp": ts,
+                    "status": "received",
+                    "glossarion_version": getattr(self, '_app_version', 'unknown'),
+                }, f)
+                
+        except Exception:
+            pass  # Silent — don't disturb the user
+    
     def _check_updates_on_startup(self):
         """Check for updates on startup with debug logging (async)"""
         print("[DEBUG] Running startup update check...")
@@ -3753,10 +3807,46 @@ Recent translations to summarize:
         file_label = QLabel("Input File(s):")
         self.frame.addWidget(file_label, 0, 0, Qt.AlignLeft)
         
-        # File entry
+        # File entry (with drag-and-drop support)
         self.entry_epub = QLineEdit()
         self.entry_epub.setText("No file selected")
         self.entry_epub.setMinimumWidth(400)
+        self.entry_epub.setAcceptDrops(True)
+
+        # Override drag/drop events on the line edit
+        def _epub_drag_enter(event):
+            if event.mimeData().hasUrls():
+                event.acceptProposedAction()
+            else:
+                event.ignore()
+
+        def _epub_drop(event):
+            urls = event.mimeData().urls()
+            if not urls:
+                return
+            paths = []
+            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json',
+                                    '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif',
+                                    '.bmp', '.webp', '.mp4'}
+            for url in urls:
+                local = url.toLocalFile()
+                if not local:
+                    continue
+                if os.path.isdir(local):
+                    # Folder drop: collect supported files
+                    for fn in sorted(os.listdir(local)):
+                        fp = os.path.join(local, fn)
+                        if os.path.isfile(fp) and os.path.splitext(fn)[1].lower() in supported_extensions:
+                            paths.append(fp)
+                elif os.path.isfile(local):
+                    paths.append(local)
+            if paths:
+                self._handle_file_selection(paths)
+                self.append_log(f"📂 Dropped {len(paths)} file(s)")
+            event.acceptProposedAction()
+
+        self.entry_epub.dragEnterEvent = _epub_drag_enter
+        self.entry_epub.dropEvent = _epub_drop
         self.frame.addWidget(self.entry_epub, 0, 1, 1, 3)  # row, col, rowspan, colspan
         
         # Create browse menu button with dropdown
@@ -3775,6 +3865,9 @@ Recent translations to summarize:
         self.btn_browse_menu.setMenu(self.browse_menu)
         self.frame.addWidget(self.btn_browse_menu, 0, 4)
         
+        # Also accept drops on the main window itself
+        self.setAcceptDrops(True)
+
         # File selection status label (shows file count and details)
         self.file_status_label = QLabel("")
         self.file_status_label.setStyleSheet("color: #17a2b8; font-size: 9pt;")
@@ -17272,6 +17365,38 @@ Important rules:
         return False
 
     # File Selection Methods
+    def dragEnterEvent(self, event):
+        """Accept drag events containing file URLs"""
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        """Handle file/folder drops on the main window"""
+        urls = event.mimeData().urls()
+        if not urls:
+            return
+        paths = []
+        supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json',
+                                '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif',
+                                '.bmp', '.webp', '.mp4'}
+        for url in urls:
+            local = url.toLocalFile()
+            if not local:
+                continue
+            if os.path.isdir(local):
+                for fn in sorted(os.listdir(local)):
+                    fp = os.path.join(local, fn)
+                    if os.path.isfile(fp) and os.path.splitext(fn)[1].lower() in supported_extensions:
+                        paths.append(fp)
+            elif os.path.isfile(local):
+                paths.append(local)
+        if paths:
+            self._handle_file_selection(paths)
+            self.append_log(f"📂 Dropped {len(paths)} file(s)")
+        event.acceptProposedAction()
+
     def browse_files(self):
         """Select one or more files - automatically handles single/multiple selection"""
         file_filter = (
