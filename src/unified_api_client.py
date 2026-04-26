@@ -18965,6 +18965,14 @@ class UnifiedClient:
         label = f"AuthCD{acct_label}" if 'acct_label' in dir() and acct_label else "AuthCD"
         print(f"\U0001f510 {label}: Sending request via Anthropic Messages API (model={actual_model})")
 
+        # Apply cached max output token limit if known for this model
+        if not hasattr(UnifiedClient, '_authcd_model_max_tokens'):
+            UnifiedClient._authcd_model_max_tokens = {}
+        effective_max_tokens = max_tokens
+        cached_limit = UnifiedClient._authcd_model_max_tokens.get(actual_model)
+        if cached_limit and effective_max_tokens and effective_max_tokens > cached_limit:
+            effective_max_tokens = cached_limit
+
         for attempt in range(max_retries):
             if self._is_stop_requested():
                 raise UnifiedClientError("AuthCD: Translation stopped by user", error_type="cancelled")
@@ -18987,7 +18995,7 @@ class UnifiedClient:
                     messages=messages,
                     model=actual_model,
                     temperature=temperature,
-                    max_tokens=max_tokens,
+                    max_tokens=effective_max_tokens,
                     timeout=_read_timeout,
                     log_fn=print,
                     connect_timeout=_connect_timeout,
@@ -19013,6 +19021,18 @@ class UnifiedClient:
 
                 if self._should_abort_retry():
                     raise UnifiedClientError("AuthCD: Translation stopped by user", error_type="cancelled")
+
+                # On 400 max_tokens exceeded, parse the limit, cache it, clamp, and retry
+                if "400" in error_str and "max_tokens" in error_str:
+                    import re as _re
+                    _m = _re.search(r'>\s*(\d+),\s*which is the maximum', error_str)
+                    if _m:
+                        model_limit = int(_m.group(1))
+                        UnifiedClient._authcd_model_max_tokens[actual_model] = model_limit
+                        if effective_max_tokens is None or effective_max_tokens > model_limit:
+                            print(f"\U0001f504 AuthCD: Clamping max_tokens {effective_max_tokens} \u2192 {model_limit} for {actual_model}")
+                            effective_max_tokens = model_limit
+                            continue  # retry immediately with clamped value
 
                 # On 401, try refreshing the token once
                 if "401" in error_str and attempt == 0:
