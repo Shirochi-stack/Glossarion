@@ -556,6 +556,34 @@ def _api_watchdog_finished(context: Optional[str] = None, model: Optional[str] =
     except Exception:
         pass
 
+def _api_watchdog_mark_waiting(request_id: Optional[str], model: Optional[str] = None,
+                                reason: Optional[str] = None) -> None:
+    """Transition an in-flight entry to waiting_cooldown (decrements counter).
+
+    Used when a request enters the fallback key cooldown queue — it is no longer
+    actually in-flight but is waiting for its reserved time slot.
+    """
+    global _api_watchdog_in_flight, _api_watchdog_last_change_ts, _api_watchdog_last_model
+    if not request_id:
+        return
+    try:
+        with _api_watchdog_lock:
+            entry = _api_watchdog_entries.get(request_id)
+            if not entry:
+                return
+            if entry.get("status") == "in_flight":
+                _api_watchdog_in_flight = max(0, _api_watchdog_in_flight - 1)
+            entry["status"] = "waiting_cooldown"
+            if model:
+                entry["model"] = model
+                _api_watchdog_last_model = model
+            if reason:
+                entry["waiting_reason"] = reason
+            _api_watchdog_last_change_ts = time.time()
+        _api_watchdog_external_write(get_api_watchdog_state())
+    except Exception:
+        pass
+
 def _api_watchdog_record_retry(request_id: str, attempt: int, reason: str = None) -> None:
     """Record a retry attempt for an active request."""
     global _api_watchdog_last_change_ts
@@ -7041,6 +7069,8 @@ class UnifiedClient:
                             print(f"{log_prefix} ⏩ {fallback_model} on cooldown ({_wait_needed:.1f}s left) — shuffling to next key")
                             continue
                         else:
+                            # Mark watchdog as waiting (not in-flight) with fallback model
+                            _api_watchdog_mark_waiting(request_id, model=fallback_model, reason=f"cooldown {_wait_needed:.0f}s")
                             print(f"{log_prefix} ⏳ Waiting {_wait_needed:.1f}s for {fallback_model} API delay...")
                             # Cancellable sleep — check stop flags every 0.2s
                             _slept = 0.0
@@ -7068,6 +7098,8 @@ class UnifiedClient:
                             _fallback_key_in_use.discard(_key_id)
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
 
+                # Mark watchdog back to in-flight with fallback model
+                _api_watchdog_mark_in_flight(request_id, model=fallback_model)
                 print(f"{log_prefix} Trying {fallback_model}")
                 
                 try:
@@ -7424,6 +7456,8 @@ class UnifiedClient:
                             print(f"[FALLBACK DIRECT {idx+1}] ⏩ {fallback_model} on cooldown ({_wait_needed:.1f}s left) — shuffling to next key")
                             continue
                         else:
+                            # Mark watchdog as waiting (not in-flight) with fallback model
+                            _api_watchdog_mark_waiting(request_id, model=fallback_model, reason=f"cooldown {_wait_needed:.0f}s")
                             print(f"[FALLBACK DIRECT {idx+1}] ⏳ Waiting {_wait_needed:.1f}s for {fallback_model} API delay...")
                             # Cancellable sleep — check stop flags every 0.2s
                             _slept = 0.0
@@ -7451,6 +7485,8 @@ class UnifiedClient:
                             _fallback_key_in_use.discard(_key_id)
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
 
+                # Mark watchdog back to in-flight with fallback model
+                _api_watchdog_mark_in_flight(request_id, model=fallback_model)
                 print(f"[FALLBACK DIRECT {idx+1}/{max_attempts}] Trying {fallback_model}")
                 
                 try:
