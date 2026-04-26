@@ -1049,6 +1049,22 @@ except ImportError:
     _authza_cancel_stream = None
     _authza_reset_cancel = None
     AUTHZA_AVAILABLE = False
+
+# AuthCD - Claude subscription via OAuth (optional)
+try:
+    from authcd_auth import get_default_store as _authcd_get_store
+    from authcd_auth import get_store as _authcd_get_store_by_id
+    from authcd_auth import send_chat_completion as _authcd_send
+    from authcd_auth import cancel_stream as _authcd_cancel_stream
+    from authcd_auth import reset_cancel as _authcd_reset_cancel
+    AUTHCD_AVAILABLE = True
+except ImportError:
+    _authcd_get_store = None
+    _authcd_get_store_by_id = None
+    _authcd_send = None
+    _authcd_cancel_stream = None
+    _authcd_reset_cancel = None
+    AUTHCD_AVAILABLE = False
     
 from functools import lru_cache
 from datetime import datetime, timedelta
@@ -1816,6 +1832,8 @@ class UnifiedClient:
         'za/': 'za',
         'authza/': 'authza',
         'authza': 'authza',
+        'authcd/': 'authcd',
+        'authcd': 'authcd',
         'nan/': 'nanogpt',
         'nan': 'nanogpt',
         'sam/': 'sambanova',
@@ -1844,7 +1862,7 @@ class UnifiedClient:
         return False
     
     # Models/prefixes that authenticate without a traditional API key
-    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgem', 'authgem-vertex', 'vertex/', 'antigravity/', 'antigravity', 'authza/', 'authza')
+    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgem', 'authgem-vertex', 'vertex/', 'antigravity/', 'antigravity', 'authza/', 'authza', 'authcd/', 'authcd')
     # NOTE: 'authgem' (without /) intentionally matches authgem/, authgem-key/, authgem-vertex/,
     # AND all numbered variants (authgem1/, authgem2/, authgem-vertex3/, etc.)
     _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
@@ -2314,6 +2332,13 @@ class UnifiedClient:
                 _authgem_cancel_stream()
         except Exception:
             pass
+
+        # Cancel any in-flight AuthCD streams
+        try:
+            if _authcd_cancel_stream is not None:
+                _authcd_cancel_stream()
+        except Exception:
+            pass
     
     @classmethod
     def is_globally_cancelled(cls) -> bool:
@@ -2347,6 +2372,12 @@ class UnifiedClient:
         try:
             if _authgpt_reset_cancel is not None:
                 _authgpt_reset_cancel()
+        except Exception:
+            pass
+        # Reset AuthCD cancel event
+        try:
+            if _authcd_reset_cancel is not None:
+                _authcd_reset_cancel()
         except Exception:
             pass
         
@@ -5069,6 +5100,14 @@ class UnifiedClient:
             if _m:
                 self.client_type = 'authza'
                 self._authza_account_id = int(_m.group(1))
+
+        # Dynamic fallback: match numbered authcd variants (authcd1/, authcd2/, etc.)
+        if self.client_type is None:
+            import re as _re
+            _m = _re.match(r'^authcd(\d{1,4})(?:/|$)', model_lower)
+            if _m:
+                self.client_type = 'authcd'
+                self._authcd_account_id = int(_m.group(1))
         
         # Check if we're using a custom OpenAI base URL
         custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', ''))
@@ -5504,6 +5543,16 @@ class UnifiedClient:
             account_id = getattr(self, '_authza_account_id', None)
             if account_id:
                 print(f"🔐 AuthZA: Using account slot #{account_id}")
+
+        elif self.client_type == 'authcd':
+            # AuthCD uses Anthropic Messages API via OAuth – no persistent SDK client
+            if not AUTHCD_AVAILABLE:
+                raise ImportError(
+                    "AuthCD package not found. Make sure 'authcd_auth.py' exists under src/."
+                )
+            account_id = getattr(self, '_authcd_account_id', None)
+            if account_id:
+                print(f"🔐 AuthCD: Using account slot #{account_id}")
 
         elif self.client_type in ['yi', 'qwen', 'baichuan', 'zhipu', 'moonshot', 'baidu', 
                                   'tencent', 'iflytek', 'bytedance', 'minimax', 
@@ -9578,6 +9627,12 @@ class UnifiedClient:
                     _authgpt_reset_cancel()
             except Exception:
                 pass
+            # Reset AuthCD cancel event
+            try:
+                if _authcd_reset_cancel is not None:
+                    _authcd_reset_cancel()
+            except Exception:
+                pass
             # Reset logging levels for new operations
             self._reset_http_logs()
 
@@ -11221,7 +11276,7 @@ class UnifiedClient:
         )
 
         # Non-Gemini wrapper-auth prefixes: suppress thinking info entirely.
-        _suppress_prefixes = ('authgpt', 'authza', 'antigravity', 'za/')
+        _suppress_prefixes = ('authgpt', 'authza', 'authcd', 'antigravity', 'za/')
         if not _is_gemini_wrapper:
             for p in _suppress_prefixes:
                 if model_lower.startswith(p):
@@ -12856,6 +12911,7 @@ class UnifiedClient:
             'google_translate_free': self._send_google_translate_free,  # Google Free Translate (web endpoint)
             'google_translate': self._send_google_translate,  # Google Cloud Translate
             'authgpt': self._send_authgpt,  # ChatGPT subscription via OAuth
+            'authcd': self._send_authcd,  # Claude subscription via OAuth
             'authgem': self._send_authgem,  # Gemini via Google OAuth + AI Studio
             'authgem_key': self._send_authgem_key,  # Gemini via AI Studio API key
             'authgem_vertex': self._send_authgem_vertex,  # Gemini via Google OAuth + Vertex AI
@@ -18827,6 +18883,159 @@ class UnifiedClient:
             f"AuthGPT request failed after {max_retries} attempts: {last_error}",
             error_type="api_error"
         )
+
+    # ------------------------------------------------------------------
+    # AuthCD – Claude subscription via OAuth (Anthropic Messages API)
+    # ------------------------------------------------------------------
+
+    def _send_authcd(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request via Anthropic Messages API using Claude subscription OAuth tokens.
+
+        Uses the authcd_auth module to obtain/refresh OAuth tokens and send
+        messages to api.anthropic.com/v1/messages with Authorization: Bearer.
+        Model names should be prefixed with 'authcd/' or 'authcdN/'.
+        """
+        if not AUTHCD_AVAILABLE or _authcd_get_store is None or _authcd_send is None:
+            raise UnifiedClientError(
+                "AuthCD is not available. Ensure 'authcd_auth.py' exists under src/.",
+                error_type="config_error"
+            )
+
+        # Strip the authcd/ or authcdN/ prefix to get the actual model name
+        actual_model = self.model
+        import re as _re
+        _m = _re.match(r'^authcd\d{0,4}/', actual_model)
+        if _m:
+            actual_model = actual_model[_m.end():]
+        elif actual_model.startswith('authcd'):
+            actual_model = actual_model[len('authcd'):].lstrip('/')
+        if not actual_model:
+            actual_model = 'claude-sonnet-4-6'
+
+        # Extract account ID from prefix
+        account_id = getattr(self, '_authcd_account_id', None) or self._extract_authcd_account_id(self.model)
+
+        # Obtain a valid OAuth access token
+        try:
+            if _authcd_get_store_by_id is not None and account_id:
+                store = _authcd_get_store_by_id(account_id)
+                acct_label = f" (Account #{account_id})"
+            else:
+                store = _authcd_get_store()
+                acct_label = ""
+            access_token = store.get_valid_access_token(auto_login=True)
+        except Exception as exc:
+            raise UnifiedClientError(
+                f"AuthCD{acct_label if 'acct_label' in dir() else ''} authentication failed: {exc}\n"
+                "Make sure you have a Claude Pro/Max subscription and try again.",
+                error_type="auth_error"
+            )
+
+        max_retries = self._get_max_retries()
+        last_error = None
+        label = f"AuthCD{acct_label}" if 'acct_label' in dir() and acct_label else "AuthCD"
+        print(f"\ud83d\udd10 {label}: Sending request via Anthropic Messages API (model={actual_model})")
+
+        for attempt in range(max_retries):
+            if self._is_stop_requested():
+                raise UnifiedClientError("AuthCD: Translation stopped by user", error_type="cancelled")
+
+            try:
+                if _authcd_reset_cancel is not None:
+                    _authcd_reset_cancel()
+
+                _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
+                _connect_timeout = float(os.getenv("CONNECT_TIMEOUT", "30")) if _http_tuning_on else None
+                _read_timeout = self.request_timeout
+                if _http_tuning_on:
+                    try:
+                        _read_timeout = int(float(os.getenv("READ_TIMEOUT", str(self.request_timeout))))
+                    except (ValueError, TypeError):
+                        pass
+
+                result = _authcd_send(
+                    access_token=access_token,
+                    messages=messages,
+                    model=actual_model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=_read_timeout,
+                    log_fn=print,
+                    connect_timeout=_connect_timeout,
+                )
+
+                content = result.get("content", "")
+                finish_reason = result.get("finish_reason", "stop")
+                usage = result.get("usage")
+
+                return UnifiedResponse(
+                    content=content,
+                    finish_reason=finish_reason,
+                    usage=usage,
+                    raw_response=result,
+                )
+
+            except RuntimeError as exc:
+                error_str = str(exc)
+
+                if "stream cancelled" in error_str.lower():
+                    self._log_once("\u23f9\ufe0f AuthCD: Stream cancelled by user")
+                    raise UnifiedClientError("AuthCD: Translation stopped by user", error_type="cancelled")
+
+                if self._should_abort_retry():
+                    raise UnifiedClientError("AuthCD: Translation stopped by user", error_type="cancelled")
+
+                # On 401, try refreshing the token once
+                if "401" in error_str and attempt == 0:
+                    print("\ud83d\udd04 AuthCD: 401 received, attempting token refresh\u2026")
+                    try:
+                        access_token = store.get_valid_access_token(auto_login=True)
+                        continue
+                    except Exception:
+                        pass
+
+                # On 429, surface rate limit
+                if "429" in error_str:
+                    raise UnifiedClientError(
+                        f"\u23f3 Claude usage limit reached. {error_str}",
+                        error_type="rate_limit"
+                    )
+
+                last_error = exc
+                if attempt < max_retries - 1:
+                    time.sleep(self._get_send_interval())
+                    continue
+
+            except Exception as exc:
+                error_str = str(exc)
+                print(f"\u26a0\ufe0f AuthCD error (attempt {attempt+1}/{max_retries}): {error_str}")
+
+                if self._should_abort_retry():
+                    raise UnifiedClientError("AuthCD: Translation stopped by user", error_type="cancelled")
+
+                last_error = exc
+                if attempt < max_retries - 1:
+                    time.sleep(self._get_send_interval())
+                    continue
+
+        raise UnifiedClientError(
+            f"AuthCD request failed after {max_retries} attempts: {last_error}",
+            error_type="api_error"
+        )
+
+    @staticmethod
+    def _extract_authcd_account_id(model: str) -> Optional[int]:
+        """Extract the numeric account ID from a numbered authcd prefix.
+
+        Examples:
+            'authcd2/claude-sonnet-4-6' \u2192 2
+            'authcd/claude-sonnet-4-6' \u2192 None (default account)
+        """
+        import re
+        m = re.match(r'^authcd(\d{1,4})(?:/|$)', model, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        return None
 
     # ------------------------------------------------------------------
     # AuthGem helpers (shared across authgem, authgem-key, authgem-vertex)

@@ -4064,6 +4064,21 @@ Recent translations to summarize:
             else:
                 self.authgpt_login_btn.hide()
 
+        # Show/hide AuthCD login button
+        if hasattr(self, 'authcd_login_btn'):
+            import re as _re
+            _cd_match = _re.match(r'^authcd\d{0,4}/', model)
+            needs_authcd = _cd_match is not None
+            
+            if not needs_authcd:
+                needs_authcd = self._has_authcd_in_key_pools()
+            
+            if needs_authcd:
+                self.authcd_login_btn.show()
+                self._update_authcd_login_status()
+            else:
+                self.authcd_login_btn.hide()
+
         # Show/hide AuthGem login button + project dropdown
         if hasattr(self, 'authgem_login_btn'):
             import re as _re
@@ -4181,6 +4196,147 @@ Recent translations to summarize:
             pass
         return False
 
+
+    def _has_authcd_in_key_pools(self):
+        """Check if any enabled key pool contains an enabled authcd model."""
+        try:
+            pool_map = {
+                'multi_api_keys': 'use_multi_api_keys',
+                'fallback_keys': 'use_fallback_keys',
+                'glossary_keys': 'use_glossary_keys',
+            }
+            for pool_key, toggle_key in pool_map.items():
+                if self.config.get(toggle_key, False):
+                    for key_data in self.config.get(pool_key, []):
+                        if isinstance(key_data, dict):
+                            if not key_data.get('enabled', True):
+                                continue
+                            m = key_data.get('model', '')
+                        else:
+                            m = getattr(key_data, 'model', '')
+                        import re as _re
+                        if _re.match(r'^authcd\d{0,4}/', m):
+                            return True
+        except Exception:
+            pass
+        return False
+
+    # ==================================================================
+    # AuthCD (Claude Login) – mirrors the AuthGPT pattern
+    # ==================================================================
+
+    def _get_authcd_account_id(self):
+        """Return the numeric account ID from the current model's authcd prefix."""
+        model = getattr(self, 'model_var', '') or self.config.get('model', '')
+        import re as _re
+        m = _re.match(r'^authcd(\d{1,4})/', model)
+        if m:
+            return int(m.group(1))
+        return 0
+
+    def _get_authcd_store_for_current_model(self):
+        """Return the AuthCDTokenStore for the currently selected model's account slot."""
+        from authcd_auth import get_store
+        return get_store(self._get_authcd_account_id())
+
+    def _update_authcd_login_status(self):
+        """Update the AuthCD login button text based on current token state."""
+        try:
+            store = self._get_authcd_store_for_current_model()
+            acct_id = self._get_authcd_account_id()
+            acct_suffix = f" #{acct_id}" if acct_id else ""
+            if store.has_tokens:
+                info = store.account_info
+                source = info.get('source', '')
+                label = f"\u2705 Claude{acct_suffix}"
+                if source == 'claude_code':
+                    label += " (Claude Code)"
+                self.authcd_login_btn.setText(label)
+                self.authcd_login_btn.setStyleSheet(
+                    "background-color: #28a745; color: white; font-weight: bold; "
+                    "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+                )
+            else:
+                self.authcd_login_btn.setText(f"\ud83d\udd10 Claude{acct_suffix} Login")
+                self.authcd_login_btn.setStyleSheet(
+                    "background-color: #d97706; color: white; font-weight: bold; "
+                    "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
+                )
+        except ImportError:
+            self.authcd_login_btn.setText("\ud83d\udd10 Claude Login (unavailable)")
+            self.authcd_login_btn.setEnabled(False)
+
+    def _authcd_login_clicked(self):
+        """Handle Claude Login button click – run OAuth flow in background thread."""
+        try:
+            store = self._get_authcd_store_for_current_model()
+        except ImportError:
+            QMessageBox.critical(
+                self, "AuthCD Unavailable",
+                "The authcd module is not installed. Please check your installation."
+            )
+            return
+
+        acct_id = self._get_authcd_account_id()
+        acct_suffix = f" #{acct_id}" if acct_id else ""
+
+        if store.has_tokens:
+            reply = QMessageBox.question(
+                self, "Claude Account",
+                f"Currently logged in{acct_suffix}.\n\nDo you want to log out?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                store.clear_tokens()
+                self._update_authcd_login_status()
+                self.append_log(f"\ud83d\udd13 Claude{acct_suffix}: Logged out")
+            return
+
+        self.authcd_login_btn.setText("\u23f3 Logging in\u2026")
+        self.authcd_login_btn.setEnabled(False)
+        self.append_log(f"\ud83d\udd10 Claude{acct_suffix}: Opening browser for login\u2026")
+
+        def _do_login():
+            try:
+                from authcd_auth import run_oauth_flow
+                tokens = run_oauth_flow()
+                store.save_tokens(tokens)
+                QMetaObject.invokeMethod(
+                    self, "_authcd_login_finished",
+                    Qt.QueuedConnection
+                )
+            except Exception as exc:
+                self._authcd_login_error = str(exc)
+                QMetaObject.invokeMethod(
+                    self, "_authcd_login_failed",
+                    Qt.QueuedConnection
+                )
+
+        t = threading.Thread(target=_do_login, daemon=True)
+        t.start()
+
+    @Slot()
+    def _authcd_login_status_changed(self):
+        """Called (thread-safe) whenever AuthCD tokens are saved or cleared."""
+        self._update_authcd_login_status()
+
+    @Slot()
+    def _authcd_login_finished(self):
+        """Called on GUI thread after successful AuthCD login."""
+        self.authcd_login_btn.setEnabled(True)
+        self._update_authcd_login_status()
+        acct_id = self._get_authcd_account_id()
+        acct_suffix = f" #{acct_id}" if acct_id else ""
+        self.append_log(f"\u2705 Claude{acct_suffix}: Logged in")
+
+    @Slot()
+    def _authcd_login_failed(self):
+        """Called on GUI thread after AuthCD login failure."""
+        self.authcd_login_btn.setEnabled(True)
+        self._update_authcd_login_status()
+        err = getattr(self, '_authcd_login_error', 'Unknown error')
+        self.append_log(f"\u274c Claude login failed: {err}")
+        QMessageBox.warning(self, "Login Failed", f"Claude login failed:\n{err}")
 
     def _get_authgpt_account_id(self):
         """Return the numeric account ID from the current model's authgpt prefix.
@@ -5155,6 +5311,21 @@ Recent translations to summarize:
         self.authgpt_login_btn.hide()
         model_btn_layout.addWidget(self.authgpt_login_btn)
         
+        # AuthCD Login button (visible only for authcd/ models)
+        self.authcd_login_btn = QPushButton("\ud83d\udd10 Claude Login")
+        self.authcd_login_btn.setStyleSheet(
+            "background-color: #d97706; color: white; font-weight: bold; "
+            "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
+        )
+        self.authcd_login_btn.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "Log in with your Claude Pro/Max subscription via browser. "
+            "No API key needed.</p></qt>"
+        )
+        self.authcd_login_btn.clicked.connect(self._authcd_login_clicked)
+        self.authcd_login_btn.hide()
+        model_btn_layout.addWidget(self.authcd_login_btn)
+        
         # AuthGem Login button (visible only for authgem/ models)
         self.authgem_login_btn = QPushButton("🔐 Gemini Login")
         self.authgem_login_btn.setStyleSheet(
@@ -5234,6 +5405,18 @@ Recent translations to summarize:
             _authgem_get_store().on_token_change(
                 lambda: QMetaObject.invokeMethod(
                     self, "_authgem_login_status_changed",
+                    Qt.QueuedConnection,
+                )
+            )
+        except ImportError:
+            pass
+        
+        # Auto-update AuthCD login button when tokens change
+        try:
+            from authcd_auth import get_default_store as _authcd_get_store
+            _authcd_get_store().on_token_change(
+                lambda: QMetaObject.invokeMethod(
+                    self, "_authcd_login_status_changed",
                     Qt.QueuedConnection,
                 )
             )
