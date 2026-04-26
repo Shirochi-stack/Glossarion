@@ -16814,9 +16814,50 @@ class UnifiedClient:
                                     or re.search(r"\((\d+)\s+in\s+the\s+prompt", err_str, re.IGNORECASE)
                                 )
 
-                                if m_ctx and m_in:
+                                # Fallback for providers (e.g. SambaNova) that only report total tokens
+                                # without breaking them down into input/output:
+                                #   "your messages resulted in 164545 tokens"
+                                #   "requested about 72559 tokens"
+                                in_tokens_fallback = None
+                                if m_ctx and not m_in:
+                                    m_total = (
+                                        re.search(r"resulted\s+in\s+(\d+)\s+tokens", err_str, re.IGNORECASE)
+                                        or re.search(r"requested\s+(?:about\s+)?(\d+)\s+tokens", err_str, re.IGNORECASE)
+                                    )
+                                    if m_total:
+                                        total_requested = int(m_total.group(1))
+                                        max_ctx_val = int(m_ctx.group(1))
+                                        # Infer input tokens: total_requested - current output limit
+                                        # If no output limit was set, the entire overage is from input
+                                        current_out = None
+                                        if "max_completion_tokens" in call_kwargs:
+                                            try:
+                                                current_out = int(call_kwargs["max_completion_tokens"])
+                                            except Exception:
+                                                pass
+                                        elif "max_tokens" in call_kwargs:
+                                            try:
+                                                current_out = int(call_kwargs["max_tokens"])
+                                            except Exception:
+                                                pass
+                                        elif "max_output_tokens" in call_kwargs:
+                                            try:
+                                                current_out = int(call_kwargs["max_output_tokens"])
+                                            except Exception:
+                                                pass
+
+                                        if current_out is not None and current_out > 0:
+                                            in_tokens_fallback = total_requested - current_out
+                                            if in_tokens_fallback < 0:
+                                                in_tokens_fallback = total_requested  # safety: treat all as input
+                                        else:
+                                            # No output limit set — the provider is saying our messages
+                                            # alone exceed the context window. Use total as input estimate.
+                                            in_tokens_fallback = total_requested
+
+                                if m_ctx and (m_in or in_tokens_fallback is not None):
                                     max_ctx = int(m_ctx.group(1))
-                                    in_tokens = int(m_in.group(1))
+                                    in_tokens = int(m_in.group(1)) if m_in else in_tokens_fallback
 
                                     # Determine which token parameter we are using
                                     token_key = None
