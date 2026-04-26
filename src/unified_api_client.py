@@ -6142,8 +6142,8 @@ class UnifiedClient:
                                         if res_content and res_content.strip():
                                             print(f"✅ Glossary key succeeded for safety filter")
                                             return res_content, res_fr
-                                except Exception as e:
-                                    print(f"❌ Glossary key retry failed: {e}")
+                                except Exception as gk_err:
+                                    print(f"❌ Glossary key retry failed: {gk_err}")
                             
                             # Try fallback keys directly (independent of multi-key mode toggle)
                             use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
@@ -6158,8 +6158,8 @@ class UnifiedClient:
                                         if res_content and res_content.strip():
                                             print(f"✅ Fallback key succeeded for safety filter")
                                             return res_content, res_fr
-                                except Exception as e:
-                                    print(f"❌ Fallback key retry failed: {e}")
+                                except Exception as fb_err:
+                                    print(f"❌ Fallback key retry failed: {fb_err}")
                     
                     # Retry transient empty responses (finish_reason='error') before giving up.
                     # Safety-filter empties go straight to finalize — retrying won't help.
@@ -6545,8 +6545,8 @@ class UnifiedClient:
                                 res_content, res_fr = retry_res
                                 if res_content and res_content.strip():
                                     return res_content, res_fr
-                        except Exception as e:
-                            print(f"❌ Glossary key retry failed: {e}")
+                        except Exception as gk_err:
+                            print(f"❌ Glossary key retry failed: {gk_err}")
                     
                     # Try fallback keys directly (independent of multi-key mode toggle)
                     use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
@@ -6560,8 +6560,8 @@ class UnifiedClient:
                                 res_content, res_fr = retry_res
                                 if res_content and res_content.strip():
                                     return res_content, res_fr
-                        except Exception as e:
-                            print(f"❌ Fallback key retry failed: {e}")
+                        except Exception as fb_err:
+                            print(f"❌ Fallback key retry failed: {fb_err}")
                     
                     # Fallthrough: record and return generic fallback
                     self._save_failed_request(messages, e, context)
@@ -7304,7 +7304,9 @@ class UnifiedClient:
         
         try:
             configured_fallbacks = json.loads(fallback_keys_json)
-            print(f"[FALLBACK DIRECT] 🔑 Loaded {len(configured_fallbacks)} fallback keys")
+            # Filter to only enabled keys with valid data
+            configured_fallbacks = [fb for fb in configured_fallbacks if fb.get('enabled') is not False and fb.get('api_key') and fb.get('model')]
+            print(f"[FALLBACK DIRECT] 🔑 Loaded {len(configured_fallbacks)} fallback key{'s' if len(configured_fallbacks) != 1 else ''}")
             
             # Try each fallback key (all of them, no arbitrary limit)
             max_attempts = len(configured_fallbacks)
@@ -7318,14 +7320,6 @@ class UnifiedClient:
                 fallback_google_region = fb.get('google_region')
                 fallback_azure_api_version = fb.get('azure_api_version')
                 use_individual_endpoint = fb.get('use_individual_endpoint', False)
-                
-                if fb.get('enabled') is False:
-                    print(f"[FALLBACK DIRECT {idx+1}] Disabled, skipping")
-                    continue
-                
-                if not fallback_key or not fallback_model:
-                    print(f"[FALLBACK DIRECT {idx+1}] Invalid key data, skipping")
-                    continue
                 
                 # --- Per-key API call delay enforcement ---
                 shuffle_mode = os.getenv('FALLBACK_KEY_SHUFFLE', '0') == '1'
@@ -7617,7 +7611,9 @@ class UnifiedClient:
         
         try:
             configured_glossary_keys = json.loads(glossary_keys_json)
-            print(f"[GLOSSARY DIRECT] 🔑 Loaded {len(configured_glossary_keys)} glossary keys")
+            # Filter to only keys with valid data
+            configured_glossary_keys = [gk for gk in configured_glossary_keys if gk.get('api_key') and gk.get('model')]
+            print(f"[GLOSSARY DIRECT] 🔑 Loaded {len(configured_glossary_keys)} glossary key{'s' if len(configured_glossary_keys) != 1 else ''}")
             
             # Try each glossary key (all of them, no arbitrary limit)
             max_attempts = len(configured_glossary_keys)
@@ -7631,10 +7627,6 @@ class UnifiedClient:
                 gk_google_region = gk.get('google_region')
                 gk_azure_api_version = gk.get('azure_api_version')
                 use_individual_endpoint = gk.get('use_individual_endpoint', False)
-                
-                if not gk_key or not gk_model:
-                    print(f"[GLOSSARY DIRECT {idx+1}] Invalid key data, skipping")
-                    continue
                 
                 print(f"[GLOSSARY DIRECT {idx+1}/{max_attempts}] Trying {gk_model}")
                 
