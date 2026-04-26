@@ -142,6 +142,7 @@ app_files = [
     # AuthGPT - ChatGPT subscription OAuth
     ('authgpt_auth.py', '.'),
     ('authgem_auth.py', '.'),
+    ('authcd_auth.py', '.'),  # Claude subscription OAuth
     ('authza_auth.py', '.'),
     ('token_encryption.py', '.'),
 
@@ -222,6 +223,7 @@ app_modules = [
     'large_env',
     'authgpt_auth',  # ChatGPT subscription OAuth
     'authgem_auth',  # Gemini subscription OAuth
+    'authcd_auth',  # Claude subscription OAuth
     'authza_auth',  # Azure/Additional auth
     'token_encryption',  # Encrypted token storage
     'antigravity_proxy',  # Antigravity Cloud Code proxy
@@ -989,7 +991,7 @@ a.pure = [p for p in a.pure if not any([
     'torch' in str(p).lower(),
     'pytorch' in str(p).lower(),
     '_torchcodec' in str(p),
-    # google-cloud-aiplatform: aiplatform_v1 is NO LONGER stripped — it is a runtime dep of google.cloud.aiplatform
+    # google-cloud-aiplatform: aiplatform_v1 is NO LONGER stripped ï¿½ it is a runtime dep of google.cloud.aiplatform
 ])]
 
 # ============================================================================
