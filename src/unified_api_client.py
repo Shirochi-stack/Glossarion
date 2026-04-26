@@ -7002,7 +7002,7 @@ class UnifiedClient:
                 # Watchdog retry tracking for fallback keys
                 _api_watchdog_record_retry(request_id, idx + 1, reason=f"fallback_{label}")
 
-                # --- Per-key API call delay enforcement (with in-use guard) ---
+                # --- Per-key API call delay enforcement (slot reservation) ---
                 shuffle_mode = os.getenv('FALLBACK_KEY_SHUFFLE', '0') == '1'
                 _key_id = (fallback_key or '', fallback_model or '')
                 _api_call_delay = 0.0
@@ -7013,40 +7013,42 @@ class UnifiedClient:
                     _api_call_delay = 0.0
                 
                 if _api_call_delay > 0:
-                    # Atomically check cooldown + in-use state under one lock acquisition
+                    # Reserve a time slot atomically: each thread stamps its
+                    # scheduled time so subsequent threads stack on top of it.
                     _wait_needed = 0.0
-                    _in_use_wait = False
+                    _reserved = False
                     with _fallback_key_lock:
-                        # Check if another thread is currently using this key
-                        if _key_id in _fallback_key_in_use:
-                            _in_use_wait = True
+                        _now = time.time()
                         _last_used = _fallback_key_last_used.get(_key_id, 0.0)
-                        _elapsed = time.time() - _last_used
-                        _remaining = _api_call_delay - _elapsed
-                        if _remaining > 0:
-                            _wait_needed = _remaining
-                        elif _in_use_wait:
-                            # Key is in-use but cooldown already passed — wait for the full delay
-                            _wait_needed = _api_call_delay
-                    
-                    # If key is in-use by another thread, wait for cooldown or skip
-                    if _in_use_wait and _wait_needed <= 0:
-                        _wait_needed = _api_call_delay
+                        _next_available = _last_used + _api_call_delay
+                        if _now >= _next_available:
+                            # Slot is free — claim at current time
+                            if not shuffle_mode:
+                                _fallback_key_last_used[_key_id] = _now
+                                _fallback_key_in_use.add(_key_id)
+                                _reserved = True
+                            _wait_needed = 0.0
+                        else:
+                            # Slot is busy — reserve the next slot (stacks delays)
+                            _wait_needed = _next_available - _now
+                            if not shuffle_mode:
+                                _fallback_key_last_used[_key_id] = _next_available
+                                _fallback_key_in_use.add(_key_id)
+                                _reserved = True
                     
                     if _wait_needed > 0:
                         if shuffle_mode:
-                            _reason = "in use by another thread" if _in_use_wait else f"cooldown ({_wait_needed:.1f}s left)"
-                            print(f"{log_prefix} ⏩ {fallback_model} {_reason} — shuffling to next key")
+                            print(f"{log_prefix} ⏩ {fallback_model} on cooldown ({_wait_needed:.1f}s left) — shuffling to next key")
                             continue
                         else:
-                            _reason = f"in-use + cooldown" if _in_use_wait else "API delay"
-                            print(f"{log_prefix} ⏳ Waiting {_wait_needed:.1f}s for {fallback_model} {_reason}...")
+                            print(f"{log_prefix} ⏳ Waiting {_wait_needed:.1f}s for {fallback_model} API delay...")
                             time.sleep(_wait_needed)
-                    
-                    # Claim the key: stamp last_used NOW and mark in-use
-                    with _fallback_key_lock:
-                        _fallback_key_last_used[_key_id] = time.time()
-                        _fallback_key_in_use.add(_key_id)
+                    elif not _reserved:
+                        # shuffle_mode with no wait — claim now
+                        with _fallback_key_lock:
+                            _fallback_key_last_used[_key_id] = time.time()
+                            _fallback_key_in_use.add(_key_id)
+                            _reserved = True
                 # ------------------------------------------
 
                 print(f"{log_prefix} Trying {fallback_model}")
@@ -7366,7 +7368,7 @@ class UnifiedClient:
                 fallback_azure_api_version = fb.get('azure_api_version')
                 use_individual_endpoint = fb.get('use_individual_endpoint', False)
                 
-                # --- Per-key API call delay enforcement (with in-use guard) ---
+                # --- Per-key API call delay enforcement (slot reservation) ---
                 shuffle_mode = os.getenv('FALLBACK_KEY_SHUFFLE', '0') == '1'
                 _key_id = (fallback_key or '', fallback_model or '')
                 _api_call_delay = 0.0
@@ -7377,40 +7379,42 @@ class UnifiedClient:
                     _api_call_delay = 0.0
                 
                 if _api_call_delay > 0:
-                    # Atomically check cooldown + in-use state under one lock acquisition
+                    # Reserve a time slot atomically: each thread stamps its
+                    # scheduled time so subsequent threads stack on top of it.
                     _wait_needed = 0.0
-                    _in_use_wait = False
+                    _reserved = False
                     with _fallback_key_lock:
-                        # Check if another thread is currently using this key
-                        if _key_id in _fallback_key_in_use:
-                            _in_use_wait = True
+                        _now = time.time()
                         _last_used = _fallback_key_last_used.get(_key_id, 0.0)
-                        _elapsed = time.time() - _last_used
-                        _remaining = _api_call_delay - _elapsed
-                        if _remaining > 0:
-                            _wait_needed = _remaining
-                        elif _in_use_wait:
-                            # Key is in-use but cooldown already passed — wait for the full delay
-                            _wait_needed = _api_call_delay
-                    
-                    # If key is in-use by another thread, wait for cooldown or skip
-                    if _in_use_wait and _wait_needed <= 0:
-                        _wait_needed = _api_call_delay
+                        _next_available = _last_used + _api_call_delay
+                        if _now >= _next_available:
+                            # Slot is free — claim at current time
+                            if not shuffle_mode:
+                                _fallback_key_last_used[_key_id] = _now
+                                _fallback_key_in_use.add(_key_id)
+                                _reserved = True
+                            _wait_needed = 0.0
+                        else:
+                            # Slot is busy — reserve the next slot (stacks delays)
+                            _wait_needed = _next_available - _now
+                            if not shuffle_mode:
+                                _fallback_key_last_used[_key_id] = _next_available
+                                _fallback_key_in_use.add(_key_id)
+                                _reserved = True
                     
                     if _wait_needed > 0:
                         if shuffle_mode:
-                            _reason = "in use by another thread" if _in_use_wait else f"cooldown ({_wait_needed:.1f}s left)"
-                            print(f"[FALLBACK DIRECT {idx+1}] ⏩ {fallback_model} {_reason} — shuffling to next key")
+                            print(f"[FALLBACK DIRECT {idx+1}] ⏩ {fallback_model} on cooldown ({_wait_needed:.1f}s left) — shuffling to next key")
                             continue
                         else:
-                            _reason = f"in-use + cooldown" if _in_use_wait else "API delay"
-                            print(f"[FALLBACK DIRECT {idx+1}] ⏳ Waiting {_wait_needed:.1f}s for {fallback_model} {_reason}...")
+                            print(f"[FALLBACK DIRECT {idx+1}] ⏳ Waiting {_wait_needed:.1f}s for {fallback_model} API delay...")
                             time.sleep(_wait_needed)
-                    
-                    # Claim the key: stamp last_used NOW and mark in-use
-                    with _fallback_key_lock:
-                        _fallback_key_last_used[_key_id] = time.time()
-                        _fallback_key_in_use.add(_key_id)
+                    elif not _reserved:
+                        # shuffle_mode with no wait — claim now
+                        with _fallback_key_lock:
+                            _fallback_key_last_used[_key_id] = time.time()
+                            _fallback_key_in_use.add(_key_id)
+                            _reserved = True
                 # ------------------------------------------
                 
                 print(f"[FALLBACK DIRECT {idx+1}/{max_attempts}] Trying {fallback_model}")
