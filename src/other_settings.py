@@ -153,7 +153,45 @@ def _rename_output_files_for_retain(gui, retain: bool, output_dir: str = None):
 
     opf_path = os.path.join(output_dir, 'content.opf')
     if not os.path.exists(opf_path):
-        return ('no_opf',)
+        # Fallback: extract content.opf from the source EPUB directly.
+        # This handles the case where the output dir doesn't have it yet
+        # (first run, cleaned output, etc.).
+        _epub = os.environ.get('EPUB_PATH', '')
+        if not _epub:
+            _sf = getattr(gui, 'selected_files', None)
+            if _sf:
+                for _f in _sf:
+                    if str(_f).lower().endswith('.epub'):
+                        _epub = str(_f)
+                        break
+        if not _epub:
+            # Try source_epub.txt sidecar in the output dir
+            _sidecar = os.path.join(output_dir, 'source_epub.txt')
+            if os.path.exists(_sidecar):
+                try:
+                    with open(_sidecar, 'r', encoding='utf-8') as _sf:
+                        _epub = _sf.read().strip()
+                except Exception:
+                    pass
+
+        if _epub and os.path.isfile(_epub) and _epub.lower().endswith('.epub'):
+            import zipfile as _zf
+            try:
+                with _zf.ZipFile(_epub, 'r') as zf:
+                    # Find content.opf inside the EPUB (may be at root or inside OEBPS/)
+                    opf_candidates = [n for n in zf.namelist() if n.lower().endswith('content.opf')]
+                    if opf_candidates:
+                        # Extract to output dir so subsequent calls find it immediately
+                        _opf_member = opf_candidates[0]
+                        os.makedirs(output_dir, exist_ok=True)
+                        _opf_data = zf.read(_opf_member)
+                        with open(opf_path, 'wb') as _wf:
+                            _wf.write(_opf_data)
+            except Exception:
+                pass
+
+        if not os.path.exists(opf_path):
+            return ('no_opf',)
 
     # Parse content.opf to build a set of original basenames + extensions
     try:

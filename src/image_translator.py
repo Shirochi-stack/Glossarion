@@ -24,7 +24,6 @@ try:
     CV2_AVAILABLE = True
 except ImportError:
     CV2_AVAILABLE = False
-    print("⚠️ OpenCV not available - advanced image processing disabled")
 import numpy as np
 from unified_api_client import UnifiedClientError
 
