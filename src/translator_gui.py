@@ -7980,8 +7980,8 @@ Recent translations to summarize:
 
         # ── Output mode dropdown (synced with Other Settings radio buttons) ──
         self._output_mode_combo = QComboBox()
-        self._output_mode_combo.addItems(["📝 Text", "🖼️ Image", "🎬 Video"])
-        self._output_mode_combo.setFixedWidth(95)
+        self._output_mode_combo.addItems(["📝Text", "🖼️Image", "🎬Video"])
+        self._output_mode_combo.setFixedWidth(75)
         self._output_mode_combo.setToolTip(
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
             "<b>Output Mode</b><br>"
@@ -7997,7 +7997,8 @@ Recent translations to summarize:
                 background-color: transparent;
                 border: 1px solid #4a5568;
                 border-radius: 3px;
-                padding: 1px 4px;
+                padding: 1px 2px 1px 2px;
+                padding-right: 0px;
                 color: #b0b0b0;
             }
             QComboBox:hover {
