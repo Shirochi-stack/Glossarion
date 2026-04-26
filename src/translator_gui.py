@@ -4472,8 +4472,27 @@ Recent translations to summarize:
             )
             if reply == QMessageBox.Yes:
                 store.clear_tokens()
-                # Also clear the in-memory cache so fallback loader doesn't re-import
                 store._tokens = None
+                # Also logout from Claude Code CLI
+                import shutil as _shutil, subprocess as _sp
+                _claude = _shutil.which("claude")
+                if _claude:
+                    try:
+                        _sp.run(
+                            [_claude, "auth", "logout"],
+                            timeout=10, capture_output=True,
+                            creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
+                        )
+                    except Exception:
+                        pass
+                # Fallback: also remove credentials file directly
+                import os as _os
+                _cc_creds = _os.path.join(_os.path.expanduser("~"), ".claude", ".credentials.json")
+                if _os.path.isfile(_cc_creds):
+                    try:
+                        _os.remove(_cc_creds)
+                    except OSError:
+                        pass
                 self._update_authcd_login_status()
                 self.append_log(f"\ud83d\udd13 Claude{acct_suffix}: Logged out")
             return
@@ -4488,7 +4507,7 @@ Recent translations to summarize:
                 self.append_log(f"\u2705 Claude{acct_suffix}: Loaded credentials from Claude Code")
                 return
 
-        # --- Strategy 2: Run 'claude login' via CLI in a visible terminal ---
+        # --- Strategy 2: Run 'claude auth login' via CLI in a visible terminal ---
         import shutil
         claude_bin = shutil.which("claude")
         if not claude_bin:
@@ -4501,7 +4520,7 @@ Recent translations to summarize:
             cmd_edit.setReadOnly(True)
             cmd_edit.selectAll()
             lay.addWidget(cmd_edit)
-            lay.addWidget(QLabel("Then run 'claude login' in a terminal,\nand click this button again to import credentials."))
+            lay.addWidget(QLabel("After installing, click this button again."))
             btn_row = QHBoxLayout()
             copy_btn = QPushButton("Copy Command")
             copy_btn.clicked.connect(lambda: (
@@ -4518,20 +4537,20 @@ Recent translations to summarize:
 
         self.authcd_login_btn.setText("\u23f3 Logging in\u2026")
         self.authcd_login_btn.setEnabled(False)
-        self.append_log(f"\ud83d\udd10 Claude{acct_suffix}: Running 'claude login' in terminal\u2026")
+        self.append_log(f"\ud83d\udd10 Claude{acct_suffix}: Opening browser for Claude login\u2026")
 
         def _do_claude_login():
             import subprocess, time as _time, os
             try:
-                # Run 'claude login' in a VISIBLE console window
+                # Run 'claude auth login' in a VISIBLE console window
                 if os.name == 'nt':
                     proc = subprocess.Popen(
-                        [claude_bin, "login"],
+                        [claude_bin, "auth", "login"],
                         creationflags=subprocess.CREATE_NEW_CONSOLE,
                     )
                 else:
                     proc = subprocess.Popen(
-                        [claude_bin, "login"],
+                        [claude_bin, "auth", "login"],
                     )
                 proc.wait(timeout=180)
 
@@ -4552,7 +4571,7 @@ Recent translations to summarize:
                 else:
                     self._authcd_login_error = (
                         "Claude login completed but no credentials found.\n"
-                        "Try running 'claude login' manually in a terminal."
+                        "Try running 'claude auth login' manually in a terminal."
                     )
                     QMetaObject.invokeMethod(
                         self, "_authcd_login_failed",
@@ -4560,7 +4579,7 @@ Recent translations to summarize:
                     )
             except subprocess.TimeoutExpired:
                 proc.kill()
-                self._authcd_login_error = "Login timed out (3 min). Try 'claude login' in a terminal."
+                self._authcd_login_error = "Login timed out (3 min). Try 'claude auth login' in a terminal."
                 QMetaObject.invokeMethod(
                     self, "_authcd_login_failed",
                     Qt.QueuedConnection
