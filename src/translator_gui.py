@@ -6944,13 +6944,14 @@ Recent translations to summarize:
             "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
             "Full: Chapter-by-chapter extraction for maximum context (most expensive)"
         )
-        self.auto_glossary_shortcut_combo.setFixedWidth(220)
+        self.auto_glossary_shortcut_combo.setFixedWidth(185)
         self.auto_glossary_shortcut_combo.setIconSize(QSize(18, 18))
         self.auto_glossary_shortcut_combo.setStyleSheet("""
             QComboBox {
                 background-color: #1a2a44;
                 color: #e8f0ff;
                 padding: 5px 10px;
+                padding-right: 0px;
                 border: 2px solid #4a8fd4;
                 border-radius: 4px;
                 font-size: 10pt;
@@ -6959,8 +6960,9 @@ Recent translations to summarize:
             QComboBox:hover { border-color: #70b8ff; background-color: #223a58; }
             QComboBox::drop-down {
                 border: none;
-                padding-right: 6px;
+                width: 0px;
             }
+            QComboBox::down-arrow { image: none; width: 0px; }
             QComboBox QAbstractItemView {
                 background-color: #162848;
                 color: #e8f0ff;
