@@ -8611,17 +8611,18 @@ def on_extraction_method_change(self):
             pass
             
 def _set_output_mode(self, mode: str):
-    """Central setter for output mode ('text', 'image', or 'video').
+    """Central setter for output mode ('text', 'vision', 'image', or 'video').
 
-    Text  = image translation OFF, normal text output.
-    Image = image translation ON, image-gen output.
-    Video = image translation ON, video-gen output.
+    Text   = image translation OFF, normal text output.
+    Vision = image translation ON, text output (OCR from images).
+    Image  = image translation ON, image-gen output.
+    Video  = image translation ON, video-gen output.
 
     Updates legacy boolean vars, config, syncs radio buttons and GUI dropdown.
     """
     try:
         mode = mode.lower().strip()
-        if mode not in ('text', 'image', 'video'):
+        if mode not in ('text', 'vision', 'image', 'video'):
             mode = 'text'
 
         # --- set legacy booleans ---
@@ -8656,7 +8657,7 @@ def _set_output_mode(self, mode: str):
         # Sync main GUI dropdown (if it exists)
         combo = getattr(self, '_output_mode_combo', None)
         if combo:
-            _map = {'text': 0, 'image': 1, 'video': 2}
+            _map = {'text': 0, 'vision': 1, 'image': 2, 'video': 3}
             idx = _map.get(mode, 0)
             if combo.currentIndex() != idx:
                 combo.blockSignals(True)
@@ -8713,45 +8714,50 @@ def _create_image_translation_section(self, parent):
 
     rb_text = QRadioButton("📝 Text")
     rb_text.setToolTip("Normal text translation — image translation OFF")
+    rb_vision = QRadioButton("👁️ Vision")
+    rb_vision.setToolTip("Translate text from images (OCR) — no image/video output")
     rb_image = QRadioButton("🖼️ Image")
     rb_image.setToolTip("Image generation output — enables image translation")
     rb_video = QRadioButton("🎬 Video")
     rb_video.setToolTip("Video generation output — enables image translation")
 
     mode_group.addButton(rb_text, 0)
-    mode_group.addButton(rb_image, 1)
-    mode_group.addButton(rb_video, 2)
+    mode_group.addButton(rb_vision, 1)
+    mode_group.addButton(rb_image, 2)
+    mode_group.addButton(rb_video, 3)
 
     mode_h.addWidget(rb_text)
+    mode_h.addWidget(rb_vision)
     mode_h.addWidget(rb_image)
     mode_h.addWidget(rb_video)
     mode_h.addStretch()
     section_v.addWidget(mode_row)
 
     # Store refs for sync
-    self._output_mode_radios = {'text': rb_text, 'image': rb_image, 'video': rb_video}
+    self._output_mode_radios = {'text': rb_text, 'vision': rb_vision, 'image': rb_image, 'video': rb_video}
 
     # Determine initial mode from legacy booleans
     if not hasattr(self, 'enable_video_output_mode_var'):
         self.enable_video_output_mode_var = self.config.get('enable_video_output_mode', False)
 
     _init_mode = self.config.get('output_mode', None)
-    if _init_mode not in ('text', 'image', 'video'):
+    if _init_mode not in ('text', 'vision', 'image', 'video'):
         if bool(getattr(self, 'enable_image_output_mode_var', False)):
             _init_mode = 'image'
         elif bool(getattr(self, 'enable_video_output_mode_var', False)):
             _init_mode = 'video'
         elif bool(getattr(self, 'enable_image_translation_var', False)):
-            _init_mode = 'image'
+            _init_mode = 'vision'
         else:
             _init_mode = 'text'
 
     rb_text.setChecked(_init_mode == 'text')
+    rb_vision.setChecked(_init_mode == 'vision')
     rb_image.setChecked(_init_mode == 'image')
     rb_video.setChecked(_init_mode == 'video')
 
     mode_desc = QLabel(
-        "Text = normal translation · Image = image-gen output · Video = video-gen output"
+        "Text = normal · Vision = OCR from images · Image = image-gen · Video = video-gen"
     )
     mode_desc.setStyleSheet("color: gray; font-size: 10pt;")
     mode_desc.setContentsMargins(0, 0, 0, 5)
@@ -8942,6 +8948,8 @@ def _create_image_translation_section(self, parent):
                 mode = 'image'
             elif rb_video.isChecked():
                 mode = 'video'
+            elif rb_vision.isChecked():
+                mode = 'vision'
             else:
                 mode = 'text'
         img_sub.setVisible(mode == 'image')
@@ -8950,10 +8958,11 @@ def _create_image_translation_section(self, parent):
 
     def _on_mode_radio_toggled(btn):
         bid = mode_group.id(btn)
-        mode = {0: 'text', 1: 'image', 2: 'video'}.get(bid, 'text')
+        mode = {0: 'text', 1: 'vision', 2: 'image', 3: 'video'}.get(bid, 'text')
         if btn.isChecked():
             self._set_output_mode(mode)
     rb_text.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_text) if checked else None)
+    rb_vision.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_vision) if checked else None)
     rb_image.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_image) if checked else None)
     rb_video.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_video) if checked else None)
 

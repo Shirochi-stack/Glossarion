@@ -7980,12 +7980,13 @@ Recent translations to summarize:
 
         # ── Output mode dropdown (synced with Other Settings radio buttons) ──
         self._output_mode_combo = QComboBox()
-        self._output_mode_combo.addItems(["📝Text", "🖼️Image", "🎬Video"])
-        self._output_mode_combo.setFixedWidth(75)
+        self._output_mode_combo.addItems(["📝Text", "👁️Vision", "🖼️Image", "🎬Video"])
+        self._output_mode_combo.setFixedWidth(80)
         self._output_mode_combo.setToolTip(
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
             "<b>Output Mode</b><br>"
             "📝 Text – Normal text translation<br>"
+            "👁️ Vision – Translate text from images (OCR)<br>"
             "🖼️ Image – Image generation output<br>"
             "🎬 Video – Video generation output<br><br>"
             "Synced with Other Settings → Image Translation section."
@@ -8020,18 +8021,20 @@ Recent translations to summarize:
 
         # Set initial value from config
         _init_mode = self.config.get('output_mode', 'text')
-        if _init_mode not in ('text', 'image', 'video'):
+        if _init_mode not in ('text', 'vision', 'image', 'video'):
             if self.config.get('enable_image_output_mode', False):
                 _init_mode = 'image'
             elif self.config.get('enable_video_output_mode', False):
                 _init_mode = 'video'
+            elif self.config.get('enable_image_translation', False):
+                _init_mode = 'vision'
             else:
                 _init_mode = 'text'
-        _mode_idx = {'text': 0, 'image': 1, 'video': 2}.get(_init_mode, 0)
+        _mode_idx = {'text': 0, 'vision': 1, 'image': 2, 'video': 3}.get(_init_mode, 0)
         self._output_mode_combo.setCurrentIndex(_mode_idx)
 
         def _on_output_mode_combo_changed(index):
-            mode = {0: 'text', 1: 'image', 2: 'video'}.get(index, 'text')
+            mode = {0: 'text', 1: 'vision', 2: 'image', 3: 'video'}.get(index, 'text')
             self._set_output_mode(mode)
         self._output_mode_combo.currentIndexChanged.connect(_on_output_mode_combo_changed)
 
