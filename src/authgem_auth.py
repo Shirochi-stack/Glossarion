@@ -2003,6 +2003,8 @@ def _stream_gemini_common(
             "finish_reason": mapped_finish_reason,
             "thought_content": thought_text,
             "usage": usage,
+            "_silent_block": (not final_content and mapped_finish_reason == "stop"
+                              and usage.get("candidatesTokenCount", 0) == 0),
         }
 
     # ── Streaming path: use streamGenerateContent (SSE) ──
@@ -2251,6 +2253,11 @@ def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float,
         "SAFETY": "content_filter",
         "RECITATION": "content_filter",
         "FINISH_REASON_UNSPECIFIED": "stop",
+        "BLOCKLIST": "safety",
+        "PROHIBITED_CONTENT": "prohibited_content",
+        "SPII": "safety",
+        "LANGUAGE": "other",
+        "OTHER": "other",
     }
     raw_fr = state["finish_reason"]
     mapped_reason = finish_reason_map.get(raw_fr, raw_fr.lower() if raw_fr else "stop")
@@ -2268,10 +2275,22 @@ def _finalize_gemini_stream(state: Dict, _log, log_stream: bool, t_start: float,
         if thinking_tokens:
             usage["thinking_tokens"] = thinking_tokens
 
+    # Detect silent content blocking: API returns finish_reason=STOP but
+    # content is empty with 0 completion tokens — this is a disguised
+    # prohibition, not a legitimate empty response.
+    _silent_block = False
+    if not content and mapped_reason == "stop":
+        _completion_tokens = (usage or {}).get("completion_tokens", 0)
+        if _completion_tokens == 0:
+            _silent_block = True
+            mapped_reason = "content_filter"
+            _log("   🚫 Silent content block detected (empty content + 0 completion tokens + stop) — overriding finish_reason to content_filter")
+
     return {
         "content": content,
         "finish_reason": mapped_reason,
         "usage": usage,
+        "_silent_block": _silent_block,
     }
 
 

@@ -19253,6 +19253,15 @@ class UnifiedClient:
 
                 result = send_fn(attempt)
 
+                # Detect silent content blocks: the API returns finish_reason='stop'
+                # but content is empty with 0 completion tokens — a disguised
+                # prohibition.  Raise a proper error so fallback keys are triggered.
+                if result.get("_silent_block"):
+                    raise UnifiedClientError(
+                        f"{label}: Content silently blocked (empty response + 0 completion tokens)",
+                        error_type="prohibited_content"
+                    )
+
                 return UnifiedResponse(
                     content=result.get("content", ""),
                     finish_reason=result.get("finish_reason", "stop"),
@@ -19340,6 +19349,21 @@ class UnifiedClient:
                     raise UnifiedClientError(f"{label}: Rate limit exceeded after {max_retries} attempts", error_type="rate_limit")
 
                 last_error = exc
+                if attempt < max_retries - 1:
+                    time.sleep(self._get_send_interval())
+                    continue
+
+            except UnifiedClientError as uce:
+                # Prohibited content and cancellations must propagate immediately
+                # so upstream fallback-key logic can handle them.
+                if uce.error_type in ("prohibited_content", "cancelled"):
+                    raise
+                # Other UnifiedClientErrors fall through to generic retry
+                error_str = str(uce)
+                print(f"⚠️ {label} error (attempt {attempt+1}/{max_retries}): {error_str}")
+                if self._should_abort_retry():
+                    raise UnifiedClientError(f"{label}: Translation stopped by user", error_type="cancelled")
+                last_error = uce
                 if attempt < max_retries - 1:
                     time.sleep(self._get_send_interval())
                     continue
