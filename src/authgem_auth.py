@@ -1775,11 +1775,22 @@ def _stream_gemini_common(
     account_id: int = 0,
 ) -> Dict:
     """Shared streaming logic for all Gemini endpoints (AI Studio & Vertex)."""
-    # Respect the "Enable streaming responses" toggle from other_settings.py
-    _enable_streaming = os.getenv("ENABLE_STREAMING", "1").lower() not in ("0", "false")
+    # Check if this is the Code Assist proxy (authgem/) — it ONLY supports
+    # streamGenerateContent; generateContent returns HTTP 200 but empty content.
+    # The Gemini CLI exclusively uses streaming, so we must do the same.
+    _is_code_assist = "cloudcode-pa.googleapis.com" in url
+
+    # Respect the "Enable streaming responses" toggle from other_settings.py,
+    # but FORCE streaming for the Code Assist proxy (authgem/).
+    if _is_code_assist:
+        _enable_streaming = True
+    else:
+        _enable_streaming = os.getenv("ENABLE_STREAMING", "1").lower() not in ("0", "false")
     log_stream = _enable_streaming and os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
     if os.getenv("BATCH_TRANSLATION", "0") == "1":
-        log_stream = os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
+        # AuthGem always streams (like AuthGPT/Antigravity), so use the
+        # forced-stream batch log toggle for parity.
+        log_stream = os.getenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
 
     # Thinking stream uses its own env var (matches other providers)
     stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
@@ -1991,7 +2002,7 @@ def _stream_gemini_common(
             "content": final_content,
             "finish_reason": mapped_finish_reason,
             "thought_content": thought_text,
-            "usage_metadata": usage,
+            "usage": usage,
         }
 
     # ── Streaming path: use streamGenerateContent (SSE) ──

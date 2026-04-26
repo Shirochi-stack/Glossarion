@@ -2603,7 +2603,7 @@ def _create_response_handling_section(self, parent):
     self.stream_thinking_logs_checkbox.setToolTip(
         "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
         "Show 🧠 thinking logs in real-time when models use reasoning/thinking. "
-        "Applies to Anthropic, Gemini, OpenAI reasoning, AuthGPT, and Antigravity. "
+        "Applies to Anthropic, Gemini, OpenAI reasoning, AuthGPT, AuthGem, and Antigravity. "
         "Disable to suppress thinking output and only show final text.</p></qt>"
     )
     try:
@@ -2662,11 +2662,11 @@ def _create_response_handling_section(self, parent):
     except Exception:
         pass
     self.allow_authgpt_batch_stream_logs_checkbox = self._create_styled_checkbox(
-        "Allow forced-stream batch log (AuthGPT / Antigravity)"
+        "Allow forced-stream batch log (AuthGPT / AuthGem / Antigravity)"
     )
     self.allow_authgpt_batch_stream_logs_checkbox.setToolTip(
         "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
-        "AuthGPT (authgpt/) and Antigravity (antigravity/) always stream internally. "
+        "AuthGPT (authgpt/), AuthGem (authgem/), and Antigravity (antigravity/) always stream internally. "
         "During batch translation this can flood the log. Enable this to see streaming "
         "tokens in the log during batch mode. Off by default.</p></qt>"
     )
@@ -2684,7 +2684,7 @@ def _create_response_handling_section(self, parent):
     self.allow_authgpt_batch_stream_logs_checkbox.toggled.connect(_on_allow_authgpt_batch_stream_logs_toggle)
     section_v.addWidget(self.allow_authgpt_batch_stream_logs_checkbox)
 
-    authgpt_note = QLabel("🔐 AuthGPT and Antigravity always stream — this controls batch log visibility")
+    authgpt_note = QLabel("🔐 AuthGPT, AuthGem, and Antigravity always stream — this controls batch log visibility")
     authgpt_note.setStyleSheet("color: #6b7280; font-size: 9pt; font-style: italic;")
     authgpt_note.setWordWrap(True)
     authgpt_note.setContentsMargins(20, 0, 0, 4)
