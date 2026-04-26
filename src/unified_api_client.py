@@ -12947,6 +12947,31 @@ class UnifiedClient:
         # Bind current run id to this thread so transport logs can be suppressed for stale runs.
         _set_thread_run_id_from_env()
 
+        # Log NanoGPT thinking configuration BEFORE the stagger delay so it
+        # appears in the console before the "API call in progress" line.
+        if getattr(self, 'client_type', '') == 'nanogpt' and not self._is_stop_requested():
+            try:
+                _eff = (self.model or '')[4:] if (self.model or '').lower().startswith('nan/') else (self.model or '')
+                _is_vid = self._is_video_gen_model(_eff)
+                _is_img = self._is_image_gen_model(_eff)
+                if not _is_vid and not _is_img:
+                    _enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
+                    _is_think_model = ':thinking' in _eff.lower() or '-thinking' in _eff.lower()
+                    if _enable_gpt or _is_think_model:
+                        _tok = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
+                        _budget = int(_tok) if _tok.isdigit() and int(_tok) > 0 else 0
+                        if _budget >= 1024:
+                            _desc = f"budget_tokens={_budget}"
+                        else:
+                            _eff_effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
+                            if _eff_effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
+                                _eff_effort = 'medium'
+                            _desc = f"effort={_eff_effort}"
+                        _src = "auto-detected" if (_is_think_model and not _enable_gpt) else "enabled"
+                        print(f"\U0001f9e0 [nanogpt] Thinking {_src} for {_eff}: {_desc}")
+            except Exception:
+                pass
+
         self._apply_api_call_stagger()
 
         # If graceful stop is active, do not transition queued work to in-flight and do not send.
@@ -20061,24 +20086,9 @@ class UnifiedClient:
                 messages, effective_model, base_url, api_key, response_name
             )
         else:
-            # Log thinking configuration before the API call starts
-            try:
-                enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
-                _is_thinking_model = ':thinking' in (effective_model or '').lower() or '-thinking' in (effective_model or '').lower()
-                if enable_gpt or _is_thinking_model:
-                    tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
-                    budget = int(tokens_str) if tokens_str.isdigit() and int(tokens_str) > 0 else 0
-                    if budget >= 1024:
-                        _think_desc = f"budget_tokens={budget}"
-                    else:
-                        effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
-                        if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
-                            effort = 'medium'
-                        _think_desc = f"effort={effort}"
-                    src = "auto-detected" if (_is_thinking_model and not enable_gpt) else "enabled"
-                    print(f"🧠 [nanogpt] Thinking {src} for {effective_model}: {_think_desc}")
-            except Exception:
-                pass
+            # Thinking log is now emitted earlier in _get_response
+            # (before _apply_api_call_stagger) so it appears before the
+            # "API call in progress" line.
             # Use the OpenAI-compatible chat completions path
             return self._send_openai_compatible(
                 messages=messages,
