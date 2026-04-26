@@ -5429,16 +5429,33 @@ img {
             if core and core not in spine_href_by_core:
                 spine_href_by_core[core] = it.file_name
 
-        # Fallback: map by OPF order (source filename order -> spine chapter order)
+        # Fallback: map by OPF order (source filename order → spine chapter order)
+        # IMPORTANT: Only use positional mapping when source and output counts match exactly,
+        # because skipped/failed chapters cause the output spine to have fewer items,
+        # leading to off-by-one (or more) misalignment in positional mappings.
         try:
             opf_order = self._get_chapter_order_from_opf() or {}
             if opf_order and spine_items_for_order:
                 ordered_source = [fn for fn, _ in sorted(opf_order.items(), key=lambda x: x[1])]
-                limit = min(len(ordered_source), len(spine_items_for_order))
-                for i in range(limit):
-                    src_core = self._normalize_core_name(ordered_source[i])
-                    if src_core and src_core not in spine_href_by_core:
-                        spine_href_by_core[src_core] = spine_items_for_order[i].file_name
+                # Only use positional fallback if counts match (no skipped chapters)
+                if len(ordered_source) == len(spine_items_for_order):
+                    for i in range(len(ordered_source)):
+                        src_core = self._normalize_core_name(ordered_source[i])
+                        if src_core and src_core not in spine_href_by_core:
+                            spine_href_by_core[src_core] = spine_items_for_order[i].file_name
+                else:
+                    # Counts differ → chapters were skipped. Use name-matching instead
+                    # of positional mapping to avoid misalignment.
+                    output_core_map = {}
+                    for it in spine_items_for_order:
+                        oc = self._normalize_core_name(it.file_name)
+                        if oc and oc not in output_core_map:
+                            output_core_map[oc] = it.file_name
+                    for fn in ordered_source:
+                        src_core = self._normalize_core_name(fn)
+                        if src_core and src_core not in spine_href_by_core:
+                            if src_core in output_core_map:
+                                spine_href_by_core[src_core] = output_core_map[src_core]
         except Exception:
             pass
 
