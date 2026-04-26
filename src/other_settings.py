@@ -8635,6 +8635,11 @@ def _set_output_mode(self, mode: str):
         self.config['enable_image_translation'] = self.enable_image_translation_var
         self.config['output_mode'] = mode
 
+        # --- immediately sync env vars so they never stay stale ---
+        import os as _os
+        _os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = '1' if self.enable_image_output_mode_var else '0'
+        _os.environ['ENABLE_VIDEO_OUTPUT_MODE'] = '1' if self.enable_video_output_mode_var else '0'
+
         # Toggle visibility of the image-translation sub-section
         try:
             self.toggle_image_translation_section()

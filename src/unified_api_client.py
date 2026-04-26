@@ -16906,6 +16906,13 @@ class UnifiedClient:
                     # Check if image/video output mode is enabled
                     enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
                     enable_video_output = os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
+
+                    # For NanoGPT, ONLY trust model-name detection — env vars may
+                    # be stale from a previous run with a generative model.
+                    if provider == 'nanogpt':
+                        enable_image_output = self._is_image_gen_model(effective_model)
+                        enable_video_output = self._is_video_gen_model(effective_model)
+
                     # Force enable for any model whose name indicates image generation
                     if self._is_image_gen_model(effective_model):
                         enable_image_output = True
@@ -20027,16 +20034,23 @@ class UnifiedClient:
         if effective_model.lower().startswith("nan/"):
             effective_model = effective_model[4:]
 
-        enable_video_output = os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
-        enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
+        # Determine if this model is actually a generative (image/video) model.
+        # Only generative models should be routed to the image/video endpoints.
+        _is_video_model = self._is_video_gen_model(effective_model)
+        _is_image_model = self._is_image_gen_model(effective_model)
 
-        # Auto-detect video/image gen models by name so routing is correct
-        # even when the env var hasn't been pushed yet
-        if self._is_video_gen_model(effective_model):
+        if _is_video_model:
             enable_video_output = True
             enable_image_output = False  # mutually exclusive
-        elif self._is_image_gen_model(effective_model):
+        elif _is_image_model:
+            enable_video_output = False
             enable_image_output = True
+        else:
+            # NOT a generative model — never route to image/video endpoints,
+            # even if ENABLE_IMAGE_OUTPUT_MODE / ENABLE_VIDEO_OUTPUT_MODE env
+            # vars are stale from a previous run with a generative model.
+            enable_video_output = False
+            enable_image_output = False
 
         if enable_video_output:
             return self._send_nanogpt_video(
