@@ -4280,15 +4280,18 @@ Recent translations to summarize:
 
         pool_ids = self._collect_auth_account_ids_from_pools()
 
-        # Determine which account ID is already shown by each main button.
-        # A main button can be visible either from the model prefix OR from
-        # key-pool detection – in both cases we must skip that slot.
+        # Determine which account ID is already covered by each main login button.
+        # Do NOT rely on isVisible() — it can return False during init or when
+        # the parent widget hasn't been rendered yet, which causes duplicate
+        # extra buttons for account 0.  Instead, re-derive from the model
+        # string and pool checks (same logic on_model_change uses).
+        model = getattr(self, 'model_var', '') or self.config.get('model', '')
         primary = {}
-        if hasattr(self, 'authgpt_login_btn') and self.authgpt_login_btn.isVisible():
+        if _re.match(r'^authgpt\d{0,4}/', model) or self._has_authgpt_in_key_pools():
             primary['authgpt'] = self._get_authgpt_account_id()
-        if hasattr(self, 'authcd_login_btn') and self.authcd_login_btn.isVisible():
+        if _re.match(r'^authcd\d{0,4}/', model) or self._has_authcd_in_key_pools():
             primary['authcd'] = self._get_authcd_account_id()
-        if hasattr(self, 'authgem_login_btn') and self.authgem_login_btn.isVisible():
+        if _re.match(r'^authgem(?:-vertex)?\d{0,4}/', model) or self._has_authgem_in_key_pools():
             primary['authgem'] = self._get_authgem_account_id()
 
         # Provider display config

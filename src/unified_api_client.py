@@ -234,6 +234,7 @@ _api_watchdog_entries = {}
 # Per-key API call delay tracking (module-level, thread-safe)
 # Maps (api_key, model) -> last_call_timestamp; used to enforce per-key cooldown
 _fallback_key_last_used: dict = {}
+_fallback_key_in_use: set = set()   # Keys currently in-flight (prevents concurrent use in batch)
 _fallback_key_lock = threading.Lock()
 
 def _parse_error_json(error_str: str) -> Dict:
@@ -7001,7 +7002,7 @@ class UnifiedClient:
                 # Watchdog retry tracking for fallback keys
                 _api_watchdog_record_retry(request_id, idx + 1, reason=f"fallback_{label}")
 
-                # --- Per-key API call delay enforcement ---
+                # --- Per-key API call delay enforcement (with in-use guard) ---
                 shuffle_mode = os.getenv('FALLBACK_KEY_SHUFFLE', '0') == '1'
                 _key_id = (fallback_key or '', fallback_model or '')
                 _api_call_delay = 0.0
@@ -7012,17 +7013,40 @@ class UnifiedClient:
                     _api_call_delay = 0.0
                 
                 if _api_call_delay > 0:
+                    # Atomically check cooldown + in-use state under one lock acquisition
+                    _wait_needed = 0.0
+                    _in_use_wait = False
                     with _fallback_key_lock:
+                        # Check if another thread is currently using this key
+                        if _key_id in _fallback_key_in_use:
+                            _in_use_wait = True
                         _last_used = _fallback_key_last_used.get(_key_id, 0.0)
-                    _elapsed = time.time() - _last_used
-                    _remaining = _api_call_delay - _elapsed
-                    if _remaining > 0:
+                        _elapsed = time.time() - _last_used
+                        _remaining = _api_call_delay - _elapsed
+                        if _remaining > 0:
+                            _wait_needed = _remaining
+                        elif _in_use_wait:
+                            # Key is in-use but cooldown already passed — wait for the full delay
+                            _wait_needed = _api_call_delay
+                    
+                    # If key is in-use by another thread, wait for cooldown or skip
+                    if _in_use_wait and _wait_needed <= 0:
+                        _wait_needed = _api_call_delay
+                    
+                    if _wait_needed > 0:
                         if shuffle_mode:
-                            print(f"{log_prefix} ⏩ {fallback_model} on API delay cooldown ({_remaining:.1f}s left) — shuffling to next key")
+                            _reason = "in use by another thread" if _in_use_wait else f"cooldown ({_wait_needed:.1f}s left)"
+                            print(f"{log_prefix} ⏩ {fallback_model} {_reason} — shuffling to next key")
                             continue
                         else:
-                            print(f"{log_prefix} ⏳ Waiting {_remaining:.1f}s for {fallback_model} API delay...")
-                            time.sleep(_remaining)
+                            _reason = f"in-use + cooldown" if _in_use_wait else "API delay"
+                            print(f"{log_prefix} ⏳ Waiting {_wait_needed:.1f}s for {fallback_model} {_reason}...")
+                            time.sleep(_wait_needed)
+                    
+                    # Claim the key: stamp last_used NOW and mark in-use
+                    with _fallback_key_lock:
+                        _fallback_key_last_used[_key_id] = time.time()
+                        _fallback_key_in_use.add(_key_id)
                 # ------------------------------------------
 
                 print(f"{log_prefix} Trying {fallback_model}")
@@ -7051,10 +7075,10 @@ class UnifiedClient:
                     except Exception:
                         pass
                     
-                    # Propagate per-key delay so _apply_api_call_stagger / _get_send_interval
-                    # use it instead of the global SEND_INTERVAL_SECONDS env var.
-                    if _api_call_delay > 0:
-                        temp_client._per_key_api_delay = _api_call_delay
+                    # NOTE: Do NOT propagate _per_key_api_delay to temp_client here.
+                    # We already waited for the cooldown above, so _apply_api_call_stagger
+                    # inside _send_internal should use the default global interval, not
+                    # the per-key delay again (which would cause a double-wait).
                     
                     # Set key-specific credentials for the temp client
                     if fallback_google_creds:
@@ -7199,16 +7223,25 @@ class UnifiedClient:
                         if content and self._safe_len(content, "main_key_retry_content") > 0:
                             print(f"{log_prefix} ✅ SUCCESS! Got content of length: {len(content)}, finish_reason={finish_reason}")
                             self._save_response(content, response_name)
-                            # Record the call time for per-key delay tracking
+                            # Release in-use claim (last_used already stamped before use)
                             if _api_call_delay > 0:
                                 with _fallback_key_lock:
                                     _fallback_key_last_used[_key_id] = time.time()
+                                    _fallback_key_in_use.discard(_key_id)
                             return content, finish_reason
                         else:
                             print(f"[{label} {idx+1}] ❌ Content empty or null")
+                            # Release in-use on failure
+                            if _api_call_delay > 0:
+                                with _fallback_key_lock:
+                                    _fallback_key_in_use.discard(_key_id)
                             continue
                     else:
                         print(f"[{label} {idx+1}] ❌ Unexpected result type: {type(result)}")
+                        # Release in-use on failure
+                        if _api_call_delay > 0:
+                            with _fallback_key_lock:
+                                _fallback_key_in_use.discard(_key_id)
                         continue
                         
                 except UnifiedClientError as e:
@@ -7223,6 +7256,9 @@ class UnifiedClient:
                         getattr(e, 'error_type', None) in ("rate_limit", "timeout") or 
                         "rate limit" in error_str_lower):
                         print(f"{log_prefix} ❌ UnifiedClientError: {e}")
+                        if _api_call_delay > 0:
+                            with _fallback_key_lock:
+                                _fallback_key_in_use.discard(_key_id)
                         continue
                     tb = traceback.format_exc()
                     if e.error_type == "cancelled" or "cancelled by user" in error_str_lower or "operation cancelled" in error_str_lower:
@@ -7232,10 +7268,16 @@ class UnifiedClient:
                     error_str = str(e).lower()
                     if ("azure" in error_str and "content" in error_str) or e.error_type == "prohibited_content":
                         print(f"{log_prefix} ❌ Content filter error: {str(e)[:200]}")
+                        if _api_call_delay > 0:
+                            with _fallback_key_lock:
+                                _fallback_key_in_use.discard(_key_id)
                         continue
                     
                     print(f"{log_prefix} ❌ UnifiedClientError: {str(e)[:200]}")
                     print(f"{log_prefix} Traceback:\n{tb}")
+                    if _api_call_delay > 0:
+                        with _fallback_key_lock:
+                            _fallback_key_in_use.discard(_key_id)
                     continue
                     
                 except Exception as e:
@@ -7243,6 +7285,9 @@ class UnifiedClient:
                     tb = traceback.format_exc()
                     print(f"{log_prefix} ❌ Exception: {str(e)[:200]}")
                     print(f"{log_prefix} Traceback:\n{tb}")
+                    if _api_call_delay > 0:
+                        with _fallback_key_lock:
+                            _fallback_key_in_use.discard(_key_id)
                     continue
             
             if len(fallback_keys) > 0 or use_main_key_fb:
@@ -7321,7 +7366,7 @@ class UnifiedClient:
                 fallback_azure_api_version = fb.get('azure_api_version')
                 use_individual_endpoint = fb.get('use_individual_endpoint', False)
                 
-                # --- Per-key API call delay enforcement ---
+                # --- Per-key API call delay enforcement (with in-use guard) ---
                 shuffle_mode = os.getenv('FALLBACK_KEY_SHUFFLE', '0') == '1'
                 _key_id = (fallback_key or '', fallback_model or '')
                 _api_call_delay = 0.0
@@ -7332,19 +7377,40 @@ class UnifiedClient:
                     _api_call_delay = 0.0
                 
                 if _api_call_delay > 0:
+                    # Atomically check cooldown + in-use state under one lock acquisition
+                    _wait_needed = 0.0
+                    _in_use_wait = False
                     with _fallback_key_lock:
+                        # Check if another thread is currently using this key
+                        if _key_id in _fallback_key_in_use:
+                            _in_use_wait = True
                         _last_used = _fallback_key_last_used.get(_key_id, 0.0)
-                    _elapsed = time.time() - _last_used
-                    _remaining = _api_call_delay - _elapsed
-                    if _remaining > 0:
+                        _elapsed = time.time() - _last_used
+                        _remaining = _api_call_delay - _elapsed
+                        if _remaining > 0:
+                            _wait_needed = _remaining
+                        elif _in_use_wait:
+                            # Key is in-use but cooldown already passed — wait for the full delay
+                            _wait_needed = _api_call_delay
+                    
+                    # If key is in-use by another thread, wait for cooldown or skip
+                    if _in_use_wait and _wait_needed <= 0:
+                        _wait_needed = _api_call_delay
+                    
+                    if _wait_needed > 0:
                         if shuffle_mode:
-                            # Shuffle: skip this key if it's still on cooldown
-                            print(f"[FALLBACK DIRECT {idx+1}] ⏩ {fallback_model} on API delay cooldown ({_remaining:.1f}s left) — shuffling to next key")
+                            _reason = "in use by another thread" if _in_use_wait else f"cooldown ({_wait_needed:.1f}s left)"
+                            print(f"[FALLBACK DIRECT {idx+1}] ⏩ {fallback_model} {_reason} — shuffling to next key")
                             continue
                         else:
-                            # Wait: enforce the delay before using this key
-                            print(f"[FALLBACK DIRECT {idx+1}] ⏳ Waiting {_remaining:.1f}s for {fallback_model} API delay...")
-                            time.sleep(_remaining)
+                            _reason = f"in-use + cooldown" if _in_use_wait else "API delay"
+                            print(f"[FALLBACK DIRECT {idx+1}] ⏳ Waiting {_wait_needed:.1f}s for {fallback_model} {_reason}...")
+                            time.sleep(_wait_needed)
+                    
+                    # Claim the key: stamp last_used NOW and mark in-use
+                    with _fallback_key_lock:
+                        _fallback_key_last_used[_key_id] = time.time()
+                        _fallback_key_in_use.add(_key_id)
                 # ------------------------------------------
                 
                 print(f"[FALLBACK DIRECT {idx+1}/{max_attempts}] Trying {fallback_model}")
@@ -7380,11 +7446,10 @@ class UnifiedClient:
                     # This flag tells _send_internal to NOT attempt fallback keys if it hits prohibited content
                     temp_client._is_retry_client = True
                     
-                    # Propagate per-key delay so _apply_api_call_stagger / _get_send_interval
-                    # use it instead of the global SEND_INTERVAL_SECONDS env var.
-                    # A value of 0.0 means "use global", so we only set it when > 0.
-                    if _api_call_delay > 0:
-                        temp_client._per_key_api_delay = _api_call_delay
+                    # NOTE: Do NOT propagate _per_key_api_delay to temp_client here.
+                    # We already waited for the cooldown above, so _apply_api_call_stagger
+                    # inside _send_internal should use the default global interval, not
+                    # the per-key delay again (which would cause a double-wait).
                     
                     # CRITICAL: Disable retries for fallback keys - they should only try once
                     temp_client._max_retries = 0
@@ -7516,9 +7581,11 @@ class UnifiedClient:
                             print(f"✅ Fallback key {idx+1} succeeded! Got {len(content)} chars")
                             # Mark that a fallback key was used
                             self._used_fallback_key = True
-                            # Record the call time for per-key delay tracking
-                            with _fallback_key_lock:
-                                _fallback_key_last_used[_key_id] = time.time()
+                            # Release in-use claim and update last_used timestamp
+                            if _api_call_delay > 0:
+                                with _fallback_key_lock:
+                                    _fallback_key_last_used[_key_id] = time.time()
+                                    _fallback_key_in_use.discard(_key_id)
                             return content, finish_reason
                         else:
                             if finish_reason in ['content_filter', 'error', 'cancelled']:
@@ -7527,24 +7594,42 @@ class UnifiedClient:
                                 print(f"❌ Fallback key {idx+1} returned only {len(content)} chars - trying next key")
                             else:
                                 print(f"❌ Fallback key {idx+1} invalid response - trying next key")
+                            # Release in-use on failure
+                            if _api_call_delay > 0:
+                                with _fallback_key_lock:
+                                    _fallback_key_in_use.discard(_key_id)
                             continue
                     else:
                         print(f"❌ Fallback key {idx+1} unexpected result format - trying next key")
+                        # Release in-use on failure
+                        if _api_call_delay > 0:
+                            with _fallback_key_lock:
+                                _fallback_key_in_use.discard(_key_id)
                         continue
                         
                 except UnifiedClientError as ue:
                     # If cancelled, stop immediately and propagate the cancellation
                     if ue.error_type == "cancelled":
+                        # Release in-use before re-raising
+                        if _api_call_delay > 0:
+                            with _fallback_key_lock:
+                                _fallback_key_in_use.discard(_key_id)
                         raise ue
                     
                     # For client errors, log the message (no traceback — these are deterministic API rejections)
                     print(f"[FALLBACK DIRECT {idx+1}] ❌ UnifiedClientError: {ue}")
+                    if _api_call_delay > 0:
+                        with _fallback_key_lock:
+                            _fallback_key_in_use.discard(_key_id)
                     continue
 
                 except Exception as e:
                     print(f"[FALLBACK DIRECT {idx+1}] ❌ Exception: {e}")
                     import traceback
                     print(f"[FALLBACK DIRECT {idx+1}] Traceback:\n{traceback.format_exc()}")
+                    if _api_call_delay > 0:
+                        with _fallback_key_lock:
+                            _fallback_key_in_use.discard(_key_id)
                     continue
             
             print(f"[FALLBACK DIRECT] All fallback keys failed")
