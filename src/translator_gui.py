@@ -19021,12 +19021,14 @@ Important rules:
                 ("🔧", "groq/", "Groq", "Ultra-fast inference", "#241c0c", "#f5b820"),
                 ("☁️", "vertex/", "Google Vertex", "Enterprise Google Cloud AI", "#181e28", "#b0c0d8"),
                 ("🔑", "authgpt/", "AuthGPT", "ChatGPT via OAuth login", "#281418", "#e88080"),
+                ("🔒", "authcd/", "AuthCD", "Claude via CLI login", "#1e1428", "#d97706"),
                 ("🔐", "authgem/", "AuthGem", "Free quota via Code Assist", "#142840", "#4285f4"),
                 ("☁️", "authgem-vertex/", "AuthGem Vertex", "Vertex AI (GCP billing)", "#142840", "#34a853"),
                 ("🤖", "antigravity/", "Cloud Code", "Local proxy (localhost)", "#181830", "#a0a0f0"),
                 ("🟢", "nd/", "NVIDIA", "NVIDIA Integrate models", "#142014", "#60d060"),
                 ("🇨🇳", "za/", "Zhipu Intl.", "GLM international endpoint", "#1e2030", "#60c0e0"),
                 ("🌌", "nan/", "NanoGPT", "Generative & text models", "#1a1025", "#c084fc"),
+                ("⚙️", "sam/", "SambaNova", "SambaNova Cloud API", "#1a1e14", "#7cb342"),
             ]
             
             pfx_w = QWidget()
