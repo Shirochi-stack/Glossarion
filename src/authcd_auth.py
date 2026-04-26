@@ -525,6 +525,83 @@ def get_store(account_id: Optional[int] = None) -> AuthCDTokenStore:
 # Anthropic Messages API adapter
 # ===========================================================================
 
+def _convert_content_parts(content):
+    """Convert OpenAI-style content (string or list of parts) to Anthropic format.
+
+    Handles:
+      - Plain string → returned as-is.
+      - List with image_url parts → converted to Anthropic image blocks.
+      - List with only text parts → joined into a single string.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content)
+
+    anthropic_parts = []
+    has_images = False
+    for part in content:
+        if not isinstance(part, dict):
+            anthropic_parts.append({"type": "text", "text": str(part)})
+            continue
+
+        ptype = part.get("type", "")
+
+        if ptype == "text":
+            anthropic_parts.append({"type": "text", "text": part.get("text", "")})
+
+        elif ptype == "image_url":
+            # OpenAI format: {"type":"image_url","image_url":{"url":"data:image/png;base64,AAA..."}}
+            image_url = part.get("image_url", {})
+            url = image_url.get("url", "") if isinstance(image_url, dict) else str(image_url)
+
+            if url.startswith("data:") and "base64," in url:
+                # Parse data-URI: data:<media_type>;base64,<data>
+                header, _, b64_data = url.partition("base64,")
+                # header is e.g. "data:image/jpeg;"
+                media_type = header.replace("data:", "").rstrip(";").strip()
+                if not media_type:
+                    media_type = "image/png"
+                anthropic_parts.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": b64_data,
+                    },
+                })
+                has_images = True
+            elif url.startswith(("http://", "https://")):
+                # Remote URL — use Anthropic's url source type
+                anthropic_parts.append({
+                    "type": "image",
+                    "source": {
+                        "type": "url",
+                        "url": url,
+                    },
+                })
+                has_images = True
+            else:
+                # Unknown URL format — pass as text fallback
+                anthropic_parts.append({"type": "text", "text": f"[image: {url[:120]}]"})
+
+        elif ptype == "image":
+            # Already Anthropic-native — pass through
+            anthropic_parts.append(part)
+            has_images = True
+
+        else:
+            # Unknown part type — stringify
+            text = part.get("text", "") or str(part)
+            anthropic_parts.append({"type": "text", "text": text})
+
+    # If no images were found, collapse to a plain string for simpler payloads
+    if not has_images:
+        return "\n\n".join(p.get("text", "") for p in anthropic_parts if p.get("type") == "text")
+
+    return anthropic_parts
+
+
 def _convert_messages_to_anthropic(messages: List[Dict]) -> Tuple[str, List[Dict]]:
     """Convert OpenAI-style messages to Anthropic format.
     Returns (system_prompt, anthropic_messages).
@@ -542,9 +619,9 @@ def _convert_messages_to_anthropic(messages: List[Dict]) -> Tuple[str, List[Dict
             else:
                 system_prompt = content if isinstance(content, str) else str(content)
         elif role == "assistant":
-            anthropic_messages.append({"role": "assistant", "content": content})
+            anthropic_messages.append({"role": "assistant", "content": _convert_content_parts(content)})
         else:
-            anthropic_messages.append({"role": "user", "content": content})
+            anthropic_messages.append({"role": "user", "content": _convert_content_parts(content)})
 
     # Merge consecutive same-role messages
     merged = []
@@ -554,6 +631,13 @@ def _convert_messages_to_anthropic(messages: List[Dict]) -> Tuple[str, List[Dict
             cur = msg["content"]
             if isinstance(prev, str) and isinstance(cur, str):
                 merged[-1]["content"] = prev + "\n\n" + cur
+            elif isinstance(prev, list) or isinstance(cur, list):
+                # Normalize both sides to lists for proper merging
+                def _to_parts(c):
+                    if isinstance(c, list):
+                        return c
+                    return [{"type": "text", "text": str(c)}]
+                merged[-1]["content"] = _to_parts(prev) + _to_parts(cur)
             else:
                 merged[-1]["content"] = str(prev) + "\n\n" + str(cur)
         else:
