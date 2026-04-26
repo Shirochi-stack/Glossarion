@@ -4451,7 +4451,7 @@ Recent translations to summarize:
             self.authcd_login_btn.setEnabled(False)
 
     def _authcd_login_clicked(self):
-        """Handle Claude Login – embedded browser OAuth flow."""
+        """Handle Claude Login – uses Claude Code CLI credentials."""
         try:
             store = self._get_authcd_store_for_current_model()
         except ImportError:
@@ -4472,162 +4472,108 @@ Recent translations to summarize:
             )
             if reply == QMessageBox.Yes:
                 store.clear_tokens()
+                # Also clear the in-memory cache so fallback loader doesn't re-import
+                store._tokens = None
                 self._update_authcd_login_status()
                 self.append_log(f"\ud83d\udd13 Claude{acct_suffix}: Logged out")
             return
 
         # --- Strategy 1: Try loading existing Claude Code credentials ---
         from authcd_auth import _load_claude_code_credentials
-        creds = _load_claude_code_credentials()
-        if creds:
-            store.save_tokens(creds)
-            self._update_authcd_login_status()
-            self.append_log(f"\u2705 Claude{acct_suffix}: Loaded credentials from Claude Code")
-            return
-
-        # --- Strategy 2: Embedded browser OAuth flow ---
-        from authcd_auth import generate_pkce, build_auth_url, CLAUDE_TOKEN_URL, CLAUDE_REDIRECT_URI, CLAUDE_CLIENT_ID
-        import secrets as _secrets
-
-        code_verifier, code_challenge = generate_pkce()
-        state = _secrets.token_urlsafe(32)
-        auth_url = build_auth_url(code_challenge, state)
-
-        self.append_log(f"\ud83d\udd10 Claude{acct_suffix}: Opening login window\u2026")
-
-        try:
-            from PySide6.QtWebEngineWidgets import QWebEngineView
-            from PySide6.QtCore import QUrl as _QUrl
-        except ImportError:
-            QMessageBox.warning(
-                self, "WebEngine Required",
-                "PySide6-WebEngine is required for Claude login.\n"
-                "Install with: pip install PySide6-WebEngine"
-            )
-            return
-
-        try:
-            login_dlg = QDialog(self)
-            login_dlg.setWindowTitle("Claude Login")
-            login_dlg.resize(500, 700)
-            dlg_layout = QVBoxLayout(login_dlg)
-            dlg_layout.setContentsMargins(0, 0, 0, 0)
-
-            web_view = QWebEngineView(login_dlg)
-
-            # Custom page to handle Google OAuth popups (FedCM doesn't work in embedded views)
-            from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
-            _popup_views = []  # prevent GC
-
-            class _OAuthPage(QWebEnginePage):
-                def createWindow(self, window_type):
-                    # Create popup as a child of login_dlg so it stays on top of modal
-                    popup = QWebEngineView(login_dlg)
-                    popup.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
-                    popup.setWindowTitle("Google Sign-In")
-                    popup.resize(500, 600)
-                    popup_page = QWebEnginePage(profile, popup)
-                    popup.setPage(popup_page)
-                    _popup_views.append(popup)
-                    def _popup_url_changed(url):
-                        url_str = url.toString()
-                        if "/oauth/code/callback" in url_str:
-                            web_view.load(url)
-                            popup.close()
-                    popup.urlChanged.connect(_popup_url_changed)
-                    popup.show()
-                    popup.raise_()
-                    popup.activateWindow()
-                    return popup_page
-
-            profile = QWebEngineProfile("claude_oauth", login_dlg)
-            profile.settings().setAttribute(QWebEngineSettings.JavascriptEnabled, True)
-            profile.settings().setAttribute(QWebEngineSettings.JavascriptCanOpenWindows, True)
-            page = _OAuthPage(profile, web_view)
-            web_view.setPage(page)
-
-            dlg_layout.addWidget(web_view)
-
-            status_label = QLabel("Loading\u2026")
-            status_label.setContentsMargins(8, 2, 8, 2)
-            status_label.setMaximumHeight(22)
-            dlg_layout.addWidget(status_label)
-
-            _result = {}
-            _captured_code = {}
-
-            def _on_url_changed(url):
-                url_str = url.toString()
-                status_label.setText(url.host() or "Loading\u2026")
-                if "/oauth/code/callback" in url_str:
-                    from urllib.parse import urlparse, parse_qs
-                    parsed = urlparse(url_str)
-                    code_vals = parse_qs(parsed.query).get("code")
-                    if code_vals:
-                        _captured_code["value"] = code_vals[0]
-                        status_label.setText("Exchanging token\u2026")
-
-            def _on_load_finished(ok):
-                if not _captured_code.get("value"):
-                    return
-                auth_code = _captured_code.pop("value")
-                # Use document.title as communication channel (runJavaScript can't handle async returns)
-                js_code = """
-                fetch('%s', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                    body: new URLSearchParams({
-                        grant_type: 'authorization_code',
-                        client_id: '%s',
-                        code: '%s',
-                        redirect_uri: '%s',
-                        code_verifier: '%s'
-                    })
-                })
-                .then(r => r.text())
-                .then(t => { document.title = 'OAUTH_RESULT:' + t; })
-                .catch(e => { document.title = 'OAUTH_ERROR:' + e.toString(); });
-                """ % (CLAUDE_TOKEN_URL, CLAUDE_CLIENT_ID, auth_code, CLAUDE_REDIRECT_URI, code_verifier)
-                web_view.page().runJavaScript(js_code)
-
-            def _on_title_changed(title):
-                if not title.startswith("OAUTH_"):
-                    return
-                try:
-                    import json as _json
-                    if title.startswith("OAUTH_RESULT:"):
-                        raw = title[len("OAUTH_RESULT:"):]
-                        data = _json.loads(raw)
-                        if data.get("access_token"):
-                            data["expires_at"] = time.time() + data.get("expires_in", 3600)
-                            _result["tokens"] = data
-                            login_dlg.accept()
-                        elif data.get("error"):
-                            err = data["error"]
-                            msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
-                            status_label.setText(f"\u274c {msg}")
-                        else:
-                            status_label.setText(f"\u274c Unexpected: {raw[:100]}")
-                    elif title.startswith("OAUTH_ERROR:"):
-                        status_label.setText(f"\u274c {title[len('OAUTH_ERROR:'):]}")
-                except Exception as exc:
-                    status_label.setText(f"\u274c {exc}")
-
-            web_view.urlChanged.connect(_on_url_changed)
-            web_view.loadFinished.connect(_on_load_finished)
-            web_view.page().titleChanged.connect(_on_title_changed)
-            web_view.load(_QUrl(auth_url))
-
-            if login_dlg.exec() == QDialog.Accepted and _result.get("tokens"):
-                store.save_tokens(_result["tokens"])
+        if not getattr(store, '_cleared', False):
+            creds = _load_claude_code_credentials()
+            if creds:
+                store.save_tokens(creds)
                 self._update_authcd_login_status()
-                self.append_log(f"\u2705 Claude{acct_suffix}: Login successful")
-            else:
-                self.append_log(f"\u274c Claude{acct_suffix}: Login cancelled")
+                self.append_log(f"\u2705 Claude{acct_suffix}: Loaded credentials from Claude Code")
+                return
 
-        except Exception as exc:
-            logger.exception("Claude login dialog failed")
-            QMessageBox.critical(self, "Login Error", f"Failed to open login window:\n{exc}")
+        # --- Strategy 2: Run 'claude login' via CLI in a visible terminal ---
+        import shutil
+        claude_bin = shutil.which("claude")
+        if not claude_bin:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Claude Code Required")
+            dlg.setMinimumWidth(420)
+            lay = QVBoxLayout(dlg)
+            lay.addWidget(QLabel("Claude Code CLI is required for login.\nInstall it with:"))
+            cmd_edit = QLineEdit("npm install -g @anthropic-ai/claude-code")
+            cmd_edit.setReadOnly(True)
+            cmd_edit.selectAll()
+            lay.addWidget(cmd_edit)
+            lay.addWidget(QLabel("Then run 'claude login' in a terminal,\nand click this button again to import credentials."))
+            btn_row = QHBoxLayout()
+            copy_btn = QPushButton("Copy Command")
+            copy_btn.clicked.connect(lambda: (
+                QApplication.clipboard().setText(cmd_edit.text()),
+                copy_btn.setText("\u2705 Copied!"),
+            ))
+            ok_btn = QPushButton("OK")
+            ok_btn.clicked.connect(dlg.accept)
+            btn_row.addWidget(copy_btn)
+            btn_row.addWidget(ok_btn)
+            lay.addLayout(btn_row)
+            dlg.exec()
+            return
+
+        self.authcd_login_btn.setText("\u23f3 Logging in\u2026")
+        self.authcd_login_btn.setEnabled(False)
+        self.append_log(f"\ud83d\udd10 Claude{acct_suffix}: Running 'claude login' in terminal\u2026")
+
+        def _do_claude_login():
+            import subprocess, time as _time, os
+            try:
+                # Run 'claude login' in a VISIBLE console window
+                if os.name == 'nt':
+                    proc = subprocess.Popen(
+                        [claude_bin, "login"],
+                        creationflags=subprocess.CREATE_NEW_CONSOLE,
+                    )
+                else:
+                    proc = subprocess.Popen(
+                        [claude_bin, "login"],
+                    )
+                proc.wait(timeout=180)
+
+                # Poll for credentials file
+                cred_path = os.path.join(os.path.expanduser("~"), ".claude", ".credentials.json")
+                for _ in range(10):
+                    _time.sleep(1)
+                    if os.path.isfile(cred_path):
+                        break
+
+                creds = _load_claude_code_credentials()
+                if creds:
+                    store.save_tokens(creds)
+                    QMetaObject.invokeMethod(
+                        self, "_authcd_login_finished",
+                        Qt.QueuedConnection
+                    )
+                else:
+                    self._authcd_login_error = (
+                        "Claude login completed but no credentials found.\n"
+                        "Try running 'claude login' manually in a terminal."
+                    )
+                    QMetaObject.invokeMethod(
+                        self, "_authcd_login_failed",
+                        Qt.QueuedConnection
+                    )
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                self._authcd_login_error = "Login timed out (3 min). Try 'claude login' in a terminal."
+                QMetaObject.invokeMethod(
+                    self, "_authcd_login_failed",
+                    Qt.QueuedConnection
+                )
+            except Exception as exc:
+                self._authcd_login_error = str(exc)
+                QMetaObject.invokeMethod(
+                    self, "_authcd_login_failed",
+                    Qt.QueuedConnection
+                )
+
+        t = threading.Thread(target=_do_claude_login, daemon=True)
+        t.start()
 
 
     @Slot()

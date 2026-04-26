@@ -59,6 +59,10 @@ TOKEN_REFRESH_MARGIN_SECONDS = 300  # refresh when <5 min remaining
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
 
+# Claude Code identity headers – required for OAuth token acceptance
+_CLAUDE_CODE_USER_AGENT = "claude-code/2.1.119"
+_CLAUDE_CODE_BETA_FLAGS = "claude-code-20250219,oauth-2025-04-20"
+
 _DEFAULT_TOKEN_DIR = os.path.join(os.path.expanduser("~"), ".glossarion")
 _DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authcd_tokens.json")
 
@@ -251,6 +255,7 @@ class AuthCDTokenStore:
         self._account_id = account_id
         self._lock = threading.RLock()
         self._tokens: Optional[Dict] = None
+        self._cleared = False  # prevents fallback reload after explicit logout
         self._on_change_callbacks: List = []
         self._load_from_disk()
 
@@ -293,8 +298,8 @@ class AuthCDTokenStore:
             logger.warning("Failed to load authcd tokens: %s", exc)
             self._tokens = None
 
-        # Fallback: try Claude Code's own credentials
-        if self._account_id == 0 and self._tokens is None:
+        # Fallback: try Claude Code's own credentials (skip if user explicitly logged out)
+        if self._account_id == 0 and self._tokens is None and not self._cleared:
             cc_tokens = _load_claude_code_credentials()
             if cc_tokens:
                 logger.info("AuthCD: Using existing Claude Code credentials")
@@ -304,6 +309,7 @@ class AuthCDTokenStore:
         """Encrypt and save tokens to disk."""
         with self._lock:
             self._tokens = tokens
+            self._cleared = False
             try:
                 self._ensure_dir()
                 saved = False
@@ -332,6 +338,7 @@ class AuthCDTokenStore:
     def clear_tokens(self):
         with self._lock:
             self._tokens = None
+            self._cleared = True  # prevent fallback from re-importing
             try:
                 if os.path.isfile(self._token_file):
                     os.remove(self._token_file)
@@ -657,6 +664,10 @@ def send_chat_completion(
         "anthropic-version": ANTHROPIC_API_VERSION,
         "Content-Type": "application/json",
         "Accept-Encoding": "identity",
+        # Claude Code identity headers – required for OAuth token acceptance
+        "User-Agent": _CLAUDE_CODE_USER_AGENT,
+        "anthropic-beta": _CLAUDE_CODE_BETA_FLAGS,
+        "x-app": "cli",
     }
 
     _log = log_fn or print
