@@ -20011,6 +20011,14 @@ class UnifiedClient:
         enable_video_output = os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
         enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
 
+        # Auto-detect video/image gen models by name so routing is correct
+        # even when the env var hasn't been pushed yet
+        if self._is_video_gen_model(effective_model):
+            enable_video_output = True
+            enable_image_output = False  # mutually exclusive
+        elif self._is_image_gen_model(effective_model):
+            enable_image_output = True
+
         if enable_video_output:
             return self._send_nanogpt_video(
                 messages, effective_model, base_url, api_key, response_name
