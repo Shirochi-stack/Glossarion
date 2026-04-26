@@ -1100,7 +1100,6 @@ excludes = [
     # It is safely optional (PLAYWRIGHT_AVAILABLE flag handles absence).
     # ============================================================================
     'playwright', 'playwright.*',
-    'fastavro', 'fastavro.*',
 ]
 
 # ============================================================================
