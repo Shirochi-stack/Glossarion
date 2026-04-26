@@ -2112,7 +2112,9 @@ Text to analyze:
         
         # ── MTool Bridge Watcher ──────────────────────────────────────
         # Polls for bridge_config.json from MTool's Glossarion Bridge
-        self._mtool_bridge_last_ts = 0
+        # Use current epoch ms as baseline — ignore configs from before Glossarion started
+        import time as _time_mod
+        self._mtool_bridge_last_ts = int(_time_mod.time() * 1000)
         self._mtool_bridge_timer = QTimer(self)
         self._mtool_bridge_timer.timeout.connect(self._check_mtool_bridge)
         self._mtool_bridge_timer.start(3000)  # Check every 3 seconds
