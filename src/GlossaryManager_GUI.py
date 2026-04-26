@@ -838,6 +838,8 @@ class GlossaryManagerMixin:
         # Type filtering section with custom types
         type_filter_frame = QGroupBox("Entry Type Configuration")
         type_filter_layout = QVBoxLayout(type_filter_frame)
+        type_filter_layout.setContentsMargins(8, 4, 8, 4)
+        type_filter_layout.setSpacing(2)
         manual_layout.addWidget(type_filter_frame)
         
         # Always reload custom entry types from config to ensure latest saved state
@@ -854,18 +856,20 @@ class GlossaryManagerMixin:
         
         # Main container with grid for better control
         type_main_grid = QGridLayout()
+        type_main_grid.setVerticalSpacing(2)
         type_filter_layout.addLayout(type_main_grid)
         
         # Left side - type list with checkboxes
         type_list_widget = QWidget()
         type_list_layout = QVBoxLayout(type_list_widget)
         type_list_layout.setContentsMargins(0, 0, 15, 0)
+        type_list_layout.setSpacing(2)
         type_main_grid.addWidget(type_list_widget, 0, 0)
         type_main_grid.setColumnStretch(0, 3)
         type_main_grid.setColumnStretch(1, 2)
         
         label = QLabel("Active Entry Types:")
-        # label.setStyleSheet("font-weight: bold;")
+        label.setContentsMargins(0, 0, 0, 0)
         type_list_layout.addWidget(label)
         
         # Scrollable frame for type checkboxes
@@ -955,9 +959,9 @@ class GlossaryManagerMixin:
         type_control_layout.addWidget(label)
         
         # Entry for new type field
-        QLabel("Type Field:").setParent(type_control_widget)
         type_control_layout.addWidget(QLabel("Type Field:"))
         new_type_entry = QLineEdit()
+        new_type_entry.setMinimumWidth(120)
         type_control_layout.addWidget(new_type_entry)
         
         # Checkbox for gender field
@@ -984,6 +988,12 @@ class GlossaryManagerMixin:
             new_type_entry.clear()
             has_gender_checkbox.setChecked(False)
             
+            # Preserve current checkbox states into custom_entry_types
+            # before rebuilding, so toggled-off types stay disabled.
+            for t_name, cb in self.type_enabled_checkboxes.items():
+                if t_name in self.custom_entry_types:
+                    self.custom_entry_types[t_name]['enabled'] = cb.isChecked()
+
             # Update display
             update_type_checkboxes()
             self.append_log(f"✅ Added custom type: {type_name}")
@@ -996,6 +1006,10 @@ class GlossaryManagerMixin:
             reply = QMessageBox.question(parent, "Confirm Removal", f"Remove type '{type_name}'?",
                                          QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
+                # Preserve current checkbox states before rebuilding
+                for t_name, cb in self.type_enabled_checkboxes.items():
+                    if t_name in self.custom_entry_types:
+                        self.custom_entry_types[t_name]['enabled'] = cb.isChecked()
                 del self.custom_entry_types[type_name]
                 if type_name in self.type_enabled_checkboxes:
                     del self.type_enabled_checkboxes[type_name]
