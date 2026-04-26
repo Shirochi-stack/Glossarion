@@ -1412,7 +1412,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 128000
         self.proc = self.glossary_proc = None
-        __version__ = "8.5.9"
+        __version__ = "8.6.0"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1487,7 +1487,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.5.9')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.6.0')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -3611,7 +3611,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v8.5.9 - Ready to use!")
+        self.append_log("🚀 Glossarion v8.6.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -4451,7 +4451,7 @@ Recent translations to summarize:
             self.authcd_login_btn.setEnabled(False)
 
     def _authcd_login_clicked(self):
-        """Handle Claude Login button click – run OAuth flow in background thread."""
+        """Handle Claude Login – uses Claude Code CLI credentials."""
         try:
             store = self._get_authcd_store_for_current_model()
         except ImportError:
@@ -4476,17 +4476,82 @@ Recent translations to summarize:
                 self.append_log(f"\ud83d\udd13 Claude{acct_suffix}: Logged out")
             return
 
+        # --- Strategy 1: Try loading existing Claude Code credentials ---
+        from authcd_auth import _load_claude_code_credentials
+        creds = _load_claude_code_credentials()
+        if creds:
+            store.save_tokens(creds)
+            self._update_authcd_login_status()
+            self.append_log(f"\u2705 Claude{acct_suffix}: Loaded credentials from Claude Code")
+            return
+
+        # --- Strategy 2: Run 'claude login' via subprocess ---
+        import shutil
+        claude_bin = shutil.which("claude")
+        if not claude_bin:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Claude Code Required")
+            dlg.setMinimumWidth(420)
+            lay = QVBoxLayout(dlg)
+            lay.addWidget(QLabel("Claude Code CLI is required for login.\nInstall it with:"))
+            cmd_edit = QLineEdit("npm install -g @anthropic-ai/claude-code")
+            cmd_edit.setReadOnly(True)
+            cmd_edit.selectAll()
+            lay.addWidget(cmd_edit)
+            lay.addWidget(QLabel("Then run 'claude login' in a terminal,\nand click this button again to import credentials."))
+            btn_row = QHBoxLayout()
+            copy_btn = QPushButton("Copy Command")
+            copy_btn.clicked.connect(lambda: (
+                QApplication.clipboard().setText(cmd_edit.text()),
+                copy_btn.setText("\u2705 Copied!"),
+            ))
+            ok_btn = QPushButton("OK")
+            ok_btn.clicked.connect(dlg.accept)
+            btn_row.addWidget(copy_btn)
+            btn_row.addWidget(ok_btn)
+            lay.addLayout(btn_row)
+            dlg.exec()
+            return
+
         self.authcd_login_btn.setText("\u23f3 Logging in\u2026")
         self.authcd_login_btn.setEnabled(False)
-        self.append_log(f"\ud83d\udd10 Claude{acct_suffix}: Opening browser for login\u2026")
+        self.append_log(f"\ud83d\udd10 Claude{acct_suffix}: Running 'claude login'\u2026")
 
-        def _do_login():
+        def _do_claude_login():
+            import subprocess, time as _time
             try:
-                from authcd_auth import run_oauth_flow
-                tokens = run_oauth_flow()
-                store.save_tokens(tokens)
+                # Run 'claude login' which handles its own OAuth flow
+                proc = subprocess.Popen(
+                    [claude_bin, "login"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                proc.wait(timeout=120)
+
+                # Wait briefly for credentials file to be written
+                _time.sleep(1)
+
+                creds = _load_claude_code_credentials()
+                if creds:
+                    store.save_tokens(creds)
+                    QMetaObject.invokeMethod(
+                        self, "_authcd_login_finished",
+                        Qt.QueuedConnection
+                    )
+                else:
+                    self._authcd_login_error = (
+                        "Claude login completed but no credentials found.\n"
+                        "Try running 'claude login' manually in a terminal."
+                    )
+                    QMetaObject.invokeMethod(
+                        self, "_authcd_login_failed",
+                        Qt.QueuedConnection
+                    )
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                self._authcd_login_error = "Login timed out (2 min). Try 'claude login' in a terminal."
                 QMetaObject.invokeMethod(
-                    self, "_authcd_login_finished",
+                    self, "_authcd_login_failed",
                     Qt.QueuedConnection
                 )
             except Exception as exc:
@@ -4496,7 +4561,7 @@ Recent translations to summarize:
                     Qt.QueuedConnection
                 )
 
-        t = threading.Thread(target=_do_login, daemon=True)
+        t = threading.Thread(target=_do_claude_login, daemon=True)
         t.start()
 
     @Slot()
@@ -22049,7 +22114,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v8.5.9...")
+    print("🚀 Starting Glossarion v8.6.0...")
     
     # Initialize splash screen
     splash_manager = None

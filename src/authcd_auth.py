@@ -50,10 +50,9 @@ def is_cancelled() -> bool:
 # ===========================================================================
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 CLAUDE_AUTH_URL = "https://claude.ai/oauth/authorize"
-CLAUDE_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
-CALLBACK_HOST = "localhost"
-CALLBACK_PORT = 54545
-CALLBACK_PATH = "/callback"
+CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+# Anthropic's registered redirect_uri – localhost is NOT supported by this client
+CLAUDE_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
 SCOPES = "user:profile user:inference org:create_api_key"
 TOKEN_REFRESH_MARGIN_SECONDS = 300  # refresh when <5 min remaining
 
@@ -80,12 +79,12 @@ def generate_pkce() -> Tuple[str, str]:
     return code_verifier, code_challenge
 
 
-def build_auth_url(code_challenge: str, state: str, redirect_uri: str) -> str:
-    """Build the full authorization URL."""
+def build_auth_url(code_challenge: str, state: str) -> str:
+    """Build the full authorization URL using the official redirect_uri."""
     params = {
         "client_id": CLAUDE_CLIENT_ID,
         "response_type": "code",
-        "redirect_uri": redirect_uri,
+        "redirect_uri": CLAUDE_REDIRECT_URI,
         "scope": SCOPES,
         "state": state,
         "code_challenge": code_challenge,
@@ -98,17 +97,26 @@ def build_auth_url(code_challenge: str, state: str, redirect_uri: str) -> str:
 # Token exchange / refresh
 # ===========================================================================
 
-def exchange_code_for_tokens(auth_code: str, code_verifier: str, redirect_uri: str) -> Dict:
+def exchange_code_for_tokens(auth_code: str, code_verifier: str) -> Dict:
     """Exchange authorization code for access + refresh tokens."""
     payload = {
         "grant_type": "authorization_code",
         "client_id": CLAUDE_CLIENT_ID,
         "code": auth_code,
-        "redirect_uri": redirect_uri,
+        "redirect_uri": CLAUDE_REDIRECT_URI,
         "code_verifier": code_verifier,
     }
+    logger.info("AuthCD token exchange")
     resp = requests.post(CLAUDE_TOKEN_URL, json=payload, timeout=30)
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        try:
+            err_body = resp.json()
+        except Exception:
+            err_body = resp.text
+        logger.error("AuthCD token exchange failed: %s %s", resp.status_code, err_body)
+        raise RuntimeError(
+            f"Token exchange failed ({resp.status_code}): {err_body}"
+        )
     data = resp.json()
     data["expires_at"] = time.time() + data.get("expires_in", 3600)
     return data
@@ -129,96 +137,63 @@ def refresh_access_token(refresh_token: str) -> Dict:
 
 
 # ===========================================================================
-# Local callback server
+# OAuth flow – split API for GUI integration
 # ===========================================================================
 
-class _OAuthCallbackHandler(BaseHTTPRequestHandler):
-    """HTTP request handler that captures the OAuth callback."""
+def start_oauth_flow() -> Dict:
+    """Start the OAuth flow: generate PKCE, build URL, open browser.
 
-    def log_message(self, format, *args):
-        pass  # Suppress default stderr logging
-
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        if parsed.path == CALLBACK_PATH or parsed.path == "/oauth/callback":
-            qs = parse_qs(parsed.query)
-            self.server._auth_code = qs.get("code", [None])[0]
-            self.server._returned_state = qs.get("state", [None])[0]
-            self.server._error = qs.get("error", [None])[0]
-            self.send_response(302)
-            self.send_header("Location", f"http://{CALLBACK_HOST}:{self.server.server_port}/success")
-            self.end_headers()
-        elif parsed.path == "/success":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            html = (
-                "<html><body style='font-family:sans-serif;text-align:center;padding-top:60px;"
-                "background:#1a1a2e;color:#e0e0e0'>"
-                "<h1 style='color:#d97706'>&#10004; Claude Authenticated!</h1>"
-                "<p>You can close this tab and return to Glossarion.</p>"
-                "</body></html>"
-            )
-            self.wfile.write(html.encode("utf-8"))
-            threading.Thread(target=self.server.shutdown, daemon=True).start()
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-
-def _find_available_port() -> int:
-    """Return the callback port for OAuth."""
-    import socket
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((CALLBACK_HOST, CALLBACK_PORT))
-            return CALLBACK_PORT
-    except OSError:
-        # If default port is busy, use a random one
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((CALLBACK_HOST, 0))
-            return s.getsockname()[1]
-
-
-# ===========================================================================
-# OAuth flow orchestrator
-# ===========================================================================
-
-def run_oauth_flow(timeout: int = 300) -> Dict:
-    """Run the full OAuth PKCE login flow."""
-    port = _find_available_port()
-    redirect_uri = f"http://{CALLBACK_HOST}:{port}{CALLBACK_PATH}"
+    Returns a dict with {auth_url, code_verifier, state} needed
+    to complete the flow after the user copies the auth code from
+    Anthropic's callback page.
+    """
     code_verifier, code_challenge = generate_pkce()
     state = secrets.token_urlsafe(32)
-
-    auth_url = build_auth_url(code_challenge, state, redirect_uri)
-
-    server = HTTPServer((CALLBACK_HOST, port), _OAuthCallbackHandler)
-    server._auth_code = None
-    server._returned_state = None
-    server._error = None
-    server.timeout = timeout
+    auth_url = build_auth_url(code_challenge, state)
 
     print(f"🔐 Opening browser for Claude login…")
     print(f"   If the browser doesn't open, visit:\n   {auth_url}")
+    print(f"   [DEBUG] code_verifier={code_verifier}")  # TEMP – remove after debugging
     webbrowser.open(auth_url)
 
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
-    server_thread.join(timeout=timeout)
-    server.shutdown()
+    return {
+        "auth_url": auth_url,
+        "code_verifier": code_verifier,
+        "state": state,
+    }
 
-    if server._error:
-        raise RuntimeError(f"OAuth error: {server._error}")
-    if not server._auth_code:
-        raise RuntimeError("OAuth login timed out – no callback received.")
-    if server._returned_state != state:
-        raise RuntimeError("OAuth state mismatch – possible CSRF attack.")
 
+def complete_oauth_exchange(auth_code: str, code_verifier: str) -> Dict:
+    """Complete the OAuth flow by exchanging the code for tokens.
+
+    Args:
+        auth_code: The authorization code copied from Anthropic's callback page.
+        code_verifier: The PKCE code_verifier from start_oauth_flow().
+
+    Returns:
+        Token dict with access_token, refresh_token, expires_at, etc.
+    """
     print("🔑 Exchanging authorization code for tokens…")
-    tokens = exchange_code_for_tokens(server._auth_code, code_verifier, redirect_uri)
+    tokens = exchange_code_for_tokens(auth_code, code_verifier)
     print("✅ Claude OAuth authentication successful!")
     return tokens
+
+
+def run_oauth_flow(timeout: int = 300) -> Dict:
+    """Run the full OAuth PKCE login flow (CLI mode).
+
+    For GUI usage, prefer start_oauth_flow() + complete_oauth_exchange().
+    This function opens a browser and prompts for the code on stdin.
+    """
+    flow = start_oauth_flow()
+
+    print("\n   After logging in, Anthropic will show an Authentication Code.")
+    print("   Copy it and paste it here:")
+    auth_code = input("   Auth code: ").strip()
+    if not auth_code:
+        raise RuntimeError("No auth code provided.")
+
+    return complete_oauth_exchange(auth_code, flow["code_verifier"])
 
 
 # ===========================================================================
