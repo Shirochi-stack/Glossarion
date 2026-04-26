@@ -20077,11 +20077,19 @@ class UnifiedClient:
             )
 
     def _send_nanogpt_image(self, messages, model, base_url, api_key, response_name) -> UnifiedResponse:
-        """POST /api/v1/images/generations on nano-gpt.com."""
+        """POST /api/v1/images/generations on nano-gpt.com.
+
+        When the messages contain base64 image parts (from the vision /
+        image-translation pipeline), those are forwarded as ``imageDataUrl``
+        or ``imageDataUrls`` so NanoGPT can perform image *editing* rather
+        than pure generation.
+        """
         import requests as _req
 
-        # Extract the text prompt from messages (last user message wins)
+        # ── Extract text prompt AND any embedded images from messages ──
         prompt = ""
+        image_data_urls: list[str] = []
+
         for msg in reversed(messages):
             if msg.get("role") == "user":
                 content = msg.get("content", "")
@@ -20089,10 +20097,30 @@ class UnifiedClient:
                     prompt = content
                 elif isinstance(content, list):
                     for part in content:
-                        if isinstance(part, dict) and part.get("type") == "text":
+                        if not isinstance(part, dict):
+                            continue
+                        ptype = part.get("type", "")
+                        if ptype == "text" and not prompt:
                             prompt = part.get("text", "")
-                            break
+                        elif ptype == "image_url":
+                            # Extract the data-URL / regular URL
+                            url_obj = part.get("image_url", {})
+                            if isinstance(url_obj, dict):
+                                img_url = url_obj.get("url", "")
+                            else:
+                                img_url = str(url_obj)
+                            if img_url:
+                                image_data_urls.append(img_url)
+                # Only use the last user message
                 break
+
+        # Also check system prompt as fallback if no user text was found
+        if not prompt:
+            for msg in messages:
+                if msg.get("role") == "system":
+                    prompt = msg.get("content", "") or ""
+                    if prompt:
+                        break
 
         if not prompt:
             prompt = "Generate an image"
@@ -20109,6 +20137,18 @@ class UnifiedClient:
             "size": image_size,
             "response_format": "url",
         }
+
+        # ── Attach source image(s) for edits ──
+        if image_data_urls:
+            if len(image_data_urls) == 1:
+                payload["imageDataUrl"] = image_data_urls[0]
+                if not self._is_stop_requested():
+                    _preview = image_data_urls[0][:60]
+                    print(f"🖼️ [NanoGPT] Attaching input image for edit ({_preview}…)")
+            else:
+                payload["imageDataUrls"] = image_data_urls
+                if not self._is_stop_requested():
+                    print(f"🖼️ [NanoGPT] Attaching {len(image_data_urls)} input images for edit")
 
         max_retries = self._get_max_retries()
         for attempt in range(max_retries):
