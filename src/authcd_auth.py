@@ -724,7 +724,7 @@ def send_chat_completion(
 
     log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
     if os.getenv("BATCH_TRANSLATION", "0") == "1":
-        log_stream = os.getenv("ALLOW_AUTHCD_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
+        log_stream = os.getenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
 
     t_start = time.time()
     state = _new_stream_state()

@@ -5325,6 +5325,18 @@ Recent translations to summarize:
             <b>ℹ️ Tip:</b> Click the <b>🔐 ChatGPT Login</b> button next to the model dropdown to authenticate.
         </p>
 
+        <h4>Claude Subscription (authcd/)</h4>
+        <p>Use your Claude Pro/Max subscription directly — no API key needed</p>
+        <ul>
+            <li><b>authcd/claude-sonnet-4-6</b> - Claude Sonnet 4.6 via subscription</li>
+            <li><b>authcd/claude-haiku-4-5-20251001</b> - Claude Haiku 4.5</li>
+            <li><b>authcd/claude-4-opus</b> - Claude 4 Opus (Max subscribers)</li>
+        </ul>
+        <p style="color: #d97706; padding: 4px; font-size: 11px;">
+            <b>ℹ️ Tip:</b> Click the <b>🔐 Claude Login</b> button to authenticate.
+            Requires Claude Code CLI (<code>npm install -g @anthropic-ai/claude-code</code>).
+        </p>
+
         <h4>Gemini Subscription (authgem/)</h4>
         <p>Use Gemini via Code Assist proxy — free daily quota with Google account</p>
         <ul>
