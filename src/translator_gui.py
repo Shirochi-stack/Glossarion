@@ -8526,18 +8526,23 @@ Recent translations to summarize:
         except Exception:
             pass
 
-        if in_flight > 0:
+        # Count waiting_cooldown entries separately for display
+        _waiting_count = sum(1 for e in entries if isinstance(e, dict) and e.get("status") == "waiting_cooldown")
+        _total_active = in_flight + _waiting_count
+
+        if _total_active > 0:
             # Keep determinate mode so text is not overridden by busy animation
-            max_val = max(1, in_flight)
+            max_val = max(1, _total_active)
             if self.api_watchdog_bar.maximum() != max_val or self.api_watchdog_bar.minimum() != 0:
                 self.api_watchdog_bar.setRange(0, max_val)
-            self.api_watchdog_bar.setValue(min(in_flight, max_val))
+            self.api_watchdog_bar.setValue(min(in_flight, max_val))  # fill only the in-flight portion
             age = 0
             if last_change > 0:
                 age = max(0, int(time.time() - last_change))
 
             # Build compact active-call labels (up to 5) for the progress bar text itself
             in_flight_entries = [e for e in entries if e.get("status") in (None, "in_flight")]
+            waiting_entries = [e for e in entries if e.get("status") == "waiting_cooldown"]
 
             def _safe_int(v, default=None):
                 try:
@@ -8791,6 +8796,8 @@ Recent translations to summarize:
                 active_bits = []
 
             label = f"API calls: {in_flight}"
+            if waiting_entries:
+                label += f" (+{len(waiting_entries)} queued)"
             if age > 0:
                 label += f" • last change {age}s ago"
             if active_bits:
@@ -8856,6 +8863,20 @@ Recent translations to summarize:
                     tooltip += "\nActive calls:"
                     for item in labels:
                         tooltip += f"\n• {item}"
+            # Show waiting/cooldown entries separately
+            if waiting_entries:
+                tooltip += f"\nWaiting for cooldown ({len(waiting_entries)}):"
+                for entry in waiting_entries:
+                    try:
+                        w_label = entry.get("label") or f"Chapter {entry.get('chapter', '?')}"
+                        w_model = entry.get("model", "")
+                        w_reason = entry.get("waiting_reason", "")
+                        w_detail = f" [{w_model}]" if w_model else ""
+                        if w_reason:
+                            w_detail += f" ({w_reason})"
+                        tooltip += f"\n⏳ {w_label}{w_detail}"
+                    except Exception:
+                        continue
             self.api_watchdog_bar.setToolTip(tooltip)
         else:
             # Determinate idle state
