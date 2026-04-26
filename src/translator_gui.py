@@ -12109,6 +12109,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # auto-force ENABLE_IMAGE_OUTPUT_MODE=1 regardless of the toggle state.
             try:
                 os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = self._get_allowed_image_output_mode()
+                os.environ['ENABLE_VIDEO_OUTPUT_MODE'] = self._get_allowed_video_output_mode()
                 os.environ['IMAGE_OUTPUT_RESOLUTION'] = str(getattr(self, 'image_output_resolution_var', '1K')).upper()
                 # Tell the video API where the source file is so it can probe metadata
                 _video_exts = {'.mp4', '.mov', '.avi', '.mkv', '.webm'}

@@ -2244,9 +2244,10 @@ class UnifiedClient:
           - Any name containing "video" (e.g. veo2-video, wan-video)
           - seedance  (ByteDance video model)
           - kling     (Kuaishou video model)
+          - pixverse  (PixVerse video model)
         """
         m = model_name.lower()
-        _VIDEO_ALIASES = ('seedance', 'kling')
+        _VIDEO_ALIASES = ('seedance', 'kling', 'pixverse')
         return 'video' in m or any(alias in m for alias in _VIDEO_ALIASES)
 
     # Class-level cancellation flag for all instances
@@ -6380,6 +6381,12 @@ class UnifiedClient:
                     extracted_content_str = str(extracted_content).strip()
                     is_image_mode = os.environ.get('ENABLE_IMAGE_OUTPUT_MODE') == '1'
                     is_video_mode = os.environ.get('ENABLE_VIDEO_OUTPUT_MODE') == '1'
+                    # Fallback: auto-detect from model name when env vars aren't set
+                    effective_model = getattr(self, 'model', '') or ''
+                    if not is_video_mode and self._is_video_gen_model(effective_model):
+                        is_video_mode = True
+                    if not is_image_mode and not is_video_mode and self._is_image_gen_model(effective_model):
+                        is_image_mode = True
                     
                     if is_image_mode or is_video_mode:
                         is_url = extracted_content_str.startswith('http') and (' ' not in extracted_content_str)
@@ -9375,6 +9382,10 @@ class UnifiedClient:
             for marker in image_model_markers:
                 if marker in model_lower:
                     return True
+            # Also use the canonical alias-aware helpers
+            _model_full = getattr(self, "model", "") or ""
+            if self._is_image_gen_model(_model_full) or self._is_video_gen_model(_model_full):
+                return True
         except Exception:
             pass
         try:
@@ -16908,6 +16919,14 @@ class UnifiedClient:
                         enable_image_output = False  # mutually exclusive
                         if not self._is_stop_requested():
                             print(f"\ud83c\udfac Video output mode auto-enabled for {effective_model}")
+                        # NanoGPT video models require a completely different endpoint;
+                        # bail out of the SDK chat path and redirect immediately.
+                        if provider == 'nanogpt':
+                            base_url_root = (os.getenv("NANOGPT_API_URL", "https://nano-gpt.com")).rstrip("/")
+                            return self._send_nanogpt_video(
+                                messages, effective_model, base_url_root,
+                                self.api_key or "", response_name
+                            )
                     
                     # Add image output config if enabled (for compatible models)
                     if enable_image_output:
