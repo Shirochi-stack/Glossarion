@@ -875,10 +875,6 @@ class GlossaryManagerMixin:
         # Scrollable frame for type checkboxes
         type_scroll_area = QScrollArea()
         type_scroll_area.setWidgetResizable(True)
-        # Use screen ratio: ~16% of screen height
-        scroll_height = int(self._screen.height() * 0.16)
-        type_scroll_area.setMinimumHeight(scroll_height)
-        type_scroll_area.setMaximumHeight(scroll_height)
         type_list_layout.addWidget(type_scroll_area)
         
         self.type_checkbox_widget = QWidget()
