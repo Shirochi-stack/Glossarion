@@ -53,7 +53,7 @@ CLAUDE_AUTH_URL = "https://claude.ai/oauth/authorize"
 CLAUDE_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 CALLBACK_HOST = "localhost"
 CALLBACK_PORT = 54545
-CALLBACK_PATH = "/oauth/callback"
+CALLBACK_PATH = "/callback"
 SCOPES = "user:profile user:inference org:create_api_key"
 TOKEN_REFRESH_MARGIN_SECONDS = 300  # refresh when <5 min remaining
 
@@ -140,7 +140,7 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        if parsed.path == CALLBACK_PATH:
+        if parsed.path == CALLBACK_PATH or parsed.path == "/oauth/callback":
             qs = parse_qs(parsed.query)
             self.server._auth_code = qs.get("code", [None])[0]
             self.server._returned_state = qs.get("state", [None])[0]

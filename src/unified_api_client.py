@@ -16642,28 +16642,7 @@ class UnifiedClient:
                                     if effort != 'none':
                                         extra_body["reasoning"] = {"effort": effort}
 
-                                # Log once per thread/model
-                                if _is_thinking_model and not enable_gpt:
-                                    try:
-                                        tls = self._get_thread_local_client()
-                                        if not hasattr(tls, '_nanogpt_thinking_auto_logged'):
-                                            tls._nanogpt_thinking_auto_logged = set()
-                                        if effective_model not in tls._nanogpt_thinking_auto_logged:
-                                            tls._nanogpt_thinking_auto_logged.add(effective_model)
-                                            print(f"🧠 [nanogpt] Auto-enabled reasoning for thinking model: {effective_model}")
-                                    except Exception:
-                                        pass
-                                elif enable_gpt:
-                                    try:
-                                        tls = self._get_thread_local_client()
-                                        if not hasattr(tls, '_nanogpt_thinking_logged'):
-                                            tls._nanogpt_thinking_logged = set()
-                                        if effective_model not in tls._nanogpt_thinking_logged:
-                                            tls._nanogpt_thinking_logged.add(effective_model)
-                                            _think_desc = f"budget_tokens={budget}" if budget >= 1024 else f"effort={extra_body.get('reasoning_effort', 'medium')}"
-                                            print(f"🧠 [nanogpt] Thinking enabled for {effective_model}: {_think_desc}")
-                                    except Exception:
-                                        pass
+
                         except Exception:
                             pass
 
@@ -19843,6 +19822,24 @@ class UnifiedClient:
                 messages, effective_model, base_url, api_key, response_name
             )
         else:
+            # Log thinking configuration before the API call starts
+            try:
+                enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
+                _is_thinking_model = ':thinking' in (effective_model or '').lower() or '-thinking' in (effective_model or '').lower()
+                if enable_gpt or _is_thinking_model:
+                    tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
+                    budget = int(tokens_str) if tokens_str.isdigit() and int(tokens_str) > 0 else 0
+                    if budget >= 1024:
+                        _think_desc = f"budget_tokens={budget}"
+                    else:
+                        effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
+                        if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
+                            effort = 'medium'
+                        _think_desc = f"effort={effort}"
+                    src = "auto-detected" if (_is_thinking_model and not enable_gpt) else "enabled"
+                    print(f"🧠 [nanogpt] Thinking {src} for {effective_model}: {_think_desc}")
+            except Exception:
+                pass
             # Use the OpenAI-compatible chat completions path
             return self._send_openai_compatible(
                 messages=messages,
