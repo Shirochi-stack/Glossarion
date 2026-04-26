@@ -4522,6 +4522,15 @@ class UnifiedClient:
         batch_mode = os.getenv("BATCH_TRANSLATION", "0") == "1"
         watchdog_started = False
         watchdog_context = context or ('image_translation' if image_data else 'translation')
+        # Initialize override flags BEFORE try block so the finally clause
+        # can always reference them (even if an exception fires early).
+        _glossary_overridden = False
+        _qa_scan_overridden = False
+        _original_api_key = None
+        _original_model = None
+        _original_multi_key_mode = None
+        _had_instance_pool = False
+        _original_instance_pool = None
         if not batch_mode:
             self._sequential_send_lock.acquire()
         try:
@@ -4585,13 +4594,6 @@ class UnifiedClient:
             # Multi-key retry wrapper
             # CONTEXT-SPECIFIC KEY OVERRIDES: When context matches a dedicated pool,
             # use that pool for full multi-key rotation (mirrors main multi-key mode).
-            _glossary_overridden = False
-            _qa_scan_overridden = False
-            _original_api_key = None
-            _original_model = None
-            _original_multi_key_mode = None
-            _had_instance_pool = False
-            _original_instance_pool = None
             
             # QA SCAN KEY OVERRIDE: When context is 'Truncation' or 'qa_truncation'
             _is_qa_scan_context = context in ('Truncation', 'qa_truncation') or (not context and 'Truncation' in threading.current_thread().name)
@@ -13098,7 +13100,7 @@ class UnifiedClient:
                 if stopped:
                     self._cancelled = True
                 return stopped
-            except ImportError:
+            except Exception:
                 pass
 
         return False
