@@ -422,7 +422,9 @@ def setup_other_settings_methods(gui_instance):
         'configure_image_compression',
         # Helper methods for styling
         '_create_styled_checkbox', '_disable_combobox_mousewheel', '_disable_spinbox_mousewheel',
-        '_add_combobox_arrow'
+        '_add_combobox_arrow',
+        # Output mode
+        '_set_output_mode', '_enforce_image_output_dependency'
     ]
     
     # Bind each method to the GUI instance
