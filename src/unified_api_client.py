@@ -20450,9 +20450,11 @@ class UnifiedClient:
         # ── Submit the job ──────────────────────────────────────────────────
         if not self._is_stop_requested():
             print(f"🎬 [NanoGPT] Submitting video job (model={model}, duration={duration})")
-            # Log payload without the massive base64 videoDataUrl
-            log_payload = {k: (f"{v[:60]}…({len(v)} chars)" if k == "videoDataUrl" and isinstance(v, str) and len(v) > 60 else v) for k, v in payload.items()}
-            print(f"   📤 Payload: {log_payload}")
+            # Log compact payload summary (avoid dumping huge prompt text)
+            _prompt_preview = payload.get('prompt', '')
+            if len(_prompt_preview) > 120:
+                _prompt_preview = _prompt_preview[:120] + f'…({len(payload["prompt"]):,} chars)'
+            print(f"   📤 model={model} | duration={payload.get('duration','')} | resolution={payload.get('resolution','')} | prompt={_prompt_preview!r}")
         try:
             resp = _req.post(gen_url, json=payload, headers=headers, timeout=60)
             if resp.status_code not in (200, 201, 202):
@@ -20547,7 +20549,8 @@ class UnifiedClient:
                         pass
                     # Dump full response for debugging
                     print(f"   ❌ [NanoGPT] Video FAILED – full response: {str(status_data)[:500]}")
-                    print(f"   📤 [NanoGPT] Original payload was: {payload}")
+                    _trunc = str({k: v for k, v in payload.items() if k not in ('videoDataUrl', 'prompt')})[:300]
+                    print(f"   📤 [NanoGPT] Original payload (keys): {_trunc}")
                     raise UnifiedClientError(
                         f"NanoGPT video generation FAILED: {error_msg}",
                         error_type="api_error",
