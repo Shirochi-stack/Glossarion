@@ -7981,7 +7981,7 @@ Recent translations to summarize:
         # ── Output mode dropdown (synced with Other Settings radio buttons) ──
         self._output_mode_combo = QComboBox()
         self._output_mode_combo.addItems(["📝Text", "👁️Vision", "🖼️Image", "🎬Video"])
-        self._output_mode_combo.setFixedWidth(80)
+        self._output_mode_combo.setFixedWidth(55)
         self._output_mode_combo.setToolTip(
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
             "<b>Output Mode</b><br>"
