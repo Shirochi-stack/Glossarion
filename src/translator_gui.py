@@ -8856,6 +8856,11 @@ Recent translations to summarize:
                             else:
                                 label = f"{label} (retry {retry})"
                                 
+                        # Append model name in brackets
+                        entry_model = entry.get("model")
+                        if entry_model:
+                            label = f"{label} [{entry_model}]"
+
                         labels.append(str(label))
                     except Exception:
                         continue
