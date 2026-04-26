@@ -1385,24 +1385,8 @@ class EPUBCompiler:
         if (self.translate_titles or os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1' or getattr(self, 'translate_toc_ncx', False)):
             model = os.getenv('MODEL')
             api_key = os.getenv('API_KEY')
-            # Check if model needs API key (vertex/, authgpt/, authgem/, authgem-vertex/, antigravity/,
-            # google-translate, google-translate-free, or models with '@' separator don't need one)
-            # Local custom endpoints (Ollama/LM Studio/etc.) also don't need an API key
-            _model_lower = (model or '').lower()
-            _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
-            _custom_ep_url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
-            _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
-            model_needs_api_key = not (
-                _model_lower in ['google-translate', 'google-translate-free'] or
-                '@' in _model_lower or
-                _model_lower.startswith('vertex/') or
-                _model_lower.startswith('authgpt/') or
-                _model_lower.startswith('authgem/') or
-                _model_lower.startswith('authgem-vertex/') or
-                _model_lower.startswith('antigravity/') or
-                _model_lower.startswith('deepl') or
-                _is_local_endpoint
-            )
+            # Check if model needs API key (delegates to UnifiedClient's authoritative list)
+            model_needs_api_key = UnifiedClient._model_needs_api_key(model) if (UnifiedClient and model) else True
             # Use a dummy API key for keyless models so UnifiedClient can initialize
             if model and not api_key and not model_needs_api_key:
                 api_key = 'dummy-key-not-required'

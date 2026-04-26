@@ -1920,6 +1920,9 @@ class UnifiedClient:
         if cls._is_local_custom_endpoint():
             return False
         model_lower = model.lower()
+        # Vertex AI models use service account credentials, not API keys
+        if '@' in model_lower:
+            return False
         for prefix in cls._NO_API_KEY_PREFIXES:
             if model_lower.startswith(prefix):
                 return False

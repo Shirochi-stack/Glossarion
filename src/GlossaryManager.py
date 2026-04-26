@@ -467,32 +467,14 @@ def is_traditional_translation_api(model: str) -> bool:
     """Check if the model is a traditional translation API"""
     return model in ['deepl', 'google-translate', 'google-translate-free'] or model.startswith('deepl/') or model.startswith('google-translate/')
 
-def _is_local_custom_endpoint() -> bool:
-    """Return True if user has enabled a custom OpenAI endpoint pointing to localhost.
-
-    Local endpoints (Ollama, LM Studio, vLLM, etc.) typically don't require an API key.
-    """
-    try:
-        if os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') != '1':
-            return False
-        url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
-        if not url:
-            return False
-        return ('localhost' in url) or ('127.0.0.1' in url) or ('0.0.0.0' in url) or ('::1' in url)
-    except Exception:
-        return False
-
 def _model_uses_own_auth(model: str) -> bool:
     """Check if the model uses its own authentication (no API key needed).
-    authgpt/ uses OAuth tokens, vertex/ uses Google service account credentials.
-    Local custom endpoints (Ollama/LM Studio/etc.) also don't require an API key."""
-    # Local custom endpoint (Ollama/LM Studio/etc.) → no API key needed
-    if _is_local_custom_endpoint():
-        return True
-    if not model:
+    Delegates to UnifiedClient's authoritative prefix list."""
+    try:
+        from unified_api_client import UnifiedClient
+        return not UnifiedClient._model_needs_api_key(model)
+    except Exception:
         return False
-    m = model.lower()
-    return m.startswith('authgpt/') or m.startswith('authgem/') or m.startswith('authgem-vertex/') or m.startswith('vertex/') or m.startswith('antigravity/')
 
 def _ensure_multi_key_config_loaded():
     """Best-effort load of multi-key config when running in subprocesses.
