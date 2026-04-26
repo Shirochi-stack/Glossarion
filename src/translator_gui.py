@@ -4124,6 +4124,9 @@ Recent translations to summarize:
         
         # Reposition project dropdown (may need its own row if authgpt also visible)
         self._reposition_authgem_project_combo()
+        
+        # Show extra login buttons for numbered auth accounts found in key pools
+        self._refresh_extra_auth_buttons()
 
     def _has_authgpt_in_key_pools(self):
         """Check if any enabled key pool contains an enabled authgpt model."""
@@ -4222,8 +4225,179 @@ Recent translations to summarize:
         return False
 
     # ==================================================================
+    # Extra Auth Buttons for numbered account slots in key pools
+    # ==================================================================
+
+    def _collect_auth_account_ids_from_pools(self):
+        """Scan enabled key pools and return sets of account IDs per provider.
+
+        Returns dict: {'authgpt': {0, 2}, 'authcd': {1}, 'authgem': {0, 3}}.
+        """
+        import re as _re
+        result = {'authgpt': set(), 'authcd': set(), 'authgem': set()}
+        patterns = {
+            'authgpt': _re.compile(r'^authgpt(\d{0,4})/'),
+            'authcd':  _re.compile(r'^authcd(\d{0,4})/'),
+            'authgem': _re.compile(r'^authgem(?:-vertex)?(\d{0,4})/'),
+        }
+        try:
+            pool_map = {
+                'multi_api_keys': 'use_multi_api_keys',
+                'fallback_keys': 'use_fallback_keys',
+                'glossary_keys': 'use_glossary_keys',
+            }
+            for pool_key, toggle_key in pool_map.items():
+                if self.config.get(toggle_key, False):
+                    for key_data in self.config.get(pool_key, []):
+                        if isinstance(key_data, dict):
+                            if not key_data.get('enabled', True):
+                                continue
+                            m = key_data.get('model', '')
+                        else:
+                            m = getattr(key_data, 'model', '')
+                        for provider, pat in patterns.items():
+                            match = pat.match(m)
+                            if match:
+                                acct_id = int(match.group(1)) if match.group(1) else 0
+                                result[provider].add(acct_id)
+        except Exception:
+            pass
+        return result
+
+    def _refresh_extra_auth_buttons(self):
+        """Create/update small status buttons for extra auth account slots found in key pools.
+
+        Only shows buttons for account IDs that differ from the primary model's
+        account (which is already shown by the main login button).
+        """
+        import re as _re
+
+        # Remove previous extra buttons
+        for btn in getattr(self, '_extra_auth_btns', []):
+            btn.setParent(None)
+            btn.deleteLater()
+        self._extra_auth_btns = []
+
+        pool_ids = self._collect_auth_account_ids_from_pools()
+
+        # Determine which account ID is already shown by each main button.
+        # A main button can be visible either from the model prefix OR from
+        # key-pool detection – in both cases we must skip that slot.
+        primary = {}
+        if hasattr(self, 'authgpt_login_btn') and self.authgpt_login_btn.isVisible():
+            primary['authgpt'] = self._get_authgpt_account_id()
+        if hasattr(self, 'authcd_login_btn') and self.authcd_login_btn.isVisible():
+            primary['authcd'] = self._get_authcd_account_id()
+        if hasattr(self, 'authgem_login_btn') and self.authgem_login_btn.isVisible():
+            primary['authgem'] = self._get_authgem_account_id()
+
+        # Provider display config
+        provider_info = {
+            'authgpt': {'label': 'ChatGPT', 'logged_color': '#28a745', 'login_color': '#10a37f',
+                        'store_fn': lambda aid: __import__('authgpt_auth', fromlist=['get_store']).get_store(aid)},
+            'authcd':  {'label': 'Claude', 'logged_color': '#28a745', 'login_color': '#d97706',
+                        'store_fn': lambda aid: __import__('authcd_auth', fromlist=['get_store']).get_store(aid)},
+            'authgem': {'label': 'Gemini', 'logged_color': '#28a745', 'login_color': '#4285f4',
+                        'store_fn': lambda aid: __import__('authgem_auth', fromlist=['get_store']).get_store(aid)},
+        }
+
+        layout = getattr(self, '_extra_auth_layout', None)
+        if not layout:
+            return
+
+        # Insert before the stretch (which is the last item)
+        insert_idx = layout.count() - 1  # before addStretch
+
+        for provider, acct_ids in sorted(pool_ids.items()):
+            info = provider_info.get(provider)
+            if not info:
+                continue
+            for acct_id in sorted(acct_ids):
+                # Skip if this is the primary model's account (already shown)
+                if provider in primary and primary[provider] == acct_id:
+                    continue
+                acct_suffix = f" #{acct_id}" if acct_id else ""
+                try:
+                    store = info['store_fn'](acct_id)
+                    if store.has_tokens:
+                        acct_info = store.account_info
+                        email = acct_info.get('email', '')
+                        btn_text = f"\u2705 {info['label']}{acct_suffix}"
+                        tip_parts = [f"Account slot: {info['label']}{acct_suffix}"]
+                        if email:
+                            tip_parts.append(f"Email: {email}")
+                        tip_parts.append("Logged in (from key pool)")
+                        color = info['logged_color']
+                    else:
+                        btn_text = f"\ud83d\udd10 {info['label']}{acct_suffix}"
+                        tip_parts = [f"Account slot: {info['label']}{acct_suffix}", "Not logged in"]
+                        color = info['login_color']
+                except Exception:
+                    btn_text = f"\ud83d\udd10 {info['label']}{acct_suffix}"
+                    tip_parts = [f"Account slot: {info['label']}{acct_suffix}", "Module unavailable"]
+                    color = info['login_color']
+
+                btn = QPushButton(btn_text)
+                btn.setStyleSheet(
+                    f"background-color: {color}; color: white; font-weight: bold; "
+                    "font-size: 9pt; padding: 2px 8px; border-radius: 4px;"
+                )
+                btn.setToolTip(
+                    "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>" +
+                    "<br>".join(tip_parts) + "</p></qt>"
+                )
+                # Make clicking open a login/logout dialog for this specific slot
+                _prov = provider
+                _aid = acct_id
+                btn.clicked.connect(lambda checked=False, p=_prov, a=_aid: self._extra_auth_btn_clicked(p, a))
+                layout.insertWidget(insert_idx, btn)
+                insert_idx += 1
+                self._extra_auth_btns.append(btn)
+
+    def _extra_auth_btn_clicked(self, provider, acct_id):
+        """Handle click on an extra auth button – login/logout for a specific account slot."""
+        acct_suffix = f" #{acct_id}" if acct_id else ""
+        provider_labels = {'authgpt': 'ChatGPT', 'authcd': 'Claude', 'authgem': 'Gemini'}
+        label = provider_labels.get(provider, provider)
+        try:
+            if provider == 'authgpt':
+                from authgpt_auth import get_store
+            elif provider == 'authcd':
+                from authcd_auth import get_store
+            elif provider == 'authgem':
+                from authgem_auth import get_store
+            else:
+                return
+            store = get_store(acct_id)
+        except ImportError:
+            QMessageBox.critical(self, "Unavailable", f"The {label} auth module is not installed.")
+            return
+
+        if store.has_tokens:
+            email = store.account_info.get('email', '')
+            msg = f"Currently logged in{acct_suffix}"
+            if email:
+                msg += f" as {email}"
+            msg += ".\n\nDo you want to log out?"
+            reply = QMessageBox.question(
+                self, f"{label} Account",
+                msg, QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                store.clear_tokens()
+                self.append_log(f"\ud83d\udd13 {label}{acct_suffix}: Logged out")
+                self._refresh_extra_auth_buttons()
+        else:
+            QMessageBox.information(
+                self, f"{label} Account",
+                f"{label}{acct_suffix} is not logged in.\n\n"
+                f"To log in, set your model field to '{provider}{acct_id}/<model>' and use the main login button."
+            )
+
+    # ==================================================================
     # AuthCD (Claude Login) – mirrors the AuthGPT pattern
     # ==================================================================
+
 
     def _get_authcd_account_id(self):
         """Return the numeric account ID from the current model's authcd prefix."""
@@ -4248,16 +4422,26 @@ Recent translations to summarize:
             if store.has_tokens:
                 info = store.account_info
                 source = info.get('source', '')
-                label = f"\u2705 Claude{acct_suffix}"
+                self.authcd_login_btn.setText(f"\u2705 Claude{acct_suffix}")
+                tip = "Logged in"
                 if source == 'claude_code':
-                    label += " (Claude Code)"
-                self.authcd_login_btn.setText(label)
+                    tip = "Using Claude Code credentials"
+                tip += "<br>Click to log out"
+                self.authcd_login_btn.setToolTip(
+                    "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>" +
+                    tip + "</p></qt>"
+                )
                 self.authcd_login_btn.setStyleSheet(
                     "background-color: #28a745; color: white; font-weight: bold; "
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
                 )
             else:
                 self.authcd_login_btn.setText(f"\ud83d\udd10 Claude{acct_suffix} Login")
+                self.authcd_login_btn.setToolTip(
+                    "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+                    "Log in with your Claude Pro/Max subscription via browser. "
+                    "No API key needed.</p></qt>"
+                )
                 self.authcd_login_btn.setStyleSheet(
                     "background-color: #d97706; color: white; font-weight: bold; "
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
@@ -4365,18 +4549,29 @@ Recent translations to summarize:
                 info = store.account_info
                 email = info.get('email', '')
                 plan = info.get('plan_type', '')
-                label = f"\u2705 ChatGPT{acct_suffix}"
+                self.authgpt_login_btn.setText(f"\u2705 ChatGPT{acct_suffix}")
+                # Put email/plan in tooltip instead of button text
+                tip_parts = []
                 if email:
-                    label += f" ({email})"
-                elif plan:
-                    label += f" ({plan})"
-                self.authgpt_login_btn.setText(label)
+                    tip_parts.append(f"Account: {email}")
+                if plan:
+                    tip_parts.append(f"Plan: {plan}")
+                tip_parts.append("Click to log out")
+                self.authgpt_login_btn.setToolTip(
+                    "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>" +
+                    "<br>".join(tip_parts) + "</p></qt>"
+                )
                 self.authgpt_login_btn.setStyleSheet(
                     "background-color: #28a745; color: white; font-weight: bold; "
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
                 )
             else:
                 self.authgpt_login_btn.setText(f"\ud83d\udd10 ChatGPT{acct_suffix} Login")
+                self.authgpt_login_btn.setToolTip(
+                    "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+                    "Log in with your ChatGPT Plus/Pro subscription via browser. "
+                    "No API key needed.</p></qt>"
+                )
                 self.authgpt_login_btn.setStyleSheet(
                     "background-color: #10a37f; color: white; font-weight: bold; "
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
@@ -4510,12 +4705,18 @@ Recent translations to summarize:
                 info = store.account_info
                 email = info.get('email', '')
                 name = info.get('name', '')
-                label = f"✅ Gemini{acct_suffix}"
+                self.authgem_login_btn.setText(f"✅ Gemini{acct_suffix}")
+                # Put email/name in tooltip instead of button text
+                tip_parts = []
                 if email:
-                    label += f" ({email})"
-                elif name:
-                    label += f" ({name})"
-                self.authgem_login_btn.setText(label)
+                    tip_parts.append(f"Account: {email}")
+                if name:
+                    tip_parts.append(f"Name: {name}")
+                tip_parts.append("Click to log out")
+                self.authgem_login_btn.setToolTip(
+                    "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>" +
+                    "<br>".join(tip_parts) + "</p></qt>"
+                )
                 self.authgem_login_btn.setStyleSheet(
                     "background-color: #28a745; color: white; font-weight: bold; "
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
@@ -4534,6 +4735,11 @@ Recent translations to summarize:
                         self.authgem_project_combo.hide()
             else:
                 self.authgem_login_btn.setText(f"🔐 Gemini{acct_suffix} Login")
+                self.authgem_login_btn.setToolTip(
+                    "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+                    "Log in with your Google account via browser. "
+                    "No API key needed.</p></qt>"
+                )
                 self.authgem_login_btn.setStyleSheet(
                     "background-color: #4285f4; color: white; font-weight: bold; "
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
@@ -5422,6 +5628,11 @@ Recent translations to summarize:
             )
         except ImportError:
             pass
+        
+        # Container for dynamically-created extra auth buttons
+        # (for numbered account slots found in key pools, e.g. authgpt2/, authcd1/)
+        self._extra_auth_btns = []  # track ephemeral buttons for cleanup
+        self._extra_auth_layout = model_btn_layout  # reuse same layout
         
         model_btn_layout.addStretch()
         self.frame.addWidget(model_btn_container, 1, 2, 1, 2, Qt.AlignLeft)
