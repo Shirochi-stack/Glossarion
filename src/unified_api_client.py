@@ -7042,7 +7042,17 @@ class UnifiedClient:
                             continue
                         else:
                             print(f"{log_prefix} ⏳ Waiting {_wait_needed:.1f}s for {fallback_model} API delay...")
-                            time.sleep(_wait_needed)
+                            # Cancellable sleep — check stop flags every 0.2s
+                            _slept = 0.0
+                            while _slept < _wait_needed:
+                                if self._is_stop_requested() or getattr(self, '_cancelled', False) or os.environ.get('GRACEFUL_STOP') == '1':
+                                    # Release the reserved slot before aborting
+                                    with _fallback_key_lock:
+                                        _fallback_key_in_use.discard(_key_id)
+                                    raise UnifiedClientError("Operation cancelled by user during fallback delay", error_type="cancelled")
+                                _step = min(0.2, _wait_needed - _slept)
+                                time.sleep(_step)
+                                _slept += _step
                     elif not _reserved:
                         # shuffle_mode with no wait — claim now
                         with _fallback_key_lock:
@@ -7050,6 +7060,13 @@ class UnifiedClient:
                             _fallback_key_in_use.add(_key_id)
                             _reserved = True
                 # ------------------------------------------
+
+                # Final stop check after delay (in case flag was set just as sleep ended)
+                if self._is_stop_requested() or os.environ.get('GRACEFUL_STOP') == '1':
+                    if _api_call_delay > 0:
+                        with _fallback_key_lock:
+                            _fallback_key_in_use.discard(_key_id)
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
 
                 print(f"{log_prefix} Trying {fallback_model}")
                 
@@ -7408,7 +7425,17 @@ class UnifiedClient:
                             continue
                         else:
                             print(f"[FALLBACK DIRECT {idx+1}] ⏳ Waiting {_wait_needed:.1f}s for {fallback_model} API delay...")
-                            time.sleep(_wait_needed)
+                            # Cancellable sleep — check stop flags every 0.2s
+                            _slept = 0.0
+                            while _slept < _wait_needed:
+                                if self._is_stop_requested() or getattr(self, '_cancelled', False) or os.environ.get('GRACEFUL_STOP') == '1':
+                                    # Release the reserved slot before aborting
+                                    with _fallback_key_lock:
+                                        _fallback_key_in_use.discard(_key_id)
+                                    raise UnifiedClientError("Operation cancelled by user during fallback delay", error_type="cancelled")
+                                _step = min(0.2, _wait_needed - _slept)
+                                time.sleep(_step)
+                                _slept += _step
                     elif not _reserved:
                         # shuffle_mode with no wait — claim now
                         with _fallback_key_lock:
@@ -7417,6 +7444,13 @@ class UnifiedClient:
                             _reserved = True
                 # ------------------------------------------
                 
+                # Final stop check after delay (in case flag was set just as sleep ended)
+                if self._is_stop_requested() or os.environ.get('GRACEFUL_STOP') == '1':
+                    if _api_call_delay > 0:
+                        with _fallback_key_lock:
+                            _fallback_key_in_use.discard(_key_id)
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
                 print(f"[FALLBACK DIRECT {idx+1}/{max_attempts}] Trying {fallback_model}")
                 
                 try:
