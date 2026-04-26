@@ -7977,6 +7977,64 @@ Recent translations to summarize:
         self.system_prompt_switch.setCursor(Qt.PointingHandCursor)
         self.system_prompt_switch.mousePressEvent = lambda e: self._toggle_system_prompt_mode()
         prompt_label_layout.addWidget(self.system_prompt_switch)
+
+        # ── Output mode dropdown (synced with Other Settings radio buttons) ──
+        self._output_mode_combo = QComboBox()
+        self._output_mode_combo.addItems(["📝 Text", "🖼️ Image", "🎬 Video"])
+        self._output_mode_combo.setFixedWidth(95)
+        self._output_mode_combo.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "<b>Output Mode</b><br>"
+            "📝 Text – Normal text translation<br>"
+            "🖼️ Image – Image generation output<br>"
+            "🎬 Video – Video generation output<br><br>"
+            "Synced with Other Settings → Image Translation section."
+            "</p></qt>"
+        )
+        self._output_mode_combo.setStyleSheet("""
+            QComboBox {
+                font-size: 7.5pt;
+                background-color: transparent;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 1px 4px;
+                color: #b0b0b0;
+            }
+            QComboBox:hover {
+                border-color: #5a9fd4;
+                color: white;
+            }
+            QComboBox::drop-down { border: none; width: 0px; }
+            QComboBox::down-arrow { image: none; width: 0px; }
+            QComboBox QAbstractItemView {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                selection-background-color: #3d4f6a;
+                border: 1px solid #4a5568;
+                font-size: 8pt;
+            }
+        """)
+        # Disable mouse wheel to prevent accidental changes
+        self._output_mode_combo.wheelEvent = lambda event: event.ignore()
+
+        # Set initial value from config
+        _init_mode = self.config.get('output_mode', 'text')
+        if _init_mode not in ('text', 'image', 'video'):
+            if self.config.get('enable_image_output_mode', False):
+                _init_mode = 'image'
+            elif self.config.get('enable_video_output_mode', False):
+                _init_mode = 'video'
+            else:
+                _init_mode = 'text'
+        _mode_idx = {'text': 0, 'image': 1, 'video': 2}.get(_init_mode, 0)
+        self._output_mode_combo.setCurrentIndex(_mode_idx)
+
+        def _on_output_mode_combo_changed(index):
+            mode = {0: 'text', 1: 'image', 2: 'video'}.get(index, 'text')
+            self._set_output_mode(mode)
+        self._output_mode_combo.currentIndexChanged.connect(_on_output_mode_combo_changed)
+
+        prompt_label_layout.addWidget(self._output_mode_combo)
         prompt_label_layout.addStretch()
         
         output_layout.addWidget(prompt_label_container)

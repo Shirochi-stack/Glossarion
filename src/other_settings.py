@@ -8608,23 +8608,73 @@ def on_extraction_method_change(self):
             # Fallback for any errors during transition
             pass
             
-def _enforce_image_output_dependency(self):
-    """Enforce that image output mode is disabled when image translation is off,
-    unless using the special gemini-3-pro-image-preview model."""
+def _set_output_mode(self, mode: str):
+    """Central setter for output mode ('text', 'image', or 'video').
+
+    Text  = image translation OFF, normal text output.
+    Image = image translation ON, image-gen output.
+    Video = image translation ON, video-gen output.
+
+    Updates legacy boolean vars, config, syncs radio buttons and GUI dropdown.
+    """
     try:
-        # Check model exception
-        model = str(getattr(self, 'model_var', '')).lower() 
+        mode = mode.lower().strip()
+        if mode not in ('text', 'image', 'video'):
+            mode = 'text'
+
+        # --- set legacy booleans ---
+        self.enable_image_output_mode_var = (mode == 'image')
+        self.enable_video_output_mode_var = (mode == 'video')
+        self.enable_image_translation_var = (mode != 'text')
+
+        self.config['enable_image_output_mode'] = self.enable_image_output_mode_var
+        self.config['enable_video_output_mode'] = self.enable_video_output_mode_var
+        self.config['enable_image_translation'] = self.enable_image_translation_var
+        self.config['output_mode'] = mode
+
+        # Toggle visibility of the image-translation sub-section
+        try:
+            self.toggle_image_translation_section()
+        except Exception:
+            pass
+
+        # Sync radio buttons in Other Settings (if open)
+        _radios = getattr(self, '_output_mode_radios', None)
+        if _radios and mode in _radios:
+            rb = _radios[mode]
+            if not rb.isChecked():
+                rb.blockSignals(True)
+                rb.setChecked(True)
+                rb.blockSignals(False)
+
+        # Show/hide sub-settings in Other Settings
+        if hasattr(self, '_update_output_mode_sub_settings'):
+            self._update_output_mode_sub_settings(mode)
+
+        # Sync main GUI dropdown (if it exists)
+        combo = getattr(self, '_output_mode_combo', None)
+        if combo:
+            _map = {'text': 0, 'image': 1, 'video': 2}
+            idx = _map.get(mode, 0)
+            if combo.currentIndex() != idx:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(idx)
+                combo.blockSignals(False)
+    except Exception:
+        pass
+
+def _enforce_image_output_dependency(self):
+    """Enforce that image/video output mode is disabled when image translation is off,
+    unless using a special generative model."""
+    try:
+        model = str(getattr(self, 'model_var', '')).lower()
         allow_without_translation = 'gemini-3-pro-image-preview' in model
-        
-        # Check if image translation is enabled
+
         image_translation_on = bool(getattr(self, 'enable_image_translation_var', False))
-        
-        # Determine if image output should be allowed
         allowed = image_translation_on or allow_without_translation
-        
+
         if not allowed:
-            # Force disable image output mode silently
-            self.enable_image_output_mode_var = False
+            self._set_output_mode('text')
     except Exception:
         pass
 
@@ -8649,31 +8699,61 @@ def _create_image_translation_section(self, parent):
     left_v = QVBoxLayout(left_column)
     left_v.setContentsMargins(0, 0, 20, 0)
     
-    # Enable Image Translation
-    enable_cb = self._create_styled_checkbox("Enable Image Translation")
-    try:
-        enable_cb.setChecked(bool(self.enable_image_translation_var))
-    except Exception:
-        pass
-    def _on_enable_image_toggle(checked):
-        try:
-            self.enable_image_translation_var = bool(checked)
-            self.toggle_image_translation_section()
-            # Enforce image output dependency when image translation changes
-            if hasattr(self, '_enforce_image_output_dependency'):
-                self._enforce_image_output_dependency()
-            # Sync enabled state of image/video output controls
-            if hasattr(self, '_update_output_mode_controls_state'):
-                self._update_output_mode_controls_state()
-        except Exception:
-            pass
-    enable_cb.toggled.connect(_on_enable_image_toggle)
-    section_v.addWidget(enable_cb)
-    
-    enable_desc = QLabel("Extracts and translates text from images using vision models")
-    enable_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    enable_desc.setContentsMargins(0, 0, 0, 10)
-    section_v.addWidget(enable_desc)
+    # ── Output Mode radio buttons (replaces old Enable Image Translation checkbox) ──
+    from PySide6.QtWidgets import QButtonGroup, QRadioButton
+
+    mode_row = QWidget()
+    mode_h = QHBoxLayout(mode_row)
+    mode_h.setContentsMargins(0, 0, 0, 0)
+    mode_h.setSpacing(14)
+
+    mode_group = QButtonGroup(mode_row)
+
+    rb_text = QRadioButton("📝 Text")
+    rb_text.setToolTip("Normal text translation — image translation OFF")
+    rb_image = QRadioButton("🖼️ Image")
+    rb_image.setToolTip("Image generation output — enables image translation")
+    rb_video = QRadioButton("🎬 Video")
+    rb_video.setToolTip("Video generation output — enables image translation")
+
+    mode_group.addButton(rb_text, 0)
+    mode_group.addButton(rb_image, 1)
+    mode_group.addButton(rb_video, 2)
+
+    mode_h.addWidget(rb_text)
+    mode_h.addWidget(rb_image)
+    mode_h.addWidget(rb_video)
+    mode_h.addStretch()
+    section_v.addWidget(mode_row)
+
+    # Store refs for sync
+    self._output_mode_radios = {'text': rb_text, 'image': rb_image, 'video': rb_video}
+
+    # Determine initial mode from legacy booleans
+    if not hasattr(self, 'enable_video_output_mode_var'):
+        self.enable_video_output_mode_var = self.config.get('enable_video_output_mode', False)
+
+    _init_mode = self.config.get('output_mode', None)
+    if _init_mode not in ('text', 'image', 'video'):
+        if bool(getattr(self, 'enable_image_output_mode_var', False)):
+            _init_mode = 'image'
+        elif bool(getattr(self, 'enable_video_output_mode_var', False)):
+            _init_mode = 'video'
+        elif bool(getattr(self, 'enable_image_translation_var', False)):
+            _init_mode = 'image'
+        else:
+            _init_mode = 'text'
+
+    rb_text.setChecked(_init_mode == 'text')
+    rb_image.setChecked(_init_mode == 'image')
+    rb_video.setChecked(_init_mode == 'video')
+
+    mode_desc = QLabel(
+        "Text = normal translation · Image = image-gen output · Video = video-gen output"
+    )
+    mode_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    mode_desc.setContentsMargins(0, 0, 0, 5)
+    section_v.addWidget(mode_desc)
     
     # Create container for all content below the main checkbox
     content_container = QWidget()
@@ -8721,101 +8801,37 @@ def _create_image_translation_section(self, parent):
     hide_desc.setStyleSheet("color: gray; font-size: 10pt;")
     hide_desc.setContentsMargins(20, 0, 0, 10)
     left_v.addWidget(hide_desc)
-    
-    # ── Image Only Output Mode ─────────────────────────────────────────────
 
-    # Shared helper: visually enable/disable one of the two output-mode checkboxes.
-    # Must handle the ✓ QLabel child overlay (hardcoded color: white — immune to setEnabled).
-    def _apply_output_toggle_disable_style(cb, enabled):
-        try:
-            from PySide6.QtWidgets import QLabel as _QL
-            cb.setEnabled(enabled)
-            cb.setStyleSheet("color: white;" if enabled else "color: #666666;")
-            checkmark_css = (
-                "QLabel { color: white; background: transparent; font-weight: bold; font-size: 11px; }"
-                if enabled else
-                "QLabel { color: #444444; background: transparent; font-weight: bold; font-size: 11px; }"
-            )
-            for child in cb.findChildren(_QL):
-                if child.text() == "✓":
-                    child.setStyleSheet(checkmark_css)
-        except Exception:
-            pass
+    # ── Image sub-settings container (visible when Image mode selected) ──
+    img_sub = QWidget()
+    img_sub_v = QVBoxLayout(img_sub)
+    img_sub_v.setContentsMargins(10, 0, 0, 0)
+    img_sub_v.setSpacing(4)
 
-    image_output_cb = self._create_styled_checkbox("Enable Image Only Output Mode")
-    self.image_output_cb = image_output_cb  # store ref for enable/disable
-    try:
-        image_output_cb.setChecked(bool(self.enable_image_output_mode_var))
-    except Exception:
-        pass
-
-    # Initialize video output mode variable if not present
-    if not hasattr(self, 'enable_video_output_mode_var'):
-        self.enable_video_output_mode_var = self.config.get('enable_video_output_mode', False)
-
-    # Forward-declare video checkbox so the mutual-exclusion callbacks can reference it
-    video_output_cb = self._create_styled_checkbox("Enable Video Only Output Mode")
-    self.video_output_cb = video_output_cb  # store ref for enable/disable
-
-    def _on_image_output_toggle(checked):
-        try:
-            self.enable_image_output_mode_var = bool(checked)
-            self.config['enable_image_output_mode'] = bool(checked)
-            # Mutual exclusion: enabling Image unchecks + DISABLES Video
-            if checked:
-                self.enable_video_output_mode_var = False
-                self.config['enable_video_output_mode'] = False
-                video_output_cb.blockSignals(True)
-                video_output_cb.setChecked(False)
-                video_output_cb.blockSignals(False)
-            # Image ON → video disabled; Image OFF → video enabled
-            _apply_output_toggle_disable_style(video_output_cb, not checked)
-        except Exception:
-            pass
-
-    image_output_cb.toggled.connect(_on_image_output_toggle)
-    left_v.addWidget(image_output_cb)
-
-    image_output_desc = QLabel("Request image output from vision models (e.g. gemini-3-pro-image-preview) / nan/ image endpoint")
-    image_output_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    image_output_desc.setContentsMargins(20, 0, 0, 5)
-    self.image_output_desc_label = image_output_desc  # store ref
-    left_v.addWidget(image_output_desc)
-
-    # Image Output Resolution dropdown
     resolution_w = QWidget()
     resolution_h = QHBoxLayout(resolution_w)
-    resolution_h.setContentsMargins(20, 0, 0, 0)
+    resolution_h.setContentsMargins(0, 0, 0, 0)
     resolution_h.setSpacing(8)
     _res_label = QLabel("Output Resolution:")
-    self.image_output_resolution_label = _res_label  # store ref
+    self.image_output_resolution_label = _res_label
     resolution_h.addWidget(_res_label)
 
     resolution_combo = QComboBox()
     resolution_combo.addItems(["1K", "2K", "4K"])
     resolution_combo.setFixedWidth(80)
     resolution_combo.setStyleSheet("""
-        QComboBox::down-arrow {
-            image: none;
-            width: 12px;
-            height: 12px;
-            border: none;
-        }
+        QComboBox::down-arrow { image: none; width: 12px; height: 12px; border: none; }
     """)
     self._add_combobox_arrow(resolution_combo)
     self._disable_combobox_mousewheel(resolution_combo)
-
-    # Initialize variable if not exists
     if not hasattr(self, 'image_output_resolution_var'):
         self.image_output_resolution_var = self.config.get('image_output_resolution', '1K')
-
     try:
         idx = resolution_combo.findText(self.image_output_resolution_var)
         if idx >= 0:
             resolution_combo.setCurrentIndex(idx)
     except Exception:
         pass
-
     def _on_resolution_changed(text):
         try:
             self.image_output_resolution_var = text
@@ -8824,77 +8840,36 @@ def _create_image_translation_section(self, parent):
     resolution_combo.currentTextChanged.connect(_on_resolution_changed)
     resolution_h.addWidget(resolution_combo)
     resolution_h.addStretch()
+    img_sub_v.addWidget(resolution_w)
+    res_desc = QLabel("Higher resolution = better quality but slower generation")
+    res_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    img_sub_v.addWidget(res_desc)
+    left_v.addWidget(img_sub)
+    self.image_output_resolution_w = resolution_w
 
-    left_v.addWidget(resolution_w)
+    # ── Video sub-settings container (visible when Video mode selected) ──
+    vid_sub = QWidget()
+    vid_sub_v = QVBoxLayout(vid_sub)
+    vid_sub_v.setContentsMargins(10, 0, 0, 0)
+    vid_sub_v.setSpacing(4)
 
-    resolution_desc = QLabel("Higher resolution = better quality but slower generation")
-    resolution_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    resolution_desc.setContentsMargins(40, 0, 0, 10)
-    self.image_resolution_desc_label = resolution_desc  # store ref
-    left_v.addWidget(resolution_desc)
-
-    # ── Video Only Output Mode ─────────────────────────────────────────────
-    try:
-        video_output_cb.setChecked(bool(self.enable_video_output_mode_var))
-    except Exception:
-        pass
-
-    def _on_video_output_toggle(checked):
-        try:
-            self.enable_video_output_mode_var = bool(checked)
-            self.config['enable_video_output_mode'] = bool(checked)
-            # Mutual exclusion: enabling Video unchecks + DISABLES Image
-            if checked:
-                self.enable_image_output_mode_var = False
-                self.config['enable_image_output_mode'] = False
-                image_output_cb.blockSignals(True)
-                image_output_cb.setChecked(False)
-                image_output_cb.blockSignals(False)
-            # Video ON → image disabled; Video OFF → image enabled
-            _apply_output_toggle_disable_style(image_output_cb, not checked)
-        except Exception:
-            pass
-
-    video_output_cb.toggled.connect(_on_video_output_toggle)
-    left_v.addWidget(video_output_cb)
-
-    video_output_desc = QLabel(
-        "Route nan/ requests to the video generation endpoint (/api/generate-video). "
-        "Polls until the video URL is returned. Mutually exclusive with Image Only Output Mode."
-    )
-    video_output_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    video_output_desc.setContentsMargins(20, 0, 0, 5)
-    video_output_desc.setWordWrap(True)
-    self.video_output_desc_label = video_output_desc  # store ref
-    left_v.addWidget(video_output_desc)
-
-    # Video Duration dropdown
     duration_w = QWidget()
     duration_h = QHBoxLayout(duration_w)
-    duration_h.setContentsMargins(20, 0, 0, 0)
+    duration_h.setContentsMargins(0, 0, 0, 0)
     duration_h.setSpacing(8)
     _dur_label = QLabel("Video Duration:")
-    self.video_duration_label = _dur_label  # store ref for enable/disable
+    self.video_duration_label = _dur_label
     duration_h.addWidget(_dur_label)
-
     duration_combo = QComboBox()
     duration_combo.addItems(["5", "10", "15", "20", "30", "60"])
     duration_combo.setFixedWidth(80)
     duration_combo.setStyleSheet("""
-        QComboBox::down-arrow {
-            image: none;
-            width: 12px;
-            height: 12px;
-            border: none;
-        }
+        QComboBox::down-arrow { image: none; width: 12px; height: 12px; border: none; }
     """)
     self._add_combobox_arrow(duration_combo)
     self._disable_combobox_mousewheel(duration_combo)
-
-    # Initialize variable if not exists
     if not hasattr(self, 'nanogpt_video_duration_var'):
         self.nanogpt_video_duration_var = self.config.get('nanogpt_video_duration', '60')
-
     try:
         idx = duration_combo.findText(str(self.nanogpt_video_duration_var))
         if idx >= 0:
@@ -8903,7 +8878,6 @@ def _create_image_translation_section(self, parent):
             duration_combo.setCurrentText(str(self.nanogpt_video_duration_var))
     except Exception:
         pass
-
     def _on_duration_changed(text):
         try:
             self.nanogpt_video_duration_var = text
@@ -8911,58 +8885,39 @@ def _create_image_translation_section(self, parent):
             pass
     duration_combo.currentTextChanged.connect(_on_duration_changed)
     duration_h.addWidget(duration_combo)
-
     _dur_unit = QLabel("seconds")
     _dur_unit.setStyleSheet("color: gray;")
-    self.video_duration_unit_label = _dur_unit
     duration_h.addWidget(_dur_unit)
     duration_h.addStretch()
+    vid_sub_v.addWidget(duration_w)
+    self.video_duration_w = duration_w
+    dur_desc = QLabel("Duration of generated video clips (depends on model support)")
+    dur_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    vid_sub_v.addWidget(dur_desc)
 
-    self.video_duration_w = duration_w  # store ref for enable/disable
-    left_v.addWidget(duration_w)
-
-    duration_desc = QLabel("Duration of generated video clips (depends on model support)")
-    duration_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    duration_desc.setContentsMargins(40, 0, 0, 10)
-    self.video_duration_desc_label = duration_desc  # store ref
-    left_v.addWidget(duration_desc)
-
-    # Video Resolution dropdown
     vid_res_w = QWidget()
     vid_res_h = QHBoxLayout(vid_res_w)
-    vid_res_h.setContentsMargins(20, 0, 0, 0)
+    vid_res_h.setContentsMargins(0, 0, 0, 0)
     vid_res_h.setSpacing(8)
     _vid_res_label = QLabel("Video Resolution:")
-    self.video_resolution_label = _vid_res_label  # store ref for enable/disable
+    self.video_resolution_label = _vid_res_label
     vid_res_h.addWidget(_vid_res_label)
-
     vid_res_combo = QComboBox()
     vid_res_combo.addItems(["360p", "480p", "720p", "1080p"])
     vid_res_combo.setFixedWidth(100)
     vid_res_combo.setStyleSheet("""
-        QComboBox::down-arrow {
-            image: none;
-            width: 12px;
-            height: 12px;
-            border: none;
-        }
+        QComboBox::down-arrow { image: none; width: 12px; height: 12px; border: none; }
     """)
     self._add_combobox_arrow(vid_res_combo)
     self._disable_combobox_mousewheel(vid_res_combo)
-
-    # Initialize variable if not exists
     if not hasattr(self, 'nanogpt_video_resolution_var'):
         self.nanogpt_video_resolution_var = self.config.get('nanogpt_video_resolution', '720p')
-
     try:
         idx = vid_res_combo.findText(str(self.nanogpt_video_resolution_var))
         if idx >= 0:
             vid_res_combo.setCurrentIndex(idx)
-        else:
-            vid_res_combo.setCurrentText(str(self.nanogpt_video_resolution_var))
     except Exception:
         pass
-
     def _on_vid_res_changed(text):
         try:
             self.nanogpt_video_resolution_var = text
@@ -8971,72 +8926,37 @@ def _create_image_translation_section(self, parent):
     vid_res_combo.currentTextChanged.connect(_on_vid_res_changed)
     vid_res_h.addWidget(vid_res_combo)
     vid_res_h.addStretch()
-
-    self.video_resolution_w = vid_res_w  # store ref for enable/disable
-    left_v.addWidget(vid_res_w)
-
+    vid_sub_v.addWidget(vid_res_w)
+    self.video_resolution_w = vid_res_w
     vid_res_desc = QLabel("Output resolution for generated videos (depends on model support)")
     vid_res_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    vid_res_desc.setContentsMargins(40, 0, 0, 10)
-    self.video_resolution_desc_label = vid_res_desc  # store ref
-    left_v.addWidget(vid_res_desc)
+    vid_sub_v.addWidget(vid_res_desc)
+    left_v.addWidget(vid_sub)
 
-    # store resolution widget ref
-    self.image_output_resolution_w = resolution_w
+    # ── Show/hide sub-settings based on mode ──
+    def _update_output_mode_sub_settings(mode=None):
+        if mode is None:
+            if rb_image.isChecked():
+                mode = 'image'
+            elif rb_video.isChecked():
+                mode = 'video'
+            else:
+                mode = 'text'
+        img_sub.setVisible(mode == 'image')
+        vid_sub.setVisible(mode == 'video')
+    self._update_output_mode_sub_settings = _update_output_mode_sub_settings
 
-    # ── helper: sync enabled state of output-mode controls ─────────────────
-    def _update_output_mode_controls_state():
-        """Enable/disable image & video output controls based on image translation toggle."""
-        try:
-            enabled = bool(getattr(self, 'enable_image_translation_var', False))
+    def _on_mode_radio_toggled(btn):
+        bid = mode_group.id(btn)
+        mode = {0: 'text', 1: 'image', 2: 'video'}.get(bid, 'text')
+        if btn.isChecked():
+            self._set_output_mode(mode)
+    rb_text.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_text) if checked else None)
+    rb_image.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_image) if checked else None)
+    rb_video.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_video) if checked else None)
 
-            img_on = bool(getattr(self, 'enable_image_output_mode_var', False))
-            vid_on = bool(getattr(self, 'enable_video_output_mode_var', False))
-
-            img_cb = getattr(self, 'image_output_cb', None)
-            vid_cb = getattr(self, 'video_output_cb', None)
-
-            if img_cb:
-                _apply_output_toggle_disable_style(img_cb, enabled and not vid_on)
-            if vid_cb:
-                _apply_output_toggle_disable_style(vid_cb, enabled and not img_on)
-
-            # Resolution row widget
-            rw = getattr(self, 'image_output_resolution_w', None)
-            if rw:
-                rw.setEnabled(enabled)
-
-            # Video duration row widget
-            dw = getattr(self, 'video_duration_w', None)
-            if dw:
-                dw.setEnabled(enabled)
-
-            # Video resolution row widget
-            vrw = getattr(self, 'video_resolution_w', None)
-            if vrw:
-                vrw.setEnabled(enabled)
-
-            # Description/resolution labels — QLabel has no :disabled pseudo-state so set explicitly
-            label_color = "color: gray; font-size: 10pt;" if enabled else "color: #505050; font-size: 10pt;"
-            for lbl in (
-                getattr(self, 'image_output_desc_label', None),
-                getattr(self, 'video_output_desc_label', None),
-                getattr(self, 'image_resolution_desc_label', None),
-                getattr(self, 'image_output_resolution_label', None),
-                getattr(self, 'video_duration_desc_label', None),
-                getattr(self, 'video_duration_label', None),
-                getattr(self, 'video_resolution_desc_label', None),
-                getattr(self, 'video_resolution_label', None),
-            ):
-                if lbl:
-                    lbl.setStyleSheet(label_color)
-        except Exception:
-            pass
-
-    self._update_output_mode_controls_state = _update_output_mode_controls_state
-    # Defer initial call via QTimer so widgets are fully rendered before styling applies
-    from PySide6.QtCore import QTimer
-    QTimer.singleShot(0, _update_output_mode_controls_state)
+    # Set initial visibility
+    _update_output_mode_sub_settings(_init_mode)
 
     
     left_v.addSpacing(10)
