@@ -834,7 +834,12 @@ def extract_all(game_dir: str, log: Callable = print
         if backed_files:
             log(f"🔄 Restoring {len(backed_files)} original files from backup...")
             for src, rel in backed_files:
-                dst = os.path.join(game_dir, rel)
+                # If rel has no subdirectory (flat/legacy backup), restore to data_dir
+                # If rel has subdirectory structure (new format), restore relative to game_dir
+                if os.path.dirname(rel):
+                    dst = os.path.join(game_dir, rel)
+                else:
+                    dst = os.path.join(data_dir, rel)
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.copy2(src, dst)
             log("✅ Originals restored — extracting from clean data")
@@ -1065,12 +1070,16 @@ def apply_translations(data_dir: str, trans_map_path: str,
         return _apply_binary_format_translations(data_dir, trans_data, trans_map_path, log, version)
 
     patched = 0
+    _first_path_logged = False
     for filename, entries in trans_data.items():
         # Support both prefixed ("www/data/Map001.json") and flat ("Map001.json") keys
         if '/' in filename or os.sep in filename:
             file_path = os.path.join(game_dir, filename)
         else:
             file_path = os.path.join(data_dir, filename)
+        if not _first_path_logged:
+            log(f"   📍 Path resolution: key='{filename}' → '{file_path}' (exists={os.path.exists(file_path)})")
+            _first_path_logged = True
         if not os.path.exists(file_path):
             continue
 
