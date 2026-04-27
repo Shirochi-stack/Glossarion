@@ -38,7 +38,9 @@ class RPGMakerVersion:
     MV = "mv"
     MZ = "mz"
     VX_ACE = "vxace"
+    VX = "vx"
     XP = "xp"
+    RM2K3 = "rm2k3"
     UNKNOWN = "unknown"
 
 
@@ -72,14 +74,24 @@ def detect_version(game_dir: str) -> Tuple[str, str]:
                             return RPGMakerVersion.MZ, direct_data
                 return RPGMakerVersion.MV, direct_data
 
-    # VX Ace: Data/*.rvdata2
+    # VX Ace / VX / XP: Data/*.rvdata2 or *.rvdata or *.rxdata
     vxa_data = os.path.join(game_dir, "Data")
     if os.path.isdir(vxa_data):
-        for f in os.listdir(vxa_data):
+        files = os.listdir(vxa_data)
+        for f in files:
             if f.endswith(".rvdata2"):
                 return RPGMakerVersion.VX_ACE, vxa_data
+        for f in files:
+            if f.endswith(".rvdata"):
+                return RPGMakerVersion.VX, vxa_data
+        for f in files:
             if f.endswith(".rxdata"):
                 return RPGMakerVersion.XP, vxa_data
+
+    # RPG Maker 2000/2003: root dir contains RPG_RT.ldb
+    for f in os.listdir(game_dir):
+        if f.lower() == "rpg_rt.ldb":
+            return RPGMakerVersion.RM2K3, game_dir
 
     return RPGMakerVersion.UNKNOWN, ""
 
@@ -242,6 +254,514 @@ def extract_db_strings(data_dir: str, log: Callable = print
     return all_strings
 
 
+# ============================================================
+# Ruby Marshal parser (pure Python) — for VX Ace / VX / XP
+# ============================================================
+import struct
+import io
+
+class RubyMarshalReader:
+    """Minimal Ruby Marshal 4.8 reader.  Enough to extract RPG Maker objects."""
+
+    def __init__(self, data: bytes):
+        self._io = io.BytesIO(data)
+        self._symbols = []
+        self._objects = []
+
+    # -- primitives --
+    def _read_byte(self) -> int:
+        b = self._io.read(1)
+        if not b:
+            raise EOFError
+        return b[0]
+
+    def _read_bytes(self, n: int) -> bytes:
+        return self._io.read(n)
+
+    def _read_fixnum(self) -> int:
+        c = struct.unpack('b', self._io.read(1))[0]
+        if c == 0:
+            return 0
+        if 5 < c:
+            return c - 5
+        if -5 <= c < 0:
+            return c + 5
+        if c > 0:
+            x = 0
+            for i in range(c):
+                x |= self._read_byte() << (8 * i)
+            return x
+        c = -c
+        x = -1
+        for i in range(c):
+            x &= ~(0xff << (8 * i))
+            x |= self._read_byte() << (8 * i)
+        return x
+
+    def _read_raw_string(self) -> bytes:
+        n = self._read_fixnum()
+        return self._read_bytes(n)
+
+    # -- top-level --
+    def load(self):
+        major = self._read_byte()
+        minor = self._read_byte()
+        return self._read_value()
+
+    def _read_value(self):
+        tag = chr(self._read_byte())
+
+        if tag == '0':  # nil
+            return None
+        if tag == 'T':
+            return True
+        if tag == 'F':
+            return False
+        if tag == 'i':  # Fixnum
+            return self._read_fixnum()
+        if tag == 'f':  # Float
+            s = self._read_raw_string()
+            return float(s)
+        if tag == ':':  # Symbol
+            name = self._read_raw_string().decode('utf-8', errors='replace')
+            self._symbols.append(name)
+            return ('__sym__', name)
+        if tag == ';':  # Symbol ref
+            idx = self._read_fixnum()
+            name = self._symbols[idx] if idx < len(self._symbols) else f'sym_{idx}'
+            return ('__sym__', name)
+        if tag == '"':  # Raw string
+            s = self._read_raw_string()
+            obj_id = len(self._objects)
+            self._objects.append(s)
+            return s
+        if tag == 'I':  # Instance (usually string with encoding)
+            obj = self._read_value()
+            n_ivars = self._read_fixnum()
+            encoding = 'utf-8'
+            for _ in range(n_ivars):
+                k = self._read_value()
+                v = self._read_value()
+                k_name = k[1] if isinstance(k, tuple) and k[0] == '__sym__' else str(k)
+                if k_name == 'E' and v is True:
+                    encoding = 'utf-8'
+                elif k_name == 'encoding':
+                    if isinstance(v, bytes):
+                        encoding = v.decode('ascii', errors='replace')
+            if isinstance(obj, bytes):
+                try:
+                    return obj.decode(encoding, errors='replace')
+                except Exception:
+                    return obj.decode('utf-8', errors='replace')
+            return obj
+        if tag == '[':  # Array
+            n = self._read_fixnum()
+            arr = []
+            obj_id = len(self._objects)
+            self._objects.append(arr)
+            for _ in range(n):
+                arr.append(self._read_value())
+            return arr
+        if tag == '{':  # Hash
+            n = self._read_fixnum()
+            h = {}
+            obj_id = len(self._objects)
+            self._objects.append(h)
+            for _ in range(n):
+                k = self._read_value()
+                v = self._read_value()
+                # Flatten symbol keys
+                if isinstance(k, tuple) and k[0] == '__sym__':
+                    k = k[1]
+                h[k] = v
+            return h
+        if tag == 'o':  # Object
+            klass = self._read_value()
+            klass_name = klass[1] if isinstance(klass, tuple) and klass[0] == '__sym__' else str(klass)
+            n_ivars = self._read_fixnum()
+            obj = {'__class__': klass_name}
+            obj_id = len(self._objects)
+            self._objects.append(obj)
+            for _ in range(n_ivars):
+                k = self._read_value()
+                v = self._read_value()
+                k_name = k[1] if isinstance(k, tuple) and k[0] == '__sym__' else str(k)
+                # Strip leading @ from instance var names
+                if k_name.startswith('@'):
+                    k_name = k_name[1:]
+                obj[k_name] = v
+            return obj
+        if tag == '@':  # Object ref
+            idx = self._read_fixnum()
+            return self._objects[idx] if idx < len(self._objects) else None
+        if tag == 'l':  # Bignum
+            sign = chr(self._read_byte())
+            n = self._read_fixnum()
+            val = 0
+            for i in range(n * 2):
+                val |= self._read_byte() << (8 * i)
+            return val if sign == '+' else -val
+        if tag == 'u':  # User-defined (Table, Tone, Color, etc.) — skip data
+            klass = self._read_value()
+            data = self._read_raw_string()
+            klass_name = klass[1] if isinstance(klass, tuple) and klass[0] == '__sym__' else str(klass)
+            obj = {'__class__': klass_name, '__userdata__': True}
+            self._objects.append(obj)
+            return obj
+        if tag == 'U':  # User marshal
+            klass = self._read_value()
+            val = self._read_value()
+            return val
+        if tag == 'e':  # Extended module
+            mod = self._read_value()
+            return self._read_value()
+        if tag == 'C':  # Subclass of built-in
+            klass = self._read_value()
+            return self._read_value()
+
+        # Unknown tag — try to skip gracefully
+        return None
+
+
+def _marshal_load(filepath: str):
+    """Load a Ruby Marshal file and return the deserialized Python object."""
+    with open(filepath, 'rb') as f:
+        data = f.read()
+    reader = RubyMarshalReader(data)
+    return reader.load()
+
+
+def _extract_marshal_strings(obj, prefix: str, strings: dict):
+    """Recursively extract translatable strings from a deserialized Marshal object."""
+    if obj is None:
+        return
+    if isinstance(obj, dict):
+        cls = obj.get('__class__', '')
+        # Skip non-data classes
+        if obj.get('__userdata__'):
+            return
+        for field in _TRANSLATABLE_FIELDS + ['display_name']:
+            val = obj.get(field)
+            if isinstance(val, str) and _is_translatable(val):
+                strings[f"{prefix}_{field}"] = val
+        # Event commands — list of RPG::EventCommand objects
+        cmd_list = obj.get('list')
+        if isinstance(cmd_list, list):
+            for ci, cmd in enumerate(cmd_list):
+                if isinstance(cmd, dict) and cmd.get('__class__', '').endswith('EventCommand'):
+                    code = cmd.get('code', 0)
+                    params = cmd.get('parameters', [])
+                    if code in _DIALOG_CODES and params:
+                        text = params[0] if isinstance(params[0], str) else None
+                        if text and _is_translatable(text):
+                            strings[f"{prefix}_cmd_{ci}"] = text
+                    elif code == _CHOICE_CODE and params:
+                        choices = params[0] if isinstance(params[0], list) else []
+                        for chi, ch in enumerate(choices):
+                            if isinstance(ch, str) and _is_translatable(ch):
+                                strings[f"{prefix}_cmd_{ci}_ch_{chi}"] = ch
+        # Pages (for map events)
+        pages = obj.get('pages')
+        if isinstance(pages, list):
+            for pi, page in enumerate(pages):
+                if isinstance(page, dict):
+                    _extract_marshal_strings(page, f"{prefix}_pg_{pi}", strings)
+        # Events hash (for maps)
+        events = obj.get('events')
+        if isinstance(events, dict):
+            for ev_id, ev in events.items():
+                if isinstance(ev, dict):
+                    ev_name = ev.get('name', '')
+                    if isinstance(ev_name, str) and _is_translatable(ev_name):
+                        strings[f"{prefix}_ev_{ev_id}_name"] = ev_name
+                    _extract_marshal_strings(ev, f"{prefix}_ev_{ev_id}", strings)
+    elif isinstance(obj, list):
+        for idx, item in enumerate(obj):
+            if isinstance(item, dict):
+                _extract_marshal_strings(item, f"{prefix}_{idx}", strings)
+
+
+def extract_marshal_data(data_dir: str, ext: str, log: Callable = print
+                         ) -> Dict[str, Dict[str, str]]:
+    """Extract translatable strings from Ruby Marshal data files (.rvdata2/.rvdata/.rxdata)."""
+    all_strings = {}
+    files = sorted([f for f in os.listdir(data_dir) if f.endswith(ext)])
+    log(f"📦 Found {len(files)} {ext} files")
+
+    # Database files to process
+    db_names = ['Actors', 'Armors', 'Classes', 'CommonEvents', 'Enemies',
+                'Items', 'Skills', 'States', 'System', 'Weapons']
+
+    for fname in files:
+        path = os.path.join(data_dir, fname)
+        base = os.path.splitext(fname)[0]
+        try:
+            obj = _marshal_load(path)
+        except Exception as e:
+            log(f"   ⚠️ Failed to parse {fname}: {e}")
+            continue
+
+        strings = {}
+
+        if base.startswith('Map') and base[3:].isdigit():
+            # Map file
+            if isinstance(obj, dict):
+                dn = obj.get('display_name', '')
+                if isinstance(dn, str) and _is_translatable(dn):
+                    strings['display_name'] = dn
+                _extract_marshal_strings(obj, 'map', strings)
+        elif base in db_names:
+            if isinstance(obj, list):
+                for idx, entry in enumerate(obj):
+                    if isinstance(entry, dict):
+                        _extract_marshal_strings(entry, f"{idx}", strings)
+            elif isinstance(obj, dict):
+                _extract_marshal_strings(obj, base.lower(), strings)
+        elif base == 'System':
+            if isinstance(obj, dict):
+                for field in ['game_title', 'title', 'currency_unit']:
+                    val = obj.get(field)
+                    if isinstance(val, str) and _is_translatable(val):
+                        strings[field] = val
+                # Words/terms
+                words = obj.get('words') or obj.get('terms')
+                if isinstance(words, dict):
+                    for k, v in words.items():
+                        if isinstance(v, str) and _is_translatable(v):
+                            strings[f"terms_{k}"] = v
+                        elif isinstance(v, list):
+                            for vi, vv in enumerate(v):
+                                if isinstance(vv, str) and _is_translatable(vv):
+                                    strings[f"terms_{k}_{vi}"] = vv
+        else:
+            # Generic — try to extract from any structure
+            if isinstance(obj, list):
+                for idx, entry in enumerate(obj):
+                    if isinstance(entry, dict):
+                        _extract_marshal_strings(entry, f"{idx}", strings)
+
+        if strings:
+            all_strings[fname] = strings
+            log(f"   📄 {fname}: {len(strings)} strings")
+
+    return all_strings
+
+
+# ============================================================
+# RPG Maker 2000/2003 binary parser (.ldb / .lmu / .lmt)
+# ============================================================
+
+def _ber_read(f) -> int:
+    """Read a BER-encoded variable-length integer."""
+    result = 0
+    shift = 0
+    while True:
+        b = f.read(1)
+        if not b:
+            raise EOFError
+        byte = b[0]
+        result |= (byte & 0x7F) << shift
+        if not (byte & 0x80):
+            break
+        shift += 7
+    return result
+
+
+def _read_rm2k_string(f, encoding='shift_jis') -> str:
+    """Read a BER-length-prefixed string."""
+    length = _ber_read(f)
+    raw = f.read(length)
+    try:
+        return raw.decode(encoding, errors='replace')
+    except Exception:
+        return raw.decode('utf-8', errors='replace')
+
+
+def _skip_rm2k_chunk(f):
+    """Skip a BER-length-prefixed chunk."""
+    length = _ber_read(f)
+    f.read(length)
+
+
+def extract_rm2k3_ldb(filepath: str, log: Callable = print
+                      ) -> Dict[str, Dict[str, str]]:
+    """Extract translatable strings from RPG Maker 2000/2003 LDB (database) file."""
+    all_strings = {}
+    basename = os.path.basename(filepath)
+
+    # Detect encoding — try shift_jis first (Japanese), then cp949 (Korean), gbk (Chinese)
+    encoding = 'shift_jis'
+
+    try:
+        with open(filepath, 'rb') as f:
+            # Read header string
+            header = _read_rm2k_string(f, 'ascii')
+            if 'RPG_RT' not in header and 'LcfDataBase' not in header:
+                log(f"⚠️ {basename}: unexpected header '{header}'")
+                return {}
+
+            strings = {}
+            # The LDB is a sequence of tagged sections
+            # Each section: tag(BER) + length(BER) + data
+            # Key sections: 0x0B=Actors, 0x0C=Skills, 0x0D=Items,
+            #   0x0E=Enemies, 0x11=Classes, 0x12=System terms
+            section_names = {
+                0x0B: 'Actors', 0x0C: 'Skills', 0x0D: 'Items',
+                0x0E: 'Enemies', 0x0F: 'Troops', 0x10: 'Terrains',
+                0x11: 'States', 0x12: 'Animations', 0x13: 'ChipSets',
+                0x14: 'Terms', 0x15: 'System', 0x16: 'Switches',
+                0x17: 'Variables', 0x18: 'CommonEvents',
+            }
+            # String field tags within each DB entry (simplified)
+            # Actors: 0x01=name, 0x02=title, 0x07=skill_name
+            # Items: 0x01=name, 0x02=description
+            # Skills: 0x01=name, 0x02=description
+            string_tags = {0x01, 0x02, 0x03, 0x07}
+
+            while True:
+                try:
+                    section_tag = _ber_read(f)
+                except EOFError:
+                    break
+
+                section_len = _ber_read(f)
+                section_end = f.tell() + section_len
+                section_name = section_names.get(section_tag, f"section_{section_tag:02x}")
+
+                if section_tag in (0x0B, 0x0C, 0x0D, 0x0E, 0x11):
+                    # Array of entries — each entry is: index(BER) + entry_data
+                    try:
+                        count = _ber_read(f)
+                        for _ in range(count):
+                            entry_idx = _ber_read(f)
+                            entry_len = _ber_read(f)
+                            entry_end = f.tell() + entry_len
+                            while f.tell() < entry_end:
+                                try:
+                                    field_tag = _ber_read(f)
+                                    field_len = _ber_read(f)
+                                    field_data = f.read(field_len)
+                                    if field_tag in string_tags and field_data:
+                                        try:
+                                            text = field_data.decode(encoding, errors='replace')
+                                            if _is_translatable(text):
+                                                key = f"{section_name}_{entry_idx}_f{field_tag:02x}"
+                                                strings[key] = text
+                                        except Exception:
+                                            pass
+                                except EOFError:
+                                    break
+                    except Exception:
+                        f.seek(section_end)
+                elif section_tag == 0x14:
+                    # Terms section — flat list of strings for menu text
+                    try:
+                        term_idx = 0
+                        pos_start = f.tell()
+                        while f.tell() < section_end:
+                            try:
+                                t_tag = _ber_read(f)
+                                t_len = _ber_read(f)
+                                t_data = f.read(t_len)
+                                if t_data:
+                                    try:
+                                        text = t_data.decode(encoding, errors='replace')
+                                        if _is_translatable(text):
+                                            strings[f"Terms_{t_tag}"] = text
+                                    except Exception:
+                                        pass
+                                term_idx += 1
+                            except EOFError:
+                                break
+                    except Exception:
+                        f.seek(section_end)
+                else:
+                    f.seek(section_end)
+
+            if strings:
+                all_strings[basename] = strings
+                log(f"   📦 {basename}: {len(strings)} strings")
+
+    except Exception as e:
+        log(f"⚠️ Failed to parse {basename}: {e}")
+
+    return all_strings
+
+
+def extract_rm2k3_maps(game_dir: str, log: Callable = print
+                       ) -> Dict[str, Dict[str, str]]:
+    """Extract translatable strings from RPG Maker 2000/2003 LMU (map) files."""
+    all_strings = {}
+    map_files = sorted([f for f in os.listdir(game_dir)
+                        if re.match(r'^Map\d+\.lmu$', f, re.IGNORECASE)])
+    log(f"🗺️ Found {len(map_files)} LMU map files")
+
+    encoding = 'shift_jis'
+
+    for mf in map_files:
+        path = os.path.join(game_dir, mf)
+        strings = {}
+        try:
+            with open(path, 'rb') as f:
+                header = _read_rm2k_string(f, 'ascii')
+                # LMU structure: tagged fields, events section at tag 0x51
+                file_size = os.path.getsize(path)
+                while f.tell() < file_size:
+                    try:
+                        tag = _ber_read(f)
+                        length = _ber_read(f)
+                        chunk_end = f.tell() + length
+
+                        if tag == 0x51:  # Events section
+                            try:
+                                ev_count = _ber_read(f)
+                                for _ in range(ev_count):
+                                    ev_id = _ber_read(f)
+                                    ev_len = _ber_read(f)
+                                    ev_end = f.tell() + ev_len
+                                    # Parse event fields
+                                    while f.tell() < ev_end:
+                                        try:
+                                            ft = _ber_read(f)
+                                            fl = _ber_read(f)
+                                            fd = f.read(fl)
+                                            # 0x01=name, 0x05=pages contain commands
+                                            if ft == 0x01 and fd:
+                                                try:
+                                                    text = fd.decode(encoding, errors='replace')
+                                                    if _is_translatable(text):
+                                                        strings[f"ev_{ev_id}_name"] = text
+                                                except Exception:
+                                                    pass
+                                            # Event commands with text are in pages
+                                            # Command strings have codes 10110 (show text)
+                                            # For simplicity, extract all non-trivial strings
+                                            elif ft in (0x02, 0x03, 0x04, 0x15, 0x16) and fd:
+                                                try:
+                                                    text = fd.decode(encoding, errors='replace')
+                                                    if _is_translatable(text) and len(text) > 2:
+                                                        strings[f"ev_{ev_id}_f{ft:02x}"] = text
+                                                except Exception:
+                                                    pass
+                                        except EOFError:
+                                            break
+                            except Exception:
+                                f.seek(chunk_end)
+                        else:
+                            f.seek(chunk_end)
+                    except EOFError:
+                        break
+        except Exception as e:
+            log(f"   ⚠️ Failed to parse {mf}: {e}")
+            continue
+
+        if strings:
+            all_strings[mf] = strings
+            log(f"   📄 {mf}: {len(strings)} strings")
+
+    return all_strings
+
+
 def extract_all(game_dir: str, log: Callable = print
                 ) -> Tuple[str, str, Dict[str, Dict[str, str]]]:
     """Full extraction pipeline. Returns (version, data_dir, all_strings)."""
@@ -257,13 +777,32 @@ def extract_all(game_dir: str, log: Callable = print
         db_strings = extract_db_strings(data_dir, log)
         map_strings = extract_map_strings(data_dir, log)
         all_strings = {**db_strings, **map_strings}
-
-        total = sum(len(v) for v in all_strings.values())
-        log(f"📊 Total extractable strings: {total}")
-        return version, data_dir, all_strings
+    elif version == RPGMakerVersion.VX_ACE:
+        log("📦 Parsing Ruby Marshal (.rvdata2) files...")
+        all_strings = extract_marshal_data(data_dir, '.rvdata2', log)
+    elif version == RPGMakerVersion.VX:
+        log("📦 Parsing Ruby Marshal (.rvdata) files...")
+        all_strings = extract_marshal_data(data_dir, '.rvdata', log)
+    elif version == RPGMakerVersion.XP:
+        log("📦 Parsing Ruby Marshal (.rxdata) files...")
+        all_strings = extract_marshal_data(data_dir, '.rxdata', log)
+    elif version == RPGMakerVersion.RM2K3:
+        log("📦 Parsing RPG Maker 2000/2003 binary files...")
+        ldb_path = None
+        for f in os.listdir(game_dir):
+            if f.lower() == 'rpg_rt.ldb':
+                ldb_path = os.path.join(game_dir, f)
+                break
+        all_strings = {}
+        if ldb_path:
+            all_strings.update(extract_rm2k3_ldb(ldb_path, log))
+        all_strings.update(extract_rm2k3_maps(game_dir, log))
     else:
-        log(f"⚠️ {version} support coming soon - currently MV/MZ only")
-        return version, data_dir, {}
+        all_strings = {}
+
+    total = sum(len(v) for v in all_strings.values())
+    log(f"📊 Total extractable strings: {total}")
+    return version, data_dir, all_strings
 
 
 def create_translation_file(game_dir: str, all_strings: Dict,
@@ -356,10 +895,12 @@ def parse_translated_chunk(response: str, chunk: Dict) -> Dict[str, str]:
 
 
 def apply_translations(data_dir: str, trans_map_path: str,
-                       log: Callable = print) -> bool:
+                       log: Callable = print, version: str = None) -> bool:
     """Apply translations from the translation map back to game files.
 
-    Creates backups before modifying any file.
+    For MV/MZ (JSON): patches files directly with backups.
+    For VX Ace/VX/XP/2K3 (binary): generates a patch JSON that can be
+    used with a game plugin or applied via a separate tool.
     """
     try:
         with open(trans_map_path, 'r', encoding='utf-8') as f:
@@ -370,6 +911,10 @@ def apply_translations(data_dir: str, trans_map_path: str,
 
     backup_dir = os.path.join(os.path.dirname(trans_map_path), "originals_backup")
     os.makedirs(backup_dir, exist_ok=True)
+
+    # For binary formats, we can't patch in-place easily — generate a patch file
+    if version and version not in (RPGMakerVersion.MV, RPGMakerVersion.MZ):
+        return _apply_binary_format_translations(data_dir, trans_data, trans_map_path, log, version)
 
     patched = 0
     for filename, entries in trans_data.items():
@@ -412,6 +957,234 @@ def apply_translations(data_dir: str, trans_map_path: str,
 
     log(f"🎮 Total: {patched} strings patched into game files")
     return True
+
+
+def _apply_binary_format_translations(data_dir: str, trans_data: dict,
+                                      trans_map_path: str, log: Callable,
+                                      version: str) -> bool:
+    """For binary formats (VX Ace/VX/XP/2K3), attempt in-place Marshal patching
+    or generate a readable patch file for manual/plugin use."""
+    backup_dir = os.path.join(os.path.dirname(trans_map_path), "originals_backup")
+    os.makedirs(backup_dir, exist_ok=True)
+
+    patched_total = 0
+
+    for filename, entries in trans_data.items():
+        file_path = os.path.join(data_dir, filename)
+        if not os.path.exists(file_path):
+            continue
+
+        # Count how many translations we have for this file
+        translated_entries = {k: v for k, v in entries.items()
+                              if v.get("translated")}
+        if not translated_entries:
+            continue
+
+        # For Marshal formats, try to load, patch, and re-serialize
+        if version in (RPGMakerVersion.VX_ACE, RPGMakerVersion.VX, RPGMakerVersion.XP):
+            try:
+                # Backup original
+                backup_path = os.path.join(backup_dir, filename)
+                if not os.path.exists(backup_path):
+                    shutil.copy2(file_path, backup_path)
+
+                obj = _marshal_load(file_path)
+                file_patched = _patch_marshal_object(obj, translated_entries)
+
+                if file_patched > 0:
+                    # Re-serialize using Ruby Marshal format
+                    serialized = _marshal_dump(obj)
+                    with open(file_path, 'wb') as f:
+                        f.write(serialized)
+                    patched_total += file_patched
+                    log(f"   ✅ {filename}: {file_patched} strings patched (Marshal)")
+            except Exception as e:
+                log(f"   ⚠️ {filename}: Marshal patch failed ({e}), saving to patch file")
+                patched_total += len(translated_entries)
+        else:
+            # 2K3 binary — too complex for in-place patching, count as patch-file output
+            patched_total += len(translated_entries)
+
+    # Always generate a human-readable patch file
+    patch_path = os.path.join(os.path.dirname(trans_map_path), "translation_patch.json")
+    patch_data = {}
+    for filename, entries in trans_data.items():
+        file_entries = {}
+        for key, entry in entries.items():
+            if entry.get("translated"):
+                file_entries[key] = {
+                    "original": entry["original"],
+                    "translated": entry["translated"]
+                }
+        if file_entries:
+            patch_data[filename] = file_entries
+
+    with open(patch_path, 'w', encoding='utf-8') as f:
+        json.dump(patch_data, f, ensure_ascii=False, indent=2)
+
+    log(f"💾 Translation patch saved: {patch_path}")
+    log(f"🎮 Total: {patched_total} strings processed")
+    return True
+
+
+def _patch_marshal_object(obj, translated_entries: dict, prefix: str = "") -> int:
+    """Recursively patch translatable strings in a deserialized Marshal object."""
+    if obj is None or not isinstance(obj, (dict, list)):
+        return 0
+
+    patched = 0
+
+    if isinstance(obj, dict):
+        if obj.get('__userdata__'):
+            return 0
+        # Direct field patches
+        for field in _TRANSLATABLE_FIELDS + ['display_name']:
+            for key, entry in translated_entries.items():
+                if key.endswith(f"_{field}") and field in obj:
+                    if isinstance(obj[field], str) and obj[field] == entry["original"]:
+                        obj[field] = entry["translated"]
+                        patched += 1
+        # Recurse into pages, events, command lists
+        for sub_key in ('pages', 'list', 'events'):
+            sub = obj.get(sub_key)
+            if isinstance(sub, (dict, list)):
+                patched += _patch_marshal_object(sub, translated_entries, prefix)
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, (dict, list)):
+                patched += _patch_marshal_object(item, translated_entries, prefix)
+
+    return patched
+
+
+# ============================================================
+# Ruby Marshal writer (minimal) — for writing patched VX Ace/VX/XP data
+# ============================================================
+
+def _marshal_dump(obj) -> bytes:
+    """Serialize a Python object back to Ruby Marshal 4.8 format."""
+    buf = io.BytesIO()
+    writer = RubyMarshalWriter(buf)
+    buf.write(b'\x04\x08')  # Marshal magic
+    writer.write_value(obj)
+    return buf.getvalue()
+
+
+class RubyMarshalWriter:
+    """Minimal Ruby Marshal writer for re-serializing patched RPG Maker data."""
+
+    def __init__(self, buf: io.BytesIO):
+        self._buf = buf
+        self._symbols = {}
+        self._objects = {}
+
+    def _write_byte(self, b: int):
+        self._buf.write(bytes([b & 0xFF]))
+
+    def _write_fixnum(self, n: int):
+        if n == 0:
+            self._buf.write(b'\x00')
+        elif 0 < n < 123:
+            self._write_byte(n + 5)
+        elif -128 < n < 0:
+            self._write_byte(n - 5 & 0xFF)
+        elif n > 0:
+            # Positive multi-byte
+            bs = []
+            tmp = n
+            while tmp > 0:
+                bs.append(tmp & 0xFF)
+                tmp >>= 8
+            self._write_byte(len(bs))
+            for b in bs:
+                self._write_byte(b)
+        else:
+            # Negative multi-byte
+            bs = []
+            tmp = -n - 1
+            for i in range(4):
+                bs.append(~(tmp >> (8 * i)) & 0xFF)
+                if tmp >> (8 * (i + 1)) == 0:
+                    break
+            self._write_byte(-len(bs) & 0xFF)
+            for b in bs:
+                self._write_byte(b)
+
+    def _write_raw_string(self, s: bytes):
+        self._write_fixnum(len(s))
+        self._buf.write(s)
+
+    def _write_symbol(self, name: str):
+        if name in self._symbols:
+            self._write_byte(ord(';'))
+            self._write_fixnum(self._symbols[name])
+        else:
+            idx = len(self._symbols)
+            self._symbols[name] = idx
+            self._write_byte(ord(':'))
+            self._write_raw_string(name.encode('utf-8'))
+
+    def write_value(self, obj):
+        if obj is None:
+            self._write_byte(ord('0'))
+        elif obj is True:
+            self._write_byte(ord('T'))
+        elif obj is False:
+            self._write_byte(ord('F'))
+        elif isinstance(obj, int):
+            self._write_byte(ord('i'))
+            self._write_fixnum(obj)
+        elif isinstance(obj, float):
+            self._write_byte(ord('f'))
+            s = repr(obj).encode('ascii')
+            self._write_raw_string(s)
+        elif isinstance(obj, str):
+            # Instance string with UTF-8 encoding
+            self._write_byte(ord('I'))
+            self._write_byte(ord('"'))
+            encoded = obj.encode('utf-8')
+            self._write_raw_string(encoded)
+            # 1 ivar: :E => true (UTF-8)
+            self._write_fixnum(1)
+            self._write_symbol('E')
+            self._write_byte(ord('T'))
+        elif isinstance(obj, bytes):
+            self._write_byte(ord('"'))
+            self._write_raw_string(obj)
+        elif isinstance(obj, list):
+            self._write_byte(ord('['))
+            self._write_fixnum(len(obj))
+            for item in obj:
+                self.write_value(item)
+        elif isinstance(obj, dict):
+            cls = obj.get('__class__')
+            if cls and not obj.get('__userdata__'):
+                # Object with class
+                self._write_byte(ord('o'))
+                self._write_symbol(cls)
+                # Count non-meta keys
+                real_keys = [k for k in obj if k not in ('__class__', '__userdata__')]
+                self._write_fixnum(len(real_keys))
+                for k in real_keys:
+                    self._write_symbol(f'@{k}')
+                    self.write_value(obj[k])
+            elif obj.get('__userdata__'):
+                # User-defined type — write as nil (data was not modified)
+                self._write_byte(ord('0'))
+            elif isinstance(obj, tuple) and len(obj) == 2 and obj[0] == '__sym__':
+                self._write_symbol(obj[1])
+            else:
+                # Regular hash
+                self._write_byte(ord('{'))
+                self._write_fixnum(len(obj))
+                for k, v in obj.items():
+                    if isinstance(k, str):
+                        self._write_symbol(k)
+                    else:
+                        self.write_value(k)
+                    self.write_value(v)
+        elif isinstance(obj, tuple) and len(obj) == 2 and obj[0] == '__sym__':
+            self._write_symbol(obj[1])
 
 
 def _patch_map_entry(data: dict, key: str, translated: str) -> int:

@@ -13000,7 +13000,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if translated_count > 0:
                 self.append_log("🔧 Applying translations to game files...")
                 rpgmaker_handler.apply_translations(
-                    data_dir, trans_path, self.append_log)
+                    data_dir, trans_path, self.append_log, version=version)
 
             self.append_log(f"🎮 GTool: Translation complete!")
             self.append_log(f"💾 Translation data: {os.path.join(game_dir, 'GTool_Translation')}")
