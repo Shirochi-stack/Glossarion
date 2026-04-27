@@ -1158,6 +1158,72 @@ def open_other_settings(self):
     main_layout.setContentsMargins(5, 5, 5, 5)  # Set uniform margins
     main_layout.setSpacing(8)  # Set spacing between widgets
 
+    # Explicit dark theme for the dialog — on macOS, child dialogs with
+    # Qt.WindowType.Window don't inherit the parent's stylesheet reliably.
+    dialog.setStyleSheet("""
+        QDialog, QWidget {
+            background-color: #1e1e1e;
+            color: white;
+        }
+        QLabel {
+            color: white;
+            background-color: transparent;
+        }
+        QGroupBox {
+            color: white;
+            border: 1px solid #4a5568;
+            border-radius: 4px;
+            margin-top: 8px;
+            padding-top: 12px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 8px;
+            padding: 0 4px;
+            color: #5a9fd4;
+        }
+        QLineEdit, QTextEdit, QSpinBox {
+            background-color: #2d2d2d;
+            color: white;
+            border: 1px solid #4a5568;
+            border-radius: 3px;
+            padding: 4px;
+        }
+        QLineEdit:focus, QTextEdit:focus, QSpinBox:focus {
+            border-color: #5a9fd4;
+        }
+        QPushButton {
+            background-color: #3d3d3d;
+            color: white;
+            border: 1px solid #4a5568;
+            border-radius: 3px;
+            padding: 5px 10px;
+        }
+        QPushButton:hover {
+            background-color: #4d4d4d;
+            border-color: #5a9fd4;
+        }
+        QComboBox {
+            background-color: #2d2d2d;
+            color: white;
+            border: 1px solid #4a5568;
+            border-radius: 3px;
+            padding: 4px;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #2d2d2d;
+            color: white;
+            selection-background-color: #5a9fd4;
+        }
+        QScrollArea {
+            background-color: #1e1e1e;
+            border: none;
+        }
+        QFrame {
+            background-color: transparent;
+        }
+    """)
+
     # Set up icon path
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
 
