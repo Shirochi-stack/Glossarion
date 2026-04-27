@@ -113,6 +113,11 @@ def _is_translatable(text: str) -> bool:
     # Skip very short strings that are just punctuation
     if len(stripped) <= 1 and not stripped.isalpha():
         return False
+    # Skip strings that are ONLY RPG Maker escape codes (no real text)
+    # Covers: \c[N], \n[N], \V[N], \N[N], \C[N], \I[N], \G, \{, \}, etc.
+    code_stripped = re.sub(r'\\+[a-zA-Z]\[\d+\]|\\+[{}GS$.|!><^]', '', stripped)
+    if not code_stripped.strip():
+        return False
     return True
 
 
