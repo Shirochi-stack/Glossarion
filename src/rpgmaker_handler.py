@@ -1443,10 +1443,11 @@ def _patch_common_event(data: list, key: str, translated: str) -> int:
             cmd_list = data[ev_idx]["list"]
             num_lines = cmd_end - cmd_start + 1
             trans_lines = translated.split("\n")
-            while len(trans_lines) < num_lines:
-                trans_lines.append("")
-            if len(trans_lines) > num_lines:
-                trans_lines = trans_lines[:num_lines - 1] + ["\n".join(trans_lines[num_lines - 1:])]
+            if len(trans_lines) < num_lines and num_lines > 1:
+                full_text = " ".join(ln.strip() for ln in trans_lines if ln.strip())
+                trans_lines = _wrap_to_lines(full_text, num_lines)
+            elif len(trans_lines) > num_lines:
+                trans_lines = trans_lines[:num_lines - 1] + [" ".join(trans_lines[num_lines - 1:])]
             for offset in range(num_lines):
                 ci = cmd_start + offset
                 if ci < len(cmd_list):
