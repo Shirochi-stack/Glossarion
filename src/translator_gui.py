@@ -4266,8 +4266,8 @@ Recent translations to summarize:
         # Reposition project dropdown (may need its own row if authgpt also visible)
         self._reposition_authgem_project_combo()
         
-        # Show extra login buttons for numbered auth accounts found in key pools
-        self._refresh_extra_auth_buttons()
+        # Show/hide ◀▶ arrows for cycling between numbered auth account slots
+        self._refresh_auth_account_arrows()
 
     def _has_authgpt_in_key_pools(self):
         """Check if any enabled key pool contains an enabled authgpt model."""
@@ -4366,7 +4366,7 @@ Recent translations to summarize:
         return False
 
     # ==================================================================
-    # Extra Auth Buttons for numbered account slots in key pools
+    # Auth Account Arrow Switcher for numbered account slots
     # ==================================================================
 
     def _collect_auth_account_ids_from_pools(self):
@@ -4405,138 +4405,100 @@ Recent translations to summarize:
             pass
         return result
 
-    def _refresh_extra_auth_buttons(self):
-        """Create/update small status buttons for extra auth account slots found in key pools.
+    def _refresh_auth_account_arrows(self):
+        """Update arrow button visibility for each auth provider.
 
-        Only shows buttons for account IDs that differ from the primary model's
-        account (which is already shown by the main login button).
+        Collects all account IDs (from the primary model + key pools),
+        stores them in ``_auth_account_ids``, and shows/hides the ◀▶
+        arrow buttons accordingly.  Arrows are only visible when 2+
+        distinct account slots exist for a provider.
         """
         import re as _re
 
-        # Remove previous extra buttons
-        for btn in getattr(self, '_extra_auth_btns', []):
-            btn.setParent(None)
-            btn.deleteLater()
-        self._extra_auth_btns = []
-
         pool_ids = self._collect_auth_account_ids_from_pools()
 
-        # Determine which account ID is already covered by each main login button.
-        # Do NOT rely on isVisible() — it can return False during init or when
-        # the parent widget hasn't been rendered yet, which causes duplicate
-        # extra buttons for account 0.  Instead, re-derive from the model
-        # string and pool checks (same logic on_model_change uses).
+        # Also include the primary model's account ID
         model = getattr(self, 'model_var', '') or self.config.get('model', '')
-        primary = {}
-        if _re.match(r'^authgpt\d{0,4}/', model) or self._has_authgpt_in_key_pools():
-            primary['authgpt'] = self._get_authgpt_account_id()
-        if _re.match(r'^authcd\d{0,4}/', model) or self._has_authcd_in_key_pools():
-            primary['authcd'] = self._get_authcd_account_id()
-        if _re.match(r'^authgem(?:-vertex)?\d{0,4}/', model) or self._has_authgem_in_key_pools():
-            primary['authgem'] = self._get_authgem_account_id()
+        _prov_patterns = {
+            'authgpt': _re.compile(r'^authgpt(\d{0,4})/'),
+            'authcd':  _re.compile(r'^authcd(\d{0,4})/'),
+            'authgem': _re.compile(r'^authgem(?:-vertex)?(\d{0,4})/'),
+        }
+        for provider, pat in _prov_patterns.items():
+            m = pat.match(model)
+            if m:
+                acct_id = int(m.group(1)) if m.group(1) else 0
+                pool_ids[provider].add(acct_id)
 
-        # Provider display config
-        provider_info = {
-            'authgpt': {'label': 'ChatGPT', 'logged_color': '#28a745', 'login_color': '#10a37f',
-                        'store_fn': lambda aid: __import__('authgpt_auth', fromlist=['get_store']).get_store(aid)},
-            'authcd':  {'label': 'Claude', 'logged_color': '#28a745', 'login_color': '#d97706',
-                        'store_fn': lambda aid: __import__('authcd_auth', fromlist=['get_store']).get_store(aid)},
-            'authgem': {'label': 'Gemini', 'logged_color': '#28a745', 'login_color': '#4285f4',
-                        'store_fn': lambda aid: __import__('authgem_auth', fromlist=['get_store']).get_store(aid)},
+        arrow_map = {
+            'authgpt': ('authgpt_prev_btn', 'authgpt_next_btn'),
+            'authcd':  ('authcd_prev_btn',  'authcd_next_btn'),
+            'authgem': ('authgem_prev_btn', 'authgem_next_btn'),
         }
 
-        layout = getattr(self, '_extra_auth_layout', None)
-        if not layout:
-            return
+        if not hasattr(self, '_auth_account_ids'):
+            self._auth_account_ids = {'authgpt': [0], 'authcd': [0], 'authgem': [0]}
+        if not hasattr(self, '_auth_account_idx'):
+            self._auth_account_idx = {'authgpt': 0, 'authcd': 0, 'authgem': 0}
 
-        # Insert before the stretch (which is the last item)
-        insert_idx = layout.count() - 1  # before addStretch
+        for provider, acct_set in pool_ids.items():
+            sorted_ids = sorted(acct_set) if acct_set else [0]
+            self._auth_account_ids[provider] = sorted_ids
 
-        for provider, acct_ids in sorted(pool_ids.items()):
-            info = provider_info.get(provider)
-            if not info:
-                continue
-            for acct_id in sorted(acct_ids):
-                # Skip if this is the primary model's account (already shown)
-                if provider in primary and primary[provider] == acct_id:
-                    continue
-                acct_suffix = f" #{acct_id}" if acct_id else ""
-                try:
-                    store = info['store_fn'](acct_id)
-                    if store.has_tokens:
-                        acct_info = store.account_info
-                        email = acct_info.get('email', '')
-                        btn_text = f"\u2705 {info['label']}{acct_suffix}"
-                        tip_parts = [f"Account slot: {info['label']}{acct_suffix}"]
-                        if email:
-                            tip_parts.append(f"Email: {email}")
-                        tip_parts.append("Logged in (from key pool)")
-                        color = info['logged_color']
+            # Clamp current index if accounts were removed
+            cur_idx = self._auth_account_idx.get(provider, 0)
+            if cur_idx >= len(sorted_ids):
+                cur_idx = 0
+            self._auth_account_idx[provider] = cur_idx
+
+            # Show/hide arrow buttons
+            prev_name, next_name = arrow_map.get(provider, (None, None))
+            if prev_name and hasattr(self, prev_name) and next_name and hasattr(self, next_name):
+                prev_btn = getattr(self, prev_name)
+                next_btn = getattr(self, next_name)
+                # Determine if the main login button for this provider is visible
+                main_btn_name = f"{provider}_login_btn"
+                main_visible = hasattr(self, main_btn_name) and getattr(self, main_btn_name).isVisible()
+                show_arrows = len(sorted_ids) > 1 and main_visible
+                if show_arrows:
+                    prev_btn.show()
+                    next_btn.show()
+                else:
+                    prev_btn.hide()
+                    next_btn.hide()
+
+        # Update all visible main button labels to reflect current selection
+        for provider in ('authgpt', 'authcd', 'authgem'):
+            main_btn_name = f"{provider}_login_btn"
+            if hasattr(self, main_btn_name) and getattr(self, main_btn_name).isVisible():
+                update_fn = getattr(self, f'_update_{provider}_login_status', None)
+                if update_fn:
+                    if provider == 'authgem':
+                        update_fn()  # authgem auto-detects needs_vertex
                     else:
-                        btn_text = f"\ud83d\udd10 {info['label']}{acct_suffix}"
-                        tip_parts = [f"Account slot: {info['label']}{acct_suffix}", "Not logged in"]
-                        color = info['login_color']
-                except Exception:
-                    btn_text = f"\ud83d\udd10 {info['label']}{acct_suffix}"
-                    tip_parts = [f"Account slot: {info['label']}{acct_suffix}", "Module unavailable"]
-                    color = info['login_color']
+                        update_fn()
 
-                btn = QPushButton(btn_text)
-                btn.setStyleSheet(
-                    f"background-color: {color}; color: white; font-weight: bold; "
-                    "font-size: 9pt; padding: 2px 8px; border-radius: 4px;"
-                )
-                btn.setToolTip(
-                    "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>" +
-                    "<br>".join(tip_parts) + "</p></qt>"
-                )
-                # Make clicking open a login/logout dialog for this specific slot
-                _prov = provider
-                _aid = acct_id
-                btn.clicked.connect(lambda checked=False, p=_prov, a=_aid: self._extra_auth_btn_clicked(p, a))
-                layout.insertWidget(insert_idx, btn)
-                insert_idx += 1
-                self._extra_auth_btns.append(btn)
+    def _cycle_auth_account(self, provider, delta):
+        """Cycle the selected account slot for *provider* by *delta* (+1 or -1).
 
-    def _extra_auth_btn_clicked(self, provider, acct_id):
-        """Handle click on an extra auth button – login/logout for a specific account slot."""
-        acct_suffix = f" #{acct_id}" if acct_id else ""
-        provider_labels = {'authgpt': 'ChatGPT', 'authcd': 'Claude', 'authgem': 'Gemini'}
-        label = provider_labels.get(provider, provider)
-        try:
-            if provider == 'authgpt':
-                from authgpt_auth import get_store
-            elif provider == 'authcd':
-                from authcd_auth import get_store
-            elif provider == 'authgem':
-                from authgem_auth import get_store
+        Updates the arrow-controlled index, then refreshes the main login
+        button text/tooltip/style to reflect the newly selected account.
+        """
+        ids_list = self._auth_account_ids.get(provider, [0])
+        if len(ids_list) <= 1:
+            return  # nothing to cycle
+
+        cur = self._auth_account_idx.get(provider, 0)
+        cur = (cur + delta) % len(ids_list)
+        self._auth_account_idx[provider] = cur
+
+        # Refresh the main button appearance
+        update_fn = getattr(self, f'_update_{provider}_login_status', None)
+        if update_fn:
+            if provider == 'authgem':
+                update_fn()  # auto-detects needs_vertex
             else:
-                return
-            store = get_store(acct_id)
-        except ImportError:
-            QMessageBox.critical(self, "Unavailable", f"The {label} auth module is not installed.")
-            return
-
-        if store.has_tokens:
-            email = store.account_info.get('email', '')
-            msg = f"Currently logged in{acct_suffix}"
-            if email:
-                msg += f" as {email}"
-            msg += ".\n\nDo you want to log out?"
-            reply = QMessageBox.question(
-                self, f"{label} Account",
-                msg, QMessageBox.Yes | QMessageBox.No
-            )
-            if reply == QMessageBox.Yes:
-                store.clear_tokens()
-                self.append_log(f"\ud83d\udd13 {label}{acct_suffix}: Logged out")
-                self._refresh_extra_auth_buttons()
-        else:
-            QMessageBox.information(
-                self, f"{label} Account",
-                f"{label}{acct_suffix} is not logged in.\n\n"
-                f"To log in, set your model field to '{provider}{acct_id}/<model>' and use the main login button."
-            )
+                update_fn()
 
     # ==================================================================
     # AuthCD (Claude Login) – mirrors the AuthGPT pattern
@@ -4544,7 +4506,18 @@ Recent translations to summarize:
 
 
     def _get_authcd_account_id(self):
-        """Return the numeric account ID from the current model's authcd prefix."""
+        """Return the numeric account ID for the AuthCD provider.
+
+        If the arrow switcher is active (multiple account slots), returns
+        the currently-selected slot.  Otherwise falls back to parsing the
+        model prefix string.
+        """
+        # Arrow switcher override
+        ids_list = getattr(self, '_auth_account_ids', {}).get('authcd', [])
+        idx = getattr(self, '_auth_account_idx', {}).get('authcd', 0)
+        if len(ids_list) > 1 and 0 <= idx < len(ids_list):
+            return ids_list[idx]
+        # Fallback: parse model string
         model = getattr(self, 'model_var', '') or self.config.get('model', '')
         import re as _re
         m = _re.match(r'^authcd(\d{1,4})/', model)
@@ -4763,10 +4736,18 @@ Recent translations to summarize:
         QMessageBox.warning(self, "Login Failed", f"Claude login failed:\n{err}")
 
     def _get_authgpt_account_id(self):
-        """Return the numeric account ID from the current model's authgpt prefix.
+        """Return the numeric account ID for the AuthGPT provider.
 
-        ``authgpt/`` → 0, ``authgpt2/`` → 2, ``authgpt99/`` → 99.
+        If the arrow switcher is active (multiple account slots), returns
+        the currently-selected slot.  Otherwise falls back to parsing the
+        model prefix string (``authgpt/`` → 0, ``authgpt2/`` → 2).
         """
+        # Arrow switcher override
+        ids_list = getattr(self, '_auth_account_ids', {}).get('authgpt', [])
+        idx = getattr(self, '_auth_account_idx', {}).get('authgpt', 0)
+        if len(ids_list) > 1 and 0 <= idx < len(ids_list):
+            return ids_list[idx]
+        # Fallback: parse model string
         model = getattr(self, 'model_var', '') or self.config.get('model', '')
         import re as _re
         m = _re.match(r'^authgpt(\d{1,4})/', model)
@@ -4910,11 +4891,18 @@ Recent translations to summarize:
     # ==================================================================
 
     def _get_authgem_account_id(self) -> int:
-        """Extract the account slot number from the current model prefix.
-        
-        Returns 0 for the default account (authgem/, authgem-vertex/),
-        or N for numbered accounts (authgemN/, authgem-vertexN/).
+        """Return the numeric account ID for the AuthGem provider.
+
+        If the arrow switcher is active (multiple account slots), returns
+        the currently-selected slot.  Otherwise falls back to parsing the
+        model prefix string.
         """
+        # Arrow switcher override
+        ids_list = getattr(self, '_auth_account_ids', {}).get('authgem', [])
+        idx = getattr(self, '_auth_account_idx', {}).get('authgem', 0)
+        if len(ids_list) > 1 and 0 <= idx < len(ids_list):
+            return ids_list[idx]
+        # Fallback: parse model string
         import re
         m = re.match(r'^authgem(?:-vertex)?(\d{1,4})/', self.model_var)
         return int(m.group(1)) if m else 0
@@ -5769,6 +5757,27 @@ Recent translations to summarize:
         self.authgpt_login_btn.hide()
         model_btn_layout.addWidget(self.authgpt_login_btn)
         
+        # AuthGPT arrow buttons for cycling account slots
+        _arrow_style = (
+            "QPushButton { background-color: #2a3a4a; color: #ccc; font-weight: bold; "
+            "font-size: 9pt; padding: 0px; border: 1px solid #555; border-radius: 3px; } "
+            "QPushButton:hover { background-color: #3a4a5a; color: white; border-color: #888; }"
+        )
+        self.authgpt_prev_btn = QPushButton("\u25c0")
+        self.authgpt_prev_btn.setFixedSize(22, 26)
+        self.authgpt_prev_btn.setStyleSheet(_arrow_style)
+        self.authgpt_prev_btn.setToolTip("Previous ChatGPT account slot")
+        self.authgpt_prev_btn.clicked.connect(lambda: self._cycle_auth_account('authgpt', -1))
+        self.authgpt_prev_btn.hide()
+        model_btn_layout.addWidget(self.authgpt_prev_btn)
+        self.authgpt_next_btn = QPushButton("\u25b6")
+        self.authgpt_next_btn.setFixedSize(22, 26)
+        self.authgpt_next_btn.setStyleSheet(_arrow_style)
+        self.authgpt_next_btn.setToolTip("Next ChatGPT account slot")
+        self.authgpt_next_btn.clicked.connect(lambda: self._cycle_auth_account('authgpt', +1))
+        self.authgpt_next_btn.hide()
+        model_btn_layout.addWidget(self.authgpt_next_btn)
+        
         # AuthCD Login button (visible only for authcd/ models)
         self.authcd_login_btn = QPushButton("\ud83d\udd10 Claude Login")
         self.authcd_login_btn.setStyleSheet(
@@ -5784,6 +5793,22 @@ Recent translations to summarize:
         self.authcd_login_btn.hide()
         model_btn_layout.addWidget(self.authcd_login_btn)
         
+        # AuthCD arrow buttons for cycling account slots
+        self.authcd_prev_btn = QPushButton("\u25c0")
+        self.authcd_prev_btn.setFixedSize(22, 26)
+        self.authcd_prev_btn.setStyleSheet(_arrow_style)
+        self.authcd_prev_btn.setToolTip("Previous Claude account slot")
+        self.authcd_prev_btn.clicked.connect(lambda: self._cycle_auth_account('authcd', -1))
+        self.authcd_prev_btn.hide()
+        model_btn_layout.addWidget(self.authcd_prev_btn)
+        self.authcd_next_btn = QPushButton("\u25b6")
+        self.authcd_next_btn.setFixedSize(22, 26)
+        self.authcd_next_btn.setStyleSheet(_arrow_style)
+        self.authcd_next_btn.setToolTip("Next Claude account slot")
+        self.authcd_next_btn.clicked.connect(lambda: self._cycle_auth_account('authcd', +1))
+        self.authcd_next_btn.hide()
+        model_btn_layout.addWidget(self.authcd_next_btn)
+        
         # AuthGem Login button (visible only for authgem/ models)
         self.authgem_login_btn = QPushButton("🔐 Gemini Login")
         self.authgem_login_btn.setStyleSheet(
@@ -5798,6 +5823,22 @@ Recent translations to summarize:
         self.authgem_login_btn.clicked.connect(self._authgem_login_clicked)
         self.authgem_login_btn.hide()
         model_btn_layout.addWidget(self.authgem_login_btn)
+        
+        # AuthGem arrow buttons for cycling account slots
+        self.authgem_prev_btn = QPushButton("\u25c0")
+        self.authgem_prev_btn.setFixedSize(22, 26)
+        self.authgem_prev_btn.setStyleSheet(_arrow_style)
+        self.authgem_prev_btn.setToolTip("Previous Gemini account slot")
+        self.authgem_prev_btn.clicked.connect(lambda: self._cycle_auth_account('authgem', -1))
+        self.authgem_prev_btn.hide()
+        model_btn_layout.addWidget(self.authgem_prev_btn)
+        self.authgem_next_btn = QPushButton("\u25b6")
+        self.authgem_next_btn.setFixedSize(22, 26)
+        self.authgem_next_btn.setStyleSheet(_arrow_style)
+        self.authgem_next_btn.setToolTip("Next Gemini account slot")
+        self.authgem_next_btn.clicked.connect(lambda: self._cycle_auth_account('authgem', +1))
+        self.authgem_next_btn.hide()
+        model_btn_layout.addWidget(self.authgem_next_btn)
         
         # AuthGem Status button — check quota / verify account (next to login)
         self.authgem_status_btn = QPushButton("📊")
@@ -5881,10 +5922,9 @@ Recent translations to summarize:
         except ImportError:
             pass
         
-        # Container for dynamically-created extra auth buttons
-        # (for numbered account slots found in key pools, e.g. authgpt2/, authcd1/)
-        self._extra_auth_btns = []  # track ephemeral buttons for cleanup
-        self._extra_auth_layout = model_btn_layout  # reuse same layout
+        # State for arrow-based account slot cycling
+        self._auth_account_ids = {'authgpt': [0], 'authcd': [0], 'authgem': [0]}
+        self._auth_account_idx = {'authgpt': 0, 'authcd': 0, 'authgem': 0}
         
         model_btn_layout.addStretch()
         self.frame.addWidget(model_btn_container, 1, 2, 1, 2, Qt.AlignLeft)
