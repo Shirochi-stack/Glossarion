@@ -12944,9 +12944,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 return False
 
             # ── Check output mode ────────────────────────────────
+            # GTool image mode = image-gen output only (not Vision/OCR)
             image_mode = (
-                os.environ.get('ENABLE_IMAGE_TRANSLATION', '0') == '1'
-                or getattr(self, 'enable_image_translation_var', False)
+                os.environ.get('ENABLE_IMAGE_OUTPUT_MODE', '0') == '1'
+                or getattr(self, 'enable_image_output_mode_var', False)
+                or self.config.get('output_mode', 'text') == 'image'
             )
 
             # Set up common env / client
