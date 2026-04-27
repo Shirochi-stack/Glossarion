@@ -13116,21 +13116,22 @@ If you see multiple p-b cookies, use the one with the longest value."""
             translated_count = 0
             progress_lock = __import__('threading').Lock()
 
+            # Single shared client — thread-local init happens lazily on first API call
+            shared_client = UnifiedClient(
+                model=self.model_var,
+                api_key=api_key,
+                output_dir=gtool_out,
+            )
+
             def _translate_chunk(chunk_info):
                 """Worker function for translating a single chunk."""
                 idx, sub_chunk = chunk_info
-                # Each thread gets its own client to avoid thread-safety issues
-                thread_client = UnifiedClient(
-                    model=self.model_var,
-                    api_key=api_key,
-                    output_dir=gtool_out,
-                )
                 source = rpgmaker_handler.format_chunk_for_translation(sub_chunk)
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": source},
                 ]
-                result = thread_client.send(
+                result = shared_client.send(
                     messages=messages,
                     temperature=float(self.trans_temp.text() or "0.3"),
                     max_tokens=self.max_output_tokens,
