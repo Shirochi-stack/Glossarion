@@ -1116,7 +1116,7 @@ _GTOOL_PLUGIN_JS = """\
 """
 
 _DEFAULT_SETTINGS = {
-    "fontSize": 21,
+    "fontSize": 22,
 }
 
 
