@@ -1413,7 +1413,9 @@ class UnifiedClient:
         # 4) Provider-specific empty behavior (can be disabled via toggle)
         if os.getenv('DISABLE_EMPTY_SAFETY_HEURISTIC', '0') != '1':
             if provider in ['openai', 'azure', 'electronhub', 'openrouter', 'poe', 'gemini']:
-                if not extracted_content and finish_reason != 'error':
+                # Exclude known model errors that are NOT safety filters
+                _non_safety_reasons = {'error', 'malformed_function_call', 'other_error', 'unexpected_tool_call'}
+                if not extracted_content and finish_reason not in _non_safety_reasons:
                     return True
         return False
     def _build_gemini3_model_message(self, msg: Dict[str, Any]) -> Dict[str, Any]:
@@ -15048,6 +15050,7 @@ class UnifiedClient:
                                 config=generation_config
                             )
                             text_parts = []
+                            stream_image_data = None  # Capture image bytes from stream
                             finish_reason = 'stop'
                             response = None
                             log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
@@ -15090,6 +15093,14 @@ class UnifiedClient:
                                                     for line in thought_text.split("\n"):
                                                         print(f"    {line}", flush=True)
                                                 continue
+                                            # Capture inline_data (image) parts from stream
+                                            if hasattr(part, 'inline_data') and part.inline_data:
+                                                if hasattr(part.inline_data, 'data') and part.inline_data.data:
+                                                    stream_image_data = part.inline_data.data
+                                                    _mime = getattr(part.inline_data, 'mime_type', 'image/png')
+                                                    if not self._is_stop_requested():
+                                                        print(f"   🖼️ Image received from stream (mime: {_mime})", flush=True)
+                                                continue
                                             if hasattr(part, 'text') and part.text:
                                                 # If we were in thinking mode, print completion
                                                 if gemini_thinking_started and stream_thinking and not self._is_stop_requested():
@@ -15124,6 +15135,9 @@ class UnifiedClient:
                                     print("".join(log_buf).replace('\x1f', '\\x1F'))
                                 print()
                             text_content = "".join(text_parts)
+                            # Promote streamed image data to the outer scope
+                            if stream_image_data is not None:
+                                image_data = stream_image_data
                             if not self._is_stop_requested():
                                 print(f"🛰️ [gemini-native] Stream finished, tokens≈{len(text_content)//4}")
                         else:
@@ -15173,6 +15187,12 @@ class UnifiedClient:
                                     finish_reason = 'length'
                                 elif 'SAFETY' in finish_reason_str:
                                     finish_reason = 'safety'
+                                elif 'MALFORMED_FUNCTION_CALL' in finish_reason_str:
+                                    finish_reason = 'malformed_function_call'
+                                    print(f"   ⚠️ Model returned MALFORMED_FUNCTION_CALL — image generation failed (not a safety block)")
+                                elif any(tag in finish_reason_str for tag in ('OTHER', 'UNEXPECTED_TOOL_CALL', 'NO_IMAGE', 'IMAGE_OTHER')):
+                                    finish_reason = 'other_error'
+                                    print(f"   ⚠️ Model returned {finish_reason_str} — unexpected termination (not a safety block)")
                     
                     # If prohibited content detected, raise error for retry logic
                     if prohibited_detected:
@@ -15409,6 +15429,19 @@ class UnifiedClient:
                         return raw_obj
 
                     raw_content_obj = _ensure_text_in_raw_obj(raw_content_obj, text_content)
+
+                    # Retry on MALFORMED_FUNCTION_CALL with empty content (known
+                    # transient failure on gemini-*-image-preview models).
+                    if finish_reason == 'malformed_function_call' and not text_content and not image_data:
+                        if attempt < attempts - 1:
+                            attempt += 1
+                            _delay = min(2 ** attempt, 8)
+                            print(f"   🔄 Retrying after MALFORMED_FUNCTION_CALL (attempt {attempt}/{attempts}, wait {_delay}s)...")
+                            if not self._sleep_with_cancel(_delay, 0.1):
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            continue
+                        else:
+                            print(f"   ❌ MALFORMED_FUNCTION_CALL persisted after {attempts} attempts — model may not support this request")
 
                     # Return with the actual content populated
                     return UnifiedResponse(
