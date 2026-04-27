@@ -6965,8 +6965,11 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
         return last_num, 'filename_digits'
     # Priority 2: special keyword files with no digits -> chapter 0
     # Priority 3: special keyword files with no digits -> chapter 0
-    special_keywords = ['title', 'toc', 'cover', 'index', 'copyright', 'preface', 'nav', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'glossary', 'bibliography']
+    special_keywords = ['title', 'toc', 'cover', 'copyright', 'preface', 'nav', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
     if any(name in base_no_ext_lower for name in special_keywords):
+        return 0, 'special_file'
+    # Exact match only: these are special only when the basename matches exactly
+    if base_no_ext_lower in ('index', 'glossary', 'glossary_extension'):
         return 0, 'special_file'
     # Priority 3: legacy fallback patterns
     name_without_ext = base_no_ext

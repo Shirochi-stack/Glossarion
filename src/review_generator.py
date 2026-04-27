@@ -63,9 +63,9 @@ def count_tokens(text: str) -> int:
 
 # Special file patterns to skip — mirrors TransateKRtoEN.py special_keywords
 _SPECIAL_PATTERNS = [
-    'title', 'toc', 'cover', 'index', 'copyright', 'preface', 'nav',
+    'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
     'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
-    'foreword', 'acknowledgment', 'author', 'appendix', 'glossary',
+    'foreword', 'acknowledgment', 'author', 'appendix',
     'bibliography', 'titlepage', 'halftitle', 'frontmatter', 'backmatter',
 ]
 
@@ -73,13 +73,17 @@ _SPECIAL_PATTERNS = [
 def _is_special_file(filename: str) -> bool:
     """Check if a filename is a special/metadata file that should be skipped.
     Mirrors the heuristic in translator_gui._is_special_file:
-    1) Known keyword patterns
-    2) Filenames with no digits (e.g. 'info.xhtml', 'about.xhtml')
+    1) Known keyword patterns (substring match)
+    2) Exact basename matches for 'index', 'glossary', 'glossary_extension'
+    3) Filenames with no digits (e.g. 'info.xhtml', 'about.xhtml')
     """
     import re
     base = os.path.splitext(os.path.basename(filename))[0].lower()
-    # Check known special-file keywords
+    # Check known special-file keywords (substring match)
     if any(pat in base for pat in _SPECIAL_PATTERNS):
+        return True
+    # Exact match only: these are special only when the basename matches exactly
+    if base in ('index', 'glossary', 'glossary_extension'):
         return True
     # Heuristic: filenames with no digits are often special/metadata files
     if not re.search(r'\d', base):

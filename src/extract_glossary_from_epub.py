@@ -1453,9 +1453,9 @@ def extract_chapters_from_epub(epub_path: str, return_metadata: bool = False) ->
     # Check if special files should be skipped (same logic as TransateKRtoEN)
     translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
     special_keywords = [
-        'title', 'toc', 'cover', 'index', 'copyright', 'preface', 'nav',
+        'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
         'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
-        'foreword', 'acknowledgment', 'author', 'appendix', 'glossary',
+        'foreword', 'acknowledgment', 'author', 'appendix',
         'bibliography'
     ]
     skipped_special = []
@@ -1476,8 +1476,11 @@ def extract_chapters_from_epub(epub_path: str, return_metadata: bool = False) ->
                     name_stripped = re.sub(r'\d+$', '', name_lower).rstrip('_- ')
                     has_digits = bool(re.search(r'\d', name_noext))
                     is_special = False
+                    # Exact match: these are special only when the basename matches exactly
+                    if name_lower in ('index', 'glossary', 'glossary_extension'):
+                        is_special = True
                     # Match if name (with or without trailing digits) contains a special keyword
-                    if any(kw in name_lower for kw in special_keywords):
+                    elif any(kw in name_lower for kw in special_keywords):
                         # If no digits at all, it's clearly special (e.g. "cover", "notice")
                         # If has digits, still special if the base part matches a keyword (e.g. "notice01")
                         if not has_digits or any(kw == name_stripped or kw in name_stripped for kw in special_keywords):
