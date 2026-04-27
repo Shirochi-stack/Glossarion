@@ -1461,23 +1461,21 @@ def filter_images_with_vision(
 
     cache_lock = threading.Lock()
 
+    # Tell _send_core not to serialise requests behind the sequential lock
+    _prev_batch = os.environ.get('BATCH_TRANSLATION', '')
+    if batch_size > 1:
+        os.environ['BATCH_TRANSLATION'] = '1'
+
     def _scan_single(entry):
         """Worker: check one image for text. Returns (entry, has_text)."""
-        if batch_size > 1 and api_key and model:
-            from unified_api_client import UnifiedClient
-            tc = UnifiedClient(model=model, api_key=api_key, output_dir=output_dir)
-        else:
-            tc = client
-        mime = _detect_mime(entry.decrypted_png)
-        b64 = base64.b64encode(entry.decrypted_png).decode('ascii')
         messages = [
             {"role": "system", "content": filter_system_prompt},
-            {"role": "user", "content": [
-                {"type": "text", "text": filter_user_prompt},
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
-            ]}
+            {"role": "user", "content": filter_user_prompt}
         ]
-        result = tc.send(messages)
+        result = client.send_image(
+            messages, entry.decrypted_png,
+            context='image_scan',
+        )
         answer = ""
         if isinstance(result, tuple):
             answer = (result[0] or "").strip().upper()
@@ -1488,33 +1486,39 @@ def filter_images_with_vision(
 
         return entry, answer.startswith("YES")
 
-    with ThreadPoolExecutor(max_workers=batch_size) as pool:
-        futures = {}
-        for entry in uncached:
-            if stop_check and stop_check():
-                break
-            future = pool.submit(_scan_single, entry)
-            futures[future] = entry
+    try:
+        with ThreadPoolExecutor(max_workers=batch_size) as pool:
+            futures = {}
+            for entry in uncached:
+                if stop_check and stop_check():
+                    break
+                future = pool.submit(_scan_single, entry)
+                futures[future] = entry
 
-        for future in as_completed(futures):
-            if stop_check and stop_check():
-                log("⏹️ Image scan stopped by user")
-                break
-            try:
-                entry, has_text = future.result()
-                entry.has_text = has_text
-                with cache_lock:
-                    cache[entry.relative_path] = has_text
-                if has_text:
+            for future in as_completed(futures):
+                if stop_check and stop_check():
+                    log("⏹️ Image scan stopped by user")
+                    break
+                try:
+                    entry, has_text = future.result()
+                    entry.has_text = has_text
+                    with cache_lock:
+                        cache[entry.relative_path] = has_text
+                    if has_text:
+                        filtered.append(entry)
+                except Exception as e:
+                    entry = futures[future]
+                    log(f"   Warning: Vision check failed for {entry.relative_path}: {e}")
+                    # On failure, include the image (false-positive is better than miss)
+                    entry.has_text = True
                     filtered.append(entry)
-            except Exception as e:
-                entry = futures[future]
-                log(f"   Warning: Vision check failed for {entry.relative_path}: {e}")
-                # On failure, include the image (false-positive is better than miss)
-                entry.has_text = True
-                filtered.append(entry)
-                with cache_lock:
-                    cache[entry.relative_path] = True
+                    with cache_lock:
+                        cache[entry.relative_path] = True
+    finally:
+        if _prev_batch:
+            os.environ['BATCH_TRANSLATION'] = _prev_batch
+        elif 'BATCH_TRANSLATION' in os.environ:
+            del os.environ['BATCH_TRANSLATION']
 
     # Save cache
     try:
@@ -1633,9 +1637,9 @@ def translate_game_images(
         system_prompt: System prompt from the RPGMaker_GTool_Image profile.
                        If empty, a sensible default is used.
         batch_size:    Number of parallel workers (1 = sequential).
-        api_key:       API key for per-task clients in batch mode.
-        model:         Model name for per-task clients.
-        output_dir:    Output dir for per-task clients.
+        api_key:       API key for creating per-thread clients.
+        model:         Model name for per-thread clients.
+        output_dir:    Output dir for per-thread clients.
     """
     log("\n🖼️ Image mode: scanning game images for text...")
 
@@ -1651,7 +1655,9 @@ def translate_game_images(
         filter_system_prompt=filter_system_prompt,
         filter_user_prompt=filter_user_prompt,
         batch_size=batch_size,
-        api_key=api_key, model=model, output_dir=output_dir,
+        api_key=api_key,
+        model=model,
+        output_dir=output_dir,
         log=log, stop_check=stop_check)
     if not text_entries:
         log("ℹ️ No images with detectable text — skipping image phase")
@@ -1696,8 +1702,12 @@ def translate_game_images(
     # Save and set env vars so unified_api_client intercepts generated media
     _prev_output_dir = os.environ.get('OUTPUT_DIRECTORY', '')
     _prev_image_mode = os.environ.get('ENABLE_IMAGE_OUTPUT_MODE', '')
+    _prev_batch = os.environ.get('BATCH_TRANSLATION', '')
     os.environ['OUTPUT_DIRECTORY'] = translated_images_dir
     os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = '1'
+    # Tell _send_core not to serialise requests behind the sequential lock
+    if batch_size > 1:
+        os.environ['BATCH_TRANSLATION'] = '1'
 
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1708,21 +1718,11 @@ def translate_game_images(
         """Worker: translate a single image. Returns (idx, translated_png, entry)."""
         idx, entry = idx_entry
 
-        if batch_size > 1 and api_key and model:
-            from unified_api_client import UnifiedClient
-            tc = UnifiedClient(model=model, api_key=api_key, output_dir=output_dir)
-        else:
-            tc = client
-
         rel = entry.relative_path
         log(f"🎨 [{idx}/{len(pending)}] Translating: {rel}")
 
         # Backup original
         backup_game_image(entry, game_dir, log)
-
-        # Build translation prompt
-        mime = _detect_mime(entry.decrypted_png)
-        b64 = base64.b64encode(entry.decrypted_png).decode('ascii')
 
         user_text = (
             f"Translate all visible text in this game image to {target_lang}. "
@@ -1731,18 +1731,14 @@ def translate_game_images(
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": [
-                {"type": "text", "text": user_text},
-                {"type": "image_url", "image_url": {
-                    "url": f"data:{mime};base64,{b64}"
-                }}
-            ]}
+            {"role": "user", "content": user_text}
         ]
 
-        result = tc.send(
-            messages,
+        result = client.send_image(
+            messages, entry.decrypted_png,
             temperature=temperature,
             max_tokens=max_tokens,
+            context='image_translation',
         )
 
         translated_png = None
@@ -1814,6 +1810,10 @@ def translate_game_images(
             os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = _prev_image_mode
         elif 'ENABLE_IMAGE_OUTPUT_MODE' in os.environ:
             del os.environ['ENABLE_IMAGE_OUTPUT_MODE']
+        if _prev_batch:
+            os.environ['BATCH_TRANSLATION'] = _prev_batch
+        elif 'BATCH_TRANSLATION' in os.environ:
+            del os.environ['BATCH_TRANSLATION']
 
     log(f"✅ Image translation complete: {translated_count} images processed")
     log(f"📁 Translated images saved to: {translated_images_dir}")
