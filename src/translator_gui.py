@@ -13093,6 +13093,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             os.environ['MODEL'] = self.model_var
             os.environ['IS_TEXT_FILE_TRANSLATION'] = '1'
 
+            # Set API call delay from GUI (same as image mode + main pipeline)
+            os.environ['SEND_INTERVAL_SECONDS'] = str(self.delay_entry.text() or '2.0')
+            os.environ['THREAD_SUBMISSION_DELAY_SECONDS'] = self.thread_delay_entry.text().strip() or '0.0001'
+
             # Determine parallelism from batch settings
             use_batch = getattr(self, 'batch_translation_var', False)
             batch_size = max(1, int(getattr(self, 'batch_size_var', 3))) if use_batch else 1

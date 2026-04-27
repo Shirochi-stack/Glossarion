@@ -11618,16 +11618,6 @@ class UnifiedClient:
         # Lock released — sleep outside lock (interruptible)
         
         if sleep_time > 0:
-            # Log queued status before sleeping
-            if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
-                try:
-                    tls = self._get_thread_local_client()
-                    _label = getattr(tls, 'current_request_label', None) or 'request'
-                    _ctx = getattr(tls, 'current_request_context', None) or 'translation'
-                except Exception:
-                    _label = 'request'
-                    _ctx = 'translation'
-                self._debug_log(f"📤 [{thread_name}] Queued {_label} ({_ctx}) — Sending API call in {api_delay:.1f}s")
             elapsed = 0.0
             step = 0.1
             while elapsed < sleep_time:
