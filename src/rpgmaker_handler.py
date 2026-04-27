@@ -152,6 +152,12 @@ def _extract_event_strings(commands: list) -> List[Tuple[str, str]]:
                 results.append((key, full_text))
             continue
 
+        elif code == 101 and len(params) > 4:
+            # MZ Show Text header — params[4] is the speaker name box
+            speaker = params[4]
+            if isinstance(speaker, str) and _is_translatable(speaker):
+                results.append((f"speaker_{i}", speaker))
+
         elif code == _CHOICE_CODE and params:
             choices = params[0] if isinstance(params[0], list) else []
             for ci, choice in enumerate(choices):
@@ -1353,6 +1359,20 @@ def _patch_map_entry(data: dict, key: str, translated: str) -> int:
             return 1
         return 0
 
+    # Speaker name: event_E_page_P_speaker_I
+    m = re.match(r'event_(\d+)_page_(\d+)_speaker_(\d+)', key)
+    if m:
+        ev_idx = int(m.group(1))
+        pg_idx = int(m.group(2))
+        cmd_idx = int(m.group(3))
+        try:
+            cmd = data["events"][ev_idx]["pages"][pg_idx]["list"][cmd_idx]
+            if cmd.get("code", 0) == 101 and len(cmd.get("parameters", [])) > 4:
+                cmd["parameters"][4] = translated
+                return 1
+        except (IndexError, KeyError, TypeError):
+            pass
+
     # Grouped message block: event_E_page_P_msg_S_E
     m = re.match(r'event_(\d+)_page_(\d+)_msg_(\d+)_(\d+)', key)
     if m:
@@ -1432,6 +1452,19 @@ def _patch_common_event(data: list, key: str, translated: str) -> int:
             data[idx]["name"] = translated
             return 1
         return 0
+
+    # Speaker name: ce_E_speaker_I
+    m = re.match(r'ce_(\d+)_speaker_(\d+)', key)
+    if m:
+        ev_idx = int(m.group(1))
+        cmd_idx = int(m.group(2))
+        try:
+            cmd = data[ev_idx]["list"][cmd_idx]
+            if cmd.get("code", 0) == 101 and len(cmd.get("parameters", [])) > 4:
+                cmd["parameters"][4] = translated
+                return 1
+        except (IndexError, KeyError, TypeError):
+            pass
 
     # Grouped message block: ce_E_msg_S_E
     m = re.match(r'ce_(\d+)_msg_(\d+)_(\d+)', key)
