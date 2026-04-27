@@ -1035,7 +1035,9 @@ def parse_translated_chunk(response: str, chunk: Dict) -> Dict[str, str]:
                 clean = re.sub(r'^\d+[.)\]]\s*', '', line)
                 translations[keys[j]] = _clean_translation(clean)
 
-    return translations
+    # Filter out empty/whitespace-only translations — these would pollute
+    # progress.json and prevent re-translation on the next run.
+    return {k: v for k, v in translations.items() if v and v.strip()}
 
 
 def apply_translations(data_dir: str, trans_map_path: str,
@@ -1070,6 +1072,7 @@ def apply_translations(data_dir: str, trans_map_path: str,
         return _apply_binary_format_translations(data_dir, trans_data, trans_map_path, log, version)
 
     patched = 0
+    failed_patch_keys = []  # (filename, key) pairs where translation existed but patch failed
     _first_path_logged = False
     for filename, entries in trans_data.items():
         # Support both prefixed ("www/data/Map001.json") and flat ("Map001.json") keys
@@ -1097,35 +1100,126 @@ def apply_translations(data_dir: str, trans_map_path: str,
             continue
 
         file_patched = 0
+        file_failed = 0
+        file_untranslated = 0
         for key, entry in entries.items():
             translated = entry.get("translated", "")
             if not translated:
+                file_untranslated += 1
                 continue
 
             # Use basename for type detection (keys may be prefixed: www/data/Map001.json)
             base = os.path.basename(filename)
             if base.startswith("Map"):
-                file_patched += _patch_map_entry(data, key, translated)
+                result = _patch_map_entry(data, key, translated)
             elif base == "System.json":
-                file_patched += _patch_system_entry(data, key, translated)
+                result = _patch_system_entry(data, key, translated)
             elif base == "CommonEvents.json":
-                file_patched += _patch_common_event(data, key, translated)
+                result = _patch_common_event(data, key, translated)
             else:
-                file_patched += _patch_db_entry(data, key, translated)
+                result = _patch_db_entry(data, key, translated)
+
+            if result > 0:
+                file_patched += result
+            else:
+                file_failed += 1
+                failed_patch_keys.append((filename, key))
 
         if file_patched > 0:
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False)
             patched += file_patched
-            log(f"   ✅ {filename}: {file_patched} strings patched")
 
+        # Per-file log with breakdown
+        parts = [f"{file_patched} patched"]
+        if file_failed > 0:
+            parts.append(f"{file_failed} failed")
+        if file_untranslated > 0:
+            parts.append(f"{file_untranslated} untranslated")
+        if file_patched > 0 or file_failed > 0:
+            icon = "✅" if file_failed == 0 else "⚠️"
+            log(f"   {icon} {filename}: {' | '.join(parts)}")
+
+    # ── Summary ──────────────────────────────────────────────────
     total_strings = sum(len(entries) for entries in trans_data.values())
-    untranslated = total_strings - patched
+    total_had_translation = patched + len(failed_patch_keys)
+    total_untranslated = total_strings - total_had_translation
     log(f"🎮 Total: {patched} strings patched into game files")
-    if untranslated > 0:
-        log(f"⚠️ Untranslated: {untranslated} strings remaining ({untranslated * 100 // total_strings}%)")
-    else:
-        log(f"✅ All {total_strings} strings translated!")
+    if len(failed_patch_keys) > 0:
+        log(f"❌ Patch failures: {len(failed_patch_keys)} strings had translations but couldn't be applied (structural mismatch)")
+    if total_untranslated > 0:
+        log(f"⚠️ Untranslated: {total_untranslated} strings remaining ({total_untranslated * 100 // total_strings}%)")
+    if total_untranslated == 0 and len(failed_patch_keys) == 0:
+        log(f"✅ All {total_strings} strings translated and patched!")
+
+    # ── Invalidate failed patches & empty translations ────────────
+    # Clear failed/empty keys from translation_map.json and progress.json
+    # so they will be re-sent for translation on the next run.
+    trans_map_dirty = False
+
+    if failed_patch_keys:
+        log(f"🔄 Invalidating {len(failed_patch_keys)} failed keys for re-translation on next run...")
+        for fn, key in failed_patch_keys:
+            if fn in trans_data and key in trans_data[fn]:
+                trans_data[fn][key]["translated"] = ""
+        trans_map_dirty = True
+
+    # Also detect empty/whitespace translations that slipped into the map
+    # (e.g. from older runs without the parse_translated_chunk filter).
+    empty_translation_keys = []
+    for fn, entries in trans_data.items():
+        for key, entry in entries.items():
+            translated = entry.get("translated", "")
+            original = entry.get("original", "")
+            if original and original.strip() and translated is not None and not translated.strip() and translated != "":
+                # Has whitespace-only translation (not a truly empty "", which is the default)
+                # This shouldn't happen, but clean it up if it does
+                pass
+            # Check: translated is non-empty string but is only whitespace
+            if isinstance(translated, str) and translated and not translated.strip():
+                empty_translation_keys.append((fn, key))
+                entry["translated"] = ""
+                trans_map_dirty = True
+
+    if empty_translation_keys:
+        log(f"🧹 Found {len(empty_translation_keys)} whitespace-only translations — cleared for re-translation")
+
+    if trans_map_dirty:
+        try:
+            with open(trans_map_path, 'w', encoding='utf-8') as f:
+                json.dump(trans_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log(f"⚠️ Failed to update translation map: {e}")
+
+    # Clean progress.json: remove failed patches + empty translations
+    all_invalid_keys = failed_patch_keys + empty_translation_keys
+    if all_invalid_keys:
+        progress_path = get_progress_path(game_dir)
+        try:
+            if os.path.exists(progress_path):
+                with open(progress_path, 'r', encoding='utf-8') as f:
+                    progress_data = json.load(f)
+                invalidated = 0
+                # Also scan for empty-valued keys already in progress
+                # (from older runs where empty translations weren't filtered)
+                empty_progress_keys = [
+                    k for k, v in progress_data.items()
+                    if isinstance(v, str) and not v.strip()
+                ]
+                for k in empty_progress_keys:
+                    del progress_data[k]
+                    invalidated += 1
+                for fn, key in all_invalid_keys:
+                    full_key = f"{fn}::{key}"
+                    if full_key in progress_data:
+                        del progress_data[full_key]
+                        invalidated += 1
+                if invalidated > 0:
+                    with open(progress_path, 'w', encoding='utf-8') as f:
+                        json.dump(progress_data, f, ensure_ascii=False, indent=2)
+                    log(f"   🗑️ Removed {invalidated} invalid keys from progress — will re-translate next run")
+        except Exception as e:
+            log(f"⚠️ Failed to update progress file: {e}")
 
     # Apply GTool settings (font size, etc.)
     _apply_gtool_settings(data_dir, os.path.dirname(trans_map_path), log)
