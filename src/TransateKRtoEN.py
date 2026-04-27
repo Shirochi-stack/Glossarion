@@ -6965,11 +6965,14 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
         return last_num, 'filename_digits'
     # Priority 2: special keyword files with no digits -> chapter 0
     # Priority 3: special keyword files with no digits -> chapter 0
-    special_keywords = ['title', 'toc', 'cover', 'copyright', 'preface', 'nav', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
+    _kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
+    special_keywords = [k.strip().lower() for k in _kw_env.split(',') if k.strip()] if _kw_env else ['title', 'toc', 'cover', 'copyright', 'preface', 'nav', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
     if any(name in base_no_ext_lower for name in special_keywords):
         return 0, 'special_file'
     # Exact match only: these are special only when the basename matches exactly
-    if base_no_ext_lower in ('index', 'glossary', 'glossary_extension'):
+    _exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
+    special_exact = [k.strip().lower() for k in _exact_env.split(',') if k.strip()] if _exact_env else ['index', 'glossary', 'glossary_extension']
+    if base_no_ext_lower in special_exact:
         return 0, 'special_file'
     # Priority 3: legacy fallback patterns
     name_without_ext = base_no_ext
@@ -11400,13 +11403,21 @@ def main(log_callback=None, stop_callback=None):
                             _all_spine_basenames.append(_manifest[_idref])
 
                 # Build offset positions — same logic as preview's
-                # _is_special_file: skip files with 'nav.', 'toc.', 'cover.'
-                # in name, or files with no digits in their stem.
+                # Uses configurable keyword lists from SPECIAL_FILE_KEYWORDS / SPECIAL_FILE_EXACT
+                _sp_kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
+                _sp_keywords = [k.strip().lower() for k in _sp_kw_env.split(',') if k.strip()] if _sp_kw_env else ['title', 'toc', 'cover', 'copyright', 'preface', 'nav', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
+                _sp_exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
+                _sp_exact = [k.strip().lower() for k in _sp_exact_env.split(',') if k.strip()] if _sp_exact_env else ['index', 'glossary', 'glossary_extension']
                 def _is_special_spine(fname):
                     fl = fname.lower()
                     fnoext = os.path.splitext(fl)[0]
-                    if any(kw in fl for kw in ['nav.', 'toc.', 'cover.']):
+                    # Substring keyword match
+                    if any(kw in fnoext for kw in _sp_keywords):
                         return True
+                    # Exact-match keywords
+                    if fnoext in _sp_exact:
+                        return True
+                    # No digits = likely special/metadata
                     if not re.search(r'\d', fnoext):
                         return True
                     return False

@@ -1452,12 +1452,15 @@ def extract_chapters_from_epub(epub_path: str, return_metadata: bool = False) ->
             
     # Check if special files should be skipped (same logic as TransateKRtoEN)
     translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
-    special_keywords = [
+    _kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
+    special_keywords = [k.strip().lower() for k in _kw_env.split(',') if k.strip()] if _kw_env else [
         'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
         'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
         'foreword', 'acknowledgment', 'author', 'appendix',
         'bibliography'
     ]
+    _exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
+    special_exact = [k.strip().lower() for k in _exact_env.split(',') if k.strip()] if _exact_env else ['index', 'glossary', 'glossary_extension']
     skipped_special = []
 
     for item in items:
@@ -1477,7 +1480,7 @@ def extract_chapters_from_epub(epub_path: str, return_metadata: bool = False) ->
                     has_digits = bool(re.search(r'\d', name_noext))
                     is_special = False
                     # Exact match: these are special only when the basename matches exactly
-                    if name_lower in ('index', 'glossary', 'glossary_extension'):
+                    if name_lower in special_exact:
                         is_special = True
                     # Match if name (with or without trailing digits) contains a special keyword
                     elif any(kw in name_lower for kw in special_keywords):

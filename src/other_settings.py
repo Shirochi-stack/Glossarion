@@ -7927,7 +7927,191 @@ def _create_processing_options_section(self, parent):
     _update_retry_split_state()
     section_v.addWidget(extraction_box)
     
-    # === REMAINING OPTIONS ===
+    # === SPECIAL FILES SETTINGS ===
+    # Translate special files (cover, nav, toc, etc.)
+    translate_special_cb = self._create_styled_checkbox("Translate Special Files (Skip Override)")
+    try:
+        translate_special_cb.setChecked(bool(self.translate_special_files_var))
+    except Exception:
+        pass
+    def _on_translate_special_toggle(checked):
+        try:
+            old_value = self.translate_special_files_var
+            self.translate_special_files_var = bool(checked)
+            self.config['translate_special_files'] = bool(checked)
+            os.environ['TRANSLATE_SPECIAL_FILES'] = '1' if checked else '0'
+            # Show helpful message if value changed
+            if old_value != bool(checked):
+                if checked:
+                    self.append_log("✅ Special files override ENABLED - special files will be included in extraction")
+                    self.append_log("🔄 If you already extracted an EPUB, re-translate to apply this setting")
+                else:
+                    self.append_log("❌ Special files override DISABLED - special files will be skipped (default behavior)")
+        except Exception:
+            pass
+    translate_special_cb.toggled.connect(_on_translate_special_toggle)
+    translate_special_cb.setContentsMargins(0, 2, 0, 0)
+    
+    # Row: checkbox + Edit Keywords button
+    translate_special_row = QWidget()
+    translate_special_h = QHBoxLayout(translate_special_row)
+    translate_special_h.setContentsMargins(0, 2, 0, 0)
+    translate_special_h.addWidget(translate_special_cb)
+    
+    edit_keywords_btn = QPushButton("Edit Keywords ▶")
+    edit_keywords_btn.setFixedWidth(130)
+    edit_keywords_btn.setCursor(Qt.PointingHandCursor)
+    edit_keywords_btn.setStyleSheet("""
+        QPushButton {
+            background-color: #2d2d2d;
+            color: #17a2b8;
+            border: 1px solid #4a5568;
+            border-radius: 3px;
+            padding: 3px 8px;
+            font-size: 9pt;
+        }
+        QPushButton:hover {
+            background-color: #3d3d3d;
+            border-color: #5a9fd4;
+        }
+    """)
+    translate_special_h.addWidget(edit_keywords_btn)
+    translate_special_h.addStretch()
+    section_v.addWidget(translate_special_row)
+    
+    translate_special_desc = QLabel("Forces translation of special files (cover, nav, toc, message, etc.)\ninstead of skipping them during extraction and compilation.")
+    translate_special_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    translate_special_desc.setContentsMargins(20, 0, 0, 5)
+    section_v.addWidget(translate_special_desc)
+    
+    # --- Collapsible keywords panel ---
+    _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, cover, copyright, preface, nav, message, info, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'
+    _DEFAULT_SPECIAL_EXACT = 'index, glossary, glossary_extension'
+    
+    # Initialize vars from config
+    if not hasattr(self, 'special_file_keywords_var'):
+        self.special_file_keywords_var = self.config.get('special_file_keywords', _DEFAULT_SPECIAL_KEYWORDS)
+    if not hasattr(self, 'special_file_exact_var'):
+        self.special_file_exact_var = self.config.get('special_file_exact', _DEFAULT_SPECIAL_EXACT)
+    
+    keywords_panel = QWidget()
+    keywords_panel.setVisible(False)
+    keywords_panel_v = QVBoxLayout(keywords_panel)
+    keywords_panel_v.setContentsMargins(20, 5, 10, 10)
+    
+    # Substring keywords
+    kw_substr_label = QLabel("Substring keywords (skip if filename contains any of these):")
+    kw_substr_label.setStyleSheet("color: #b0b0b0; font-size: 9pt; font-weight: bold;")
+    keywords_panel_v.addWidget(kw_substr_label)
+    
+    kw_substr_edit = QTextEdit()
+    kw_substr_edit.setPlaceholderText("e.g. title, toc, cover, copyright, nav, ...")
+    kw_substr_edit.setText(self.special_file_keywords_var)
+    kw_substr_edit.setFixedHeight(60)
+    kw_substr_edit.setStyleSheet("""
+        QTextEdit {
+            background-color: #1e1e1e;
+            color: #d4d4d4;
+            border: 1px solid #4a5568;
+            border-radius: 3px;
+            padding: 4px;
+            font-family: Consolas, monospace;
+            font-size: 9pt;
+        }
+    """)
+    def _on_substr_keywords_changed():
+        try:
+            text = kw_substr_edit.toPlainText().strip()
+            self.special_file_keywords_var = text
+            self.config['special_file_keywords'] = text
+            os.environ['SPECIAL_FILE_KEYWORDS'] = text
+        except Exception:
+            pass
+    kw_substr_edit.textChanged.connect(_on_substr_keywords_changed)
+    keywords_panel_v.addWidget(kw_substr_edit)
+    
+    kw_substr_hint = QLabel("Files whose name contains any of these words will be treated as special.")
+    kw_substr_hint.setStyleSheet("color: gray; font-size: 8pt;")
+    kw_substr_hint.setContentsMargins(0, 0, 0, 5)
+    keywords_panel_v.addWidget(kw_substr_hint)
+    
+    # Exact-match keywords
+    kw_exact_label = QLabel("Exact-match keywords (skip only if filename equals one of these):")
+    kw_exact_label.setStyleSheet("color: #b0b0b0; font-size: 9pt; font-weight: bold;")
+    keywords_panel_v.addWidget(kw_exact_label)
+    
+    kw_exact_edit = QTextEdit()
+    kw_exact_edit.setPlaceholderText("e.g. index, glossary, glossary_extension")
+    kw_exact_edit.setText(self.special_file_exact_var)
+    kw_exact_edit.setFixedHeight(40)
+    kw_exact_edit.setStyleSheet("""
+        QTextEdit {
+            background-color: #1e1e1e;
+            color: #d4d4d4;
+            border: 1px solid #4a5568;
+            border-radius: 3px;
+            padding: 4px;
+            font-family: Consolas, monospace;
+            font-size: 9pt;
+        }
+    """)
+    def _on_exact_keywords_changed():
+        try:
+            text = kw_exact_edit.toPlainText().strip()
+            self.special_file_exact_var = text
+            self.config['special_file_exact'] = text
+            os.environ['SPECIAL_FILE_EXACT'] = text
+        except Exception:
+            pass
+    kw_exact_edit.textChanged.connect(_on_exact_keywords_changed)
+    keywords_panel_v.addWidget(kw_exact_edit)
+    
+    kw_exact_hint = QLabel("Files whose name (without extension) exactly matches one of these will be treated as special.\nUse this for names like 'index' that shouldn't match substrings (e.g. 'reindex').")
+    kw_exact_hint.setStyleSheet("color: gray; font-size: 8pt;")
+    kw_exact_hint.setContentsMargins(0, 0, 0, 5)
+    keywords_panel_v.addWidget(kw_exact_hint)
+    
+    # Reset to defaults button
+    reset_kw_btn = QPushButton("Reset to Defaults")
+    reset_kw_btn.setFixedWidth(130)
+    reset_kw_btn.setCursor(Qt.PointingHandCursor)
+    reset_kw_btn.setStyleSheet("""
+        QPushButton {
+            background-color: #2d2d2d;
+            color: #aaa;
+            border: 1px solid #4a5568;
+            border-radius: 3px;
+            padding: 3px 8px;
+            font-size: 9pt;
+        }
+        QPushButton:hover {
+            background-color: #3d3d3d;
+            color: #fff;
+            border-color: #e2b714;
+        }
+    """)
+    def _on_reset_keywords():
+        kw_substr_edit.setText(_DEFAULT_SPECIAL_KEYWORDS)
+        kw_exact_edit.setText(_DEFAULT_SPECIAL_EXACT)
+    reset_kw_btn.clicked.connect(_on_reset_keywords)
+    keywords_panel_v.addWidget(reset_kw_btn)
+    
+    section_v.addWidget(keywords_panel)
+    
+    # Toggle keywords panel visibility
+    def _toggle_keywords_panel():
+        visible = not keywords_panel.isVisible()
+        keywords_panel.setVisible(visible)
+        edit_keywords_btn.setText("Edit Keywords ▼" if visible else "Edit Keywords ▶")
+    edit_keywords_btn.clicked.connect(_toggle_keywords_panel)
+    
+    # Separator before gallery/cover
+    sep_special = QFrame()
+    sep_special.setFrameShape(QFrame.HLine)
+    sep_special.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_special)
+    
+    # === EPUB OUTPUT OPTIONS ===
     # Disable Image Gallery
     gallery_cb = self._create_styled_checkbox("Disable Image Gallery in EPUB")
     try:
@@ -7971,36 +8155,6 @@ def _create_processing_options_section(self, parent):
     cover_desc.setStyleSheet("color: gray; font-size: 10pt;")
     cover_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(cover_desc)
-    
-    # Translate special files (cover, nav, toc, etc.)
-    translate_special_cb = self._create_styled_checkbox("Translate Special Files (Skip Override)")
-    try:
-        translate_special_cb.setChecked(bool(self.translate_special_files_var))
-    except Exception:
-        pass
-    def _on_translate_special_toggle(checked):
-        try:
-            old_value = self.translate_special_files_var
-            self.translate_special_files_var = bool(checked)
-            self.config['translate_special_files'] = bool(checked)
-            os.environ['TRANSLATE_SPECIAL_FILES'] = '1' if checked else '0'
-            # Show helpful message if value changed
-            if old_value != bool(checked):
-                if checked:
-                    self.append_log("✅ Special files override ENABLED - special files will be included in extraction")
-                    self.append_log("🔄 If you already extracted an EPUB, re-translate to apply this setting")
-                else:
-                    self.append_log("❌ Special files override DISABLED - special files will be skipped (default behavior)")
-        except Exception:
-            pass
-    translate_special_cb.toggled.connect(_on_translate_special_toggle)
-    translate_special_cb.setContentsMargins(0, 2, 0, 0)
-    section_v.addWidget(translate_special_cb)
-    
-    translate_special_desc = QLabel("Forces translation of special files (cover, nav, toc, message, etc.)\ninstead of skipping them during extraction and compilation.")
-    translate_special_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    translate_special_desc.setContentsMargins(20, 0, 0, 10)
-    section_v.addWidget(translate_special_desc)
     
     # === PDF OUTPUT SETTINGS ===
     # Separator

@@ -3438,6 +3438,11 @@ Recent translations to summarize:
         # Translate special files - with backward compatibility for old translate_cover_html setting
         self.translate_special_files_var = self.config.get('translate_special_files', 
                                                            self.config.get('translate_cover_html', False))
+        # Custom special file keywords (comma-separated)
+        _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, cover, copyright, preface, nav, message, info, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'
+        _DEFAULT_SPECIAL_EXACT = 'index, glossary, glossary_extension'
+        self.special_file_keywords_var = self.config.get('special_file_keywords', _DEFAULT_SPECIAL_KEYWORDS)
+        self.special_file_exact_var = self.config.get('special_file_exact', _DEFAULT_SPECIAL_EXACT)
         
         # String variables
         str_vars = [
@@ -10643,13 +10648,26 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self._preview_dialog = dlg
 
     def _is_special_file(self, filename):
-        """Check if a filename is a special file (cover, nav, toc, or no digits)."""
+        """Check if a filename is a special file using configurable keyword lists."""
         name_lower = filename.lower()
         name_noext = os.path.splitext(name_lower)[0]
-        # Check known special-file patterns
-        if any(skip in name_lower for skip in ['nav.', 'toc.', 'cover.']):
-            return True
-        # Check if filename has no digits (special file heuristic from TransateKRtoEN)
+        # Check known special-file patterns (substring match)
+        _kw_str = getattr(self, 'special_file_keywords_var', '')
+        if _kw_str:
+            _keywords = [k.strip().lower() for k in _kw_str.split(',') if k.strip()]
+            if any(kw in name_noext for kw in _keywords):
+                return True
+        else:
+            # Fallback if var not set
+            if any(skip in name_lower for skip in ['nav.', 'toc.', 'cover.']):
+                return True
+        # Exact-match keywords
+        _exact_str = getattr(self, 'special_file_exact_var', '')
+        if _exact_str:
+            _exact = [k.strip().lower() for k in _exact_str.split(',') if k.strip()]
+            if name_noext in _exact:
+                return True
+        # Check if filename has no digits (special file heuristic)
         if not re.search(r'\d', name_noext):
             return True
         return False
@@ -10850,15 +10868,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         if idref and idref in manifest:
                             spine_order_full.append(manifest[idref])
                 
-                # Now filter out cover and nav/toc files for processing (unless override is enabled)
+                # Now filter out special files for processing (unless override is enabled)
                 translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
                 # Backward compatibility
                 translate_special = translate_special or (os.environ.get('TRANSLATE_COVER_HTML', '0') == '1')
                 
                 spine_order = []
                 for item in spine_order_full:
-                    # Skip navigation and cover files unless override is enabled
-                    if translate_special or not any(skip in item.lower() for skip in ['nav.', 'toc.', 'cover.']):
+                    # Skip special files unless override is enabled
+                    if translate_special or not self._is_special_file(item):
                         spine_order.append(item)
                 
                 self.append_log(f"📋 Found {len(spine_order_full)} items in OPF spine ({len(spine_order)} after filtering)")
@@ -21575,6 +21593,12 @@ Important rules:
                 self.config['translate_cover_html'] = self.translate_cover_html_var
                 self.config['translate_special_files'] = self.translate_cover_html_var
 
+            # Custom special file keywords
+            if hasattr(self, 'special_file_keywords_var'):
+                self.config['special_file_keywords'] = self.special_file_keywords_var
+            if hasattr(self, 'special_file_exact_var'):
+                self.config['special_file_exact'] = self.special_file_exact_var
+
             # Backward compatibility for extraction_mode
             if hasattr(self, 'text_extraction_method_var') and hasattr(self, 'file_filtering_level_var'):
                 if self.text_extraction_method_var == 'enhanced':
@@ -22288,6 +22312,9 @@ Important rules:
                 ('TRANSLATE_SPECIAL_FILES', '1' if getattr(self, 'translate_special_files_var', False) else '0'),
                 # Backward compatibility: Also set the old TRANSLATE_COVER_HTML for any legacy code
                 ('TRANSLATE_COVER_HTML', '1' if getattr(self, 'translate_special_files_var', False) else '0'),
+                # Custom special file keywords
+                ('SPECIAL_FILE_KEYWORDS', getattr(self, 'special_file_keywords_var', '')),
+                ('SPECIAL_FILE_EXACT', getattr(self, 'special_file_exact_var', '')),
                 ('DISABLE_ZERO_DETECTION', '1' if getattr(self, 'disable_zero_detection_var', True) else '0'),
                 ('DUPLICATE_DETECTION_MODE', getattr(self, 'duplicate_detection_mode_var', 'basic')),
                 ('ENABLE_DECIMAL_CHAPTERS', '1' if getattr(self, 'enable_decimal_chapters_var', False) else '0'),

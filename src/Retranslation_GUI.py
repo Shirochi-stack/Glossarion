@@ -1650,12 +1650,15 @@ class RetranslationMixin:
                             if idref in id_to_href:
                                 spine_hrefs.append(id_to_href[idref])
                         
-                        special_keywords = [
+                        _kw_env = os.environ.get('SPECIAL_FILE_KEYWORDS', '')
+                        special_keywords = [k.strip().lower() for k in _kw_env.split(',') if k.strip()] if _kw_env else [
                             'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
                             'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
                             'foreword', 'acknowledgment', 'author', 'appendix',
                             'bibliography'
                         ]
+                        _exact_env = os.environ.get('SPECIAL_FILE_EXACT', '')
+                        special_exact = [k.strip().lower() for k in _exact_env.split(',') if k.strip()] if _exact_env else ['index', 'glossary', 'glossary_extension']
                         import re as _re_spine
                         ci = 0
                         for href in spine_hrefs:
@@ -1665,7 +1668,7 @@ class RetranslationMixin:
                                 name_lower = name_noext.lower()
                                 name_stripped = _re_spine.sub(r'\d+$', '', name_lower).rstrip('_- ')
                                 # Exact match: these are special only when the basename matches exactly
-                                if name_lower in ('index', 'glossary', 'glossary_extension'):
+                                if name_lower in special_exact:
                                     continue
                                 if any(kw in name_lower for kw in special_keywords):
                                     has_digits = bool(_re_spine.search(r'\d', name_noext))

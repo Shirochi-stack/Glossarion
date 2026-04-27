@@ -61,29 +61,46 @@ def count_tokens(text: str) -> int:
 
 # ─── EPUB reading helpers ───────────────────────────────────────────────
 
-# Special file patterns to skip — mirrors TransateKRtoEN.py special_keywords
-_SPECIAL_PATTERNS = [
+# Default special file patterns — can be overridden via SPECIAL_FILE_KEYWORDS env var
+_DEFAULT_SPECIAL_PATTERNS = [
     'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
     'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
     'foreword', 'acknowledgment', 'author', 'appendix',
     'bibliography', 'titlepage', 'halftitle', 'frontmatter', 'backmatter',
 ]
+_DEFAULT_SPECIAL_EXACT = ['index', 'glossary', 'glossary_extension']
+
+
+def _get_special_keywords():
+    """Read special file keywords from environment or use defaults."""
+    kw_env = os.environ.get('SPECIAL_FILE_KEYWORDS', '')
+    if kw_env:
+        return [k.strip().lower() for k in kw_env.split(',') if k.strip()]
+    return _DEFAULT_SPECIAL_PATTERNS
+
+
+def _get_special_exact():
+    """Read exact-match special file keywords from environment or use defaults."""
+    exact_env = os.environ.get('SPECIAL_FILE_EXACT', '')
+    if exact_env:
+        return [k.strip().lower() for k in exact_env.split(',') if k.strip()]
+    return _DEFAULT_SPECIAL_EXACT
 
 
 def _is_special_file(filename: str) -> bool:
     """Check if a filename is a special/metadata file that should be skipped.
-    Mirrors the heuristic in translator_gui._is_special_file:
+    Uses configurable keyword lists from SPECIAL_FILE_KEYWORDS / SPECIAL_FILE_EXACT env vars.
     1) Known keyword patterns (substring match)
-    2) Exact basename matches for 'index', 'glossary', 'glossary_extension'
+    2) Exact basename matches
     3) Filenames with no digits (e.g. 'info.xhtml', 'about.xhtml')
     """
     import re
     base = os.path.splitext(os.path.basename(filename))[0].lower()
     # Check known special-file keywords (substring match)
-    if any(pat in base for pat in _SPECIAL_PATTERNS):
+    if any(pat in base for pat in _get_special_keywords()):
         return True
-    # Exact match only: these are special only when the basename matches exactly
-    if base in ('index', 'glossary', 'glossary_extension'):
+    # Exact match only
+    if base in _get_special_exact():
         return True
     # Heuristic: filenames with no digits are often special/metadata files
     if not re.search(r'\d', base):
