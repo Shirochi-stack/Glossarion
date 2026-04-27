@@ -1402,6 +1402,7 @@ def filter_images_with_vision(
     game_dir: str,
     filter_system_prompt: str = "",
     filter_user_prompt: str = "",
+    temperature: float = 0.3,
     batch_size: int = 1,
     api_key: str = "",
     model: str = "",
@@ -1474,6 +1475,7 @@ def filter_images_with_vision(
         ]
         result = client.send_image(
             messages, entry.decrypted_png,
+            temperature=temperature,
             context='image_scan',
         )
         answer = ""
@@ -1654,6 +1656,7 @@ def translate_game_images(
         entries, client, game_dir,
         filter_system_prompt=filter_system_prompt,
         filter_user_prompt=filter_user_prompt,
+        temperature=temperature,
         batch_size=batch_size,
         api_key=api_key,
         model=model,
