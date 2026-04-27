@@ -13100,6 +13100,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
             # Load progress for resume
             progress = rpgmaker_handler.load_progress(game_dir)
+            # Scrub empty-valued entries that leaked in from previous runs
+            # (e.g. AI returned empty translation, old code stored it as "done")
+            empty_keys = [k for k, v in progress.items() if not v or not v.strip()]
+            if empty_keys:
+                for k in empty_keys:
+                    del progress[k]
+                rpgmaker_handler.save_progress(game_dir, progress)
+                self.append_log(f"🧹 Cleaned {len(empty_keys)} empty translations from progress")
             if progress:
                 self.append_log(f"📋 Resuming: {len(progress)} strings already translated")
 
@@ -13134,7 +13142,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 new_keys = []
                 new_texts = []
                 for k, t in zip(chunk["keys"], chunk["texts"]):
-                    if k not in progress:
+                    if k not in progress or not progress[k].strip():
                         new_keys.append(k)
                         new_texts.append(t)
                 if new_keys:
