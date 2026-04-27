@@ -4406,12 +4406,11 @@ Recent translations to summarize:
         return result
 
     def _refresh_auth_account_arrows(self):
-        """Update arrow button visibility for each auth provider.
+        """Update account-slot dropdown visibility and items for each auth provider.
 
         Collects all account IDs (from the primary model + key pools),
-        stores them in ``_auth_account_ids``, and shows/hides the ◀▶
-        arrow buttons accordingly.  Arrows are only visible when 2+
-        distinct account slots exist for a provider.
+        stores them in ``_auth_account_ids``, and populates/shows the
+        dropdown only when 2+ distinct account slots exist for a provider.
         """
         import re as _re
 
@@ -4430,10 +4429,10 @@ Recent translations to summarize:
                 acct_id = int(m.group(1)) if m.group(1) else 0
                 pool_ids[provider].add(acct_id)
 
-        arrow_map = {
-            'authgpt': ('authgpt_prev_btn', 'authgpt_next_btn'),
-            'authcd':  ('authcd_prev_btn',  'authcd_next_btn'),
-            'authgem': ('authgem_prev_btn', 'authgem_next_btn'),
+        combo_map = {
+            'authgpt': 'authgpt_acct_combo',
+            'authcd':  'authcd_acct_combo',
+            'authgem': 'authgem_acct_combo',
         }
 
         if not hasattr(self, '_auth_account_ids'):
@@ -4451,21 +4450,25 @@ Recent translations to summarize:
                 cur_idx = 0
             self._auth_account_idx[provider] = cur_idx
 
-            # Show/hide arrow buttons
-            prev_name, next_name = arrow_map.get(provider, (None, None))
-            if prev_name and hasattr(self, prev_name) and next_name and hasattr(self, next_name):
-                prev_btn = getattr(self, prev_name)
-                next_btn = getattr(self, next_name)
+            # Show/hide and populate account dropdown
+            combo_name = combo_map.get(provider)
+            if combo_name and hasattr(self, combo_name):
+                combo = getattr(self, combo_name)
                 # Determine if the main login button for this provider is visible
                 main_btn_name = f"{provider}_login_btn"
                 main_visible = hasattr(self, main_btn_name) and getattr(self, main_btn_name).isVisible()
-                show_arrows = len(sorted_ids) > 1 and main_visible
-                if show_arrows:
-                    prev_btn.show()
-                    next_btn.show()
+                show_combo = len(sorted_ids) > 1 and main_visible
+                if show_combo:
+                    # Repopulate items (block signals to avoid triggering change handler)
+                    combo.blockSignals(True)
+                    combo.clear()
+                    for aid in sorted_ids:
+                        combo.addItem(f"#{aid}", aid)
+                    combo.setCurrentIndex(cur_idx)
+                    combo.blockSignals(False)
+                    combo.show()
                 else:
-                    prev_btn.hide()
-                    next_btn.hide()
+                    combo.hide()
 
         # Update all visible main button labels to reflect current selection
         for provider in ('authgpt', 'authcd', 'authgem'):
@@ -4478,19 +4481,17 @@ Recent translations to summarize:
                     else:
                         update_fn()
 
-    def _cycle_auth_account(self, provider, delta):
-        """Cycle the selected account slot for *provider* by *delta* (+1 or -1).
+    def _on_auth_acct_combo_changed(self, provider, index):
+        """Handle account-slot dropdown selection change for *provider*.
 
-        Updates the arrow-controlled index, then refreshes the main login
-        button text/tooltip/style to reflect the newly selected account.
+        Updates the internal index, then refreshes the main login button.
         """
+        if index < 0:
+            return
         ids_list = self._auth_account_ids.get(provider, [0])
-        if len(ids_list) <= 1:
-            return  # nothing to cycle
-
-        cur = self._auth_account_idx.get(provider, 0)
-        cur = (cur + delta) % len(ids_list)
-        self._auth_account_idx[provider] = cur
+        if index >= len(ids_list):
+            return
+        self._auth_account_idx[provider] = index
 
         # Refresh the main button appearance
         update_fn = getattr(self, f'_update_{provider}_login_status', None)
@@ -5757,26 +5758,24 @@ Recent translations to summarize:
         self.authgpt_login_btn.hide()
         model_btn_layout.addWidget(self.authgpt_login_btn)
         
-        # AuthGPT arrow buttons for cycling account slots
-        _arrow_style = (
-            "QPushButton { background-color: #2a3a4a; color: #ccc; font-weight: bold; "
-            "font-size: 9pt; padding: 0px; border: 1px solid #555; border-radius: 3px; } "
-            "QPushButton:hover { background-color: #3a4a5a; color: white; border-color: #888; }"
+        # AuthGPT account slot dropdown (narrow, shown only when 2+ slots exist)
+        _acct_combo_style = (
+            "QComboBox { background-color: #2a3a4a; color: #ccc; font-weight: bold; "
+            "font-size: 9pt; padding: 1px 2px 1px 4px; border: 1px solid #555; border-radius: 3px; "
+            "min-width: 28px; max-width: 46px; } "
+            "QComboBox:hover { background-color: #3a4a5a; color: white; border-color: #888; } "
+            "QComboBox::drop-down { width: 12px; border: none; } "
+            "QComboBox::down-arrow { image: none; border: none; width: 0px; } "
+            "QComboBox QAbstractItemView { background-color: #2a3a4a; color: #e0e0e0; "
+            "selection-background-color: #4a6a8a; border: 1px solid #555; }"
         )
-        self.authgpt_prev_btn = QPushButton("\u25c0")
-        self.authgpt_prev_btn.setFixedSize(22, 26)
-        self.authgpt_prev_btn.setStyleSheet(_arrow_style)
-        self.authgpt_prev_btn.setToolTip("Previous ChatGPT account slot")
-        self.authgpt_prev_btn.clicked.connect(lambda: self._cycle_auth_account('authgpt', -1))
-        self.authgpt_prev_btn.hide()
-        model_btn_layout.addWidget(self.authgpt_prev_btn)
-        self.authgpt_next_btn = QPushButton("\u25b6")
-        self.authgpt_next_btn.setFixedSize(22, 26)
-        self.authgpt_next_btn.setStyleSheet(_arrow_style)
-        self.authgpt_next_btn.setToolTip("Next ChatGPT account slot")
-        self.authgpt_next_btn.clicked.connect(lambda: self._cycle_auth_account('authgpt', +1))
-        self.authgpt_next_btn.hide()
-        model_btn_layout.addWidget(self.authgpt_next_btn)
+        self.authgpt_acct_combo = QComboBox()
+        self.authgpt_acct_combo.setStyleSheet(_acct_combo_style)
+        self.authgpt_acct_combo.setToolTip("Select ChatGPT account slot")
+        self.authgpt_acct_combo.setFixedWidth(46)
+        self.authgpt_acct_combo.currentIndexChanged.connect(lambda idx: self._on_auth_acct_combo_changed('authgpt', idx))
+        self.authgpt_acct_combo.hide()
+        model_btn_layout.addWidget(self.authgpt_acct_combo)
         
         # AuthCD Login button (visible only for authcd/ models)
         self.authcd_login_btn = QPushButton("\ud83d\udd10 Claude Login")
@@ -5793,21 +5792,14 @@ Recent translations to summarize:
         self.authcd_login_btn.hide()
         model_btn_layout.addWidget(self.authcd_login_btn)
         
-        # AuthCD arrow buttons for cycling account slots
-        self.authcd_prev_btn = QPushButton("\u25c0")
-        self.authcd_prev_btn.setFixedSize(22, 26)
-        self.authcd_prev_btn.setStyleSheet(_arrow_style)
-        self.authcd_prev_btn.setToolTip("Previous Claude account slot")
-        self.authcd_prev_btn.clicked.connect(lambda: self._cycle_auth_account('authcd', -1))
-        self.authcd_prev_btn.hide()
-        model_btn_layout.addWidget(self.authcd_prev_btn)
-        self.authcd_next_btn = QPushButton("\u25b6")
-        self.authcd_next_btn.setFixedSize(22, 26)
-        self.authcd_next_btn.setStyleSheet(_arrow_style)
-        self.authcd_next_btn.setToolTip("Next Claude account slot")
-        self.authcd_next_btn.clicked.connect(lambda: self._cycle_auth_account('authcd', +1))
-        self.authcd_next_btn.hide()
-        model_btn_layout.addWidget(self.authcd_next_btn)
+        # AuthCD account slot dropdown
+        self.authcd_acct_combo = QComboBox()
+        self.authcd_acct_combo.setStyleSheet(_acct_combo_style)
+        self.authcd_acct_combo.setToolTip("Select Claude account slot")
+        self.authcd_acct_combo.setFixedWidth(46)
+        self.authcd_acct_combo.currentIndexChanged.connect(lambda idx: self._on_auth_acct_combo_changed('authcd', idx))
+        self.authcd_acct_combo.hide()
+        model_btn_layout.addWidget(self.authcd_acct_combo)
         
         # AuthGem Login button (visible only for authgem/ models)
         self.authgem_login_btn = QPushButton("🔐 Gemini Login")
@@ -5824,21 +5816,14 @@ Recent translations to summarize:
         self.authgem_login_btn.hide()
         model_btn_layout.addWidget(self.authgem_login_btn)
         
-        # AuthGem arrow buttons for cycling account slots
-        self.authgem_prev_btn = QPushButton("\u25c0")
-        self.authgem_prev_btn.setFixedSize(22, 26)
-        self.authgem_prev_btn.setStyleSheet(_arrow_style)
-        self.authgem_prev_btn.setToolTip("Previous Gemini account slot")
-        self.authgem_prev_btn.clicked.connect(lambda: self._cycle_auth_account('authgem', -1))
-        self.authgem_prev_btn.hide()
-        model_btn_layout.addWidget(self.authgem_prev_btn)
-        self.authgem_next_btn = QPushButton("\u25b6")
-        self.authgem_next_btn.setFixedSize(22, 26)
-        self.authgem_next_btn.setStyleSheet(_arrow_style)
-        self.authgem_next_btn.setToolTip("Next Gemini account slot")
-        self.authgem_next_btn.clicked.connect(lambda: self._cycle_auth_account('authgem', +1))
-        self.authgem_next_btn.hide()
-        model_btn_layout.addWidget(self.authgem_next_btn)
+        # AuthGem account slot dropdown
+        self.authgem_acct_combo = QComboBox()
+        self.authgem_acct_combo.setStyleSheet(_acct_combo_style)
+        self.authgem_acct_combo.setToolTip("Select Gemini account slot")
+        self.authgem_acct_combo.setFixedWidth(46)
+        self.authgem_acct_combo.currentIndexChanged.connect(lambda idx: self._on_auth_acct_combo_changed('authgem', idx))
+        self.authgem_acct_combo.hide()
+        model_btn_layout.addWidget(self.authgem_acct_combo)
         
         # AuthGem Status button — check quota / verify account (next to login)
         self.authgem_status_btn = QPushButton("📊")
