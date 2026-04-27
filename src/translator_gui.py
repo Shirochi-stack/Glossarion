@@ -3519,6 +3519,8 @@ Recent translations to summarize:
             "korean_OCR",
             "japanese_OCR",
             "chinese_OCR",
+            # RPG Maker GTool profile
+            "RPGMaker_GTool",
         ]
         
         # Add missing required profiles while preserving existing profile positions
@@ -7848,12 +7850,21 @@ Recent translations to summarize:
             return
         
         if len(files) == 1:
+            file_path = files[0]
+            ext = os.path.splitext(file_path)[1].lower()
+            
+            # RPG Maker .exe — output is GTool_Translation in the game directory
+            if ext == '.exe':
+                output_path = os.path.join(os.path.dirname(os.path.abspath(file_path)), 'GTool_Translation')
+                self._open_single_output_folder(output_path)
+                return
+            
             # Single file — open directly
-            base_name = os.path.splitext(os.path.basename(files[0]))[0]
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
             if override_dir:
                 output_path = os.path.join(override_dir, base_name)
             else:
-                base_dir = self._get_output_base_dir(files[0])
+                base_dir = self._get_output_base_dir(file_path)
                 output_path = os.path.join(base_dir, base_name)
             self._open_single_output_folder(output_path)
             return

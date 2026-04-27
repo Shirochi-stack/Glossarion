@@ -112,28 +112,54 @@ def _is_translatable(text: str) -> bool:
     return True
 
 
-def _extract_event_strings(commands: list) -> List[Tuple[int, str]]:
+def _extract_event_strings(commands: list) -> List[Tuple[str, str]]:
     """Extract translatable strings from RPG Maker event command list.
 
-    Returns list of (index, text) tuples.
+    Groups consecutive code-401 lines into single message blocks so the AI
+    translates each dialog box as one unit instead of line-by-line.
+    Returns list of (key_suffix, text) tuples.
     """
     results = []
     if not commands:
         return results
-    for i, cmd in enumerate(commands):
+
+    i = 0
+    while i < len(commands):
+        cmd = commands[i]
         if not isinstance(cmd, dict):
+            i += 1
             continue
         code = cmd.get("code", 0)
         params = cmd.get("parameters", [])
-        if code in _DIALOG_CODES and params:
-            text = params[0] if isinstance(params[0], str) else ""
-            if _is_translatable(text):
-                results.append((i, text))
+
+        if code in _DIALOG_CODES:
+            # Collect ALL consecutive lines of this dialog block
+            block_start = i
+            lines = []
+            while i < len(commands):
+                c = commands[i]
+                if not isinstance(c, dict) or c.get("code", 0) != code:
+                    break
+                p = c.get("parameters", [])
+                line = p[0] if p and isinstance(p[0], str) else ""
+                lines.append(line)
+                i += 1
+            # Join lines with newline — translate as a single message
+            full_text = "\n".join(lines)
+            if _is_translatable(full_text):
+                # Key encodes the range: cmd_{start}_{end}
+                key = f"msg_{block_start}_{block_start + len(lines) - 1}"
+                results.append((key, full_text))
+            continue
+
         elif code == _CHOICE_CODE and params:
             choices = params[0] if isinstance(params[0], list) else []
             for ci, choice in enumerate(choices):
                 if isinstance(choice, str) and _is_translatable(choice):
-                    results.append((i, choice))
+                    results.append((f"choice_{i}_{ci}", choice))
+
+        i += 1
+
     return results
 
 
@@ -177,8 +203,8 @@ def extract_map_strings(data_dir: str, log: Callable = print
                 if not page or not isinstance(page, dict):
                     continue
                 cmds = page.get("list", [])
-                for cmd_idx, text in _extract_event_strings(cmds):
-                    key = f"event_{ev_idx}_page_{pg_idx}_cmd_{cmd_idx}"
+                for key_suffix, text in _extract_event_strings(cmds):
+                    key = f"event_{ev_idx}_page_{pg_idx}_{key_suffix}"
                     strings[key] = text
 
         if strings:
@@ -234,8 +260,8 @@ def extract_db_strings(data_dir: str, log: Callable = print
                     if _is_translatable(ev_name):
                         strings[f"ce_{idx}_name"] = ev_name
                     cmds = event.get("list", [])
-                    for cmd_idx, text in _extract_event_strings(cmds):
-                        strings[f"ce_{idx}_cmd_{cmd_idx}"] = text
+                    for key_suffix, text in _extract_event_strings(cmds):
+                        strings[f"ce_{idx}_{key_suffix}"] = text
         else:
             # Standard DB array (Actors, Items, etc.)
             if isinstance(data, list):
@@ -1188,7 +1214,7 @@ class RubyMarshalWriter:
 
 
 def _patch_map_entry(data: dict, key: str, translated: str) -> int:
-    """Patch a single map entry."""
+    """Patch a single map entry with translated text."""
     if key == "displayName":
         data["displayName"] = translated
         return 1
@@ -1202,20 +1228,51 @@ def _patch_map_entry(data: dict, key: str, translated: str) -> int:
             return 1
         return 0
 
-    m = re.match(r'event_(\d+)_page_(\d+)_cmd_(\d+)', key)
+    # Grouped message block: event_E_page_P_msg_S_E
+    m = re.match(r'event_(\d+)_page_(\d+)_msg_(\d+)_(\d+)', key)
     if m:
-        ev_idx, pg_idx, cmd_idx = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        ev_idx = int(m.group(1))
+        pg_idx = int(m.group(2))
+        cmd_start = int(m.group(3))
+        cmd_end = int(m.group(4))
         try:
-            cmd = data["events"][ev_idx]["pages"][pg_idx]["list"][cmd_idx]
-            code = cmd.get("code", 0)
-            if code in _DIALOG_CODES:
-                cmd["parameters"][0] = translated
-                return 1
-            elif code == _CHOICE_CODE:
-                # Find which choice matches - for now patch all
-                pass
+            cmd_list = data["events"][ev_idx]["pages"][pg_idx]["list"]
+            num_lines = cmd_end - cmd_start + 1
+            # Split translated text into the same number of lines
+            trans_lines = translated.split("\n")
+            # Pad or trim to match original line count
+            while len(trans_lines) < num_lines:
+                trans_lines.append("")
+            if len(trans_lines) > num_lines:
+                # Merge excess lines into the last slot
+                trans_lines = trans_lines[:num_lines - 1] + ["\n".join(trans_lines[num_lines - 1:])]
+            for offset in range(num_lines):
+                ci = cmd_start + offset
+                if ci < len(cmd_list):
+                    cmd = cmd_list[ci]
+                    if isinstance(cmd, dict) and cmd.get("code", 0) in _DIALOG_CODES:
+                        cmd["parameters"][0] = trans_lines[offset]
+            return 1
         except (IndexError, KeyError, TypeError):
             pass
+
+    # Choice: event_E_page_P_choice_I_C
+    m = re.match(r'event_(\d+)_page_(\d+)_choice_(\d+)_(\d+)', key)
+    if m:
+        ev_idx = int(m.group(1))
+        pg_idx = int(m.group(2))
+        cmd_idx = int(m.group(3))
+        choice_idx = int(m.group(4))
+        try:
+            cmd = data["events"][ev_idx]["pages"][pg_idx]["list"][cmd_idx]
+            if cmd.get("code", 0) == _CHOICE_CODE:
+                choices = cmd["parameters"][0]
+                if isinstance(choices, list) and choice_idx < len(choices):
+                    choices[choice_idx] = translated
+                    return 1
+        except (IndexError, KeyError, TypeError):
+            pass
+
     return 0
 
 
@@ -1249,16 +1306,47 @@ def _patch_common_event(data: list, key: str, translated: str) -> int:
             data[idx]["name"] = translated
             return 1
         return 0
-    m = re.match(r'ce_(\d+)_cmd_(\d+)', key)
+
+    # Grouped message block: ce_E_msg_S_E
+    m = re.match(r'ce_(\d+)_msg_(\d+)_(\d+)', key)
     if m:
-        ev_idx, cmd_idx = int(m.group(1)), int(m.group(2))
+        ev_idx = int(m.group(1))
+        cmd_start = int(m.group(2))
+        cmd_end = int(m.group(3))
         try:
-            cmd = data[ev_idx]["list"][cmd_idx]
-            if cmd.get("code", 0) in _DIALOG_CODES:
-                cmd["parameters"][0] = translated
-                return 1
+            cmd_list = data[ev_idx]["list"]
+            num_lines = cmd_end - cmd_start + 1
+            trans_lines = translated.split("\n")
+            while len(trans_lines) < num_lines:
+                trans_lines.append("")
+            if len(trans_lines) > num_lines:
+                trans_lines = trans_lines[:num_lines - 1] + ["\n".join(trans_lines[num_lines - 1:])]
+            for offset in range(num_lines):
+                ci = cmd_start + offset
+                if ci < len(cmd_list):
+                    cmd = cmd_list[ci]
+                    if isinstance(cmd, dict) and cmd.get("code", 0) in _DIALOG_CODES:
+                        cmd["parameters"][0] = trans_lines[offset]
+            return 1
         except (IndexError, KeyError, TypeError):
             pass
+
+    # Choice: ce_E_choice_I_C
+    m = re.match(r'ce_(\d+)_choice_(\d+)_(\d+)', key)
+    if m:
+        ev_idx = int(m.group(1))
+        cmd_idx = int(m.group(2))
+        choice_idx = int(m.group(3))
+        try:
+            cmd = data[ev_idx]["list"][cmd_idx]
+            if cmd.get("code", 0) == _CHOICE_CODE:
+                choices = cmd["parameters"][0]
+                if isinstance(choices, list) and choice_idx < len(choices):
+                    choices[choice_idx] = translated
+                    return 1
+        except (IndexError, KeyError, TypeError):
+            pass
+
     return 0
 
 
