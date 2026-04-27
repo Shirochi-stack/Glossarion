@@ -1402,6 +1402,10 @@ def filter_images_with_vision(
     game_dir: str,
     filter_system_prompt: str = "",
     filter_user_prompt: str = "",
+    batch_size: int = 1,
+    api_key: str = "",
+    model: str = "",
+    output_dir: str = "",
     log: Callable = print,
     stop_check: Callable = None,
 ) -> List[ImageEntry]:
@@ -1412,6 +1416,7 @@ def filter_images_with_vision(
     Args:
         filter_system_prompt: System prompt for the YES/NO filter.
         filter_user_prompt:   User prompt for the YES/NO filter.
+        batch_size:           Number of parallel workers for the scan.
     """
     # Defaults
     if not filter_system_prompt or not filter_system_prompt.strip():
@@ -1432,53 +1437,90 @@ def filter_images_with_vision(
             cache = {}
 
     filtered: List[ImageEntry] = []
-    checked = 0
+    uncached: List[ImageEntry] = []
 
+    # Separate cached from uncached
     for entry in entries:
-        if stop_check and stop_check():
-            log("⏹️ Image scan stopped by user")
-            break
-
         cache_key = entry.relative_path
         if cache_key in cache:
             entry.has_text = cache[cache_key]
             if entry.has_text:
                 filtered.append(entry)
-            continue
+        else:
+            uncached.append(entry)
 
-        # Ask the vision model
-        try:
-            mime = _detect_mime(entry.decrypted_png)
-            b64 = base64.b64encode(entry.decrypted_png).decode('ascii')
-            messages = [
-                {"role": "system", "content": filter_system_prompt},
-                {"role": "user", "content": [
-                    {"type": "text", "text": filter_user_prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
-                ]}
-            ]
-            result = client.send(messages)
-            answer = ""
-            if isinstance(result, tuple):
-                answer = (result[0] or "").strip().upper()
-            elif isinstance(result, str):
-                answer = result.strip().upper()
-            elif hasattr(result, 'content'):
-                answer = (result.content or "").strip().upper()
+    if not uncached:
+        log(f"🤖 All {len(entries)} images cached — {len(filtered)} have text")
+        return filtered
 
-            has_text = answer.startswith("YES")
-            entry.has_text = has_text
-            cache[cache_key] = has_text
+    log(f"🔍 Scanning {len(uncached)} uncached images ({len(entries) - len(uncached)} cached) "
+        f"with {batch_size} worker(s)...")
 
-            if has_text:
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    cache_lock = threading.Lock()
+
+    def _scan_single(entry):
+        """Worker: check one image for text. Returns (entry, has_text)."""
+        # Per-thread client for parallelism
+        if batch_size > 1 and api_key and model:
+            from unified_api_client import UnifiedClient
+            thread_client = UnifiedClient(
+                model=model,
+                api_key=api_key,
+                output_dir=output_dir or os.path.join(game_dir, "GTool_Translation"),
+            )
+        else:
+            thread_client = client
+
+        mime = _detect_mime(entry.decrypted_png)
+        b64 = base64.b64encode(entry.decrypted_png).decode('ascii')
+        messages = [
+            {"role": "system", "content": filter_system_prompt},
+            {"role": "user", "content": [
+                {"type": "text", "text": filter_user_prompt},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+            ]}
+        ]
+        result = thread_client.send(messages)
+        answer = ""
+        if isinstance(result, tuple):
+            answer = (result[0] or "").strip().upper()
+        elif isinstance(result, str):
+            answer = result.strip().upper()
+        elif hasattr(result, 'content'):
+            answer = (result.content or "").strip().upper()
+
+        return entry, answer.startswith("YES")
+
+    with ThreadPoolExecutor(max_workers=batch_size) as pool:
+        futures = {}
+        for entry in uncached:
+            if stop_check and stop_check():
+                break
+            future = pool.submit(_scan_single, entry)
+            futures[future] = entry
+
+        for future in as_completed(futures):
+            if stop_check and stop_check():
+                log("⏹️ Image scan stopped by user")
+                break
+            try:
+                entry, has_text = future.result()
+                entry.has_text = has_text
+                with cache_lock:
+                    cache[entry.relative_path] = has_text
+                if has_text:
+                    filtered.append(entry)
+            except Exception as e:
+                entry = futures[future]
+                log(f"   Warning: Vision check failed for {entry.relative_path}: {e}")
+                # On failure, include the image (false-positive is better than miss)
+                entry.has_text = True
                 filtered.append(entry)
-            checked += 1
-        except Exception as e:
-            log(f"   ⚠️ Vision check failed for {entry.relative_path}: {e}")
-            # On failure, include the image (false-positive is better than miss)
-            entry.has_text = True
-            filtered.append(entry)
-            cache[cache_key] = True
+                with cache_lock:
+                    cache[entry.relative_path] = True
 
     # Save cache
     try:
@@ -1488,7 +1530,7 @@ def filter_images_with_vision(
     except Exception:
         pass
 
-    log(f"🤖 Detected text in {len(filtered)} of {len(entries)} images")
+    log(f"Detected text in {len(filtered)} of {len(entries)} images")
     return filtered
 
 
@@ -1609,11 +1651,15 @@ def translate_game_images(
         log("ℹ️ No translatable images found — skipping image phase")
         return 0
 
-    # Filter with vision AI
+    # Filter with vision AI (parallelized with batch_size)
     text_entries = filter_images_with_vision(
         entries, client, game_dir,
         filter_system_prompt=filter_system_prompt,
         filter_user_prompt=filter_user_prompt,
+        batch_size=batch_size,
+        api_key=api_key,
+        model=model,
+        output_dir=output_dir,
         log=log, stop_check=stop_check)
     if not text_entries:
         log("ℹ️ No images with detectable text — skipping image phase")
