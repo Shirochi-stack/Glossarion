@@ -2338,10 +2338,12 @@ def _wrap_to_lines(text: str, num_lines: int) -> list:
     RPG Maker dialog boxes have a fixed number of lines per message command.
     If the AI returns a single-line translation for a multi-line original,
     this splits it into the required number of lines.
+    Trailing lines are padded with a single space (not empty string) so
+    RPG Maker renders them cleanly instead of showing blank dialog.
     """
     words = text.split()
     if not words or num_lines <= 1:
-        return [text] if num_lines == 1 else [text] + [""] * (num_lines - 1)
+        return [text] if num_lines == 1 else [text] + [" "] * (num_lines - 1)
 
     # Target roughly equal character count per line
     total_len = sum(len(w) for w in words) + len(words) - 1
@@ -2364,9 +2366,9 @@ def _wrap_to_lines(text: str, num_lines: int) -> list:
     if current_line:
         lines.append(" ".join(current_line))
 
-    # Pad if we somehow got fewer lines
+    # Pad if we somehow got fewer lines — use space, not empty string
     while len(lines) < num_lines:
-        lines.append("")
+        lines.append(" ")
 
     return lines
 
