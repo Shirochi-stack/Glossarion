@@ -2358,26 +2358,21 @@ Text to analyze:
 
             ),
             "RPGMaker_GTool": (
-                "You are a professional game translator specializing in RPG Maker games. "
-                "You MUST translate the following numbered game text entries to {target_lang}.\n\n"
-                "RULES:\n"
-                "- Each [N] entry is one dialog box. It may contain multiple lines separated by newlines.\n"
-                "- CRITICAL: Preserve the EXACT same number of lines (newlines) in each entry. "
-                "If [1] has 3 lines, your translation of [1] must also have exactly 3 lines.\n"
-                "- Preserve RPG Maker control codes exactly as-is (e.g. \\V[1], \\N[2], \\C[3], \\{, \\}, \\$, \\., \\|, \\!, \\>, \\<, \\^).\n"
-                "- Keep character names consistent throughout.\n"
-                "- Match the tone: casual dialogue stays casual, formal stays formal.\n"
-                "- For UI/menu terms (item names, skill names, etc.), use natural {target_lang} gaming terminology.\n"
-                "- Do NOT add explanations, notes, or commentary - output ONLY the numbered translations.\n"
-                "- Do NOT merge or split entries. Each [N] input = exactly one [N] output.\n"
-                "- Each [N] tag MUST start on a new line. Never put two [N] tags on the same line.\n\n"
-                "FORMAT EXAMPLE:\n"
-                "[1] First line of dialog box 1\n"
-                "Second line of dialog box 1\n"
-                "[2] Single line dialog\n"
-                "[3] First line of dialog box 3\n"
-                "Second line of dialog box 3\n"
-                "Third line of dialog box 3\n"
+                "You are a professional game translator. "
+                "Translate every numbered entry below to {target_lang}.\n\n"
+                "OUTPUT FORMAT — follow this EXACTLY:\n"
+                "[1] translated text only\n"
+                "[2] translated text only\n"
+                "...for every entry.\n\n"
+                "STRICT RULES:\n"
+                "- Output ONLY [N] followed by the translated text. Nothing else.\n"
+                "- Do NOT include the original text, arrows (->), quotes, or commentary.\n"
+                "- Do NOT write 'same', 'unchanged', 'Two lines:', or any meta-text.\n"
+                "- If the original has template codes like %1 or %2, keep them as-is in the translation.\n"
+                "- Preserve RPG Maker control codes exactly: \\V[1], \\N[2], \\C[3], \\{, \\}, \\$, \\., \\|, \\!, \\>, \\<, \\^\n"
+                "- If an entry has multiple lines, preserve the exact same number of lines.\n"
+                "- Each [N] tag MUST start on its own new line.\n"
+                "- For UI terms (items, skills, menus), use natural {target_lang} gaming terminology.\n"
             ),
             "Original": "Return everything exactly as seen on the source."
         }
@@ -12471,14 +12466,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
             
             # Make the API call
             try:
-                # Create Payloads directory for API response tracking
-                payloads_dir = "Payloads"
+                # Create Payloads/image directory for API response tracking
+                # Route to the image subfolder to match unified_api_client routing
+                payloads_dir = os.path.join("Payloads", "image")
                 try:
                     os.makedirs(payloads_dir, exist_ok=True)
                 except (PermissionError, OSError):
                     # Fall back to temp directory if CWD is not writable
                     import tempfile
-                    payloads_dir = os.path.join(tempfile.gettempdir(), "Glossarion_Payloads")
+                    payloads_dir = os.path.join(tempfile.gettempdir(), "Glossarion_Payloads", "image")
                     try:
                         os.makedirs(payloads_dir, exist_ok=True)
                     except Exception:
