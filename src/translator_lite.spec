@@ -198,6 +198,9 @@ app_files = [
 
 	# EPUB Library & Reader: EXCLUDED in Lite (saves ~152 MB â€” removes Chromium)
 	# ('epub_library.py', '.'),
+
+	# RPG Maker handler
+	('rpgmaker_handler.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -271,7 +274,8 @@ app_modules = [
 	'token_encryption',  # Encrypted token storage
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client
-	# 'epub_library',  # EXCLUDED in Lite â€” removes Chromium WebEngine (152 MB)
+	# 'epub_library',  # EXCLUDED in Lite — removes Chromium WebEngine (152 MB)
+	'rpgmaker_handler',  # RPG Maker game file handler
 ]
 # GUI Framework
 gui_modules = [

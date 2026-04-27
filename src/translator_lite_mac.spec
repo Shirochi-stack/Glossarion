@@ -163,6 +163,9 @@ app_files = [
 
 	# EPUB Library & Reader
 	('epub_library.py', '.'),
+
+	# RPG Maker handler
+	('rpgmaker_handler.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -237,6 +240,7 @@ app_modules = [
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client
 	'epub_library',  # EPUB Library & Reader
+	'rpgmaker_handler',  # RPG Maker game file handler
 ]
 # GUI Framework
 gui_modules = [
