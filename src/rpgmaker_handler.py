@@ -30,7 +30,7 @@ _DB_FILES = [
 
 # Fields to extract from database entries
 _TRANSLATABLE_FIELDS = ["name", "description", "message1", "message2",
-                        "message3", "message4", "nickname", "profile", "note"]
+                        "message3", "message4", "nickname", "profile"]
 
 # System.json specific translatable paths
 _SYSTEM_FIELDS = ["gameTitle"]
@@ -113,6 +113,11 @@ def _is_translatable(text: str) -> bool:
         return False
     # Skip very short strings that are just punctuation
     if len(stripped) <= 1 and not stripped.isalpha():
+        return False
+    # Skip strings that are ONLY plugin/meta tags (e.g. <srpgReactionSkill:1>)
+    # These are machine-readable and must not be translated.
+    tag_stripped = re.sub(r'<[^>]+>', '', stripped).strip()
+    if not tag_stripped:
         return False
     # Skip strings that are ONLY RPG Maker escape codes (no real text)
     # Covers: \c[N], \n[N], \V[N], \N[N], \C[N], \I[N], \G, \{, \}, etc.
