@@ -13116,15 +13116,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             translated_count = 0
             progress_lock = __import__('threading').Lock()
 
-            # Enable batch mode to suppress per-request log noise
-            _prev_batch = os.environ.get('BATCH_TRANSLATION', '')
-            if batch_size > 1:
-                os.environ['BATCH_TRANSLATION'] = '1'
-
             def _translate_chunk(chunk_info):
                 """Worker function for translating a single chunk."""
                 idx, sub_chunk = chunk_info
-                # Each API request gets its own dedicated client
+                # Each thread gets its own client to avoid thread-safety issues
                 thread_client = UnifiedClient(
                     model=self.model_var,
                     api_key=api_key,
@@ -13158,26 +13153,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
             with ThreadPoolExecutor(max_workers=batch_size) as pool:
                 futures = {}
-                chunk_iter = iter(pending_chunks)
-
-                # Seed the pool with up to batch_size initial tasks
-                for chunk_info in itertools.islice(chunk_iter, batch_size):
+                for chunk_info in pending_chunks:
                     if self.stop_requested:
                         break
                     future = pool.submit(_translate_chunk, chunk_info)
-                    futures[future] = chunk_info[0]
+                    futures[future] = chunk_info[0]  # map future -> chunk index
 
-                # As each future completes, submit the next chunk
-                while futures:
-                    done = next(iter(as_completed(futures)))
-                    chunk_idx = futures.pop(done)
-
+                for future in as_completed(futures):
                     if self.stop_requested:
                         self.append_log("⏹️ Translation stopped by user")
                         break
-
+                    chunk_idx = futures[future]
                     try:
-                        idx, parsed, total_keys = done.result()
+                        idx, parsed, total_keys = future.result()
                         if parsed:
                             with progress_lock:
                                 progress.update(parsed)
@@ -13193,20 +13181,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     except Exception as e:
                         self.append_log(f"   ⚠️ Chunk {chunk_idx+1} failed: {e}")
 
-                    # Submit next chunk if available
-                    if not self.stop_requested:
-                        next_chunk = next(chunk_iter, None)
-                        if next_chunk is not None:
-                            future = pool.submit(_translate_chunk, next_chunk)
-                            futures[future] = next_chunk[0]
-
             self.append_log(f"\n📊 Translated {translated_count} strings total")
-
-            # Restore batch mode env var
-            if _prev_batch:
-                os.environ['BATCH_TRANSLATION'] = _prev_batch
-            elif 'BATCH_TRANSLATION' in os.environ:
-                del os.environ['BATCH_TRANSLATION']
 
             # Update translation map
             try:
