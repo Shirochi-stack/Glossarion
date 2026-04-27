@@ -799,6 +799,31 @@ def extract_all(game_dir: str, log: Callable = print
     log(f"🎮 Detected RPG Maker {version.upper()}")
     log(f"📁 Data directory: {data_dir}")
 
+    # If backups exist but progress is gone/empty, restore originals first.
+    # This prevents re-extracting from half-patched files after a reset.
+    backup_dir = os.path.join(game_dir, "GTool_Translation", "originals_backup")
+    progress_path = get_progress_path(game_dir)
+    progress_exists = os.path.exists(progress_path)
+    progress_empty = True
+    if progress_exists:
+        try:
+            with open(progress_path, 'r', encoding='utf-8') as f:
+                progress_data = json.load(f)
+                progress_empty = len(progress_data) == 0
+        except Exception:
+            progress_empty = True
+
+    if os.path.isdir(backup_dir) and (not progress_exists or progress_empty):
+        backed_files = [f for f in os.listdir(backup_dir)
+                        if os.path.isfile(os.path.join(backup_dir, f))]
+        if backed_files:
+            log(f"🔄 Restoring {len(backed_files)} original files from backup...")
+            for fn in backed_files:
+                src = os.path.join(backup_dir, fn)
+                dst = os.path.join(data_dir, fn)
+                shutil.copy2(src, dst)
+            log("✅ Originals restored — extracting from clean data")
+
     if version in (RPGMakerVersion.MV, RPGMakerVersion.MZ):
         db_strings = extract_db_strings(data_dir, log)
         map_strings = extract_map_strings(data_dir, log)
