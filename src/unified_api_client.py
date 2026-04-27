@@ -11618,6 +11618,19 @@ class UnifiedClient:
         # Lock released — sleep outside lock (interruptible)
         
         if sleep_time > 0:
+            # In batch mode, all threads enter simultaneously — logging before
+            # the sleep dumps 45 "Queued" lines at once.  Log AFTER the sleep
+            # instead so each message appears right before its actual API call.
+            _is_batch = os.getenv("BATCH_TRANSLATION", "0") == "1"
+            if not _is_batch and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+                try:
+                    tls = self._get_thread_local_client()
+                    _label = getattr(tls, 'current_request_label', None) or 'request'
+                    _ctx = getattr(tls, 'current_request_context', None) or 'translation'
+                except Exception:
+                    _label = 'request'
+                    _ctx = 'translation'
+                self._debug_log(f"📤 [{thread_name}] Queued {_label} ({_ctx}) — Sending API call in {api_delay:.1f}s")
             elapsed = 0.0
             step = 0.1
             while elapsed < sleep_time:
@@ -11630,6 +11643,16 @@ class UnifiedClient:
                 dt = min(step, sleep_time - elapsed)
                 time.sleep(dt)
                 elapsed += dt
+            # Batch mode: log after the sleep so it appears right before the API call
+            if _is_batch and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+                try:
+                    tls = self._get_thread_local_client()
+                    _label = getattr(tls, 'current_request_label', None) or 'request'
+                    _ctx = getattr(tls, 'current_request_context', None) or 'translation'
+                except Exception:
+                    _label = 'request'
+                    _ctx = 'translation'
+                self._debug_log(f"📤 [{thread_name}] Queued {_label} ({_ctx}) — Sending API call in {api_delay:.1f}s")
         
         # Log stagger status — shows queued+delay or immediate in-progress
         # (Skip for authgem, native gemini, vertex/ providers, and all
