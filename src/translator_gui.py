@@ -12955,6 +12955,35 @@ If you see multiple p-b cookies, use the one with the longest value."""
             from unified_api_client import UnifiedClient
             gtool_out = os.path.join(game_dir, "GTool_Translation")
 
+            # Initialize key pools from config (normally done by _get_environment_variables,
+            # but image mode bypasses that path)
+            try:
+                if self.config.get('use_multi_api_keys', False):
+                    os.environ['USE_MULTI_KEYS'] = '1'
+                else:
+                    os.environ['USE_MULTI_KEYS'] = '0'
+                if self.config.get('use_qa_scan_keys', False):
+                    os.environ['USE_QA_SCAN_KEYS'] = '1'
+                else:
+                    os.environ['USE_QA_SCAN_KEYS'] = '0'
+
+                # Push in-memory key pools
+                if self.config.get('use_multi_api_keys', False) and self.config.get('multi_api_keys', []):
+                    UnifiedClient.set_in_memory_multi_keys(
+                        self.config.get('multi_api_keys', []),
+                        force_rotation=self.config.get('force_key_rotation', True),
+                        rotation_frequency=self.config.get('rotation_frequency', 1),
+                    )
+                if self.config.get('use_qa_scan_keys', False) and self.config.get('qa_scan_keys', []):
+                    UnifiedClient.set_in_memory_qa_scan_keys(
+                        self.config.get('qa_scan_keys', []),
+                        force_rotation=self.config.get('force_key_rotation', True),
+                        rotation_frequency=self.config.get('rotation_frequency', 1),
+                    )
+                    os.environ['QA_SCAN_API_KEYS'] = json.dumps(self.config.get('qa_scan_keys', []))
+            except Exception:
+                pass
+
             # ── IMAGE MODE: image-asset-only translation ─────────
             if image_mode:
                 # MV/MZ only (older engines don't use JS encryption)
