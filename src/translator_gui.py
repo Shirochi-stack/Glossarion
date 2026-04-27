@@ -12992,8 +12992,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     pass
 
                 # Load filter prompts from settings
-                filter_sys = getattr(self, 'gtool_filter_system_prompt_var', '') or ''
-                filter_usr = getattr(self, 'gtool_filter_user_prompt_var', '') or ''
+                filter_sys = getattr(self, 'gtool_filter_user_prompt_var', '') or ''  # system prompt (legacy var name)
+                filter_usr = getattr(self, 'gtool_scan_user_prompt_var', '') or ''    # user prompt
 
                 img_count = rpgmaker_handler.translate_game_images(
                     game_dir=game_dir,

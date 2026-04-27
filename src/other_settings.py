@@ -4962,6 +4962,138 @@ def configure_translation_chunk_prompt(self):
     except Exception:
         dialog.show()
 
+def _open_gtool_scan_dialog(self):
+    """Dialog to configure the GTool image scan prompts."""
+    from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QTextEdit, QHBoxLayout, QMessageBox
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QIcon
+
+    _DEFAULT_SYS = (
+        "You are an image analyst. Does this image contain readable text "
+        "(Japanese, Chinese, Korean, or any language)? Reply with only YES or NO."
+    )
+    _DEFAULT_USR = ""
+
+    # Reuse existing dialog
+    if hasattr(self, '_gtool_scan_dialog') and self._gtool_scan_dialog is not None:
+        try:
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(self._gtool_scan_dialog, duration=220)
+            except Exception:
+                self._gtool_scan_dialog.show()
+            self._gtool_scan_dialog.raise_()
+            self._gtool_scan_dialog.activateWindow()
+            return
+        except RuntimeError:
+            self._gtool_scan_dialog = None
+
+    # Initialize vars from config if needed
+    if not hasattr(self, 'gtool_filter_user_prompt_var'):
+        self.gtool_filter_user_prompt_var = self.config.get('gtool_filter_user_prompt', _DEFAULT_SYS)
+    if not hasattr(self, 'gtool_scan_user_prompt_var'):
+        self.gtool_scan_user_prompt_var = self.config.get('gtool_scan_user_prompt', _DEFAULT_USR)
+
+    parent = getattr(self, '_other_settings_dialog', None) or self
+    dialog = QDialog(parent)
+    dialog.setWindowTitle("GTool Image Scan Prompts")
+    dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+    dialog.resize(520, 450)
+    try:
+        dialog.setWindowIcon(QIcon("halgakos.ico"))
+    except Exception:
+        pass
+    dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
+    self._gtool_scan_dialog = dialog
+
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(20, 20, 20, 20)
+
+    title = QLabel("🎮 GTool Image Scan Prompts")
+    title.setStyleSheet("font-size: 14pt; font-weight: bold;")
+    layout.addWidget(title)
+
+    desc = QLabel(
+        "Configure the prompts sent with each game image to determine\n"
+        "if it contains translatable text. The AI should respond YES or NO."
+    )
+    desc.setStyleSheet("color: gray; font-size: 10pt;")
+    layout.addWidget(desc)
+    layout.addSpacing(8)
+
+    # System prompt
+    sys_label = QLabel("System Prompt:")
+    sys_label.setStyleSheet("font-size: 10pt; font-weight: bold;")
+    layout.addWidget(sys_label)
+
+    sys_edit = QTextEdit()
+    sys_edit.setPlaceholderText(_DEFAULT_SYS)
+    sys_edit.setFixedHeight(80)
+    sys_edit.setStyleSheet("font-size: 10pt; border: 1px solid #555; border-radius: 3px;")
+    sys_edit.setPlainText(self.gtool_filter_user_prompt_var)
+    layout.addWidget(sys_edit)
+
+    # User prompt
+    usr_label = QLabel("User Prompt:")
+    usr_label.setStyleSheet("font-size: 10pt; font-weight: bold;")
+    layout.addWidget(usr_label)
+
+    usr_desc = QLabel("Optional. The image is automatically attached to this message.")
+    usr_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    layout.addWidget(usr_desc)
+
+    usr_edit = QTextEdit()
+    usr_edit.setPlaceholderText("(leave empty — image is attached automatically)")
+    usr_edit.setFixedHeight(60)
+    usr_edit.setStyleSheet("font-size: 10pt; border: 1px solid #555; border-radius: 3px;")
+    usr_edit.setPlainText(self.gtool_scan_user_prompt_var)
+    layout.addWidget(usr_edit)
+
+    layout.addSpacing(10)
+
+    # Buttons: Reset | stretch | Save | Cancel
+    btn_row = QHBoxLayout()
+
+    btn_reset = QPushButton("Reset to Default")
+    btn_reset.setFixedWidth(130)
+    def _reset_prompts():
+        reply = QMessageBox.question(
+            dialog, "Reset Prompts",
+            "Reset both prompts to defaults?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            sys_edit.setPlainText(_DEFAULT_SYS)
+            usr_edit.setPlainText(_DEFAULT_USR)
+    btn_reset.clicked.connect(_reset_prompts)
+    btn_row.addWidget(btn_reset)
+
+    btn_row.addStretch()
+
+    btn_save = QPushButton("Save")
+    btn_save.setFixedWidth(80)
+    def _save_prompts():
+        self.gtool_filter_user_prompt_var = sys_edit.toPlainText()
+        self.config['gtool_filter_user_prompt'] = self.gtool_filter_user_prompt_var
+        self.gtool_scan_user_prompt_var = usr_edit.toPlainText()
+        self.config['gtool_scan_user_prompt'] = self.gtool_scan_user_prompt_var
+        dialog.hide()
+    btn_save.clicked.connect(_save_prompts)
+    btn_row.addWidget(btn_save)
+
+    btn_cancel = QPushButton("Cancel")
+    btn_cancel.setFixedWidth(80)
+    btn_cancel.clicked.connect(dialog.hide)
+    btn_row.addWidget(btn_cancel)
+
+    layout.addLayout(btn_row)
+
+    try:
+        from dialog_animations import show_dialog_with_fade
+        show_dialog_with_fade(dialog, duration=220)
+    except Exception:
+        dialog.show()
+
 def configure_image_chunk_prompt(self):
     """Configure the prompt template for image chunks (PySide6)"""
     from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit, QGroupBox, QWidget, QMessageBox
@@ -9317,78 +9449,16 @@ def _create_image_translation_section(self, parent):
     btn_image_chunk_desc.setContentsMargins(0, 0, 0, 5)
     right_v.addWidget(btn_image_chunk_desc)
 
-    # ── GTool Image Scan Filter Prompts ──
-    from PySide6.QtWidgets import QTextEdit
+    # ── GTool Image Scan Filter Prompt ──
+    btn_gtool_scan = QPushButton("🎮 Configure GTool Scan Prompt")
+    btn_gtool_scan.setFixedWidth(250)
+    btn_gtool_scan.clicked.connect(lambda: _open_gtool_scan_dialog(self))
+    right_v.addWidget(btn_gtool_scan)
 
-    gtool_sep = QFrame()
-    gtool_sep.setFrameShape(QFrame.HLine)
-    gtool_sep.setFrameShadow(QFrame.Sunken)
-    right_v.addWidget(gtool_sep)
-
-    gtool_title = QLabel("🎮 GTool Image Scan Prompts:")
-    gtool_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
-    right_v.addWidget(gtool_title)
-
-    gtool_desc = QLabel("Controls how the vision AI decides which game images contain translatable text.")
-    gtool_desc.setStyleSheet("color: gray; font-size: 9pt;")
-    gtool_desc.setContentsMargins(0, 0, 0, 3)
-    right_v.addWidget(gtool_desc)
-
-    # System prompt
-    scan_sys_label = QLabel("Filter System Prompt:")
-    scan_sys_label.setStyleSheet("font-size: 10pt;")
-    right_v.addWidget(scan_sys_label)
-
-    if not hasattr(self, 'gtool_filter_system_prompt_var'):
-        self.gtool_filter_system_prompt_var = self.config.get(
-            'gtool_filter_system_prompt',
-            'You are an image analyst. Reply with only YES or NO.'
-        )
-
-    scan_sys_edit = QTextEdit()
-    scan_sys_edit.setPlaceholderText("You are an image analyst. Reply with only YES or NO.")
-    scan_sys_edit.setFixedHeight(50)
-    scan_sys_edit.setStyleSheet("font-size: 10pt; border: 1px solid #555; border-radius: 3px;")
-    try:
-        scan_sys_edit.setPlainText(self.gtool_filter_system_prompt_var)
-    except Exception:
-        pass
-    def _on_scan_sys_changed():
-        try:
-            self.gtool_filter_system_prompt_var = scan_sys_edit.toPlainText()
-            self.config['gtool_filter_system_prompt'] = self.gtool_filter_system_prompt_var
-        except Exception:
-            pass
-    scan_sys_edit.textChanged.connect(_on_scan_sys_changed)
-    right_v.addWidget(scan_sys_edit)
-
-    # User prompt
-    scan_usr_label = QLabel("Filter User Prompt:")
-    scan_usr_label.setStyleSheet("font-size: 10pt;")
-    right_v.addWidget(scan_usr_label)
-
-    if not hasattr(self, 'gtool_filter_user_prompt_var'):
-        self.gtool_filter_user_prompt_var = self.config.get(
-            'gtool_filter_user_prompt',
-            'Does this image contain readable text (Japanese, Chinese, Korean, or any language)? Reply YES or NO.'
-        )
-
-    scan_usr_edit = QTextEdit()
-    scan_usr_edit.setPlaceholderText("Does this image contain readable text? Reply YES or NO.")
-    scan_usr_edit.setFixedHeight(60)
-    scan_usr_edit.setStyleSheet("font-size: 10pt; border: 1px solid #555; border-radius: 3px;")
-    try:
-        scan_usr_edit.setPlainText(self.gtool_filter_user_prompt_var)
-    except Exception:
-        pass
-    def _on_scan_usr_changed():
-        try:
-            self.gtool_filter_user_prompt_var = scan_usr_edit.toPlainText()
-            self.config['gtool_filter_user_prompt'] = self.gtool_filter_user_prompt_var
-        except Exception:
-            pass
-    scan_usr_edit.textChanged.connect(_on_scan_usr_changed)
-    right_v.addWidget(scan_usr_edit)
+    btn_gtool_scan_desc = QLabel("Configure the vision AI prompt for game image text detection")
+    btn_gtool_scan_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    btn_gtool_scan_desc.setContentsMargins(0, 0, 0, 5)
+    right_v.addWidget(btn_gtool_scan_desc)
     
     # Image compression button
     btn_compression = QPushButton("🗜️ Configure Image Compression")

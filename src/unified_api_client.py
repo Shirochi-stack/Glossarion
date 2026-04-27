@@ -4687,8 +4687,8 @@ class UnifiedClient:
             # CONTEXT-SPECIFIC KEY OVERRIDES: When context matches a dedicated pool,
             # use that pool for full multi-key rotation (mirrors main multi-key mode).
             
-            # QA SCAN KEY OVERRIDE: When context is 'Truncation' or 'qa_truncation'
-            _is_qa_scan_context = context in ('Truncation', 'qa_truncation') or (not context and 'Truncation' in threading.current_thread().name)
+            # QA SCAN KEY OVERRIDE: When context is 'Truncation', 'qa_truncation', or 'image_scan' (GTool)
+            _is_qa_scan_context = context in ('Truncation', 'qa_truncation', 'image_scan') or (not context and 'Truncation' in threading.current_thread().name)
             if _is_qa_scan_context:
                 try:
                     use_qa_scan_keys = os.getenv('USE_QA_SCAN_KEYS', '0') == '1'

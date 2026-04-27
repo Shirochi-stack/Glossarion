@@ -1421,11 +1421,10 @@ def filter_images_with_vision(
     """
     # Defaults
     if not filter_system_prompt or not filter_system_prompt.strip():
-        filter_system_prompt = "You are an image analyst. Reply with only YES or NO."
-    if not filter_user_prompt or not filter_user_prompt.strip():
-        filter_user_prompt = (
+        filter_system_prompt = (
+            "You are an image analyst. "
             "Does this image contain readable text "
-            "(Japanese, Chinese, Korean, or any language)? Reply YES or NO."
+            "(Japanese, Chinese, Korean, or any language)? Reply with only YES or NO."
         )
 
     cache_path = os.path.join(game_dir, "GTool_Translation", "image_scan_cache.json")
