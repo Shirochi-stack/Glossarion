@@ -1466,6 +1466,12 @@ def filter_images_with_vision(
     if batch_size > 1:
         os.environ['BATCH_TRANSLATION'] = '1'
 
+    # Force vision mode for scanning (not image generation)
+    _prev_img_output = os.environ.get('ENABLE_IMAGE_OUTPUT_MODE', '')
+    _prev_img_trans = os.environ.get('ENABLE_IMAGE_TRANSLATION', '')
+    os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = '0'
+    os.environ['ENABLE_IMAGE_TRANSLATION'] = '1'
+
     def _scan_single(entry):
         """Worker: check one image for text. Returns (entry, has_text)."""
         messages = [
@@ -1520,6 +1526,15 @@ def filter_images_with_vision(
             os.environ['BATCH_TRANSLATION'] = _prev_batch
         elif 'BATCH_TRANSLATION' in os.environ:
             del os.environ['BATCH_TRANSLATION']
+        # Restore image mode env vars
+        if _prev_img_output:
+            os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = _prev_img_output
+        elif 'ENABLE_IMAGE_OUTPUT_MODE' in os.environ:
+            del os.environ['ENABLE_IMAGE_OUTPUT_MODE']
+        if _prev_img_trans:
+            os.environ['ENABLE_IMAGE_TRANSLATION'] = _prev_img_trans
+        elif 'ENABLE_IMAGE_TRANSLATION' in os.environ:
+            del os.environ['ENABLE_IMAGE_TRANSLATION']
 
     # Save cache
     try:
