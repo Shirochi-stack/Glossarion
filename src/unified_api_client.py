@@ -10235,9 +10235,9 @@ class UnifiedClient:
                 if self._is_image_gen_model(self.model):
                     enable_image_output = True
                     if not self._is_stop_requested():
-                        print(f"\ud83c\udfa8 Image output mode auto-enabled for {self.model}")
+                        print(f"[ImageGen] Image output mode auto-enabled for {self.model}")
                 elif enable_image_output and not self._is_stop_requested():
-                    print(f"\ud83c\udfa8 Image output mode enabled for {model_name}")
+                    print(f"[ImageGen] Image output mode enabled for {model_name}")
                 
                 # Log configuration (consolidate all info in one log)
                 if not self._is_stop_requested():
@@ -16989,15 +16989,15 @@ class UnifiedClient:
                     if self._is_image_gen_model(effective_model):
                         enable_image_output = True
                         if not self._is_stop_requested():
-                            print(f"\ud83c\udfa8 Image output mode auto-enabled for {effective_model}")
+                            print(f"[ImageGen] Image output mode auto-enabled for {effective_model}")
                     elif enable_image_output and not self._is_stop_requested():
-                        print(f"\ud83c\udfa8 Image output mode enabled for {effective_model}")
+                        print(f"[ImageGen] Image output mode enabled for {effective_model}")
                     # Force enable video for any model whose name indicates video generation
                     if self._is_video_gen_model(effective_model):
                         enable_video_output = True
                         enable_image_output = False  # mutually exclusive
                         if not self._is_stop_requested():
-                            print(f"\ud83c\udfac Video output mode auto-enabled for {effective_model}")
+                            print(f"[VideoGen] Video output mode auto-enabled for {effective_model}")
                         # NanoGPT video models require a completely different endpoint;
                         # bail out of the SDK chat path and redirect immediately.
                         if provider == 'nanogpt':
@@ -19050,7 +19050,7 @@ class UnifiedClient:
             except UnifiedClientError:
                 raise
             except Exception as exc:
-                print(f"\ud83d\uded1 [OpenAI Images] attempt {attempt+1}: {exc}")
+                print(f"[OpenAI Images] attempt {attempt+1}: {exc}")
                 if attempt < max_retries - 1:
                     time.sleep(min(2 ** attempt + random.uniform(0, 1), 30))
                 else:
