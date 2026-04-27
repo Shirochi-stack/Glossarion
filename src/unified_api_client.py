@@ -15350,6 +15350,15 @@ class UnifiedClient:
                             
                             # Include image path marker in text content for GUI to detect
                             text_content = f"[GENERATED_IMAGE:{filepath}]"
+                            
+                            # Store raw image bytes in thread-local storage for direct retrieval
+                            # This bypasses the text-chain entirely — callers can grab bytes directly
+                            try:
+                                tls = self._get_thread_local_client()
+                                tls._last_generated_image_bytes = image_data
+                                tls._last_generated_image_path = filepath
+                            except Exception:
+                                pass
                         except Exception as e:
                             print(f"   ⚠️ Failed to save generated image: {e}")
                     

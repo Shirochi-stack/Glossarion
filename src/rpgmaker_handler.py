@@ -1731,6 +1731,17 @@ def translate_game_images(
         # Backup original
         backup_game_image(entry, game_dir, log)
 
+        # Pre-compute expected output filename so we can find it after the API call
+        entry_basename = os.path.splitext(os.path.basename(rel))[0]  # e.g. "カラーリラC"
+        expected_output = os.path.join(translated_images_dir, f"{entry_basename}.png")
+
+        # Skip API call if translated image already exists from a previous run
+        if os.path.exists(expected_output) and os.path.getsize(expected_output) > 0:
+            with open(expected_output, 'rb') as gf:
+                cached_png = gf.read()
+            log(f"   ♻️ Using cached translation: {entry_basename}.png")
+            return idx, cached_png, entry, "[CACHED]"
+
         user_text = (
             f"Translate all visible text in this game image to {target_lang}. "
             f"Generate the translated image."
@@ -1746,6 +1757,7 @@ def translate_game_images(
             temperature=temperature,
             max_tokens=max_tokens,
             context='image_translation',
+            response_name=rel,  # _send_gemini uses this to name the saved file
         )
 
         translated_png = None
@@ -1757,21 +1769,41 @@ def translate_game_images(
         elif hasattr(result, 'content'):
             response_text = result.content or ""
 
-        # Handle [GENERATED_IMAGE:path] responses
-        if "[GENERATED_IMAGE:" in response_text:
+        # PRIMARY: Check the translated_images folder for our specific file
+        if os.path.exists(expected_output):
+            with open(expected_output, 'rb') as gf:
+                translated_png = gf.read()
+            log(f"   📥 Generated image: {entry_basename}.png")
+
+        # FALLBACK 1: Thread-local storage (bypasses text chain)
+        if not translated_png:
+            try:
+                tls = client._get_thread_local_client()
+                tls_bytes = getattr(tls, '_last_generated_image_bytes', None)
+                if tls_bytes:
+                    translated_png = tls_bytes
+                    log(f"   📥 Generated image (TLS fallback)")
+                tls._last_generated_image_bytes = None
+                tls._last_generated_image_path = None
+            except Exception:
+                pass
+
+        # FALLBACK 2: [GENERATED_IMAGE:path] in response text
+        if not translated_png and "[GENERATED_IMAGE:" in response_text:
             match = re.search(r'\[GENERATED_IMAGE:(.+?)\]', response_text)
             if match:
                 gen_path = match.group(1)
                 if os.path.exists(gen_path):
                     with open(gen_path, 'rb') as gf:
                         translated_png = gf.read()
-                    log(f"   📥 Generated image: {os.path.basename(gen_path)}")
+                    log(f"   📥 Generated image (text fallback)")
 
-        # Handle raw data:image/...;base64, responses
-        elif response_text.startswith("data:image/"):
+        # FALLBACK 3: raw data:image/...;base64, responses
+        if not translated_png and response_text.startswith("data:image/"):
             try:
                 _, b64data = response_text.split(",", 1)
                 translated_png = base64.b64decode(b64data)
+                log(f"   📥 Generated image (base64)")
             except Exception as e:
                 log(f"   ⚠️ Failed to decode base64 image response: {e}")
 
