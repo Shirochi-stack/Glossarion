@@ -2597,6 +2597,13 @@ def process_game(exe_path: str, log: Callable = print,
 
     # Load previous progress
     progress = load_progress(game_dir)
+    # Scrub empty-valued entries from previous runs
+    empty_keys = [k for k, v in progress.items() if not v or not v.strip()]
+    if empty_keys:
+        for k in empty_keys:
+            del progress[k]
+        save_progress(game_dir, progress)
+        log(f"🧹 Cleaned {len(empty_keys)} empty translations from progress")
     if progress:
         log(f"📋 Resuming: {len(progress)} strings already translated")
 
@@ -2620,7 +2627,7 @@ def process_game(exe_path: str, log: Callable = print,
         untranslated_keys = []
         untranslated_texts = []
         for k, t in zip(chunk["keys"], chunk["texts"]):
-            if k not in progress:
+            if k not in progress or not progress[k].strip():
                 untranslated_keys.append(k)
                 untranslated_texts.append(t)
 
