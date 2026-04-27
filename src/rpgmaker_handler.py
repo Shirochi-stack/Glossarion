@@ -1516,6 +1516,10 @@ def filter_images_with_vision(
                         filtered.append(entry)
                 except Exception as e:
                     entry = futures[future]
+                    err_str = str(e).lower()
+                    # Suppress cancel-related warnings — user hit stop
+                    if 'cancel' in err_str or (stop_check and stop_check()):
+                        continue
                     log(f"   Warning: Vision check failed for {entry.relative_path}: {e}")
                     # On failure, include the image (false-positive is better than miss)
                     entry.has_text = True
