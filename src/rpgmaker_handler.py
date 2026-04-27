@@ -1182,8 +1182,7 @@ _DEFAULT_SETTINGS = {
     "minFontSize": 14,
     "imageTranslation": {
         "scanDirectories": ["titles1", "titles2", "pictures", "system"],
-        "skipPatterns": ["*battle*", "*animation*"],
-        "maxImages": 50
+        "skipPatterns": ["*battle*", "*animation*"]
     }
 }
 
@@ -1332,7 +1331,6 @@ def discover_translatable_images(
     settings = _load_image_settings(gtool_dir)
     scan_dirs = settings.get("scanDirectories", _IMAGE_SCAN_DIRS)
     skip_patterns = settings.get("skipPatterns", [])
-    max_images = settings.get("maxImages", 50)
 
     entries: List[ImageEntry] = []
 
@@ -1367,12 +1365,6 @@ def discover_translatable_images(
                 ))
             except Exception as e:
                 log(f"   ⚠️ Could not read {rel_path}: {e}")
-
-            if len(entries) >= max_images:
-                log(f"   ⚠️ Hit max image limit ({max_images}) — increase in settings.json")
-                break
-        if len(entries) >= max_images:
-            break
 
     log(f"📷 Found {len(entries)} images in {', '.join(scan_dirs)}")
     return entries
@@ -1450,7 +1442,8 @@ def filter_images_with_vision(
                     {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
                 ]}
             ]
-            result = client.send(messages, temperature=0.0, max_tokens=10)
+            result = client.send_image(messages, image_data=entry.decrypted_png,
+                                       context='rpg_image_scan')
             answer = ""
             if isinstance(result, tuple):
                 answer = (result[0] or "").strip().upper()
@@ -1570,6 +1563,8 @@ def translate_game_images(
     client,
     target_lang: str = "English",
     system_prompt: str = "",
+    temperature: float = 0.3,
+    max_tokens: int = None,
     log: Callable = print,
     stop_check: Callable = None,
 ) -> int:
@@ -1663,7 +1658,8 @@ def translate_game_images(
             result = client.send_image(
                 messages,
                 image_data=entry.decrypted_png,
-                temperature=0.3,
+                temperature=temperature,
+                max_tokens=max_tokens,
                 context='rpg_image_translation',
             )
 

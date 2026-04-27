@@ -12988,6 +12988,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     client=img_client,
                     target_lang=output_lang,
                     system_prompt=img_prompt,
+                    temperature=float(self.trans_temp.text() or "0.3"),
+                    max_tokens=self.max_output_tokens,
                     log=self.append_log,
                     stop_check=lambda: self.stop_requested,
                 )
