@@ -1010,7 +1010,7 @@ class UpdateManager(QObject):
         
         # Get screen dimensions and calculate size
         screen = app.primaryScreen().geometry()
-        dialog_width = int(screen.width() * 0.25)
+        dialog_width = int(screen.width() * 0.23)
         dialog_height = int(screen.height() * 0.67) 
         dialog.resize(dialog_width, dialog_height)
         

@@ -853,6 +853,32 @@ def _sanitize_for_log(text: str, limit: int = 400) -> str:
         return str(text)[:limit] + ('…' if text and len(str(text)) > limit else '')
 
 
+def _sanitize_headers_ascii(headers: dict) -> dict:
+    """Ensure all header values are ASCII-safe.
+
+    HTTP headers (RFC 7230) must consist of visible ASCII characters.
+    httpx / the OpenAI SDK will raise UnicodeEncodeError if a header
+    value contains characters outside the ASCII range (e.g. CJK
+    characters inadvertently placed in X-Title or Referer).
+
+    Strategy: encode each value as ASCII with 'ignore' to silently
+    drop any non-ASCII codepoints.  This is safe because header
+    values are metadata (identifiers, URLs, tokens) — never the
+    payload body.
+    """
+    if not headers:
+        return headers
+    cleaned = {}
+    for k, v in headers.items():
+        if isinstance(v, str):
+            try:
+                v.encode('ascii')
+            except UnicodeEncodeError:
+                v = v.encode('ascii', errors='ignore').decode('ascii')
+        cleaned[k] = v
+    return cleaned
+
+
 def _analyze_auth_token(token) -> dict:
     """Return safe, non-secret diagnostics for an auth token (API key or full header value).
 
@@ -11601,9 +11627,10 @@ class UnifiedClient:
                 elapsed += dt
         
         # Log stagger status — shows queued+delay or immediate in-progress
-        # (Skip for authgem, native gemini, and vertex/ providers — they emit
-        # this after their own config summary so the "API call in progress"
-        # line appears at the end of the per-request log block.)
+        # (Skip for authgem, native gemini, vertex/ providers, and all
+        # SDK-routed providers — they emit this after their own config
+        # summary / route log so the "API call in progress" line appears
+        # right before the actual HTTP POST.)
         _model_lower = getattr(self, 'model', '').lower()
         _is_authgem = _model_lower.startswith('authgem')
         _is_native_gemini = _model_lower.startswith('gemini')
@@ -11611,7 +11638,22 @@ class UnifiedClient:
             _model_lower.startswith('vertex/') or
             _model_lower.startswith('vertex_ai/')
         )
-        if not _is_authgem and not _is_native_gemini and not _is_vertex and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+        # SDK-compatible providers emit their own log right before the
+        # actual SDK call so it appears after the route/config lines.
+        _sdk_providers = {
+            'openai', 'deepseek', 'together', 'mistral', 'yi', 'qwen',
+            'moonshot', 'groq', 'electronhub', 'openrouter', 'fireworks',
+            'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu',
+            'nanogpt', 'sambanova',
+        }
+        _is_sdk_provider = False
+        try:
+            _provider = self._get_actual_provider()
+            if _provider in _sdk_providers:
+                _is_sdk_provider = True
+        except Exception:
+            pass
+        if not _is_authgem and not _is_native_gemini and not _is_vertex and not _is_sdk_provider and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
             try:
                 tls = self._get_thread_local_client()
                 label = getattr(tls, 'current_request_label', None) or 'request'
@@ -12714,6 +12756,11 @@ class UnifiedClient:
                 api_key_clean = api_key.decode("utf-8", errors="replace").strip()
             else:
                 api_key_clean = str(api_key).strip()
+            # Drop non-ASCII artifacts that break HTTP header encoding
+            try:
+                api_key_clean.encode('ascii')
+            except UnicodeEncodeError:
+                api_key_clean = api_key_clean.encode('ascii', errors='ignore').decode('ascii')
         except Exception:
             api_key_clean = api_key
 
@@ -16575,6 +16622,12 @@ class UnifiedClient:
                         else:
                             api_key_clean = str(actual_api_key)
                         api_key_clean = api_key_clean.strip()
+                        # Drop non-ASCII artifacts (zero-width spaces, etc.)
+                        # that can sneak in via copy-paste and break httpx
+                        try:
+                            api_key_clean.encode('ascii')
+                        except UnicodeEncodeError:
+                            api_key_clean = api_key_clean.encode('ascii', errors='ignore').decode('ascii')
                     except Exception:
                         api_key_clean = actual_api_key
 
@@ -17024,9 +17077,11 @@ class UnifiedClient:
                             extra_headers["Accept-Encoding"] = "identity"
                     
                     # Build call kwargs and include extra_body only when present
+                    # Sanitize headers to prevent UnicodeEncodeError from httpx
+                    # when header values contain non-ASCII characters.
                     call_kwargs = {
                         **params,
-                        "extra_headers": extra_headers,
+                        "extra_headers": _sanitize_headers_ascii(extra_headers),
                     }
                     if extra_body:
                         call_kwargs["extra_body"] = extra_body
@@ -17054,6 +17109,18 @@ class UnifiedClient:
                     # Avoid infinite retry loops when we need to auto-adjust max_tokens
                     context_retry_done = False
 
+                    # Emit "API call in progress" here so it appears after
+                    # the route/config logs and right before the HTTP POST.
+                    if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+                        try:
+                            _tls = self._get_thread_local_client()
+                            _label = getattr(_tls, 'current_request_label', None) or 'request'
+                        except Exception:
+                            _label = 'request'
+                        _think = self._get_thinking_status_label()
+                        _tname = threading.current_thread().name
+                        self._debug_log(f"⏳ [{_tname}] {_label} API call in progress{_think}")
+
                     try:
                         import time as _t
                         start_ts = _t.time()
@@ -17080,6 +17147,64 @@ class UnifiedClient:
                                 else:
                                     print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s, got choices={len(getattr(resp,'choices',[]) or [])}")
                     except Exception as sdk_err:
+                        # If httpx/openai SDK failed because of non-ASCII in the
+                        # serialized request (e.g. CJK chars in JSON body on a
+                        # system whose locale is not UTF-8), fall back to the
+                        # direct HTTP path which uses requests + ensure_ascii.
+                        if isinstance(sdk_err, UnicodeEncodeError):
+                            if not self._is_stop_requested():
+                                print(
+                                    f"⚠️ [{provider}] SDK UnicodeEncodeError — "
+                                    f"falling back to HTTP path ({sdk_err})"
+                                )
+                            # The SDK (httpx) choked on non-ASCII in the
+                            # serialized request.  Retry via the direct HTTP
+                            # path which uses requests + ensure_ascii=False.
+                            try:
+                                fb_headers = self._build_openai_headers(provider, actual_api_key, headers)
+                                if provider == 'openrouter':
+                                    fb_headers['HTTP-Referer'] = os.getenv('OPENROUTER_REFERER', 'https://github.com/Shirochi-stack/Glossarion')
+                                    fb_headers['X-Title'] = os.getenv('OPENROUTER_APP_NAME', 'Glossarion Translation')
+                                    fb_headers['X-Proxy-TTL'] = '0'
+                                    fb_headers['Accept'] = 'application/json'
+                                    fb_headers['Cache-Control'] = 'no-cache'
+                                fb_headers = _sanitize_headers_ascii(fb_headers)
+                                fb_headers["Idempotency-Key"] = self._get_idempotency_key()
+                                _norm_mt, _norm_mct = self._normalize_token_params(max_tokens, None)
+                                fb_body = {
+                                    "model": effective_model,
+                                    "messages": messages,
+                                    "temperature": temperature,
+                                }
+                                if _norm_mct is not None:
+                                    fb_body["max_completion_tokens"] = _norm_mct
+                                elif _norm_mt is not None:
+                                    fb_body["max_tokens"] = _norm_mt
+                                fb_endpoint = "/chat/completions"
+                                fb_resp = self._http_request_with_retries(
+                                    method="POST",
+                                    url=f"{base_url}{fb_endpoint}",
+                                    headers=fb_headers,
+                                    json=fb_body,
+                                    expected_status=(200,),
+                                    max_retries=max_retries,
+                                    provider_name=f"{provider} (HTTP-fallback)",
+                                    use_session=True,
+                                )
+                                fb_json = fb_resp.json()
+                                fb_content, fb_fr, fb_usage = self._extract_openai_json(fb_json)
+                                return UnifiedResponse(
+                                    content=fb_content,
+                                    finish_reason=fb_fr,
+                                    usage=fb_usage,
+                                    raw_response=fb_json,
+                                )
+                            except Exception as fb_err:
+                                raise UnifiedClientError(
+                                    f"{provider} HTTP fallback (after SDK UnicodeEncodeError) failed: {fb_err}",
+                                    error_type="api_error",
+                                )
+
                         # Special handling: provider context length errors (e.g., OpenRouter 32768 window)
                         # Example:
                         #   "maximum context length is 32768 tokens... requested about 72559 tokens (7023 of text input, 65536 in the output)"
@@ -18163,6 +18288,7 @@ class UnifiedClient:
                             http_headers['Cache-Control'] = 'no-cache'
                             if os.getenv('OPENROUTER_ACCEPT_IDENTITY', '0') == '1':
                                 http_headers['Accept-Encoding'] = 'identity'
+                            http_headers = _sanitize_headers_ascii(http_headers)
                             # Build body similar to HTTP branch
                             norm_max_tokens, norm_max_completion_tokens = self._normalize_token_params(max_tokens, None)
                             body = {
@@ -18356,6 +18482,8 @@ class UnifiedClient:
                 headers["Authorization"] = f"Bearer {actual_api_key}"
             elif provider == 'baidu':
                 headers["Content-Type"] = "application/json"
+            # Sanitize all header values to ASCII to prevent UnicodeEncodeError
+            headers = _sanitize_headers_ascii(headers)
             # Normalize token parameter (o-series: max_completion_tokens; others: max_tokens)
             norm_max_tokens, norm_max_completion_tokens = self._normalize_token_params(max_tokens, None)
 
@@ -18618,6 +18746,17 @@ class UnifiedClient:
                     base_url = "https://api.groq.com/openai/v1"
                 print(f"⚠️ Groq HTTP: base_url was empty, using default: {base_url}")
             
+            # Emit "API call in progress" right before the HTTP POST
+            if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+                try:
+                    _tls = self._get_thread_local_client()
+                    _label = getattr(_tls, 'current_request_label', None) or 'request'
+                except Exception:
+                    _label = 'request'
+                _think = self._get_thinking_status_label()
+                _tname = threading.current_thread().name
+                self._debug_log(f"⏳ [{_tname}] {_label} API call in progress{_think}")
+
             resp = self._http_request_with_retries(
                 method="POST",
                 url=f"{base_url}{endpoint}",
