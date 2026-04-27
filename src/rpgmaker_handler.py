@@ -173,6 +173,18 @@ def _extract_event_strings(commands: list) -> List[Tuple[str, str]]:
                 if isinstance(choice, str) and _is_translatable(choice):
                     results.append((f"choice_{i}_{ci}", choice))
 
+        elif code == _NAME_CODE and len(params) >= 2:
+            # Change Name — params = [actor_id, new_name]
+            name = params[1]
+            if isinstance(name, str) and _is_translatable(name):
+                results.append((f"chname_{i}", name))
+
+        elif code == _NICKNAME_CODE and len(params) >= 2:
+            # Change Nickname — params = [actor_id, new_nickname]
+            nick = params[1]
+            if isinstance(nick, str) and _is_translatable(nick):
+                results.append((f"chnick_{i}", nick))
+
         i += 1
 
     return results
@@ -501,6 +513,14 @@ def _extract_marshal_strings(obj, prefix: str, strings: dict):
                         for chi, ch in enumerate(choices):
                             if isinstance(ch, str) and _is_translatable(ch):
                                 strings[f"{prefix}_cmd_{ci}_ch_{chi}"] = ch
+                    elif code == _NAME_CODE and len(params) >= 2:
+                        name = params[1] if isinstance(params[1], str) else None
+                        if name and _is_translatable(name):
+                            strings[f"{prefix}_cmd_{ci}_chname"] = name
+                    elif code == _NICKNAME_CODE and len(params) >= 2:
+                        nick = params[1] if isinstance(params[1], str) else None
+                        if nick and _is_translatable(nick):
+                            strings[f"{prefix}_cmd_{ci}_chnick"] = nick
         # Pages (for map events)
         pages = obj.get('pages')
         if isinstance(pages, list):
@@ -2453,6 +2473,34 @@ def _patch_map_entry(data: dict, key: str, translated: str) -> int:
         except (IndexError, KeyError, TypeError):
             pass
 
+    # Change Name: event_E_page_P_chname_I
+    m = re.match(r'event_(\d+)_page_(\d+)_chname_(\d+)', key)
+    if m:
+        ev_idx = int(m.group(1))
+        pg_idx = int(m.group(2))
+        cmd_idx = int(m.group(3))
+        try:
+            cmd = data["events"][ev_idx]["pages"][pg_idx]["list"][cmd_idx]
+            if cmd.get("code", 0) == _NAME_CODE and len(cmd.get("parameters", [])) >= 2:
+                cmd["parameters"][1] = translated
+                return 1
+        except (IndexError, KeyError, TypeError):
+            pass
+
+    # Change Nickname: event_E_page_P_chnick_I
+    m = re.match(r'event_(\d+)_page_(\d+)_chnick_(\d+)', key)
+    if m:
+        ev_idx = int(m.group(1))
+        pg_idx = int(m.group(2))
+        cmd_idx = int(m.group(3))
+        try:
+            cmd = data["events"][ev_idx]["pages"][pg_idx]["list"][cmd_idx]
+            if cmd.get("code", 0) == _NICKNAME_CODE and len(cmd.get("parameters", [])) >= 2:
+                cmd["parameters"][1] = translated
+                return 1
+        except (IndexError, KeyError, TypeError):
+            pass
+
     return 0
 
 
@@ -2538,6 +2586,32 @@ def _patch_common_event(data: list, key: str, translated: str) -> int:
                 if isinstance(choices, list) and choice_idx < len(choices):
                     choices[choice_idx] = translated
                     return 1
+        except (IndexError, KeyError, TypeError):
+            pass
+
+    # Change Name: ce_E_chname_I
+    m = re.match(r'ce_(\d+)_chname_(\d+)', key)
+    if m:
+        ev_idx = int(m.group(1))
+        cmd_idx = int(m.group(2))
+        try:
+            cmd = data[ev_idx]["list"][cmd_idx]
+            if cmd.get("code", 0) == _NAME_CODE and len(cmd.get("parameters", [])) >= 2:
+                cmd["parameters"][1] = translated
+                return 1
+        except (IndexError, KeyError, TypeError):
+            pass
+
+    # Change Nickname: ce_E_chnick_I
+    m = re.match(r'ce_(\d+)_chnick_(\d+)', key)
+    if m:
+        ev_idx = int(m.group(1))
+        cmd_idx = int(m.group(2))
+        try:
+            cmd = data[ev_idx]["list"][cmd_idx]
+            if cmd.get("code", 0) == _NICKNAME_CODE and len(cmd.get("parameters", [])) >= 2:
+                cmd["parameters"][1] = translated
+                return 1
         except (IndexError, KeyError, TypeError):
             pass
 
