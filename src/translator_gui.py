@@ -12958,19 +12958,27 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Initialize key pools from config (normally done by _get_environment_variables,
             # but image mode bypasses that path)
             try:
-                if self.config.get('use_multi_api_keys', False):
-                    os.environ['USE_MULTI_KEYS'] = '1'
-                else:
-                    os.environ['USE_MULTI_KEYS'] = '0'
-                if self.config.get('use_qa_scan_keys', False):
-                    os.environ['USE_QA_SCAN_KEYS'] = '1'
-                else:
-                    os.environ['USE_QA_SCAN_KEYS'] = '0'
+                # Env toggles
+                os.environ['USE_MULTI_KEYS'] = '1' if self.config.get('use_multi_api_keys', False) else '0'
+                os.environ['USE_FALLBACK_KEYS'] = '1' if self.config.get('use_fallback_keys', False) else '0'
+                os.environ['USE_MAIN_KEY_FALLBACK'] = '1' if self.config.get('use_main_key_fallback', True) else '0'
+                os.environ['FALLBACK_KEY_SHUFFLE'] = '1' if self.config.get('fallback_key_shuffle', False) else '0'
+                os.environ['USE_GLOSSARY_KEYS'] = '1' if self.config.get('use_glossary_keys', False) else '0'
+                os.environ['USE_QA_SCAN_KEYS'] = '1' if self.config.get('use_qa_scan_keys', False) else '0'
+                os.environ['FALLBACK_KEYS'] = json.dumps(self.config.get('fallback_keys', []))
+                os.environ['GLOSSARY_API_KEYS'] = json.dumps(self.config.get('glossary_keys', []))
+                os.environ['QA_SCAN_API_KEYS'] = json.dumps(self.config.get('qa_scan_keys', []))
 
-                # Push in-memory key pools
+                # In-memory key pools
                 if self.config.get('use_multi_api_keys', False) and self.config.get('multi_api_keys', []):
                     UnifiedClient.set_in_memory_multi_keys(
                         self.config.get('multi_api_keys', []),
+                        force_rotation=self.config.get('force_key_rotation', True),
+                        rotation_frequency=self.config.get('rotation_frequency', 1),
+                    )
+                if self.config.get('use_glossary_keys', False) and self.config.get('glossary_keys', []):
+                    UnifiedClient.set_in_memory_glossary_keys(
+                        self.config.get('glossary_keys', []),
                         force_rotation=self.config.get('force_key_rotation', True),
                         rotation_frequency=self.config.get('rotation_frequency', 1),
                     )
@@ -12980,7 +12988,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         force_rotation=self.config.get('force_key_rotation', True),
                         rotation_frequency=self.config.get('rotation_frequency', 1),
                     )
-                    os.environ['QA_SCAN_API_KEYS'] = json.dumps(self.config.get('qa_scan_keys', []))
             except Exception:
                 pass
 

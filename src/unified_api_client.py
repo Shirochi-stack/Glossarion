@@ -4807,7 +4807,8 @@ class UnifiedClient:
                                         print(f"[QA SCAN KEYS] 🔑 Using QA scan key pool ({len(qa_scan_pool.keys)} keys)")
                                         self.__class__._qa_scan_pool_logged = True
                             except Exception as e:
-                                print(f"[QA SCAN KEYS] ⚠️ Failed to get QA scan key from pool: {e}")
+                                if 'cancel' not in str(e).lower() and not self._is_stop_requested():
+                                    print(f"[QA SCAN KEYS] ⚠️ Failed to get QA scan key from pool: {e}")
                                 if _had_instance_pool:
                                     self._api_key_pool = _original_instance_pool
                                 elif '_api_key_pool' in self.__dict__:
@@ -6413,7 +6414,9 @@ class UnifiedClient:
                     effective_model = getattr(self, 'model', '') or ''
                     # Skip image auto-detect if this thread is in vision-only scan mode
                     _force_vision = getattr(threading.current_thread(), '_force_vision_mode', False)
-                    if not is_video_mode and self._is_video_gen_model(effective_model):
+                    if _force_vision:
+                        is_image_mode = False
+                    elif not is_video_mode and self._is_video_gen_model(effective_model):
                         is_video_mode = True
                     if not is_image_mode and not is_video_mode and self._is_image_gen_model(effective_model) and not _force_vision:
                         is_image_mode = True
@@ -10238,7 +10241,9 @@ class UnifiedClient:
                 # Force enable for any model whose name indicates image generation
                 # but NOT if this thread is in vision-only scan mode
                 _force_vision = getattr(threading.current_thread(), '_force_vision_mode', False)
-                if self._is_image_gen_model(self.model) and not _force_vision:
+                if _force_vision:
+                    enable_image_output = False
+                elif self._is_image_gen_model(self.model):
                     enable_image_output = True
                     if not self._is_stop_requested():
                         print(f"[ImageGen] Image output mode auto-enabled for {self.model}")
@@ -14412,7 +14417,9 @@ class UnifiedClient:
         # Force enable for any model whose name indicates image generation
         # but NOT if this thread is in vision-only scan mode
         _force_vision = getattr(threading.current_thread(), '_force_vision_mode', False)
-        if self._is_image_gen_model(self.model) and not _force_vision:
+        if _force_vision:
+            enable_image_output = False
+        elif self._is_image_gen_model(self.model):
             enable_image_output = True
             if not self._is_stop_requested():
                 print(f"[ImageGen] Image output mode auto-enabled for {self.model}")
@@ -17047,7 +17054,9 @@ class UnifiedClient:
                     # Force enable for any model whose name indicates image generation
                     # but NOT if this thread is in vision-only scan mode
                     _force_vision = getattr(threading.current_thread(), '_force_vision_mode', False)
-                    if self._is_image_gen_model(effective_model) and not _force_vision:
+                    if _force_vision:
+                        enable_image_output = False
+                    elif self._is_image_gen_model(effective_model):
                         enable_image_output = True
                         if not self._is_stop_requested():
                             print(f"[ImageGen] Image output mode auto-enabled for {effective_model}")
