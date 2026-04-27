@@ -824,15 +824,23 @@ def extract_all(game_dir: str, log: Callable = print
             progress_empty = True
 
     if os.path.isdir(backup_dir) and (not progress_exists or progress_empty):
-        backed_files = [f for f in os.listdir(backup_dir)
-                        if os.path.isfile(os.path.join(backup_dir, f))]
+        # Walk backup dir recursively to restore files in their original subfolder structure
+        backed_files = []
+        for root, _dirs, files in os.walk(backup_dir):
+            for fn in files:
+                src = os.path.join(root, fn)
+                rel = os.path.relpath(src, backup_dir)  # e.g. www/data/Map001.json or Map001.json
+                backed_files.append((src, rel))
         if backed_files:
             log(f"🔄 Restoring {len(backed_files)} original files from backup...")
-            for fn in backed_files:
-                src = os.path.join(backup_dir, fn)
-                dst = os.path.join(data_dir, fn)
+            for src, rel in backed_files:
+                dst = os.path.join(game_dir, rel)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.copy2(src, dst)
             log("✅ Originals restored — extracting from clean data")
+
+    # Compute the relative path from game root to data dir (e.g. "www/data" or "data")
+    data_prefix = os.path.relpath(data_dir, game_dir).replace(os.sep, '/')
 
     if version in (RPGMakerVersion.MV, RPGMakerVersion.MZ):
         db_strings = extract_db_strings(data_dir, log)
@@ -860,6 +868,15 @@ def extract_all(game_dir: str, log: Callable = print
         all_strings.update(extract_rm2k3_maps(game_dir, log))
     else:
         all_strings = {}
+
+    # Prefix keys with subfolder structure so translation_map.json is self-documenting
+    # e.g. "Map001.json" → "www/data/Map001.json"
+    if data_prefix and data_prefix != '.':
+        prefixed = {}
+        for filename, strings in all_strings.items():
+            prefixed_key = f"{data_prefix}/{filename}"
+            prefixed[prefixed_key] = strings
+        all_strings = prefixed
 
     total = sum(len(v) for v in all_strings.values())
     log(f"📊 Total extractable strings: {total}")
@@ -1017,13 +1034,22 @@ def parse_translated_chunk(response: str, chunk: Dict) -> Dict[str, str]:
 
 
 def apply_translations(data_dir: str, trans_map_path: str,
-                       log: Callable = print, version: str = None) -> bool:
+                       log: Callable = print, version: str = None,
+                       game_dir: str = None) -> bool:
     """Apply translations from the translation map back to game files.
 
     For MV/MZ (JSON): patches files directly with backups.
     For VX Ace/VX/XP/2K3 (binary): generates a patch JSON that can be
     used with a game plugin or applied via a separate tool.
+
+    Keys in trans_data may be:
+      - Prefixed with subfolder: "www/data/Map001.json" (new format)
+      - Flat basename only: "Map001.json" (legacy format)
     """
+    if not game_dir:
+        # Infer game_dir from trans_map_path (GTool_Translation is inside game_dir)
+        game_dir = os.path.dirname(os.path.dirname(trans_map_path))
+
     try:
         with open(trans_map_path, 'r', encoding='utf-8') as f:
             trans_data = json.load(f)
@@ -1040,12 +1066,17 @@ def apply_translations(data_dir: str, trans_map_path: str,
 
     patched = 0
     for filename, entries in trans_data.items():
-        file_path = os.path.join(data_dir, filename)
+        # Support both prefixed ("www/data/Map001.json") and flat ("Map001.json") keys
+        if '/' in filename or os.sep in filename:
+            file_path = os.path.join(game_dir, filename)
+        else:
+            file_path = os.path.join(data_dir, filename)
         if not os.path.exists(file_path):
             continue
 
-        # Backup original
+        # Backup original — preserve subfolder structure
         backup_path = os.path.join(backup_dir, filename)
+        os.makedirs(os.path.dirname(backup_path), exist_ok=True)
         if not os.path.exists(backup_path):
             shutil.copy2(file_path, backup_path)
 
@@ -1062,11 +1093,13 @@ def apply_translations(data_dir: str, trans_map_path: str,
             if not translated:
                 continue
 
-            if filename.startswith("Map"):
+            # Use basename for type detection (keys may be prefixed: www/data/Map001.json)
+            base = os.path.basename(filename)
+            if base.startswith("Map"):
                 file_patched += _patch_map_entry(data, key, translated)
-            elif filename == "System.json":
+            elif base == "System.json":
                 file_patched += _patch_system_entry(data, key, translated)
-            elif filename == "CommonEvents.json":
+            elif base == "CommonEvents.json":
                 file_patched += _patch_common_event(data, key, translated)
             else:
                 file_patched += _patch_db_entry(data, key, translated)
