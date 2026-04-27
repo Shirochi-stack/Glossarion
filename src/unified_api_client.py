@@ -122,6 +122,7 @@ Note: Many Chinese model providers (Yi, Qwen, Baichuan, etc.) may require
 API keys from their respective platforms. Some endpoints might need adjustment
 based on your region or deployment.
 """
+import sys
 import os
 import json
 import requests
