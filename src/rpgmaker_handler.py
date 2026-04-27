@@ -977,11 +977,73 @@ def build_translation_chunks(all_strings: Dict, max_chars: int = 4000
     return chunks
 
 
+_ESC_PATTERN = re.compile(
+    r'\\+[a-zA-Z]\[\d+\]|\\+[a-zA-Z](?![a-zA-Z])|\\+[{}GS$.|!><^]'
+)
+
+
+def _strip_escape_wrapping(text: str):
+    """Strip leading/trailing RPG Maker escape codes from text.
+
+    Returns (prefix_codes, clean_text, suffix_codes).
+    Only strips codes at the very start/end — mid-text codes are preserved.
+    """
+    remaining = text
+
+    # Extract leading codes
+    prefix = ""
+    while True:
+        m = _ESC_PATTERN.match(remaining)
+        if m:
+            prefix += m.group()
+            remaining = remaining[m.end():]
+        else:
+            break
+
+    # Extract trailing codes — match a contiguous block of escape codes at the end
+    suffix_match = re.search(
+        r'(' + _ESC_PATTERN.pattern + r')+$', remaining
+    )
+    if suffix_match:
+        suffix = suffix_match.group()
+        remaining = remaining[:suffix_match.start()]
+    else:
+        suffix = ""
+
+    return prefix, remaining, suffix
+
+
+def _is_escape_only(text: str) -> bool:
+    """True if text contains ONLY RPG Maker escape codes with no real content."""
+    if not text or not text.strip():
+        return True
+    return not _ESC_PATTERN.sub('', text).strip()
+
+
 def format_chunk_for_translation(chunk: Dict) -> str:
-    """Format a chunk into a numbered list for the AI to translate."""
+    """Format a chunk into a numbered list for the AI to translate.
+
+    Strips leading/trailing escape codes and stores them in
+    chunk['_escape_map'] so parse_translated_chunk can reattach them.
+    Pure escape-code entries are stored in chunk['_auto_copy'] and
+    excluded from the AI prompt.
+    """
     lines = []
-    for i, text in enumerate(chunk["texts"], 1):
-        lines.append(f"[{i}] {text}")
+    chunk["_escape_map"] = {}   # idx -> (prefix, suffix)
+    chunk["_auto_copy"] = {}    # idx -> original text (escape-only, skip AI)
+
+    for i, text in enumerate(chunk["texts"]):
+        # Pure escape-code entry — auto-copy, don't send to AI
+        if _is_escape_only(text):
+            chunk["_auto_copy"][i] = text
+            continue
+
+        prefix, clean, suffix = _strip_escape_wrapping(text)
+        if prefix or suffix:
+            chunk["_escape_map"][i] = (prefix, suffix)
+        # Use 1-based numbering for the AI prompt
+        lines.append(f"[{i + 1}] {clean}")
+
     return "\n".join(lines)
 
 
@@ -1070,7 +1132,22 @@ def parse_translated_chunk(response: str, chunk: Dict) -> Dict[str, str]:
                 translations[keys[j]] = _clean_translation(clean)
 
     # Filter out empty/whitespace-only translations
-    return {k: v for k, v in translations.items() if v and v.strip()}
+    translations = {k: v for k, v in translations.items() if v and v.strip()}
+
+    # Reattach escape code prefixes/suffixes that were stripped before sending
+    escape_map = chunk.get("_escape_map", {})
+    for idx, (prefix, suffix) in escape_map.items():
+        key = keys[idx]
+        if key in translations:
+            translations[key] = prefix + translations[key] + suffix
+
+    # Merge in auto-copied escape-code-only entries (never sent to AI)
+    auto_copy = chunk.get("_auto_copy", {})
+    for idx, original_text in auto_copy.items():
+        if idx < len(keys):
+            translations[keys[idx]] = original_text
+
+    return translations
 
 
 def apply_translations(data_dir: str, trans_map_path: str,
@@ -2714,17 +2791,13 @@ def process_game(exe_path: str, log: Callable = print,
 
     # Load previous progress
     progress = load_progress(game_dir)
-    # Scrub empty-valued and escape-code-only entries from previous runs
-    _esc_re = re.compile(r'\\+[a-zA-Z]\[\d+\]|\\+[a-zA-Z](?![a-zA-Z])|\\+[{}GS$.|!><^]')
-    def _esc_only(t):
-        return not _esc_re.sub('', t).strip() if t and t.strip() else True
-    bad_keys = [k for k, v in progress.items()
-                if isinstance(v, str) and (not v or not v.strip() or _esc_only(v))]
-    if bad_keys:
-        for k in bad_keys:
+    # Scrub empty-valued entries from previous runs
+    empty_keys = [k for k, v in progress.items() if not v or not v.strip()]
+    if empty_keys:
+        for k in empty_keys:
             del progress[k]
         save_progress(game_dir, progress)
-        log(f"🧹 Cleaned {len(bad_keys)} invalid translations from progress (empty/escape-code-only)")
+        log(f"🧹 Cleaned {len(empty_keys)} empty translations from progress")
     if progress:
         log(f"📋 Resuming: {len(progress)} strings already translated")
 
