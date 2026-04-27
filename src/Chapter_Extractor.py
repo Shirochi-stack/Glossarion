@@ -1084,14 +1084,9 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
     enhanced_filtering = extraction_mode  # Default fallback
     preserve_structure = True
     
-    # Check if user wants to translate special files (info.xhtml, message.xhtml, etc.)
-    # By default, skip them as they're typically metadata/navigation
-    translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
-    
-    if translate_special:
-        print("📝 Special files translation is ENABLED (info.xhtml, message.xhtml, etc.)")
-    else:
-        print("📝 Special files translation is DISABLED - skipping navigation/metadata files")
+    # Special file filtering (cover, nav, title, etc.) is handled downstream
+    # by the translation pipeline via TRANSLATE_SPECIAL_FILES toggle.
+    # The extraction stage collects ALL HTML files unconditionally.
     
     if extraction_mode == "enhanced":
         print("🚀 Initializing Enhanced extraction mode with html2text...")
@@ -1158,18 +1153,6 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
                     ProgressBar.update(idx, total_files, prefix="📂 Scanning files")
             
         if name.lower().endswith(('.xhtml', '.html', '.htm')):
-            basename = os.path.basename(name).lower()
-            
-            # Skip cover files unless special file translation is enabled
-            if basename in ['cover.html', 'cover.xhtml', 'cover.htm']:
-                if not translate_special:
-                    print(f"[SKIP] Cover file excluded: {name}")
-                    continue
-                else:
-                    print(f"[INCLUDE] Cover file included (special files enabled): {name}")
-            
-            # All filtering is now controlled by TRANSLATE_SPECIAL_FILES toggle and extraction mode
-            # No hardcoded special file patterns
             html_files.append(name)
     
     # Print final 100% progress update before finishing

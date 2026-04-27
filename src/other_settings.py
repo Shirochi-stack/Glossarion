@@ -7473,8 +7473,8 @@ def _create_processing_options_section(self, parent):
     sep_extract1.setFrameShadow(QFrame.Sunken)
     extraction_v.addWidget(sep_extract1)
     
-    # File Filtering Level
-    filter_title = QLabel("File Filtering Level:")
+    # EPUB File Filtering Level
+    filter_title = QLabel("EPUB File Filtering Level:")
     filter_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
     filter_title.setContentsMargins(0, 0, 0, 5)
     extraction_v.addWidget(filter_title)
@@ -7499,7 +7499,7 @@ def _create_processing_options_section(self, parent):
     smart_rb.setContentsMargins(0, 2, 0, 0)
     extraction_v.addWidget(smart_rb)
     
-    smart_desc = QLabel("Skips navigation, TOC, copyright files\nBest for clean EPUBs with clear chapter structure")
+    smart_desc = QLabel("Uses heuristics to detect content chapters\nBest for clean EPUBs with clear chapter structure")
     smart_desc.setStyleSheet("color: gray; font-size: 9pt;")
     smart_desc.setContentsMargins(20, 0, 0, 5)
     extraction_v.addWidget(smart_desc)
@@ -7522,13 +7522,13 @@ def _create_processing_options_section(self, parent):
     comprehensive_rb.setContentsMargins(0, 2, 0, 0)
     extraction_v.addWidget(comprehensive_rb)
     
-    comprehensive_desc = QLabel("Only skips obvious navigation files\nGood when Smart mode misses chapters")
+    comprehensive_desc = QLabel("Extracts all HTML files with sequential numbering\nGood when Smart mode misses chapters")
     comprehensive_desc.setStyleSheet("color: gray; font-size: 9pt;")
     comprehensive_desc.setContentsMargins(20, 0, 0, 5)
     extraction_v.addWidget(comprehensive_desc)
     
     # Full extraction
-    full_rb = QRadioButton("Full (No Filtering)")
+    full_rb = QRadioButton("No Filtering")
     try:
         if self.file_filtering_level_var == "full":
             full_rb.setChecked(True)
@@ -7545,7 +7545,7 @@ def _create_processing_options_section(self, parent):
     full_rb.setContentsMargins(0, 2, 0, 0)
     extraction_v.addWidget(full_rb)
     
-    full_desc = QLabel("Extracts ALL HTML/XHTML files\nUse when other modes skip important content")
+    full_desc = QLabel("Extracts ALL HTML/XHTML including headers and metadata\nUse when other modes skip important content")
     full_desc.setStyleSheet("color: gray; font-size: 9pt;")
     full_desc.setContentsMargins(20, 0, 0, 5)
     extraction_v.addWidget(full_desc)
