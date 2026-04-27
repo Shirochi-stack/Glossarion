@@ -919,11 +919,38 @@ def format_chunk_for_translation(chunk: Dict) -> str:
     return "\n".join(lines)
 
 
+def _clean_translation(text: str) -> str:
+    """Clean up messy AI translation output.
+
+    Handles common LLM quirks:
+    - 'original text -> translation' → keep only the translation
+    - '"quoted translation"' → strip quotes
+    - Trailing commentary in parentheses → strip
+    """
+    t = text.strip()
+    if not t:
+        return t
+
+    # Strip 'original -> translation' pattern (keep right side)
+    arrow_match = re.search(r'\s*->\s*', t)
+    if arrow_match:
+        right = t[arrow_match.end():].strip()
+        if right:
+            t = right
+
+    # Strip surrounding quotes
+    if len(t) >= 2 and t[0] == '"' and t[-1] == '"':
+        t = t[1:-1].strip()
+
+    return t
+
+
 def parse_translated_chunk(response: str, chunk: Dict) -> Dict[str, str]:
     """Parse numbered translation response back into key->translation map.
 
     Handles multi-line entries where each [N] block can span multiple
     lines until the next [N+1] tag or end of response.
+    Also cleans up common LLM output quirks (arrows, quotes, references).
     """
     translations = {}
     keys = chunk["keys"]
@@ -934,7 +961,8 @@ def parse_translated_chunk(response: str, chunk: Dict) -> Dict[str, str]:
     parts = re.split(r'\[(\d+)\]\s*', response.strip())
 
     if len(parts) > 2:
-        # Process (number, text) pairs starting at index 1
+        # First pass: collect raw translations
+        raw = {}
         idx = 1
         while idx < len(parts) - 1:
             try:
@@ -942,17 +970,32 @@ def parse_translated_chunk(response: str, chunk: Dict) -> Dict[str, str]:
                 text = parts[idx + 1].strip()
                 key_idx = num - 1
                 if 0 <= key_idx < len(keys):
-                    translations[keys[key_idx]] = text
+                    raw[num] = (key_idx, text)
             except (ValueError, IndexError):
                 pass
             idx += 2
+
+        # Second pass: clean and resolve references
+        for num, (key_idx, text) in raw.items():
+            # Handle 'same as [N]' or 'same as [22]' references
+            same_match = re.match(r'(?:same(?:\s+as)?)\s*\[?(\d+)\]?', text, re.IGNORECASE)
+            if same_match:
+                ref_num = int(same_match.group(1))
+                if ref_num in raw:
+                    _, ref_text = raw[ref_num]
+                    text = _clean_translation(ref_text)
+                else:
+                    text = _clean_translation(text)
+            else:
+                text = _clean_translation(text)
+            translations[keys[key_idx]] = text
     else:
         # Fallback: split by lines and match 1:1
         flines = [ln.strip() for ln in response.strip().split('\n') if ln.strip()]
         for j, line in enumerate(flines):
             if j < len(keys):
                 clean = re.sub(r'^\d+[.)\]]\s*', '', line)
-                translations[keys[j]] = clean
+                translations[keys[j]] = _clean_translation(clean)
 
     return translations
 
