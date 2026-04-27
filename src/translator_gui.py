@@ -12983,13 +12983,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         rotation_frequency=self.config.get('rotation_frequency', 1),
                     )
                 if self.config.get('use_qa_scan_keys', False) and self.config.get('qa_scan_keys', []):
-                    UnifiedClient.set_in_memory_qa_scan_keys(
-                        self.config.get('qa_scan_keys', []),
+                    qa_keys = self.config.get('qa_scan_keys', [])
+                    ok = UnifiedClient.set_in_memory_qa_scan_keys(
+                        qa_keys,
                         force_rotation=self.config.get('force_key_rotation', True),
                         rotation_frequency=self.config.get('rotation_frequency', 1),
                     )
-            except Exception:
-                pass
+                    pool = getattr(UnifiedClient, '_qa_scan_key_pool', None)
+                    pool_count = len(getattr(pool, 'keys', [])) if pool else 0
+                    self.append_log(f"[GTool] QA scan key pool: {pool_count} keys loaded (setup={'OK' if ok else 'FAILED'})")
+                else:
+                    if self.config.get('use_qa_scan_keys', False):
+                        self.append_log("[GTool] QA scan keys enabled but no keys configured")
+            except Exception as e:
+                self.append_log(f"[GTool] ⚠️ Key pool init error: {e}")
 
             # ── IMAGE MODE: image-asset-only translation ─────────
             if image_mode:

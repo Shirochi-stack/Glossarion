@@ -4692,6 +4692,10 @@ class UnifiedClient:
             if _is_qa_scan_context:
                 try:
                     use_qa_scan_keys = os.getenv('USE_QA_SCAN_KEYS', '0') == '1'
+                    if not use_qa_scan_keys:
+                        if not getattr(self.__class__, '_qa_scan_env_warned', False):
+                            print(f"[QA SCAN KEYS] ℹ️ Context is '{context}' but USE_QA_SCAN_KEYS={os.getenv('USE_QA_SCAN_KEYS', '0')} — skipping override")
+                            self.__class__._qa_scan_env_warned = True
                     if use_qa_scan_keys:
                         qa_scan_pool = self.__class__._qa_scan_key_pool
                         if not qa_scan_pool or not getattr(qa_scan_pool, 'keys', []):

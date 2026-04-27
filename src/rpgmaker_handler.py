@@ -1870,7 +1870,7 @@ def translate_game_images(
                             skipped_dir = os.path.join("Payloads", "image", "skipped")
                             os.makedirs(skipped_dir, exist_ok=True)
                             safe_name = re.sub(r'[\\/:*?"<>|]', '_', os.path.splitext(os.path.basename(rel))[0])
-                            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            ts = __import__('datetime').datetime.now().strftime("%Y%m%d_%H%M%S")
                             dump_path = os.path.join(skipped_dir, f"skipped_{safe_name}_{ts}.json")
                             import json as _json
                             with open(dump_path, 'w', encoding='utf-8') as df:
