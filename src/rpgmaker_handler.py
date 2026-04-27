@@ -1807,6 +1807,24 @@ def translate_game_images(
             except Exception as e:
                 log(f"   ⚠️ Failed to decode base64 image response: {e}")
 
+        # Resize translated image to match original dimensions
+        if translated_png and entry.decrypted_png:
+            try:
+                from PIL import Image
+                import io
+                orig_img = Image.open(io.BytesIO(entry.decrypted_png))
+                trans_img = Image.open(io.BytesIO(translated_png))
+                orig_w, orig_h = orig_img.size
+                trans_w, trans_h = trans_img.size
+                if (trans_w, trans_h) != (orig_w, orig_h):
+                    trans_img = trans_img.resize((orig_w, orig_h), Image.LANCZOS)
+                    buf = io.BytesIO()
+                    trans_img.save(buf, format='PNG')
+                    translated_png = buf.getvalue()
+                    log(f"   📐 Resized {trans_w}×{trans_h} → {orig_w}×{orig_h}")
+            except Exception as e:
+                log(f"   ⚠️ Resize failed (using as-is): {e}")
+
         return idx, translated_png, entry, response_text
 
     try:
