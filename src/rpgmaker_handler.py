@@ -17,6 +17,7 @@ import fnmatch
 # RPG Maker MV/MZ event command codes that contain translatable text
 _DIALOG_CODES = {401, 405}  # Show Text, Show Scrolling Text
 _CHOICE_CODE = 102           # Show Choices
+_COND_CODE = 111             # Conditional Branch
 _NAME_CODE = 320             # Change Name (rare)
 _NICKNAME_CODE = 324         # Change Nickname
 
@@ -185,6 +186,13 @@ def _extract_event_strings(commands: list) -> List[Tuple[str, str]]:
             nick = params[1]
             if isinstance(nick, str) and _is_translatable(nick):
                 results.append((f"chnick_{i}", nick))
+
+        elif code == _COND_CODE and len(params) >= 4 and params[0] == 4:
+            # Conditional Branch subtype 4: Actor name check
+            # params = [4, actor_id, condition_type, name_string]
+            # condition_type 1 = "Name is" comparison
+            if params[2] == 1 and isinstance(params[3], str) and _is_translatable(params[3]):
+                results.append((f"cond_{i}", params[3]))
 
         i += 1
 
@@ -2527,6 +2535,22 @@ def _patch_map_entry(data: dict, key: str, translated: str) -> int:
         except (IndexError, KeyError, TypeError):
             pass
 
+    # Conditional Branch (actor name check): event_E_page_P_cond_I
+    m = re.match(r'event_(\d+)_page_(\d+)_cond_(\d+)', key)
+    if m:
+        ev_idx = int(m.group(1))
+        pg_idx = int(m.group(2))
+        cmd_idx = int(m.group(3))
+        try:
+            cmd = data["events"][ev_idx]["pages"][pg_idx]["list"][cmd_idx]
+            if cmd.get("code", 0) == _COND_CODE:
+                params = cmd.get("parameters", [])
+                if len(params) >= 4 and params[0] == 4 and params[2] == 1:
+                    params[3] = translated
+                    return 1
+        except (IndexError, KeyError, TypeError):
+            pass
+
     return 0
 
 
@@ -2638,6 +2662,21 @@ def _patch_common_event(data: list, key: str, translated: str) -> int:
             if cmd.get("code", 0) == _NICKNAME_CODE and len(cmd.get("parameters", [])) >= 2:
                 cmd["parameters"][1] = translated
                 return 1
+        except (IndexError, KeyError, TypeError):
+            pass
+
+    # Conditional Branch (actor name check): ce_E_cond_I
+    m = re.match(r'ce_(\d+)_cond_(\d+)', key)
+    if m:
+        ev_idx = int(m.group(1))
+        cmd_idx = int(m.group(2))
+        try:
+            cmd = data[ev_idx]["list"][cmd_idx]
+            if cmd.get("code", 0) == _COND_CODE:
+                params = cmd.get("parameters", [])
+                if len(params) >= 4 and params[0] == 4 and params[2] == 1:
+                    params[3] = translated
+                    return 1
         except (IndexError, KeyError, TypeError):
             pass
 

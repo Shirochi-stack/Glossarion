@@ -41,7 +41,7 @@ def get_model_options() -> List[str]:
         "claude-3-haiku-20240307",       
         
         # Grok Models
-        "grok-4.20-beta-0309-reasoning","grok-4.20-beta-0309-non-reasoning" "grok-4.20-multi-agent-beta-0309",
+        "grok-4.20-beta-0309-reasoning","grok-4.20-beta-0309-non-reasoning", "grok-4.20-multi-agent-beta-0309",
         "grok-4.20-multi-agent-experimental-beta-0304","grok-4-1-fast-reasoning", "grok-4-1-fast-non-reasoning","grok-4-0709", "grok-4-fast",
         "grok-4-fast-reasoning", "grok-4-fast-non-reasoning",  "grok-4-fast-reasoning-latest", "grok-3", "grok-3-mini",        
         
