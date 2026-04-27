@@ -17023,6 +17023,9 @@ class UnifiedClient:
                                     extra_body["reasoning_effort"] = _ds_effort
                                 else:
                                     extra_body["thinking"] = {"type": "enabled"}
+                            else:
+                                # Must explicitly disable — DeepSeek API defaults to enabled
+                                extra_body["thinking"] = {"type": "disabled"}
                         except Exception:
                             pass
 
@@ -18714,11 +18717,15 @@ class UnifiedClient:
                 elif norm_max_tokens is not None:
                     data["max_tokens"] = norm_max_tokens
                 
-                # Enable DeepSeek thinking when using chutes OpenAI-compatible endpoint
+                # Enable/disable DeepSeek thinking when using chutes OpenAI-compatible endpoint
                 try:
                     enable_ds_env = os.getenv('ENABLE_DEEPSEEK_THINKING', '1') == '1'
-                    if str(base_url or '').rstrip('/') == 'https://llm.chutes.ai/v1' and enable_ds_env:
-                        data.setdefault("extra_body", {})["thinking"] = {"type": "enabled"}
+                    if str(base_url or '').rstrip('/') == 'https://llm.chutes.ai/v1':
+                        if enable_ds_env:
+                            data.setdefault("extra_body", {})["thinking"] = {"type": "enabled"}
+                        else:
+                            # Must explicitly disable — DeepSeek API defaults to enabled
+                            data.setdefault("extra_body", {})["thinking"] = {"type": "disabled"}
                 except Exception:
                     pass
                 
