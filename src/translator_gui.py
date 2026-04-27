@@ -5618,15 +5618,76 @@ Recent translations to summarize:
     # Also add this to bind manual typing events to the combobox
     def setup_model_combobox_bindings(self):
         """Setup bindings for manual model input in combobox with autocomplete"""
-        # PySide6: QComboBox already has built-in autocomplete
-        # We can set the completer for better UX
+        self._install_model_completer(self._model_all_values)
+
+    def _install_model_completer(self, model_list):
+        """Create and install a prefix-priority completer on the model combobox.
+
+        Results that start with the typed text rank above results where the
+        text only appears after a provider prefix (e.g. ``chutes/``, ``or/``).
+        """
         from PySide6.QtWidgets import QCompleter
-        from PySide6.QtCore import Qt
-        
-        completer = QCompleter(self._model_all_values)
+        from PySide6.QtCore import Qt, QSortFilterProxyModel
+        from PySide6.QtCore import QStringListModel
+
+        class _PrefixPriorityProxy(QSortFilterProxyModel):
+            """Sorts completer results so prefix matches beat substring matches."""
+
+            def __init__(self, parent=None):
+                super().__init__(parent)
+                self._search = ""
+                self.setDynamicSortFilter(True)
+
+            def set_search_text(self, text):
+                self._search = text.lower()
+                self.invalidate()
+                self.sort(0)
+
+            def lessThan(self, left, right):
+                l_val = (self.sourceModel().data(left, Qt.DisplayRole) or "").lower()
+                r_val = (self.sourceModel().data(right, Qt.DisplayRole) or "").lower()
+                l_s = self._score(l_val)
+                r_s = self._score(r_val)
+                if l_s != r_s:
+                    return l_s < r_s
+                return l_val < r_val
+
+            def _score(self, text):
+                s = self._search
+                if not s:
+                    return 0
+                if text == s:
+                    return 0          # exact
+                if text.startswith(s):
+                    return 1          # prefix
+                # any segment after '/' starts with the search text
+                pos = 0
+                while True:
+                    slash = text.find('/', pos)
+                    if slash < 0:
+                        break
+                    if text[slash + 1:].startswith(s):
+                        return 2      # segment-start
+                    pos = slash + 1
+                return 3              # plain substring
+
+        source = QStringListModel(model_list)
+        proxy = _PrefixPriorityProxy()
+        proxy.setSourceModel(source)
+        proxy.sort(0)
+
+        completer = QCompleter()
+        completer.setModel(proxy)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         completer.setFilterMode(Qt.MatchContains)
         self.model_combo.setCompleter(completer)
+
+        # Re-sort proxy whenever the user types
+        self.model_combo.lineEdit().textEdited.connect(proxy.set_search_text)
+
+        # prevent GC
+        self._model_completer_proxy = proxy
+        self._model_completer_source = source
         
     # Note: These Tkinter-specific methods are replaced by PySide6's QCompleter
     # which provides built-in autocomplete functionality
@@ -6827,13 +6888,8 @@ Recent translations to summarize:
         self.model_combo.setCurrentText(current_model)
         self.model_combo.blockSignals(False)
 
-        # Rebuild autocomplete completer
-        from PySide6.QtWidgets import QCompleter
-        from PySide6.QtCore import Qt as QtConst
-        completer = QCompleter(new_order)
-        completer.setCaseSensitivity(QtConst.CaseInsensitive)
-        completer.setFilterMode(QtConst.MatchContains)
-        self.model_combo.setCompleter(completer)
+        # Rebuild autocomplete completer (prefix-priority sorting)
+        self._install_model_completer(new_order)
 
         # Save config
         self.save_config(show_message=False)
