@@ -13162,9 +13162,21 @@ If you see multiple p-b cookies, use the one with the longest value."""
             total_strings = sum(len(v) for v in all_strings.values())
             self.append_log(f"📊 Found {total_strings} translatable strings")
 
-            # Build chunks
-            chunks = rpgmaker_handler.build_translation_chunks(all_strings)
-            self.append_log(f"📦 Split into {len(chunks)} translation chunks")
+            # Build chunks — use the same compression factor + safety margin
+            # approach as the main chapter splitter to avoid output truncation.
+            # Formula: available_tokens = (output_limit - margin) / compression
+            # Then convert tokens → chars (JP text ≈ 1.5 tokens/char).
+            compression_factor = float(getattr(self, 'compression_factor_var', '3.0') or '3.0')
+            if compression_factor <= 0:
+                compression_factor = 3.0
+            safety_margin = 200
+            available_tokens = int((self.max_output_tokens - safety_margin) / compression_factor)
+            # Convert token budget to character budget (~1.5 JP tokens per char)
+            max_chars = max(4000, int(available_tokens / 1.5))
+            chunks = rpgmaker_handler.build_translation_chunks(all_strings, max_chars=max_chars)
+            self.append_log(f"📦 Split into {len(chunks)} translation chunks "
+                          f"(max {max_chars:,} chars/chunk, "
+                          f"compression: {compression_factor}x)")
 
             # Load progress for resume
             progress = rpgmaker_handler.load_progress(game_dir)
