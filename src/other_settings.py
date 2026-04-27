@@ -8097,8 +8097,14 @@ def _create_processing_options_section(self, parent):
         }
     """)
     def _on_reset_keywords():
-        kw_substr_edit.setText(_DEFAULT_SPECIAL_KEYWORDS)
-        kw_exact_edit.setText(_DEFAULT_SPECIAL_EXACT)
+        reply = QMessageBox.question(
+            keywords_panel, "Reset Keywords",
+            "Reset special file keywords to defaults?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            kw_substr_edit.setText(_DEFAULT_SPECIAL_KEYWORDS)
+            kw_exact_edit.setText(_DEFAULT_SPECIAL_EXACT)
     reset_kw_btn.clicked.connect(_on_reset_keywords)
     keywords_panel_v.addWidget(reset_kw_btn)
     
