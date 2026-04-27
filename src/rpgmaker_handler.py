@@ -904,8 +904,9 @@ def parse_translated_chunk(response: str, chunk: Dict) -> Dict[str, str]:
     keys = chunk["keys"]
 
     # Split on [N] tag boundaries, capturing the number.
-    # Result: ['preamble', '1', 'block1 text', '2', 'block2 text', ...]
-    parts = re.split(r'^\[(\d+)\]\s*', response.strip(), flags=re.MULTILINE)
+    # No ^ anchor — handles AI merging entries on one line (e.g. [1] text[2] text)
+    # Safe because \d+ only matches digits, so [Common Equipment] etc. won't match.
+    parts = re.split(r'\[(\d+)\]\s*', response.strip())
 
     if len(parts) > 2:
         # Process (number, text) pairs starting at index 1
