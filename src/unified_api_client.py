@@ -15170,44 +15170,53 @@ class UnifiedClient:
                                 details={"block_reason": str(feedback.block_reason)}
                             )
                     
-                    # Check if response has candidates with prohibited content finish reason
+                    # Check if response has candidates with blocked/prohibited finish reasons
                     prohibited_detected = False
+                    blocked_reason = ''
                     finish_reason = 'stop'  # Default
+                    
+                    # All finish reasons that indicate content was blocked (mirrors Vertex _FR_BLOCK)
+                    _BLOCK_REASONS = {
+                        'SAFETY', 'RECITATION', 'BLOCKLIST', 'PROHIBITED_CONTENT',
+                        'SPII', 'LANGUAGE',
+                        'IMAGE_SAFETY', 'IMAGE_RECITATION', 'IMAGE_PROHIBITED_CONTENT',
+                    }
                     
                     if hasattr(response, 'candidates') and response.candidates:
                         for candidate in response.candidates:
                             if hasattr(candidate, 'finish_reason'):
                                 finish_reason_str = str(candidate.finish_reason)
-                                if 'PROHIBITED_CONTENT' in finish_reason_str:
+                                # Extract the enum name (e.g. "FinishReason.IMAGE_SAFETY" → "IMAGE_SAFETY")
+                                fr_name = finish_reason_str.rsplit('.', 1)[-1].strip().upper()
+                                if fr_name in _BLOCK_REASONS:
                                     prohibited_detected = True
+                                    blocked_reason = fr_name
                                     finish_reason = 'prohibited_content'
-                                    print(f"   🚫 Candidate has prohibited content finish reason: {finish_reason_str}")
+                                    print(f"   🚫 Content blocked: {fr_name}")
                                     break
-                                elif 'MAX_TOKENS' in finish_reason_str:
+                                elif fr_name == 'MAX_TOKENS':
                                     finish_reason = 'length'
-                                elif 'SAFETY' in finish_reason_str:
-                                    finish_reason = 'safety'
-                                elif 'MALFORMED_FUNCTION_CALL' in finish_reason_str:
+                                elif fr_name == 'MALFORMED_FUNCTION_CALL':
                                     finish_reason = 'malformed_function_call'
                                     print(f"   ⚠️ Model returned MALFORMED_FUNCTION_CALL — image generation failed (not a safety block)")
-                                elif any(tag in finish_reason_str for tag in ('OTHER', 'UNEXPECTED_TOOL_CALL', 'NO_IMAGE', 'IMAGE_OTHER')):
+                                elif fr_name in ('OTHER', 'UNEXPECTED_TOOL_CALL', 'NO_IMAGE', 'IMAGE_OTHER'):
                                     finish_reason = 'other_error'
-                                    print(f"   ⚠️ Model returned {finish_reason_str} — unexpected termination (not a safety block)")
+                                    print(f"   ⚠️ Model returned {fr_name} — unexpected termination (not a safety block)")
                     
-                    # If prohibited content detected, raise error for retry logic
+                    # If content was blocked, raise error for retry logic
                     if prohibited_detected:
                         # Get thinking tokens if available for debugging
                         thinking_tokens_wasted = 0
                         if hasattr(response, 'usage_metadata') and hasattr(response.usage_metadata, 'thoughts_token_count'):
                             thinking_tokens_wasted = response.usage_metadata.thoughts_token_count or 0
                             if thinking_tokens_wasted > 0:
-                                print(f"   ⚠️ Wasted {thinking_tokens_wasted} thinking tokens on prohibited content")
+                                print(f"   ⚠️ Wasted {thinking_tokens_wasted} thinking tokens on blocked content")
                         
                         raise UnifiedClientError(
-                            "Content blocked: FinishReason.PROHIBITED_CONTENT",
+                            f"Content blocked: FinishReason.{blocked_reason}",
                             error_type="prohibited_content",
                             details={
-                                "finish_reason": "PROHIBITED_CONTENT",
+                                "finish_reason": blocked_reason,
                                 "thinking_tokens_wasted": thinking_tokens_wasted
                             }
                         )
@@ -15235,7 +15244,8 @@ class UnifiedClient:
                                 raw_content_obj = cand0.content
                         except Exception:
                             pass
-                    image_data = None  # Store extracted image data
+                    if not use_streaming:
+                        image_data = None  # Store extracted image data (non-streaming only; streaming already set it)
                     
                     # Try the simple .text property first (most common)
                     # IMPORTANT: when streaming, keep the aggregated text_parts; only fill in if empty
@@ -15310,8 +15320,9 @@ class UnifiedClient:
                     # Save image if present
                     if image_data and enable_image_output:
                         try:
-                            # Get output directory - save directly to output folder
-                            output_dir = getattr(self, 'output_dir', None) or '.'
+                            # Get output directory - prefer OUTPUT_DIRECTORY env var (set by rpgmaker_handler),
+                            # then self.output_dir, then current directory
+                            output_dir = os.getenv('OUTPUT_DIRECTORY', '') or getattr(self, 'output_dir', None) or '.'
                             os.makedirs(output_dir, exist_ok=True)
                             
                             # Use response_name as filename (no prefix)

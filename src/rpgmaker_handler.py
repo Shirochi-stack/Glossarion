@@ -1542,9 +1542,13 @@ def backup_game_image(entry: ImageEntry, game_dir: str, log: Callable = print):
     # Preserve subdirectory structure: img/pictures/foo.rpgmvp
     rel = entry.relative_path  # e.g. img/pictures/foo.rpgmvp
     backup_path = os.path.join(backup_root, rel)
-    os.makedirs(os.path.dirname(backup_path), exist_ok=True)
-    if not os.path.exists(backup_path):
-        shutil.copy2(entry.original_path, backup_path)
+    try:
+        os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+        if not os.path.exists(backup_path):
+            shutil.copy2(entry.original_path, backup_path)
+            log(f"   💾 Backed up: {rel}")
+    except Exception as e:
+        log(f"   ⚠️ Failed to backup {rel}: {e}")
 
 
 def inject_translated_image(
