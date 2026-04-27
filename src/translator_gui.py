@@ -1214,6 +1214,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             "korean_OCR",
             "japanese_OCR",
             "chinese_OCR",
+            "RPGMaker_GTool",
         }
         return protected
 
