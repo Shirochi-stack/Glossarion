@@ -1463,17 +1463,11 @@ def filter_images_with_vision(
 
     def _scan_single(entry):
         """Worker: check one image for text. Returns (entry, has_text)."""
-        # Per-thread client for parallelism
         if batch_size > 1 and api_key and model:
             from unified_api_client import UnifiedClient
-            thread_client = UnifiedClient(
-                model=model,
-                api_key=api_key,
-                output_dir=output_dir or os.path.join(game_dir, "GTool_Translation"),
-            )
+            tc = UnifiedClient(model=model, api_key=api_key, output_dir=output_dir)
         else:
-            thread_client = client
-
+            tc = client
         mime = _detect_mime(entry.decrypted_png)
         b64 = base64.b64encode(entry.decrypted_png).decode('ascii')
         messages = [
@@ -1483,7 +1477,7 @@ def filter_images_with_vision(
                 {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
             ]}
         ]
-        result = thread_client.send(messages)
+        result = tc.send(messages)
         answer = ""
         if isinstance(result, tuple):
             answer = (result[0] or "").strip().upper()
@@ -1639,9 +1633,9 @@ def translate_game_images(
         system_prompt: System prompt from the RPGMaker_GTool_Image profile.
                        If empty, a sensible default is used.
         batch_size:    Number of parallel workers (1 = sequential).
-        api_key:       API key for creating per-thread clients.
-        model:         Model name for per-thread clients.
-        output_dir:    Output dir for per-thread clients.
+        api_key:       API key for per-task clients in batch mode.
+        model:         Model name for per-task clients.
+        output_dir:    Output dir for per-task clients.
     """
     log("\n🖼️ Image mode: scanning game images for text...")
 
@@ -1657,9 +1651,7 @@ def translate_game_images(
         filter_system_prompt=filter_system_prompt,
         filter_user_prompt=filter_user_prompt,
         batch_size=batch_size,
-        api_key=api_key,
-        model=model,
-        output_dir=output_dir,
+        api_key=api_key, model=model, output_dir=output_dir,
         log=log, stop_check=stop_check)
     if not text_entries:
         log("ℹ️ No images with detectable text — skipping image phase")
@@ -1716,16 +1708,11 @@ def translate_game_images(
         """Worker: translate a single image. Returns (idx, translated_png, entry)."""
         idx, entry = idx_entry
 
-        # Each thread gets its own client to avoid thread-safety issues
         if batch_size > 1 and api_key and model:
             from unified_api_client import UnifiedClient
-            thread_client = UnifiedClient(
-                model=model,
-                api_key=api_key,
-                output_dir=output_dir or os.path.join(game_dir, "GTool_Translation"),
-            )
+            tc = UnifiedClient(model=model, api_key=api_key, output_dir=output_dir)
         else:
-            thread_client = client
+            tc = client
 
         rel = entry.relative_path
         log(f"🎨 [{idx}/{len(pending)}] Translating: {rel}")
@@ -1752,7 +1739,7 @@ def translate_game_images(
             ]}
         ]
 
-        result = thread_client.send(
+        result = tc.send(
             messages,
             temperature=temperature,
             max_tokens=max_tokens,
