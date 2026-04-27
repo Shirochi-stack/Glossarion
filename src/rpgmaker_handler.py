@@ -895,27 +895,38 @@ def format_chunk_for_translation(chunk: Dict) -> str:
 
 
 def parse_translated_chunk(response: str, chunk: Dict) -> Dict[str, str]:
-    """Parse numbered translation response back into key->translation map."""
+    """Parse numbered translation response back into key->translation map.
+
+    Handles multi-line entries where each [N] block can span multiple
+    lines until the next [N+1] tag or end of response.
+    """
     translations = {}
     keys = chunk["keys"]
 
-    # Try to parse [N] format
-    pattern = re.compile(r'^\[(\d+)\]\s*(.+)$', re.MULTILINE)
-    matches = pattern.findall(response)
+    # Split on [N] tag boundaries, capturing the number.
+    # Result: ['preamble', '1', 'block1 text', '2', 'block2 text', ...]
+    parts = re.split(r'^\[(\d+)\]\s*', response.strip(), flags=re.MULTILINE)
 
-    if matches:
-        for num_str, text in matches:
-            idx = int(num_str) - 1
-            if 0 <= idx < len(keys):
-                translations[keys[idx]] = text.strip()
+    if len(parts) > 2:
+        # Process (number, text) pairs starting at index 1
+        idx = 1
+        while idx < len(parts) - 1:
+            try:
+                num = int(parts[idx])
+                text = parts[idx + 1].strip()
+                key_idx = num - 1
+                if 0 <= key_idx < len(keys):
+                    translations[keys[key_idx]] = text
+            except (ValueError, IndexError):
+                pass
+            idx += 2
     else:
         # Fallback: split by lines and match 1:1
-        lines = [l.strip() for l in response.strip().split('\n') if l.strip()]
-        for i, line in enumerate(lines):
-            if i < len(keys):
-                # Strip any leading number markers
-                clean = re.sub(r'^\d+[\.\)\]]\s*', '', line)
-                translations[keys[i]] = clean
+        flines = [ln.strip() for ln in response.strip().split('\n') if ln.strip()]
+        for j, line in enumerate(flines):
+            if j < len(keys):
+                clean = re.sub(r'^\d+[.)\]]\s*', '', line)
+                translations[keys[j]] = clean
 
     return translations
 
