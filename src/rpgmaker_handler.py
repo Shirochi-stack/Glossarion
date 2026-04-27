@@ -1741,15 +1741,18 @@ def translate_game_images(
         # Backup original
         backup_game_image(entry, game_dir, log)
 
-        # Pre-compute expected output filename so we can find it after the API call
-        entry_basename = os.path.splitext(os.path.basename(rel))[0]  # e.g. "カラーリラC"
-        expected_output = os.path.join(translated_images_dir, f"{entry_basename}.png")
+        # Pre-compute expected output filename — preserve subdir structure
+        # to avoid cross-thread collisions (e.g. two 'foo.rpgmvp' in different dirs)
+        rel_png = os.path.splitext(rel)[0] + ".png"  # img/pictures/foo.png
+        expected_output = os.path.join(translated_images_dir, rel_png)
+        os.makedirs(os.path.dirname(expected_output), exist_ok=True)
+        entry_basename = os.path.splitext(os.path.basename(rel))[0]
 
         # Skip API call if translated image already exists from a previous run
         if os.path.exists(expected_output) and os.path.getsize(expected_output) > 0:
             with open(expected_output, 'rb') as gf:
                 cached_png = gf.read()
-            log(f"   ♻️ Using cached translation: {entry_basename}.png")
+            log(f"   ♻️ Using cached translation: {rel_png}")
             return idx, cached_png, entry, "[CACHED]"
 
         user_text = (
@@ -1767,7 +1770,7 @@ def translate_game_images(
             temperature=temperature,
             max_tokens=max_tokens,
             context='image_translation',
-            response_name=rel,  # _send_gemini uses this to name the saved file
+            response_name=rel_png,  # _send_gemini uses this to name the saved file
         )
 
         translated_png = None

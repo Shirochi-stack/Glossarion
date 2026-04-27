@@ -15338,22 +15338,24 @@ class UnifiedClient:
                             output_dir = os.getenv('OUTPUT_DIRECTORY', '') or getattr(self, 'output_dir', None) or '.'
                             os.makedirs(output_dir, exist_ok=True)
                             
-                            # Use response_name as filename (no prefix)
-                            # Extract clean filename from response_name if it contains path separators
+                            # Use response_name as filename, preserving subdirectory structure
+                            # (rpgmaker handler passes e.g. 'img/pictures/foo.png')
                             if response_name:
-                                clean_name = os.path.basename(response_name)
-                                # Remove file extension if present
-                                clean_name = os.path.splitext(clean_name)[0]
+                                clean_name = response_name
                                 # Remove hash and counter suffix if present (e.g., _865a1e39_imgA0)
                                 import re
-                                clean_name = re.sub(r'_[a-f0-9]{8}_img[A-Z0-9]+$', '', clean_name)
-                                filename = f"{clean_name}.png"
+                                base, ext = os.path.splitext(clean_name)
+                                base = re.sub(r'_[a-f0-9]{8}_img[A-Z0-9]+$', '', base)
+                                if not ext or ext.lower() not in ('.png', '.jpg', '.jpeg', '.webp'):
+                                    ext = '.png'
+                                filename = f"{base}{ext}"
                             else:
                                 # Fallback to timestamp if no response_name
                                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                                 filename = f"{timestamp}.png"
                             
                             filepath = os.path.join(output_dir, filename)
+                            os.makedirs(os.path.dirname(filepath), exist_ok=True)
                             
                             # Write image data to file
                             with open(filepath, 'wb') as f:
