@@ -1299,6 +1299,45 @@ class RubyMarshalWriter:
             self._write_symbol(obj[1])
 
 
+def _wrap_to_lines(text: str, num_lines: int) -> list:
+    """Distribute text evenly across num_lines, splitting at word boundaries.
+
+    RPG Maker dialog boxes have a fixed number of lines per message command.
+    If the AI returns a single-line translation for a multi-line original,
+    this splits it into the required number of lines.
+    """
+    words = text.split()
+    if not words or num_lines <= 1:
+        return [text] if num_lines == 1 else [text] + [""] * (num_lines - 1)
+
+    # Target roughly equal character count per line
+    total_len = sum(len(w) for w in words) + len(words) - 1
+    target_per_line = total_len / num_lines
+
+    lines = []
+    current_line = []
+    current_len = 0
+
+    for word in words:
+        word_len = len(word) + (1 if current_line else 0)
+        if current_line and current_len + word_len > target_per_line and len(lines) < num_lines - 1:
+            lines.append(" ".join(current_line))
+            current_line = [word]
+            current_len = len(word)
+        else:
+            current_line.append(word)
+            current_len += word_len
+
+    if current_line:
+        lines.append(" ".join(current_line))
+
+    # Pad if we somehow got fewer lines
+    while len(lines) < num_lines:
+        lines.append("")
+
+    return lines
+
+
 def _patch_map_entry(data: dict, key: str, translated: str) -> int:
     """Patch a single map entry with translated text."""
     if key == "displayName":
