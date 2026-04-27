@@ -1119,7 +1119,13 @@ def apply_translations(data_dir: str, trans_map_path: str,
             patched += file_patched
             log(f"   ✅ {filename}: {file_patched} strings patched")
 
+    total_strings = sum(len(entries) for entries in trans_data.values())
+    untranslated = total_strings - patched
     log(f"🎮 Total: {patched} strings patched into game files")
+    if untranslated > 0:
+        log(f"⚠️ Untranslated: {untranslated} strings remaining ({untranslated * 100 // total_strings}%)")
+    else:
+        log(f"✅ All {total_strings} strings translated!")
 
     # Apply GTool settings (font size, etc.)
     _apply_gtool_settings(data_dir, os.path.dirname(trans_map_path), log)
