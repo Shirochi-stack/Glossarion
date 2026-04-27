@@ -12937,64 +12937,94 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Initialize the unified client for translation
             from unified_api_client import UnifiedClient
             gtool_out = os.path.join(game_dir, "GTool_Translation")
-            client = UnifiedClient(
-                model=self.model_var,
-                api_key=api_key,
-                output_dir=gtool_out,
-            )
 
-            translated_count = 0
+            # Determine parallelism from batch settings
+            use_batch = getattr(self, 'batch_translation_var', False)
+            batch_size = max(1, int(getattr(self, 'batch_size_var', 3))) if use_batch else 1
+            if use_batch:
+                self.append_log(f"⚡ Batch mode: {batch_size} parallel workers")
+
+            # Pre-filter chunks to only those with untranslated keys
+            pending_chunks = []
             for i, chunk in enumerate(chunks):
-                if self.stop_requested:
-                    self.append_log("⏹️ Translation stopped by user")
-                    break
-
-                # Filter out already-translated keys
                 new_keys = []
                 new_texts = []
                 for k, t in zip(chunk["keys"], chunk["texts"]):
                     if k not in progress:
                         new_keys.append(k)
                         new_texts.append(t)
+                if new_keys:
+                    pending_chunks.append((i, {"keys": new_keys, "texts": new_texts}))
 
-                if not new_keys:
-                    continue
+            self.append_log(f"📦 {len(pending_chunks)} chunks need translation (of {len(chunks)} total)")
 
-                sub_chunk = {"keys": new_keys, "texts": new_texts}
+            translated_count = 0
+            progress_lock = __import__('threading').Lock()
+
+            def _translate_chunk(chunk_info):
+                """Worker function for translating a single chunk."""
+                idx, sub_chunk = chunk_info
+                # Each thread gets its own client to avoid thread-safety issues
+                thread_client = UnifiedClient(
+                    model=self.model_var,
+                    api_key=api_key,
+                    output_dir=gtool_out,
+                )
                 source = rpgmaker_handler.format_chunk_for_translation(sub_chunk)
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": source},
+                ]
+                result = thread_client.send(
+                    messages=messages,
+                    temperature=float(self.trans_temp.text() or "0.3"),
+                    max_tokens=self.max_output_tokens,
+                )
+                response_text = ""
+                if result:
+                    if isinstance(result, tuple):
+                        response_text = result[0] if result[0] else ""
+                    elif isinstance(result, str):
+                        response_text = result
+                    elif hasattr(result, 'content'):
+                        response_text = result.content or ""
+                if response_text:
+                    parsed = rpgmaker_handler.parse_translated_chunk(
+                        response_text, sub_chunk)
+                    return idx, parsed, len(sub_chunk["keys"])
+                return idx, {}, len(sub_chunk["keys"])
 
-                self.append_log(
-                    f"🔄 Chunk {i+1}/{len(chunks)} — "
-                    f"{len(new_keys)} strings...")
+            from concurrent.futures import ThreadPoolExecutor, as_completed
 
-                try:
-                    messages = [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": source},
-                    ]
-                    result = client.send(
-                        messages=messages,
-                        temperature=float(self.trans_temp.text() or "0.3"),
-                        max_tokens=self.max_output_tokens,
-                    )
-                    response_text = ""
-                    if result:
-                        if isinstance(result, tuple):
-                            response_text = result[0] if result[0] else ""
-                        elif isinstance(result, str):
-                            response_text = result
-                        elif hasattr(result, 'content'):
-                            response_text = result.content or ""
-                    if response_text:
-                        parsed = rpgmaker_handler.parse_translated_chunk(
-                            response_text, sub_chunk)
-                        progress.update(parsed)
-                        translated_count += len(parsed)
-                        rpgmaker_handler.save_progress(game_dir, progress)
-                        self.append_log(
-                            f"   ✅ {len(parsed)}/{len(new_keys)} translated")
-                except Exception as e:
-                    self.append_log(f"   ⚠️ Chunk {i+1} failed: {e}")
+            with ThreadPoolExecutor(max_workers=batch_size) as pool:
+                futures = {}
+                for chunk_info in pending_chunks:
+                    if self.stop_requested:
+                        break
+                    future = pool.submit(_translate_chunk, chunk_info)
+                    futures[future] = chunk_info[0]  # map future -> chunk index
+
+                for future in as_completed(futures):
+                    if self.stop_requested:
+                        self.append_log("⏹️ Translation stopped by user")
+                        break
+                    chunk_idx = futures[future]
+                    try:
+                        idx, parsed, total_keys = future.result()
+                        if parsed:
+                            with progress_lock:
+                                progress.update(parsed)
+                                translated_count += len(parsed)
+                                rpgmaker_handler.save_progress(game_dir, progress)
+                            self.append_log(
+                                f"   ✅ Chunk {idx+1}/{len(chunks)}: "
+                                f"{len(parsed)}/{total_keys} translated")
+                        else:
+                            self.append_log(
+                                f"   ⚠️ Chunk {idx+1}/{len(chunks)}: "
+                                f"no translations parsed")
+                    except Exception as e:
+                        self.append_log(f"   ⚠️ Chunk {chunk_idx+1} failed: {e}")
 
             self.append_log(f"\n📊 Translated {translated_count} strings total")
 
