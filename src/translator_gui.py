@@ -1215,6 +1215,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             "japanese_OCR",
             "chinese_OCR",
             "RPGMaker_GTool",
+            "RPGMaker_GTool_Image",
         }
         return protected
 
@@ -2379,6 +2380,20 @@ Text to analyze:
                 "- If an entry has multiple lines (newlines), keep the same number of lines.\n"
                 "- No explanations. No original text. Just [N] and the translation.\n"
             ),
+            "RPGMaker_GTool_Image": (
+                "You are a game UI image translator specializing in RPG Maker games.\n\n"
+                "TASK:\n"
+                "Generate a new version of this game image with all visible text translated to {target_lang}.\n\n"
+                "RULES:\n"
+                "- Translate ALL readable text in the image (menus, labels, titles, buttons, tooltips).\n"
+                "- Preserve the original visual style exactly: background art, colors, gradients, effects, and layout.\n"
+                "- Match the original font style as closely as possible (weight, size, shadow, outline, glow).\n"
+                "- Keep text positioning identical — translated text should occupy the same regions.\n"
+                "- If text is part of a decorative element (e.g. stylized title logo), recreate the decoration with the translated text.\n"
+                "- Do NOT add, remove, or reposition any non-text visual elements.\n"
+                "- Do NOT add watermarks, signatures, or any extra markings.\n"
+                "- Output the translated image at the same resolution as the input.\n"
+            ),
             "Original": "Return everything exactly as seen on the source."
         }
 
@@ -3530,8 +3545,9 @@ Recent translations to summarize:
             "korean_OCR",
             "japanese_OCR",
             "chinese_OCR",
-            # RPG Maker GTool profile
+            # RPG Maker GTool profiles
             "RPGMaker_GTool",
+            "RPGMaker_GTool_Image",
         ]
         
         # Add missing required profiles while preserving existing profile positions
@@ -12897,7 +12913,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
             return False
         
     def _process_rpgmaker_game(self, exe_path):
-        """Process an RPG Maker game executable via GTool pipeline."""
+        """Process an RPG Maker game executable via GTool pipeline.
+
+        Mode behaviour:
+          - Text mode  → text-only translation (unchanged)
+          - Image mode → image-asset-only translation (no text)
+        """
         try:
             import rpgmaker_handler
 
@@ -12914,10 +12935,69 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
             game_dir = os.path.dirname(os.path.abspath(exe_path))
 
-            # Detect version and extract strings
+            # Detect version & data dir (needed by both modes)
             version, data_dir, all_strings = rpgmaker_handler.extract_all(
                 game_dir, self.append_log)
 
+            if version == rpgmaker_handler.RPGMakerVersion.UNKNOWN:
+                self.append_log("❌ Could not detect RPG Maker version")
+                return False
+
+            # ── Check output mode ────────────────────────────────
+            image_mode = (
+                os.environ.get('ENABLE_IMAGE_TRANSLATION', '0') == '1'
+                or getattr(self, 'enable_image_translation_var', False)
+            )
+
+            # Set up common env / client
+            api_key = self.api_key_entry.text()
+            output_lang = self.config.get('output_language', 'English')
+            from unified_api_client import UnifiedClient
+            gtool_out = os.path.join(game_dir, "GTool_Translation")
+
+            # ── IMAGE MODE: image-asset-only translation ─────────
+            if image_mode:
+                # MV/MZ only (older engines don't use JS encryption)
+                if version not in (rpgmaker_handler.RPGMakerVersion.MV,
+                                   rpgmaker_handler.RPGMakerVersion.MZ):
+                    self.append_log("⚠️ Image translation is only supported for MV/MZ games")
+                    return False
+
+                self.append_log("🖼️ Output mode: Image — translating game image assets only")
+
+                img_client = UnifiedClient(
+                    model=self.model_var,
+                    api_key=api_key,
+                    output_dir=gtool_out,
+                )
+
+                # Load system prompt from the image profile
+                img_prompt = ""
+                try:
+                    profiles = getattr(self, 'prompt_profiles', {})
+                    if "RPGMaker_GTool_Image" in profiles:
+                        img_prompt = profiles["RPGMaker_GTool_Image"]
+                    elif hasattr(self, 'default_prompts') and "RPGMaker_GTool_Image" in self.default_prompts:
+                        img_prompt = self.default_prompts["RPGMaker_GTool_Image"]
+                except Exception:
+                    pass
+
+                img_count = rpgmaker_handler.translate_game_images(
+                    game_dir=game_dir,
+                    data_dir=data_dir,
+                    client=img_client,
+                    target_lang=output_lang,
+                    system_prompt=img_prompt,
+                    log=self.append_log,
+                    stop_check=lambda: self.stop_requested,
+                )
+
+                self.append_log(f"🎮 GTool: Image translation complete!")
+                self.append_log(f"💾 Translation data: {gtool_out}")
+                self.append_log(f"📁 Backups: {os.path.join(gtool_out, 'originals_backup')}")
+                return img_count > 0
+
+            # ── TEXT MODE: text-only translation (original path) ──
             if not all_strings:
                 self.append_log("❌ No translatable strings found - is this an RPG Maker game?")
                 return False
@@ -12939,12 +13019,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 game_dir, all_strings, self.append_log)
 
             # Set up environment for translation
-            api_key = self.api_key_entry.text()
             system_prompt = self.prompt_text.toPlainText().strip()
-            # Replace target language placeholder
-            output_lang = self.config.get('output_language', 'English')
             system_prompt = system_prompt.replace('{target_lang}', output_lang)
-            # Strip split marker placeholder
             import re
             system_prompt = re.sub(r'\s*\{split_marker_instruction\}\s*', '', system_prompt)
 
@@ -12952,10 +13028,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
             os.environ['SYSTEM_PROMPT'] = system_prompt
             os.environ['MODEL'] = self.model_var
             os.environ['IS_TEXT_FILE_TRANSLATION'] = '1'
-
-            # Initialize the unified client for translation
-            from unified_api_client import UnifiedClient
-            gtool_out = os.path.join(game_dir, "GTool_Translation")
 
             # Determine parallelism from batch settings
             use_batch = getattr(self, 'batch_translation_var', False)

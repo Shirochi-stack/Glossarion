@@ -9,6 +9,10 @@ import shutil
 import time
 import hashlib
 from typing import Dict, List, Tuple, Optional, Callable
+from dataclasses import dataclass, field
+import base64
+import glob
+import fnmatch
 
 # RPG Maker MV/MZ event command codes that contain translatable text
 _DIALOG_CODES = {401, 405}  # Show Text, Show Scrolling Text
@@ -1176,7 +1180,534 @@ _GTOOL_PLUGIN_JS = """\
 _DEFAULT_SETTINGS = {
     "fontSize": 22,
     "minFontSize": 14,
+    "imageTranslation": {
+        "scanDirectories": ["titles1", "titles2", "pictures", "system"],
+        "skipPatterns": ["*battle*", "*animation*"],
+        "maxImages": 50
+    }
 }
+
+# ============================================================
+# RPG Maker Image Asset Translation (Phases 1-4)
+# ============================================================
+
+# RPGMV encrypted file header signature
+_RPGMV_HEADER = bytes([
+    0x52, 0x50, 0x47, 0x4D, 0x56, 0x00, 0x00, 0x00,
+    0x00, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+])
+
+# Directories likely to contain text-bearing images
+_IMAGE_SCAN_DIRS = ["titles1", "titles2", "pictures", "system"]
+
+# Directories to skip (unlikely to contain translatable text)
+_IMAGE_SKIP_DIRS = {
+    "animations", "battlebacks1", "battlebacks2", "characters",
+    "enemies", "faces", "parallaxes", "sv_actors", "sv_enemies",
+    "tilesets", "balloon",
+}
+
+# Encrypted image extensions
+_ENCRYPTED_IMG_EXT = {".rpgmvp", ".png_"}
+_PLAIN_IMG_EXT = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+@dataclass
+class ImageEntry:
+    """Represents a single game image asset for translation."""
+    original_path: str        # Path to encrypted/original file
+    decrypted_png: bytes = b''  # Decrypted PNG data
+    category: str = ''        # 'title', 'picture', 'system'
+    has_text: bool = False    # Vision AI detection result
+    is_encrypted: bool = False
+    relative_path: str = ''   # Relative path from game img/ root
+
+
+# -- Phase 1: Decryption / Encryption --------------------------
+
+def get_encryption_key(data_dir: str) -> Optional[str]:
+    """Read encryption key from System.json.
+
+    Returns the hex key string, or None if images aren't encrypted.
+    """
+    sys_path = os.path.join(data_dir, "System.json")
+    if not os.path.exists(sys_path):
+        return None
+    try:
+        with open(sys_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if not data.get("hasEncryptedImages"):
+            return None
+        key = data.get("encryptionKey", "")
+        return key if key else None
+    except Exception:
+        return None
+
+
+def _hex_key_to_bytes(hex_key: str) -> bytes:
+    """Convert a hex encryption key string to a 16-byte XOR key."""
+    # Pad or truncate to exactly 32 hex chars (16 bytes)
+    hex_key = hex_key.ljust(32, '0')[:32]
+    return bytes.fromhex(hex_key)
+
+
+def decrypt_rpgmv_image(file_path: str, key: str) -> bytes:
+    """Decrypt an RPG Maker MV/MZ encrypted image.
+
+    Format: 16-byte RPGMV header + XOR'd first 16 bytes + plain remainder.
+    Returns valid PNG/JPEG bytes.
+    """
+    with open(file_path, 'rb') as f:
+        data = f.read()
+
+    if len(data) < 32:
+        raise ValueError(f"File too small to be encrypted: {file_path}")
+
+    # Strip the 16-byte RPGMV header
+    body = data[16:]
+
+    # XOR the first 16 bytes with the key
+    key_bytes = _hex_key_to_bytes(key)
+    decrypted_head = bytes(b ^ k for b, k in zip(body[:16], key_bytes))
+
+    return decrypted_head + body[16:]
+
+
+def encrypt_to_rpgmv(png_bytes: bytes, key: str) -> bytes:
+    """Encrypt PNG bytes back to RPG Maker MV/MZ format.
+
+    Reverse of decryption: prepend RPGMV header + XOR first 16 bytes.
+    """
+    key_bytes = _hex_key_to_bytes(key)
+    encrypted_head = bytes(b ^ k for b, k in zip(png_bytes[:16], key_bytes))
+    return _RPGMV_HEADER + encrypted_head + png_bytes[16:]
+
+
+def _read_image_bytes(file_path: str, encryption_key: Optional[str]) -> Tuple[bytes, bool]:
+    """Read image bytes, decrypting if necessary.
+
+    Returns (image_bytes, was_encrypted).
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in _ENCRYPTED_IMG_EXT and encryption_key:
+        return decrypt_rpgmv_image(file_path, encryption_key), True
+    else:
+        with open(file_path, 'rb') as f:
+            return f.read(), False
+
+
+# -- Phase 2: Image Discovery & Filtering ----------------------
+
+def _find_img_root(game_dir: str) -> Optional[str]:
+    """Locate the img/ directory for MV/MZ games."""
+    for candidate in [
+        os.path.join(game_dir, "www", "img"),
+        os.path.join(game_dir, "img"),
+    ]:
+        if os.path.isdir(candidate):
+            return candidate
+    return None
+
+
+def discover_translatable_images(
+    game_dir: str,
+    data_dir: str,
+    log: Callable = print,
+) -> List[ImageEntry]:
+    """Scan game img/ directories for potential text-bearing images.
+
+    Returns a list of ImageEntry with decrypted PNG data loaded.
+    """
+    img_root = _find_img_root(game_dir)
+    if not img_root:
+        log("⚠️ No img/ directory found — skipping image phase")
+        return []
+
+    encryption_key = get_encryption_key(data_dir)
+    if encryption_key:
+        log(f"🔑 Decrypting with key: {encryption_key[:8]}...")
+
+    # Load settings for custom dirs / skip patterns
+    gtool_dir = os.path.join(game_dir, "GTool_Translation")
+    settings = _load_image_settings(gtool_dir)
+    scan_dirs = settings.get("scanDirectories", _IMAGE_SCAN_DIRS)
+    skip_patterns = settings.get("skipPatterns", [])
+    max_images = settings.get("maxImages", 50)
+
+    entries: List[ImageEntry] = []
+
+    for subdir in scan_dirs:
+        dir_path = os.path.join(img_root, subdir)
+        if not os.path.isdir(dir_path):
+            continue
+
+        category = "title" if "title" in subdir else (
+            "system" if subdir == "system" else "picture")
+
+        for fname in sorted(os.listdir(dir_path)):
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in _ENCRYPTED_IMG_EXT and ext not in _PLAIN_IMG_EXT:
+                continue
+
+            # Apply skip patterns
+            if any(fnmatch.fnmatch(fname.lower(), pat.lower()) for pat in skip_patterns):
+                continue
+
+            fpath = os.path.join(dir_path, fname)
+            rel_path = os.path.join("img", subdir, fname)
+
+            try:
+                img_bytes, was_encrypted = _read_image_bytes(fpath, encryption_key)
+                entries.append(ImageEntry(
+                    original_path=fpath,
+                    decrypted_png=img_bytes,
+                    category=category,
+                    is_encrypted=was_encrypted,
+                    relative_path=rel_path,
+                ))
+            except Exception as e:
+                log(f"   ⚠️ Could not read {rel_path}: {e}")
+
+            if len(entries) >= max_images:
+                log(f"   ⚠️ Hit max image limit ({max_images}) — increase in settings.json")
+                break
+        if len(entries) >= max_images:
+            break
+
+    log(f"📷 Found {len(entries)} images in {', '.join(scan_dirs)}")
+    return entries
+
+
+def _load_image_settings(gtool_dir: str) -> dict:
+    """Load imageTranslation block from settings.json."""
+    settings_path = os.path.join(gtool_dir, "settings.json")
+    try:
+        if os.path.exists(settings_path):
+            with open(settings_path, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+            return settings.get("imageTranslation", {})
+    except Exception:
+        pass
+    return {}
+
+
+def _detect_mime(data: bytes) -> str:
+    """Detect image MIME from magic bytes."""
+    if data[:8] == b'\x89PNG\r\n\x1a\n':
+        return "image/png"
+    if data[:3] == b'\xff\xd8\xff':
+        return "image/jpeg"
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return "image/webp"
+    if data[:3] == b'GIF':
+        return "image/gif"
+    return "image/png"  # fallback
+
+
+def filter_images_with_vision(
+    entries: List[ImageEntry],
+    client,
+    game_dir: str,
+    log: Callable = print,
+    stop_check: Callable = None,
+) -> List[ImageEntry]:
+    """Use Vision AI to detect which images contain readable text.
+
+    Results are cached in GTool_Translation/image_scan_cache.json.
+    """
+    cache_path = os.path.join(game_dir, "GTool_Translation", "image_scan_cache.json")
+    cache: Dict[str, bool] = {}
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                cache = json.load(f)
+        except Exception:
+            cache = {}
+
+    filtered: List[ImageEntry] = []
+    checked = 0
+
+    for entry in entries:
+        if stop_check and stop_check():
+            log("⏹️ Image scan stopped by user")
+            break
+
+        cache_key = entry.relative_path
+        if cache_key in cache:
+            entry.has_text = cache[cache_key]
+            if entry.has_text:
+                filtered.append(entry)
+            continue
+
+        # Ask the vision model
+        try:
+            mime = _detect_mime(entry.decrypted_png)
+            b64 = base64.b64encode(entry.decrypted_png).decode('ascii')
+            messages = [
+                {"role": "system", "content": "You are an image analyst. Reply with only YES or NO."},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Does this image contain readable text (Japanese, Chinese, Korean, or any language)? Reply YES or NO."},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+                ]}
+            ]
+            result = client.send(messages, temperature=0.0, max_tokens=10)
+            answer = ""
+            if isinstance(result, tuple):
+                answer = (result[0] or "").strip().upper()
+            elif isinstance(result, str):
+                answer = result.strip().upper()
+            elif hasattr(result, 'content'):
+                answer = (result.content or "").strip().upper()
+
+            has_text = answer.startswith("YES")
+            entry.has_text = has_text
+            cache[cache_key] = has_text
+
+            if has_text:
+                filtered.append(entry)
+            checked += 1
+        except Exception as e:
+            log(f"   ⚠️ Vision check failed for {entry.relative_path}: {e}")
+            # On failure, include the image (false-positive is better than miss)
+            entry.has_text = True
+            filtered.append(entry)
+            cache[cache_key] = True
+
+    # Save cache
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, indent=2)
+    except Exception:
+        pass
+
+    log(f"🤖 Detected text in {len(filtered)} of {len(entries)} images")
+    return filtered
+
+
+# -- Phase 4: Result Injection ---------------------------------
+
+def backup_game_image(entry: ImageEntry, game_dir: str, log: Callable = print):
+    """Backup an original game image before replacement."""
+    backup_root = os.path.join(game_dir, "GTool_Translation", "originals_backup")
+    # Preserve subdirectory structure: img/pictures/foo.rpgmvp
+    rel = entry.relative_path  # e.g. img/pictures/foo.rpgmvp
+    backup_path = os.path.join(backup_root, rel)
+    os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+    if not os.path.exists(backup_path):
+        shutil.copy2(entry.original_path, backup_path)
+
+
+def inject_translated_image(
+    entry: ImageEntry,
+    translated_png: bytes,
+    encryption_key: Optional[str],
+    log: Callable = print,
+):
+    """Write translated image back to game directory, re-encrypting if needed."""
+    if entry.is_encrypted and encryption_key:
+        final_bytes = encrypt_to_rpgmv(translated_png, encryption_key)
+    else:
+        final_bytes = translated_png
+
+    with open(entry.original_path, 'wb') as f:
+        f.write(final_bytes)
+
+
+def update_image_progress(
+    game_dir: str,
+    entry: ImageEntry,
+    status: str = "translated",
+):
+    """Track translated images in progress.json under __images__ key."""
+    progress_path = get_progress_path(game_dir)
+    progress = {}
+    if os.path.exists(progress_path):
+        try:
+            with open(progress_path, 'r', encoding='utf-8') as f:
+                progress = json.load(f)
+        except Exception:
+            progress = {}
+
+    if "__images__" not in progress:
+        progress["__images__"] = {}
+
+    img_hash = hashlib.md5(entry.decrypted_png).hexdigest()
+    progress["__images__"][entry.relative_path] = {
+        "status": status,
+        "hash": img_hash,
+    }
+
+    with open(progress_path, 'w', encoding='utf-8') as f:
+        json.dump(progress, f, ensure_ascii=False, indent=2)
+
+
+def _is_image_already_translated(game_dir: str, entry: ImageEntry) -> bool:
+    """Check if an image was already translated (by hash comparison)."""
+    progress_path = get_progress_path(game_dir)
+    if not os.path.exists(progress_path):
+        return False
+    try:
+        with open(progress_path, 'r', encoding='utf-8') as f:
+            progress = json.load(f)
+        images = progress.get("__images__", {})
+        record = images.get(entry.relative_path)
+        if not record:
+            return False
+        if record.get("status") != "translated":
+            return False
+        img_hash = hashlib.md5(entry.decrypted_png).hexdigest()
+        return record.get("hash") == img_hash
+    except Exception:
+        return False
+
+
+# -- Phase 3 helper: end-to-end image translation entry point --
+
+def translate_game_images(
+    game_dir: str,
+    data_dir: str,
+    client,
+    target_lang: str = "English",
+    system_prompt: str = "",
+    log: Callable = print,
+    stop_check: Callable = None,
+) -> int:
+    """Full image-asset translation pipeline.
+
+    1. Discover images  2. Filter with vision  3. Translate  4. Inject
+    Returns number of images translated.
+
+    Args:
+        system_prompt: System prompt from the RPGMaker_GTool_Image profile.
+                       If empty, a sensible default is used.
+    """
+    log("\n🖼️ Image mode: scanning game images for text...")
+
+    # Discover
+    entries = discover_translatable_images(game_dir, data_dir, log)
+    if not entries:
+        log("ℹ️ No translatable images found — skipping image phase")
+        return 0
+
+    # Filter with vision AI
+    text_entries = filter_images_with_vision(
+        entries, client, game_dir, log, stop_check)
+    if not text_entries:
+        log("ℹ️ No images with detectable text — skipping image phase")
+        return 0
+
+    # Skip already-translated
+    pending = [e for e in text_entries
+               if not _is_image_already_translated(game_dir, e)]
+    if not pending:
+        log("✅ All text images already translated")
+        return 0
+
+    log(f"🎨 Translating {len(pending)} image(s)...")
+
+    # Default system prompt if none provided
+    if not system_prompt or not system_prompt.strip():
+        system_prompt = (
+            "You are a game UI image translator specializing in RPG Maker games.\n\n"
+            "TASK:\n"
+            f"Generate a new version of this game image with all visible text translated to {target_lang}.\n\n"
+            "RULES:\n"
+            "- Translate ALL readable text in the image (menus, labels, titles, buttons, tooltips).\n"
+            "- Preserve the original visual style exactly: background art, colors, gradients, effects, and layout.\n"
+            "- Match the original font style as closely as possible (weight, size, shadow, outline, glow).\n"
+            "- Keep text positioning identical — translated text should occupy the same regions.\n"
+            "- If text is part of a decorative element (e.g. stylized title logo), recreate the decoration with the translated text.\n"
+            "- Do NOT add, remove, or reposition any non-text visual elements.\n"
+            "- Do NOT add watermarks, signatures, or any extra markings.\n"
+            "- Output the translated image at the same resolution as the input.\n"
+        )
+    else:
+        # Replace {target_lang} placeholder in user-provided prompt
+        system_prompt = system_prompt.replace("{target_lang}", target_lang)
+
+    encryption_key = get_encryption_key(data_dir)
+    translated_count = 0
+
+    for idx, entry in enumerate(pending, 1):
+        if stop_check and stop_check():
+            log("⏹️ Image translation stopped by user")
+            break
+
+        rel = entry.relative_path
+        log(f"🎨 Translating image {idx}/{len(pending)}: {rel}")
+
+        # Backup original
+        backup_game_image(entry, game_dir, log)
+
+        # Build translation prompt
+        mime = _detect_mime(entry.decrypted_png)
+        b64 = base64.b64encode(entry.decrypted_png).decode('ascii')
+
+        user_text = (
+            f"Translate all visible text in this game image to {target_lang}. "
+            f"Generate the translated image."
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": [
+                {"type": "text", "text": user_text},
+                {"type": "image_url", "image_url": {
+                    "url": f"data:{mime};base64,{b64}"
+                }}
+            ]}
+        ]
+
+        try:
+            result = client.send_image(
+                messages,
+                image_data=entry.decrypted_png,
+                temperature=0.3,
+                context='rpg_image_translation',
+            )
+
+            translated_png = None
+            response_text = ""
+            if isinstance(result, tuple):
+                response_text = result[0] or ""
+            elif isinstance(result, str):
+                response_text = result
+            elif hasattr(result, 'content'):
+                response_text = result.content or ""
+
+            # Handle data:image/...;base64, responses
+            if response_text.startswith("data:image/"):
+                try:
+                    _, b64data = response_text.split(",", 1)
+                    translated_png = base64.b64decode(b64data)
+                except Exception as e:
+                    log(f"   ⚠️ Failed to decode base64 image response: {e}")
+
+            # Handle [GENERATED_IMAGE:path] responses
+            elif response_text.startswith("[GENERATED_IMAGE:"):
+                match = re.search(r'\[GENERATED_IMAGE:(.+?)\]', response_text)
+                if match:
+                    gen_path = match.group(1)
+                    if os.path.exists(gen_path):
+                        with open(gen_path, 'rb') as gf:
+                            translated_png = gf.read()
+
+            if translated_png:
+                inject_translated_image(entry, translated_png, encryption_key, log)
+                update_image_progress(game_dir, entry, "translated")
+                translated_count += 1
+                log(f"   ✅ {rel}: translated and injected")
+            else:
+                log(f"   ⚠️ {rel}: no image returned from AI — skipped")
+                update_image_progress(game_dir, entry, "skipped")
+
+        except Exception as e:
+            log(f"   ❌ {rel}: translation failed — {e}")
+            update_image_progress(game_dir, entry, "error")
+
+    log(f"✅ Image translation complete: {translated_count} images processed")
+    return translated_count
 
 
 def _apply_gtool_settings(data_dir: str, gtool_dir: str, log: Callable):
