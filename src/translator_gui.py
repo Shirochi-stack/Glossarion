@@ -2356,6 +2356,23 @@ Text to analyze:
                 "6. Fix gender inconsistencies - Correct based on context from aliases.\n"
 
             ),
+            "RPGMaker_GTool": (
+                "You are a professional game translator specializing in RPG Maker games. "
+                "You MUST translate the following numbered game text lines to {target_lang}.\n\n"
+                "RULES:\n"
+                "- Translate EVERY line. Output each translation with its original [N] number tag.\n"
+                "- Preserve RPG Maker control codes exactly as-is (e.g. \\V[1], \\N[2], \\C[3], \\{, \\}, \\$, \\., \\|, \\!, \\>, \\<, \\^).\n"
+                "- Preserve any \\n newline markers within lines.\n"
+                "- Keep character names consistent throughout (use the glossary if provided).\n"
+                "- Match the tone: casual dialogue stays casual, formal stays formal.\n"
+                "- For UI/menu terms (item names, skill names, etc.), use natural {target_lang} gaming terminology.\n"
+                "- Do NOT add explanations, notes, or commentary - output ONLY the numbered translations.\n"
+                "- Do NOT merge or split lines. Each [N] input = exactly one [N] output.\n\n"
+                "FORMAT:\n"
+                "[1] translated text here\n"
+                "[2] translated text here\n"
+                "...and so on for every line.\n"
+            ),
             "Original": "Return everything exactly as seen on the source."
         }
 
@@ -11704,6 +11721,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             successful += 1
                         else:
                             failed += 1
+                    elif ext == '.exe':
+                        # Process as RPG Maker game via GTool
+                        if self._process_rpgmaker_game(file_path):
+                            successful += 1
+                        else:
+                            failed += 1
                     elif ext in {'.epub', '.txt', '.csv', '.json', '.pdf', '.md'}:
                         # Process as EPUB/TXT/CSV/JSON/PDF/MD
                         result = self._process_text_file(file_path)
@@ -12837,6 +12860,159 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.append_log(f"❌ Full error: {traceback.format_exc()}")
             return False
         
+    def _process_rpgmaker_game(self, exe_path):
+        """Process an RPG Maker game executable via GTool pipeline."""
+        try:
+            import rpgmaker_handler
+
+            self.append_log(f"\n{'='*60}")
+            self.append_log(f"🎮 GTool: RPG Maker Game Translation")
+            self.append_log(f"📁 Game: {os.path.basename(exe_path)}")
+            self.append_log(f"{'='*60}")
+
+            # Load translation modules if needed
+            if not self._modules_loaded:
+                if not self._lazy_load_modules():
+                    self.append_log("❌ Failed to load translation modules")
+                    return False
+
+            game_dir = os.path.dirname(os.path.abspath(exe_path))
+
+            # Detect version and extract strings
+            version, data_dir, all_strings = rpgmaker_handler.extract_all(
+                game_dir, self.append_log)
+
+            if not all_strings:
+                self.append_log("❌ No translatable strings found - is this an RPG Maker game?")
+                return False
+
+            total_strings = sum(len(v) for v in all_strings.values())
+            self.append_log(f"📊 Found {total_strings} translatable strings")
+
+            # Build chunks
+            chunks = rpgmaker_handler.build_translation_chunks(all_strings)
+            self.append_log(f"📦 Split into {len(chunks)} translation chunks")
+
+            # Load progress for resume
+            progress = rpgmaker_handler.load_progress(game_dir)
+            if progress:
+                self.append_log(f"📋 Resuming: {len(progress)} strings already translated")
+
+            # Create translation map file
+            trans_path = rpgmaker_handler.create_translation_file(
+                game_dir, all_strings, self.append_log)
+
+            # Set up environment for translation
+            api_key = self.api_key_entry.text()
+            system_prompt = self.prompt_text.toPlainText().strip()
+            # Replace target language placeholder
+            output_lang = self.config.get('output_language', 'English')
+            system_prompt = system_prompt.replace('{target_lang}', output_lang)
+            # Strip split marker placeholder
+            import re
+            system_prompt = re.sub(r'\s*\{split_marker_instruction\}\s*', '', system_prompt)
+
+            os.environ['API_KEY'] = api_key
+            os.environ['SYSTEM_PROMPT'] = system_prompt
+            os.environ['MODEL'] = self.model_var
+            os.environ['IS_TEXT_FILE_TRANSLATION'] = '1'
+
+            # Initialize the unified client for translation
+            from unified_api_client import UnifiedClient
+            gtool_out = os.path.join(game_dir, "GTool_Translation")
+            client = UnifiedClient(
+                model=self.model_var,
+                api_key=api_key,
+                output_dir=gtool_out,
+            )
+
+            translated_count = 0
+            for i, chunk in enumerate(chunks):
+                if self.stop_requested:
+                    self.append_log("⏹️ Translation stopped by user")
+                    break
+
+                # Filter out already-translated keys
+                new_keys = []
+                new_texts = []
+                for k, t in zip(chunk["keys"], chunk["texts"]):
+                    if k not in progress:
+                        new_keys.append(k)
+                        new_texts.append(t)
+
+                if not new_keys:
+                    continue
+
+                sub_chunk = {"keys": new_keys, "texts": new_texts}
+                source = rpgmaker_handler.format_chunk_for_translation(sub_chunk)
+
+                self.append_log(
+                    f"🔄 Chunk {i+1}/{len(chunks)} — "
+                    f"{len(new_keys)} strings...")
+
+                try:
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": source},
+                    ]
+                    result = client.send(
+                        messages=messages,
+                        temperature=float(self.trans_temp.text() or "0.3"),
+                        max_tokens=self.max_output_tokens,
+                    )
+                    response_text = ""
+                    if result:
+                        if isinstance(result, tuple):
+                            response_text = result[0] if result[0] else ""
+                        elif isinstance(result, str):
+                            response_text = result
+                        elif hasattr(result, 'content'):
+                            response_text = result.content or ""
+                    if response_text:
+                        parsed = rpgmaker_handler.parse_translated_chunk(
+                            response_text, sub_chunk)
+                        progress.update(parsed)
+                        translated_count += len(parsed)
+                        rpgmaker_handler.save_progress(game_dir, progress)
+                        self.append_log(
+                            f"   ✅ {len(parsed)}/{len(new_keys)} translated")
+                except Exception as e:
+                    self.append_log(f"   ⚠️ Chunk {i+1} failed: {e}")
+
+            self.append_log(f"\n📊 Translated {translated_count} strings total")
+
+            # Update translation map
+            try:
+                with open(trans_path, 'r', encoding='utf-8') as f:
+                    trans_data = json.load(f)
+                for full_key, translated in progress.items():
+                    parts = full_key.split("::", 1)
+                    if len(parts) == 2:
+                        fn, key = parts
+                        if fn in trans_data and key in trans_data[fn]:
+                            trans_data[fn][key]["translated"] = translated
+                with open(trans_path, 'w', encoding='utf-8') as f:
+                    json.dump(trans_data, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                self.append_log(f"⚠️ Failed to update translation map: {e}")
+
+            # Apply translations to game files
+            if translated_count > 0:
+                self.append_log("🔧 Applying translations to game files...")
+                rpgmaker_handler.apply_translations(
+                    data_dir, trans_path, self.append_log)
+
+            self.append_log(f"🎮 GTool: Translation complete!")
+            self.append_log(f"💾 Translation data: {os.path.join(game_dir, 'GTool_Translation')}")
+            self.append_log(f"📁 Backups: {os.path.join(game_dir, 'GTool_Translation', 'originals_backup')}")
+            return translated_count > 0
+
+        except Exception as e:
+            self.append_log(f"❌ GTool error: {str(e)}")
+            import traceback
+            self.append_log(f"❌ Full error: {traceback.format_exc()}")
+            return False
+
     def _process_text_file(self, file_path):
         """Process EPUB or TXT file (existing translation logic)"""
         try:
@@ -17403,7 +17579,7 @@ Important rules:
     def browse_files(self):
         """Select one or more files - automatically handles single/multiple selection"""
         file_filter = (
-            "Supported files (*.epub *.zip *.cbz *.pdf *.txt *.json *.csv *.md *.png *.jpg *.jpeg *.gif *.bmp *.webp *.mp4);;"
+            "Supported files (*.epub *.zip *.cbz *.pdf *.txt *.json *.csv *.md *.png *.jpg *.jpeg *.gif *.bmp *.webp *.mp4 *.exe);;"
             "EPUB/ZIP/CBZ (*.epub *.zip *.cbz);;"
             "EPUB files (*.epub);;"
             "ZIP files (*.zip);;"
@@ -17419,6 +17595,7 @@ Important rules:
             "BMP files (*.bmp);;"
             "WebP files (*.webp);;"
             "Video files (*.mp4);;"
+            "RPG Maker Game (*.exe);;"
             "All files (*.*)"
         )
         
@@ -17439,7 +17616,7 @@ Important rules:
         )
         if folder_path:
             # Find all supported files in the folder
-            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.mp4'}
+            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.mp4', '.exe'}
             files = []
             
             # Recursively find files if deep scan is enabled
