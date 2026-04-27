@@ -14407,9 +14407,9 @@ class UnifiedClient:
         if self._is_image_gen_model(self.model):
             enable_image_output = True
             if not self._is_stop_requested():
-                print(f"\ud83c\udfa8 Image output mode auto-enabled for {self.model}")
+                print(f"[ImageGen] Image output mode auto-enabled for {self.model}")
         elif enable_image_output and not self._is_stop_requested():
-            print(f"\ud83c\udfa8 Image output mode enabled for {self.model}")
+            print(f"[ImageGen] Image output mode enabled for {self.model}")
         
         # Check if this model supports thinking
         supports_thinking = self._supports_thinking()
