@@ -2381,7 +2381,7 @@ Text to analyze:
                 "- No explanations. No original text. Just [N] and the translation.\n"
             ),
             "RPGMaker_GTool_Image": (
-                "You are a game UI image translator specializing in RPG Maker games.\n\n"
+                "You are a game UI image editor specializing in RPG Maker games.\n\n"
                 "TASK:\n"
                 "Generate a new version of this game image with all visible text translated to {target_lang}.\n\n"
                 "RULES:\n"
@@ -12965,6 +12965,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
                 self.append_log("🖼️ Output mode: Image — translating game image assets only")
 
+                # Set API call delay from GUI
+                os.environ['SEND_INTERVAL_SECONDS'] = str(self.delay_entry.text() or '2.0')
+
+                # Determine parallelism from batch settings
+                use_batch = getattr(self, 'batch_translation_var', False)
+                batch_size = max(1, int(getattr(self, 'batch_size_var', 3))) if use_batch else 1
+                if use_batch:
+                    self.append_log(f"⚡ Batch mode: {batch_size} parallel workers")
+
                 img_client = UnifiedClient(
                     model=self.model_var,
                     api_key=api_key,
@@ -12982,14 +12991,24 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 except Exception:
                     pass
 
+                # Load filter prompts from settings
+                filter_sys = getattr(self, 'gtool_filter_system_prompt_var', '') or ''
+                filter_usr = getattr(self, 'gtool_filter_user_prompt_var', '') or ''
+
                 img_count = rpgmaker_handler.translate_game_images(
                     game_dir=game_dir,
                     data_dir=data_dir,
                     client=img_client,
                     target_lang=output_lang,
                     system_prompt=img_prompt,
+                    filter_system_prompt=filter_sys,
+                    filter_user_prompt=filter_usr,
                     temperature=float(self.trans_temp.text() or "0.3"),
                     max_tokens=self.max_output_tokens,
+                    batch_size=batch_size,
+                    api_key=api_key,
+                    model=self.model_var,
+                    output_dir=gtool_out,
                     log=self.append_log,
                     stop_check=lambda: self.stop_requested,
                 )

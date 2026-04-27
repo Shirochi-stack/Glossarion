@@ -1400,13 +1400,28 @@ def filter_images_with_vision(
     entries: List[ImageEntry],
     client,
     game_dir: str,
+    filter_system_prompt: str = "",
+    filter_user_prompt: str = "",
     log: Callable = print,
     stop_check: Callable = None,
 ) -> List[ImageEntry]:
     """Use Vision AI to detect which images contain readable text.
 
     Results are cached in GTool_Translation/image_scan_cache.json.
+
+    Args:
+        filter_system_prompt: System prompt for the YES/NO filter.
+        filter_user_prompt:   User prompt for the YES/NO filter.
     """
+    # Defaults
+    if not filter_system_prompt or not filter_system_prompt.strip():
+        filter_system_prompt = "You are an image analyst. Reply with only YES or NO."
+    if not filter_user_prompt or not filter_user_prompt.strip():
+        filter_user_prompt = (
+            "Does this image contain readable text "
+            "(Japanese, Chinese, Korean, or any language)? Reply YES or NO."
+        )
+
     cache_path = os.path.join(game_dir, "GTool_Translation", "image_scan_cache.json")
     cache: Dict[str, bool] = {}
     if os.path.exists(cache_path):
@@ -1436,14 +1451,13 @@ def filter_images_with_vision(
             mime = _detect_mime(entry.decrypted_png)
             b64 = base64.b64encode(entry.decrypted_png).decode('ascii')
             messages = [
-                {"role": "system", "content": "You are an image analyst. Reply with only YES or NO."},
+                {"role": "system", "content": filter_system_prompt},
                 {"role": "user", "content": [
-                    {"type": "text", "text": "Does this image contain readable text (Japanese, Chinese, Korean, or any language)? Reply YES or NO."},
+                    {"type": "text", "text": filter_user_prompt},
                     {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
                 ]}
             ]
-            result = client.send_image(messages, image_data=entry.decrypted_png,
-                                       context='rpg_image_scan')
+            result = client.send(messages)
             answer = ""
             if isinstance(result, tuple):
                 answer = (result[0] or "").strip().upper()
@@ -1563,8 +1577,14 @@ def translate_game_images(
     client,
     target_lang: str = "English",
     system_prompt: str = "",
+    filter_system_prompt: str = "",
+    filter_user_prompt: str = "",
     temperature: float = 0.3,
     max_tokens: int = None,
+    batch_size: int = 1,
+    api_key: str = "",
+    model: str = "",
+    output_dir: str = "",
     log: Callable = print,
     stop_check: Callable = None,
 ) -> int:
@@ -1576,6 +1596,10 @@ def translate_game_images(
     Args:
         system_prompt: System prompt from the RPGMaker_GTool_Image profile.
                        If empty, a sensible default is used.
+        batch_size:    Number of parallel workers (1 = sequential).
+        api_key:       API key for creating per-thread clients.
+        model:         Model name for per-thread clients.
+        output_dir:    Output dir for per-thread clients.
     """
     log("\n🖼️ Image mode: scanning game images for text...")
 
@@ -1587,7 +1611,10 @@ def translate_game_images(
 
     # Filter with vision AI
     text_entries = filter_images_with_vision(
-        entries, client, game_dir, log, stop_check)
+        entries, client, game_dir,
+        filter_system_prompt=filter_system_prompt,
+        filter_user_prompt=filter_user_prompt,
+        log=log, stop_check=stop_check)
     if not text_entries:
         log("ℹ️ No images with detectable text — skipping image phase")
         return 0
@@ -1599,7 +1626,7 @@ def translate_game_images(
         log("✅ All text images already translated")
         return 0
 
-    log(f"🎨 Translating {len(pending)} image(s)...")
+    log(f"🎨 Translating {len(pending)} image(s) with {batch_size} worker(s)...")
 
     # Default system prompt if none provided
     if not system_prompt or not system_prompt.strip():
@@ -1624,13 +1651,38 @@ def translate_game_images(
     encryption_key = get_encryption_key(data_dir)
     translated_count = 0
 
-    for idx, entry in enumerate(pending, 1):
-        if stop_check and stop_check():
-            log("⏹️ Image translation stopped by user")
-            break
+    # Ensure the unified client knows to intercept generated images
+    translated_images_dir = os.path.join(game_dir, "GTool_Translation", "translated_images")
+    os.makedirs(translated_images_dir, exist_ok=True)
+
+    # Save and set env vars so unified_api_client intercepts generated media
+    _prev_output_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+    _prev_image_mode = os.environ.get('ENABLE_IMAGE_OUTPUT_MODE', '')
+    os.environ['OUTPUT_DIRECTORY'] = translated_images_dir
+    os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = '1'
+
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    progress_lock = threading.Lock()
+
+    def _translate_single(idx_entry):
+        """Worker: translate a single image. Returns (idx, translated_png, entry)."""
+        idx, entry = idx_entry
+
+        # Each thread gets its own client to avoid thread-safety issues
+        if batch_size > 1 and api_key and model:
+            from unified_api_client import UnifiedClient
+            thread_client = UnifiedClient(
+                model=model,
+                api_key=api_key,
+                output_dir=output_dir or os.path.join(game_dir, "GTool_Translation"),
+            )
+        else:
+            thread_client = client
 
         rel = entry.relative_path
-        log(f"🎨 Translating image {idx}/{len(pending)}: {rel}")
+        log(f"🎨 [{idx}/{len(pending)}] Translating: {rel}")
 
         # Backup original
         backup_game_image(entry, game_dir, log)
@@ -1654,55 +1706,84 @@ def translate_game_images(
             ]}
         ]
 
-        try:
-            result = client.send_image(
-                messages,
-                image_data=entry.decrypted_png,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                context='rpg_image_translation',
-            )
+        result = thread_client.send(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
-            translated_png = None
-            response_text = ""
-            if isinstance(result, tuple):
-                response_text = result[0] or ""
-            elif isinstance(result, str):
-                response_text = result
-            elif hasattr(result, 'content'):
-                response_text = result.content or ""
+        translated_png = None
+        response_text = ""
+        if isinstance(result, tuple):
+            response_text = result[0] or ""
+        elif isinstance(result, str):
+            response_text = result
+        elif hasattr(result, 'content'):
+            response_text = result.content or ""
 
-            # Handle data:image/...;base64, responses
-            if response_text.startswith("data:image/"):
+        # Handle [GENERATED_IMAGE:path] responses
+        if "[GENERATED_IMAGE:" in response_text:
+            match = re.search(r'\[GENERATED_IMAGE:(.+?)\]', response_text)
+            if match:
+                gen_path = match.group(1)
+                if os.path.exists(gen_path):
+                    with open(gen_path, 'rb') as gf:
+                        translated_png = gf.read()
+                    log(f"   📥 Generated image: {os.path.basename(gen_path)}")
+
+        # Handle raw data:image/...;base64, responses
+        elif response_text.startswith("data:image/"):
+            try:
+                _, b64data = response_text.split(",", 1)
+                translated_png = base64.b64decode(b64data)
+            except Exception as e:
+                log(f"   ⚠️ Failed to decode base64 image response: {e}")
+
+        return idx, translated_png, entry, response_text
+
+    try:
+        with ThreadPoolExecutor(max_workers=batch_size) as pool:
+            futures = {}
+            for idx, entry in enumerate(pending, 1):
+                if stop_check and stop_check():
+                    break
+                future = pool.submit(_translate_single, (idx, entry))
+                futures[future] = idx
+
+            for future in as_completed(futures):
+                if stop_check and stop_check():
+                    log("⏹️ Image translation stopped by user")
+                    break
                 try:
-                    _, b64data = response_text.split(",", 1)
-                    translated_png = base64.b64decode(b64data)
+                    idx, translated_png, entry, response_text = future.result()
+                    rel = entry.relative_path
+                    if translated_png:
+                        with progress_lock:
+                            inject_translated_image(entry, translated_png, encryption_key, log)
+                            update_image_progress(game_dir, entry, "translated")
+                            translated_count += 1
+                        log(f"   ✅ {rel}: translated and injected")
+                    else:
+                        log(f"   ⚠️ {rel}: no image returned from AI — skipped")
+                        log(f"   📝 Response was: {response_text[:200]}")
+                        with progress_lock:
+                            update_image_progress(game_dir, entry, "skipped")
                 except Exception as e:
-                    log(f"   ⚠️ Failed to decode base64 image response: {e}")
+                    log(f"   ❌ Image {futures[future]} failed: {e}")
 
-            # Handle [GENERATED_IMAGE:path] responses
-            elif response_text.startswith("[GENERATED_IMAGE:"):
-                match = re.search(r'\[GENERATED_IMAGE:(.+?)\]', response_text)
-                if match:
-                    gen_path = match.group(1)
-                    if os.path.exists(gen_path):
-                        with open(gen_path, 'rb') as gf:
-                            translated_png = gf.read()
-
-            if translated_png:
-                inject_translated_image(entry, translated_png, encryption_key, log)
-                update_image_progress(game_dir, entry, "translated")
-                translated_count += 1
-                log(f"   ✅ {rel}: translated and injected")
-            else:
-                log(f"   ⚠️ {rel}: no image returned from AI — skipped")
-                update_image_progress(game_dir, entry, "skipped")
-
-        except Exception as e:
-            log(f"   ❌ {rel}: translation failed — {e}")
-            update_image_progress(game_dir, entry, "error")
+    finally:
+        # Restore original env vars
+        if _prev_output_dir:
+            os.environ['OUTPUT_DIRECTORY'] = _prev_output_dir
+        elif 'OUTPUT_DIRECTORY' in os.environ:
+            del os.environ['OUTPUT_DIRECTORY']
+        if _prev_image_mode:
+            os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = _prev_image_mode
+        elif 'ENABLE_IMAGE_OUTPUT_MODE' in os.environ:
+            del os.environ['ENABLE_IMAGE_OUTPUT_MODE']
 
     log(f"✅ Image translation complete: {translated_count} images processed")
+    log(f"📁 Translated images saved to: {translated_images_dir}")
     return translated_count
 
 
