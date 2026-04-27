@@ -115,7 +115,8 @@ def _is_translatable(text: str) -> bool:
         return False
     # Skip strings that are ONLY RPG Maker escape codes (no real text)
     # Covers: \c[N], \n[N], \V[N], \N[N], \C[N], \I[N], \G, \{, \}, etc.
-    code_stripped = re.sub(r'\\+[a-zA-Z]\[\d+\]|\\+[{}GS$.|!><^]', '', stripped)
+    # Also catches bare escape codes without brackets: \c, \n, \G, etc.
+    code_stripped = re.sub(r'\\+[a-zA-Z]\[\d+\]|\\+[a-zA-Z](?![a-zA-Z])|\\+[{}GS$.|!><^]', '', stripped)
     if not code_stripped.strip():
         return False
     return True
@@ -1060,9 +1061,20 @@ def parse_translated_chunk(response: str, chunk: Dict) -> Dict[str, str]:
                 clean = re.sub(r'^\d+[.)\]]\s*', '', line)
                 translations[keys[j]] = _clean_translation(clean)
 
-    # Filter out empty/whitespace-only translations — these would pollute
-    # progress.json and prevent re-translation on the next run.
-    return {k: v for k, v in translations.items() if v and v.strip()}
+    # Filter out empty/whitespace-only translations AND translations that are
+    # only RPG Maker escape codes (AI sometimes returns \c, \n[1] etc. as
+    # "translations" which render as invisible/blank in-game).
+    def _is_valid_translation(text: str) -> bool:
+        if not text or not text.strip():
+            return False
+        # Strip all RPG Maker escape codes and check if real text remains
+        stripped = re.sub(
+            r'\\+[a-zA-Z]\[\d+\]|\\+[a-zA-Z](?![a-zA-Z])|\\+[{}GS$.|!><^]',
+            '', text
+        )
+        return bool(stripped.strip())
+
+    return {k: v for k, v in translations.items() if _is_valid_translation(v)}
 
 
 def apply_translations(data_dir: str, trans_map_path: str,
@@ -1192,22 +1204,36 @@ def apply_translations(data_dir: str, trans_map_path: str,
     # Also detect empty/whitespace translations that slipped into the map
     # (e.g. from older runs without the parse_translated_chunk filter).
     empty_translation_keys = []
+    # Also detect escape-code-only translations (e.g. \\c, \\n[1]) that the AI
+    # returned instead of real text — these render as invisible/blank in-game.
+    _escape_only_re = re.compile(
+        r'\\+[a-zA-Z]\[\d+\]|\\+[a-zA-Z](?![a-zA-Z])|\\+[{}GS$.|!><^]'
+    )
+    def _is_escape_only(text: str) -> bool:
+        """True if text contains ONLY RPG Maker escape codes with no real content."""
+        if not text or not text.strip():
+            return True
+        stripped = _escape_only_re.sub('', text)
+        return not stripped.strip()
+
     for fn, entries in trans_data.items():
         for key, entry in entries.items():
             translated = entry.get("translated", "")
-            original = entry.get("original", "")
-            if original and original.strip() and translated is not None and not translated.strip() and translated != "":
-                # Has whitespace-only translation (not a truly empty "", which is the default)
-                # This shouldn't happen, but clean it up if it does
-                pass
-            # Check: translated is non-empty string but is only whitespace
-            if isinstance(translated, str) and translated and not translated.strip():
+            if not isinstance(translated, str) or not translated:
+                continue
+            # Whitespace-only
+            if translated and not translated.strip():
+                empty_translation_keys.append((fn, key))
+                entry["translated"] = ""
+                trans_map_dirty = True
+            # Escape-code-only (e.g. "\\c", "\\n" — AI hallucinations)
+            elif translated.strip() and _is_escape_only(translated):
                 empty_translation_keys.append((fn, key))
                 entry["translated"] = ""
                 trans_map_dirty = True
 
     if empty_translation_keys:
-        log(f"🧹 Found {len(empty_translation_keys)} whitespace-only translations — cleared for re-translation")
+        log(f"🧹 Found {len(empty_translation_keys)} invalid translations (whitespace/escape-code-only) — cleared for re-translation")
 
     if trans_map_dirty:
         try:
@@ -1216,7 +1242,7 @@ def apply_translations(data_dir: str, trans_map_path: str,
         except Exception as e:
             log(f"⚠️ Failed to update translation map: {e}")
 
-    # Clean progress.json: remove failed patches + empty translations
+    # Clean progress.json: remove failed patches + empty/escape-only translations
     all_invalid_keys = failed_patch_keys + empty_translation_keys
     if all_invalid_keys:
         progress_path = get_progress_path(game_dir)
@@ -1225,13 +1251,13 @@ def apply_translations(data_dir: str, trans_map_path: str,
                 with open(progress_path, 'r', encoding='utf-8') as f:
                     progress_data = json.load(f)
                 invalidated = 0
-                # Also scan for empty-valued keys already in progress
-                # (from older runs where empty translations weren't filtered)
-                empty_progress_keys = [
+                # Scan for empty-valued or escape-only keys in progress
+                # (from older runs where these weren't filtered)
+                bad_progress_keys = [
                     k for k, v in progress_data.items()
-                    if isinstance(v, str) and not v.strip()
+                    if isinstance(v, str) and (not v.strip() or _is_escape_only(v))
                 ]
-                for k in empty_progress_keys:
+                for k in bad_progress_keys:
                     del progress_data[k]
                     invalidated += 1
                 for fn, key in all_invalid_keys:
@@ -2678,13 +2704,17 @@ def process_game(exe_path: str, log: Callable = print,
 
     # Load previous progress
     progress = load_progress(game_dir)
-    # Scrub empty-valued entries from previous runs
-    empty_keys = [k for k, v in progress.items() if not v or not v.strip()]
-    if empty_keys:
-        for k in empty_keys:
+    # Scrub empty-valued and escape-code-only entries from previous runs
+    _esc_re = re.compile(r'\\+[a-zA-Z]\[\d+\]|\\+[a-zA-Z](?![a-zA-Z])|\\+[{}GS$.|!><^]')
+    def _esc_only(t):
+        return not _esc_re.sub('', t).strip() if t and t.strip() else True
+    bad_keys = [k for k, v in progress.items()
+                if isinstance(v, str) and (not v or not v.strip() or _esc_only(v))]
+    if bad_keys:
+        for k in bad_keys:
             del progress[k]
         save_progress(game_dir, progress)
-        log(f"🧹 Cleaned {len(empty_keys)} empty translations from progress")
+        log(f"🧹 Cleaned {len(bad_keys)} invalid translations from progress (empty/escape-code-only)")
     if progress:
         log(f"📋 Resuming: {len(progress)} strings already translated")
 
