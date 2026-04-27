@@ -7076,6 +7076,22 @@ class MangaTranslator:
         result = cv2.addWeighted(img, 0.7, heatmap_colored, 0.3, 0)
         return result
 
+    @staticmethod
+    def _detect_image_mime(data: bytes) -> str:
+        """Detect image MIME type from raw bytes via magic-number sniffing."""
+        if data[:8] == b'\x89PNG\r\n\x1a\n':
+            return 'image/png'
+        if data[:3] == b'\xff\xd8\xff':
+            return 'image/jpeg'
+        if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+            return 'image/webp'
+        if data[:6] in (b'GIF87a', b'GIF89a'):
+            return 'image/gif'
+        if data[:4] == b'\x00\x00\x01\x00':
+            return 'image/x-icon'
+        # Default fallback – PNG is the safest assumption for unknown formats
+        return 'image/png'
+
     def _build_memory_image_part(self, image_path: str) -> Optional[Dict[str, Any]]:
         """Build an image_url content part for memory messages.
 
@@ -7110,9 +7126,10 @@ class MangaTranslator:
                     img_data = buffered.getvalue()
 
             img_b64 = base64.b64encode(img_data).decode("utf-8")
+            img_mime = self._detect_image_mime(img_data)
             return {
                 "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                "image_url": {"url": f"data:{img_mime};base64,{img_b64}"},
             }
         except Exception as e:
             self._log(f"⚠️ Failed to build memory image from '{image_path}': {e}", "warning")
@@ -7476,7 +7493,7 @@ class MangaTranslator:
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                    "url": f"data:image/png;base64,{img_base64}"
+                                    "url": f"data:{self._detect_image_mime(img_data)};base64,{img_base64}"
                                 }
                             },
                             {
@@ -8057,7 +8074,7 @@ class MangaTranslator:
                         "role": "user",
                         "content": [
                             {"type": "text", "text": context_text},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+                            {"type": "image_url", "image_url": {"url": f"data:{self._detect_image_mime(img_data)};base64,{img_b64}"}}
                         ]
                     })
                     
