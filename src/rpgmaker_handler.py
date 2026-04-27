@@ -1802,6 +1802,26 @@ def translate_game_images(
                     else:
                         log(f"   ⚠️ {rel}: no image returned from AI — skipped")
                         log(f"   📝 Response was: {response_text[:200]}")
+                        # Dump full response to Payloads/image/skipped/ for debugging
+                        try:
+                            skipped_dir = os.path.join("Payloads", "image", "skipped")
+                            os.makedirs(skipped_dir, exist_ok=True)
+                            safe_name = re.sub(r'[\\/:*?"<>|]', '_', os.path.splitext(os.path.basename(rel))[0])
+                            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            dump_path = os.path.join(skipped_dir, f"skipped_{safe_name}_{ts}.json")
+                            import json as _json
+                            with open(dump_path, 'w', encoding='utf-8') as df:
+                                _json.dump({
+                                    "image": rel,
+                                    "timestamp": ts,
+                                    "response_text": response_text,
+                                    "response_length": len(response_text) if response_text else 0,
+                                    "had_generated_image_tag": "[GENERATED_IMAGE:" in (response_text or ""),
+                                    "had_base64_prefix": (response_text or "").startswith("data:image/"),
+                                }, df, indent=2, ensure_ascii=False)
+                            log(f"   📁 Skipped debug: {dump_path}")
+                        except Exception as dump_err:
+                            log(f"   ⚠️ Failed to save skip debug: {dump_err}")
                         with progress_lock:
                             update_image_progress(game_dir, entry, "skipped")
                 except Exception as e:
