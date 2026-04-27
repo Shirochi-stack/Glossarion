@@ -1069,20 +1069,8 @@ def parse_translated_chunk(response: str, chunk: Dict) -> Dict[str, str]:
                 clean = re.sub(r'^\d+[.)\]]\s*', '', line)
                 translations[keys[j]] = _clean_translation(clean)
 
-    # Filter out empty/whitespace-only translations AND translations that are
-    # only RPG Maker escape codes (AI sometimes returns \c, \n[1] etc. as
-    # "translations" which render as invisible/blank in-game).
-    def _is_valid_translation(text: str) -> bool:
-        if not text or not text.strip():
-            return False
-        # Strip all RPG Maker escape codes and check if real text remains
-        stripped = re.sub(
-            r'\\+[a-zA-Z]\[\d+\]|\\+[a-zA-Z](?![a-zA-Z])|\\+[{}GS$.|!><^]',
-            '', text
-        )
-        return bool(stripped.strip())
-
-    return {k: v for k, v in translations.items() if _is_valid_translation(v)}
+    # Filter out empty/whitespace-only translations
+    return {k: v for k, v in translations.items() if v and v.strip()}
 
 
 def apply_translations(data_dir: str, trans_map_path: str,
@@ -1210,20 +1198,8 @@ def apply_translations(data_dir: str, trans_map_path: str,
         trans_map_dirty = True
 
     # Also detect empty/whitespace translations that slipped into the map
-    # (e.g. from older runs without the parse_translated_chunk filter).
+    # (e.g. from older runs).
     empty_translation_keys = []
-    # Also detect escape-code-only translations (e.g. \\c, \\n[1]) that the AI
-    # returned instead of real text — these render as invisible/blank in-game.
-    _escape_only_re = re.compile(
-        r'\\+[a-zA-Z]\[\d+\]|\\+[a-zA-Z](?![a-zA-Z])|\\+[{}GS$.|!><^]'
-    )
-    def _is_escape_only(text: str) -> bool:
-        """True if text contains ONLY RPG Maker escape codes with no real content."""
-        if not text or not text.strip():
-            return True
-        stripped = _escape_only_re.sub('', text)
-        return not stripped.strip()
-
     for fn, entries in trans_data.items():
         for key, entry in entries.items():
             translated = entry.get("translated", "")
@@ -1231,11 +1207,6 @@ def apply_translations(data_dir: str, trans_map_path: str,
                 continue
             # Whitespace-only
             if translated and not translated.strip():
-                empty_translation_keys.append((fn, key))
-                entry["translated"] = ""
-                trans_map_dirty = True
-            # Escape-code-only (e.g. "\\c", "\\n" — AI hallucinations)
-            elif translated.strip() and _is_escape_only(translated):
                 empty_translation_keys.append((fn, key))
                 entry["translated"] = ""
                 trans_map_dirty = True
@@ -1263,7 +1234,7 @@ def apply_translations(data_dir: str, trans_map_path: str,
                 # (from older runs where these weren't filtered)
                 bad_progress_keys = [
                     k for k, v in progress_data.items()
-                    if isinstance(v, str) and (not v.strip() or _is_escape_only(v))
+                    if isinstance(v, str) and not v.strip()
                 ]
                 for k in bad_progress_keys:
                     del progress_data[k]
