@@ -12944,11 +12944,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 return False
 
             # ── Check output mode ────────────────────────────────
-            # GTool image mode = image-gen output only (not Vision/OCR)
             image_mode = (
-                os.environ.get('ENABLE_IMAGE_OUTPUT_MODE', '0') == '1'
-                or getattr(self, 'enable_image_output_mode_var', False)
-                or self.config.get('output_mode', 'text') == 'image'
+                os.environ.get('ENABLE_IMAGE_TRANSLATION', '0') == '1'
+                or getattr(self, 'enable_image_translation_var', False)
             )
 
             # Set up common env / client
@@ -13123,21 +13121,23 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if batch_size > 1:
                 os.environ['BATCH_TRANSLATION'] = '1'
 
+            # Single shared client — same pattern as Chapter_Extractor / image mode.
+            # BATCH_TRANSLATION=1 bypasses _sequential_send_lock in _send_core.
+            shared_client = UnifiedClient(
+                model=self.model_var,
+                api_key=api_key,
+                output_dir=gtool_out,
+            )
+
             def _translate_chunk(chunk_info):
                 """Worker function for translating a single chunk."""
                 idx, sub_chunk = chunk_info
-                # Each thread gets its own client to avoid thread-safety issues
-                thread_client = UnifiedClient(
-                    model=self.model_var,
-                    api_key=api_key,
-                    output_dir=gtool_out,
-                )
                 source = rpgmaker_handler.format_chunk_for_translation(sub_chunk)
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": source},
                 ]
-                result = thread_client.send(
+                result = shared_client.send(
                     messages=messages,
                     temperature=float(self.trans_temp.text() or "0.3"),
                     max_tokens=self.max_output_tokens,
