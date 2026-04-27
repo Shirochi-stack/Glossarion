@@ -1326,12 +1326,13 @@ def _patch_map_entry(data: dict, key: str, translated: str) -> int:
             num_lines = cmd_end - cmd_start + 1
             # Split translated text into the same number of lines
             trans_lines = translated.split("\n")
-            # Pad or trim to match original line count
-            while len(trans_lines) < num_lines:
-                trans_lines.append("")
-            if len(trans_lines) > num_lines:
+            if len(trans_lines) < num_lines and num_lines > 1:
+                # AI returned fewer lines — word-wrap to fill original line count
+                full_text = " ".join(ln.strip() for ln in trans_lines if ln.strip())
+                trans_lines = _wrap_to_lines(full_text, num_lines)
+            elif len(trans_lines) > num_lines:
                 # Merge excess lines into the last slot
-                trans_lines = trans_lines[:num_lines - 1] + ["\n".join(trans_lines[num_lines - 1:])]
+                trans_lines = trans_lines[:num_lines - 1] + [" ".join(trans_lines[num_lines - 1:])]
             for offset in range(num_lines):
                 ci = cmd_start + offset
                 if ci < len(cmd_list):
