@@ -7809,7 +7809,17 @@ def _create_processing_options_section(self, parent):
     """
     
     placeholder_label.setStyleSheet(base_style)
-    placeholder_label.setToolTip("Click to copy.\nPaste this into your system prompt to inject instructions for preserving split markers.")
+    placeholder_label.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 42em; margin: 0;'>"
+        "Click to copy.<br>"
+        "Paste this into your system prompt to inject instructions for preserving split markers.<br><br>"
+        "<b>When Request Merging is enabled, this expands to:</b><br>"
+        "<i>- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' "
+        "(Example: &lt;h1 id=\"split-1\"&gt;SPLIT MARKER: Do Not Remove This Tag&lt;/h1&gt;), "
+        "you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.</i><br><br>"
+        "When Request Merging is disabled, this placeholder is silently removed."
+        "</p></qt>"
+    )
     placeholder_label.setCursor(Qt.PointingHandCursor)
     
     # Store state
