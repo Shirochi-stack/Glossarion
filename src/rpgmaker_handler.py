@@ -1466,14 +1466,15 @@ def filter_images_with_vision(
     if batch_size > 1:
         os.environ['BATCH_TRANSLATION'] = '1'
 
-    # Force vision mode for scanning (not image generation)
-    _prev_img_output = os.environ.get('ENABLE_IMAGE_OUTPUT_MODE', '')
-    _prev_img_trans = os.environ.get('ENABLE_IMAGE_TRANSLATION', '')
-    os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = '0'
-    os.environ['ENABLE_IMAGE_TRANSLATION'] = '1'
+    # Thread-local flag to force vision mode in scan threads only
+    # (do NOT touch os.environ — it's process-wide and would block concurrent image gen)
+    _scan_tls = threading.local()
 
     def _scan_single(entry):
         """Worker: check one image for text. Returns (entry, has_text)."""
+        # Mark this thread as a scan thread so the API client uses vision mode
+        _scan_tls.force_vision = True
+        threading.current_thread()._force_vision_mode = True
         messages = [
             {"role": "system", "content": filter_system_prompt},
             {"role": "user", "content": filter_user_prompt}
@@ -1526,15 +1527,6 @@ def filter_images_with_vision(
             os.environ['BATCH_TRANSLATION'] = _prev_batch
         elif 'BATCH_TRANSLATION' in os.environ:
             del os.environ['BATCH_TRANSLATION']
-        # Restore image mode env vars
-        if _prev_img_output:
-            os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = _prev_img_output
-        elif 'ENABLE_IMAGE_OUTPUT_MODE' in os.environ:
-            del os.environ['ENABLE_IMAGE_OUTPUT_MODE']
-        if _prev_img_trans:
-            os.environ['ENABLE_IMAGE_TRANSLATION'] = _prev_img_trans
-        elif 'ENABLE_IMAGE_TRANSLATION' in os.environ:
-            del os.environ['ENABLE_IMAGE_TRANSLATION']
 
     # Save cache
     try:

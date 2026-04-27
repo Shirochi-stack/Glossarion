@@ -6411,10 +6411,11 @@ class UnifiedClient:
                     is_video_mode = os.environ.get('ENABLE_VIDEO_OUTPUT_MODE') == '1'
                     # Fallback: auto-detect from model name when env vars aren't explicitly set
                     effective_model = getattr(self, 'model', '') or ''
-                    _explicit_img_mode = os.environ.get('ENABLE_IMAGE_OUTPUT_MODE')
+                    # Skip image auto-detect if this thread is in vision-only scan mode
+                    _force_vision = getattr(threading.current_thread(), '_force_vision_mode', False)
                     if not is_video_mode and self._is_video_gen_model(effective_model):
                         is_video_mode = True
-                    if not is_image_mode and not is_video_mode and self._is_image_gen_model(effective_model) and _explicit_img_mode != '0':
+                    if not is_image_mode and not is_video_mode and self._is_image_gen_model(effective_model) and not _force_vision:
                         is_image_mode = True
                     
                     if is_image_mode or is_video_mode:
@@ -10235,9 +10236,9 @@ class UnifiedClient:
                 # Check if image output mode is enabled
                 enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
                 # Force enable for any model whose name indicates image generation
-                # but NOT if ENABLE_IMAGE_OUTPUT_MODE was explicitly set to '0' (e.g. image_scan)
-                _explicit_img_mode = os.environ.get("ENABLE_IMAGE_OUTPUT_MODE")
-                if self._is_image_gen_model(self.model) and _explicit_img_mode != "0":
+                # but NOT if this thread is in vision-only scan mode
+                _force_vision = getattr(threading.current_thread(), '_force_vision_mode', False)
+                if self._is_image_gen_model(self.model) and not _force_vision:
                     enable_image_output = True
                     if not self._is_stop_requested():
                         print(f"[ImageGen] Image output mode auto-enabled for {self.model}")
@@ -14409,9 +14410,9 @@ class UnifiedClient:
         # Check if image output mode is enabled
         enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
         # Force enable for any model whose name indicates image generation
-        # but NOT if ENABLE_IMAGE_OUTPUT_MODE was explicitly set to '0' (e.g. image_scan)
-        _explicit_img_mode = os.environ.get("ENABLE_IMAGE_OUTPUT_MODE")
-        if self._is_image_gen_model(self.model) and _explicit_img_mode != "0":
+        # but NOT if this thread is in vision-only scan mode
+        _force_vision = getattr(threading.current_thread(), '_force_vision_mode', False)
+        if self._is_image_gen_model(self.model) and not _force_vision:
             enable_image_output = True
             if not self._is_stop_requested():
                 print(f"[ImageGen] Image output mode auto-enabled for {self.model}")
@@ -17044,9 +17045,9 @@ class UnifiedClient:
                     enable_video_output = os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
 
                     # Force enable for any model whose name indicates image generation
-                    # but NOT if ENABLE_IMAGE_OUTPUT_MODE was explicitly set to '0' (e.g. image_scan)
-                    _explicit_img_mode = os.environ.get("ENABLE_IMAGE_OUTPUT_MODE")
-                    if self._is_image_gen_model(effective_model) and _explicit_img_mode != "0":
+                    # but NOT if this thread is in vision-only scan mode
+                    _force_vision = getattr(threading.current_thread(), '_force_vision_mode', False)
+                    if self._is_image_gen_model(effective_model) and not _force_vision:
                         enable_image_output = True
                         if not self._is_stop_requested():
                             print(f"[ImageGen] Image output mode auto-enabled for {effective_model}")
@@ -18936,9 +18937,9 @@ class UnifiedClient:
         # Detect image-generation model by name OR by ENABLE_IMAGE_OUTPUT_MODE flag
         _image_in_name = self._is_image_gen_model(self.model or '')
         _image_flag    = os.getenv('ENABLE_IMAGE_OUTPUT_MODE', '0') == '1'
-        _explicit_img_mode = os.environ.get('ENABLE_IMAGE_OUTPUT_MODE')
-        # Don't auto-detect from name if explicitly disabled (e.g. image_scan context)
-        if _image_in_name and _explicit_img_mode == '0':
+        # Don't auto-detect from name if this thread is in vision-only scan mode
+        _force_vision = getattr(threading.current_thread(), '_force_vision_mode', False)
+        if _image_in_name and _force_vision:
             _image_in_name = False
         if _image_in_name or _image_flag:
             if not self._is_stop_requested():
@@ -20263,12 +20264,12 @@ class UnifiedClient:
 
         # Auto-detect generative models by name so routing is correct
         # even if the user forgot to switch the dropdown.
-        # But NOT if ENABLE_IMAGE_OUTPUT_MODE was explicitly set to '0' (e.g. image_scan)
-        _explicit_img_mode = os.environ.get('ENABLE_IMAGE_OUTPUT_MODE')
+        # But NOT if this thread is in vision-only scan mode
+        _force_vision = getattr(threading.current_thread(), '_force_vision_mode', False)
         if self._is_video_gen_model(effective_model):
             enable_video_output = True
             enable_image_output = False  # mutually exclusive
-        elif self._is_image_gen_model(effective_model) and _explicit_img_mode != '0':
+        elif self._is_image_gen_model(effective_model) and not _force_vision:
             enable_image_output = True
 
         if enable_video_output:
