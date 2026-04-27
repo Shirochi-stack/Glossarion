@@ -686,15 +686,22 @@ def _payloads_dir() -> str:
     global _payloads_resolved_dir, _PAYLOADS_DISABLED
     if _payloads_resolved_dir is not None:
         return _payloads_resolved_dir
-    # Try CWD/Payloads first
+    # Resolve base directory: next to the exe (frozen) or next to this script (dev).
+    # NEVER rely on CWD — in PyInstaller one-file builds the CWD is typically
+    # System32, Downloads, or wherever the user double-clicked, not the exe dir.
+    if getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
+        _base = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        _base = os.path.dirname(os.path.abspath(__file__))
+    _candidate = os.path.join(_base, "Payloads")
     try:
-        os.makedirs("Payloads", exist_ok=True)
+        os.makedirs(_candidate, exist_ok=True)
         # Verify we can actually write there
-        _test = os.path.join("Payloads", ".write_test")
+        _test = os.path.join(_candidate, ".write_test")
         with open(_test, "w") as _f:
             _f.write("ok")
         os.remove(_test)
-        _payloads_resolved_dir = "Payloads"
+        _payloads_resolved_dir = _candidate
         return _payloads_resolved_dir
     except (PermissionError, OSError):
         pass
