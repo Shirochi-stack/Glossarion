@@ -13116,6 +13116,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
             translated_count = 0
             progress_lock = __import__('threading').Lock()
 
+            # Tell _send_core not to serialise requests behind the sequential lock
+            _prev_batch = os.environ.get('BATCH_TRANSLATION', '')
+            if batch_size > 1:
+                os.environ['BATCH_TRANSLATION'] = '1'
+
             def _translate_chunk(chunk_info):
                 """Worker function for translating a single chunk."""
                 idx, sub_chunk = chunk_info
@@ -13182,6 +13187,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         self.append_log(f"   ⚠️ Chunk {chunk_idx+1} failed: {e}")
 
             self.append_log(f"\n📊 Translated {translated_count} strings total")
+
+            # Restore batch mode env var
+            if _prev_batch:
+                os.environ['BATCH_TRANSLATION'] = _prev_batch
+            elif 'BATCH_TRANSLATION' in os.environ:
+                del os.environ['BATCH_TRANSLATION']
 
             # Update translation map
             try:
