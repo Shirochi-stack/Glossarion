@@ -922,27 +922,33 @@ def format_chunk_for_translation(chunk: Dict) -> str:
 def _clean_translation(text: str) -> str:
     """Clean up messy AI translation output.
 
-    Handles common LLM quirks:
+    Handles common LLM quirks per-line:
     - 'original text -> translation' → keep only the translation
     - '"quoted translation"' → strip quotes
-    - Trailing commentary in parentheses → strip
+    Works on multi-line entries, preserving line count.
     """
-    t = text.strip()
-    if not t:
-        return t
+    if not text or not text.strip():
+        return text.strip()
 
-    # Strip 'original -> translation' pattern (keep right side)
-    arrow_match = re.search(r'\s*->\s*', t)
-    if arrow_match:
-        right = t[arrow_match.end():].strip()
-        if right:
-            t = right
+    lines = text.split('\n')
+    cleaned = []
+    for line in lines:
+        t = line.strip()
 
-    # Strip surrounding quotes
-    if len(t) >= 2 and t[0] == '"' and t[-1] == '"':
-        t = t[1:-1].strip()
+        # Strip 'original -> translation' pattern (keep right side)
+        arrow_match = re.search(r'\s*->\s*', t)
+        if arrow_match:
+            right = t[arrow_match.end():].strip()
+            if right:
+                t = right
 
-    return t
+        # Strip surrounding quotes
+        if len(t) >= 2 and t[0] == '"' and t[-1] == '"':
+            t = t[1:-1].strip()
+
+        cleaned.append(t)
+
+    return '\n'.join(cleaned)
 
 
 def parse_translated_chunk(response: str, chunk: Dict) -> Dict[str, str]:
