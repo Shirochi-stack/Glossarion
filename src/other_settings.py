@@ -8010,13 +8010,16 @@ def _create_processing_options_section(self, parent):
     kw_substr_edit.setFixedHeight(60)
     kw_substr_edit.setStyleSheet("""
         QTextEdit {
-            background-color: #1e1e1e;
+            background-color: #252530;
             color: #d4d4d4;
-            border: 1px solid #4a5568;
-            border-radius: 3px;
+            border: 2px solid #6b7a8d;
+            border-radius: 4px;
             padding: 4px;
             font-family: Consolas, monospace;
             font-size: 9pt;
+        }
+        QTextEdit:focus {
+            border: 2px solid #17a2b8;
         }
     """)
     def _on_substr_keywords_changed():
@@ -8046,13 +8049,16 @@ def _create_processing_options_section(self, parent):
     kw_exact_edit.setFixedHeight(40)
     kw_exact_edit.setStyleSheet("""
         QTextEdit {
-            background-color: #1e1e1e;
+            background-color: #252530;
             color: #d4d4d4;
-            border: 1px solid #4a5568;
-            border-radius: 3px;
+            border: 2px solid #6b7a8d;
+            border-radius: 4px;
             padding: 4px;
             font-family: Consolas, monospace;
             font-size: 9pt;
+        }
+        QTextEdit:focus {
+            border: 2px solid #17a2b8;
         }
     """)
     def _on_exact_keywords_changed():
