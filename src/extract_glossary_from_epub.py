@@ -1142,9 +1142,17 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                         entry_type = entry.get('type', 'term')
                         type_config = custom_types.get(entry_type, {})
                         row = [entry_type, entry.get('raw_name', ''), entry.get('translated_name', '')]
+                        # Always emit gender column to keep alignment with header;
+                        # non-gender types get an empty string.
                         if type_config.get('has_gender', False):
                             row.append(entry.get('gender', ''))
+                        else:
+                            row.append('')
                         for field in custom_fields:
+                            # Skip description here — handled by the explicit
+                            # include_description_legacy block below to avoid duplication.
+                            if isinstance(field, str) and field.strip().lower() == 'description':
+                                continue
                             row.append(entry.get(field, ''))
                         if include_description_legacy:
                             _dv = ''
@@ -1293,9 +1301,15 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                             entry_type = entry.get('type', 'term')
                             type_config = custom_types.get(entry_type, {})
                             row = [entry_type, entry.get('raw_name', ''), entry.get('translated_name', '')]
+                            # Always emit gender column for alignment
                             if type_config.get('has_gender', False):
                                 row.append(entry.get('gender', ''))
+                            else:
+                                row.append('')
                             for field in custom_fields:
+                                # Skip description — handled explicitly below
+                                if isinstance(field, str) and field.strip().lower() == 'description':
+                                    continue
                                 row.append(entry.get(field, ''))
                             if include_description_legacy:
                                 _dv = ''
@@ -2227,6 +2241,18 @@ def build_prompt(chapter_text: str) -> tuple:
         return ", ".join(items[:-1]) + f", & {items[-1]} entries"
 
     entries_str = _entries_phrase(custom_types)
+
+    # Build dynamic gender instruction based on which types have has_gender
+    _gender_types = [t for t, cfg in custom_types.items()
+                     if cfg.get('enabled', True) and cfg.get('has_gender', False)]
+    if _gender_types:
+        _gender_labels = ', '.join(_gender_types)
+        _gender_instruction = (
+            f"For {_gender_labels} entries, determine gender from context, leave empty if context is insufficient.\n"
+            f"For all other entry types, leave gender empty."
+        )
+    else:
+        _gender_instruction = ""
     
     if not custom_prompt:
         # If no custom prompt, create a default
@@ -2237,8 +2263,7 @@ Columns and entry types in this exact order provided:
 
 {fields}
 
-For character entries, determine gender from context, leave empty if context is insufficient.
-For non-character entries, leave gender empty.
+{gender_instruction}
 {description_mandatory}
 IMPORTANT: Use commas to separate columns. Wrap a field value in double quotes ONLY when the value itself contains a comma.
 
@@ -2267,6 +2292,9 @@ CRITICAL EXTRACTION RULES:
     # Replace {entries} placeholder now that we have the enabled custom entry types
     custom_prompt = custom_prompt.replace('{entries}', entries_str)
     custom_prompt = custom_prompt.replace('{{entries}}', entries_str)
+
+    # Replace {gender_instruction} with dynamic gender rule
+    custom_prompt = custom_prompt.replace('{gender_instruction}', _gender_instruction)
 
     # Expand (or strip) the description-rule placeholders. Done BEFORE the
     # {fields}/{fields1} expansion so no subsequent regex or format op can
@@ -2327,7 +2355,7 @@ CRITICAL EXTRACTION RULES:
                     fields_spec.append('  "raw_name": the name in original language/script (required)')
                     fields_spec.append('  "translated_name": English translation or romanization (required)')
                     if type_config.get('has_gender', False):
-                        fields_spec.append('  "gender": "Male", "Female", or "Unknown" (required for characters)')
+                        fields_spec.append(f'  "gender": "Male", "Female", or "Unknown" (required for {type_name} entries)')
                     fields_spec.append("")
                 
                 # Add custom fields info
@@ -2342,8 +2370,11 @@ CRITICAL EXTRACTION RULES:
                     fields_spec.append("Example output format:")
                     fields_spec.append('[')
                     examples = []
-                    if 'character' in [t[0] for t in enabled_types]:
-                        example = '  {"type": "character", "raw_name": "田中太郎", "translated_name": "Tanaka Taro", "gender": "Male"'
+                    # Generate an example for the first gender-enabled type
+                    _gender_example_types = [t for t, cfg in enabled_types if cfg.get('has_gender', False)]
+                    if _gender_example_types:
+                        _get = _gender_example_types[0]
+                        example = f'  {{"type": "{_get}", "raw_name": "田中太郎", "translated_name": "Tanaka Taro", "gender": "Male"'
                         for field in custom_fields:
                             example += f', "{field}": "example value"'
                         example += '}'
