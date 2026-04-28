@@ -20828,6 +20828,9 @@ Important rules:
                         """Same rules as translator / retranslation GUIs."""
                         if not _epub_path:
                             return None
+                        # RPG Maker .exe uses its own GTool_Translation folder; skip
+                        if _epub_path.lower().endswith('.exe'):
+                            return None
                         _base = os.path.splitext(os.path.basename(_epub_path))[0]
                         _override = None
                         for _c in (
@@ -21241,6 +21244,9 @@ Important rules:
         seen_dirs = set()
         for file_path in input_files:
             try:
+                # RPG Maker .exe uses its own GTool_Translation folder; skip
+                if file_path.lower().endswith('.exe'):
+                    continue
                 base_name = os.path.splitext(os.path.basename(file_path))[0]
                 if override_dir:
                     output_dir = os.path.join(override_dir, base_name)
