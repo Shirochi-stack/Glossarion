@@ -8311,7 +8311,15 @@ class UnifiedClient:
         if _PAYLOADS_DISABLED:
             return
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        failed_dir = os.path.join(_payloads_dir(), "failed_requests")
+        # Route image-context failures to Payloads/image/failed_requests/
+        try:
+            is_image = self._is_image_request(messages, context)
+        except Exception:
+            is_image = False
+        if is_image:
+            failed_dir = os.path.join(_payloads_dir(), "image", "failed_requests")
+        else:
+            failed_dir = os.path.join(_payloads_dir(), "failed_requests")
         try:
             os.makedirs(failed_dir, exist_ok=True)
         except (PermissionError, OSError):
@@ -11660,21 +11668,19 @@ class UnifiedClient:
             next_available = self.__class__._last_api_call_start + api_delay
             
             if current_time < next_available:
-                # Reserve this slot
+                # Reserve this slot (needed so simultaneous batch threads
+                # get staggered, not all sleep_time=0)
                 self.__class__._last_api_call_start = next_available
                 
                 try:
                     sleep_time = max(0.0, float(next_available - current_time))
                 except Exception:
                     sleep_time = float(api_delay)
-            else:
-                # This thread gets to go immediately
-                self.__class__._last_api_call_start = current_time
+            # else: don't update timestamp here — defer to fire time below
         # Lock released — sleep outside lock (interruptible)
         
         if sleep_time > 0:
-            # Always log BEFORE the sleep so the user sees the queue status
-            # during the wait, not after it's already done.
+            # Log BEFORE the sleep so the user sees queue status during the wait
             if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
                 try:
                     tls = self._get_thread_local_client()
@@ -11687,7 +11693,6 @@ class UnifiedClient:
             elapsed = 0.0
             step = 0.1
             while elapsed < sleep_time:
-                # If graceful stop toggles on during stagger, do not start this call.
                 if os.environ.get('GRACEFUL_STOP') == '1':
                     raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
                 if self._is_stop_requested() or getattr(self, '_cancelled', False):
@@ -11696,11 +11701,8 @@ class UnifiedClient:
                 dt = min(step, sleep_time - elapsed)
                 time.sleep(dt)
                 elapsed += dt
-            # Flush any deferred prompt-preparation logs (🔄, 🎯, 💬) so they
-            # appear right before the ⏳ in-progress line.
             flush_deferred_batch_logs()
         else:
-            # No sleep needed — still flush deferred logs before proceeding
             flush_deferred_batch_logs()
             if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
                 try:
@@ -11712,11 +11714,7 @@ class UnifiedClient:
                     _ctx = 'translation'
                 self._debug_log(f"📤 [{thread_name}] {_label} ({_ctx}) — Sending API call now")
         
-        # Anchor the stagger timestamp to the ACTUAL fire time (now, after all
-        # sleeps, key rotation, and client init).  Without this, the timestamp
-        # reflects when the slot was reserved inside the lock — which can be
-        # seconds earlier due to init overhead — causing the next thread to
-        # see an "expired" slot and skip its delay entirely.
+        # Timer tied to the log: set timestamp NOW (actual fire time)
         with self.__class__._api_stagger_lock:
             self.__class__._last_api_call_start = max(
                 self.__class__._last_api_call_start, time.time()

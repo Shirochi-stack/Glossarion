@@ -392,18 +392,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             except Exception:
                 api_delay = 2.0
 
-        enforce_delay = max(thread_delay, api_delay)
-
-        if enforce_delay > 0:
-            with _glossary_thread_submit_lock:
-                now = time.time()
-                elapsed_since_last = now - _glossary_last_thread_submit
-                remaining = enforce_delay - elapsed_since_last
-                if remaining > 0:
-                    interruptible_sleep(remaining, stop_check_fn, interval=0.1)
-                    _glossary_last_thread_submit = time.time()
-                else:
-                    _glossary_last_thread_submit = now
+        # Delay is handled by _apply_api_call_stagger inside client.send()
 
         api_thread = threading.Thread(target=api_call)
         api_thread.daemon = True
