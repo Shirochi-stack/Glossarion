@@ -649,10 +649,20 @@ def setup_http_logging():
     openai_logger.setLevel(logging.DEBUG)
 
     # Add a filter to suppress stale logs from previous runs (safe even if run id not set)
+    # and prepend 🌐 emoji to httpx HTTP Request lines
+    class _HttpEmojiFilter(logging.Filter):
+        """Prepend 🌐 to httpx 'HTTP Request' log messages."""
+        def filter(self, record):
+            if record.name == 'httpx' and 'HTTP Request' in (record.getMessage() or ''):
+                record.msg = f"🌐 {record.msg}"
+            return True
+
     try:
         # Avoid adding duplicates
         if not any(isinstance(f, _RunIdFilter) for f in (getattr(httpx_logger, 'filters', None) or [])):
             httpx_logger.addFilter(_RunIdFilter())
+        if not any(isinstance(f, _HttpEmojiFilter) for f in (getattr(httpx_logger, 'filters', None) or [])):
+            httpx_logger.addFilter(_HttpEmojiFilter())
         if not any(isinstance(f, _RunIdFilter) for f in (getattr(openai_logger, 'filters', None) or [])):
             openai_logger.addFilter(_RunIdFilter())
     except Exception:
@@ -662,18 +672,7 @@ def setup_http_logging():
     if not any(isinstance(h, logging.StreamHandler) for h in logging.root.handlers):
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
-
-        class _HttpEmojiFormatter(logging.Formatter):
-            """Prepend 🌐 to httpx 'HTTP Request' lines."""
-            def format(self, record):
-                msg = super().format(record)
-                if record.name == 'httpx' and 'HTTP Request' in (record.getMessage() or ''):
-                    # Strip the 'INFO:httpx:' prefix and add emoji
-                    raw = record.getMessage()
-                    return f"🌐 {raw}"
-                return msg
-
-        formatter = _HttpEmojiFormatter('%(levelname)s:%(name)s:%(message)s')
+        formatter = logging.Formatter('%(levelname)s:%(name)s:%(message)s')
         console_handler.setFormatter(formatter)
 
         httpx_logger.addHandler(console_handler)
