@@ -411,8 +411,14 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     _glossary_last_thread_submit = time.time()
                 else:
                     _glossary_last_thread_submit = now
+                    # Log even when no wait is needed so the user always sees the call
+                    if not stop_check_fn() and os.environ.get('GRACEFUL_STOP') != '1':
+                        try:
+                            thread_name = threading.current_thread().name
+                        except Exception:
+                            thread_name = "thread"
+                        print(f"📤 [{thread_name}] {chapter_label} — Sending API call now")
 
-        api_thread = threading.Thread(target=api_call)
         api_thread = threading.Thread(target=api_call)
         api_thread.daemon = True
         api_thread.start()

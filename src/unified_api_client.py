@@ -11714,6 +11714,15 @@ class UnifiedClient:
         else:
             # No sleep needed — still flush deferred logs before proceeding
             flush_deferred_batch_logs()
+            if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+                try:
+                    tls = self._get_thread_local_client()
+                    _label = getattr(tls, 'current_request_label', None) or 'request'
+                    _ctx = getattr(tls, 'current_request_context', None) or 'translation'
+                except Exception:
+                    _label = 'request'
+                    _ctx = 'translation'
+                self._debug_log(f"📤 [{thread_name}] {_label} ({_ctx}) — Sending API call now")
         
         # Log stagger status — shows queued+delay or immediate in-progress
         # (Skip for authgem, native gemini, vertex/ providers, and all
