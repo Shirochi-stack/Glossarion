@@ -400,24 +400,10 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 elapsed_since_last = now - _glossary_last_thread_submit
                 remaining = enforce_delay - elapsed_since_last
                 if remaining > 0:
-                    # Emit queued log with the actual remaining sleep time
-                    if not stop_check_fn() and os.environ.get('GRACEFUL_STOP') != '1':
-                        try:
-                            thread_name = threading.current_thread().name
-                        except Exception:
-                            thread_name = "thread"
-                        print(f"📤 [{thread_name}] Queued {chapter_label} — Sending API call in {remaining:.1f}s")
                     interruptible_sleep(remaining, stop_check_fn, interval=0.1)
                     _glossary_last_thread_submit = time.time()
                 else:
                     _glossary_last_thread_submit = now
-                    # Log even when no wait is needed so the user always sees the call
-                    if not stop_check_fn() and os.environ.get('GRACEFUL_STOP') != '1':
-                        try:
-                            thread_name = threading.current_thread().name
-                        except Exception:
-                            thread_name = "thread"
-                        print(f"📤 [{thread_name}] {chapter_label} — Sending API call now")
 
         api_thread = threading.Thread(target=api_call)
         api_thread.daemon = True
@@ -4873,18 +4859,18 @@ def main(log_callback=None, stop_callback=None):
                             return
                         if is_merged_mode:
                             # For merged mode, mark all chapters in the unit as failed on error
+                            _err_lower = str(e).lower()
+                            _is_user_cancel = "stopped by user" in _err_lower or "cancelled by user" in _err_lower or "operation cancelled" in _err_lower
                             for u_idx, u_chap in unit:
-                                if "stopped by user" in str(e).lower():
-                                    print(f"✅ Chapter {u_idx+1} stopped by user")
-                                else:
+                                if not _is_user_cancel:
                                     print(f"Error processing merged chapter {u_idx+1}: {e}")
                                 if u_idx not in completed and u_idx not in failed:
                                     failed.append(u_idx)
                         else:
                             idx, chap = unit[0]
-                            if "stopped by user" in str(e).lower():
-                                print(f"✅ Chapter {idx+1} stopped by user")
-                            else:
+                            _err_lower = str(e).lower()
+                            _is_user_cancel = "stopped by user" in _err_lower or "cancelled by user" in _err_lower or "operation cancelled" in _err_lower
+                            if not _is_user_cancel:
                                 print(f"Error processing chapter {idx+1}: {e}")
                             if idx not in completed and idx not in failed:
                                 failed.append(idx)
