@@ -180,24 +180,12 @@ def _extract_event_strings(commands: list) -> List[Tuple[str, str]]:
                 if isinstance(choice, str) and _is_translatable(choice):
                     results.append((f"choice_{i}_{ci}", choice))
 
-        elif code == _NAME_CODE and len(params) >= 2:
-            # Change Name — params = [actor_id, new_name]
-            name = params[1]
-            if isinstance(name, str) and _is_translatable(name):
-                results.append((f"chname_{i}", name))
-
-        elif code == _NICKNAME_CODE and len(params) >= 2:
-            # Change Nickname — params = [actor_id, new_nickname]
-            nick = params[1]
-            if isinstance(nick, str) and _is_translatable(nick):
-                results.append((f"chnick_{i}", nick))
-
-        elif code == _COND_CODE and len(params) >= 4 and params[0] == 4:
-            # Conditional Branch subtype 4: Actor name check
-            # params = [4, actor_id, condition_type, name_string]
-            # condition_type 1 = "Name is" comparison
-            if params[2] == 1 and isinstance(params[3], str) and _is_translatable(params[3]):
-                results.append((f"cond_{i}", params[3]))
+        # NOTE: ChangeName (320), ChangeNickname (324), and CondBranch
+        # actor name checks (111 type 4) are intentionally NOT extracted.
+        # These are internal game-logic identifiers — the game sets actor
+        # names via ChangeName and compares them in CondBranch.  Translating
+        # them risks inconsistency (e.g. 留奈 → "Runa" vs "Luna") which
+        # breaks conditional logic and prevents images/scenes from triggering.
 
         i += 1
 
