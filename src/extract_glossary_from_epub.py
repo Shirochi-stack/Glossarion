@@ -330,27 +330,42 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
         except Exception:
             thread_delay = 0.1
 
-        # Check for per-key delay from glossary pool first
+        # Check for per-key delay from glossary pool first.
+        # IMPORTANT: Key rotation hasn't happened yet (it occurs inside client.send()),
+        # so client._per_key_api_delay is stale/None. We must peek at the pool's
+        # current rotation index to find the NEXT key's delay.
         _per_key_delay = None
+
+        # 1. Peek at glossary key pool — find the key that will be selected next
         try:
-            # 1. Check if the client already has a per-key delay set
-            _per_key_delay = getattr(client, '_per_key_api_delay', None)
+            _gk_pool = getattr(UnifiedClient, '_glossary_key_pool', None)
+            if _gk_pool and hasattr(_gk_pool, 'keys') and _gk_pool.keys:
+                _pool_keys = _gk_pool.keys
+                _cur_idx = getattr(_gk_pool, 'current_index', 0) % len(_pool_keys)
+                # Read the NEXT key's delay (the one that will be selected)
+                _next_key = _pool_keys[_cur_idx]
+                _gk_d = getattr(_next_key, 'api_call_delay', 0.0) or 0.0
+                if _gk_d > 0:
+                    _per_key_delay = _gk_d
         except Exception:
             pass
+
+        # 2. Fallback: peek at multi-key pool if no glossary pool
         if _per_key_delay is None:
-            # 2. Check glossary key pool entries for individual api_call_delay
             try:
-                _gk_pool = getattr(UnifiedClient, '_glossary_key_pool', None)
-                if _gk_pool and hasattr(_gk_pool, 'keys') and _gk_pool.keys:
-                    for _gk in _gk_pool.keys:
-                        _gk_d = getattr(_gk, 'api_call_delay', 0.0) or 0.0
-                        if _gk_d > 0:
-                            _per_key_delay = _gk_d
-                            break
+                _mk_pool = getattr(UnifiedClient, '_api_key_pool', None)
+                if _mk_pool and hasattr(_mk_pool, 'keys') and _mk_pool.keys:
+                    _pool_keys = _mk_pool.keys
+                    _cur_idx = getattr(_mk_pool, 'current_index', 0) % len(_pool_keys)
+                    _next_key = _pool_keys[_cur_idx]
+                    _gk_d = getattr(_next_key, 'api_call_delay', 0.0) or 0.0
+                    if _gk_d > 0:
+                        _per_key_delay = _gk_d
             except Exception:
                 pass
+
+        # 3. Fallback: check in-memory glossary keys (raw dict list)
         if _per_key_delay is None:
-            # 3. Check in-memory glossary keys (raw dict list)
             try:
                 _im_gk = getattr(UnifiedClient, '_in_memory_glossary_keys', None)
                 if _im_gk:
@@ -359,6 +374,13 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         if _gk_d > 0:
                             _per_key_delay = _gk_d
                             break
+            except Exception:
+                pass
+
+        # 4. Last resort: check client instance (may be set from a previous rotation)
+        if _per_key_delay is None:
+            try:
+                _per_key_delay = getattr(client, '_per_key_api_delay', None)
             except Exception:
                 pass
 

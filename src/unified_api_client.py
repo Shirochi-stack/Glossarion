@@ -11594,9 +11594,21 @@ class UnifiedClient:
         except Exception:
             pass
 
-        # Per-key delay wins over the global GUI setting when explicitly set on this client
+        # Per-key delay wins over the global GUI setting when explicitly set on this client.
+        # IMPORTANT: Read from thread-local storage first (set during key rotation in
+        # _ensure_thread_client) to avoid a race condition where self._per_key_api_delay
+        # on the shared instance gets overwritten by concurrent threads.
         try:
-            per_key = getattr(self, '_per_key_api_delay', None)
+            per_key = None
+            try:
+                tls = self._get_thread_local_client()
+                _tls_delay = getattr(tls, 'api_call_delay', 0.0) or 0.0
+                if _tls_delay > 0:
+                    per_key = _tls_delay
+            except Exception:
+                pass
+            if per_key is None:
+                per_key = getattr(self, '_per_key_api_delay', None)
             api_delay = float(per_key) if per_key is not None else float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
         except Exception:
             api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
