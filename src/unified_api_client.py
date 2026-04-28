@@ -11653,7 +11653,6 @@ class UnifiedClient:
         # _update_stagger_timestamp for threads that had already received their
         # API response, causing conversion+saving to be deferred in bulk.
         sleep_time = 0.0
-        _is_first_call = False
         with self.__class__._api_stagger_lock:
             current_time = time.time()
             
@@ -11670,7 +11669,6 @@ class UnifiedClient:
                     sleep_time = float(api_delay)
             else:
                 # This thread gets to go immediately
-                _is_first_call = (self.__class__._last_api_call_start == 0)
                 self.__class__._last_api_call_start = current_time
         # Lock released — sleep outside lock (interruptible)
         
@@ -11704,8 +11702,7 @@ class UnifiedClient:
         else:
             # No sleep needed — still flush deferred logs before proceeding
             flush_deferred_batch_logs()
-            # Only log "now" for the genuinely first API call (no prior calls)
-            if _is_first_call and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+            if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
                 try:
                     tls = self._get_thread_local_client()
                     _label = getattr(tls, 'current_request_label', None) or 'request'
@@ -11714,6 +11711,16 @@ class UnifiedClient:
                     _label = 'request'
                     _ctx = 'translation'
                 self._debug_log(f"📤 [{thread_name}] {_label} ({_ctx}) — Sending API call now")
+        
+        # Anchor the stagger timestamp to the ACTUAL fire time (now, after all
+        # sleeps, key rotation, and client init).  Without this, the timestamp
+        # reflects when the slot was reserved inside the lock — which can be
+        # seconds earlier due to init overhead — causing the next thread to
+        # see an "expired" slot and skip its delay entirely.
+        with self.__class__._api_stagger_lock:
+            self.__class__._last_api_call_start = max(
+                self.__class__._last_api_call_start, time.time()
+            )
         
         # Log stagger status — shows queued+delay or immediate in-progress
         # (Skip for authgem, native gemini, vertex/ providers, and all
