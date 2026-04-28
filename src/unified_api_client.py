@@ -11676,20 +11676,13 @@ class UnifiedClient:
                     sleep_time = max(0.0, float(next_available - current_time))
                 except Exception:
                     sleep_time = float(api_delay)
-            # else: don't update timestamp here — defer to fire time below
+            else:
+                # Immediate — reserve slot at current_time for batch ordering
+                self.__class__._last_api_call_start = current_time
         # Lock released — sleep outside lock (interruptible)
         
+        # Sleep FIRST (silently) so logs don't dump all at once
         if sleep_time > 0:
-            # Log BEFORE the sleep so the user sees queue status during the wait
-            if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
-                try:
-                    tls = self._get_thread_local_client()
-                    _label = getattr(tls, 'current_request_label', None) or 'request'
-                    _ctx = getattr(tls, 'current_request_context', None) or 'translation'
-                except Exception:
-                    _label = 'request'
-                    _ctx = 'translation'
-                self._debug_log(f"📤 [{thread_name}] Queued {_label} ({_ctx}) — Sending API call in {sleep_time:.1f}s")
             elapsed = 0.0
             step = 0.1
             while elapsed < sleep_time:
@@ -11701,20 +11694,23 @@ class UnifiedClient:
                 dt = min(step, sleep_time - elapsed)
                 time.sleep(dt)
                 elapsed += dt
-            flush_deferred_batch_logs()
-        else:
-            flush_deferred_batch_logs()
-            if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
-                try:
-                    tls = self._get_thread_local_client()
-                    _label = getattr(tls, 'current_request_label', None) or 'request'
-                    _ctx = getattr(tls, 'current_request_context', None) or 'translation'
-                except Exception:
-                    _label = 'request'
-                    _ctx = 'translation'
+        
+        # Flush deferred logs, then emit 📤 and reset timer — all at fire time
+        flush_deferred_batch_logs()
+        if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+            try:
+                tls = self._get_thread_local_client()
+                _label = getattr(tls, 'current_request_label', None) or 'request'
+                _ctx = getattr(tls, 'current_request_context', None) or 'translation'
+            except Exception:
+                _label = 'request'
+                _ctx = 'translation'
+            if sleep_time > 0:
+                self._debug_log(f"📤 [{thread_name}] Queued {_label} ({_ctx}) — Sending API call in {api_delay:.1f}s")
+            else:
                 self._debug_log(f"📤 [{thread_name}] {_label} ({_ctx}) — Sending API call now")
         
-        # Timer tied to the log: set timestamp NOW (actual fire time)
+        # Timer resets ON the log — next thread measures delay from here
         with self.__class__._api_stagger_lock:
             self.__class__._last_api_call_start = max(
                 self.__class__._last_api_call_start, time.time()
