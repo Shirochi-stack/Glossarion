@@ -722,7 +722,7 @@ def _payloads_dir() -> str:
             except OSError:
                 pass  # Cleanup is best-effort
             _payloads_resolved_dir = _candidate
-            logger.info(f"Payloads directory: {_payloads_resolved_dir}")
+            logger.info(f"📂 Payloads directory: {_payloads_resolved_dir}")
             return _payloads_resolved_dir
         except (PermissionError, OSError) as _e:
             logger.warning(f"Payloads directory: cannot use {_candidate!r} (base={_base!r}): {_e}")
