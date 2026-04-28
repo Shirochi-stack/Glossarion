@@ -2068,7 +2068,7 @@ class ProgressManager:
         
         # Log if we're using a composite key
         if "_" in chapter_key and chapter_key != str(actual_num):
-            print(f"📌 Using composite key for chapter {actual_num}: {chapter_key}")
+            pass  # composite key — no need to log per-chapter
         
         # MERGED CHAPTERS FIX: If this chapter has merged children and status changes to failed/pending,
         # clear the merged status from all child chapters so they can be retranslated
@@ -2266,7 +2266,10 @@ class ProgressManager:
             
             # Check if file exists for auto-discovery
             if os.path.exists(output_path):
-                print(f"📁 Found existing file for chapter {actual_num}: {output_filename}")
+                # Track auto-discovered files for a single summary instead of per-chapter spam
+                if not hasattr(self, '_auto_discovered_count'):
+                    self._auto_discovered_count = 0
+                self._auto_discovered_count += 1
                 
                 self.prog["chapters"][chapter_key] = {
                     "actual_num": actual_num,
@@ -4471,7 +4474,7 @@ class BatchTranslationProcessor:
                         # Only log if not during graceful stop (about to be cancelled)
                         graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                         if not graceful_stop_active:
-                            print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.5f}s for Chapter {actual_num}")
+                            pass  # thread delay is sub-millisecond, no need to log
                         
                         # Interruptible sleep - check stop flag every 0.1 seconds
                         elapsed = 0
@@ -11877,6 +11880,11 @@ def main(log_callback=None, stop_callback=None):
                 for num, term, reason in skipped[:5]:
                     print(f"   • {term} {num}: {reason.split('(')[0].strip()}")
         
+        # Print auto-discovered files summary
+        _auto_disc = getattr(progress_manager, '_auto_discovered_count', 0)
+        if _auto_disc > 0:
+            print(f"📁 Auto-discovered {_auto_disc} existing translated file(s) on disk")
+
         print(f"📊 Found {len(chapters_to_translate)} chapters to translate in parallel")
         
         # Continue with the rest of the existing batch processing code...
