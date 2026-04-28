@@ -2154,6 +2154,11 @@ class MultiAPIKeyDialog(QDialog):
         bottom_btn.clicked.connect(lambda: self._move_fallback_key('bottom'))
         move_layout.addWidget(bottom_btn)
         
+        move_layout.addSpacing(10)
+        
+        self.fallback_position_label = QLabel()
+        self.fallback_position_label.setStyleSheet("color: gray;")
+        move_layout.addWidget(self.fallback_position_label)
         move_layout.addStretch()
         container_layout.addWidget(self.fallback_move_frame)
         
@@ -2188,6 +2193,7 @@ class MultiAPIKeyDialog(QDialog):
         
         # Connect to model's rowsMoved signal to sync data after Qt moves items
         self.fallback_tree.model().rowsMoved.connect(self._on_fallback_rows_moved)
+        self.fallback_tree.itemSelectionChanged.connect(self._on_fallback_selection_change)
         
         # Connect double-click for inline editing (consistent with multi-key tree)
         self.fallback_tree.itemDoubleClicked.connect(self._on_fallback_click)
@@ -2427,7 +2433,7 @@ class MultiAPIKeyDialog(QDialog):
                 self._load_fallback_keys()
                 
                 # Show status
-                self._show_status(f"Changed model to '{new_model}' for {len(selected)} fallback keys")
+                self._show_fallback_status(f"Changed model to '{new_model}' for {len(selected)} fallback keys")
                 
                 dialog.accept()
         
@@ -2637,7 +2643,7 @@ class MultiAPIKeyDialog(QDialog):
             extras.append(f"Azure: {azure_endpoint[:30]}...")
         
         extra_info = f" ({', '.join(extras)})" if extras else ""
-        self._show_status(f"Added fallback key for model: {model}{extra_info}")
+        self._show_fallback_status(f"Added fallback key for model: {model}{extra_info}")
         
         # Re-evaluate AuthGPT login button visibility
         self._notify_authgpt_visibility()
@@ -2918,33 +2924,27 @@ class MultiAPIKeyDialog(QDialog):
             thread.start()
 
     def _remove_selected_fallback(self):
-        """Remove selected fallback key"""
+        """Remove selected fallback keys"""
         selected = self.fallback_tree.selectedItems()
         if not selected:
             return
         
-        reply = QMessageBox.question(self, "Confirm", "Remove selected fallback key?",
+        reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected fallback key(s)?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
-            index = self.fallback_tree.indexOfTopLevelItem(selected[0])
+            indices = sorted([self.fallback_tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
             
-            # Get current fallback keys
             fallback_keys = self.translator_gui.config.get('fallback_keys', [])
             
-            if index < len(fallback_keys):
-                del fallback_keys[index]
-                
-                # Save to config
-                self.translator_gui.config['fallback_keys'] = fallback_keys
-                self.translator_gui.save_config(show_message=False)
-                
-                # Reload list
-                self._load_fallback_keys()
-                
-                self._show_status("Removed fallback key")
-                
-                # Re-evaluate AuthGPT login button visibility
-                self._notify_authgpt_visibility()
+            for index in indices:
+                if index < len(fallback_keys):
+                    del fallback_keys[index]
+            
+            self.translator_gui.config['fallback_keys'] = fallback_keys
+            self.translator_gui.save_config(show_message=False)
+            self._load_fallback_keys()
+            self._show_fallback_status(f"Removed {len(selected)} fallback key(s)")
+            self._notify_authgpt_visibility()
 
     def _enable_selected_fallback(self):
         """Enable selected fallback keys"""
@@ -2959,7 +2959,7 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['fallback_keys'] = fallback_keys
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
-        self._show_status(f"Enabled {len(selected)} fallback key(s)")
+        self._show_fallback_status(f"Enabled {len(selected)} fallback key(s)")
         self._notify_authgpt_visibility()
 
     def _disable_selected_fallback(self):
@@ -2975,7 +2975,7 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['fallback_keys'] = fallback_keys
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
-        self._show_status(f"Disabled {len(selected)} fallback key(s)")
+        self._show_fallback_status(f"Disabled {len(selected)} fallback key(s)")
         self._notify_authgpt_visibility()
 
     def _clear_all_fallbacks(self):
@@ -2993,7 +2993,7 @@ class MultiAPIKeyDialog(QDialog):
             # Reload list
             self._load_fallback_keys()
             
-            self._show_status("Cleared all fallback keys")
+            self._show_fallback_status("Cleared all fallback keys")
             
             # Re-evaluate AuthGPT login button visibility
             self._notify_authgpt_visibility()
@@ -3048,7 +3048,7 @@ class MultiAPIKeyDialog(QDialog):
         
         # Show status message
         status = "enabled" if enabled else "disabled"
-        self._show_status(f"Fallback Keys {status}")
+        self._show_fallback_status(f"Fallback Keys {status}")
         if not getattr(self, '_initializing', False):
             fallback_keys = self.translator_gui.config.get('fallback_keys', [])
             if enabled:
@@ -3140,13 +3140,13 @@ class MultiAPIKeyDialog(QDialog):
             
             # Show status
             status = "configured" if temp_key.use_individual_endpoint else "disabled"
-            self._show_status(f"Individual endpoint {status} for fallback key")
+            self._show_fallback_status(f"Individual endpoint {status} for fallback key")
         
         # Create individual endpoint dialog using the class
         if IndividualEndpointDialog is None:
             QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
             return
-        dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_status)
+        dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_fallback_status)
         dialog.exec_()
     
     def _set_fallback_output_token_limit_for_selected(self):
@@ -3197,7 +3197,7 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['fallback_keys'] = fallback_keys
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
-        self._show_status(f"Set fallback output token limit to {value} for {len(selected_indices)} key(s)")
+        self._show_fallback_status(f"Set fallback output token limit to {value} for {len(selected_indices)} key(s)")
     
     def _clear_fallback_output_token_limit_for_selected(self):
         """Clear per-key output token limit for selected fallback keys"""
@@ -3214,7 +3214,7 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['fallback_keys'] = fallback_keys
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
-        self._show_status(f"Cleared fallback output token limit for {len(selected_indices)} key(s)")
+        self._show_fallback_status(f"Cleared fallback output token limit for {len(selected_indices)} key(s)")
     
     def _set_fallback_key_temperature_for_selected(self):
         """Set per-key temperature for selected fallback keys"""
@@ -3256,7 +3256,7 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['fallback_keys'] = fallback_keys
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
-        self._show_status(f"Set fallback key temperature to {value} for {len(selected_indices)} key(s)")
+        self._show_fallback_status(f"Set fallback key temperature to {value} for {len(selected_indices)} key(s)")
     
     def _clear_fallback_key_temperature_for_selected(self):
         """Clear per-key temperature for selected fallback keys"""
@@ -3273,7 +3273,7 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['fallback_keys'] = fallback_keys
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
-        self._show_status(f"Cleared fallback key temperature for {len(selected_indices)} key(s)")
+        self._show_fallback_status(f"Cleared fallback key temperature for {len(selected_indices)} key(s)")
     
     def _set_fallback_api_call_delay_for_selected(self):
         """Set per-key API call delay for selected fallback keys"""
@@ -3337,7 +3337,7 @@ class MultiAPIKeyDialog(QDialog):
         # Show status
         status = "enabled" if enabled else "disabled"
         model = fallback_keys[fallback_index].get('model', 'unknown')
-        self._show_status(f"Individual endpoint {status} for fallback key ({model})")
+        self._show_fallback_status(f"Individual endpoint {status} for fallback key ({model})")
 
     def _create_button_bar(self, parent_layout):
         """Create the bottom button bar as a fixed section"""
@@ -3888,6 +3888,16 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui.config['fallback_keys'] = new_order
             self.translator_gui.save_config(show_message=False)
             self._show_fallback_status("Reordered fallback keys")
+
+    def _on_fallback_selection_change(self):
+        """Update position label when fallback selection changes"""
+        selected = self.fallback_tree.selectedItems()
+        if selected:
+            index = self.fallback_tree.indexOfTopLevelItem(selected[0])
+            total = self.fallback_tree.topLevelItemCount()
+            self.fallback_position_label.setText(f"#{index + 1}/{total}")
+        else:
+            self.fallback_position_label.setText("")
 
     def _on_fallback_click(self, item, column):
         """Handle double-click on fallback tree item for inline editing (consistent with multi-key tree)"""
@@ -4693,7 +4703,7 @@ class MultiAPIKeyDialog(QDialog):
                     creds_data = json.load(f)
                     if 'type' in creds_data and 'project_id' in creds_data:
                         self.fallback_google_creds_entry.setText(filename)
-                        self._show_status(f"Selected fallback Google credentials: {os.path.basename(filename)}")
+                        self._show_fallback_status(f"Selected fallback Google credentials: {os.path.basename(filename)}")
                     else:
                         QMessageBox.critical(
                             self,
@@ -4933,6 +4943,11 @@ class MultiAPIKeyDialog(QDialog):
         bottom_btn.clicked.connect(lambda: self._move_glossary_key('bottom'))
         move_layout.addWidget(bottom_btn)
         
+        move_layout.addSpacing(10)
+        
+        self.glossary_position_label = QLabel()
+        self.glossary_position_label.setStyleSheet("color: gray;")
+        move_layout.addWidget(self.glossary_position_label)
         move_layout.addStretch()
         container_layout.addWidget(self.glossary_move_frame)
         
@@ -4963,6 +4978,7 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         
         self.glossary_tree.model().rowsMoved.connect(self._on_glossary_rows_moved)
+        self.glossary_tree.itemSelectionChanged.connect(self._on_glossary_selection_change)
         self.glossary_tree.itemDoubleClicked.connect(self._on_glossary_click)
         
         container_layout.addWidget(self.glossary_tree)
@@ -5441,24 +5457,27 @@ class MultiAPIKeyDialog(QDialog):
             thread.start()
 
     def _remove_selected_glossary(self):
-        """Remove selected glossary key"""
+        """Remove selected glossary keys"""
         selected = self.glossary_tree.selectedItems()
         if not selected:
             return
         
-        reply = QMessageBox.question(self, "Confirm", "Remove selected glossary key?",
+        reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected glossary key(s)?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
-            index = self.glossary_tree.indexOfTopLevelItem(selected[0])
+            indices = sorted([self.glossary_tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
+            
             glossary_keys = self.translator_gui.config.get('glossary_keys', [])
             
-            if index < len(glossary_keys):
-                del glossary_keys[index]
-                self.translator_gui.config['glossary_keys'] = glossary_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_glossary_keys()
-                self._show_glossary_status("Removed glossary key")
-                self._notify_authgpt_visibility()
+            for index in indices:
+                if index < len(glossary_keys):
+                    del glossary_keys[index]
+            
+            self.translator_gui.config['glossary_keys'] = glossary_keys
+            self.translator_gui.save_config(show_message=False)
+            self._load_glossary_keys()
+            self._show_glossary_status(f"Removed {len(selected)} glossary key(s)")
+            self._notify_authgpt_visibility()
 
     def _enable_selected_glossary(self):
         """Enable selected glossary keys"""
@@ -5791,6 +5810,16 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui.config['glossary_keys'] = new_order
             self.translator_gui.save_config(show_message=False)
             self._show_glossary_status("Reordered glossary keys")
+
+    def _on_glossary_selection_change(self):
+        """Update position label when glossary selection changes"""
+        selected = self.glossary_tree.selectedItems()
+        if selected:
+            index = self.glossary_tree.indexOfTopLevelItem(selected[0])
+            total = self.glossary_tree.topLevelItemCount()
+            self.glossary_position_label.setText(f"#{index + 1}/{total}")
+        else:
+            self.glossary_position_label.setText("")
 
     def _on_glossary_click(self, item, column):
         """Handle double-click on glossary tree item for inline editing"""
@@ -6348,6 +6377,11 @@ class MultiAPIKeyDialog(QDialog):
         bottom_btn.clicked.connect(lambda: self._move_qa_scan_key('bottom'))
         move_layout.addWidget(bottom_btn)
         
+        move_layout.addSpacing(10)
+        
+        self.qa_scan_position_label = QLabel()
+        self.qa_scan_position_label.setStyleSheet("color: gray;")
+        move_layout.addWidget(self.qa_scan_position_label)
         move_layout.addStretch()
         container_layout.addWidget(self.qa_scan_move_frame)
         
@@ -6378,6 +6412,7 @@ class MultiAPIKeyDialog(QDialog):
         self.qa_scan_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         
         self.qa_scan_tree.model().rowsMoved.connect(self._on_qa_scan_rows_moved)
+        self.qa_scan_tree.itemSelectionChanged.connect(self._on_qa_scan_selection_change)
         self.qa_scan_tree.itemDoubleClicked.connect(self._on_qa_scan_click)
         
         container_layout.addWidget(self.qa_scan_tree)
@@ -6854,24 +6889,28 @@ class MultiAPIKeyDialog(QDialog):
             thread.start()
 
     def _remove_selected_qa_scan(self):
-        """Remove selected QA scan key"""
+        """Remove selected QA scan keys"""
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
             return
         
-        reply = QMessageBox.question(self, "Confirm", "Remove selected QA scan key?",
+        reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected QA scan key(s)?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
-            index = self.qa_scan_tree.indexOfTopLevelItem(selected[0])
+            indices = sorted([self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
+            
             qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
             
-            if index < len(qa_scan_keys):
-                del qa_scan_keys[index]
-                self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_qa_scan_keys()
-                self._show_qa_scan_status("Removed QA scan key")
-                self._notify_authgpt_visibility()
+            for index in indices:
+                if index < len(qa_scan_keys):
+                    del qa_scan_keys[index]
+            
+            self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
+            self.translator_gui.save_config(show_message=False)
+            self._load_qa_scan_keys()
+            self._show_qa_scan_status(f"Removed {len(selected)} QA scan key(s)")
+            self._notify_authgpt_visibility()
+
 
     def _enable_selected_qa_scan(self):
         """Enable selected QA scan keys"""
@@ -7200,6 +7239,16 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui.config['qa_scan_keys'] = new_order
             self.translator_gui.save_config(show_message=False)
             self._show_qa_scan_status("Reordered QA scan keys")
+
+    def _on_qa_scan_selection_change(self):
+        """Update position label when QA scan selection changes"""
+        selected = self.qa_scan_tree.selectedItems()
+        if selected:
+            index = self.qa_scan_tree.indexOfTopLevelItem(selected[0])
+            total = self.qa_scan_tree.topLevelItemCount()
+            self.qa_scan_position_label.setText(f"#{index + 1}/{total}")
+        else:
+            self.qa_scan_position_label.setText("")
 
     def _on_qa_scan_click(self, item, column):
         """Handle double-click on QA scan tree item for inline editing"""
