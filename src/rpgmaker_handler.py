@@ -1153,9 +1153,10 @@ def parse_translated_chunk(response: str, chunk: Dict) -> Dict[str, str]:
     keys = chunk["keys"]
 
     # Split on [N] tag boundaries, capturing the number.
-    # No ^ anchor — handles AI merging entries on one line (e.g. [1] text[2] text)
+    # Uses negative lookbehind for backslash to avoid splitting on RPG Maker
+    # escape codes like \c[27], \n[50], \v[261], \N[1] etc.
     # Safe because \d+ only matches digits, so [Common Equipment] etc. won't match.
-    parts = re.split(r'\[(\d+)\]\s*', response.strip())
+    parts = re.split(r'(?<![a-zA-Z])\[(\d+)\]\s*', response.strip())
 
     if len(parts) > 2:
         # First pass: collect raw translations
