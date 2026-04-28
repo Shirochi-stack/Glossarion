@@ -17,6 +17,23 @@ import csv
 from io import StringIO
 
 try:
+    from extract_glossary_from_epub import get_custom_entry_types as _get_custom_entry_types
+except ImportError:
+    _get_custom_entry_types = None
+
+
+def _get_gender_types():
+    """Return a set of entry type names that have has_gender enabled."""
+    if _get_custom_entry_types:
+        try:
+            types = _get_custom_entry_types()
+            return {t for t, cfg in types.items()
+                    if cfg.get('enabled', True) and cfg.get('has_gender', False)}
+        except Exception:
+            pass
+    return {'character'}  # safe fallback
+
+try:
     from GlossaryManager import GLOSSARY_SEP, _gsep, _is_glossary_header
 except ImportError:
     GLOSSARY_SEP = '\x1F'
@@ -148,7 +165,8 @@ def _compress_token_efficient_format(lines, source_text):
     """Compress token-efficient glossary format with section headers."""
     filtered_lines = []
     current_section = None
-    current_section_is_character = False
+    current_section_has_gender = False
+    _gender_types = _get_gender_types()
     
     for line in lines:
         stripped = line.strip()
@@ -161,7 +179,11 @@ def _compress_token_efficient_format(lines, source_text):
         # Track section headers
         if stripped.startswith('==='):
             current_section = line
-            current_section_is_character = 'CHARACTER' in stripped.upper()
+            # Check if any gender-enabled type name appears in the header
+            header_upper = stripped.upper()
+            current_section_has_gender = any(
+                t.upper() in header_upper for t in _gender_types
+            )
             continue
         
         # Process entry lines (start with "* ")
@@ -172,7 +194,7 @@ def _compress_token_efficient_format(lines, source_text):
             if match:
                 raw_name = match.group(1).strip()
                 # Check if raw name appears in source text
-                if _text_contains_term(source_text, raw_name, is_character=current_section_is_character):
+                if _text_contains_term(source_text, raw_name, is_character=current_section_has_gender):
                     # Add section header if this is the first entry in section
                     if current_section:
                         filtered_lines.append(current_section)
@@ -220,7 +242,7 @@ def _compress_legacy_csv_format(lines, source_text):
                 raw_name = parts[1].strip()
                 translated_name = parts[2].strip()
                 
-                is_char = entry_type == 'character'
+                is_char = entry_type in _get_gender_types()
                 # Check if raw name appears in source text
                 if _text_contains_term(source_text, raw_name, is_character=is_char):
                     filtered_lines.append(line)
@@ -245,9 +267,9 @@ def _compress_json_glossary(json_data, source_text):
             return _compress_fallback_text(json_data, source_text)
     
     def _is_char_entry(val):
-        """Check if a JSON entry value represents a character."""
+        """Check if a JSON entry value represents a gender-enabled type."""
         if isinstance(val, dict):
-            return val.get('type', '').lower() == 'character'
+            return val.get('type', '').lower() in _get_gender_types()
         return False
     
     if isinstance(json_data, dict):
@@ -281,7 +303,7 @@ def _compress_json_glossary(json_data, source_text):
             if isinstance(entry, dict):
                 # Check various possible keys for the raw term
                 raw_term = entry.get('raw_name') or entry.get('original_name') or entry.get('original') or ''
-                is_char = entry.get('type', '').lower() == 'character'
+                is_char = entry.get('type', '').lower() in _get_gender_types()
                 if raw_term and _text_contains_term(source_text, raw_term, is_character=is_char):
                     filtered_list.append(entry)
         return filtered_list
@@ -432,15 +454,18 @@ def _compress_fallback_text(content, source_text):
     # For each entry group, extract candidates and check against source.
     # Track which section header (if any) precedes each entry group for
     # character-type detection.
-    current_section_is_character = False
+    _gender_types = _get_gender_types()
+    current_section_has_gender = False
     for group in groups:
         if group['type'] == 'header':
             header_text = lines[group['line_indices'][0]].strip().upper()
-            current_section_is_character = 'CHARACTER' in header_text
+            current_section_has_gender = any(
+                t.upper() in header_text for t in _gender_types
+            )
         elif group['type'] == 'entry':
             entry_text = '\n'.join(lines[idx] for idx in group['line_indices'])
             candidates = _extract_candidates(entry_text)
-            group['keep'] = any(_text_contains_term(source_text, c, is_character=current_section_is_character) for c in candidates)
+            group['keep'] = any(_text_contains_term(source_text, c, is_character=current_section_has_gender) for c in candidates)
         elif group['type'] in ('meta', 'blank'):
             group['keep'] = True  # always keep meta lines and blanks (blanks filtered later)
         elif group['type'] == 'header':

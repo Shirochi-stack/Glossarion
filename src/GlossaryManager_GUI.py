@@ -5331,7 +5331,7 @@ CRITICAL EXTRACTION RULES:
             gender_value = "all"
             gender_buttons = {}
             if is_new_format:
-                gender_group = QGroupBox("Gender Filter (Characters Only)")
+                gender_group = QGroupBox("Gender Filter (Gender-Enabled Types)")
                 gender_layout = QVBoxLayout(gender_group)
                 conditions_layout.addWidget(gender_group)
                 conditions_layout.addSpacing(10)
@@ -5396,7 +5396,13 @@ CRITICAL EXTRACTION RULES:
                 
                 # Gender filter
                 if is_new_format and gender_value != "all":
-                    if entry.get('type') == 'character' and entry.get('gender') != gender_value:
+                    # Apply gender filter to any type with has_gender
+                    _custom_types = self.config.get('custom_entry_types', {
+                        'character': {'enabled': True, 'has_gender': True},
+                        'terms': {'enabled': True, 'has_gender': False}
+                    })
+                    entry_cfg = _custom_types.get(entry.get('type', ''), {})
+                    if entry_cfg.get('has_gender', False) and entry.get('gender') != gender_value:
                         return False
                 
                 return True
@@ -5516,8 +5522,13 @@ CRITICAL EXTRACTION RULES:
                        import csv
                        with open(path, 'w', encoding='utf-8', newline='') as f:
                            writer = csv.writer(f)
+                           _custom_types = self.config.get('custom_entry_types', {
+                               'character': {'enabled': True, 'has_gender': True},
+                               'terms': {'enabled': True, 'has_gender': False}
+                           })
                            for entry in exported:
-                               if entry.get('type') == 'character':
+                               entry_cfg = _custom_types.get(entry.get('type', ''), {})
+                               if entry_cfg.get('has_gender', False):
                                    writer.writerow([entry.get('type', ''), entry.get('raw_name', ''), 
                                                   entry.get('translated_name', ''), entry.get('gender', '')])
                                else:
@@ -5802,8 +5813,13 @@ CRITICAL EXTRACTION RULES:
                    with open(path, 'w', encoding='utf-8', newline='') as f:
                        writer = csv.writer(f)
                        if self.current_glossary_format == 'list':
+                           _custom_types = self.config.get('custom_entry_types', {
+                               'character': {'enabled': True, 'has_gender': True},
+                               'terms': {'enabled': True, 'has_gender': False}
+                           })
                            for entry in self.current_glossary_data:
-                               if entry.get('type') == 'character':
+                               entry_cfg = _custom_types.get(entry.get('type', ''), {})
+                               if entry_cfg.get('has_gender', False):
                                    writer.writerow([entry.get('type', ''), entry.get('raw_name', ''), 
                                                   entry.get('translated_name', ''), entry.get('gender', '')])
                                else:
