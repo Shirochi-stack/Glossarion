@@ -7891,7 +7891,7 @@ Recent translations to summarize:
         # Update switch emoji and tooltip
         self.system_prompt_switch.setText("🔀" if self.system_prompt_to_user_var else "↕️")
         self.system_prompt_switch.setToolTip(
-            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>" +
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0; font-size: 9pt;'>" +
             ("System prompt content will be sent as part of user message (🔀 mode)" if self.system_prompt_to_user_var 
              else "System prompt content will be sent as system message (↕️ mode)") +
             "<br><br>Click to toggle.</p></qt>"
@@ -8213,7 +8213,7 @@ Recent translations to summarize:
         # Add clickable switch emoji
         self.system_prompt_switch = QLabel("🔀" if self.system_prompt_to_user_var else "↕️")
         self.system_prompt_switch.setToolTip(
-            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>" +
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0; font-size: 9pt;'>" +
             ("System prompt content will be sent as part of user message (🔀 mode)" if self.system_prompt_to_user_var 
              else "System prompt content will be sent as system message (↕️ mode)") +
             "<br><br>Click to toggle.</p></qt>"
