@@ -2774,10 +2774,11 @@ class UnifiedClient:
             if not hasattr(self, '_thread_submission_count'):
                 self._thread_submission_count = 0
             
-            should_log = self._thread_submission_count < 3
+            # Skip noisy thread-slot logs when delay is negligible
+            should_log = self._thread_submission_count < 3 and thread_delay >= 0.1
             if should_log:
                 log_message = f"🧵 [{threading.current_thread().name}] Reserved slot: wait {wait:.2f}s (delay={thread_delay}s)"
-            elif self._thread_submission_count == 3:
+            elif self._thread_submission_count == 3 and thread_delay >= 0.1:
                 # Suppress "Subsequent threads" log during stop to avoid clutter
                 if not self._is_stop_requested():
                     log_message = f"🧵 [Subsequent threads: {thread_delay}s spacing enforced...]"
