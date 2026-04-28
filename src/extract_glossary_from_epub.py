@@ -2248,7 +2248,7 @@ def build_prompt(chapter_text: str) -> tuple:
     if _gender_types:
         _gender_labels = ', '.join(_gender_types)
         _gender_instruction = (
-            f"For {_gender_labels} entries, determine gender from context, leave empty if context is insufficient.\n"
+            f"The gender column applies only to {_gender_labels} entries — determine gender from context clues, leave empty if insufficient.\n"
             f"For all other entry types, leave gender empty."
         )
     else:
