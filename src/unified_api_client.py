@@ -11693,7 +11693,8 @@ class UnifiedClient:
                 except Exception:
                     sleep_time = float(api_delay)
             else:
-                # Immediate — reserve slot at current_time for batch ordering
+                # Immediate — capture real gap since last call for display
+                time_since_last = current_time - self.__class__._last_api_call_start
                 self.__class__._last_api_call_start = current_time
         # Lock released — sleep outside lock (interruptible)
         
@@ -11735,7 +11736,11 @@ class UnifiedClient:
                 except Exception:
                     _label = 'request'
                     _ctx = 'translation'
-                self._debug_log(f"📤 [{thread_name}] {_label} ({_ctx}) — Sending API call now")
+                if time_since_last < 30 and api_delay > 0:
+                    _fmt = f"{time_since_last:.1f}" if time_since_last >= 1.0 else f"{time_since_last:.2f}"
+                    self._debug_log(f"📤 [{thread_name}] {_label} ({_ctx}) — Sending API call in {_fmt}s")
+                else:
+                    self._debug_log(f"📤 [{thread_name}] {_label} ({_ctx}) — Sending API call now")
         
         # Timer resets ON the log — next thread measures delay from here
         with self.__class__._api_stagger_lock:
