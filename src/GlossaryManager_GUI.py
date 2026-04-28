@@ -4643,7 +4643,7 @@ CRITICAL EXTRACTION RULES:
         # Common save helper
         def save_current_glossary():
            path = self.editor_file_entry.text()
-           if not path or not self.current_glossary_data:
+           if not path or self.current_glossary_data is None:
                return False
            try:
                if path.endswith('.csv'):
