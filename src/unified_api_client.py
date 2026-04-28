@@ -5386,7 +5386,7 @@ class UnifiedClient:
                 logger.info("DeepSeek will use HTTP API")
             else:
                 base_url = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1")
-                logger.info(f"DeepSeek will use endpoint: {base_url}")
+                pass  # logged after client creation
         
         elif self.client_type == 'groq':
             # Groq uses OpenAI-compatible endpoint
@@ -5397,7 +5397,7 @@ class UnifiedClient:
                 # If env var is set but empty, use the hardcoded default
                 if not base_url or base_url.strip() == '':
                     base_url = "https://api.groq.com/openai/v1"
-                logger.info(f"Groq will use endpoint: {base_url}")
+                pass  # logged after client creation
         
         elif self.client_type == 'fireworks':
             # Fireworks uses OpenAI-compatible endpoint
@@ -5405,7 +5405,7 @@ class UnifiedClient:
                 logger.info("Fireworks will use HTTP API")
             else:
                 base_url = os.getenv("FIREWORKS_API_URL", "https://api.fireworks.ai/inference/v1")
-                logger.info(f"Fireworks will use endpoint: {base_url}")
+                pass  # logged after client creation
         
         elif self.client_type == 'sambanova':
             # SambaNova uses OpenAI-compatible endpoint
@@ -5413,7 +5413,7 @@ class UnifiedClient:
                 logger.info("SambaNova will use HTTP API")
             else:
                 base_url = os.getenv("SAMBANOVA_API_URL", "https://api.sambanova.ai/v1")
-                logger.info(f"SambaNova will use endpoint: {base_url}")
+                pass  # logged after client creation
 
         elif self.client_type == 'xai':
             # xAI (Grok) uses OpenAI-compatible endpoint

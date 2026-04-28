@@ -5740,9 +5740,11 @@ class BatchTranslationProcessor:
             )
 
             if is_graceful_stop_skip:
-                # Keep a concise log so the user understands why the chapter didn't run.
-                # (Do NOT include the original error text, since it is noisy and is suppressed in the GUI logger.)
-                print(f"⏭️ Chapter {actual_num} skipped (graceful stop)")
+                # Track graceful-stop skips for a single summary instead of per-chapter spam
+                with self.progress_lock:
+                    if not hasattr(self, '_graceful_stop_skipped'):
+                        self._graceful_stop_skipped = []
+                    self._graceful_stop_skipped.append(actual_num)
                 try:
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                     with self.progress_lock:
@@ -12424,6 +12426,12 @@ def main(log_callback=None, stop_callback=None):
         
         chapters_completed = batch_processor.chapters_completed
         chunks_completed = batch_processor.chunks_completed
+        
+        # Print graceful-stop summary if any chapters were skipped
+        _gs_skipped = getattr(batch_processor, '_graceful_stop_skipped', [])
+        if _gs_skipped:
+            _gs_skipped_sorted = sorted(_gs_skipped)
+            print(f"\n⏭️ {len(_gs_skipped)} chapter(s) skipped (graceful stop): {', '.join(str(n) for n in _gs_skipped_sorted)}")
         
         print(f"\n🎉 Parallel translation complete!")
         print(f"   Total chapters processed: {processed}")
