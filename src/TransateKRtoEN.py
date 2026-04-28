@@ -21,7 +21,7 @@ except ImportError:
     # Older versions of BeautifulSoup might not have this warning
     pass
 from collections import Counter
-from unified_api_client import UnifiedClient, UnifiedClientError
+from unified_api_client import UnifiedClient, UnifiedClientError, defer_batch_log
 
 # Translation thread submission throttling (batch) to align queued logs with actual delay
 _translation_thread_submit_lock = threading.Lock()
@@ -4509,7 +4509,7 @@ class BatchTranslationProcessor:
             # Check if this is from a text file
             is_text_source = self.is_text_file or chapter.get('filename', '').endswith('.txt') or chapter.get('is_chunk', False)
             terminology = "Section" if is_text_source else "Chapter"
-            print(f"🔄 Starting #{idx+1} (Internal: {terminology} {chap_num}, Actual: {terminology} {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'{terminology}_{chap_num}')}]")
+            defer_batch_log(f"🔄 Starting #{idx+1} (Internal: {terminology} {chap_num}, Actual: {terminology} {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'{terminology}_{chap_num}')}]")
                       
             content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
             
@@ -4749,13 +4749,13 @@ class BatchTranslationProcessor:
 
                 _term = "Section" if self.is_text_file else "Chapter"
                 if self.config.CONTEXTUAL and assistant_tokens > 0:
-                    print(
+                    defer_batch_log(
                         f"💬 {_term} {actual_num}: Chunk {chunk_idx}/{total_chunks} combined prompt: "
                         f"{total_tokens:,} tokens (system + user: {non_assistant_tokens:,}, "
                         f"assistant/memory: {assistant_tokens:,}) / {budget_str} [File: {file_ref}]"
                     )
                 else:
-                    print(
+                    defer_batch_log(
                         f"💬 {_term} {actual_num}: Chunk {chunk_idx}/{total_chunks} combined prompt: "
                         f"{total_tokens:,} tokens (system + user) / {budget_str} [File: {file_ref}]"
                     )
@@ -8502,9 +8502,9 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
         except:
             enc = tiktoken.get_encoding("cl100k_base")
         system_tokens = len(enc.encode(system))
-        print(f"🎯 Final system prompt: {len(system):,} chars, {system_tokens:,} tokens")
+        defer_batch_log(f"🎯 Final system prompt: {len(system):,} chars, {system_tokens:,} tokens")
     except ImportError:
-        print(f"🎯 Final system prompt length: {len(system)} characters")
+        defer_batch_log(f"🎯 Final system prompt length: {len(system)} characters")
     
     return system
 

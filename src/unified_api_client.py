@@ -1179,6 +1179,31 @@ class UnifiedClientError(Exception):
         self.http_status = http_status
         self.details = details
 
+# ---------------------------------------------------------------------------
+# Deferred batch log buffer
+# In batch mode, prompt-preparation logs (🎯 system prompt, 💬 combined prompt)
+# fire simultaneously across all threads, creating a noisy dump. These helpers
+# let callers buffer those messages and flush them after the stagger delay so
+# each message appears right before its thread's actual API call.
+# ---------------------------------------------------------------------------
+_deferred_batch_logs = threading.local()
+
+def defer_batch_log(msg: str) -> None:
+    """Buffer *msg* for later printing if batch mode is active, else print now."""
+    if os.getenv("BATCH_TRANSLATION", "0") != "1":
+        print(msg)
+        return
+    if not hasattr(_deferred_batch_logs, 'messages'):
+        _deferred_batch_logs.messages = []
+    _deferred_batch_logs.messages.append(msg)
+
+def flush_deferred_batch_logs() -> None:
+    """Print and clear all deferred batch log messages for the current thread."""
+    if hasattr(_deferred_batch_logs, 'messages') and _deferred_batch_logs.messages:
+        for msg in _deferred_batch_logs.messages:
+            print(msg)
+        _deferred_batch_logs.messages.clear()
+
 class UnifiedClient:
     # ----- Helper methods to reduce duplication -----
 
@@ -11673,6 +11698,9 @@ class UnifiedClient:
                 dt = min(step, sleep_time - elapsed)
                 time.sleep(dt)
                 elapsed += dt
+            # Flush any deferred prompt-preparation logs (🔄, 🎯, 💬) so they
+            # appear right before the 📤 Queued / ⏳ in-progress line.
+            flush_deferred_batch_logs()
             # Batch mode: log after the sleep so it appears right before the API call
             if _is_batch and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
                 try:
@@ -11683,6 +11711,9 @@ class UnifiedClient:
                     _label = 'request'
                     _ctx = 'translation'
                 self._debug_log(f"📤 [{thread_name}] Queued {_label} ({_ctx}) — Sending API call in {api_delay:.1f}s")
+        else:
+            # No sleep needed — still flush deferred logs before proceeding
+            flush_deferred_batch_logs()
         
         # Log stagger status — shows queued+delay or immediate in-progress
         # (Skip for authgem, native gemini, vertex/ providers, and all
