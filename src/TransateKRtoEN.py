@@ -8385,7 +8385,13 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
     
     if append_glossary and actual_glossary_path and os.path.exists(actual_glossary_path):
         try:
-            print(f"✅ Loading glossary from: {os.path.abspath(actual_glossary_path)}")
+            # Only log glossary loading once per unique path
+            _gp_abs = os.path.abspath(actual_glossary_path)
+            if not hasattr(build_system_prompt, '_logged_glossary_paths'):
+                build_system_prompt._logged_glossary_paths = set()
+            if _gp_abs not in build_system_prompt._logged_glossary_paths:
+                build_system_prompt._logged_glossary_paths.add(_gp_abs)
+                print(f"✅ Loading glossary from: {_gp_abs}")
             
             # Try to load as JSON first
             try:
@@ -8423,10 +8429,10 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
                         token_reduction = original_tokens - compressed_tokens
                         token_reduction_pct = (token_reduction / original_tokens * 100) if original_tokens > 0 else 0
                         
-                        print(f"🗜️ Glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%), {original_tokens:,}→{compressed_tokens:,} tokens ({token_reduction_pct:.1f}%)")
+                        defer_batch_log(f"🗜️ Glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%), {original_tokens:,}→{compressed_tokens:,} tokens ({token_reduction_pct:.1f}%)")
                     except ImportError:
                         # If tiktoken is not available, just show character reduction
-                        print(f"🗜️ Glossary compressed: {original_length:,} → {compressed_length:,} chars ({reduction_pct:.1f}% reduction)")
+                        defer_batch_log(f"🗜️ Glossary compressed: {original_length:,} → {compressed_length:,} chars ({reduction_pct:.1f}% reduction)")
                 except Exception as e:
                     print(f"⚠️ Glossary compression failed: {e}")
                     # Continue with uncompressed glossary
