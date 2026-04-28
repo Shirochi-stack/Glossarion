@@ -662,7 +662,18 @@ def setup_http_logging():
     if not any(isinstance(h, logging.StreamHandler) for h in logging.root.handlers):
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(levelname)s:%(name)s:%(message)s')
+
+        class _HttpEmojiFormatter(logging.Formatter):
+            """Prepend 🌐 to httpx 'HTTP Request' lines."""
+            def format(self, record):
+                msg = super().format(record)
+                if record.name == 'httpx' and 'HTTP Request' in (record.getMessage() or ''):
+                    # Strip the 'INFO:httpx:' prefix and add emoji
+                    raw = record.getMessage()
+                    return f"🌐 {raw}"
+                return msg
+
+        formatter = _HttpEmojiFormatter('%(levelname)s:%(name)s:%(message)s')
         console_handler.setFormatter(formatter)
 
         httpx_logger.addHandler(console_handler)
