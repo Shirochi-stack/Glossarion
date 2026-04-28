@@ -1613,7 +1613,7 @@ class GlossaryManagerMixin:
         placeholders_line = QLineEdit(
             "Available placeholders: {fields}, {fields1}, {language}, {entries}, "
             "{description_mandatory}, {description_detailed}, {description_in_language}, "
-            "{description_excluded_note},  Separator: \\x1F"
+            "{description_excluded_note}, {gender_instruction},  Separator: \\x1F"
         )
         placeholders_line.setReadOnly(True)
         placeholders_line.setFrame(False)
@@ -1634,7 +1634,9 @@ class GlossaryManagerMixin:
             "                          when 'description' is in Custom Fields; blank otherwise\n"
             "{description_excluded_note} -&gt; appends ' (The description column is excluded from this\n"
             "                            restriction)' to the REJECT-starters rule when 'description'\n"
-            "                            is in Custom Fields; blank otherwise"
+            "                            is in Custom Fields; blank otherwise\n"
+            "{gender_instruction} -&gt; inserts dynamic gender rules based on which entry types\n"
+            "                      have 'has_gender' enabled; blank if none do"
             "</pre></qt>"
         )
         prompt_frame_layout.addWidget(placeholders_line)
@@ -3121,7 +3123,7 @@ CRITICAL EXTRACTION RULES:
         desc_label = QLabel("This prompt guides the AI to extract character names, terms, and titles from the text:")
         glossary_prompt_frame_layout.addWidget(desc_label)
         
-        placeholder_line = QLineEdit("Available placeholders: {fields}, {fields1}, {language}, {entries}, {min_frequency}, {max_names}, {max_titles}, {marker},  Separator: \\x1F")
+        placeholder_line = QLineEdit("Available placeholders: {fields}, {fields1}, {language}, {entries}, {min_frequency}, {max_names}, {max_titles}, {marker}, {gender_instruction},  Separator: \\x1F")
         placeholder_line.setReadOnly(True)
         placeholder_line.setFrame(False)
         placeholder_line.setCursorPosition(0)
@@ -3135,7 +3137,9 @@ CRITICAL EXTRACTION RULES:
             "{min_frequency} -&gt; minimum term frequency\n"
             "{max_names} -&gt; max character names\n"
             "{max_titles} -&gt; max titles\n"
-            "{marker} -&gt; context window marker count"
+            "{marker} -&gt; context window marker count\n"
+            "{gender_instruction} -&gt; inserts dynamic gender rules based on which entry types\n"
+            "                      have 'has_gender' enabled; blank if none do"
             "</pre></qt>"
         )
         glossary_prompt_frame_layout.addWidget(placeholder_line)

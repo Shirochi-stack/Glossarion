@@ -5298,7 +5298,7 @@ class GlossarionWeb:
                                             "Extraction Template (Use placeholders: {language}, {min_frequency}, "
                                             "{max_names}, {max_titles}, {description_mandatory}, "
                                             "{description_detailed}, {description_in_language}, "
-                                            "{description_excluded_note})"
+                                            "{description_excluded_note}, {gender_instruction})"
                                         ),
                                         lines=10,
                                         value=self.get_config_value('manual_glossary_prompt3',
