@@ -1670,8 +1670,7 @@ Columns and entry types in this exact order provided:
 
 {fields}
 
-For character entries, determine gender from context, leave empty if context is insufficient.
-For non-character entries, leave gender empty.
+{gender_instruction}
 {description_mandatory}
 IMPORTANT: Use commas to separate columns. Wrap a field value in double quotes ONLY when the value itself contains a comma.
 
@@ -3151,8 +3150,7 @@ CRITICAL EXTRACTION RULES:
 
 You must strictly return ONLY CSV format with columns separated by commas.
 Columns in this exact order: type,raw_name,translated_name,gender,description
-For character entries, determine gender from context, leave empty if context is insufficient.
-For non-character entries, leave gender empty.
+{gender_instruction}
 The description column is optional and can contain brief context (role, location, significance).
 IMPORTANT: Use commas to separate columns. Wrap a field value in double quotes ONLY when the value itself contains a comma.
 
