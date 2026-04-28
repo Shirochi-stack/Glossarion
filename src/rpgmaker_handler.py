@@ -1136,8 +1136,10 @@ def parse_translated_chunk(response: str, chunk: Dict) -> Dict[str, str]:
                 clean = re.sub(r'^\d+[.)\]]\s*', '', line)
                 translations[keys[j]] = _clean_translation(clean)
 
-    # Filter out empty/whitespace-only translations
-    translations = {k: v for k, v in translations.items() if v and v.strip()}
+    # Filter out empty/whitespace-only AND escape-code-only translations
+    # (AI sometimes returns bare \c, \n[1] etc. which render blank in-game)
+    translations = {k: v for k, v in translations.items()
+                    if v and v.strip() and not _is_escape_only(v)}
 
     # Reattach escape code prefixes/suffixes that were stripped before sending
     escape_map = chunk.get("_escape_map", {})
@@ -1279,16 +1281,16 @@ def apply_translations(data_dir: str, trans_map_path: str,
                 trans_data[fn][key]["translated"] = ""
         trans_map_dirty = True
 
-    # Also detect empty/whitespace translations that slipped into the map
-    # (e.g. from older runs).
+    # Also detect empty/whitespace/escape-code-only translations that slipped
+    # into the map (e.g. from older runs).
     empty_translation_keys = []
     for fn, entries in trans_data.items():
         for key, entry in entries.items():
             translated = entry.get("translated", "")
             if not isinstance(translated, str) or not translated:
                 continue
-            # Whitespace-only
-            if translated and not translated.strip():
+            # Whitespace-only or escape-code-only
+            if not translated.strip() or _is_escape_only(translated):
                 empty_translation_keys.append((fn, key))
                 entry["translated"] = ""
                 trans_map_dirty = True
@@ -1316,7 +1318,7 @@ def apply_translations(data_dir: str, trans_map_path: str,
                 # (from older runs where these weren't filtered)
                 bad_progress_keys = [
                     k for k, v in progress_data.items()
-                    if isinstance(v, str) and not v.strip()
+                    if isinstance(v, str) and (not v.strip() or _is_escape_only(v))
                 ]
                 for k in bad_progress_keys:
                     del progress_data[k]
@@ -2796,13 +2798,14 @@ def process_game(exe_path: str, log: Callable = print,
 
     # Load previous progress
     progress = load_progress(game_dir)
-    # Scrub empty-valued entries from previous runs
-    empty_keys = [k for k, v in progress.items() if not v or not v.strip()]
-    if empty_keys:
-        for k in empty_keys:
+    # Scrub empty-valued and escape-code-only entries from previous runs
+    bad_keys = [k for k, v in progress.items()
+                if isinstance(v, str) and (not v or not v.strip() or _is_escape_only(v))]
+    if bad_keys:
+        for k in bad_keys:
             del progress[k]
         save_progress(game_dir, progress)
-        log(f"🧹 Cleaned {len(empty_keys)} empty translations from progress")
+        log(f"🧹 Cleaned {len(bad_keys)} invalid translations from progress (empty/escape-code-only)")
     if progress:
         log(f"📋 Resuming: {len(progress)} strings already translated")
 
