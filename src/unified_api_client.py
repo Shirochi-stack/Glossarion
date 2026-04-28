@@ -11709,7 +11709,8 @@ class UnifiedClient:
                 except Exception:
                     _label = 'request'
                     _ctx = 'translation'
-                self._debug_log(f"📤 [{thread_name}] Queued {_label} ({_ctx}) — Sending API call in {sleep_time:.1f}s")
+                _fmt = f"{sleep_time:.1f}" if sleep_time >= 1.0 else f"{sleep_time:.2f}"
+                self._debug_log(f"📤 [{thread_name}] Queued {_label} ({_ctx}) — Sending API call in {_fmt}s")
             
             elapsed = 0.0
             step = 0.1
