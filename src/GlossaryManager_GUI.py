@@ -503,26 +503,15 @@ class GlossaryManagerMixin:
         # Main layout
         main_layout = QVBoxLayout(dialog)
         
-        # Create scroll area
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        
-        # Scrollable widget and layout
-        scrollable_widget = QWidget()
-        scrollable_layout = QVBoxLayout(scrollable_widget)
-        scroll_area.setWidget(scrollable_widget)
-        main_layout.addWidget(scroll_area)
-        
-        # Create notebook for tabs
+        # Create notebook for tabs (placed directly in main_layout — individual tabs
+        # that need scrolling wrap their own content in a QScrollArea)
         notebook = QTabWidget()
         # Prevent wheel from switching tabs, but keep wheel events working inside tab contents
         class NoWheelTabBar(QTabBar):
             def wheelEvent(self, event):
                 event.ignore()
         notebook.setTabBar(NoWheelTabBar())
-        scrollable_layout.addWidget(notebook)
+        main_layout.addWidget(notebook)
         
         # Create and add tabs
         tabs = [
@@ -532,9 +521,21 @@ class GlossaryManagerMixin:
         ]
         
         for tab_name, setup_method in tabs:
-            tab_widget = QWidget()
-            notebook.addTab(tab_widget, tab_name)
-            setup_method(tab_widget)
+            if tab_name == "Glossary Editor":
+                # Glossary Editor gets its own non-scrolling tab so the tree
+                # fills available space without double-scroll issues
+                tab_widget = QWidget()
+                notebook.addTab(tab_widget, tab_name)
+                setup_method(tab_widget)
+            else:
+                # Other tabs: wrap in scroll area so long settings pages scroll
+                tab_scroll = QScrollArea()
+                tab_scroll.setWidgetResizable(True)
+                tab_scroll.setFrameShape(QScrollArea.NoFrame)
+                tab_inner = QWidget()
+                tab_scroll.setWidget(tab_inner)
+                notebook.addTab(tab_scroll, tab_name)
+                setup_method(tab_inner)
         
         # Re-run glossary editor path resolution when switching to Glossary Editor tab
         try:
@@ -4133,7 +4134,7 @@ CRITICAL EXTRACTION RULES:
 
         content_frame = QGroupBox("Glossary Entries")
         content_frame_layout = QVBoxLayout(content_frame)
-        editor_layout.addWidget(content_frame)
+        editor_layout.addWidget(content_frame, 1)  # stretch=1 so tree fills available space
 
         # Create tree widget
         self.glossary_tree = QTreeWidget()
