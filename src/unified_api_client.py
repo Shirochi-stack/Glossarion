@@ -683,44 +683,53 @@ setup_http_logging()
 _payloads_resolved_dir = None  # Cached resolved payloads directory
 _PAYLOADS_DISABLED = False  # Set True when even fallback fails
 
+_payloads_lock = threading.Lock()
+
 def _payloads_dir() -> str:
     global _payloads_resolved_dir, _PAYLOADS_DISABLED
     if _payloads_resolved_dir is not None:
         return _payloads_resolved_dir
-    # Resolve base directory: next to the exe (frozen) or next to this script (dev).
-    # NEVER rely on CWD — in PyInstaller one-file builds the CWD is typically
-    # System32, Downloads, or wherever the user double-clicked, not the exe dir.
-    if getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
-        _base = os.path.dirname(os.path.abspath(sys.executable))
-    else:
-        _base = os.path.dirname(os.path.abspath(__file__))
-    _candidate = os.path.join(_base, "Payloads")
-    try:
-        os.makedirs(_candidate, exist_ok=True)
-        # Verify we can actually write there
-        _test = os.path.join(_candidate, ".write_test")
-        with open(_test, "w") as _f:
-            _f.write("ok")
-        os.remove(_test)
-        _payloads_resolved_dir = _candidate
-        logger.info(f"Payloads directory: {_payloads_resolved_dir}")
+    with _payloads_lock:
+        # Double-check after acquiring lock (another thread may have resolved it)
+        if _payloads_resolved_dir is not None:
+            return _payloads_resolved_dir
+        # Resolve base directory: next to the exe (frozen) or next to this script (dev).
+        # NEVER rely on CWD — in PyInstaller one-file builds the CWD is typically
+        # System32, Downloads, or wherever the user double-clicked, not the exe dir.
+        if getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
+            _base = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            _base = os.path.dirname(os.path.abspath(__file__))
+        _candidate = os.path.join(_base, "Payloads")
+        try:
+            os.makedirs(_candidate, exist_ok=True)
+            # Verify we can actually write there (unique name to avoid thread races)
+            _test = os.path.join(_candidate, f".write_test_{os.getpid()}_{threading.get_ident()}")
+            with open(_test, "w") as _f:
+                _f.write("ok")
+            try:
+                os.remove(_test)
+            except OSError:
+                pass  # Cleanup is best-effort
+            _payloads_resolved_dir = _candidate
+            logger.info(f"Payloads directory: {_payloads_resolved_dir}")
+            return _payloads_resolved_dir
+        except (PermissionError, OSError) as _e:
+            logger.warning(f"Payloads directory: cannot use {_candidate!r} (base={_base!r}): {_e}")
+        # Fallback: use temp directory
+        try:
+            import tempfile
+            fallback = os.path.join(tempfile.gettempdir(), "Glossarion_Payloads")
+            os.makedirs(fallback, exist_ok=True)
+            _payloads_resolved_dir = fallback
+            logger.info(f"Payloads directory: using fallback {fallback} (primary {_candidate!r} not writable)")
+            return _payloads_resolved_dir
+        except Exception:
+            pass
+        # Last resort: disable payload saving entirely
+        _PAYLOADS_DISABLED = True
+        _payloads_resolved_dir = "Payloads"  # Return something, callers should check _PAYLOADS_DISABLED
         return _payloads_resolved_dir
-    except (PermissionError, OSError) as _e:
-        logger.warning(f"Payloads directory: cannot use {_candidate!r} (base={_base!r}, frozen={getattr(sys, 'frozen', False)}, exe={getattr(sys, 'executable', '?')}): {_e}")
-    # Fallback: use temp directory
-    try:
-        import tempfile
-        fallback = os.path.join(tempfile.gettempdir(), "Glossarion_Payloads")
-        os.makedirs(fallback, exist_ok=True)
-        _payloads_resolved_dir = fallback
-        logger.info(f"Payloads directory: using fallback {fallback} (primary {_candidate!r} not writable)")
-        return _payloads_resolved_dir
-    except Exception:
-        pass
-    # Last resort: disable payload saving entirely
-    _PAYLOADS_DISABLED = True
-    _payloads_resolved_dir = "Payloads"  # Return something, callers should check _PAYLOADS_DISABLED
-    return _payloads_resolved_dir
 
 def _redact_headers_for_dump(headers: dict) -> dict:
     try:
