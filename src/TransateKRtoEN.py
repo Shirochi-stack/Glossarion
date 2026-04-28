@@ -8181,7 +8181,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     except Exception:
         api_delay = 2.0
 
-    enforce_delay = max(thread_delay, api_delay)
+    enforce_delay = thread_delay  # Only space out thread launches; _apply_api_call_stagger handles the full API delay
 
     if enforce_delay > 0:
         global _translation_thread_submit_lock, _translation_last_thread_submit
