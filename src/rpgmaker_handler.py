@@ -1166,11 +1166,35 @@ def parse_translated_chunk(response: str, chunk: Dict) -> Dict[str, str]:
     translations = {}
     keys = chunk["keys"]
 
-    # Split on [N] tag boundaries, capturing the number.
-    # Uses negative lookbehind for backslash to avoid splitting on RPG Maker
-    # escape codes like \c[27], \n[50], \v[261], \N[1] etc.
-    # Safe because \d+ only matches digits, so [Common Equipment] etc. won't match.
-    parts = re.split(r'(?<![a-zA-Z])\[(\d+)\]\s*', response.strip())
+    # Two-step split: protect escape codes, then split on [N] markers.
+    #
+    # Problem: RPG Maker escape codes like \c[27], \v[261], \N[1] and
+    # conditional codes like s[140], v[101] all contain [digits] that
+    # could be mistaken for entry markers.
+    #
+    # Solution: temporarily replace known false-positive patterns with
+    # placeholders, split freely, then restore.
+    _PH = "\x00#"  # placeholder prefix
+    _protected = []
+
+    def _protect(m):
+        _protected.append(m.group())
+        return f"{_PH}{len(_protected) - 1}\x00"
+
+    work = response.strip()
+    # Protect \X[N] — RPG Maker escape codes (\c[27], \v[261], \N[1], etc.)
+    work = re.sub(r'\\[a-zA-Z]\[\d+\]', _protect, work)
+    # Protect single-letter conditional codes preceded by non-letter
+    work = re.sub(r'(?<![a-zA-Z])([a-zA-Z])\[(\d+)\]', _protect, work)
+
+    parts = re.split(r'\[(\d+)\]\s*', work)
+
+    # Restore placeholders in every part
+    def _restore(text):
+        return re.sub(r'\x00#(\d+)\x00',
+                      lambda m: _protected[int(m.group(1))], text)
+
+    parts = [_restore(p) for p in parts]
 
     if len(parts) > 2:
         # First pass: collect raw translations
