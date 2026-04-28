@@ -8310,12 +8310,12 @@ class UnifiedClient:
     
     def _save_stats(self):
         """Save statistics to file"""
-        stats_file = "api_stats.json"
         try:
+            stats_file = os.path.join(_payloads_dir(), "api_stats.json")
             with open(stats_file, 'w') as f:
                 json.dump(self.stats, f, indent=2)
-        except Exception as e:
-            print(f"Failed to save stats: {e}")
+        except Exception:
+            pass  # Best-effort, don't spam console
     
     def _save_failed_request(self, messages, error, context, response=None):
         """Save failed requests for debugging"""
