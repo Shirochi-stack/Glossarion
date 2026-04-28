@@ -2585,9 +2585,7 @@ class MultiAPIKeyDialog(QDialog):
             QMessageBox.critical(self, "Error", "Please enter a model name")
             return
         
-        if not api_key and _model_needs_api_key(model):
-            QMessageBox.critical(self, "Error", "Please enter an API key (not required for authgpt/, authgem/, authgem-vertex/, vertex/, google-translate, deepl)")
-            return
+
         
         # Get current fallback keys
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
@@ -5132,9 +5130,7 @@ class MultiAPIKeyDialog(QDialog):
             QMessageBox.critical(self, "Error", "Please enter a model name")
             return
         
-        if not api_key and _model_needs_api_key(model):
-            QMessageBox.critical(self, "Error", "Please enter an API key (not required for authgpt/, authgem/, authgem-vertex/, vertex/, google-translate, deepl)")
-            return
+
         
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
         
@@ -6549,9 +6545,7 @@ class MultiAPIKeyDialog(QDialog):
             QMessageBox.critical(self, "Error", "Please enter a model name")
             return
         
-        if not api_key and _model_needs_api_key(model):
-            QMessageBox.critical(self, "Error", "Please enter an API key (not required for authgpt/, authgem/, authgem-vertex/, vertex/, google-translate, deepl)")
-            return
+
         
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
         
@@ -7807,9 +7801,7 @@ class MultiAPIKeyDialog(QDialog):
             QMessageBox.critical(self, "Error", "Please enter a model name")
             return
         
-        if not api_key and _model_needs_api_key(model):
-            QMessageBox.critical(self, "Error", "Please enter an API key (not required for authgpt/, authgem/, authgem-vertex/, vertex/, google-translate, deepl)")
-            return
+
         
         # Per-key output token limit and temperature default to None (global)
         # Users can set these later via the right-click context menu
