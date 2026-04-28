@@ -11672,30 +11672,43 @@ class UnifiedClient:
         # _update_stagger_timestamp for threads that had already received their
         # API response, causing conversion+saving to be deferred in bulk.
         sleep_time = 0.0
+        time_since_last = 0.0
         with self.__class__._api_stagger_lock:
             current_time = time.time()
+            gap_since_last = current_time - self.__class__._last_api_call_start
             
-            # Calculate next available slot (ensures exact intervals)
-            next_available = self.__class__._last_api_call_start + api_delay
-            
-            if current_time < next_available:
-                # Reserve this slot (needed so simultaneous batch threads
-                # get staggered, not all sleep_time=0)
-                self.__class__._last_api_call_start = next_available
-                
-                try:
-                    sleep_time = max(0.0, float(next_available - current_time))
-                    # Ceil to next whole second for clean log output (still respects rate limit)
-                    # Only for delays >= 1s; sub-second delays stay precise
-                    if api_delay >= 1.0:
-                        import math
-                        sleep_time = math.ceil(sleep_time)
-                except Exception:
-                    sleep_time = float(api_delay)
-            else:
-                # Immediate — capture real gap since last call for display
-                time_since_last = current_time - self.__class__._last_api_call_start
+            # Detect stale timestamp from a previous batch run:
+            # if the last call was more than 2x the delay ago, this is
+            # effectively the first call of a new batch — fire immediately.
+            if gap_since_last > api_delay * 2:
                 self.__class__._last_api_call_start = current_time
+                time_since_last = gap_since_last
+                # sleep_time stays 0 → immediate
+            else:
+                # Calculate next available slot (ensures exact intervals)
+                next_available = self.__class__._last_api_call_start + api_delay
+                
+                if current_time < next_available:
+                    # Reserve this slot (needed so simultaneous batch threads
+                    # get staggered, not all sleep_time=0)
+                    self.__class__._last_api_call_start = next_available
+                    
+                    try:
+                        sleep_time = max(0.0, float(next_available - current_time))
+                        # Snap to next multiple of api_delay for clean log output
+                        # e.g. 3.2→5, 8.1→10, 18.7→20 with api_delay=5
+                        # Only for delays >= 1s; sub-second delays stay precise
+                        if api_delay >= 1.0:
+                            import math
+                            sleep_time = math.ceil(sleep_time / api_delay) * api_delay
+                            # Update the reserved slot to match the snapped time
+                            self.__class__._last_api_call_start = current_time + sleep_time
+                    except Exception:
+                        sleep_time = float(api_delay)
+                else:
+                    # Immediate — capture real gap since last call for display
+                    time_since_last = current_time - self.__class__._last_api_call_start
+                    self.__class__._last_api_call_start = current_time
         # Lock released — sleep outside lock (interruptible)
         
         # For queued requests: flush deferred logs and show "Queued" BEFORE sleeping
