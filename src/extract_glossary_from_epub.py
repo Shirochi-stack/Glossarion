@@ -3299,7 +3299,6 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                     client._thread_submission_count = 0
                 client._thread_submission_count += 1
     start_time = time.time()
-    print(f"[BATCH] Starting API call for Chapter {idx+1} at {time.strftime('%H:%M:%S')}")
     
     # Thread-safe payload directory
     thread_name = threading.current_thread().name
