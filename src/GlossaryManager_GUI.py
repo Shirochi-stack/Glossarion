@@ -1620,20 +1620,22 @@ class GlossaryManagerMixin:
         placeholders_line.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
         placeholders_line.setCursorPosition(0)
         placeholders_line.setToolTip(
-            "{fields} -> comma-separated columns/entry types list\n"
-            "{fields1} -> \\x1F-separated columns/entry types list (recommended)\n"
-            "{language} -> target language\n"
-            "{entries} -> enabled custom entry types (comma list with ampersand)\n"
-            "{description_mandatory} -> inserts 'description column is mandatory...' line when\n"
+            "<qt><pre style='white-space: pre; margin: 4px; font-size: 9pt;'>"
+            "{fields} -&gt; comma-separated columns/entry types list\n"
+            "{fields1} -&gt; \\x1F-separated columns/entry types list (recommended)\n"
+            "{language} -&gt; target language\n"
+            "{entries} -&gt; enabled custom entry types (comma list with ampersand)\n"
+            "{description_mandatory} -&gt; inserts 'description column is mandatory...' line when\n"
             "                         'description' is in Custom Fields; stripped otherwise\n"
-            "{description_detailed} -> inserts 'description column must contain detailed...' rule\n"
+            "{description_detailed} -&gt; inserts 'description column must contain detailed...' rule\n"
             "                         when 'description' is in Custom Fields; stripped otherwise\n"
-            "{description_in_language} -> inserts ' and description' (inline) so the 'Critical Requirement'\n"
+            "{description_in_language} -&gt; inserts ' and description' (inline) so the 'Critical Requirement'\n"
             "                          sentence reads 'translated name and description column...'\n"
             "                          when 'description' is in Custom Fields; blank otherwise\n"
-            "{description_excluded_note} -> appends ' (The description column is excluded from this\n"
+            "{description_excluded_note} -&gt; appends ' (The description column is excluded from this\n"
             "                            restriction)' to the REJECT-starters rule when 'description'\n"
             "                            is in Custom Fields; blank otherwise"
+            "</pre></qt>"
         )
         prompt_frame_layout.addWidget(placeholders_line)
         
@@ -3125,7 +3127,18 @@ CRITICAL EXTRACTION RULES:
         placeholder_line.setFrame(False)
         placeholder_line.setCursorPosition(0)
         placeholder_line.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
-        placeholder_line.setToolTip("{fields} -> comma-separated columns/entry types list\n{fields1} -> \\x1F-separated columns/entry types list (recommended)\n{language} -> target language\n{entries} -> enabled custom entry types (comma list with ampersand)\n{min_frequency} -> minimum term frequency\n{max_names} -> max character names\n{max_titles} -> max titles\n{marker} -> context window marker count")
+        placeholder_line.setToolTip(
+            "<qt><pre style='white-space: pre; margin: 4px; font-size: 9pt;'>"
+            "{fields} -&gt; comma-separated columns/entry types list\n"
+            "{fields1} -&gt; \\x1F-separated columns/entry types list (recommended)\n"
+            "{language} -&gt; target language\n"
+            "{entries} -&gt; enabled custom entry types (comma list with ampersand)\n"
+            "{min_frequency} -&gt; minimum term frequency\n"
+            "{max_names} -&gt; max character names\n"
+            "{max_titles} -&gt; max titles\n"
+            "{marker} -&gt; context window marker count"
+            "</pre></qt>"
+        )
         glossary_prompt_frame_layout.addWidget(placeholder_line)
         
         self.auto_prompt_text = QTextEdit()
