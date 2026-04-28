@@ -942,29 +942,55 @@ def create_translation_file(game_dir: str, all_strings: Dict,
     return trans_path
 
 
-def build_translation_chunks(all_strings: Dict, max_chars: int = 4000
-                             ) -> List[Dict]:
+def _get_tiktoken_encoder():
+    """Lazy-load tiktoken encoder (cached after first call)."""
+    if not hasattr(_get_tiktoken_encoder, '_enc'):
+        try:
+            import tiktoken
+            _get_tiktoken_encoder._enc = tiktoken.get_encoding("cl100k_base")
+        except ImportError:
+            _get_tiktoken_encoder._enc = None
+    return _get_tiktoken_encoder._enc
+
+
+def _count_tokens(text: str) -> int:
+    """Count tokens using tiktoken, fallback to char estimate."""
+    enc = _get_tiktoken_encoder()
+    if enc:
+        return len(enc.encode(text))
+    # Fallback: ~1.5 tokens per JP char, ~0.25 tokens per EN char
+    return max(1, len(text) // 2)
+
+
+def build_translation_chunks(all_strings: Dict, max_chars: int = 4000,
+                             max_tokens: int = None) -> List[Dict]:
     """Group extracted strings into chunks for batch translation.
 
     Each chunk is sent as one API request (like a "chapter").
     Returns list of dicts with 'file', 'keys', 'texts' fields.
+
+    If max_tokens is provided, uses tiktoken for accurate token counting
+    and ignores max_chars. Otherwise falls back to max_chars.
     """
+    use_tokens = max_tokens is not None
+    budget = max_tokens if use_tokens else max_chars
+
     chunks = []
     current_chunk = {"file": "", "keys": [], "texts": []}
-    current_len = 0
+    current_cost = 0
 
     for filename, strings in all_strings.items():
         for key, text in strings.items():
-            text_len = len(text)
-            if current_len + text_len > max_chars and current_chunk["keys"]:
+            cost = _count_tokens(text) if use_tokens else len(text)
+            if current_cost + cost > budget and current_chunk["keys"]:
                 chunks.append(current_chunk)
                 current_chunk = {"file": "", "keys": [], "texts": []}
-                current_len = 0
+                current_cost = 0
 
             current_chunk["file"] = filename
             current_chunk["keys"].append(f"{filename}::{key}")
             current_chunk["texts"].append(text)
-            current_len += text_len
+            current_cost += cost
 
     if current_chunk["keys"]:
         chunks.append(current_chunk)
