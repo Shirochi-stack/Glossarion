@@ -703,16 +703,17 @@ def _payloads_dir() -> str:
             _f.write("ok")
         os.remove(_test)
         _payloads_resolved_dir = _candidate
+        logger.info(f"Payloads directory: {_payloads_resolved_dir}")
         return _payloads_resolved_dir
-    except (PermissionError, OSError):
-        pass
+    except (PermissionError, OSError) as _e:
+        logger.warning(f"Payloads directory: cannot use {_candidate!r} (base={_base!r}, frozen={getattr(sys, 'frozen', False)}, exe={getattr(sys, 'executable', '?')}): {_e}")
     # Fallback: use temp directory
     try:
         import tempfile
         fallback = os.path.join(tempfile.gettempdir(), "Glossarion_Payloads")
         os.makedirs(fallback, exist_ok=True)
         _payloads_resolved_dir = fallback
-        logger.info(f"Payloads directory: using fallback {fallback} (CWD not writable)")
+        logger.info(f"Payloads directory: using fallback {fallback} (primary {_candidate!r} not writable)")
         return _payloads_resolved_dir
     except Exception:
         pass
