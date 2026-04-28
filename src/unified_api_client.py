@@ -11685,6 +11685,9 @@ class UnifiedClient:
                 
                 try:
                     sleep_time = max(0.0, float(next_available - current_time))
+                    # Ceil to next whole second for clean log output (still respects rate limit)
+                    import math
+                    sleep_time = math.ceil(sleep_time)
                 except Exception:
                     sleep_time = float(api_delay)
             else:
