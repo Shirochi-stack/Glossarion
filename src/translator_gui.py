@@ -13190,6 +13190,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     del progress[k]
                 rpgmaker_handler.save_progress(game_dir, progress)
                 self.append_log(f"🧹 Cleaned {len(bad_keys)} invalid translations from progress")
+
+            # Detect stale translations from previous runs where originals
+            # were corrupted (now restored from backup).
+            stale_count = rpgmaker_handler.scrub_stale_progress(
+                progress, all_strings, self.append_log)
+            if stale_count:
+                rpgmaker_handler.save_progress(game_dir, progress)
+
             if progress:
                 self.append_log(f"📋 Resuming: {len(progress)} strings already translated")
 

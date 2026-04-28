@@ -1015,6 +1015,74 @@ def _is_escape_only(text: str) -> bool:
     return not _ESC_PATTERN.sub('', text).strip()
 
 
+# Regex to detect text that contains Japanese characters (hiragana/katakana/CJK)
+_HAS_JAPANESE = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]')
+
+
+def scrub_stale_progress(progress: Dict, all_strings: Dict,
+                         log: Callable = print) -> int:
+    """Detect and remove stale progress entries whose original text changed.
+
+    When originals are restored from backup, the extracted text changes
+    back to Japanese while progress may still hold translations that were
+    made from corrupted (English) originals.  These stale translations
+    would be silently reapplied, breaking the game.
+
+    Detection: for each progress key, look up the current original text
+    from all_strings.  If the original contains Japanese characters but
+    the progress translation is suspiciously short compared to the
+    original, or lacks any target-language text, invalidate it.
+
+    Returns the number of invalidated entries.
+    """
+    # Build lookup: progress_key -> original text
+    originals = {}
+    for filename, strings in all_strings.items():
+        for key, text in strings.items():
+            pkey = f"{filename}::{key}"
+            originals[pkey] = text
+
+    stale_keys = []
+    for pkey, translated in list(progress.items()):
+        if not isinstance(translated, str) or not translated:
+            continue
+        original = originals.get(pkey)
+        if not original:
+            continue  # key no longer exists in extraction — harmless orphan
+
+        # If original has Japanese but translation is suspiciously bad:
+        if _HAS_JAPANESE.search(original):
+            # 1. Translation is far too short relative to original
+            #    (e.g. orig=28chars JP, trans=2chars "On")
+            #    Japanese→English typically produces 0.6-2x char ratio.
+            #    Anything below 0.35x for text >10 chars is suspicious.
+            orig_len = len(original.strip())
+            trans_len = len(translated.strip())
+            if orig_len > 10 and trans_len < orig_len * 0.35:
+                stale_keys.append(pkey)
+                continue
+
+            # 2. Translation is identical to original (was never translated)
+            if translated.strip() == original.strip():
+                stale_keys.append(pkey)
+                continue
+
+            # 3. Translation is mostly escape codes with trivial text
+            #    (e.g. "Protagonist is \\v", "icon\\c", "boobs\\c")
+            real_text = _ESC_PATTERN.sub('', translated).strip()
+            if orig_len > 15 and real_text and len(real_text) < orig_len * 0.35:
+                stale_keys.append(pkey)
+                continue
+
+    if stale_keys:
+        for k in stale_keys:
+            del progress[k]
+        log(f"🔄 Invalidated {len(stale_keys)} stale translations "
+            f"(originals changed after backup restore)")
+
+    return len(stale_keys)
+
+
 def format_chunk_for_translation(chunk: Dict) -> str:
     """Format a chunk into a numbered list for the AI to translate.
 
@@ -2815,6 +2883,13 @@ def process_game(exe_path: str, log: Callable = print,
             del progress[k]
         save_progress(game_dir, progress)
         log(f"🧹 Cleaned {len(bad_keys)} invalid translations from progress (empty/escape-code-only)")
+
+    # Detect stale translations from previous runs where originals
+    # were corrupted (now restored from backup).
+    stale_count = scrub_stale_progress(progress, all_strings, log)
+    if stale_count:
+        save_progress(game_dir, progress)
+
     if progress:
         log(f"📋 Resuming: {len(progress)} strings already translated")
 
