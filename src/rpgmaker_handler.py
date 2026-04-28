@@ -848,21 +848,11 @@ def extract_all(game_dir: str, log: Callable = print
     log(f"🎮 Detected RPG Maker {version.upper()}")
     log(f"📁 Data directory: {data_dir}")
 
-    # If backups exist but progress is gone/empty, restore originals first.
-    # This prevents re-extracting from half-patched files after a reset.
+    # Always restore originals before extracting so the translation map is
+    # built from clean Japanese data, never from previously-patched files.
     backup_dir = os.path.join(game_dir, "GTool_Translation", "originals_backup")
-    progress_path = get_progress_path(game_dir)
-    progress_exists = os.path.exists(progress_path)
-    progress_empty = True
-    if progress_exists:
-        try:
-            with open(progress_path, 'r', encoding='utf-8') as f:
-                progress_data = json.load(f)
-                progress_empty = len(progress_data) == 0
-        except Exception:
-            progress_empty = True
 
-    if os.path.isdir(backup_dir) and (not progress_exists or progress_empty):
+    if os.path.isdir(backup_dir):
         # Walk backup dir recursively to restore files in their original subfolder structure
         backed_files = []
         for root, _dirs, files in os.walk(backup_dir):
@@ -1183,6 +1173,25 @@ def apply_translations(data_dir: str, trans_map_path: str,
 
     backup_dir = os.path.join(os.path.dirname(trans_map_path), "originals_backup")
     os.makedirs(backup_dir, exist_ok=True)
+
+    # Always restore originals before patching to prevent compound corruption.
+    # Without this, re-running patches already-translated files, stacking errors.
+    if os.path.isdir(backup_dir):
+        backed_files = []
+        for root, _dirs, files in os.walk(backup_dir):
+            for fn in files:
+                src = os.path.join(root, fn)
+                rel = os.path.relpath(src, backup_dir)
+                backed_files.append((src, rel))
+        if backed_files:
+            log(f"🔄 Restoring {len(backed_files)} original files from backup before patching...")
+            for src, rel in backed_files:
+                if os.path.dirname(rel):
+                    dst = os.path.join(game_dir, rel)
+                else:
+                    dst = os.path.join(data_dir, rel)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
 
     # For binary formats, we can't patch in-place easily — generate a patch file
     if version and version not in (RPGMakerVersion.MV, RPGMakerVersion.MZ):
