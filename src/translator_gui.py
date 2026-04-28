@@ -13196,6 +13196,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if stale_count:
                 rpgmaker_handler.save_progress(game_dir, progress)
 
+            # Ensure identical originals get the same translation
+            # (e.g. '留奈' must always be 'Runa', never sometimes 'Luna')
+            consistency_fixes = rpgmaker_handler.enforce_translation_consistency(
+                progress, all_strings, self.append_log)
+            if consistency_fixes:
+                rpgmaker_handler.save_progress(game_dir, progress)
+
             if progress:
                 self.append_log(f"📋 Resuming: {len(progress)} strings already translated")
 

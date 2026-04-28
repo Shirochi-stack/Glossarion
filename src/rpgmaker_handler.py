@@ -180,12 +180,24 @@ def _extract_event_strings(commands: list) -> List[Tuple[str, str]]:
                 if isinstance(choice, str) and _is_translatable(choice):
                     results.append((f"choice_{i}_{ci}", choice))
 
-        # NOTE: ChangeName (320), ChangeNickname (324), and CondBranch
-        # actor name checks (111 type 4) are intentionally NOT extracted.
-        # These are internal game-logic identifiers — the game sets actor
-        # names via ChangeName and compares them in CondBranch.  Translating
-        # them risks inconsistency (e.g. 留奈 → "Runa" vs "Luna") which
-        # breaks conditional logic and prevents images/scenes from triggering.
+        elif code == _NAME_CODE and len(params) >= 2:
+            # Change Name — params = [actor_id, new_name]
+            name = params[1]
+            if isinstance(name, str) and _is_translatable(name):
+                results.append((f"chname_{i}", name))
+
+        elif code == _NICKNAME_CODE and len(params) >= 2:
+            # Change Nickname — params = [actor_id, new_nickname]
+            nick = params[1]
+            if isinstance(nick, str) and _is_translatable(nick):
+                results.append((f"chnick_{i}", nick))
+
+        elif code == _COND_CODE and len(params) >= 4 and params[0] == 4:
+            # Conditional Branch subtype 4: Actor name check
+            # params = [4, actor_id, condition_type, name_string]
+            # condition_type 1 = "Name is" comparison
+            if params[2] == 1 and isinstance(params[3], str) and _is_translatable(params[3]):
+                results.append((f"cond_{i}", params[3]))
 
         i += 1
 
@@ -1096,6 +1108,59 @@ def scrub_stale_progress(progress: Dict, all_strings: Dict,
 
     return len(stale_keys)
 
+
+def enforce_translation_consistency(progress: Dict, all_strings: Dict,
+                                     log: Callable = print) -> int:
+    """Ensure identical Japanese originals always get the same translation.
+
+    RPG Maker games reuse the same text in ChangeName (320) and
+    CondBranch (111) commands.  If the AI translates '留奈' as 'Runa'
+    in one spot and 'Luna' in another, conditional logic breaks.
+
+    Strategy: for each unique original text, pick the most frequent
+    translation (majority vote) and overwrite all divergent entries.
+
+    Returns the number of entries corrected.
+    """
+    # Build: original_text -> {translation: [pkey, ...]}
+    originals = {}
+    for filename, strings in all_strings.items():
+        for key, text in strings.items():
+            pkey = f"{filename}::{key}"
+            originals[pkey] = text
+
+    # Group progress entries by their original text
+    from collections import Counter, defaultdict
+    text_groups = defaultdict(list)  # original -> [(pkey, translation), ...]
+    for pkey, translated in progress.items():
+        if not isinstance(translated, str) or not translated.strip():
+            continue
+        original = originals.get(pkey)
+        if not original:
+            continue
+        text_groups[original].append((pkey, translated.strip()))
+
+    corrected = 0
+    for original, entries in text_groups.items():
+        if len(entries) < 2:
+            continue
+        # Count translation frequencies
+        translations = [t for _, t in entries]
+        counts = Counter(translations)
+        if len(counts) <= 1:
+            continue  # all consistent
+        # Pick the most common translation
+        best_translation = counts.most_common(1)[0][0]
+        for pkey, current in entries:
+            if current != best_translation:
+                progress[pkey] = best_translation
+                corrected += 1
+
+    if corrected:
+        log(f"🔗 Enforced translation consistency: {corrected} entries "
+            f"aligned to majority translation")
+
+    return corrected
 
 def format_chunk_for_translation(chunk: Dict) -> str:
     """Format a chunk into a numbered list for the AI to translate.
