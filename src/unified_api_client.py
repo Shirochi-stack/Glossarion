@@ -5371,7 +5371,7 @@ class UnifiedClient:
                         api_key=api_key_snapshot,
                         base_url=chutes_base_url
                     )
-                defer_batch_log(f"chutes client configured with endpoint: {chutes_base_url}")
+                defer_batch_log(f"🔌 chutes client configured with endpoint: {chutes_base_url}")
             else:
                 logger.info("chutes will use HTTP API")
         
@@ -5540,7 +5540,7 @@ class UnifiedClient:
                         api_key=api_key_snapshot,
                         base_url=base_url
                     )
-                defer_batch_log(f"DeepSeek client configured with endpoint: {base_url}")
+                defer_batch_log(f"🔌 DeepSeek client configured with endpoint: {base_url}")
         
         elif self.client_type == 'groq':
             if openai is not None:
@@ -5556,7 +5556,7 @@ class UnifiedClient:
                         api_key=api_key_snapshot,
                         base_url=base_url
                     )
-                defer_batch_log(f"Groq client configured with endpoint: {base_url}")
+                defer_batch_log(f"🔌 Groq client configured with endpoint: {base_url}")
         
         elif self.client_type == 'fireworks':
             if openai is not None:
@@ -5569,7 +5569,7 @@ class UnifiedClient:
                         api_key=api_key_snapshot,
                         base_url=base_url
                     )
-                defer_batch_log(f"Fireworks client configured with endpoint: {base_url}")
+                defer_batch_log(f"🔌 Fireworks client configured with endpoint: {base_url}")
         
         elif self.client_type == 'sambanova':
             if openai is not None:
@@ -5582,7 +5582,7 @@ class UnifiedClient:
                         api_key=api_key_snapshot,
                         base_url=base_url
                     )
-                defer_batch_log(f"SambaNova client configured with endpoint: {base_url}")
+                defer_batch_log(f"🔌 SambaNova client configured with endpoint: {base_url}")
 
         elif self.client_type == 'xai':
             if openai is not None:
@@ -5595,7 +5595,7 @@ class UnifiedClient:
                         api_key=api_key_snapshot,
                         base_url=base_url
                     )
-                defer_batch_log(f"xAI client configured with endpoint: {base_url}")
+                defer_batch_log(f"🔌 xAI client configured with endpoint: {base_url}")
         elif self.client_type == 'nvidia':
             if openai is not None:
                 if base_url is None:
@@ -5606,7 +5606,7 @@ class UnifiedClient:
                         api_key=api_key_snapshot,
                         base_url=base_url
                     )
-                defer_batch_log(f"NVIDIA client configured with endpoint: {base_url}")
+                defer_batch_log(f"🔌 NVIDIA client configured with endpoint: {base_url}")
  
         elif self.client_type == 'deepl' or model_snapshot.startswith('deepl'):
             self.client_type = 'deepl'
