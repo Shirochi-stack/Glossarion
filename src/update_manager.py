@@ -37,11 +37,9 @@ class UpdateCheckWorker(QThread):
     def run(self):
         """Run update check in background thread"""
         try:
-            print("[DEBUG] Worker thread starting update check...")
             result = self.update_manager._check_for_updates_internal(self.silent, self.force_show)
             self.update_checked.emit(*result)
         except Exception as e:
-            print(f"[DEBUG] Worker thread error: {e}")
             self.error_occurred.emit(str(e))
 
 class DownloadWorker(QObject):
@@ -513,11 +511,9 @@ class UpdateManager(QObject):
     def check_for_updates_async(self, silent=True, force_show=False):
         """Run check_for_updates in background using QThread (PySide6 compatible).
         """
-        print("[DEBUG] Starting background update check with QThread")
         
         # Prevent concurrent update checks
         if self._check_in_progress:
-            print("[DEBUG] Update check already in progress, skipping...")
             return None
             
         self._check_in_progress = True
@@ -537,13 +533,11 @@ class UpdateManager(QObject):
     
     def _on_update_checked(self, update_available, release_data):
         """Handle update check results from worker thread"""
-        print(f"[DEBUG] Update check completed: available={update_available}")
         if update_available or self.worker.force_show:
             self.show_update_dialog()
     
     def _on_update_error(self, error_msg):
         """Handle update check error from worker thread"""
-        print(f"[DEBUG] Update check error: {error_msg}")
         # Close loading dialog first
         self._close_loading_dialog()
         if not self.worker.silent:
@@ -555,7 +549,6 @@ class UpdateManager(QObject):
     
     def _on_update_finished(self):
         """Clean up after update check is finished"""
-        print("[DEBUG] Update check finished, resetting progress flag")
         self._check_in_progress = False
         # Close loading dialog if it exists
         self._close_loading_dialog()
@@ -570,12 +563,10 @@ class UpdateManager(QObject):
         Returns:
             Tuple of (update_available, release_info)
         """
-        print("[DEBUG] _check_for_updates_internal called")
         try:
             # Check if we need to skip the check due to cache
             current_time = time.time()
             if not force_show and (current_time - self._last_check_time) < self._check_cache_duration:
-                print(f"[DEBUG] Skipping update check - cache still valid for {int(self._check_cache_duration - (current_time - self._last_check_time))} seconds")
                 return False, None
             
             # Check if this version was previously skipped
@@ -592,7 +583,6 @@ class UpdateManager(QObject):
             
             for attempt in range(max_retries + 1):
                 try:
-                    print(f"[DEBUG] Update check attempt {attempt + 1}/{max_retries + 1}")
                     response = requests.get(self.GITHUB_LATEST_URL, headers=headers, timeout=timeout)
                     response.raise_for_status()
                     break  # Success, exit retry loop

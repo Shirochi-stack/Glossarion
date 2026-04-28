@@ -2089,14 +2089,10 @@ Text to analyze:
             
             # Check for updates on startup if enabled
             auto_check_enabled = self.config.get('auto_update_check', True)
-            print(f"[DEBUG] Auto-update check enabled: {auto_check_enabled}")
             
             if auto_check_enabled:
-                print("[DEBUG] Scheduling update check for 5 seconds from now...")
                 from PySide6.QtCore import QTimer
                 QTimer.singleShot(5000, self._check_updates_on_startup)
-            else:
-                print("[DEBUG] Auto-update check is disabled")
             
             # Show first-time glossary mode selection dialog
             if not self.config.get('glossary_mode_dialog_shown', False):
@@ -2858,15 +2854,11 @@ Text to analyze:
     
     def _check_updates_on_startup(self):
         """Check for updates on startup with debug logging (async)"""
-        print("[DEBUG] Running startup update check...")
         if self.update_manager:
             try:
                 self.update_manager.check_for_updates_async(silent=True)
-                print(f"[DEBUG] Update check dispatched asynchronously")
-            except Exception as e:
-                print(f"[DEBUG] Update check failed to dispatch: {e}")
-        else:
-            print("[DEBUG] Update manager is None")
+            except Exception:
+                pass
         
     def check_for_updates_manual(self):
         """Manually check for updates from the Other Settings dialog"""
