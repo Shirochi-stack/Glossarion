@@ -11704,7 +11704,7 @@ class UnifiedClient:
                 except Exception:
                     _label = 'request'
                     _ctx = 'translation'
-                self._debug_log(f"📤 [{thread_name}] Queued {_label} ({_ctx}) — Sending API call in {api_delay:.1f}s")
+                self._debug_log(f"📤 [{thread_name}] Queued {_label} ({_ctx}) — Sending API call in {sleep_time:.1f}s")
             
             elapsed = 0.0
             step = 0.1
