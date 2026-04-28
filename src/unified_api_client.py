@@ -2968,7 +2968,7 @@ class UnifiedClient:
                     
                     # Only log key assignment for non-glossary keys (glossary rotation is too noisy)
                     if not _is_glossary_pool:
-                        print(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
+                        defer_batch_log(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
                     
                     # Setup client with new key (might need lock if it modifies instance state)
                     self._setup_client()
@@ -5359,7 +5359,7 @@ class UnifiedClient:
                         api_key=api_key_snapshot,
                         base_url=chutes_base_url
                     )
-                logger.info(f"chutes client configured with endpoint: {chutes_base_url}")
+                defer_batch_log(f"chutes client configured with endpoint: {chutes_base_url}")
             else:
                 logger.info("chutes will use HTTP API")
         
@@ -5528,7 +5528,7 @@ class UnifiedClient:
                         api_key=api_key_snapshot,
                         base_url=base_url
                     )
-                logger.info(f"DeepSeek client configured with endpoint: {base_url}")
+                defer_batch_log(f"DeepSeek client configured with endpoint: {base_url}")
         
         elif self.client_type == 'groq':
             if openai is not None:
@@ -5544,7 +5544,7 @@ class UnifiedClient:
                         api_key=api_key_snapshot,
                         base_url=base_url
                     )
-                logger.info(f"Groq client configured with endpoint: {base_url}")
+                defer_batch_log(f"Groq client configured with endpoint: {base_url}")
         
         elif self.client_type == 'fireworks':
             if openai is not None:
@@ -5557,7 +5557,7 @@ class UnifiedClient:
                         api_key=api_key_snapshot,
                         base_url=base_url
                     )
-                logger.info(f"Fireworks client configured with endpoint: {base_url}")
+                defer_batch_log(f"Fireworks client configured with endpoint: {base_url}")
         
         elif self.client_type == 'sambanova':
             if openai is not None:
@@ -5570,7 +5570,7 @@ class UnifiedClient:
                         api_key=api_key_snapshot,
                         base_url=base_url
                     )
-                logger.info(f"SambaNova client configured with endpoint: {base_url}")
+                defer_batch_log(f"SambaNova client configured with endpoint: {base_url}")
 
         elif self.client_type == 'xai':
             if openai is not None:
@@ -5583,7 +5583,7 @@ class UnifiedClient:
                         api_key=api_key_snapshot,
                         base_url=base_url
                     )
-                logger.info(f"xAI client configured with endpoint: {base_url}")
+                defer_batch_log(f"xAI client configured with endpoint: {base_url}")
         elif self.client_type == 'nvidia':
             if openai is not None:
                 if base_url is None:
@@ -5594,7 +5594,7 @@ class UnifiedClient:
                         api_key=api_key_snapshot,
                         base_url=base_url
                     )
-                logger.info(f"NVIDIA client configured with endpoint: {base_url}")
+                defer_batch_log(f"NVIDIA client configured with endpoint: {base_url}")
  
         elif self.client_type == 'deepl' or model_snapshot.startswith('deepl'):
             self.client_type = 'deepl'
@@ -5742,11 +5742,11 @@ class UnifiedClient:
                 _is_glossary_pool = (self._api_key_pool is getattr(self.__class__, '_glossary_key_pool', None))
                 _is_qa_pool = (self._api_key_pool is getattr(self.__class__, '_qa_scan_key_pool', None))
                 _pool_label = "(glossary-key)" if _is_glossary_pool else "(qa-key)" if _is_qa_pool else "(multi-key)"
-                logger.info(f"✅ Initialized {self.client_type} client for model: {log_model} {_pool_label}")
+                defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model} {_pool_label}")
             elif log_model != model_snapshot and not self._is_stop_requested():
-                logger.info(f"✅ Initialized {self.client_type} client for model: {log_model}")
+                defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model}")
             elif not self._is_stop_requested():
-                logger.info(f"✅ Initialized {self.client_type} client for model: {log_model}")
+                defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model}")
         except Exception:
             # Last-resort: never fail client init due to logging
             pass
