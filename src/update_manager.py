@@ -1753,8 +1753,9 @@ class UpdateManager(QObject):
             download_path = new_exe_path
 
         url = asset['browser_download_url']
-        # Track path for cleanup on cancel/error
+        # Track path and expected size for cleanup/validation on cancel/error
         self._current_download_path = download_path
+        self._expected_download_size = asset.get('size', 0)
 
         # Reset and show initial progress state
         self.progress_bar.setRange(0, 0)  # indeterminate until we know size
@@ -2023,6 +2024,45 @@ class UpdateManager(QObject):
                 self.cancel_btn.setEnabled(True)
         except Exception:
             pass
+        
+        # Validate downloaded file before offering install
+        try:
+            if not os.path.exists(file_path):
+                self._show_download_error(dialog, "Download failed: file was not saved.")
+                return
+            
+            file_size = os.path.getsize(file_path)
+            # A valid Glossarion exe should be at least 1 MB
+            if file_size < 1_000_000:
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+                self._show_download_error(
+                    dialog,
+                    f"Download appears corrupted (only {file_size / 1024:.0f} KB).\n\n"
+                    "This usually means the connection was interrupted.\n"
+                    "Please try downloading again."
+                )
+                return
+            
+            # Check expected size if we tracked it
+            expected_size = getattr(self, '_expected_download_size', 0)
+            if expected_size > 0 and file_size < expected_size * 0.95:
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+                self._show_download_error(
+                    dialog,
+                    f"Download incomplete ({file_size / (1024*1024):.1f} MB of "
+                    f"{expected_size / (1024*1024):.1f} MB expected).\n\n"
+                    "Please try downloading again."
+                )
+                return
+        except Exception as e:
+            print(f"[DEBUG] File validation error: {e}")
+        
         dialog.close()
         
         msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
@@ -2049,10 +2089,12 @@ class UpdateManager(QObject):
                 current_dir = os.path.dirname(current_exe)
                 
                 # Create a batch file to handle the update
+                # Note: uses ping instead of timeout for compatibility
+                # with CREATE_NO_WINDOW (timeout requires console input)
                 batch_content = f"""@echo off
 echo Updating Glossarion...
 echo Waiting for current version to close...
-timeout /t 3 /nobreak > nul
+ping -n 4 127.0.0.1 > nul
 
 :: Delete the old executable
 echo Deleting old version...
@@ -2060,7 +2102,7 @@ if exist "{current_exe}" (
     del /f /q "{current_exe}"
     if exist "{current_exe}" (
         echo Failed to delete old version, retrying...
-        timeout /t 2 /nobreak > nul
+        ping -n 3 127.0.0.1 > nul
         del /f /q "{current_exe}"
     )
 )
@@ -2070,15 +2112,25 @@ echo Starting new version...
 start "" "{update_file}"
 
 :: Clean up this batch file
-del "%~f0"
+(goto) 2>nul & del "%~f0"
 """
                 batch_path = os.path.join(current_dir, "update_glossarion.bat")
                 with open(batch_path, 'w') as f:
                     f.write(batch_content)
                 
-                # Run the batch file
+                # Run the batch file detached from this process so it
+                # survives our exit.  Use cmd.exe /c explicitly and
+                # DETACHED_PROCESS so the batch keeps running even
+                # after the Python process terminates.
                 import subprocess
-                subprocess.Popen([batch_path], shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                DETACHED_PROCESS = 0x00000008
+                CREATE_NEW_PROCESS_GROUP = 0x00000200
+                CREATE_NO_WINDOW = 0x08000000
+                subprocess.Popen(
+                    f'cmd.exe /c "{batch_path}"',
+                    creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+                    close_fds=True,
+                )
                 
                 print(f"[DEBUG] Update batch file created: {batch_path}")
                 print(f"[DEBUG] Will delete: {current_exe}")
@@ -2086,7 +2138,11 @@ del "%~f0"
             else:
                 # Running as script, just start the new exe
                 import subprocess
-                subprocess.Popen([update_file], shell=True)
+                subprocess.Popen([update_file])
+            
+            # Give the subprocess a moment to fully spawn before we die
+            import time
+            time.sleep(0.5)
             
             # Exit current application
             print("[DEBUG] Closing application for update...")
