@@ -14015,10 +14015,18 @@ class EpubReaderDialog(QDialog):
         self._chapter_page_cache = {}  # {chapter_index: page_count}
         self._loaded_chapter = -1  # track which chapter's HTML is loaded
 
+        # Freeze splitter sizes around the TOC rebuild to prevent a
+        # momentary flash where the empty list causes the splitter to
+        # give all space to the TOC pane.
+        _saved_sizes = self._splitter.sizes()
+        self._toc_list.blockSignals(True)
         self._toc_list.clear()
         for idx, (title, _) in enumerate(self._chapters):
             item = QListWidgetItem(title)
             self._toc_list.addItem(item)
+        self._toc_list.blockSignals(False)
+        if _saved_sizes and any(s > 0 for s in _saved_sizes):
+            self._splitter.setSizes(_saved_sizes)
 
         self._toolbar_widget.show()
         self._loading_widget.hide()
@@ -15059,6 +15067,18 @@ class EpubReaderDialog(QDialog):
             self._current_page = max(0, min(int(target), c - 1))
         self._pending_page_hint = None
 
+    def _consume_pending_search(self, browser):
+        """If a cross-chapter search stored ``_pending_search_text``,
+        highlight the match and scroll the paginated view to the correct
+        page.  Called by the paginated finalizers after layout is ready.
+        """
+        text = getattr(self, '_pending_search_text', None)
+        if not text:
+            return
+        self._pending_search_text = None
+        browser.findText(text)
+        self._find_and_scroll(browser, text)
+
     def _finalize_single_page(self):
         """After HTML load: get page count and scroll to current page."""
         def on_count(count):
@@ -15469,9 +15489,10 @@ class EpubReaderDialog(QDialog):
                 del self._img_temp_dir
             except AttributeError:
                 pass
-        self._toc_list.blockSignals(True)
-        self._toc_list.clear()
-        self._toc_list.blockSignals(False)
+        # NOTE: do NOT clear _toc_list here — it causes a visible flash
+        # where the splitter momentarily resizes the empty TOC to full
+        # width. The TOC is rebuilt in _finalize_post_load when the new
+        # data arrives.
         # Start loading in the background WITHOUT showing the loading
         # spinner — keeps the current content visible for a seamless
         # raw↔translated transition instead of a jarring flash.
