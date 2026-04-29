@@ -15667,6 +15667,8 @@ Important rules:
             os.environ['SKIP_DUPLICATE_TOC_TRANSLATION'] = '1' if getattr(self, 'skip_duplicate_toc_translation_var', self.config.get('skip_duplicate_toc_translation', False)) else '0'
             os.environ['DEDUPLICATE_TOC'] = '1' if getattr(self, 'deduplicate_toc_var', self.config.get('deduplicate_toc', False)) else '0'
             os.environ['FORCE_NCX_ONLY'] = '1' if getattr(self, 'force_ncx_only_var', True) else '0'
+            os.environ['ATTACH_CSS_TO_CHAPTERS'] = '1' if getattr(self, 'attach_css_to_chapters_var', self.config.get('attach_css_to_chapters', False)) else '0'
+            os.environ['EPUB_USE_HTML_METHOD'] = '1' if getattr(self, 'epub_use_html_method_var', self.config.get('epub_use_html_method', False)) else '0'
             os.environ['ENABLE_IMAGE_COMPRESSION'] = '1' if self.config.get('enable_image_compression', False) else '0'
             os.environ['IMAGE_COMPRESSION_QUALITY'] = str(self.config.get('image_compression_quality', 80))
             os.environ['EXCLUDE_COVER_COMPRESSION'] = '1' if self.config.get('exclude_cover_compression', True) else '0'

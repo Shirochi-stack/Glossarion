@@ -6731,6 +6731,8 @@ def _create_prompt_management_section(self, parent):
             file_name, _ = QFileDialog.getOpenFileName(parent, "Select CSS file", start_dir, "CSS Files (*.css);;All Files (*.*)")
             if file_name:
                 self.epub_css_override_path_var = file_name
+                self.config['epub_css_override_path'] = file_name
+                os.environ['EPUB_CSS_OVERRIDE_PATH'] = file_name
                 css_path_label.setText(_os.path.basename(file_name))
                 css_status_label.setText("✓")
                 css_status_label.show()
@@ -6743,6 +6745,8 @@ def _create_prompt_management_section(self, parent):
     def _on_clear_css_clicked():
         try:
             self.epub_css_override_path_var = ''
+            self.config['epub_css_override_path'] = ''
+            os.environ.pop('EPUB_CSS_OVERRIDE_PATH', None)
             css_path_label.setText('')
             css_status_label.hide()
         except Exception:
