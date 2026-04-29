@@ -14442,7 +14442,54 @@ class EpubReaderDialog(QDialog):
                 if hasattr(w, 'findText'):
                     w.findText("")
             return
-        self._reader.findText(text)
+        # Use callback to scroll to the match in paginated modes
+        browser = self._reader
+        if self._layout_mode == LAYOUT_DOUBLE:
+            browser = self._reader_left
+        browser.findText(text, 0, lambda found: self._scroll_to_find_match(browser) if found else None)
+
+    def _scroll_to_find_match(self, browser):
+        """After findText highlights a match, scroll the paginated view to it.
+
+        In column-based pagination the match may be in a column that's
+        translated off-screen. We ask JS for the selection's bounding
+        rect, compute which page it's on, and navigate there.
+        """
+        if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            return  # scroll modes don't need help
+        js = (
+            "(function() {"
+            "  var sel = window.getSelection();"
+            "  if (!sel || sel.rangeCount === 0) return -1;"
+            "  var range = sel.getRangeAt(0);"
+            "  var rect = range.getBoundingClientRect();"
+            "  var c = document.getElementById('columns');"
+            "  if (!c) return -1;"
+            "  var w = (typeof _PAGE_W !== 'undefined' && _PAGE_W) ? _PAGE_W : Math.floor(window.innerWidth);"
+            "  // rect.left is relative to the viewport, but the columns are"
+            "  // transformed with translateX. Get the scroll offset from the transform."
+            "  var tx = 0;"
+            "  var m = c.style.transform.match(/translate3d\\(([^,]+)/);"
+            "  if (m) tx = parseFloat(m[1]) || 0;"
+            "  // The actual horizontal position in the full column layout"
+            "  var absX = rect.left - tx;"
+            "  return Math.max(0, Math.floor(absX / w));"
+            "})();"
+        )
+        def _on_page_result(page_num):
+            try:
+                page_num = int(page_num)
+            except (TypeError, ValueError):
+                return
+            if page_num < 0:
+                return
+            if page_num != self._current_page:
+                self._current_page = page_num
+                if self._layout_mode == LAYOUT_SINGLE:
+                    self._scroll_to_page_single()
+                elif self._layout_mode == LAYOUT_DOUBLE:
+                    self._scroll_to_page_double()
+        browser.page().runJavaScript(js, _on_page_result)
 
     def _on_search_next(self):
         """Enter pressed: find next match across all chapters."""
@@ -14458,17 +14505,21 @@ class EpubReaderDialog(QDialog):
             _, html = self._chapters[idx]
             plain = _TAG_RE.sub('', html)
             if text.lower() in plain.lower():
+                browser = self._reader
+                if self._layout_mode == LAYOUT_DOUBLE:
+                    browser = self._reader_left
                 if idx != self._current_row:
                     # Navigate to that chapter
                     self._toc_list.blockSignals(True)
                     self._toc_list.setCurrentRow(idx)
                     self._toc_list.blockSignals(False)
                     self._on_chapter_selected(idx)
-                    # After load finishes, highlight — use a short timer
-                    QTimer.singleShot(300, lambda t=text: self._reader.findText(t))
+                    # After load finishes, highlight + scroll to match
+                    QTimer.singleShot(300, lambda t=text, b=browser: b.findText(
+                        t, 0, lambda found: self._scroll_to_find_match(b) if found else None))
                 else:
-                    # Same chapter — just do findText (advances to next match)
-                    self._reader.findText(text)
+                    # Same chapter — find next match + scroll to it
+                    browser.findText(text, 0, lambda found: self._scroll_to_find_match(browser) if found else None)
                 # Advance for next Enter press
                 self._search_chapter_idx = (idx + 1) % n
                 return
@@ -15246,6 +15297,9 @@ class EpubReaderDialog(QDialog):
         if new_value == self._show_raw:
             return
         self._show_raw = new_value
+        # Invalidate embedded CSS cache so it re-reads from the correct EPUB
+        if hasattr(self, '_embedded_css_cache'):
+            del self._embedded_css_cache
         try:
             self._config['epub_reader_show_raw'] = self._show_raw
         except Exception:
@@ -15348,6 +15402,9 @@ class EpubReaderDialog(QDialog):
         self._chapter_page_cache = {}
         self._loaded_chapter = -1
         self._current_page = 0
+        # Clear embedded CSS cache so it re-reads from the new EPUB path
+        if hasattr(self, '_embedded_css_cache'):
+            del self._embedded_css_cache
         if hasattr(self, "_img_temp_dir"):
             # Clear so _process_html picks a fresh per-EPUB temp dir.
             try:
