@@ -15626,7 +15626,9 @@ class EpubReaderDialog(QDialog):
     def _get_embedded_css(self) -> str:
         """Lazily extract and return the EPUB's embedded CSS.
 
-        Sources (in order, all merged):
+        Sources (highest priority first):
+          0. ``EPUB_CSS_OVERRIDE_PATH`` env var — if set, this is the
+             **only** CSS used (matches what the compiled EPUB gets).
           1. CSS and font files inside the EPUB zip.
           2. Font files in the extracted folder's ``fonts/`` subdirectory.
           3. CSS files in the extracted folder's ``css/`` subdirectory
@@ -15644,7 +15646,19 @@ class EpubReaderDialog(QDialog):
         font_data: dict[str, bytes] = {}
         _FONT_EXTS = ('.ttf', '.otf', '.woff', '.woff2')
 
+        # --- Source 0: Explicit CSS override from the GUI -------------------
+        override_path = os.environ.get('EPUB_CSS_OVERRIDE_PATH', '').strip()
+        has_override = bool(override_path and os.path.isfile(override_path))
+        if has_override:
+            try:
+                with open(override_path, 'r', encoding='utf-8',
+                          errors='replace') as f:
+                    css_text = f.read() + '\n'
+            except OSError:
+                has_override = False  # fall through to normal sources
+
         # --- Source 1: EPUB zip contents ------------------------------------
+        # Always read fonts from the zip; only read CSS if no override.
         try:
             with zipfile.ZipFile(self._epub_path, 'r') as zf:
                 for entry in zf.namelist():
@@ -15652,13 +15666,14 @@ class EpubReaderDialog(QDialog):
                     if ext in _FONT_EXTS:
                         bname = os.path.basename(entry).lower()
                         font_data[bname] = zf.read(entry)
-                for entry in zf.namelist():
-                    if entry.lower().endswith('.css'):
-                        try:
-                            raw_css = zf.read(entry).decode('utf-8', errors='replace')
-                            css_text += raw_css + '\n'
-                        except Exception:
-                            pass
+                if not has_override:
+                    for entry in zf.namelist():
+                        if entry.lower().endswith('.css'):
+                            try:
+                                raw_css = zf.read(entry).decode('utf-8', errors='replace')
+                                css_text += raw_css + '\n'
+                            except Exception:
+                                pass
         except Exception:
             pass
 
@@ -15679,17 +15694,18 @@ class EpubReaderDialog(QDialog):
                                         font_data[bname] = ff.read()
                                 except OSError:
                                     pass
-            # CSS from <epub_dir>/css/ (appended after zip CSS)
-            css_dir = os.path.join(epub_dir, 'css')
-            if os.path.isdir(css_dir):
-                for fname in sorted(os.listdir(css_dir)):
-                    if fname.lower().endswith('.css'):
-                        try:
-                            with open(os.path.join(css_dir, fname), 'r',
-                                      encoding='utf-8', errors='replace') as cf:
-                                css_text += cf.read() + '\n'
-                        except OSError:
-                            pass
+            # CSS from <epub_dir>/css/ (only if no override)
+            if not has_override:
+                css_dir = os.path.join(epub_dir, 'css')
+                if os.path.isdir(css_dir):
+                    for fname in sorted(os.listdir(css_dir)):
+                        if fname.lower().endswith('.css'):
+                            try:
+                                with open(os.path.join(css_dir, fname), 'r',
+                                          encoding='utf-8', errors='replace') as cf:
+                                    css_text += cf.read() + '\n'
+                            except OSError:
+                                pass
 
         # --- Rewrite font URLs to data URIs ---------------------------------
         def _replace_font_url(m):
