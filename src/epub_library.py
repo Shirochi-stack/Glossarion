@@ -13964,6 +13964,48 @@ class EpubReaderDialog(QDialog):
             raw_chapters, overlaid_chapters,
             merged_images, bool(overlay_applied), filenames)
 
+    def _begin_toc_width_lock(self) -> list[int]:
+        """Pin the TOC pane width during transient reader reload states.
+
+        Hiding the reader stack during the paginated prime pass leaves the
+        TOC as the only visible splitter child. Qt then happily expands it
+        to fill the splitter until the reader is shown again, which reads
+        as a full-screen TOC flash during raw/translated swaps.
+        """
+        sizes = list(self._splitter.sizes())
+        total = sum(sizes) if sizes else 0
+        if total > 0:
+            width = max(0, int(sizes[0]))
+        else:
+            width = max(0, int(getattr(self, '_toc_saved_width', 220) or 220))
+            sizes = [width, max(1, int(self.width()) - width)]
+
+        if not hasattr(self, '_toc_width_lock_state'):
+            self._toc_width_lock_state = (
+                self._toc_list.minimumWidth(),
+                self._toc_list.maximumWidth(),
+            )
+        self._toc_list.setMinimumWidth(width)
+        self._toc_list.setMaximumWidth(width)
+        if total > 0:
+            self._splitter.setSizes(sizes)
+        return sizes
+
+    def _end_toc_width_lock(self, sizes: list[int] | None = None) -> None:
+        """Restore normal TOC resizing after a transient lock."""
+        state = getattr(self, '_toc_width_lock_state', None)
+        if state is None:
+            return
+        min_width, max_width = state
+        self._toc_list.setMinimumWidth(min_width)
+        self._toc_list.setMaximumWidth(max_width)
+        try:
+            del self._toc_width_lock_state
+        except AttributeError:
+            pass
+        if sizes and any(s > 0 for s in sizes):
+            self._splitter.setSizes(sizes)
+
     def _finalize_post_load(self, raw_chapters, overlaid_chapters, images,
                             overlay_applied: bool, filenames):
         """Install the loaded chapters + images into the reader UI.
@@ -14015,10 +14057,10 @@ class EpubReaderDialog(QDialog):
         self._chapter_page_cache = {}  # {chapter_index: page_count}
         self._loaded_chapter = -1  # track which chapter's HTML is loaded
 
-        # Freeze splitter sizes around the TOC rebuild to prevent a
-        # momentary flash where the empty list causes the splitter to
-        # give all space to the TOC pane.
-        _saved_sizes = self._splitter.sizes()
+        # Freeze splitter sizes around the TOC rebuild and any hidden
+        # paginated-prime render. Otherwise the TOC can momentarily fill
+        # the splitter when the reader stack is hidden.
+        _saved_sizes = self._begin_toc_width_lock()
         self._toc_list.blockSignals(True)
         self._toc_list.clear()
         for idx, (title, _) in enumerate(self._chapters):
@@ -14084,9 +14126,11 @@ class EpubReaderDialog(QDialog):
             if saved_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
                 # Hide the reader stack during the prime swap so the
                 # brief scroll-mode render never becomes visible. The
-                # dialog background (theme bg) shows through instead.
+                # TOC width remains locked until the real paginated view
+                # is shown, preventing a full-width sidebar flash.
                 self._reader_stack.hide()
                 self._priming_initial_render = True
+                self._prime_toc_sizes = _saved_sizes
                 self._prime_saved_mode = saved_mode
                 self._layout_mode = LAYOUT_SCROLL
                 # The swap-back is triggered event-driven the moment the
@@ -14094,8 +14138,10 @@ class EpubReaderDialog(QDialog):
                 # avoiding an arbitrary fixed delay.
                 self._render_current()
             else:
+                self._end_toc_width_lock(_saved_sizes)
                 self._render_current()
         else:
+            self._end_toc_width_lock(_saved_sizes)
             self._reader_stack.setCurrentIndex(0)
             self._reader.setHtml(
                 "<div style='text-align:center; padding: 60px; color: #888;'>"
@@ -14295,6 +14341,7 @@ class EpubReaderDialog(QDialog):
         # Rebuild the TOC, preserving the current selection. Chapter
         # count can grow (new translated chapters surface with
         # translated titles) but never shrinks during a refresh.
+        _saved_sizes = self._begin_toc_width_lock()
         self._toc_list.blockSignals(True)
         self._toc_list.clear()
         for title, _ in new_chapters:
@@ -14306,6 +14353,7 @@ class EpubReaderDialog(QDialog):
         else:
             self._current_row = 0
         self._toc_list.blockSignals(False)
+        self._end_toc_width_lock(_saved_sizes)
         # Refresh the Show-raw pill visibility \u2014 overlay_applied can
         # flip from False \u2192 True when the first translated chapter
         # lands mid-read.
@@ -15119,6 +15167,9 @@ class EpubReaderDialog(QDialog):
             return
         self._priming_initial_render = False
         self._reader_stack.show()
+        sizes = getattr(self, '_prime_toc_sizes', None)
+        self._prime_toc_sizes = None
+        self._end_toc_width_lock(sizes)
 
     def _scroll_to_page_single(self):
         """Navigate single-page reader to current page."""
@@ -15403,12 +15454,14 @@ class EpubReaderDialog(QDialog):
         # Rebuild TOC entries so titles reflect the active flavor. Hold
         # the current row so we don't lose the reading position.
         current_row = max(0, min(self._current_row, len(self._chapters) - 1))
+        _saved_sizes = self._begin_toc_width_lock()
         self._toc_list.blockSignals(True)
         self._toc_list.clear()
         for title, _ in self._chapters:
             self._toc_list.addItem(QListWidgetItem(title))
         self._toc_list.setCurrentRow(current_row)
         self._toc_list.blockSignals(False)
+        self._end_toc_width_lock(_saved_sizes)
         self._current_row = current_row
         # Force a fresh paginated render: page-count caches differ
         # between translations and the currently-loaded chapter needs to
