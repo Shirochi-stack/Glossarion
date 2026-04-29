@@ -52,21 +52,29 @@ Filename: "{app}\Glossarion.exe"; Description: "{cm:LaunchProgram,Glossarion}"; 
 [Code]
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  ConfigStr: String;
+  Lines: TArrayOfString;
+  i: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
     { If config.json exists, gracefully turn off the updater flag }
-    if LoadStringFromFile(ExpandConstant('{app}\config.json'), ConfigStr) then
+    if LoadStringsFromFile(ExpandConstant('{app}\config.json'), Lines) then
     begin
-      StringChangeEx(ConfigStr, '"auto_update_check": true', '"auto_update_check": false', True);
-      SaveStringToFile(ExpandConstant('{app}\config.json'), ConfigStr, False);
+      for i := 0 to GetArrayLength(Lines) - 1 do
+      begin
+        StringChangeEx(Lines[i], '"auto_update_check": true', '"auto_update_check": false', True);
+      end;
+      SaveStringsToFile(ExpandConstant('{app}\config.json'), Lines, False);
     end
     else
     begin
       { If it doesn't exist, create a tiny config file to turn off the updater }
       { Glossarion's robust config loader will automatically fill in the rest of the defaults! }
-      SaveStringToFile(ExpandConstant('{app}\config.json'), '{' + #13#10 + '  "auto_update_check": false' + #13#10 + '}', False);
+      SetArrayLength(Lines, 3);
+      Lines[0] := '{';
+      Lines[1] := '  "auto_update_check": false';
+      Lines[2] := '}';
+      SaveStringsToFile(ExpandConstant('{app}\config.json'), Lines, False);
     end;
   end;
 end;
