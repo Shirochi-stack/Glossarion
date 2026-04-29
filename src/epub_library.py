@@ -13517,7 +13517,7 @@ class EpubReaderDialog(QDialog):
         toolbar.addSpacing(8)
 
         # Font size controls
-        font_down = self._make_toolbar_btn("A−", "Decrease font size")
+        font_down = self._make_toolbar_btn("A−", "Decrease font size", width=42)
         font_down.clicked.connect(lambda: self._change_font_size(-1))
         toolbar.addWidget(font_down)
 
@@ -13525,7 +13525,7 @@ class EpubReaderDialog(QDialog):
         self._font_label.setStyleSheet("color: #888; font-size: 8.5pt; padding: 0 2px;")
         toolbar.addWidget(self._font_label)
 
-        font_up = self._make_toolbar_btn("A+", "Increase font size")
+        font_up = self._make_toolbar_btn("A+", "Increase font size", width=42)
         font_up.clicked.connect(lambda: self._change_font_size(1))
         toolbar.addWidget(font_up)
 
