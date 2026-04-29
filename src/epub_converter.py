@@ -4341,7 +4341,7 @@ img {
                 with open(font_path, 'rb') as f:
                     book.add_item(epub.EpubItem(
                         uid=f"font_{font_file}",
-                        file_name=f"fonts/{font_file}",
+                        file_name=f"Fonts/{font_file}",
                         media_type=mime_type,
                         content=f.read()
                     ))
