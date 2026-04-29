@@ -6739,6 +6739,33 @@ def _create_prompt_management_section(self, parent):
                 # If user explicitly loads CSS, ensure attachment is enabled
                 if not css_cb.isChecked():
                     css_cb.setChecked(True)
+                # Also copy the CSS into the working directory's css/ folder
+                # so the reader's "Embedded CSS" mode and future compilations
+                # pick it up immediately.
+                try:
+                    import shutil
+                    _od = getattr(self, 'output_dir', None)
+                    if not _od or not _os.path.isdir(str(_od)):
+                        _od = os.environ.get('OUTPUT_DIR', '')
+                    if not _od or not _os.path.isdir(str(_od)):
+                        _cfg = getattr(self, 'config', {})
+                        _override = _cfg.get('output_directory', '') or ''
+                        if _override:
+                            _epub = _cfg.get('epub_path', '') or os.environ.get('EPUB_PATH', '')
+                            if _epub:
+                                _base = _os.path.splitext(_os.path.basename(_epub))[0]
+                                _candidate = _os.path.join(_override, _base)
+                                if _os.path.isdir(_candidate):
+                                    _od = _candidate
+                    if _od and _os.path.isdir(str(_od)):
+                        css_dir = _os.path.join(str(_od), 'css')
+                        if _os.path.isdir(css_dir):
+                            for existing in _os.listdir(css_dir):
+                                if existing.lower().endswith('.css'):
+                                    dst = _os.path.join(css_dir, existing)
+                                    shutil.copy2(file_name, dst)
+                except Exception:
+                    pass
         except Exception:
             pass
 

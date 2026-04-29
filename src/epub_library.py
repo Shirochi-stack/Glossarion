@@ -13493,6 +13493,10 @@ class EpubReaderDialog(QDialog):
             QComboBox:hover { border-color: #6c63ff; }
             QComboBox::drop-down { border: none; width: 0px; }
             QComboBox::down-arrow { width: 0px; height: 0px; }
+            QComboBox QLineEdit {
+                background: transparent; color: #e0e0e0; border: none;
+                padding: 0px; margin: 0px; font-size: 8.5pt;
+            }
             QComboBox QAbstractItemView {
                 background: #1e1e2e; color: #e0e0e0; selection-background-color: #3a3a5e;
                 border: 1px solid #3a3a5e;
