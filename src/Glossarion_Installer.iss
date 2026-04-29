@@ -20,6 +20,8 @@ SolidCompression=yes
 ; Icon settings
 SetupIconFile=Halgakos.ico
 UninstallDisplayIcon={app}\Glossarion.exe
+WizardSmallImageFile=Halgakos.png
+WizardImageFile=Halgakos.png
 
 [Types]
 Name: "custom"; Description: "Select which version of Glossarion to install:"; Flags: iscustom
