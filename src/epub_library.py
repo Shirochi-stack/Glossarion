@@ -14545,23 +14545,12 @@ class EpubReaderDialog(QDialog):
                     self._toc_list.setCurrentRow(idx)
                     self._toc_list.blockSignals(False)
                     self._on_chapter_selected(idx)
-                    # We jumped chapters — advance so next Enter
-                    # continues cycling within the new chapter.
-                    self._search_chapter_idx = idx
                 else:
-                    # Same chapter — find next in-page match + scroll.
-                    # Use the result callback to detect when Qt wraps
-                    # back to the first match, signalling we've exhausted
-                    # all matches in this chapter.
-                    try:
-                        from PySide6.QtWebEngineCore import QWebEnginePage
-                        browser.page().findText(
-                            text, QWebEnginePage.FindFlag(0),
-                            lambda result, _t=text, _b=browser, _n=n, _idx=idx:
-                                self._on_find_result(result, _t, _b, _n, _idx))
-                    except Exception:
-                        browser.findText(text)
-                        self._find_and_scroll(browser, text)
+                    # Same chapter — find next match + scroll to it
+                    browser.findText(text)
+                    self._find_and_scroll(browser, text)
+                # Advance for next Enter press
+                self._search_chapter_idx = (idx + 1) % n
                 return
         # No match found anywhere
         self._search_bar.setStyleSheet(
