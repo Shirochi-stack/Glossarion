@@ -2002,6 +2002,11 @@ Text to analyze:
         self.use_sorted_fallback_var = self.config.get('use_sorted_fallback', False)  # Disabled by default
         self.attach_css_to_chapters_var = self.config.get('attach_css_to_chapters', False)
         self.epub_use_html_method_var = self.config.get('epub_use_html_method', False)
+        # CSS override path — initialize from config so the converter can
+        # pick it up without requiring the Other Settings dialog to be opened.
+        self.epub_css_override_path_var = self.config.get('epub_css_override_path', '')
+        if self.epub_css_override_path_var:
+            os.environ['EPUB_CSS_OVERRIDE_PATH'] = self.epub_css_override_path_var
         
         # Retain exact source extension and disable 'response_' prefix
         self.retain_source_extension_var = self.config.get('retain_source_extension', False)
