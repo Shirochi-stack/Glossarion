@@ -2065,17 +2065,10 @@ class UpdateManager(QObject):
         
         dialog.close()
         
-        msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
-        msg.setIcon(QMessageBox.Question)
-        msg.setWindowTitle("Download Complete")
-        msg.setText("Update downloaded successfully.\n\n"
-                   "Would you like to install it now?\n"
-                   "(The application will need to restart)")
-        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        msg.setDefaultButton(QMessageBox.Yes)
-        
-        if msg.exec() == QMessageBox.Yes:
-            self.install_update(file_path)
+        # Proceed directly to install (no confirmation prompt — clicking
+        # "Download Update" already expressed intent, and declining leaves
+        # orphan .exe / .exe.new files in the directory).
+        self.install_update(file_path)
     
     def install_update(self, update_file):
         """Launch the update installer and exit current app"""
