@@ -20,8 +20,8 @@ SolidCompression=yes
 ; Icon settings
 SetupIconFile=Halgakos.ico
 UninstallDisplayIcon={app}\Glossarion.exe
-WizardSmallImageFile=Halgakos.png
-WizardImageFile=Halgakos.png
+WizardSmallImageFile=Halgakos_small.png
+WizardImageFile=Halgakos_large.png
 
 [Types]
 Name: "custom"; Description: "Select which version of Glossarion to install:"; Flags: iscustom
@@ -52,6 +52,19 @@ Name: "{autodesktop}\Glossarion"; Filename: "{app}\Glossarion.exe"; Tasks: deskt
 Filename: "{app}\Glossarion.exe"; Description: "{cm:LaunchProgram,Glossarion}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+var
+  ComponentsReset: Boolean;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  { Force the radio button to the very top option on the first visit, overriding Windows registry memory! }
+  if (CurPageID = wpSelectComponents) and not ComponentsReset then
+  begin
+    WizardForm.ComponentsList.Checked[0] := True;
+    ComponentsReset := True;
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Lines: TArrayOfString;
