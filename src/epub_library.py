@@ -15366,30 +15366,17 @@ class EpubReaderDialog(QDialog):
         self._loaded_chapter = -1
         self._pending_page_hint = position_hint
         if self._chapters:
-            # Fade out the reader stack before re-rendering to avoid a
-            # jarring flash of blank content. The _js_reveal call in the
-            # paginated finalizer will fade the #columns div back in; for
-            # scroll modes the QTimer below handles the widget-level fade.
-            self._reader_stack.setGraphicsEffect(None)  # clear any stale effect
-            from PySide6.QtWidgets import QGraphicsOpacityEffect
-            fade_effect = QGraphicsOpacityEffect(self._reader_stack)
-            fade_effect.setOpacity(0.0)
-            self._reader_stack.setGraphicsEffect(fade_effect)
+            # Hide content before re-render to prevent flash (same pattern
+            # as font/theme changes). The _js_reveal in the paginated
+            # finalizer will set opacity back to 1 after positioning.
+            _hide = "var c = document.getElementById('columns'); if (c) c.style.opacity = '0';"
+            if _HAS_WEBENGINE:
+                if self._layout_mode == LAYOUT_DOUBLE:
+                    self._reader_left.page().runJavaScript(_hide)
+                    self._reader_right.page().runJavaScript(_hide)
+                else:
+                    self._reader.page().runJavaScript(_hide)
             self._render_current()
-            # Reveal after a short delay to let the new HTML settle
-            def _fade_in():
-                eff = self._reader_stack.graphicsEffect()
-                if isinstance(eff, QGraphicsOpacityEffect):
-                    # Animate opacity from 0 → 1
-                    from PySide6.QtCore import QPropertyAnimation
-                    anim = QPropertyAnimation(eff, b"opacity", self)
-                    anim.setDuration(200)
-                    anim.setStartValue(0.0)
-                    anim.setEndValue(1.0)
-                    anim.start()
-                    # Keep ref so it isn't GC'd mid-animation
-                    self._fade_anim = anim
-            QTimer.singleShot(100, _fade_in)
 
     def _capture_position_hint(self) -> dict:
         """Snapshot the current reading position for later restoration.
