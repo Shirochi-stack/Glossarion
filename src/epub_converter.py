@@ -4320,13 +4320,52 @@ img {
         return css_items
     
     def _add_fonts(self, book: epub.EpubBook):
-        """Add font files to book"""
+        """Add font files to book.
+
+        Before scanning the workspace ``fonts/`` directory, copies any
+        fonts from the global ``custom_fonts/`` store (populated by the
+        Load Font button in Other Settings) into the workspace so that
+        user-loaded fonts are automatically bundled with every EPUB.
+        """
+        _FONT_EXTS = ('.ttf', '.otf', '.woff', '.woff2')
+
+        # ── 1. Copy from global custom_fonts/ → workspace fonts/ ──
+        try:
+            # Resolve the global store the same way Other Settings does
+            import platform, sys
+            if platform.system() == 'Windows':
+                if getattr(sys, 'frozen', False):
+                    app_dir = os.path.dirname(sys.executable)
+                else:
+                    app_dir = os.path.dirname(os.path.abspath(__file__))
+            else:
+                app_dir = os.getcwd()
+            global_fonts = os.path.join(app_dir, 'custom_fonts')
+            if os.path.isdir(global_fonts):
+                os.makedirs(self.fonts_dir, exist_ok=True)
+                import shutil
+                for fname in os.listdir(global_fonts):
+                    if os.path.splitext(fname)[1].lower() in _FONT_EXTS:
+                        src = os.path.join(global_fonts, fname)
+                        dst = os.path.join(self.fonts_dir, fname)
+                        if not os.path.isfile(dst):
+                            try:
+                                shutil.copy2(src, dst)
+                                self.log(f"  📋 Copied global font → workspace: {fname}")
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+
+        # ── 2. Bundle all fonts in the workspace fonts/ directory ──
         if not os.path.isdir(self.fonts_dir):
             return
         
         for font_file in os.listdir(self.fonts_dir):
             font_path = os.path.join(self.fonts_dir, font_file)
             if not os.path.isfile(font_path):
+                continue
+            if os.path.splitext(font_file)[1].lower() not in _FONT_EXTS:
                 continue
             
             try:

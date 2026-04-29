@@ -6837,20 +6837,39 @@ def _create_prompt_management_section(self, parent):
             gdir = _get_global_fonts_dir()
             _os.makedirs(gdir, exist_ok=True)
             files, _ = QFileDialog.getOpenFileNames(
-                parent, "Select Font Files",
+                parent, "Select Font Files or ZIP Archives",
                 gdir if _os.path.isdir(gdir) else _os.getcwd(),
-                "Font Files (*.ttf *.otf *.woff *.woff2);;All Files (*.*)"
+                "Fonts & Archives (*.ttf *.otf *.woff *.woff2 *.zip);;Font Files (*.ttf *.otf *.woff *.woff2);;ZIP Archives (*.zip);;All Files (*.*)"
             )
             if files:
                 import shutil
+                import zipfile
                 copied = 0
                 for src in files:
-                    dst = _os.path.join(gdir, _os.path.basename(src))
-                    try:
-                        shutil.copy2(src, dst)
-                        copied += 1
-                    except Exception:
-                        pass
+                    ext = _os.path.splitext(src)[1].lower()
+                    if ext == '.zip':
+                        # Extract all font files from the zip (including subfolders)
+                        try:
+                            with zipfile.ZipFile(src, 'r') as zf:
+                                for entry in zf.namelist():
+                                    entry_ext = _os.path.splitext(entry)[1].lower()
+                                    if entry_ext in _FONT_EXTS:
+                                        font_name = _os.path.basename(entry)
+                                        if not font_name:
+                                            continue
+                                        dst = _os.path.join(gdir, font_name)
+                                        with zf.open(entry) as zin, open(dst, 'wb') as zout:
+                                            zout.write(zin.read())
+                                        copied += 1
+                        except Exception:
+                            pass
+                    elif ext in _FONT_EXTS:
+                        dst = _os.path.join(gdir, _os.path.basename(src))
+                        try:
+                            shutil.copy2(src, dst)
+                            copied += 1
+                        except Exception:
+                            pass
                 _refresh_font_label()
                 if copied:
                     load_font_btn.setText(f"✅ {copied} loaded")
