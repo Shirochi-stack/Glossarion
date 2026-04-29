@@ -13230,7 +13230,7 @@ class EpubReaderDialog(QDialog):
         self._font_size = self._config.get('epub_reader_font_size', 14)
         self._line_spacing = self._config.get('epub_reader_line_spacing', 1.8)
         self._theme_index = self._config.get('epub_reader_theme', 0)
-        self._font_family = self._config.get('epub_reader_font_family', 'Georgia')
+        self._font_family = self._config.get('epub_reader_font_family', 'Embedded CSS')
         layout_key = self._config.get('epub_reader_layout', LAYOUT_SINGLE)
         self._layout_mode = layout_key if layout_key in (LAYOUT_SCROLL, LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_ALL) else LAYOUT_SINGLE
         # Optional — caller can request opening at a specific chapter index.
@@ -13459,6 +13459,9 @@ class EpubReaderDialog(QDialog):
         self._font_combo.setFixedWidth(150)
         self._font_combo.setCursor(Qt.PointingHandCursor)
         self._font_combo.setToolTip("Text font family")
+        # First item: use the EPUB's own embedded CSS (fonts, layout, etc.)
+        self._font_combo.addItem("Embedded CSS")
+        self._font_combo.insertSeparator(self._font_combo.count())
         # Populate with smoothly-scalable system font families (same pattern
         # used in review_dialog.py). Pin common reading fonts to the top.
         try:
@@ -14602,6 +14605,9 @@ class EpubReaderDialog(QDialog):
         if not family or family == self._font_family:
             return
         self._font_family = family
+        # Clear embedded CSS cache if switching away from or to Embedded CSS
+        if hasattr(self, '_embedded_css_cache'):
+            del self._embedded_css_cache
         self._chapter_page_cache.clear()
         self._loaded_chapter = -1
         # Hide content before re-render to prevent flash
@@ -15505,6 +15511,62 @@ class EpubReaderDialog(QDialog):
             logger.debug("HTML processing failed: %s", traceback.format_exc())
             return html_content
 
+    def _get_embedded_css(self) -> str:
+        """Lazily extract and return the EPUB's embedded CSS.
+
+        Reads all CSS files and font files from the EPUB zip,
+        rewrites ``@font-face src: url(...)`` references to inline
+        ``data:`` URIs so the CSS is self-contained and renders
+        correctly in the QWebEngineView without needing file access.
+        """
+        cache_attr = '_embedded_css_cache'
+        if hasattr(self, cache_attr):
+            return getattr(self, cache_attr)
+
+        import zipfile, re, base64, mimetypes
+        css_text = ''
+        try:
+            with zipfile.ZipFile(self._epub_path, 'r') as zf:
+                # Collect all font data keyed by basename (lowercase)
+                font_data: dict[str, bytes] = {}
+                _FONT_EXTS = ('.ttf', '.otf', '.woff', '.woff2')
+                for entry in zf.namelist():
+                    ext = os.path.splitext(entry)[1].lower()
+                    if ext in _FONT_EXTS:
+                        bname = os.path.basename(entry).lower()
+                        font_data[bname] = zf.read(entry)
+
+                # Collect all CSS files
+                for entry in zf.namelist():
+                    if entry.lower().endswith('.css'):
+                        try:
+                            raw_css = zf.read(entry).decode('utf-8', errors='replace')
+                            css_text += raw_css + '\n'
+                        except Exception:
+                            pass
+
+                # Rewrite font URLs to data URIs
+                def _replace_font_url(m):
+                    url_val = m.group(1)
+                    bname = os.path.basename(url_val).lower()
+                    if bname in font_data:
+                        ext = os.path.splitext(bname)[1]
+                        mime_map = {'.ttf': 'font/ttf', '.otf': 'font/otf',
+                                    '.woff': 'font/woff', '.woff2': 'font/woff2'}
+                        mime = mime_map.get(ext, 'application/octet-stream')
+                        b64 = base64.b64encode(font_data[bname]).decode('ascii')
+                        return f'url(data:{mime};base64,{b64})'
+                    return m.group(0)  # leave unchanged if font not found
+
+                css_text = re.sub(
+                    r'url\s*\(\s*["\']?([^"\')\s]+\.(?:ttf|otf|woff2?))["\'\s]*\)',
+                    _replace_font_url, css_text)
+        except Exception:
+            pass
+
+        setattr(self, cache_attr, css_text)
+        return css_text
+
     def _wrap_html(self, body_html: str, paginated: bool = False) -> str:
         """Wrap processed HTML in a full styled document.
 
@@ -15514,6 +15576,7 @@ class EpubReaderDialog(QDialog):
           #content  — inner padding for readability
         """
         t = self._get_theme()
+        _use_embedded = (self._font_family or '').strip() == 'Embedded CSS'
         # Build a CSS font stack: user-selected family first, then common
         # fallbacks so missing fonts degrade gracefully. Any embedded single
         # quotes in the family name are stripped to keep the stylesheet valid.
@@ -15523,12 +15586,22 @@ class EpubReaderDialog(QDialog):
                                     'cascadia code', 'source code pro', 'fira code'}
         _generic = 'monospace' if _is_mono else 'serif'
         _font_stack = f"'{_fam}', 'Georgia', 'Noto Serif', {_generic}"
+        # When using embedded CSS, inject the EPUB's own stylesheet and
+        # let its @font-face / font-family rules take precedence.
+        _embedded_css_block = ''
+        if _use_embedded:
+            epub_css = self._get_embedded_css()
+            if epub_css:
+                _embedded_css_block = epub_css
+                # Don't override font-family — let the embedded CSS dictate it
+                _font_stack = "inherit"
         # Use px units (integer device pixels) for sharper glyph rasterization.
         # 1pt = 1/72 inch, 1px = 1/96 inch → px = pt * 96/72.
         _font_px = int(round(self._font_size * 96 / 72))
         if paginated:
             return (
                 f"<html><head><style>"
+                f"{_embedded_css_block}"
                 f"* {{ box-sizing: border-box; }}"
                 # Grayscale AA + geometricPrecision kill the subpixel LCD
                 # fringing ("red shift") that appears on text inside a
@@ -15620,6 +15693,7 @@ class EpubReaderDialog(QDialog):
             # grayscale AA.
             return (
                 f"<html><head><style>"
+                f"{_embedded_css_block}"
                 f"body {{ background: {t['bg']}; color: {t['fg']}; "
                 f"font-family: {_font_stack}; "
                 f"font-size: {_font_px}px; line-height: {self._line_spacing}; "
