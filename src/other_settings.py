@@ -6779,15 +6779,7 @@ def _create_prompt_management_section(self, parent):
     )
     font_row_h.addWidget(load_font_btn)
 
-    clear_font_btn = QPushButton("Clear")
-    clear_font_btn.setToolTip("Remove all custom fonts from the global font store")
-    clear_font_btn.setMinimumWidth(60)
-    clear_font_btn.setStyleSheet(
-        "QPushButton { background-color: #6c757d; color: white; padding: 4px 8px; "
-        "border-radius: 4px; font-weight: bold; } "
-        "QPushButton:hover { background-color: #5a6268; }"
-    )
-    font_row_h.addWidget(clear_font_btn)
+
 
     font_status_label = QLabel()
     font_status_label.setStyleSheet("color: #28a745; font-size: 11pt; font-weight: bold;")
@@ -6878,29 +6870,7 @@ def _create_prompt_management_section(self, parent):
         except Exception:
             pass
 
-    def _on_clear_font_clicked():
-        try:
-            gdir = _get_global_fonts_dir()
-            if not gdir or not _os.path.isdir(gdir):
-                return
-            removed = 0
-            for f in _os.listdir(gdir):
-                if _os.path.splitext(f)[1].lower() in _FONT_EXTS:
-                    try:
-                        _os.remove(_os.path.join(gdir, f))
-                        removed += 1
-                    except Exception:
-                        pass
-            _refresh_font_label()
-            if removed:
-                clear_font_btn.setText(f"✅ {removed} cleared")
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(2500, lambda: clear_font_btn.setText("Clear"))
-        except Exception:
-            pass
-
     load_font_btn.clicked.connect(_on_load_font_clicked)
-    clear_font_btn.clicked.connect(_on_clear_font_clicked)
     
     # HTML serialization method toggle
     html_method_cb = self._create_styled_checkbox("Use HTML Method for EPUB (Better for preserving whitespaces)")
