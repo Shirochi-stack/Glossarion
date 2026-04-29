@@ -2119,20 +2119,23 @@ start "" "{update_file}"
                     f.write(batch_content)
                 
                 # Run the batch file detached from this process so it
-                # survives our exit.  Use cmd.exe /c explicitly and
-                # DETACHED_PROCESS so the batch keeps running even
-                # after the Python process terminates.
+                # survives our exit.  Redirect all handles to DEVNULL
+                # (close_fds=True conflicts with creationflags on Windows
+                # and silently fails to spawn).
                 import subprocess
                 DETACHED_PROCESS = 0x00000008
                 CREATE_NEW_PROCESS_GROUP = 0x00000200
                 CREATE_NO_WINDOW = 0x08000000
-                subprocess.Popen(
-                    f'cmd.exe /c "{batch_path}"',
+                proc = subprocess.Popen(
+                    ['cmd.exe', '/c', batch_path],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
-                    close_fds=True,
                 )
                 
                 print(f"[DEBUG] Update batch file created: {batch_path}")
+                print(f"[DEBUG] Batch process PID: {proc.pid}")
                 print(f"[DEBUG] Will delete: {current_exe}")
                 print(f"[DEBUG] Will start: {update_file}")
             else:
@@ -2140,14 +2143,15 @@ start "" "{update_file}"
                 import subprocess
                 subprocess.Popen([update_file])
             
-            # Give the subprocess a moment to fully spawn before we die
-            import time
-            time.sleep(0.5)
-            
-            # Exit current application
+            # Hard-exit so QApplication cleanup doesn't kill children.
+            # os._exit skips atexit handlers and Python cleanup, which
+            # is exactly what we want – the batch must outlive us.
             print("[DEBUG] Closing application for update...")
-            QApplication.quit()
-            sys.exit(0)
+            try:
+                self.main_gui.save_config(show_message=False)
+            except Exception:
+                pass
+            os._exit(0)
             
         except Exception as e:
             msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
