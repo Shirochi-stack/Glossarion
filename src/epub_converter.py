@@ -1427,6 +1427,35 @@ class EPUBCompiler:
 
         return False
 
+    def _relative_item_href(self, document_name: str, item_name: str) -> str:
+        """Return an EPUB-safe relative href from a document to a manifest item."""
+        try:
+            document_dir = os.path.dirname((document_name or "").replace("\\", "/"))
+            normalized_item = (item_name or "").replace("\\", "/")
+            if not document_dir:
+                return normalized_item
+            rel_href = os.path.relpath(normalized_item, start=document_dir)
+            return rel_href.replace("\\", "/")
+        except Exception:
+            normalized_item = (item_name or "").replace("\\", "/")
+            prefix = "../" if getattr(self, 'legacy_epub_structure', False) else ""
+            return f"{prefix}{normalized_item}"
+
+    def _attach_css_items_to_document(self, document: epub.EpubHtml, css_items: List[epub.EpubItem]) -> None:
+        """Attach CSS with hrefs relative to the XHTML document path.
+
+        EbookLib's EpubHtml.add_item() injects the manifest href verbatim. That
+        breaks EPUB2-style layouts where documents live in Text/ and styles live
+        in css/, because Text/chapter.xhtml needs ../css/stylesheet.css.
+        """
+        document_name = getattr(document, "file_name", "") or ""
+        for css_item in css_items:
+            document.add_link(
+                href=self._relative_item_href(document_name, css_item.file_name),
+                rel="stylesheet",
+                type="text/css"
+            )
+
     def log(self, message: str):
         """Log a message"""
         if self.log_callback:
@@ -2780,7 +2809,8 @@ class EPUBCompiler:
                     self.log(f"[DEBUG] Chapter title: {title}")
                 
                 # Prepare CSS links
-                css_links = [f"css/{item.file_name.split('/')[-1]}" for item in css_items]
+                css_prefix = "../css/" if getattr(self, 'legacy_epub_structure', False) else "css/"
+                css_links = [f"{css_prefix}{item.file_name.split('/')[-1]}" for item in css_items]
                 if is_problem_chapter:
                     self.log(f"[DEBUG] CSS links: {css_links}")
                 
@@ -2976,8 +3006,7 @@ class EPUBCompiler:
                     chapter.content = FileUtils.ensure_bytes(chapter_data['content'])
                     
                     if self.attach_css_to_chapters:
-                        for css_item in css_items:
-                            chapter.add_item(css_item)
+                        self._attach_css_items_to_document(chapter, css_items)
                     
                     # Add to book
                     book.add_item(chapter)
@@ -3616,8 +3645,7 @@ class EPUBCompiler:
             
             # Attach CSS if configured
             if self.attach_css_to_chapters:
-                for css_item in css_items:
-                    chapter.add_item(css_item)
+                self._attach_css_items_to_document(chapter, css_items)
                 if is_problem_chapter:
                     self.log(f"[DEBUG] Attached {len(css_items)} CSS files")
             
@@ -4825,8 +4853,7 @@ img {
             
             # Associate CSS with cover page if needed
             if self.attach_css_to_chapters:
-                for css_item in css_items:
-                    cover_page.add_item(css_item)
+                self._attach_css_items_to_document(cover_page, css_items)
 
             book.add_item(cover_page)
             self.log(f"✅ Set cover image: {cover_file}")
@@ -5060,8 +5087,7 @@ img {
         
         # Associate CSS with gallery page
         if self.attach_css_to_chapters:
-            for css_item in css_items:
-                gallery_page.add_item(css_item)
+            self._attach_css_items_to_document(gallery_page, css_items)
         
         book.add_item(gallery_page)
         return gallery_page
