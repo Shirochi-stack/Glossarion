@@ -4232,24 +4232,14 @@ img {
         """Add CSS files to book.
 
         Behavior:
-          * Always adds our built‑in default.css.
-          * If EPUB_CSS_OVERRIDE_PATH is set, add ONLY that CSS (plus default) and
-            skip all CSS files from the extracted EPUB/css directory.
+          * If EPUB_CSS_OVERRIDE_PATH is set and attach_css_to_chapters is
+            enabled, add ONLY that CSS — the default.css is skipped because
+            the user explicitly chose a replacement stylesheet.
           * Also overwrites PDF-generated styles.css in the output directory if override is set.
-          * Otherwise, add all .css files from self.css_dir as before.
+          * Otherwise, add the built-in default.css followed by all .css files
+            from the extracted EPUB/css directory.
         """
         css_items = []
-        
-        # First, add a default CSS to ensure proper formatting
-        default_css = epub.EpubItem(
-            uid="css_default",
-            file_name="css/default.css",
-            media_type="text/css",
-            content=FileUtils.ensure_bytes(self._create_default_css())
-        )
-        book.add_item(default_css)
-        css_items.append(default_css)
-        self.log("✅ Added default CSS")
         
         # Check for explicit CSS override from GUI
         # Only apply if attach_css_to_chapters is enabled
@@ -4271,14 +4261,18 @@ img {
                         except Exception as e:
                             self.log(f"[WARNING] Failed to overwrite styles.css: {e}")
                     
+                    # Retain the original filename so the EPUB output is
+                    # traceable back to what the user selected.
+                    original_name = os.path.basename(override_path)
                     override_item = epub.EpubItem(
                         uid="css_override",
-                        file_name="css/override.css",
+                        file_name=f"css/{original_name}",
                         media_type="text/css",
                         content=FileUtils.ensure_bytes(css_content)
                     )
                     book.add_item(override_item)
                     css_items.append(override_item)
+                    self.log(f"✅ Added override CSS: {original_name} (default.css skipped)")
                     return css_items
                 else:
                     self.log(f"[WARNING] EPUB_CSS_OVERRIDE_PATH does not exist: {override_path}")
@@ -4287,6 +4281,17 @@ img {
                 # Fall back to normal behavior below
         elif override_path and not self.attach_css_to_chapters:
             self.log(f"[INFO] CSS override set but 'Attach CSS to Chapters' is disabled - ignoring override")
+        
+        # No override — add the built-in default.css as baseline formatting
+        default_css = epub.EpubItem(
+            uid="css_default",
+            file_name="css/default.css",
+            media_type="text/css",
+            content=FileUtils.ensure_bytes(self._create_default_css())
+        )
+        book.add_item(default_css)
+        css_items.append(default_css)
+        self.log("✅ Added default CSS")
         
         # Then add user CSS files from css/ directory (original behavior)
         if not os.path.isdir(self.css_dir):

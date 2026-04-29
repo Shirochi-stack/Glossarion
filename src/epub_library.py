@@ -15421,6 +15421,48 @@ class EpubReaderDialog(QDialog):
                     if candidate in self._images:
                         image_data = self._images[candidate]
                         break
+                # Filesystem fallback: if the image wasn't found in the
+                # pre-merged dict (common when the translator renamed
+                # images during extraction, or extra_image_dirs wasn't
+                # populated), try to load it directly from disk.
+                if not image_data:
+                    img_basename = os.path.basename(src)
+                    # 1. Check extra image directories (output_folder/images, etc.)
+                    for extra_dir in getattr(self, '_extra_image_dirs', []) or []:
+                        if extra_dir and os.path.isdir(extra_dir):
+                            disk_path = os.path.join(extra_dir, img_basename)
+                            if os.path.isfile(disk_path):
+                                try:
+                                    with open(disk_path, "rb") as df:
+                                        image_data = df.read()
+                                except OSError:
+                                    pass
+                                if image_data:
+                                    break
+                    # 2. Resolve relative to the EPUB's parent directory
+                    if not image_data and hasattr(self, '_epub_path') and self._epub_path:
+                        epub_dir = os.path.dirname(self._epub_path)
+                        if epub_dir:
+                            # Try the raw relative path resolved from the EPUB's dir
+                            rel_candidate = os.path.normpath(os.path.join(epub_dir, src))
+                            if os.path.isfile(rel_candidate):
+                                try:
+                                    with open(rel_candidate, "rb") as df:
+                                        image_data = df.read()
+                                except OSError:
+                                    pass
+                            # Also try common image subdirs (images/, Images/)
+                            if not image_data:
+                                for sub in ("images", "Images", "translated_images"):
+                                    disk_path = os.path.join(epub_dir, sub, img_basename)
+                                    if os.path.isfile(disk_path):
+                                        try:
+                                            with open(disk_path, "rb") as df:
+                                                image_data = df.read()
+                                        except OSError:
+                                            pass
+                                        if image_data:
+                                            break
                 if image_data:
                     # Write to temp file (skip if already cached)
                     safe_name = os.path.basename(src).replace("/", "_").replace("\\", "_")
