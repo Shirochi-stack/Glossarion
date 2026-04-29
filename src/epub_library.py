@@ -13776,6 +13776,10 @@ class EpubReaderDialog(QDialog):
         btn.setToolTip(tooltip)
         btn.setFixedSize(width, 28)
         btn.setCursor(Qt.PointingHandCursor)
+        # Prevent Enter key from activating toolbar buttons (conflicts
+        # with the search bar's returnPressed signal in QDialog).
+        btn.setAutoDefault(False)
+        btn.setDefault(False)
         btn.setStyleSheet(
             "QPushButton { background: #2a2a3e; border-radius: 4px; color: #e0e0e0; "
             "font-size: 10pt; font-weight: bold; border: none; }"
@@ -14469,25 +14473,20 @@ class EpubReaderDialog(QDialog):
         """
         if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
             return  # scroll modes don't need help
-        js = (
-            "(function() {"
-            "  var sel = window.getSelection();"
-            "  if (!sel || sel.rangeCount === 0) return -1;"
-            "  var range = sel.getRangeAt(0);"
-            "  var rect = range.getBoundingClientRect();"
-            "  var c = document.getElementById('columns');"
-            "  if (!c) return -1;"
-            "  var w = (typeof _PAGE_W !== 'undefined' && _PAGE_W) ? _PAGE_W : Math.floor(window.innerWidth);"
-            "  // rect.left is relative to the viewport, but the columns are"
-            "  // transformed with translateX. Get the scroll offset from the transform."
-            "  var tx = 0;"
-            "  var m = c.style.transform.match(/translate3d\\(([^,]+)/);"
-            "  if (m) tx = parseFloat(m[1]) || 0;"
-            "  // The actual horizontal position in the full column layout"
-            "  var absX = rect.left - tx;"
-            "  return Math.max(0, Math.floor(absX / w));"
-            "})();"
-        )
+        js = """(function() {
+  var sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return -1;
+  var range = sel.getRangeAt(0);
+  var rect = range.getBoundingClientRect();
+  var c = document.getElementById('columns');
+  if (!c) return -1;
+  var w = (typeof _PAGE_W !== 'undefined' && _PAGE_W) ? _PAGE_W : Math.floor(window.innerWidth);
+  var tx = 0;
+  var m = c.style.transform.match(/translate3d\(([^,]+)/);
+  if (m) tx = parseFloat(m[1]) || 0;
+  var absX = rect.left - tx;
+  return Math.max(0, Math.floor(absX / w));
+})();"""
         def _on_page_result(page_num):
             try:
                 page_num = int(page_num)
@@ -15596,29 +15595,32 @@ class EpubReaderDialog(QDialog):
     def _get_embedded_css(self) -> str:
         """Lazily extract and return the EPUB's embedded CSS.
 
-        Reads all CSS files and font files from the EPUB zip,
-        rewrites ``@font-face src: url(...)`` references to inline
-        ``data:`` URIs so the CSS is self-contained and renders
-        correctly in the QWebEngineView without needing file access.
+        Sources (in order, all merged):
+          1. CSS and font files inside the EPUB zip.
+          2. Font files in the extracted folder's ``fonts/`` subdirectory.
+          3. CSS files in the extracted folder's ``css/`` subdirectory
+             (appended after zip CSS so they can override originals).
+
+        Font ``url(...)`` references are rewritten to inline ``data:``
+        URIs so the result is self-contained.
         """
         cache_attr = '_embedded_css_cache'
         if hasattr(self, cache_attr):
             return getattr(self, cache_attr)
 
-        import zipfile, re, base64, mimetypes
+        import zipfile, re, base64
         css_text = ''
+        font_data: dict[str, bytes] = {}
+        _FONT_EXTS = ('.ttf', '.otf', '.woff', '.woff2')
+
+        # --- Source 1: EPUB zip contents ------------------------------------
         try:
             with zipfile.ZipFile(self._epub_path, 'r') as zf:
-                # Collect all font data keyed by basename (lowercase)
-                font_data: dict[str, bytes] = {}
-                _FONT_EXTS = ('.ttf', '.otf', '.woff', '.woff2')
                 for entry in zf.namelist():
                     ext = os.path.splitext(entry)[1].lower()
                     if ext in _FONT_EXTS:
                         bname = os.path.basename(entry).lower()
                         font_data[bname] = zf.read(entry)
-
-                # Collect all CSS files
                 for entry in zf.namelist():
                     if entry.lower().endswith('.css'):
                         try:
@@ -15626,25 +15628,54 @@ class EpubReaderDialog(QDialog):
                             css_text += raw_css + '\n'
                         except Exception:
                             pass
-
-                # Rewrite font URLs to data URIs
-                def _replace_font_url(m):
-                    url_val = m.group(1)
-                    bname = os.path.basename(url_val).lower()
-                    if bname in font_data:
-                        ext = os.path.splitext(bname)[1]
-                        mime_map = {'.ttf': 'font/ttf', '.otf': 'font/otf',
-                                    '.woff': 'font/woff', '.woff2': 'font/woff2'}
-                        mime = mime_map.get(ext, 'application/octet-stream')
-                        b64 = base64.b64encode(font_data[bname]).decode('ascii')
-                        return f'url(data:{mime};base64,{b64})'
-                    return m.group(0)  # leave unchanged if font not found
-
-                css_text = re.sub(
-                    r'url\s*\(\s*["\']?([^"\')\s]+\.(?:ttf|otf|woff2?))["\'\s]*\)',
-                    _replace_font_url, css_text)
         except Exception:
             pass
+
+        # --- Source 2 & 3: Extracted folder on disk -------------------------
+        epub_dir = os.path.dirname(self._epub_path) if self._epub_path else ''
+        if epub_dir:
+            # Fonts from <epub_dir>/fonts/ (supplement zip fonts)
+            fonts_dir = os.path.join(epub_dir, 'fonts')
+            if os.path.isdir(fonts_dir):
+                for root, _dirs, files in os.walk(fonts_dir):
+                    for fname in files:
+                        ext = os.path.splitext(fname)[1].lower()
+                        if ext in _FONT_EXTS:
+                            bname = fname.lower()
+                            if bname not in font_data:
+                                try:
+                                    with open(os.path.join(root, fname), 'rb') as ff:
+                                        font_data[bname] = ff.read()
+                                except OSError:
+                                    pass
+            # CSS from <epub_dir>/css/ (appended after zip CSS)
+            css_dir = os.path.join(epub_dir, 'css')
+            if os.path.isdir(css_dir):
+                for fname in sorted(os.listdir(css_dir)):
+                    if fname.lower().endswith('.css'):
+                        try:
+                            with open(os.path.join(css_dir, fname), 'r',
+                                      encoding='utf-8', errors='replace') as cf:
+                                css_text += cf.read() + '\n'
+                        except OSError:
+                            pass
+
+        # --- Rewrite font URLs to data URIs ---------------------------------
+        def _replace_font_url(m):
+            url_val = m.group(1)
+            bname = os.path.basename(url_val).lower()
+            if bname in font_data:
+                ext = os.path.splitext(bname)[1]
+                mime_map = {'.ttf': 'font/ttf', '.otf': 'font/otf',
+                            '.woff': 'font/woff', '.woff2': 'font/woff2'}
+                mime = mime_map.get(ext, 'application/octet-stream')
+                b64 = base64.b64encode(font_data[bname]).decode('ascii')
+                return f'url(data:{mime};base64,{b64})'
+            return m.group(0)
+
+        css_text = re.sub(
+            r'url\s*\(\s*["\']?([^"\')\s]+\.(?:ttf|otf|woff2?))["\'\s]*\)',
+            _replace_font_url, css_text)
 
         setattr(self, cache_attr, css_text)
         return css_text
