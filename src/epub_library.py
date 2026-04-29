@@ -15471,7 +15471,28 @@ class EpubReaderDialog(QDialog):
         self._toc_list.blockSignals(True)
         self._toc_list.clear()
         self._toc_list.blockSignals(False)
-        self._start_loading()
+        # Start loading in the background WITHOUT showing the loading
+        # spinner — keeps the current content visible for a seamless
+        # raw↔translated transition instead of a jarring flash.
+        prev_cache = getattr(self, "_cache_loader_thread", None)
+        if prev_cache is not None:
+            try:
+                prev_cache.hit.disconnect()
+                prev_cache.miss.disconnect()
+            except Exception:
+                pass
+            try:
+                prev_cache.quit()
+            except Exception:
+                pass
+        self._cache_loader_thread = _EpubCacheLoaderThread(
+            self._epub_path,
+            show_special_files=self._show_special_files,
+            parent=self,
+        )
+        self._cache_loader_thread.hit.connect(self._on_cache_hit)
+        self._cache_loader_thread.miss.connect(self._on_cache_miss)
+        self._cache_loader_thread.start()
 
     def _on_chapter_selected(self, row):
         if row < 0 or row >= len(self._chapters):
