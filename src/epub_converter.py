@@ -4322,16 +4322,53 @@ img {
     def _add_fonts(self, book: epub.EpubBook):
         """Add font files to book.
 
-        Before scanning the workspace ``fonts/`` directory, copies any
-        fonts from the global ``custom_fonts/`` store (populated by the
-        Load Font button in Other Settings) into the workspace so that
-        user-loaded fonts are automatically bundled with every EPUB.
+        Only bundles fonts that are actually referenced by the active
+        CSS (override or workspace CSS files) via ``@font-face``
+        ``src: url(...)`` declarations.  Fonts are sourced from both
+        the global ``custom_fonts/`` store and the workspace ``fonts/``
+        directory.
         """
+        import re
         _FONT_EXTS = ('.ttf', '.otf', '.woff', '.woff2')
 
-        # ── 1. Copy from global custom_fonts/ → workspace fonts/ ──
+        # ── 1. Discover which font filenames the CSS actually needs ──
+        referenced_fonts = set()   # lowercase basenames the CSS references
+        css_sources = []
+
+        # Check override CSS
+        override_path = os.getenv('EPUB_CSS_OVERRIDE_PATH', '').strip()
+        if override_path and os.path.isfile(override_path):
+            css_sources.append(override_path)
+
+        # Check workspace css/ directory
+        if os.path.isdir(self.css_dir):
+            for cf in os.listdir(self.css_dir):
+                if cf.endswith('.css'):
+                    css_sources.append(os.path.join(self.css_dir, cf))
+
+        for css_path in css_sources:
+            try:
+                with open(css_path, 'r', encoding='utf-8') as f:
+                    css_text = f.read()
+                # Match url(...) inside @font-face blocks
+                # Captures: url(../Fonts/Lexend-Regular.ttf)
+                for m in re.finditer(r'url\s*\(\s*["\']?([^"\')\s]+)["\']?\s*\)', css_text):
+                    url_val = m.group(1)
+                    basename = os.path.basename(url_val).lower()
+                    if os.path.splitext(basename)[1] in _FONT_EXTS:
+                        referenced_fonts.add(basename)
+            except Exception:
+                pass
+
+        if not referenced_fonts:
+            # No fonts referenced in any CSS — skip entirely
+            return
+
+        self.log(f"[INFO] CSS references {len(referenced_fonts)} font file(s): "
+                 f"{', '.join(sorted(referenced_fonts))}")
+
+        # ── 2. Copy needed fonts from global custom_fonts/ → workspace fonts/ ──
         try:
-            # Resolve the global store the same way Other Settings does
             import platform, sys
             if platform.system() == 'Windows':
                 if getattr(sys, 'frozen', False):
@@ -4345,7 +4382,7 @@ img {
                 os.makedirs(self.fonts_dir, exist_ok=True)
                 import shutil
                 for fname in os.listdir(global_fonts):
-                    if os.path.splitext(fname)[1].lower() in _FONT_EXTS:
+                    if fname.lower() in referenced_fonts:
                         src = os.path.join(global_fonts, fname)
                         dst = os.path.join(self.fonts_dir, fname)
                         if not os.path.isfile(dst):
@@ -4357,7 +4394,7 @@ img {
         except Exception:
             pass
 
-        # ── 2. Bundle all fonts in the workspace fonts/ directory ──
+        # ── 3. Bundle only referenced fonts from workspace fonts/ ──
         if not os.path.isdir(self.fonts_dir):
             return
         
@@ -4365,7 +4402,7 @@ img {
             font_path = os.path.join(self.fonts_dir, font_file)
             if not os.path.isfile(font_path):
                 continue
-            if os.path.splitext(font_file)[1].lower() not in _FONT_EXTS:
+            if font_file.lower() not in referenced_fonts:
                 continue
             
             try:
