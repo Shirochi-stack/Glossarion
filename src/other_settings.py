@@ -6767,8 +6767,9 @@ def _create_prompt_management_section(self, parent):
 
     load_font_btn = QPushButton("Load Font…")
     load_font_btn.setToolTip(
-        "Select .ttf / .otf / .woff font files to bundle into the EPUB.\n"
-        "They will be copied to the current workspace's fonts/ directory."
+        "Select .ttf / .otf / .woff font files to bundle into EPUBs.\n"
+        "Fonts are stored globally and automatically copied into each\n"
+        "workspace's fonts/ directory at compile time."
     )
     load_font_btn.setMinimumWidth(100)
     load_font_btn.setStyleSheet(
@@ -6779,7 +6780,7 @@ def _create_prompt_management_section(self, parent):
     font_row_h.addWidget(load_font_btn)
 
     clear_font_btn = QPushButton("Clear")
-    clear_font_btn.setToolTip("Remove all custom fonts from the workspace fonts/ directory")
+    clear_font_btn.setToolTip("Remove all custom fonts from the global font store")
     clear_font_btn.setMinimumWidth(60)
     clear_font_btn.setStyleSheet(
         "QPushButton { background-color: #6c757d; color: white; padding: 4px 8px; "
@@ -6800,25 +6801,27 @@ def _create_prompt_management_section(self, parent):
     font_row_h.addStretch()
     section_v.addWidget(font_row)
 
-    def _get_fonts_dir():
-        """Return the fonts/ directory for the current workspace."""
+    _FONT_EXTS = ('.ttf', '.otf', '.woff', '.woff2')
+
+    def _get_global_fonts_dir():
+        """Return the global custom_fonts/ directory alongside the app.
+
+        Uses the same ``_get_app_dir()`` root that Payloads/ and logs/
+        use — safe on both Windows and macOS (lowercase, no spaces).
+        """
         try:
-            epub_folder = getattr(self, 'epub_folder', '') or ''
-            if not epub_folder:
-                epub_folder = self.config.get('epub_folder', '')
-            if epub_folder and _os.path.isdir(epub_folder):
-                return _os.path.join(epub_folder, 'fonts')
+            from translator_gui import _get_app_dir
+            return _os.path.join(_get_app_dir(), 'custom_fonts')
         except Exception:
-            pass
-        return ''
+            # Fallback: next to this script
+            return _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'custom_fonts')
 
     def _refresh_font_label():
-        """Update the font count label from the workspace fonts/ directory."""
-        fonts_dir = _get_fonts_dir()
-        if fonts_dir and _os.path.isdir(fonts_dir):
-            exts = ('.ttf', '.otf', '.woff', '.woff2')
-            count = sum(1 for f in _os.listdir(fonts_dir)
-                        if _os.path.splitext(f)[1].lower() in exts)
+        """Update the font count label from the global custom_fonts/ directory."""
+        gdir = _get_global_fonts_dir()
+        if gdir and _os.path.isdir(gdir):
+            count = sum(1 for f in _os.listdir(gdir)
+                        if _os.path.splitext(f)[1].lower() in _FONT_EXTS)
             if count:
                 font_count_label.setText(f"{count} font{'s' if count != 1 else ''} loaded")
                 font_status_label.setText("✓")
@@ -6831,25 +6834,18 @@ def _create_prompt_management_section(self, parent):
 
     def _on_load_font_clicked():
         try:
-            fonts_dir = _get_fonts_dir()
-            if not fonts_dir:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.warning(
-                    self._other_settings_dialog if hasattr(self, '_other_settings_dialog') else self,
-                    "No Workspace",
-                    "Please open an EPUB workspace first before loading fonts."
-                )
-                return
-            _os.makedirs(fonts_dir, exist_ok=True)
+            gdir = _get_global_fonts_dir()
+            _os.makedirs(gdir, exist_ok=True)
             files, _ = QFileDialog.getOpenFileNames(
-                parent, "Select Font Files", _os.getcwd(),
+                parent, "Select Font Files",
+                gdir if _os.path.isdir(gdir) else _os.getcwd(),
                 "Font Files (*.ttf *.otf *.woff *.woff2);;All Files (*.*)"
             )
             if files:
                 import shutil
                 copied = 0
                 for src in files:
-                    dst = _os.path.join(fonts_dir, _os.path.basename(src))
+                    dst = _os.path.join(gdir, _os.path.basename(src))
                     try:
                         shutil.copy2(src, dst)
                         copied += 1
@@ -6865,15 +6861,14 @@ def _create_prompt_management_section(self, parent):
 
     def _on_clear_font_clicked():
         try:
-            fonts_dir = _get_fonts_dir()
-            if not fonts_dir or not _os.path.isdir(fonts_dir):
+            gdir = _get_global_fonts_dir()
+            if not gdir or not _os.path.isdir(gdir):
                 return
-            exts = ('.ttf', '.otf', '.woff', '.woff2')
             removed = 0
-            for f in _os.listdir(fonts_dir):
-                if _os.path.splitext(f)[1].lower() in exts:
+            for f in _os.listdir(gdir):
+                if _os.path.splitext(f)[1].lower() in _FONT_EXTS:
                     try:
-                        _os.remove(_os.path.join(fonts_dir, f))
+                        _os.remove(_os.path.join(gdir, f))
                         removed += 1
                     except Exception:
                         pass
