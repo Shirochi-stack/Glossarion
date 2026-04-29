@@ -14491,6 +14491,7 @@ class EpubReaderDialog(QDialog):
             self._search_bar.setFocus()
             self._search_bar.selectAll()
             self._search_chapter_idx = self._current_row
+            self._search_last_row = self._current_row
             self._search_match_index = 0
 
     def _close_search(self):
@@ -14506,6 +14507,7 @@ class EpubReaderDialog(QDialog):
         if not _HAS_WEBENGINE:
             return
         self._search_chapter_idx = self._current_row
+        self._search_last_row = self._current_row
         self._search_match_index = 0
         if not text:
             for w in [self._reader, self._reader_left, self._reader_right]:
@@ -14671,22 +14673,18 @@ class EpubReaderDialog(QDialog):
             return
         n = len(self._chapters)
         browser = self._reader_left if self._layout_mode == LAYOUT_DOUBLE else self._reader
-        current_count = self._count_chapter_matches(self._current_row, text)
-        current_match = int(getattr(self, '_search_match_index', 0) or 0)
-        if current_count > 0 and current_match + 1 < current_count:
-            self._search_match_index = current_match + 1
-            if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-                self._find_paginated_match(browser, text, self._search_match_index)
-            else:
-                browser.findText(text)
-            return
 
-        start = (self._current_row + 1) % n
+        # Enter means "next matching HTML/chapter", not "next occurrence
+        # inside this same file". Live typing already selects the first
+        # match in the active chapter; repeated Enter hops between files.
+        last_row = int(getattr(self, '_search_last_row', self._current_row) or 0)
+        start = (last_row + 1) % n
         for offset in range(n):
             idx = (start + offset) % n
             count = self._count_chapter_matches(idx, text)
             if count > 0:
                 self._search_chapter_idx = idx
+                self._search_last_row = idx
                 self._search_match_index = 0
                 self._search_match_count = count
                 if idx != self._current_row:
@@ -14913,7 +14911,11 @@ class EpubReaderDialog(QDialog):
                 tmp_path = os.path.join(tmp_dir, f"_reader_{id(browser)}.html")
                 with open(tmp_path, "w", encoding="utf-8") as f:
                     f.write(html)
-                browser.setUrl(QUrl.fromLocalFile(tmp_path))
+                serial = int(getattr(self, "_reader_html_serial", 0) or 0) + 1
+                self._reader_html_serial = serial
+                url = QUrl.fromLocalFile(tmp_path)
+                url.setQuery(f"v={serial}")
+                browser.setUrl(url)
             else:
                 browser.setHtml(html)
 
@@ -15151,6 +15153,7 @@ class EpubReaderDialog(QDialog):
                     # Record the target page so _setupColumns can re-anchor
                     # the transform on the next viewport-width change.
                     f"  _CURRENT_PAGE = {page_num};"
+                    "  c.style.transition = 'transform 0.3s ease';"
                     f"  c.style.transform = 'translate3d(' + Math.round(-{page_num} * w) + 'px, 0, 0)';"
                     "}"
                 )
@@ -15160,11 +15163,9 @@ class EpubReaderDialog(QDialog):
                     "if (c) {"
                     "  var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:Math.floor(window.innerWidth);"
                     f"  _CURRENT_PAGE = {page_num};"
-                    "  var _t = c.style.transition;"
                     "  c.style.transition = 'none';"
                     f"  c.style.transform = 'translate3d(' + Math.round(-{page_num} * w) + 'px, 0, 0)';"
                     "  void c.offsetHeight;"  # force reflow so the jump is committed w/o transition
-                    "  c.style.transition = _t || 'transform 0.3s ease';"
                     "}"
                 )
             browser.page().runJavaScript(js)
@@ -15985,7 +15986,7 @@ class EpubReaderDialog(QDialog):
                 f"text-rendering: geometricPrecision; "
                 f"-webkit-text-size-adjust: 100%; }}"
                 f"#columns {{ column-fill: auto; column-gap: 0; "
-                f"transition: transform 0.3s ease; opacity: 0; "
+                f"transition: none; opacity: 0; "
                 # will-change + backface-visibility stabilize the compositor
                 # layer so text isn't re-rasterized at fractional offsets.
                 f"will-change: transform; backface-visibility: hidden; "
