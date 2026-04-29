@@ -13495,10 +13495,7 @@ class EpubReaderDialog(QDialog):
             QComboBox:hover { border-color: #6c63ff; }
             QComboBox::drop-down {
                 border: none; background: transparent;
-                width: 14px; subcontrol-position: right center;
-            }
-            QComboBox::down-arrow {
-                image: none; width: 0px; height: 0px;
+                subcontrol-position: right center;
             }
             QComboBox QLineEdit {
                 background: transparent; color: #e0e0e0; border: none;
@@ -13509,32 +13506,6 @@ class EpubReaderDialog(QDialog):
                 border: 1px solid #3a3a5e;
             }
         """)
-        # Paint a small ▾ indicator on the drop-down button so the user
-        # can see there is a clickable area (the default arrow is removed
-        # by the stylesheet above to save horizontal space).
-        from PySide6.QtWidgets import QStyle, QStyleOptionComboBox, QProxyStyle
-        class _ArrowStyle(QProxyStyle):
-            def drawPrimitive(self, element, option, painter, widget=None):
-                if element == QStyle.PE_IndicatorArrowDown:
-                    painter.save()
-                    painter.setPen(Qt.NoPen)
-                    from PySide6.QtGui import QColor
-                    painter.setBrush(QColor("#888"))
-                    r = option.rect
-                    cx, cy = r.center().x(), r.center().y()
-                    from PySide6.QtGui import QPolygon
-                    from PySide6.QtCore import QPoint
-                    painter.drawPolygon(QPolygon([
-                        QPoint(cx - 3, cy - 1),
-                        QPoint(cx + 3, cy - 1),
-                        QPoint(cx, cy + 2),
-                    ]))
-                    painter.restore()
-                    return
-                super().drawPrimitive(element, option, painter, widget)
-        _arrow_style = _ArrowStyle(self._font_combo.style())
-        _arrow_style.setParent(self._font_combo)
-        self._font_combo.setStyle(_arrow_style)
         self._font_combo.activated.connect(
             lambda idx: self._on_font_family_changed(self._font_combo.itemText(idx)))
         self._font_combo.lineEdit().editingFinished.connect(

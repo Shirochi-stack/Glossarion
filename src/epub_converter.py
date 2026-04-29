@@ -4274,6 +4274,25 @@ img {
                     book.add_item(override_item)
                     css_items.append(override_item)
                     self.log(f"✅ Added override CSS: {original_name} (default.css skipped)")
+                    # Also sync the override CSS to the extracted css/
+                    # folder on disk so the working directory matches the
+                    # compiled EPUB.
+                    try:
+                        import shutil
+                        os.makedirs(self.css_dir, exist_ok=True)
+                        # Remove old CSS files so only the override remains
+                        for old in os.listdir(self.css_dir):
+                            if old.lower().endswith('.css'):
+                                try:
+                                    os.remove(os.path.join(self.css_dir, old))
+                                except OSError:
+                                    pass
+                        # Copy override with its original filename
+                        shutil.copy2(override_path,
+                                     os.path.join(self.css_dir, original_name))
+                        self.log(f"✅ Synced override CSS to {self.css_dir}/{original_name}")
+                    except Exception as e:
+                        self.log(f"[WARNING] Failed to sync CSS to disk: {e}")
                     return css_items
                 else:
                     self.log(f"[WARNING] EPUB_CSS_OVERRIDE_PATH does not exist: {override_path}")

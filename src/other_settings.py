@@ -6744,26 +6744,27 @@ def _create_prompt_management_section(self, parent):
                 # pick it up immediately.
                 try:
                     import shutil
-                    _od = getattr(self, 'output_dir', None)
-                    if not _od or not _os.path.isdir(str(_od)):
-                        _od = os.environ.get('OUTPUT_DIR', '')
-                    if not _od or not _os.path.isdir(str(_od)):
-                        _cfg = getattr(self, 'config', {})
-                        _override = _cfg.get('output_directory', '') or ''
-                        if _override:
-                            _epub = _cfg.get('epub_path', '') or os.environ.get('EPUB_PATH', '')
-                            if _epub:
-                                _base = _os.path.splitext(_os.path.basename(_epub))[0]
-                                _candidate = _os.path.join(_override, _base)
-                                if _os.path.isdir(_candidate):
-                                    _od = _candidate
-                    if _od and _os.path.isdir(str(_od)):
-                        css_dir = _os.path.join(str(_od), 'css')
-                        if _os.path.isdir(css_dir):
-                            for existing in _os.listdir(css_dir):
-                                if existing.lower().endswith('.css'):
-                                    dst = _os.path.join(css_dir, existing)
-                                    shutil.copy2(file_name, dst)
+                    # The extraction folder sits next to this script, named
+                    # after the EPUB basename (no extension).
+                    _epub = (getattr(self, 'config', {}).get('last_epub_path', '')
+                             or _os.environ.get('EPUB_PATH', ''))
+                    if _epub:
+                        _base = _os.path.splitext(_os.path.basename(_epub))[0]
+                        _script_dir = _os.path.dirname(_os.path.abspath(__file__))
+                        _candidate = _os.path.join(_script_dir, _base)
+                        if _os.path.isdir(_candidate):
+                            css_dir = _os.path.join(_candidate, 'css')
+                            _os.makedirs(css_dir, exist_ok=True)
+                            # Remove old CSS files
+                            for old in _os.listdir(css_dir):
+                                if old.lower().endswith('.css'):
+                                    try:
+                                        _os.remove(_os.path.join(css_dir, old))
+                                    except OSError:
+                                        pass
+                            # Copy override with its original filename
+                            shutil.copy2(file_name,
+                                         _os.path.join(css_dir, _os.path.basename(file_name)))
                 except Exception:
                     pass
         except Exception:
