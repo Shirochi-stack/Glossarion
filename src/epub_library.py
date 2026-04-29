@@ -13363,7 +13363,7 @@ class EpubReaderDialog(QDialog):
         # Layout mode dropdown
         self._layout_combo = QComboBox()
         self._layout_combo.addItems(["📄 Single Page", "📖 Double Page", "📜 Scroll", "📃 Scroll All"])
-        self._layout_combo.setFixedWidth(125)
+        self._layout_combo.setFixedWidth(100)
         self._layout_combo.setCursor(Qt.PointingHandCursor)
         self._layout_combo.setStyleSheet("""
             QComboBox {
@@ -13458,7 +13458,7 @@ class EpubReaderDialog(QDialog):
         self._font_combo = QComboBox()
         self._font_combo.setEditable(True)
         self._font_combo.setInsertPolicy(QComboBox.NoInsert)
-        self._font_combo.setFixedWidth(130)
+        self._font_combo.setFixedWidth(110)
         self._font_combo.setCursor(Qt.PointingHandCursor)
         self._font_combo.setToolTip("Text font family")
         # First item: use the EPUB's own embedded CSS (fonts, layout, etc.)
@@ -13490,11 +13490,14 @@ class EpubReaderDialog(QDialog):
         self._font_combo.setStyleSheet("""
             QComboBox {
                 background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
-                color: #e0e0e0; font-size: 8.5pt; padding: 3px 8px;
+                color: #e0e0e0; font-size: 8.5pt; padding: 3px 8px 3px 8px;
             }
             QComboBox:hover { border-color: #6c63ff; }
-            QComboBox::drop-down { border: none; width: 0px; }
-            QComboBox::down-arrow { width: 0px; height: 0px; }
+            QComboBox::drop-down {
+                border: none; width: 16px;
+                subcontrol-origin: padding; subcontrol-position: right center;
+            }
+            QComboBox::down-arrow { image: none; width: 8px; height: 8px; }
             QComboBox QLineEdit {
                 background: transparent; color: #e0e0e0; border: none;
                 padding: 0px; margin: 0px; font-size: 8.5pt;
@@ -13533,7 +13536,7 @@ class EpubReaderDialog(QDialog):
         self._theme_combo = QComboBox()
         self._theme_combo.addItems([t["name"] for t in _READER_THEMES])
         self._theme_combo.setCurrentIndex(0)
-        self._theme_combo.setFixedWidth(78)
+        self._theme_combo.setFixedWidth(68)
         self._theme_combo.setCursor(Qt.PointingHandCursor)
         self._theme_combo.setStyleSheet("""
             QComboBox {
