@@ -14446,7 +14446,19 @@ class EpubReaderDialog(QDialog):
         browser = self._reader
         if self._layout_mode == LAYOUT_DOUBLE:
             browser = self._reader_left
-        browser.findText(text, 0, lambda found: self._scroll_to_find_match(browser) if found else None)
+        # Highlight via the view, then scroll via page callback
+        browser.findText(text)
+        self._find_and_scroll(browser, text)
+
+    def _find_and_scroll(self, browser, text):
+        """Run page-level findText with callback to scroll to the match."""
+        try:
+            from PySide6.QtWebEngineCore import QWebEnginePage
+            browser.page().findText(
+                text, QWebEnginePage.FindFlag(0),
+                lambda result: self._scroll_to_find_match(browser))
+        except Exception:
+            pass
 
     def _scroll_to_find_match(self, browser):
         """After findText highlights a match, scroll the paginated view to it.
@@ -14515,11 +14527,14 @@ class EpubReaderDialog(QDialog):
                     self._toc_list.blockSignals(False)
                     self._on_chapter_selected(idx)
                     # After load finishes, highlight + scroll to match
-                    QTimer.singleShot(300, lambda t=text, b=browser: b.findText(
-                        t, 0, lambda found: self._scroll_to_find_match(b) if found else None))
+                    def _delayed_find(t=text, b=browser):
+                        b.findText(t)
+                        self._find_and_scroll(b, t)
+                    QTimer.singleShot(300, _delayed_find)
                 else:
                     # Same chapter — find next match + scroll to it
-                    browser.findText(text, 0, lambda found: self._scroll_to_find_match(browser) if found else None)
+                    browser.findText(text)
+                    self._find_and_scroll(browser, text)
                 # Advance for next Enter press
                 self._search_chapter_idx = (idx + 1) % n
                 return
