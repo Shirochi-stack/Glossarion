@@ -14540,6 +14540,14 @@ class EpubReaderDialog(QDialog):
   var root = document.getElementById('content') || document.body;
   var columns = document.getElementById('columns');
   if (!root || !columns) return -1;
+  if (typeof _setupColumns === 'function') _setupColumns();
+  var oldHits = root.querySelectorAll('.glossarion-search-hit');
+  oldHits.forEach(function(hit) {{
+    var parent = hit.parentNode;
+    if (!parent) return;
+    parent.replaceChild(document.createTextNode(hit.textContent || ''), hit);
+    parent.normalize();
+  }});
   var lowerQuery = query.toLocaleLowerCase();
   var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {{
     acceptNode: function(node) {{
@@ -14568,12 +14576,32 @@ class EpubReaderDialog(QDialog):
   var range = document.createRange();
   range.setStart(picked[0], picked[1]);
   range.setEnd(picked[0], picked[2]);
+  var hit = document.createElement('span');
+  hit.className = 'glossarion-search-hit';
+  hit.style.background = 'rgba(255, 214, 102, 0.55)';
+  hit.style.color = 'inherit';
+  hit.style.borderRadius = '2px';
+  try {{
+    range.surroundContents(hit);
+  }} catch (err) {{
+    hit.appendChild(range.extractContents());
+    range.insertNode(hit);
+  }}
   var sel = window.getSelection();
   sel.removeAllRanges();
-  sel.addRange(range);
-  var rect = range.getBoundingClientRect();
-  var colRect = columns.getBoundingClientRect();
+  var selected = document.createRange();
+  selected.selectNodeContents(hit);
+  sel.addRange(selected);
   var w = (typeof _PAGE_W !== 'undefined' && _PAGE_W) ? _PAGE_W : Math.floor(window.innerWidth);
+  var oldTransform = columns.style.transform;
+  var oldTransition = columns.style.transition;
+  columns.style.transition = 'none';
+  columns.style.transform = 'translate3d(0, 0, 0)';
+  void columns.offsetHeight;
+  var rect = hit.getBoundingClientRect();
+  var colRect = columns.getBoundingClientRect();
+  columns.style.transform = oldTransform;
+  columns.style.transition = oldTransition || 'none';
   return {{
     page: Math.max(0, Math.floor((rect.left - colRect.left) / Math.max(1, w))),
     count: matches.length
@@ -14599,11 +14627,11 @@ class EpubReaderDialog(QDialog):
             if page_num != self._current_page:
                 self._current_page = page_num
                 if self._layout_mode == LAYOUT_SINGLE:
-                    self._scroll_to_page_single()
+                    self._js_scroll_to(self._reader, self._current_page, animate=False)
                 elif self._layout_mode == LAYOUT_DOUBLE:
-                    self._scroll_to_page_double()
-            else:
-                self._update_nav_buttons()
+                    self._js_scroll_to(self._reader_left, self._current_page, animate=False)
+                    self._js_scroll_to(self._reader_right, self._current_page + 1, animate=False)
+            self._update_nav_buttons()
 
         browser.page().runJavaScript(js, _on_page_result)
 
@@ -14656,9 +14684,22 @@ class EpubReaderDialog(QDialog):
         browser.page().runJavaScript(js, _on_page_result)
 
     def _plain_chapter_text(self, html: str) -> str:
-        """Return searchable chapter text with tags stripped."""
-        import re
-        return re.sub(r'<[^>]+>', '', html or '')
+        """Return searchable visible text, matching the reader DOM search."""
+        html = html or ''
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
+            for node in soup(["script", "style", "noscript"]):
+                node.decompose()
+            return soup.get_text(" ", strip=False)
+        except Exception:
+            import html as html_lib
+            import re
+            cleaned = re.sub(
+                r'<(script|style|noscript)\b[^>]*>.*?</\1>',
+                ' ', html, flags=re.IGNORECASE | re.DOTALL)
+            cleaned = re.sub(r'<[^>]+>', ' ', cleaned)
+            return html_lib.unescape(cleaned)
 
     def _count_chapter_matches(self, chapter_idx: int, text: str) -> int:
         if not text or chapter_idx < 0 or chapter_idx >= len(self._chapters):
@@ -14670,6 +14711,13 @@ class EpubReaderDialog(QDialog):
         """Enter pressed: find next match across all chapters."""
         text = self._search_bar.text().strip()
         if not text or not self._chapters:
+            return
+        if self._layout_mode == LAYOUT_ALL:
+            # Scroll All is one rendered document containing every chapter.
+            # Re-rendering via the chapter-hop path resets WebEngine's find
+            # state to the first match, so repeated Enter should just advance
+            # the browser's own in-document search.
+            self._reader.findText(text)
             return
         n = len(self._chapters)
         browser = self._reader_left if self._layout_mode == LAYOUT_DOUBLE else self._reader
@@ -16012,6 +16060,8 @@ class EpubReaderDialog(QDialog):
                 f"p {{ margin: 0.6em 0; orphans: 2; widows: 2; }}"
                 f"a {{ color: {t['link']}; }}"
                 f"code {{ background: {t['code_bg']}; padding: 1px 4px; border-radius: 3px; }}"
+                f".glossarion-search-hit {{ background: rgba(255, 214, 102, 0.55); "
+                f"border-radius: 2px; color: inherit; }}"
                 f"</style>"
                 f"<script>"
                 f"var _PAGE_W = 0;"
@@ -16037,7 +16087,7 @@ class EpubReaderDialog(QDialog):
                 f"  c.style.transition = 'none';"
                 f"  c.style.transform = 'translate3d(' + Math.round(-_CURRENT_PAGE * _PAGE_W) + 'px, 0, 0)';"
                 f"  void c.offsetHeight;"
-                f"  c.style.transition = _t || 'transform 0.3s ease';"
+                f"  c.style.transition = _t || 'none';"
                 f"  /* Clean up whitespace between consecutive full-page images */"
 
                 f"  var imgs = c.querySelectorAll('.full-page-img');"
