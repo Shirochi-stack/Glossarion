@@ -58,7 +58,7 @@ var
 procedure CurPageChanged(CurPageID: Integer);
 begin
   { Force the radio button to the very top option on the first visit, overriding Windows registry memory! }
-  if (CurPageID = wpSelectComponents) and not ComponentsReset then
+  if (not WizardSilent) and (CurPageID = wpSelectComponents) and (not ComponentsReset) then
   begin
     WizardForm.ComponentsList.Checked[0] := True;
     ComponentsReset := True;
