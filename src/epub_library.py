@@ -14491,6 +14491,7 @@ class EpubReaderDialog(QDialog):
             self._search_bar.setFocus()
             self._search_bar.selectAll()
             self._search_chapter_idx = self._current_row
+            self._search_match_index = 0
 
     def _close_search(self):
         self._search_bar.hide()
@@ -14505,6 +14506,7 @@ class EpubReaderDialog(QDialog):
         if not _HAS_WEBENGINE:
             return
         self._search_chapter_idx = self._current_row
+        self._search_match_index = 0
         if not text:
             for w in [self._reader, self._reader_left, self._reader_right]:
                 if hasattr(w, 'findText'):
@@ -14514,9 +14516,94 @@ class EpubReaderDialog(QDialog):
         browser = self._reader
         if self._layout_mode == LAYOUT_DOUBLE:
             browser = self._reader_left
-        # Highlight via the view, then scroll via page callback
-        browser.findText(text)
-        self._find_and_scroll(browser, text)
+        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            self._find_paginated_match(browser, text, 0)
+        else:
+            browser.findText(text)
+
+    def _find_paginated_match(self, browser, text: str, occurrence: int = 0):
+        """Select a match by index and move the paginated viewport to it."""
+        if not _HAS_WEBENGINE or self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            return
+        try:
+            import json
+            needle = json.dumps(text or "")
+            occurrence = max(0, int(occurrence or 0))
+        except Exception:
+            return
+        js = f"""(function() {{
+  var query = {needle};
+  var wanted = {occurrence};
+  if (!query) return -1;
+  var root = document.getElementById('content') || document.body;
+  var columns = document.getElementById('columns');
+  if (!root || !columns) return -1;
+  var lowerQuery = query.toLocaleLowerCase();
+  var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {{
+    acceptNode: function(node) {{
+      var parent = node.parentElement;
+      if (!parent) return NodeFilter.FILTER_REJECT;
+      var tag = parent.tagName ? parent.tagName.toLowerCase() : '';
+      if (tag === 'script' || tag === 'style' || tag === 'noscript') {{
+        return NodeFilter.FILTER_REJECT;
+      }}
+      return node.nodeValue ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    }}
+  }});
+  var matches = [];
+  var node;
+  while ((node = walker.nextNode())) {{
+    var hay = node.nodeValue || '';
+    var lowerHay = hay.toLocaleLowerCase();
+    var pos = 0;
+    while ((pos = lowerHay.indexOf(lowerQuery, pos)) !== -1) {{
+      matches.push([node, pos, pos + query.length]);
+      pos += Math.max(1, query.length);
+    }}
+  }}
+  if (!matches.length) return -1;
+  var picked = matches[Math.min(wanted, matches.length - 1)];
+  var range = document.createRange();
+  range.setStart(picked[0], picked[1]);
+  range.setEnd(picked[0], picked[2]);
+  var sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  var rect = range.getBoundingClientRect();
+  var colRect = columns.getBoundingClientRect();
+  var w = (typeof _PAGE_W !== 'undefined' && _PAGE_W) ? _PAGE_W : Math.floor(window.innerWidth);
+  return {{
+    page: Math.max(0, Math.floor((rect.left - colRect.left) / Math.max(1, w))),
+    count: matches.length
+  }};
+}})();"""
+
+        def _on_page_result(result):
+            try:
+                if isinstance(result, dict):
+                    page_num = int(result.get("page"))
+                    count = int(result.get("count") or 0)
+                else:
+                    page_num = int(result)
+                    count = 0
+            except (TypeError, ValueError):
+                return
+            if page_num < 0:
+                return
+            if count:
+                self._search_match_count = count
+            if self._layout_mode == LAYOUT_DOUBLE:
+                page_num = max(0, page_num - (page_num % 2))
+            if page_num != self._current_page:
+                self._current_page = page_num
+                if self._layout_mode == LAYOUT_SINGLE:
+                    self._scroll_to_page_single()
+                elif self._layout_mode == LAYOUT_DOUBLE:
+                    self._scroll_to_page_double()
+            else:
+                self._update_nav_buttons()
+
+        browser.page().runJavaScript(js, _on_page_result)
 
     def _find_and_scroll(self, browser, text):
         """Run page-level findText with callback to scroll to the match."""
@@ -14537,7 +14624,7 @@ class EpubReaderDialog(QDialog):
         """
         if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
             return  # scroll modes don't need help
-        js = """(function() {
+        js = r"""(function() {
   var sel = window.getSelection();
   if (!sel || sel.rangeCount === 0) return -1;
   var range = sel.getRangeAt(0);
@@ -14566,44 +14653,58 @@ class EpubReaderDialog(QDialog):
                     self._scroll_to_page_double()
         browser.page().runJavaScript(js, _on_page_result)
 
+    def _plain_chapter_text(self, html: str) -> str:
+        """Return searchable chapter text with tags stripped."""
+        import re
+        return re.sub(r'<[^>]+>', '', html or '')
+
+    def _count_chapter_matches(self, chapter_idx: int, text: str) -> int:
+        if not text or chapter_idx < 0 or chapter_idx >= len(self._chapters):
+            return 0
+        plain = self._plain_chapter_text(self._chapters[chapter_idx][1])
+        return plain.lower().count(text.lower())
+
     def _on_search_next(self):
         """Enter pressed: find next match across all chapters."""
         text = self._search_bar.text().strip()
         if not text or not self._chapters:
             return
-        import re
-        _TAG_RE = re.compile(r'<[^>]+>')
         n = len(self._chapters)
-        # Search from _search_chapter_idx onward (wrap around)
+        browser = self._reader_left if self._layout_mode == LAYOUT_DOUBLE else self._reader
+        current_count = self._count_chapter_matches(self._current_row, text)
+        current_match = int(getattr(self, '_search_match_index', 0) or 0)
+        if current_count > 0 and current_match + 1 < current_count:
+            self._search_match_index = current_match + 1
+            if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+                self._find_paginated_match(browser, text, self._search_match_index)
+            else:
+                browser.findText(text)
+            return
+
+        start = (self._current_row + 1) % n
         for offset in range(n):
-            idx = (self._search_chapter_idx + offset) % n
-            _, html = self._chapters[idx]
-            plain = _TAG_RE.sub('', html)
-            if text.lower() in plain.lower():
-                browser = self._reader
-                if self._layout_mode == LAYOUT_DOUBLE:
-                    browser = self._reader_left
+            idx = (start + offset) % n
+            count = self._count_chapter_matches(idx, text)
+            if count > 0:
+                self._search_chapter_idx = idx
+                self._search_match_index = 0
+                self._search_match_count = count
                 if idx != self._current_row:
-                    # Navigate to that chapter — store the search text
-                    # so the paginated finalizer can highlight + scroll
-                    # to the match AFTER pagination is ready (replaces
-                    # an unreliable fixed timer).
                     self._pending_search_text = text
+                    self._pending_search_index = 0
                     self._toc_list.blockSignals(True)
                     self._toc_list.setCurrentRow(idx)
                     self._toc_list.blockSignals(False)
                     self._on_chapter_selected(idx)
+                elif self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+                    self._find_paginated_match(browser, text, 0)
                 else:
-                    # Same chapter — find next match + scroll to it
                     browser.findText(text)
-                    self._find_and_scroll(browser, text)
-                # Advance for next Enter press
-                self._search_chapter_idx = (idx + 1) % n
                 return
-        # No match found anywhere
         self._search_bar.setStyleSheet(
             self._search_bar.styleSheet() + " QLineEdit { border-color: #c04040; }")
         QTimer.singleShot(800, lambda: self._apply_reader_style())
+        return
 
     def _toggle_toc(self):
         """Show or hide the TOC sidebar using splitter sizes."""
@@ -15008,6 +15109,10 @@ class EpubReaderDialog(QDialog):
             self._render_current()
             return
         if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            if (self._layout_mode in (LAYOUT_SCROLL, LAYOUT_ALL)
+                    and self.sender() is self._reader
+                    and getattr(self, '_pending_search_text', None)):
+                self._consume_pending_search(self._reader)
             return
         # The signal fires from whichever browser finished loading; route
         # based on the sender rather than layout alone so stale loads from
@@ -15124,8 +15229,13 @@ class EpubReaderDialog(QDialog):
         if not text:
             return
         self._pending_search_text = None
-        browser.findText(text)
-        self._find_and_scroll(browser, text)
+        occurrence = int(getattr(self, '_pending_search_index', 0) or 0)
+        self._pending_search_index = 0
+        self._search_match_index = occurrence
+        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            self._find_paginated_match(browser, text, occurrence)
+        else:
+            browser.findText(text)
 
     def _finalize_single_page(self):
         """After HTML load: get page count and scroll to current page."""
@@ -15574,6 +15684,8 @@ class EpubReaderDialog(QDialog):
             return
         self._current_row = row
         self._current_page = 0  # reset pagination when selecting a new chapter
+        if not getattr(self, '_pending_search_text', None):
+            self._search_match_index = 0
         self._render_current()
 
     def _process_html(self, html_content: str) -> str:
@@ -15856,6 +15968,7 @@ class EpubReaderDialog(QDialog):
         # Use px units (integer device pixels) for sharper glyph rasterization.
         # 1pt = 1/72 inch, 1px = 1/96 inch → px = pt * 96/72.
         _font_px = int(round(self._font_size * 96 / 72))
+        _has_embedded_css = bool(_use_embedded and _embedded_css_block)
         if paginated:
             return (
                 f"<html><head><style>"
@@ -15949,21 +16062,33 @@ class EpubReaderDialog(QDialog):
             # so we let Chromium use native OS rendering (ClearType subpixel
             # AA on Windows) which is noticeably sharper than forced
             # grayscale AA.
+            _scroll_typography = (
+                ""
+                if _has_embedded_css
+                else f"font-family: {_font_stack}; "
+                     f"font-size: {_font_px}px; line-height: {self._line_spacing}; "
+            )
+            _scroll_heading_css = (
+                "" if _has_embedded_css
+                else f"h1, h2, h3 {{ color: {t['heading']}; }}"
+            )
+            _scroll_paragraph_css = (
+                "" if _has_embedded_css else "p { margin: 0.6em 0; }"
+            )
             return (
                 f"<html><head><style>"
                 f"{_embedded_css_block}"
                 f"body {{ background: {t['bg']}; color: {t['fg']}; "
-                f"font-family: {_font_stack}; "
-                f"font-size: {_font_px}px; line-height: {self._line_spacing}; "
+                f"{_scroll_typography}"
                 f"-webkit-font-smoothing: auto; "
                 f"-moz-osx-font-smoothing: auto; "
                 f"text-rendering: optimizeLegibility; "
                 f"-webkit-text-size-adjust: 100%; "
                 f"padding: 10px 20px; margin: 0 auto; }}"
-                f"h1, h2, h3 {{ color: {t['heading']}; }}"
+                f"{_scroll_heading_css}"
                 f"img {{ display: block; max-width: 100%; height: auto; "
                 f"border-radius: 4px; margin: 12px auto; }}"
-                f"p {{ margin: 0.6em 0; }}"
+                f"{_scroll_paragraph_css}"
                 f"a {{ color: {t['link']}; }}"
                 f"code {{ background: {t['code_bg']}; padding: 1px 4px; border-radius: 3px; }}"
                 f"::-webkit-scrollbar {{ width: 8px; }}"
