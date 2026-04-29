@@ -1507,6 +1507,11 @@ def _list_compiled_outputs(folder: str) -> list[tuple[str, str]]:
     successive recompiles, or a ``.epub`` paired with a leftover
     ``*_translated.html``) so the card can render a warning badge and
     the user can investigate / clean up.
+
+    ``*_translated.html`` files are silently excluded when a
+    ``*_translated.pdf`` with the same stem exists in the folder,
+    because PDF translation always emits a companion HTML for
+    debugging — it is not a separate output.
     """
     results: list[tuple[str, str]] = []
     try:
@@ -1523,12 +1528,24 @@ def _list_compiled_outputs(folder: str) -> list[tuple[str, str]]:
     priority = (("_translated.pdf", "pdf"),
                 ("_translated.txt", "txt"),
                 ("_translated.html", "html"))
+    # Collect PDF stems so we can suppress their companion debug HTML.
+    pdf_stems: set[str] = set()
+    for entry in entries:
+        if not entry.is_file(follow_symlinks=False):
+            continue
+        nl = entry.name.lower()
+        if nl.endswith("_translated.pdf"):
+            pdf_stems.add(nl[: -len("_translated.pdf")])
     for suffix, kind in priority:
         for entry in entries:
             if not entry.is_file(follow_symlinks=False):
                 continue
             nl = entry.name.lower()
             if nl.endswith(suffix):
+                # Skip _translated.html when a _translated.pdf with the
+                # same stem exists — the HTML is a PDF debug artifact.
+                if kind == "html" and nl[: -len(suffix)] in pdf_stems:
+                    continue
                 results.append((entry.path, kind))
     return results
 
