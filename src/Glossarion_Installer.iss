@@ -5,9 +5,11 @@ AppPublisher=Shirochi
 AppSupportURL=https://github.com/Shirochi-stack/Glossarion
 
 ; Default installation folder
-DefaultDirName={autopf}\Glossarion
+DefaultDirName={localappdata}\Glossarion
+PrivilegesRequired=lowest
 DefaultGroupName=Glossarion
 DisableProgramGroupPage=yes
+UsePreviousSetupType=no
 
 ; Output settings
 OutputDir=Output
@@ -26,7 +28,7 @@ Name: "custom"; Description: "Select which version of Glossarion to install:"; F
 ; The 'exclusive' flag means they can only select ONE of these options at a time via radio buttons.
 Name: "full"; Description: "Glossarion - Optimal for Novels (Full-featured, no Manga translation)"; Types: custom; Flags: exclusive
 Name: "lite"; Description: "Glossarion Lite - Excludes the EPUB Reader"; Types: custom; Flags: exclusive
-Name: "turbolite"; Description: "Glossarion TurboLite - Excludes the EPUB Reader, Vertex AI SDK, and PDF generation"; Types: custom; Flags: exclusive
+Name: "turbolite"; Description: "Glossarion TurboLite - Excludes the EPUB Reader, Vertex AI SDK, and PDF Translation"; Types: custom; Flags: exclusive
 Name: "nocuda"; Description: "Glossarion NoCuda - Optimal for Manga (Full-featured with experimental features)"; Types: custom; Flags: exclusive
 
 [Tasks]
@@ -46,3 +48,25 @@ Name: "{autodesktop}\Glossarion"; Filename: "{app}\Glossarion.exe"; Tasks: deskt
 
 [Run]
 Filename: "{app}\Glossarion.exe"; Description: "{cm:LaunchProgram,Glossarion}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ConfigStr: String;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    { If config.json exists, gracefully turn off the updater flag }
+    if LoadStringFromFile(ExpandConstant('{app}\config.json'), ConfigStr) then
+    begin
+      StringChangeEx(ConfigStr, '"auto_update_check": true', '"auto_update_check": false', True);
+      SaveStringToFile(ExpandConstant('{app}\config.json'), ConfigStr, False);
+    end
+    else
+    begin
+      { If it doesn't exist, create a tiny config file to turn off the updater }
+      { Glossarion's robust config loader will automatically fill in the rest of the defaults! }
+      SaveStringToFile(ExpandConstant('{app}\config.json'), '{' + #13#10 + '  "auto_update_check": false' + #13#10 + '}', False);
+    end;
+  end;
+end;
