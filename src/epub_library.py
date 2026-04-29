@@ -13406,6 +13406,8 @@ class EpubReaderDialog(QDialog):
             QPushButton:hover { background: #3a3a5e; color: #e0e0e0; }
             QPushButton:checked { background: #6c63ff; border-color: #7c73ff; color: #fff; }
         """)
+        self._raw_btn.setAutoDefault(False)
+        self._raw_btn.setDefault(False)
         self._raw_btn.toggled.connect(self._on_show_raw_toggled)
         # Hidden until we know whether there's a translated overlay to flip
         # against — :meth:`_on_epub_loaded_from_cache` reveals it when the
@@ -14674,6 +14676,9 @@ class EpubReaderDialog(QDialog):
         if not family or family == self._font_family:
             return
         self._font_family = family
+        # Persist immediately so the choice survives crashes / force-closes
+        self._config['epub_reader_font_family'] = family
+        _persist_config_via_parent(self)
         # Clear embedded CSS cache if switching away from or to Embedded CSS
         if hasattr(self, '_embedded_css_cache'):
             del self._embedded_css_cache
@@ -15286,6 +15291,28 @@ class EpubReaderDialog(QDialog):
                 pass
         _persist_config_via_parent(self)
         super().closeEvent(event)
+
+    def keyPressEvent(self, event):
+        """Suppress Enter/Return from activating auto-default buttons.
+
+        In a QDialog, Enter presses the auto-default QPushButton —
+        which randomly toggles whichever button Qt chose as the default
+        (TOC, raw/translated, etc.).  We eat the key unless a QLineEdit
+        (e.g. the search bar) currently has focus, in which case we let
+        it handle returnPressed normally.
+        """
+        key = event.key()
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            from PySide6.QtWidgets import QLineEdit
+            fw = self.focusWidget()
+            if isinstance(fw, QLineEdit):
+                # Let the search bar's returnPressed signal fire
+                super().keyPressEvent(event)
+            else:
+                # Swallow — do nothing
+                event.accept()
+            return
+        super().keyPressEvent(event)
 
     # ── Chapter rendering ───────────────────────────────────────────────
 
