@@ -13458,7 +13458,7 @@ class EpubReaderDialog(QDialog):
         self._font_combo = QComboBox()
         self._font_combo.setEditable(True)
         self._font_combo.setInsertPolicy(QComboBox.NoInsert)
-        self._font_combo.setFixedWidth(110)
+        self._font_combo.setFixedWidth(130)
         self._font_combo.setCursor(Qt.PointingHandCursor)
         self._font_combo.setToolTip("Text font family")
         # First item: use the EPUB's own embedded CSS (fonts, layout, etc.)
@@ -13490,14 +13490,16 @@ class EpubReaderDialog(QDialog):
         self._font_combo.setStyleSheet("""
             QComboBox {
                 background: #2a2a3e; border: 1px solid #3a3a5e; border-radius: 4px;
-                color: #e0e0e0; font-size: 8.5pt; padding: 3px 8px 3px 8px;
+                color: #e0e0e0; font-size: 8.5pt; padding: 3px 6px 3px 8px;
             }
             QComboBox:hover { border-color: #6c63ff; }
             QComboBox::drop-down {
-                border: none; width: 16px;
-                subcontrol-origin: padding; subcontrol-position: right center;
+                border: none; background: transparent;
+                width: 14px; subcontrol-position: right center;
             }
-            QComboBox::down-arrow { image: none; width: 8px; height: 8px; }
+            QComboBox::down-arrow {
+                image: none; width: 0px; height: 0px;
+            }
             QComboBox QLineEdit {
                 background: transparent; color: #e0e0e0; border: none;
                 padding: 0px; margin: 0px; font-size: 8.5pt;
@@ -13507,6 +13509,32 @@ class EpubReaderDialog(QDialog):
                 border: 1px solid #3a3a5e;
             }
         """)
+        # Paint a small ▾ indicator on the drop-down button so the user
+        # can see there is a clickable area (the default arrow is removed
+        # by the stylesheet above to save horizontal space).
+        from PySide6.QtWidgets import QStyle, QStyleOptionComboBox, QProxyStyle
+        class _ArrowStyle(QProxyStyle):
+            def drawPrimitive(self, element, option, painter, widget=None):
+                if element == QStyle.PE_IndicatorArrowDown:
+                    painter.save()
+                    painter.setPen(Qt.NoPen)
+                    from PySide6.QtGui import QColor
+                    painter.setBrush(QColor("#888"))
+                    r = option.rect
+                    cx, cy = r.center().x(), r.center().y()
+                    from PySide6.QtGui import QPolygon
+                    from PySide6.QtCore import QPoint
+                    painter.drawPolygon(QPolygon([
+                        QPoint(cx - 3, cy - 1),
+                        QPoint(cx + 3, cy - 1),
+                        QPoint(cx, cy + 2),
+                    ]))
+                    painter.restore()
+                    return
+                super().drawPrimitive(element, option, painter, widget)
+        _arrow_style = _ArrowStyle(self._font_combo.style())
+        _arrow_style.setParent(self._font_combo)
+        self._font_combo.setStyle(_arrow_style)
         self._font_combo.activated.connect(
             lambda idx: self._on_font_family_changed(self._font_combo.itemText(idx)))
         self._font_combo.lineEdit().editingFinished.connect(
