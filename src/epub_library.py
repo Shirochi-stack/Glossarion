@@ -14528,16 +14528,15 @@ class EpubReaderDialog(QDialog):
                 if self._layout_mode == LAYOUT_DOUBLE:
                     browser = self._reader_left
                 if idx != self._current_row:
-                    # Navigate to that chapter
+                    # Navigate to that chapter — store the search text
+                    # so the paginated finalizer can highlight + scroll
+                    # to the match AFTER pagination is ready (replaces
+                    # an unreliable fixed timer).
+                    self._pending_search_text = text
                     self._toc_list.blockSignals(True)
                     self._toc_list.setCurrentRow(idx)
                     self._toc_list.blockSignals(False)
                     self._on_chapter_selected(idx)
-                    # After load finishes, highlight + scroll to match
-                    def _delayed_find(t=text, b=browser):
-                        b.findText(t)
-                        self._find_and_scroll(b, t)
-                    QTimer.singleShot(300, _delayed_find)
                 else:
                     # Same chapter — find next match + scroll to it
                     browser.findText(text)
@@ -15074,6 +15073,7 @@ class EpubReaderDialog(QDialog):
             self._js_reveal(self._reader)
             self._update_nav_buttons()
             self._reveal_reader_stack_after_prime()
+            self._consume_pending_search(self._reader)
         self._js_page_count(self._reader, on_count)
 
     def _finalize_double_page(self):
@@ -15088,6 +15088,7 @@ class EpubReaderDialog(QDialog):
             self._js_reveal(self._reader_right)
             self._update_nav_buttons()
             self._reveal_reader_stack_after_prime()
+            self._consume_pending_search(self._reader_left)
         self._js_page_count(self._reader_left, on_count)
 
     def _reveal_reader_stack_after_prime(self):
