@@ -8135,6 +8135,24 @@ def _is_auxiliary_output_path(path_or_name: str, out_dir: str) -> bool:
     except Exception:
         return False
 
+def _is_root_output_html_path(path_or_name: str, out_dir: str) -> bool:
+    """Audio/refinement should only read translated HTML at the output root."""
+    if not path_or_name:
+        return False
+    try:
+        path = str(path_or_name)
+        rel = os.path.relpath(path, out_dir) if os.path.isabs(path) else path
+        rel = rel.replace("\\", "/").strip("/")
+        if not rel or rel.startswith("../") or rel == "..":
+            return False
+        if "/" in rel:
+            return False
+        if _is_auxiliary_output_path(rel, out_dir):
+            return False
+        return rel.lower().endswith((".html", ".xhtml", ".htm"))
+    except Exception:
+        return False
+
 def _find_existing_translated_output(out_dir, chapter, actual_num, progress_manager):
     expected = FileUtilities.create_chapter_filename(chapter, actual_num)
     candidates = [expected]
@@ -8151,6 +8169,7 @@ def _find_existing_translated_output(out_dir, chapter, actual_num, progress_mana
         tracked = progress_manager.prog.get("chapters", {}).get(chapter_key, {})
         if tracked.get("output_file"):
             candidates.insert(0, tracked["output_file"])
+            candidates.append(os.path.basename(str(tracked["output_file"])))
     except Exception:
         pass
 
@@ -8158,7 +8177,7 @@ def _find_existing_translated_output(out_dir, chapter, actual_num, progress_mana
         if not cand:
             continue
         path = cand if os.path.isabs(cand) else os.path.join(out_dir, cand)
-        if _is_auxiliary_output_path(path, out_dir):
+        if not _is_root_output_html_path(path, out_dir):
             continue
         if os.path.exists(path) and path.lower().endswith((".html", ".xhtml", ".htm")):
             return _as_output_file(path if os.path.isabs(cand) else cand), path
@@ -8189,7 +8208,7 @@ def _find_existing_translated_output(out_dir, chapter, actual_num, progress_mana
             if not (same_num or same_original or same_output_shape):
                 continue
             path = output_file if os.path.isabs(output_file) else os.path.join(out_dir, output_file)
-            if _is_auxiliary_output_path(path, out_dir):
+            if not _is_root_output_html_path(path, out_dir):
                 continue
             if os.path.exists(path) and path.lower().endswith((".html", ".xhtml", ".htm")):
                 return _as_output_file(output_file), path
@@ -8197,15 +8216,14 @@ def _find_existing_translated_output(out_dir, chapter, actual_num, progress_mana
         pass
 
     try:
-        ignored_dirs = {"text_to_speech", "unrefined_backup", "raw", "__pycache__"}
-        for root, dirs, files in os.walk(out_dir):
-            dirs[:] = [d for d in dirs if d.lower() not in ignored_dirs]
-            for fname in files:
-                if not fname.lower().endswith((".html", ".xhtml", ".htm")):
-                    continue
-                if _normalize_output_basename(fname) == expected_norm:
-                    path = os.path.join(root, fname)
-                    return _as_output_file(path), path
+        for fname in os.listdir(out_dir):
+            path = os.path.join(out_dir, fname)
+            if not os.path.isfile(path):
+                continue
+            if not _is_root_output_html_path(path, out_dir):
+                continue
+            if _normalize_output_basename(fname) == expected_norm:
+                return _as_output_file(fname), path
     except Exception:
         pass
     return expected, None
