@@ -8151,41 +8151,42 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
     else:
         return False
 
-    processed = 0
-    skipped = 0
-    failed = 0
-    total = len(chapters)
+    progress_lock = threading.Lock()
+    use_batch = bool(getattr(config, "BATCH_TRANSLATION", False))
+    batch_size = max(1, int(getattr(config, "BATCH_SIZE", 1) or 1))
+    if use_batch and len(chapters) > 1:
+        print(f"⚡ Batch mode enabled for {mode}: {batch_size} parallel workers")
 
-    for idx, chapter in enumerate(chapters):
+    def _process_one(idx, chapter):
         if check_stop():
-            print("⏹️ Post-processing stopped by user")
-            break
+            return "skipped", f"⏹️ Post-processing stopped before item {idx + 1}"
 
         actual_num = chapter.get("actual_chapter_num", chapter.get("num"))
         if actual_num is None:
             actual_num = FileUtilities.extract_actual_chapter_number(chapter, patterns=None, config=config) or idx + 1
-        output_file, output_path = _find_existing_translated_output(out, chapter, actual_num, progress_manager)
+
+        with progress_lock:
+            output_file, output_path = _find_existing_translated_output(out, chapter, actual_num, progress_manager)
         if not output_path:
-            skipped += 1
-            print(f"⬜ Chapter {actual_num}: translated output not found ({output_file})")
-            continue
+            return "skipped", f"⬜ Chapter {actual_num}: translated output not found ({output_file})"
 
         with open(output_path, "r", encoding="utf-8", errors="ignore") as f:
             html_content = f.read()
         content_hash = ContentProcessor.get_content_hash(html_content)
 
         # Ensure a base completed entry exists so the two post-process checks are visible.
-        progress_manager.update(idx, actual_num, content_hash, output_file, status="completed", chapter_obj=chapter)
+        with progress_lock:
+            progress_manager.update(idx, actual_num, content_hash, output_file, status="completed", chapter_obj=chapter)
 
-        chapter_key = progress_manager._get_chapter_key(actual_num, output_file, chapter, content_hash)
-        entry = progress_manager.prog.get("chapters", {}).get(chapter_key, {})
+            chapter_key = progress_manager._get_chapter_key(actual_num, output_file, chapter, content_hash)
+            entry = dict(progress_manager.prog.get("chapters", {}).get(chapter_key, {}))
 
         if mode == "refinement":
             if entry.get("refinement_status") == "refined":
-                skipped += 1
-                continue
-            progress_manager.update_refinement_status(idx, actual_num, content_hash, output_file, "in_progress", chapter_obj=chapter)
-            progress_manager.save()
+                return "skipped", f"✨ Chapter {actual_num}: already refined"
+            with progress_lock:
+                progress_manager.update_refinement_status(idx, actual_num, content_hash, output_file, "in_progress", chapter_obj=chapter)
+                progress_manager.save()
             try:
                 refine_system = os.getenv(
                     "REFINEMENT_SYSTEM_PROMPT",
@@ -8204,41 +8205,79 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 with open(output_path, "w", encoding="utf-8") as f:
                     f.write(refined)
                 new_hash = ContentProcessor.get_content_hash(refined)
-                progress_manager.update(idx, actual_num, new_hash, output_file, status="completed", chapter_obj=chapter)
-                progress_manager.update_refinement_status(idx, actual_num, new_hash, output_file, "refined", chapter_obj=chapter)
-                progress_manager.prog["chapters"][progress_manager._get_chapter_key(actual_num, output_file, chapter, new_hash)]["unrefined_backup_file"] = os.path.relpath(backup_path, out).replace("\\", "/")
-                progress_manager.save()
-                processed += 1
-                print(f"✨ Refined Chapter {actual_num}: {output_file}")
+                with progress_lock:
+                    progress_manager.update(idx, actual_num, new_hash, output_file, status="completed", chapter_obj=chapter)
+                    progress_manager.update_refinement_status(idx, actual_num, new_hash, output_file, "refined", chapter_obj=chapter)
+                    progress_manager.prog["chapters"][progress_manager._get_chapter_key(actual_num, output_file, chapter, new_hash)]["unrefined_backup_file"] = os.path.relpath(backup_path, out).replace("\\", "/")
+                    progress_manager.save()
+                return "processed", f"✨ Refined Chapter {actual_num}: {output_file}"
             except Exception as exc:
-                failed += 1
-                progress_manager.update_refinement_status(idx, actual_num, content_hash, output_file, "failed", chapter_obj=chapter, error=exc)
-                progress_manager.save()
-                print(f"❌ Refinement failed for Chapter {actual_num}: {exc}")
+                with progress_lock:
+                    progress_manager.update_refinement_status(idx, actual_num, content_hash, output_file, "failed", chapter_obj=chapter, error=exc)
+                    progress_manager.save()
+                return "failed", f"❌ Refinement failed for Chapter {actual_num}: {exc}"
 
         elif mode == "audio":
             audio_base = os.path.splitext(os.path.basename(output_file))[0] + ".mp3"
             audio_path = os.path.join(tts_dir, audio_base)
             rel_audio = os.path.relpath(audio_path, out).replace("\\", "/")
             if entry.get("tts_status") == "tts_completed" and os.path.exists(audio_path):
-                skipped += 1
-                continue
-            progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "in_progress", chapter_obj=chapter, tts_file=rel_audio)
-            progress_manager.save()
+                return "skipped", f"🔊 Chapter {actual_num}: TTS already exists"
+            with progress_lock:
+                progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "in_progress", chapter_obj=chapter, tts_file=rel_audio)
+                progress_manager.save()
             try:
                 text = _html_to_tts_text(html_content)
                 if not text:
                     raise RuntimeError("No readable text found in translated HTML")
                 client.text_to_speech(text, audio_path)
-                progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "tts_completed", chapter_obj=chapter, tts_file=rel_audio)
-                progress_manager.save()
-                processed += 1
-                print(f"🔊 TTS Chapter {actual_num}: {rel_audio}")
+                with progress_lock:
+                    progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "tts_completed", chapter_obj=chapter, tts_file=rel_audio)
+                    progress_manager.save()
+                return "processed", f"🔊 TTS Chapter {actual_num}: {rel_audio}"
             except Exception as exc:
-                failed += 1
-                progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "failed", chapter_obj=chapter, tts_file=rel_audio, error=exc)
-                progress_manager.save()
-                print(f"❌ TTS failed for Chapter {actual_num}: {exc}")
+                with progress_lock:
+                    progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "failed", chapter_obj=chapter, tts_file=rel_audio, error=exc)
+                    progress_manager.save()
+                return "failed", f"❌ TTS failed for Chapter {actual_num}: {exc}"
+
+        return "skipped", f"Skipped Chapter {actual_num}"
+
+    processed = 0
+    skipped = 0
+    failed = 0
+
+    def _record_result(result):
+        nonlocal processed, skipped, failed
+        status, message = result
+        if status == "processed":
+            processed += 1
+        elif status == "failed":
+            failed += 1
+        else:
+            skipped += 1
+        if message:
+            print(message)
+
+    if use_batch and len(chapters) > 1:
+        with ThreadPoolExecutor(max_workers=batch_size) as executor:
+            futures = {
+                executor.submit(_process_one, idx, chapter): (idx, chapter)
+                for idx, chapter in enumerate(chapters)
+            }
+            for future in as_completed(futures):
+                if check_stop():
+                    print("⏹️ Post-processing stop requested; waiting for already-started items to settle...")
+                try:
+                    _record_result(future.result())
+                except Exception as exc:
+                    failed += 1
+                    idx, chapter = futures[future]
+                    actual_num = chapter.get("actual_chapter_num", chapter.get("num", idx + 1))
+                    print(f"❌ {mode.title()} failed for Chapter {actual_num}: {exc}")
+    else:
+        for idx, chapter in enumerate(chapters):
+            _record_result(_process_one(idx, chapter))
 
     print(f"\n📊 {mode.title()} summary: {processed} processed, {skipped} skipped, {failed} failed")
     return True

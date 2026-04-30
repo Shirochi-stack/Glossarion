@@ -2637,10 +2637,11 @@ class RetranslationMixin:
                 lb = listbox_ref[0]
                 if not lb:
                     return
+                status_data = {'prog': prog}
                 indices = [
                     i for i in range(lb.count())
                     if not lb.item(i).isHidden()
-                    and (lb.item(i).data(Qt.UserRole) or {}).get('info', {}).get('status') in statuses
+                    and self._progress_display_status((lb.item(i).data(Qt.UserRole) or {}).get('info', {}), status_data) in statuses
                 ]
                 if not indices:
                     return
@@ -2653,7 +2654,7 @@ class RetranslationMixin:
         lbl_completed.mousePressEvent   = _make_cycle_handler(('completed',))
         lbl_in_progress.mousePressEvent = _make_cycle_handler(('in_progress',))
         lbl_pending.mousePressEvent     = _make_cycle_handler(('pending',))
-        lbl_missing.mousePressEvent     = _make_cycle_handler(('not_translated',))
+        lbl_missing.mousePressEvent     = _make_cycle_handler(('not_translated', 'not_refined', 'no_tts'))
         lbl_failed.mousePressEvent      = _make_cycle_handler(('failed', 'qa_failed'))
         
         # Populate listbox with dynamic column widths
@@ -2665,6 +2666,8 @@ class RetranslationMixin:
             'in_progress': '🔄',
             'pending': '❓',
             'not_translated': '⬜',
+            'not_refined': '✨',
+            'no_tts': '🔊',
             'unknown': '❓'
         }
         
@@ -2676,6 +2679,8 @@ class RetranslationMixin:
             'in_progress': 'In Progress',
             'pending': 'Pending',
             'not_translated': 'Not Translated',
+            'not_refined': 'Not Refined',
+            'no_tts': 'No TTS',
             'unknown': 'Unknown'
         }
         
@@ -2696,7 +2701,7 @@ class RetranslationMixin:
         
         for info in chapter_display_info:
             chapter_num = info['num']
-            status = info['status']
+            status = self._progress_display_status(info, {'prog': prog})
             output_file = info['output_file']
             icon = status_icons.get(status, '❓')
             status_label = status_labels.get(status, status)
@@ -2753,6 +2758,8 @@ class RetranslationMixin:
                 item.setForeground(QColor('red'))
             elif status == 'not_translated':
                 item.setForeground(QColor('#2b6cb0'))
+            elif status in ['not_refined', 'no_tts']:
+                item.setForeground(QColor('#8a63d2'))
             elif status == 'in_progress':
                 item.setForeground(QColor('orange'))
             elif status == 'pending':
