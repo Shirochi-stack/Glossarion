@@ -8119,6 +8119,22 @@ def _normalize_output_basename(fname: str) -> str:
         base = stem
     return base.lower()
 
+def _is_auxiliary_output_path(path_or_name: str, out_dir: str) -> bool:
+    """True for post-process/helper folders that must never be treated as source HTML."""
+    if not path_or_name:
+        return False
+    try:
+        path = str(path_or_name)
+        if os.path.isabs(path):
+            rel = os.path.relpath(path, out_dir)
+        else:
+            rel = path
+        rel = rel.replace("\\", "/").strip("/")
+        parts = [part.lower() for part in rel.split("/") if part]
+        return any(part in {"text_to_speech", "unrefined_backup", "raw", "__pycache__"} for part in parts)
+    except Exception:
+        return False
+
 def _find_existing_translated_output(out_dir, chapter, actual_num, progress_manager):
     expected = FileUtilities.create_chapter_filename(chapter, actual_num)
     candidates = [expected]
@@ -8142,6 +8158,8 @@ def _find_existing_translated_output(out_dir, chapter, actual_num, progress_mana
         if not cand:
             continue
         path = cand if os.path.isabs(cand) else os.path.join(out_dir, cand)
+        if _is_auxiliary_output_path(path, out_dir):
+            continue
         if os.path.exists(path) and path.lower().endswith((".html", ".xhtml", ".htm")):
             return _as_output_file(path if os.path.isabs(cand) else cand), path
 
@@ -8171,6 +8189,8 @@ def _find_existing_translated_output(out_dir, chapter, actual_num, progress_mana
             if not (same_num or same_original or same_output_shape):
                 continue
             path = output_file if os.path.isabs(output_file) else os.path.join(out_dir, output_file)
+            if _is_auxiliary_output_path(path, out_dir):
+                continue
             if os.path.exists(path) and path.lower().endswith((".html", ".xhtml", ".htm")):
                 return _as_output_file(output_file), path
     except Exception:
@@ -8179,7 +8199,7 @@ def _find_existing_translated_output(out_dir, chapter, actual_num, progress_mana
     try:
         ignored_dirs = {"text_to_speech", "unrefined_backup", "raw", "__pycache__"}
         for root, dirs, files in os.walk(out_dir):
-            dirs[:] = [d for d in dirs if d not in ignored_dirs]
+            dirs[:] = [d for d in dirs if d.lower() not in ignored_dirs]
             for fname in files:
                 if not fname.lower().endswith((".html", ".xhtml", ".htm")):
                     continue
@@ -8229,6 +8249,17 @@ def _preferred_tts_audio_extension(config, client) -> str:
     if not google_cloud_requested and (gemini_requested or gemini_auto):
         return "wav"
     return audio_format or "mp3"
+
+def _tts_stem_variants(output_file: str):
+    stem = os.path.splitext(os.path.basename(output_file or ""))[0]
+    if not stem:
+        return []
+    variants = [stem]
+    if stem.startswith("response_"):
+        variants.append(stem[len("response_"):])
+    else:
+        variants.append(f"response_{stem}")
+    return list(dict.fromkeys(variants))
 
 def _process_refinement_or_tts_mode(config, client, chapters, out, progress_manager, check_stop):
     mode = config.OUTPUT_MODE
@@ -8286,9 +8317,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         if preferred_path:
             candidates.append(preferred_path)
         if output_file:
-            stem = os.path.splitext(os.path.basename(output_file))[0]
-            for ext in ("wav", "mp3", "pcm", "m4a", "ogg", "flac"):
-                candidates.append(os.path.join("text_to_speech", f"{stem}.{ext}"))
+            for stem in _tts_stem_variants(output_file):
+                for ext in ("wav", "mp3", "pcm", "m4a", "ogg", "flac"):
+                    candidates.append(os.path.join("text_to_speech", f"{stem}.{ext}"))
 
         seen = set()
         for candidate in candidates:
@@ -8397,7 +8428,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "no_tts", chapter_obj=chapter, tts_file=rel_audio)
                         progress_manager.save()
                     return "skipped", f"🔊 Chapter {actual_num}: no readable text found; left as No TTS"
-                print(f"🔊 [{threading.current_thread().name}] TTS API start Ch.{actual_num} ({len(text):,} chars) -> {rel_audio}")
+                print(f"🔊 [{threading.current_thread().name}] TTS API start Ch.{actual_num} from {output_file} ({len(text):,} chars) -> {rel_audio}")
                 actual_audio_path = client.text_to_speech(text, audio_path) or audio_path
                 rel_audio = os.path.relpath(actual_audio_path, out).replace("\\", "/")
                 with progress_lock:

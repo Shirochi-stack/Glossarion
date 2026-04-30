@@ -2996,11 +2996,11 @@ class RetranslationMixin:
 
                     output_file = (ch_entry or {}).get('output_file') or ch_info.get('output_file')
                     if output_file:
-                        stem = os.path.splitext(os.path.basename(output_file))[0]
                         configured_ext = str(os.environ.get('TTS_AUDIO_FORMAT') or 'mp3').lower().strip().lstrip('.')
-                        for ext in [configured_ext, 'mp3', 'wav']:
-                            if ext:
-                                candidates.append(os.path.join('text_to_speech', f"{stem}.{ext}"))
+                        for stem in self._audio_stem_variants(output_file):
+                            for ext in [configured_ext, 'mp3', 'wav']:
+                                if ext:
+                                    candidates.append(os.path.join('text_to_speech', f"{stem}.{ext}"))
 
                     seen = set()
                     paths = []
@@ -3493,9 +3493,9 @@ class RetranslationMixin:
                     if isinstance(tracked, dict) and tracked.get('output_file') == output_file and tracked.get('tts_file'):
                         candidates.append(tracked.get('tts_file'))
 
-                stem = os.path.splitext(os.path.basename(output_file))[0]
-                for ext in ("wav", "mp3", "pcm", "m4a", "ogg", "flac"):
-                    candidates.append(os.path.join("text_to_speech", f"{stem}.{ext}"))
+                for stem in self._audio_stem_variants(output_file):
+                    for ext in ("wav", "mp3", "pcm", "m4a", "ogg", "flac"):
+                        candidates.append(os.path.join("text_to_speech", f"{stem}.{ext}"))
 
             seen = set()
             for candidate in candidates:
@@ -4679,6 +4679,17 @@ class RetranslationMixin:
                 return mode
         return 'text'
 
+    def _audio_stem_variants(self, output_file):
+        stem = os.path.splitext(os.path.basename(output_file or ""))[0]
+        if not stem:
+            return []
+        variants = [stem]
+        if stem.startswith("response_"):
+            variants.append(stem[len("response_"):])
+        else:
+            variants.append(f"response_{stem}")
+        return list(dict.fromkeys(variants))
+
     def _audio_candidates_for_entry(self, output_dir, entry):
         """Return possible audio files for a progress entry as (relative, absolute) pairs."""
         candidates = []
@@ -4691,9 +4702,9 @@ class RetranslationMixin:
 
         output_file = entry.get('output_file')
         if output_file:
-            stem = os.path.splitext(os.path.basename(output_file))[0]
-            for ext in ("wav", "mp3", "pcm", "m4a", "ogg", "flac"):
-                candidates.append(os.path.join("text_to_speech", f"{stem}.{ext}"))
+            for stem in self._audio_stem_variants(output_file):
+                for ext in ("wav", "mp3", "pcm", "m4a", "ogg", "flac"):
+                    candidates.append(os.path.join("text_to_speech", f"{stem}.{ext}"))
 
         seen = set()
         resolved = []
