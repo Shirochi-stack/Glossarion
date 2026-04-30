@@ -21,6 +21,8 @@ try:
 except ImportError:
     _get_custom_entry_types = None
 
+_gender_bias_log_seen = set()
+
 
 def _get_gender_types():
     """Return a set of entry type names that have has_gender enabled."""
@@ -139,15 +141,33 @@ def _tracker_entry_for_raw(tracker, raw_name):
 
 def _gender_noise_threshold():
     try:
-        value = float(os.getenv("GLOSSARY_GENDER_NOISE_THRESHOLD", "15"))
+        value = float(os.getenv("GLOSSARY_GENDER_NOISE_THRESHOLD", "10"))
     except Exception:
-        value = 15.0
+        value = 10.0
     return max(0.0, min(100.0, value)) / 100.0
 
 
 def _gender_bias():
     bias = _normal_gender(os.getenv("GLOSSARY_GENDER_TRACKING_BIAS", "none"))
     return bias if bias in {"male", "female"} else "none"
+
+
+def _gender_rarity_stats(entry):
+    occurrences = [o for o in entry.get("occurrences", []) if isinstance(o, dict)] if isinstance(entry, dict) else []
+    genders = [_normal_gender(o.get("gender")) for o in occurrences]
+    genders = [g for g in genders if g not in {"", "unknown", "n/a", "na", "none", "-"}]
+    total = len(genders)
+    stats = {}
+    if not total:
+        return stats
+    for gender in set(genders):
+        count = sum(1 for g in genders if g == gender)
+        stats[gender] = {
+            "count": count,
+            "total": total,
+            "ratio": count / total,
+        }
+    return stats
 
 
 def _rare_tracker_genders(entry):
@@ -157,24 +177,46 @@ def _rare_tracker_genders(entry):
     if threshold <= 0:
         return set()
     bias = _gender_bias()
-    occurrences = [o for o in entry.get("occurrences", []) if isinstance(o, dict)]
-    genders = [_normal_gender(o.get("gender")) for o in occurrences]
-    genders = [g for g in genders if g not in {"", "unknown", "n/a", "na", "none", "-"}]
-    if not genders:
-        return set()
+    stats = _gender_rarity_stats(entry)
     rare = set()
-    for gender in set(genders):
+    for gender, values in stats.items():
         if gender == bias:
             continue
-        if (sum(1 for g in genders if g == gender) / len(genders)) <= threshold:
+        if values["ratio"] <= threshold:
             rare.add(gender)
     return rare
 
 
-def _gender_is_rare_noise(entry, actual_gender):
+def _log_gender_bias_effect(entry, raw_name, actual_gender):
+    bias = _gender_bias()
+    actual_gender = _normal_gender(actual_gender)
+    if bias != actual_gender:
+        return
+    threshold = _gender_noise_threshold()
+    if threshold <= 0:
+        return
+    stats = _gender_rarity_stats(entry).get(actual_gender)
+    if not stats or stats["ratio"] > threshold:
+        return
+    key = (str(raw_name or "").casefold(), actual_gender, int(threshold * 100))
+    if key in _gender_bias_log_seen:
+        return
+    _gender_bias_log_seen.add(key)
+    translated_name = str(entry.get("translated_name", "") or "").strip() if isinstance(entry, dict) else ""
+    label = f"{translated_name} ({raw_name})" if translated_name and raw_name else (translated_name or str(raw_name or "unknown"))
+    print(
+        "📑 Gender tracker bias active: "
+        f"keeping rare {actual_gender} variant for {label} "
+        f"({stats['count']}/{stats['total']} = {stats['ratio'] * 100:.1f}%, "
+        f"slider {threshold * 100:.0f}%, bias={bias})"
+    )
+
+
+def _gender_is_rare_noise(entry, actual_gender, raw_name=None):
     actual_gender = _normal_gender(actual_gender)
     if actual_gender in {"", "unknown", "n/a", "na", "none", "-"}:
         return False
+    _log_gender_bias_effect(entry, raw_name, actual_gender)
     return actual_gender in _rare_tracker_genders(entry)
 
 
@@ -215,7 +257,7 @@ def _gender_variant_allowed(tracker, raw_name, gender, chapter_ref=None):
     if not actual or actual in {"unknown", "n/a", "na", "none", "-"}:
         return True
     entry = _tracker_entry_for_raw(tracker, raw_name)
-    if _gender_is_rare_noise(entry, actual):
+    if _gender_is_rare_noise(entry, actual, raw_name):
         return False
     wanted = _tracker_gender_for_entry(entry, chapter_ref)
     if not wanted:

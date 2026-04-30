@@ -2613,8 +2613,8 @@ Rules:
         if not hasattr(self, 'gender_noise_threshold_slider'):
             self.gender_noise_threshold_slider = QSlider(Qt.Horizontal)
             self.gender_noise_threshold_slider.setMinimum(0)
-            self.gender_noise_threshold_slider.setMaximum(50)
-            self.gender_noise_threshold_slider.setValue(int(self.config.get('glossary_gender_noise_threshold', 15)))
+            self.gender_noise_threshold_slider.setMaximum(100)
+            self.gender_noise_threshold_slider.setValue(int(self.config.get('glossary_gender_noise_threshold', 10)))
             self.gender_noise_threshold_slider.setMaximumWidth(180)
             self._disable_slider_mousewheel(self.gender_noise_threshold_slider)
         gender_noise_layout.addWidget(self.gender_noise_threshold_slider)
@@ -2646,7 +2646,7 @@ Rules:
         )
         gender_noise_layout.addWidget(self.gender_tracking_bias_combo)
 
-        gender_noise_hint = QLabel("(Default 15%: one-off AI misgenders are ignored during glossary compression)")
+        gender_noise_hint = QLabel("(Default 10%: one-off AI misgenders are ignored during glossary compression)")
         gender_noise_layout.addWidget(gender_noise_hint)
         gender_noise_layout.addStretch()
         
