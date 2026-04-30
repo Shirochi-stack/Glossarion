@@ -2416,7 +2416,7 @@ CRITICAL EXTRACTION RULES:
     
     return (system_prompt, user_prompt)
 
-def build_single_pass_translation_system_prompt(translation_prompt: str, source_text: str, mode: str = "balanced") -> str:
+def build_single_pass_translation_system_prompt(translation_prompt: str, source_text: str) -> str:
     """Build a combined glossary-extraction + translation system prompt.
 
     The glossary extraction half reuses build_prompt(), so custom fields,
@@ -2424,11 +2424,10 @@ def build_single_pass_translation_system_prompt(translation_prompt: str, source_
     with the normal glossary pipeline.
     """
     glossary_system_prompt, _ = build_prompt(source_text or "")
-    mode_label = (mode or "balanced").strip().capitalize()
     translation_prompt = translation_prompt or ""
     return (
         "You have 2 roles to complete.\n\n"
-        f"1. Perform glossary extraction using the {mode_label} glossary logic.\n"
+        "1. Perform glossary extraction using the Balanced/Full glossary logic.\n"
         "2. Perform translation using the provided glossary.\n\n"
         "Rules:\n"
         "- Wrap the generated glossary in <glossary>...</glossary> tags.\n"

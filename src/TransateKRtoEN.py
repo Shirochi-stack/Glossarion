@@ -485,6 +485,8 @@ class TranslationConfig:
     def __init__(self):
         self.MODEL = os.getenv("MODEL", "gemini-1.5-flash")
         self.OUTPUT_MODE = os.getenv("OUTPUT_MODE", "text").lower().strip()
+        if self.OUTPUT_MODE == "refine":
+            self.OUTPUT_MODE = "refinement"
         if self.OUTPUT_MODE not in ("text", "vision", "image", "video", "audio", "refinement"):
             self.OUTPUT_MODE = "text"
         self.input_path = os.getenv("input_path", "default.epub")
@@ -1850,6 +1852,8 @@ class ProgressManager:
             }
 
         _env_output_mode = os.getenv("OUTPUT_MODE", "").lower().strip()
+        if _env_output_mode == "refine":
+            _env_output_mode = "refinement"
         if _env_output_mode in ("text", "vision", "image", "video", "audio", "refinement"):
             prog["output_mode"] = _env_output_mode
         else:
@@ -6876,12 +6880,10 @@ def _single_pass_glossary_mode():
     """Return the requested single-pass glossary depth, or None when disabled."""
     mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower()
     explicit = (os.getenv("SINGLE_PASS_GLOSSARY_MODE") or "").strip().lower()
-    if explicit in ("balanced", "full"):
-        return explicit
-    if mode in ("single_pass_balanced", "single-pass-balanced"):
-        return "balanced"
-    if mode in ("single_pass_full", "single-pass-full"):
-        return "full"
+    if explicit in ("1", "true", "yes", "single_pass", "single-pass", "single"):
+        return "single_pass"
+    if mode in ("single_pass", "single-pass"):
+        return "single_pass"
     return None
 
 def _build_single_pass_glossary_messages(messages, source_text):
@@ -6897,14 +6899,12 @@ def _build_single_pass_glossary_messages(messages, source_text):
 
     wrapped = []
     system_wrapped = False
-    mode_label = depth.capitalize()
     for msg in messages:
         if msg.get("role") == "system" and not system_wrapped:
             translation_prompt = msg.get("content", "") or ""
             combined = glossary_extractor.build_single_pass_translation_system_prompt(
                 translation_prompt,
                 source_text or "",
-                mode=depth,
             )
             new_msg = dict(msg)
             new_msg["content"] = combined
@@ -6914,7 +6914,7 @@ def _build_single_pass_glossary_messages(messages, source_text):
             wrapped.append(msg)
 
     if system_wrapped:
-        print(f"📑 Single Pass Glossary: {mode_label} prompt merged into translation request")
+        print("📑 Single Pass Glossary: prompt merged into translation request")
     return wrapped
 
 def _split_single_pass_glossary_response(response_text):
@@ -8712,9 +8712,16 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 progress_manager.update_refinement_status(idx, actual_num, content_hash, output_file, "in_progress", chapter_obj=chapter)
                 progress_manager.save()
             try:
-                refine_system = os.getenv(
-                    "REFINEMENT_SYSTEM_PROMPT",
-                    "You are refining an existing English translation. Improve clarity, flow, consistency, and readability while preserving all HTML structure, tags, images, links, ids, and meaning. Return only the refined HTML."
+                try:
+                    import large_env as _large_env
+                    refine_env_prompt = (_large_env.get_env("REFINEMENT_SYSTEM_PROMPT", "") or "").strip()
+                except Exception:
+                    refine_env_prompt = ""
+                refine_system = (
+                    refine_env_prompt
+                    or os.getenv("REFINEMENT_SYSTEM_PROMPT", "").strip()
+                    or getattr(config, "SYSTEM_PROMPT", "").strip()
+                    or "You are refining an existing English translation. Improve clarity, flow, consistency, and readability while preserving all HTML structure, tags, images, links, ids, and meaning. Return only the refined HTML."
                 )
                 messages = [
                     {"role": "system", "content": refine_system},

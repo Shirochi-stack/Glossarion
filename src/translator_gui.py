@@ -1205,6 +1205,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         # Keep this list in sync with the always-include logic in _init_variables.
         protected = {
             "Universal",
+            "Refinement",
             "Korean_BeautifulSoup",
             "Japanese_BeautifulSoup",
             "Chinese_BeautifulSoup",
@@ -1775,7 +1776,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
 
         # Force-sync auto-mapping/fuzzy states based on auto_glossary_mode
         _agm = self.config.get('auto_glossary_mode', 'off')
-        if _agm in ('off', 'off_fuzzy_automap', 'balanced', 'full', 'single_pass_balanced', 'single_pass_full'):
+        if _agm in ('off', 'off_fuzzy_automap', 'balanced', 'full', 'single_pass'):
             self.append_glossary_auto_load_var = True
             self.config['append_glossary_auto_load'] = True
         elif _agm in ('off_no_automap', 'minimal'):
@@ -2136,6 +2137,11 @@ Text to analyze:
                 "- If the text does not contain HTML tags, use line breaks for proper formatting as expected of a novel.\n"
                 "- Maintain the original meaning, tone, and style.\n"
                 "- Output ONLY the translated text in {target_lang}. Do not add any explanations, notes, or conversational filler.\n"
+            ),
+            "Refinement": (
+                "You are refining an existing English translation. Improve clarity, flow, "
+                "consistency, and readability while preserving all HTML structure, tags, "
+                "images, links, ids, and meaning. Return only the refined HTML."
             ),
             "Korean_BeautifulSoup": (
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
@@ -3311,7 +3317,106 @@ Recent translations to summarize:
             mode = str(getattr(self, 'output_mode_var', None) or self.config.get('output_mode', 'text')).lower().strip()
         except Exception:
             mode = 'text'
+        if mode == 'refine':
+            mode = 'refinement'
         return mode if mode in ('text', 'vision', 'image', 'video', 'audio', 'refinement') else 'text'
+
+    def _get_prompt_profile_text(self, profile_name: str, fallback: str = "") -> str:
+        """Return prompt text from a profile, supporting legacy string and dict formats."""
+        try:
+            profiles = getattr(self, 'prompt_profiles', None) or self.config.get('prompt_profiles', {})
+            profile_data = profiles.get(profile_name) if isinstance(profiles, dict) else None
+            if isinstance(profile_data, str):
+                return profile_data
+            if isinstance(profile_data, dict):
+                return str(profile_data.get('prompt', '') or '')
+        except Exception:
+            pass
+
+        try:
+            default_data = getattr(self, 'default_prompts', {}).get(profile_name)
+            if isinstance(default_data, str):
+                return default_data
+            if isinstance(default_data, dict):
+                return str(default_data.get('prompt', '') or '')
+        except Exception:
+            pass
+
+        return fallback
+
+    def _get_refinement_profile_name(self) -> str:
+        """Profile name used as the refinement-mode system prompt."""
+        try:
+            name = str(self.config.get('refinement_profile', 'Refinement') or '').strip()
+        except Exception:
+            name = ''
+        return name or 'Refinement'
+
+    def _get_refinement_system_prompt(self) -> str:
+        """Resolve the refinement prompt from the profile system."""
+        default_prompt = (
+            "You are refining an existing English translation. Improve clarity, flow, "
+            "consistency, and readability while preserving all HTML structure, tags, "
+            "images, links, ids, and meaning. Return only the refined HTML."
+        )
+        prompt = self._get_prompt_profile_text(self._get_refinement_profile_name(), default_prompt).strip()
+        return prompt or default_prompt
+
+    def _activate_refinement_profile(self):
+        """Switch the visible prompt editor to the refinement profile."""
+        try:
+            profile_name = self._get_refinement_profile_name()
+            if profile_name not in self.prompt_profiles:
+                self.prompt_profiles[profile_name] = self._get_refinement_system_prompt()
+                self.config['prompt_profiles'] = self.prompt_profiles
+
+            current = ''
+            if hasattr(self, 'profile_menu'):
+                current = self.profile_menu.currentText().strip()
+            else:
+                current = str(getattr(self, 'profile_var', '') or '').strip()
+
+            if current and current != profile_name:
+                self.config['_previous_non_refinement_profile'] = current
+
+            if hasattr(self, 'profile_menu'):
+                items = [self.profile_menu.itemText(i) for i in range(self.profile_menu.count())]
+                if profile_name not in items:
+                    self.profile_menu.addItem(profile_name)
+                if self.profile_menu.currentText().strip() != profile_name:
+                    self.profile_menu.setCurrentText(profile_name)
+                else:
+                    self.on_profile_select()
+            else:
+                self.profile_var = profile_name
+                self.config['active_profile'] = profile_name
+        except Exception:
+            pass
+
+    def _restore_profile_after_refinement_mode(self):
+        """Restore the last non-refinement profile when leaving refinement mode."""
+        try:
+            refinement_profile = self._get_refinement_profile_name()
+            previous = str(self.config.get('_previous_non_refinement_profile', '') or '').strip()
+            if not previous or previous == refinement_profile or previous not in self.prompt_profiles:
+                return
+
+            current = ''
+            if hasattr(self, 'profile_menu'):
+                current = self.profile_menu.currentText().strip()
+            else:
+                current = str(getattr(self, 'profile_var', '') or '').strip()
+
+            if current != refinement_profile:
+                return
+
+            if hasattr(self, 'profile_menu'):
+                self.profile_menu.setCurrentText(previous)
+            else:
+                self.profile_var = previous
+                self.config['active_profile'] = previous
+        except Exception:
+            pass
 
     def _get_allowed_image_output_mode(self):
         """Check if image output mode should be enabled based on dependencies.
@@ -3555,6 +3660,7 @@ Recent translations to summarize:
         # Define profiles that should always be included (in order of priority)
         always_include_profiles = [
             "Universal",
+            "Refinement",
             "Korean_BeautifulSoup",
             "Japanese_BeautifulSoup",
             "Chinese_BeautifulSoup",
@@ -3596,6 +3702,12 @@ Recent translations to summarize:
             self.prompt_profiles = new_profiles
         
         active = self.config.get('active_profile', next(iter(self.prompt_profiles)))
+        if str(self.config.get('output_mode', '')).lower().strip() in ('refine', 'refinement'):
+            refinement_profile = self._get_refinement_profile_name()
+            if active != refinement_profile and active in self.prompt_profiles:
+                self.config['_previous_non_refinement_profile'] = active
+            if refinement_profile in self.prompt_profiles:
+                active = refinement_profile
         self.profile_var = active
         # Initialize lang_var to the actual target language from config, not the profile name
         # This will be properly synced when update_target_language is called during GUI setup
@@ -7160,7 +7272,7 @@ Recent translations to summarize:
         auto_glossary_label.setStyleSheet("color: #e8f0ff; font-size: 10pt; font-weight: bold;")
         batch_right_layout.addWidget(auto_glossary_label)
         self.auto_glossary_shortcut_combo = QComboBox()
-        self.auto_glossary_shortcut_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Manual Glossary Only", "No Glossary", "Minimal", "Balanced", "Full", "Single Pass Balanced", "Single Pass Full"])
+        self.auto_glossary_shortcut_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Manual Glossary Only", "No Glossary", "Minimal", "Balanced", "Full", "Single Pass"])
         # Add Halgakos icon to each item
         try:
             _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
@@ -7175,7 +7287,7 @@ Recent translations to summarize:
         _auto_mode = self.config.get('auto_glossary_mode', None)
         if _auto_mode is None:
             _auto_mode = 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
-        _mode_idx = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6, 'single_pass_balanced': 7, 'single_pass_full': 8}.get(_auto_mode.lower(), 0)
+        _mode_idx = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6, 'single_pass': 7}.get(_auto_mode.lower(), 0)
         self.auto_glossary_shortcut_combo.setCurrentIndex(_mode_idx)
         self.auto_glossary_shortcut_combo.setToolTip(
             "Off: No automatic glossary extraction + enables Auto-Mapping\n"
@@ -7185,7 +7297,7 @@ Recent translations to summarize:
             "Minimal: Lightweight extraction during translation (in-process)\n"
             "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
             "Full: Chapter-by-chapter extraction for maximum context (most expensive)\n"
-            "Single Pass Balanced/Full: Extract glossary inline during each translation request"
+            "Single Pass: Extract glossary inline during each translation request"
         )
         self.auto_glossary_shortcut_combo.setFixedWidth(185)
         self.auto_glossary_shortcut_combo.setIconSize(QSize(18, 18))
@@ -7224,7 +7336,7 @@ Recent translations to summarize:
         
         def _on_auto_glossary_shortcut_changed(index):
             """Sync shortcut dropdown → main auto_glossary_mode_combo."""
-            mode_map = {0: 'off', 1: 'off_fuzzy_automap', 2: 'off_no_automap', 3: 'no_glossary', 4: 'minimal', 5: 'balanced', 6: 'full', 7: 'single_pass_balanced', 8: 'single_pass_full'}
+            mode_map = {0: 'off', 1: 'off_fuzzy_automap', 2: 'off_no_automap', 3: 'no_glossary', 4: 'minimal', 5: 'balanced', 6: 'full', 7: 'single_pass'}
             new_mode = mode_map.get(index, 'off')
             is_on = new_mode not in ('off', 'off_fuzzy_automap', 'off_no_automap', 'no_glossary')
             self.config['auto_glossary_mode'] = new_mode
@@ -7243,7 +7355,7 @@ Recent translations to summarize:
                     self.append_glossary_checkbox.style().polish(self.append_glossary_checkbox)
                     self.append_glossary_checkbox.update()
             # Auto-enable auto map when off/off_fuzzy_automap/balanced/full is selected
-            if new_mode in ('off', 'off_fuzzy_automap', 'balanced', 'full', 'single_pass_balanced', 'single_pass_full'):
+            if new_mode in ('off', 'off_fuzzy_automap', 'balanced', 'full', 'single_pass'):
                 self.config['append_glossary_auto_load'] = True
                 self.append_glossary_auto_load_var = True
                 if hasattr(self, 'append_glossary_auto_load_checkbox'):
@@ -7288,7 +7400,7 @@ Recent translations to summarize:
             # (blockSignals above prevents _on_auto_mapping_toggled from firing,
             #  so we do the path switch inline here.)
             try:
-                automap_now = new_mode in ('balanced', 'full', 'single_pass_balanced', 'single_pass_full') or (
+                automap_now = new_mode in ('balanced', 'full', 'single_pass') or (
                     new_mode != 'minimal' and
                     hasattr(self, 'append_glossary_auto_load_checkbox') and self.append_glossary_auto_load_checkbox.isChecked()
                 )
@@ -13767,6 +13879,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'OPENAI_OR_Gemini_API_KEY': api_key,
             'GEMINI_API_KEY': api_key,
             'SYSTEM_PROMPT': self.prompt_text.toPlainText().strip(),
+            'REFINEMENT_SYSTEM_PROMPT': self._get_refinement_system_prompt(),
             'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',  # Optional assistant prefill
             'TRANSLATE_BOOK_TITLE': "1" if self.translate_book_title_var else "0",
             'SKIP_TXT_TITLE_TRANSLATION': "1" if getattr(self, 'skip_txt_title_translation_var', True) else "0",
@@ -13819,13 +13932,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_AUTO_INJECT_BOOK_TITLE': "1" if auto_inject_book_title else "0",
             'ENABLE_AUTO_GLOSSARY': "1" if (self.config.get('auto_glossary_mode', 'off') == 'minimal' or (self.config.get('auto_glossary_mode') is None and self.enable_auto_glossary_var)) else "0",
             'AUTO_GLOSSARY_MODE': self.config.get('auto_glossary_mode', 'off'),
-            'SINGLE_PASS_GLOSSARY_MODE': 'balanced' if self.config.get('auto_glossary_mode', 'off') == 'single_pass_balanced' else ('full' if self.config.get('auto_glossary_mode', 'off') == 'single_pass_full' else ''),
+            'SINGLE_PASS_GLOSSARY_MODE': '1' if self.config.get('auto_glossary_mode', 'off') == 'single_pass' else '',
             'AUTO_GLOSSARY_PROMPT': self.unified_auto_glosary_prompt3 if hasattr(self, 'unified_auto_glosary_prompt3') else '',
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
             'GLOSSARY_TRANSLATION_PROMPT': self.glossary_translation_prompt if hasattr(self, 'glossary_translation_prompt') else '',
             'GLOSSARY_FORMAT_INSTRUCTIONS': self.glossary_format_instructions if hasattr(self, 'glossary_format_instructions') else '',
             'GLOSSARY_USE_LEGACY_CSV': '1' if self.use_legacy_csv_var else '0',
             'GLOSSARY_OUTPUT_LEGACY_JSON': '1' if getattr(self, 'glossary_output_legacy_json_var', False) else '0',
+            'OUTPUT_MODE': self._get_output_mode(),
+            'ENABLE_REFINEMENT_OUTPUT_MODE': "1" if self._get_output_mode() == 'refinement' else "0",
             'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var else "0",
             'WEBNOVEL_MIN_HEIGHT': str(self.webnovel_min_height_var),
@@ -15268,7 +15383,7 @@ Important rules:
                     'CONTEXT_WINDOW_SIZE': str(self.context_window_size_var),
                     'ENABLE_AUTO_GLOSSARY': "1" if (self.config.get('auto_glossary_mode', 'off') == 'minimal' or (self.config.get('auto_glossary_mode') is None and self.enable_auto_glossary_var)) else "0",
                     'AUTO_GLOSSARY_MODE': self.config.get('auto_glossary_mode', 'off'),
-                    'SINGLE_PASS_GLOSSARY_MODE': 'balanced' if self.config.get('auto_glossary_mode', 'off') == 'single_pass_balanced' else ('full' if self.config.get('auto_glossary_mode', 'off') == 'single_pass_full' else ''),
+                    'SINGLE_PASS_GLOSSARY_MODE': '1' if self.config.get('auto_glossary_mode', 'off') == 'single_pass' else '',
                     'APPEND_GLOSSARY': "0" if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ("1" if self.append_glossary_var else "0"),
                     'GLOSSARY_STRIP_HONORIFICS': '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var else '1',
                     'AUTO_GLOSSARY_PROMPT': getattr(self, 'unified_auto_glosary_prompt3', ''),
@@ -15672,6 +15787,8 @@ Important rules:
             # Set prompts
             import large_env
             large_env.set_env('SYSTEM_PROMPT', self.prompt_text.toPlainText().strip())
+            large_env.set_env('REFINEMENT_SYSTEM_PROMPT', self._get_refinement_system_prompt())
+            os.environ['REFINEMENT_SYSTEM_PROMPT'] = self._get_refinement_system_prompt()
 
             # PDF output settings
             os.environ['ENABLE_PDF_OUTPUT'] = '1' if getattr(self, 'enable_pdf_output_var', self.config.get('enable_pdf_output', False)) else '0'
@@ -19893,10 +20010,10 @@ Important rules:
                     setattr(self, 'auto_glossary_mode_var', mode_val)
                     setattr(self, 'enable_auto_glossary_var', (mode_val not in ('off', 'off_fuzzy_automap', 'off_no_automap', 'no_glossary')))
                     if hasattr(self, 'auto_glossary_mode_combo'):
-                        idx = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6, 'single_pass_balanced': 7, 'single_pass_full': 8}.get(mode_val, 5)
+                        idx = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6, 'single_pass': 7}.get(mode_val, 5)
                         self.auto_glossary_mode_combo.setCurrentIndex(idx)
                     if hasattr(self, 'auto_glossary_shortcut_combo'):
-                        _shortcut_idx = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6, 'single_pass_balanced': 7, 'single_pass_full': 8}.get(mode_val, 5)
+                        _shortcut_idx = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6, 'single_pass': 7}.get(mode_val, 5)
                         self.auto_glossary_shortcut_combo.blockSignals(True)
                         self.auto_glossary_shortcut_combo.setCurrentIndex(_shortcut_idx)
                         self.auto_glossary_shortcut_combo.blockSignals(False)
@@ -21999,7 +22116,7 @@ Important rules:
                     ('ADDITIONAL_GLOSSARY_PATH', self.config.get('additional_glossary_path', '')),
                     ('ENABLE_AUTO_GLOSSARY', '1' if self.config.get('auto_glossary_mode', 'off') == 'minimal' else '0'),
                     ('AUTO_GLOSSARY_MODE', self.config.get('auto_glossary_mode', 'off')),
-                    ('SINGLE_PASS_GLOSSARY_MODE', 'balanced' if self.config.get('auto_glossary_mode', 'off') == 'single_pass_balanced' else ('full' if self.config.get('auto_glossary_mode', 'off') == 'single_pass_full' else '')),
+                    ('SINGLE_PASS_GLOSSARY_MODE', '1' if self.config.get('auto_glossary_mode', 'off') == 'single_pass' else ''),
                     ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
                     ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),
                     ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter') else '0'),
@@ -22642,6 +22759,7 @@ Important rules:
                 # Prompts
                 ('TRANSLATION_CHUNK_PROMPT', str(getattr(self, 'translation_chunk_prompt', ''))),
                 ('IMAGE_CHUNK_PROMPT', str(getattr(self, 'image_chunk_prompt', ''))),
+                ('REFINEMENT_SYSTEM_PROMPT', self._get_refinement_system_prompt()),
                 ('ASSISTANT_PROMPT', str(getattr(self, 'assistant_prompt', ''))),  # Optional assistant prefill
 
                 # Safety flags

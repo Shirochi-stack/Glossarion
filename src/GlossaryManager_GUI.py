@@ -2100,7 +2100,7 @@ CRITICAL EXTRACTION RULES:
         if not hasattr(self, 'auto_glossary_mode_combo'):
             from PySide6.QtWidgets import QComboBox
             self.auto_glossary_mode_combo = QComboBox()
-            self.auto_glossary_mode_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Manual Glossary Only", "No Glossary", "Minimal", "Balanced", "Full", "Single Pass Balanced", "Single Pass Full"])
+            self.auto_glossary_mode_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Manual Glossary Only", "No Glossary", "Minimal", "Balanced", "Full", "Single Pass"])
             # Add Halgakos icon to each item
             try:
                 _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
@@ -2116,7 +2116,7 @@ CRITICAL EXTRACTION RULES:
                 # Migrate from old boolean
                 old_enabled = self.config.get('enable_auto_glossary', False)
                 saved_mode = 'minimal' if old_enabled else 'off'
-            mode_index = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6, 'single_pass_balanced': 7, 'single_pass_full': 8}.get(saved_mode.lower(), 5)
+            mode_index = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6, 'single_pass': 7}.get(saved_mode.lower(), 5)
             self.auto_glossary_mode_combo.setCurrentIndex(mode_index)
         self.auto_glossary_mode_combo.setToolTip(
             "Off: No automatic glossary extraction + enables Auto-Mapping\n"
@@ -2126,7 +2126,7 @@ CRITICAL EXTRACTION RULES:
             "Minimal: Lightweight extraction during translation (in-process)\n"
             "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
             "Full: Chapter-by-chapter extraction for maximum context (most expensive)\n"
-            "Single Pass Balanced/Full: Extract glossary inline during each translation request"
+            "Single Pass: Extract glossary inline during each translation request"
         )
         from PySide6.QtCore import QSize
         self.auto_glossary_mode_combo.setFixedWidth(220)
@@ -3233,8 +3233,7 @@ CRITICAL EXTRACTION RULES:
                 'Off (No Auto-Mapping)': 'off_no_automap',
                 'No Glossary': 'no_glossary', 'Minimal': 'minimal',
                 'Balanced': 'balanced', 'Full': 'full',
-                'Single Pass Balanced': 'single_pass_balanced',
-                'Single Pass Full': 'single_pass_full',
+                'Single Pass': 'single_pass',
             }
             mode = _display_to_mode.get(mode_raw, mode_raw.lower().replace(' ', '_'))
             enabled = mode not in ('off', 'off_no_automap', 'no_glossary')
@@ -3318,7 +3317,7 @@ CRITICAL EXTRACTION RULES:
                     _append_desc_label.mousePressEvent = lambda _: self.append_glossary_checkbox.toggle()
 
             # Auto-enable & lock auto-map when off/off_fuzzy_automap/balanced/full is selected
-            if mode in ('off', 'off_fuzzy_automap', 'balanced', 'full', 'single_pass_balanced', 'single_pass_full') and hasattr(self, 'append_glossary_auto_load_checkbox'):
+            if mode in ('off', 'off_fuzzy_automap', 'balanced', 'full', 'single_pass') and hasattr(self, 'append_glossary_auto_load_checkbox'):
                 if not self.append_glossary_auto_load_checkbox.isChecked():
                     self.append_glossary_auto_load_checkbox.setChecked(True)
                 _lock_toggle(self.append_glossary_auto_load_checkbox, _auto_load_desc_label)
@@ -5951,7 +5950,7 @@ CRITICAL EXTRACTION RULES:
                 ext_priority = ['.csv', '.json', '.txt', '.md']
                 mode = str(self.config.get('auto_glossary_mode', 'off')).lower()
                 auto_mapping_on = bool(self.config.get('append_glossary_auto_load', False))
-                use_per_book = (mode == 'minimal') or (auto_mapping_on and mode not in ('balanced', 'full', 'single_pass_balanced', 'single_pass_full'))
+                use_per_book = (mode == 'minimal') or (auto_mapping_on and mode not in ('balanced', 'full', 'single_pass'))
 
                 found_glossaries = []  # list of (display_name, full_path)
 

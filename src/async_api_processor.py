@@ -3186,6 +3186,8 @@ class AsyncProcessingDialog:
         else:
             system_prompt = self.gui.prompt_text.toPlainText().strip()
         env_vars['SYSTEM_PROMPT'] = system_prompt.replace('{target_lang}', target_lang).replace('{split_marker_instruction}', '')
+        if hasattr(self.gui, '_get_refinement_system_prompt'):
+            env_vars['REFINEMENT_SYSTEM_PROMPT'] = self.gui._get_refinement_system_prompt()
         
         # Async processing does not support request merging logic, so force it off
         env_vars['REQUEST_MERGING_ENABLED'] = '0'
@@ -3283,10 +3285,7 @@ class AsyncProcessingDialog:
         env_vars['APPEND_GLOSSARY_PROMPT'] = self.gui.append_glossary_prompt if hasattr(self.gui, 'append_glossary_prompt') else ''
         auto_glossary_mode = self.gui.config.get('auto_glossary_mode', 'off')
         env_vars['AUTO_GLOSSARY_MODE'] = auto_glossary_mode
-        env_vars['SINGLE_PASS_GLOSSARY_MODE'] = (
-            'balanced' if auto_glossary_mode == 'single_pass_balanced'
-            else ('full' if auto_glossary_mode == 'single_pass_full' else '')
-        )
+        env_vars['SINGLE_PASS_GLOSSARY_MODE'] = '1' if auto_glossary_mode == 'single_pass' else ''
         env_vars['GLOSSARY_MIN_FREQUENCY'] = _val(self.gui.glossary_min_frequency_var, 0)
         env_vars['GLOSSARY_MAX_NAMES'] = _val(self.gui.glossary_max_names_var, 0)
         env_vars['GLOSSARY_MAX_TITLES'] = _val(self.gui.glossary_max_titles_var, 0)
