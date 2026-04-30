@@ -1,6 +1,6 @@
 [Setup]
 AppName=Glossarion
-AppVersion=8.6.4
+AppVersion=8.6.5
 AppPublisher=Shirochi
 AppSupportURL=https://github.com/Shirochi-stack/Glossarion
 
@@ -13,7 +13,7 @@ UsePreviousSetupType=no
 
 ; Output settings
 OutputDir=Output
-OutputBaseFilename=Glossarion_Setup_v8.6.4
+OutputBaseFilename=Glossarion_Setup_v8.6.5
 Compression=lzma2/ultra64
 SolidCompression=yes
 
@@ -39,10 +39,10 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 ; Notice the 'DestName' trick! No matter which one they pick, it saves to their computer as 'Glossarion.exe'.
 ; This makes our shortcuts and uninstaller work perfectly regardless of their choice!
-Source: "dist\Glossarion v8.6.4.exe"; DestDir: "{app}"; DestName: "Glossarion.exe"; Flags: ignoreversion; Components: full
-; Source: "dist\N_Glossarion_NoCuda v8.6.4.exe"; DestDir: "{app}"; DestName: "Glossarion.exe"; Flags: ignoreversion; Components: nocuda
-; Source: "dist\L_Glossarion_Lite v8.6.4.exe"; DestDir: "{app}"; DestName: "Glossarion.exe"; Flags: ignoreversion; Components: lite
-; Source: "dist\L_Glossarion_TurboLite v8.6.4.exe"; DestDir: "{app}"; DestName: "Glossarion.exe"; Flags: ignoreversion; Components: turbolite
+Source: "dist\Glossarion v8.6.5.exe"; DestDir: "{app}"; DestName: "Glossarion.exe"; Flags: ignoreversion; Components: full
+; Source: "dist\N_Glossarion_NoCuda v8.6.5.exe"; DestDir: "{app}"; DestName: "Glossarion.exe"; Flags: ignoreversion; Components: nocuda
+; Source: "dist\L_Glossarion_Lite v8.6.5.exe"; DestDir: "{app}"; DestName: "Glossarion.exe"; Flags: ignoreversion; Components: lite
+; Source: "dist\L_Glossarion_TurboLite v8.6.5.exe"; DestDir: "{app}"; DestName: "Glossarion.exe"; Flags: ignoreversion; Components: turbolite
 
 [Icons]
 Name: "{autoprograms}\Glossarion"; Filename: "{app}\Glossarion.exe"
