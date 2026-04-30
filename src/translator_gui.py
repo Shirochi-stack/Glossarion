@@ -18796,6 +18796,12 @@ Important rules:
                 self.current_file_index = 0
             except Exception:
                 pass
+            try:
+                self.config['last_input_files'] = [path]
+                self.config['last_epub_path'] = path if path.lower().endswith('.epub') else None
+                self.save_config(show_message=False)
+            except Exception:
+                pass
             self._update_entry_epub_tooltip()
             try:
                 self.append_log(f"\U0001f4d6 Loaded from library: {os.path.basename(path)}")
@@ -18843,6 +18849,13 @@ Important rules:
             try:
                 self.selected_files = valid
                 self.current_file_index = 0
+            except Exception:
+                pass
+            try:
+                self.config['last_input_files'] = valid
+                first_epub = next((p for p in valid if str(p).lower().endswith('.epub')), None)
+                self.config['last_epub_path'] = first_epub
+                self.save_config(show_message=False)
             except Exception:
                 pass
             try:
