@@ -19,6 +19,7 @@ import shutil
 import traceback
 import subprocess
 import platform
+import time
 
 _IS_MACOS = (sys.platform == 'darwin')
 
@@ -2579,7 +2580,8 @@ class RetranslationMixin:
             lbl_pending.setVisible(False)
         
         # Not Translated: unique emoji/color (distinct from failures)
-        _missing_label_text = "✨ Not Refined" if str(prog.get('output_mode', '')).lower() == 'refinement' else ("🔊 No TTS" if str(prog.get('output_mode', '')).lower() == 'audio' else "⬜ Not Translated")
+        _current_output_mode = self._current_progress_output_mode({'prog': prog})
+        _missing_label_text = "✨ Not Refined" if _current_output_mode == 'refinement' else ("🔊 No TTS" if _current_output_mode == 'audio' else "⬜ Not Translated")
         lbl_missing = QLabel(f"{_missing_label_text}: {missing} | ")
         lbl_missing.setFont(stats_font)
         lbl_missing.setStyleSheet("color: #2b6cb0;")
@@ -2968,6 +2970,106 @@ class RetranslationMixin:
             
             selected_indices = [data['listbox'].row(item) for item in selected_items]
             selected_chapters = [data['chapter_display_info'][i] for i in selected_indices]
+
+            if self._current_progress_output_mode(data) == 'audio':
+                count = len(selected_chapters)
+                reply = self._styled_msgbox(
+                    QMessageBox.Question,
+                    data.get('dialog', self),
+                    "Confirm TTS Reset",
+                    f"This will delete only generated TTS audio for {count} selected chapter(s), mark them as No TTS, and leave translated HTML files untouched.\n\nContinue?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply != QMessageBox.Yes:
+                    return
+
+                deleted_count = 0
+                status_reset_count = 0
+                missing_audio_count = 0
+                progress_updated = False
+
+                def _audio_candidates(ch_entry, ch_info):
+                    candidates = []
+                    stored_tts_file = ch_entry.get('tts_file') if isinstance(ch_entry, dict) else None
+                    if stored_tts_file:
+                        candidates.append(stored_tts_file)
+
+                    output_file = (ch_entry or {}).get('output_file') or ch_info.get('output_file')
+                    if output_file:
+                        stem = os.path.splitext(os.path.basename(output_file))[0]
+                        configured_ext = str(os.environ.get('TTS_AUDIO_FORMAT') or 'mp3').lower().strip().lstrip('.')
+                        for ext in [configured_ext, 'mp3', 'wav']:
+                            if ext:
+                                candidates.append(os.path.join('text_to_speech', f"{stem}.{ext}"))
+
+                    seen = set()
+                    paths = []
+                    for candidate in candidates:
+                        normalized = str(candidate).replace('\\', '/')
+                        if normalized in seen:
+                            continue
+                        seen.add(normalized)
+                        full_path = normalized if os.path.isabs(normalized) else os.path.join(data['output_dir'], normalized)
+                        paths.append(full_path)
+                    return paths
+
+                for ch_info in selected_chapters:
+                    match = None
+                    progress_key = ch_info.get('progress_key')
+                    if progress_key and progress_key in data['prog'].get("chapters", {}):
+                        match = (progress_key, data['prog']["chapters"][progress_key])
+                    else:
+                        match = _find_progress_entry(ch_info, data['prog'])
+
+                    ch_entry = match[1] if match else {}
+                    deleted_for_chapter = False
+                    for audio_path in _audio_candidates(ch_entry, ch_info):
+                        try:
+                            if os.path.exists(audio_path):
+                                os.remove(audio_path)
+                                deleted_count += 1
+                                deleted_for_chapter = True
+                                print(f"Deleted TTS audio: {audio_path}")
+                        except Exception as e:
+                            print(f"Failed to delete TTS audio {audio_path}: {e}")
+
+                    if not deleted_for_chapter:
+                        missing_audio_count += 1
+
+                    if match:
+                        chapter_key, ch_entry = match
+                        ch_entry["tts_status"] = "no_tts"
+                        ch_entry.pop("tts_file", None)
+                        ch_entry.pop("tts_at", None)
+                        ch_entry.pop("tts_error", None)
+                        ch_entry["last_updated"] = time.time()
+                        progress_updated = True
+                        status_reset_count += 1
+                        print(f"Reset TTS status to no_tts for chapter {ch_info.get('num')} (key: {chapter_key})")
+                    else:
+                        print(f"WARNING: Could not find exact progress entry for {ch_info.get('output_file')}; skipped TTS status reset")
+
+                if progress_updated:
+                    try:
+                        with open(data['progress_file'], 'w', encoding='utf-8') as f:
+                            json.dump(data['prog'], f, ensure_ascii=False, indent=2)
+                        print(f"Updated progress tracking file - reset {status_reset_count} TTS statuses to no_tts")
+                    except Exception as e:
+                        print(f"Failed to update progress file: {e}")
+
+                data['skip_cleanup'] = True
+                self._refresh_retranslation_data(data)
+
+                success_parts = []
+                if deleted_count > 0:
+                    success_parts.append(f"deleted {deleted_count} TTS file(s)")
+                if status_reset_count > 0:
+                    success_parts.append(f"marked {status_reset_count} chapter(s) as No TTS")
+                if missing_audio_count > 0:
+                    success_parts.append(f"{missing_audio_count} chapter(s) had no audio file on disk")
+                message = "Successfully " + ", ".join(success_parts) + "." if success_parts else "No TTS changes made."
+                self._styled_msgbox(QMessageBox.Information, data.get('dialog', self), "TTS Reset", message)
+                return
             
             # Count different types
             missing_count = sum(1 for ch in selected_chapters if ch['status'] == 'not_translated')
@@ -3121,7 +3223,7 @@ class RetranslationMixin:
         button_layout.addWidget(btn_select_failed, 0, 4)
         
         # Second row
-        btn_retranslate = QPushButton("Retranslate Selected")
+        btn_retranslate = QPushButton("Reset TTS Selected" if self._current_progress_output_mode(data) == 'audio' else "Retranslate Selected")
         btn_retranslate.setMinimumHeight(32)
         btn_retranslate.setStyleSheet("QPushButton { background-color: #d39e00; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
         btn_retranslate.clicked.connect(retranslate_selected)
@@ -4411,12 +4513,63 @@ class RetranslationMixin:
         # Update data with rebuilt list
         data['chapter_display_info'] = chapter_display_info
     
+    def _current_progress_output_mode(self, data=None, entry=None):
+        """Prefer the live GUI output mode over stale mode values saved in progress JSON."""
+        candidates = []
+
+        combo = getattr(self, '_output_mode_combo', None)
+        if combo is not None:
+            try:
+                idx_mode = {0: 'text', 1: 'vision', 2: 'image', 3: 'video', 4: 'audio', 5: 'refinement'}.get(combo.currentIndex())
+                if idx_mode:
+                    candidates.append(idx_mode)
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+            try:
+                candidates.append(combo.currentText())
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+
+        try:
+            if hasattr(self, '_get_output_mode'):
+                candidates.append(self._get_output_mode())
+        except Exception:
+            pass
+
+        candidates.append(getattr(self, 'output_mode_var', None))
+
+        config = getattr(self, 'config', None)
+        if isinstance(config, dict):
+            candidates.append(config.get('output_mode'))
+            if config.get('enable_audio_output_mode'):
+                candidates.append('audio')
+            if config.get('enable_refinement_output_mode'):
+                candidates.append('refinement')
+
+        prog = (data or {}).get('prog') or {}
+        candidates.append(prog.get('output_mode'))
+        if isinstance(entry, dict):
+            candidates.append(entry.get('output_mode'))
+
+        for candidate in candidates:
+            mode = str(candidate or '').lower().strip()
+            if 'audio' in mode:
+                return 'audio'
+            if 'refine' in mode or 'refinement' in mode:
+                return 'refinement'
+            if mode in ('text', 'vision', 'image', 'video'):
+                return mode
+        return 'text'
+
     def _progress_display_status(self, info, data=None):
         """Derive the status shown in Progress Manager for post-processing modes."""
         status = info.get('status', 'unknown')
         entry = info.get('progress_entry') or info.get('info') or {}
-        prog = (data or {}).get('prog') or {}
-        mode = str(prog.get('output_mode') or entry.get('output_mode') or '').lower().strip()
+        mode = self._current_progress_output_mode(data, entry)
 
         if status in ('failed', 'qa_failed', 'in_progress', 'pending', 'merged', 'not_translated'):
             return status
@@ -4729,7 +4882,7 @@ class RetranslationMixin:
                 else:
                     stats_labels['pending'].setVisible(False)
             if 'missing' in stats_labels:
-                mode = str(data.get('prog', {}).get('output_mode', '')).lower()
+                mode = self._current_progress_output_mode(data)
                 missing_label = "✨ Not Refined" if mode == 'refinement' else ("🔊 No TTS" if mode == 'audio' else "⬜ Not Translated")
                 stats_labels['missing'].setText(f"{missing_label}: {missing} | ")
             if 'failed' in stats_labels:
