@@ -5848,41 +5848,108 @@ class UnifiedClient:
         """Generate speech audio from text and write it to output_path.
 
         Supports OpenAI-compatible /audio/speech endpoints, including local
-        FastAPI servers such as http://localhost:8000/v1/audio/speech. A
-        Google Cloud TTS path is also available when TTS_PROVIDER=google or
-        the model name starts with google-tts.
+        FastAPI servers such as http://localhost:8000/v1/audio/speech. Google
+        AI Studio/Gemini API keys use Gemini native TTS by default; Google
+        Cloud TTS is available only when explicitly requested.
         """
         text = text or ""
         if not text.strip():
             raise UnifiedClientError("TTS input text is empty", error_type="validation")
 
-        provider = os.getenv("TTS_PROVIDER", "").lower().strip()
-        model_name = (os.getenv("TTS_MODEL", "") or self.model or "tts-1").strip() or "tts-1"
-        model_l = model_name.lower()
-        explicit_openai_endpoint = bool((os.getenv("OPENAI_TTS_ENDPOINT") or "").strip())
-        custom_base_url = (os.getenv("OPENAI_CUSTOM_BASE_URL") or "").strip()
-        use_custom_endpoint = os.getenv("USE_CUSTOM_OPENAI_ENDPOINT", "0") == "1"
-        google_key = (
-            os.getenv("GOOGLE_TTS_API_KEY")
-            or os.getenv("GOOGLE_API_KEY")
-            or os.getenv("GEMINI_API_KEY")
-            or (self.api_key if str(self.api_key or "").startswith("AIza") else "")
-        )
+        batch_mode = os.getenv("BATCH_TRANSLATION", "0") == "1"
+        watchdog_started = False
+        request_id = None
+        start_time = time.time()
+        if not batch_mode:
+            self._sequential_send_lock.acquire()
+        try:
+            self.reset_cleanup_state()
 
-        # If the user explicitly configured an OpenAI-compatible/custom endpoint,
-        # honor that first. Otherwise, Google-looking keys/models should not fall
-        # through to api.openai.com and produce a misleading 401.
-        if (
-            provider == "google"
-            or model_l.startswith(("google-tts", "google/cloud-tts", "gemini-"))
-            or (google_key and not explicit_openai_endpoint and not (use_custom_endpoint and custom_base_url))
-        ):
-            return self._text_to_speech_google(text, output_path, voice=voice, audio_format=audio_format)
-        return self._text_to_speech_openai_compatible(text, output_path, voice=voice, audio_format=audio_format)
+            # Match normal send(): reserve a batch submission slot before the
+            # request is even queued in the watchdog.
+            self._apply_thread_submission_delay()
+            if self._is_stop_requested():
+                self._cancelled = True
+                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+            if os.environ.get("GRACEFUL_STOP") == "1":
+                raise UnifiedClientError("Graceful stop active - not starting new TTS call", error_type="cancelled")
+
+            request_id = str(uuid.uuid4())[:8]
+            label = f"TTS {os.path.basename(output_path) or 'audio'}"
+            try:
+                tls = self._get_thread_local_client()
+                tls.current_request_id = request_id
+                tls.current_request_label = label
+                tls.current_request_context = "tts"
+            except Exception:
+                pass
+
+            _api_watchdog_started("tts", model=getattr(self, "model", None), request_id=request_id, label=label, queued=True)
+            watchdog_started = True
+
+            # TTS must participate in multi-key/per-key-delay setup just like
+            # translation calls. Without this, it can skip key rotation and the
+            # individual key's API call delay.
+            if getattr(self, "_multi_key_mode", False):
+                self._ensure_thread_client()
+                _api_watchdog_update_model(getattr(self, "model", None), request_id)
+
+            provider = os.getenv("TTS_PROVIDER", "").lower().strip()
+            model_name = (os.getenv("TTS_MODEL", "") or self.model or "tts-1").strip() or "tts-1"
+            model_l = model_name.lower()
+            explicit_openai_endpoint = bool((os.getenv("OPENAI_TTS_ENDPOINT") or "").strip())
+            custom_base_url = (os.getenv("OPENAI_CUSTOM_BASE_URL") or "").strip()
+            use_custom_endpoint = os.getenv("USE_CUSTOM_OPENAI_ENDPOINT", "0") == "1"
+            google_key = (
+                os.getenv("GOOGLE_TTS_API_KEY")
+                or os.getenv("GOOGLE_API_KEY")
+                or os.getenv("GEMINI_API_KEY")
+                or (self.api_key if str(self.api_key or "").startswith("AIza") else "")
+            )
+
+            # Match normal HTTP lifecycle: obey SEND_INTERVAL_SECONDS/per-key
+            # delay and transition watchdog from queued -> in-flight only when
+            # the call is actually about to be sent.
+            self._apply_api_call_stagger()
+            if os.environ.get("GRACEFUL_STOP") == "1":
+                raise UnifiedClientError("Graceful stop active - not starting new TTS call", error_type="cancelled")
+            if self._is_stop_requested():
+                self._cancelled = True
+                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+            _api_watchdog_mark_in_flight(request_id, getattr(self, "model", None))
+
+            # If the user explicitly configured an OpenAI-compatible/custom endpoint,
+            # honor that first. AIza keys are Google AI Studio/Gemini keys, not
+            # Google Cloud Text-to-Speech OAuth credentials, so route them to Gemini.
+            google_cloud_requested = provider in ("google_cloud", "google-cloud", "cloud_tts", "google_cloud_tts") or model_l.startswith(("google-tts", "google/cloud-tts"))
+            gemini_requested = provider in ("google", "gemini", "google_ai", "google-ai", "google_tts", "gemini_tts") or model_l.startswith(("gemini-", "models/gemini-"))
+            if google_cloud_requested:
+                print(f"🔊 [{threading.current_thread().name}] UnifiedClient TTS route=google_cloud model={model_name} chars={len(text):,}")
+                result = self._text_to_speech_google_cloud(text, output_path, voice=voice, audio_format=audio_format)
+            elif (
+                gemini_requested
+                or (google_key and not explicit_openai_endpoint and not (use_custom_endpoint and custom_base_url))
+            ):
+                print(f"🔊 [{threading.current_thread().name}] UnifiedClient TTS route=gemini model={model_name} chars={len(text):,}")
+                result = self._text_to_speech_gemini(text, output_path, voice=voice, audio_format=audio_format)
+            else:
+                print(f"🔊 [{threading.current_thread().name}] UnifiedClient TTS route=openai-compatible model={model_name} chars={len(text):,}")
+                result = self._text_to_speech_openai_compatible(text, output_path, voice=voice, audio_format=audio_format)
+
+            self._track_stats("tts", True, None, time.time() - start_time)
+            self._mark_key_success()
+            self._update_stagger_timestamp()
+            return result
+        except Exception as exc:
+            self._track_stats("tts", False, exc, time.time() - start_time)
+            raise
+        finally:
+            if watchdog_started:
+                _api_watchdog_finished("tts", model=getattr(self, "model", None), request_id=request_id)
+            if not batch_mode:
+                self._sequential_send_lock.release()
 
     def _text_to_speech_openai_compatible(self, text: str, output_path: str, voice: Optional[str] = None, audio_format: Optional[str] = None) -> str:
-        import requests as _req
-
         endpoint = (os.getenv("OPENAI_TTS_ENDPOINT") or "").strip()
         custom_base_url = (os.getenv("OPENAI_CUSTOM_BASE_URL") or "").strip()
         use_custom_endpoint = os.getenv("USE_CUSTOM_OPENAI_ENDPOINT", "0") == "1"
@@ -5893,6 +5960,7 @@ class UnifiedClient:
                 endpoint = f"{custom_base_url.rstrip('/')}/audio/speech"
             else:
                 endpoint = "https://api.openai.com/v1/audio/speech"
+        print(f"🌐 [{threading.current_thread().name}] TTS POST {endpoint}")
 
         configured_tts_model = os.getenv("TTS_MODEL", "").strip()
         model = configured_tts_model or self.model or "tts-1"
@@ -5917,18 +5985,19 @@ class UnifiedClient:
             "response_format": audio_format,
         }
 
-        timeout = int(os.getenv("TTS_TIMEOUT_SECONDS", "300"))
+        timeout = self._get_tts_timeout()
         max_retries = self._get_max_retries()
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         for attempt in range(max_retries):
             try:
                 if self._is_stop_requested():
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                resp = _req.post(endpoint, json=payload, headers=headers, timeout=timeout)
+                resp = self._tts_post_json(endpoint, payload, headers, timeout)
                 if resp.status_code == 429 and attempt < max_retries - 1:
                     wait = min(2 ** attempt + random.uniform(0, 1), 30)
                     print(f"⏳ TTS rate-limited, retrying in {wait:.1f}s")
-                    time.sleep(wait)
+                    if not self._sleep_with_cancel(wait, 0.1):
+                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                     continue
                 if resp.status_code not in (200, 201):
                     err = resp.text[:500]
@@ -5943,12 +6012,124 @@ class UnifiedClient:
             except UnifiedClientError:
                 raise
             except Exception as exc:
+                if self._is_stop_requested():
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 if attempt >= max_retries - 1:
                     raise UnifiedClientError(f"TTS request failed after {max_retries} attempts: {exc}", error_type="api_error")
-                time.sleep(min(2 ** attempt + random.uniform(0, 1), 30))
+                wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                if not self._sleep_with_cancel(wait, 0.1):
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
         raise UnifiedClientError("TTS request failed", error_type="api_error")
 
-    def _text_to_speech_google(self, text: str, output_path: str, voice: Optional[str] = None, audio_format: Optional[str] = None) -> str:
+    def _get_tts_timeout(self):
+        """Inherit the same HTTP timeout settings used by regular API calls."""
+        try:
+            return self._get_timeouts()
+        except Exception:
+            return getattr(self, "request_timeout", None)
+
+    def _tts_post_json(self, url: str, payload: dict, headers: dict, timeout):
+        """POST JSON through the tracked session pool so hard-cancel can abort TTS too."""
+        if self._is_stop_requested():
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+        try:
+            from urllib.parse import urlsplit
+            parts = urlsplit(url)
+            base_url = f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else None
+        except Exception:
+            base_url = None
+        session = self._get_session(base_url) if base_url else requests
+        return session.post(url, json=payload, headers=headers, timeout=timeout)
+
+    def _write_wav_file(self, output_path: str, pcm_data: bytes, channels: int = 1, rate: int = 24000, sample_width: int = 2) -> str:
+        import wave
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with wave.open(output_path, "wb") as wf:
+            wf.setnchannels(channels)
+            wf.setsampwidth(sample_width)
+            wf.setframerate(rate)
+            wf.writeframes(pcm_data)
+        return output_path
+
+    def _text_to_speech_gemini(self, text: str, output_path: str, voice: Optional[str] = None, audio_format: Optional[str] = None) -> str:
+        api_key = (
+            os.getenv("GOOGLE_TTS_API_KEY")
+            or os.getenv("GOOGLE_API_KEY")
+            or os.getenv("GEMINI_API_KEY")
+            or (self.api_key if str(self.api_key or "").startswith("AIza") else "")
+        )
+        if not api_key:
+            raise UnifiedClientError("Gemini TTS requires a Google AI Studio/Gemini API key", error_type="validation")
+
+        model = (os.getenv("TTS_MODEL", "").strip() or self.model or "gemini-2.5-flash-preview-tts").strip()
+        model_l = model.lower()
+        if not model_l.startswith(("gemini-", "models/gemini-")) or "tts" not in model_l:
+            model = "gemini-2.5-flash-preview-tts"
+        model_path = model if model.startswith("models/") else f"models/{model}"
+        voice_name = voice or os.getenv("TTS_VOICE", "Kore")
+        language_code = os.getenv("TTS_LANGUAGE_CODE", "").strip()
+        url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent"
+        print(f"🌐 [{threading.current_thread().name}] TTS POST {url}")
+        payload = {
+            "contents": [{"parts": [{"text": text}]}],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {
+                    "voiceConfig": {
+                        "prebuiltVoiceConfig": {
+                            "voiceName": voice_name,
+                        }
+                    }
+                },
+            },
+        }
+        if language_code:
+            payload["generationConfig"]["speechConfig"]["languageCode"] = language_code
+
+        timeout = self._get_tts_timeout()
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        }
+        try:
+            resp = self._tts_post_json(url, payload, headers, timeout)
+        except UnifiedClientError:
+            raise
+        except Exception as exc:
+            if self._is_stop_requested():
+                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+            raise UnifiedClientError(f"Gemini TTS request failed: {exc}", error_type="api_error")
+        if resp.status_code not in (200, 201):
+            err = resp.text[:500]
+            try:
+                err = resp.json().get("error", {}).get("message", err)
+            except Exception:
+                pass
+            raise UnifiedClientError(f"Gemini TTS API error ({resp.status_code}): {err}", error_type="api_error", http_status=resp.status_code)
+
+        try:
+            data = resp.json()
+            part = data["candidates"][0]["content"]["parts"][0]
+            inline_data = part.get("inlineData") or part.get("inline_data") or {}
+            audio_b64 = inline_data.get("data")
+        except Exception as exc:
+            raise UnifiedClientError(f"Gemini TTS response did not contain inline audio data: {exc}", error_type="api_error")
+        if not audio_b64:
+            raise UnifiedClientError("Gemini TTS API returned no audio data", error_type="api_error")
+
+        audio_bytes = base64.b64decode(audio_b64)
+        ext = os.path.splitext(output_path)[1].lower()
+        if ext == ".pcm":
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            with open(output_path, "wb") as f:
+                f.write(audio_bytes)
+            return output_path
+        if ext != ".wav":
+            output_path = os.path.splitext(output_path)[0] + ".wav"
+        return self._write_wav_file(output_path, audio_bytes)
+
+    def _text_to_speech_google_cloud(self, text: str, output_path: str, voice: Optional[str] = None, audio_format: Optional[str] = None) -> str:
         language_code = os.getenv("TTS_LANGUAGE_CODE", "en-US")
         voice_name = voice or os.getenv("TTS_VOICE", "en-US-Neural2-J")
         audio_format = (audio_format or os.getenv("TTS_AUDIO_FORMAT", "mp3")).lower().strip()
@@ -5960,37 +6141,7 @@ class UnifiedClient:
         )
 
         if api_key:
-            import requests as _req
-
-            encoding = "MP3" if audio_format == "mp3" else "LINEAR16"
-            url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={api_key}"
-            payload = {
-                "input": {"text": text},
-                "voice": {
-                    "languageCode": language_code,
-                    "name": voice_name,
-                },
-                "audioConfig": {
-                    "audioEncoding": encoding,
-                },
-            }
-            timeout = int(os.getenv("TTS_TIMEOUT_SECONDS", "300"))
-            resp = _req.post(url, json=payload, timeout=timeout)
-            if resp.status_code not in (200, 201):
-                err = resp.text[:500]
-                try:
-                    err = resp.json().get("error", {}).get("message", err)
-                except Exception:
-                    pass
-                raise UnifiedClientError(f"Google TTS API error ({resp.status_code}): {err}", error_type="api_error", http_status=resp.status_code)
-            data = resp.json()
-            audio_b64 = data.get("audioContent")
-            if not audio_b64:
-                raise UnifiedClientError("Google TTS API returned no audioContent", error_type="api_error")
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            with open(output_path, "wb") as f:
-                f.write(base64.b64decode(audio_b64))
-            return output_path
+            print("⚠️ Google Cloud Text-to-Speech requires OAuth/service-account credentials. Ignoring API key and trying ADC/client credentials.")
 
         try:
             from google.cloud import texttospeech
@@ -6000,6 +6151,7 @@ class UnifiedClient:
         encoding = texttospeech.AudioEncoding.MP3 if audio_format == "mp3" else texttospeech.AudioEncoding.LINEAR16
 
         client = texttospeech.TextToSpeechClient()
+        print(f"🌐 [{threading.current_thread().name}] Google Cloud TTS synthesize_speech")
         response = client.synthesize_speech(
             input=texttospeech.SynthesisInput(text=text),
             voice=texttospeech.VoiceSelectionParams(language_code=language_code, name=voice_name),

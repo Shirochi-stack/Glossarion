@@ -3472,6 +3472,54 @@ class RetranslationMixin:
             except Exception as e:
                 self._show_message('error', "Open Failed", str(e), parent=data.get('dialog', self))
 
+        def _find_audio_file_for_item(display_info):
+            """Return the generated TTS file path associated with an HTML row, if one exists."""
+            progress_entry = display_info.get('info', {}) or {}
+            output_file = display_info.get('output_file') or progress_entry.get('output_file')
+            candidates = []
+
+            stored_tts_file = progress_entry.get('tts_file')
+            if stored_tts_file:
+                candidates.append(stored_tts_file)
+
+            progress_key = display_info.get('progress_key')
+            if progress_key and progress_key in data.get('prog', {}).get('chapters', {}):
+                tracked_tts_file = data['prog']['chapters'][progress_key].get('tts_file')
+                if tracked_tts_file:
+                    candidates.append(tracked_tts_file)
+
+            if output_file:
+                for _key, tracked in data.get('prog', {}).get('chapters', {}).items():
+                    if isinstance(tracked, dict) and tracked.get('output_file') == output_file and tracked.get('tts_file'):
+                        candidates.append(tracked.get('tts_file'))
+
+                stem = os.path.splitext(os.path.basename(output_file))[0]
+                for ext in ("wav", "mp3", "pcm", "m4a", "ogg", "flac"):
+                    candidates.append(os.path.join("text_to_speech", f"{stem}.{ext}"))
+
+            seen = set()
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                normalized = str(candidate).replace("\\", "/")
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                path = normalized if os.path.isabs(normalized) else os.path.join(data['output_dir'], normalized)
+                if os.path.exists(path):
+                    return path
+            return None
+
+        def _open_audio_file_for_item(display_info):
+            audio_path = _find_audio_file_for_item(display_info)
+            if not audio_path:
+                self._show_message('error', "Audio Missing", "No generated audio file was found for this HTML entry.", parent=data.get('dialog', self))
+                return
+            try:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(audio_path))
+            except Exception as e:
+                self._show_message('error', "Open Failed", str(e), parent=data.get('dialog', self))
+
         def show_context_menu(pos):
             item = listbox.itemAt(pos)
             if not item:
@@ -3532,6 +3580,9 @@ class RetranslationMixin:
                 "}"
             )
             act_open = menu.addAction("📂 Open File")
+            act_open_audio = None
+            if _find_audio_file_for_item(display_info):
+                act_open_audio = menu.addAction("🔊 Open Audio File")
             act_notepad_qa = None
             if qa_file_path:
                 _label = "✏️ Edit File (find QA issue)" if qa_issues else "✏️ Edit File"
@@ -3546,6 +3597,8 @@ class RetranslationMixin:
             chosen = menu.exec(listbox.mapToGlobal(pos))
             if chosen == act_open:
                 _open_file_for_item(display_info)
+            elif act_open_audio and chosen == act_open_audio:
+                _open_audio_file_for_item(display_info)
             elif chosen == act_retranslate:
                 retranslate_selected()
             elif act_insert_img and chosen == act_insert_img:

@@ -8085,6 +8085,13 @@ def _find_existing_translated_output(out_dir, chapter, actual_num, progress_mana
     expected = FileUtilities.create_chapter_filename(chapter, actual_num)
     candidates = [expected]
 
+    def _as_output_file(path_or_name):
+        if not path_or_name:
+            return path_or_name
+        if os.path.isabs(path_or_name):
+            return os.path.relpath(path_or_name, out_dir).replace("\\", "/")
+        return str(path_or_name).replace("\\", "/")
+
     try:
         chapter_key = progress_manager._get_chapter_key(actual_num, expected, chapter, chapter.get("content_hash"))
         tracked = progress_manager.prog.get("chapters", {}).get(chapter_key, {})
@@ -8098,15 +8105,49 @@ def _find_existing_translated_output(out_dir, chapter, actual_num, progress_mana
             continue
         path = cand if os.path.isabs(cand) else os.path.join(out_dir, cand)
         if os.path.exists(path) and path.lower().endswith((".html", ".xhtml", ".htm")):
-            return os.path.basename(path), path
+            return _as_output_file(path if os.path.isabs(cand) else cand), path
 
     expected_norm = _normalize_output_basename(expected)
+    original_basename = os.path.basename(
+        str(
+            chapter.get("original_filename")
+            or chapter.get("filename")
+            or chapter.get("file")
+            or chapter.get("path")
+            or ""
+        )
+    )
+
     try:
-        for fname in os.listdir(out_dir):
-            if not fname.lower().endswith((".html", ".xhtml", ".htm")):
+        for _chapter_key, tracked in progress_manager.prog.get("chapters", {}).items():
+            if not isinstance(tracked, dict):
                 continue
-            if _normalize_output_basename(fname) == expected_norm:
-                return fname, os.path.join(out_dir, fname)
+            output_file = tracked.get("output_file")
+            if not output_file:
+                continue
+            tracked_actual = tracked.get("actual_num", tracked.get("chapter_num"))
+            tracked_original = os.path.basename(str(tracked.get("original_basename") or tracked.get("original_filename") or ""))
+            same_num = tracked_actual is not None and str(tracked_actual) == str(actual_num)
+            same_original = bool(original_basename and tracked_original and tracked_original == original_basename)
+            same_output_shape = _normalize_output_basename(output_file) == expected_norm
+            if not (same_num or same_original or same_output_shape):
+                continue
+            path = output_file if os.path.isabs(output_file) else os.path.join(out_dir, output_file)
+            if os.path.exists(path) and path.lower().endswith((".html", ".xhtml", ".htm")):
+                return _as_output_file(output_file), path
+    except Exception:
+        pass
+
+    try:
+        ignored_dirs = {"text_to_speech", "unrefined_backup", "raw", "__pycache__"}
+        for root, dirs, files in os.walk(out_dir):
+            dirs[:] = [d for d in dirs if d not in ignored_dirs]
+            for fname in files:
+                if not fname.lower().endswith((".html", ".xhtml", ".htm")):
+                    continue
+                if _normalize_output_basename(fname) == expected_norm:
+                    path = os.path.join(root, fname)
+                    return _as_output_file(path), path
     except Exception:
         pass
     return expected, None
@@ -8129,6 +8170,27 @@ def _backup_unrefined_file(source_path: str, backup_dir: str) -> str:
         target = os.path.join(backup_dir, f"{stem}_{int(time.time())}{ext}")
     shutil.move(source_path, target)
     return target
+
+def _preferred_tts_audio_extension(config, client) -> str:
+    """Pick an on-disk extension that matches the TTS route we will use."""
+    audio_format = str(os.getenv("TTS_AUDIO_FORMAT", "mp3") or "mp3").lower().strip().lstrip(".")
+    provider = str(os.getenv("TTS_PROVIDER", "") or "").lower().strip()
+    model = str(os.getenv("TTS_MODEL", "") or getattr(client, "model", "") or "").lower().strip()
+    explicit_openai_endpoint = bool(str(os.getenv("OPENAI_TTS_ENDPOINT", "") or "").strip())
+    custom_base_url = str(os.getenv("OPENAI_CUSTOM_BASE_URL", "") or "").strip()
+    use_custom_endpoint = os.getenv("USE_CUSTOM_OPENAI_ENDPOINT", "0") == "1"
+    google_key = (
+        os.getenv("GOOGLE_TTS_API_KEY")
+        or os.getenv("GOOGLE_API_KEY")
+        or os.getenv("GEMINI_API_KEY")
+        or (getattr(client, "api_key", "") if str(getattr(client, "api_key", "") or "").startswith("AIza") else "")
+    )
+    google_cloud_requested = provider in ("google_cloud", "google-cloud", "cloud_tts", "google_cloud_tts") or model.startswith(("google-tts", "google/cloud-tts"))
+    gemini_requested = provider in ("google", "gemini", "google_ai", "google-ai", "google_tts", "gemini_tts") or model.startswith(("gemini-", "models/gemini-"))
+    gemini_auto = google_key and not explicit_openai_endpoint and not (use_custom_endpoint and custom_base_url)
+    if not google_cloud_requested and (gemini_requested or gemini_auto):
+        return "wav"
+    return audio_format or "mp3"
 
 def _process_refinement_or_tts_mode(config, client, chapters, out, progress_manager, check_stop):
     mode = config.OUTPUT_MODE
@@ -8218,10 +8280,13 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 return "failed", f"❌ Refinement failed for Chapter {actual_num}: {exc}"
 
         elif mode == "audio":
-            audio_base = os.path.splitext(os.path.basename(output_file))[0] + ".mp3"
+            audio_ext = _preferred_tts_audio_extension(config, client)
+            audio_base = os.path.splitext(os.path.basename(output_file))[0] + f".{audio_ext}"
             audio_path = os.path.join(tts_dir, audio_base)
             rel_audio = os.path.relpath(audio_path, out).replace("\\", "/")
-            if entry.get("tts_status") == "tts_completed" and os.path.exists(audio_path):
+            existing_audio = entry.get("tts_file")
+            existing_audio_path = os.path.join(out, existing_audio) if existing_audio and not os.path.isabs(existing_audio) else existing_audio
+            if entry.get("tts_status") == "tts_completed" and os.path.exists(existing_audio_path or audio_path):
                 return "skipped", f"🔊 Chapter {actual_num}: TTS already exists"
             with progress_lock:
                 progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "in_progress", chapter_obj=chapter, tts_file=rel_audio)
@@ -8233,7 +8298,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "no_tts", chapter_obj=chapter, tts_file=rel_audio)
                         progress_manager.save()
                     return "skipped", f"🔊 Chapter {actual_num}: no readable text found; left as No TTS"
-                client.text_to_speech(text, audio_path)
+                print(f"🔊 [{threading.current_thread().name}] TTS API start Ch.{actual_num} ({len(text):,} chars) -> {rel_audio}")
+                actual_audio_path = client.text_to_speech(text, audio_path) or audio_path
+                rel_audio = os.path.relpath(actual_audio_path, out).replace("\\", "/")
                 with progress_lock:
                     progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "tts_completed", chapter_obj=chapter, tts_file=rel_audio)
                     progress_manager.save()
@@ -8263,7 +8330,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             print(message)
 
     if use_batch and len(chapters) > 1:
-        with ThreadPoolExecutor(max_workers=batch_size) as executor:
+        with ThreadPoolExecutor(max_workers=batch_size, thread_name_prefix=f"{mode.title()}Worker") as executor:
             futures = {
                 executor.submit(_process_one, idx, chapter): (idx, chapter)
                 for idx, chapter in enumerate(chapters)
