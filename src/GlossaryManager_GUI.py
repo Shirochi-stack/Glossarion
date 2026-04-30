@@ -686,6 +686,19 @@ class GlossaryManagerMixin:
                     split_enabled = self.glossary_enable_chapter_split_checkbox.isChecked()
                     self.config['glossary_enable_chapter_split'] = split_enabled
                     setattr(self, 'glossary_enable_chapter_split_var', split_enabled)
+
+                # Gender tracker false-positive controls
+                if hasattr(self, 'gender_noise_threshold_slider'):
+                    threshold_value = int(self.gender_noise_threshold_slider.value())
+                    self.config['glossary_gender_noise_threshold'] = threshold_value
+                    setattr(self, 'glossary_gender_noise_threshold_var', threshold_value)
+                    os.environ['GLOSSARY_GENDER_NOISE_THRESHOLD'] = str(threshold_value)
+                if hasattr(self, 'gender_tracking_bias_combo'):
+                    bias_map = {0: 'none', 1: 'female', 2: 'male'}
+                    bias_value = bias_map.get(self.gender_tracking_bias_combo.currentIndex(), 'none')
+                    self.config['glossary_gender_tracking_bias'] = bias_value
+                    setattr(self, 'glossary_gender_tracking_bias_var', bias_value)
+                    os.environ['GLOSSARY_GENDER_TRACKING_BIAS'] = bias_value
                 
                 # Update text field variables from Targeted Extraction Settings
                 text_field_to_var_mapping = [
@@ -2587,6 +2600,55 @@ Rules:
         skip_gender_tracking_label = QLabel("(Disables the per-chapter gender tracker sidecar file)")
         skip_gender_tracking_layout.addWidget(skip_gender_tracking_label)
         skip_gender_tracking_layout.addStretch()
+
+        # Gender tracker false-positive controls
+        gender_noise_widget = QWidget()
+        gender_noise_layout = QHBoxLayout(gender_noise_widget)
+        gender_noise_layout.setContentsMargins(20, 0, 0, 15)
+        auto_layout.addWidget(gender_noise_widget)
+
+        gender_noise_label = QLabel("Ignore rare gender flips:")
+        gender_noise_layout.addWidget(gender_noise_label)
+
+        if not hasattr(self, 'gender_noise_threshold_slider'):
+            self.gender_noise_threshold_slider = QSlider(Qt.Horizontal)
+            self.gender_noise_threshold_slider.setMinimum(0)
+            self.gender_noise_threshold_slider.setMaximum(50)
+            self.gender_noise_threshold_slider.setValue(int(self.config.get('glossary_gender_noise_threshold', 15)))
+            self.gender_noise_threshold_slider.setMaximumWidth(180)
+            self._disable_slider_mousewheel(self.gender_noise_threshold_slider)
+        gender_noise_layout.addWidget(self.gender_noise_threshold_slider)
+
+        self.gender_noise_threshold_value_label = QLabel(f"{self.gender_noise_threshold_slider.value()}%")
+        self.gender_noise_threshold_value_label.setMinimumWidth(42)
+        gender_noise_layout.addWidget(self.gender_noise_threshold_value_label)
+
+        def _update_gender_noise_label(value):
+            self.gender_noise_threshold_value_label.setText(f"{value}%")
+        self.gender_noise_threshold_slider.valueChanged.connect(_update_gender_noise_label)
+
+        gender_noise_bias_label = QLabel("Bias:")
+        gender_noise_layout.addWidget(gender_noise_bias_label)
+
+        if not hasattr(self, 'gender_tracking_bias_combo'):
+            self.gender_tracking_bias_combo = QComboBox()
+            self.gender_tracking_bias_combo.addItems(["No Bias", "Prefer Female", "Prefer Male"])
+            bias_index = {'none': 0, 'female': 1, 'male': 2}.get(
+                str(self.config.get('glossary_gender_tracking_bias', 'none')).lower(),
+                0
+            )
+            self.gender_tracking_bias_combo.setCurrentIndex(bias_index)
+            self._disable_combobox_mousewheel(self.gender_tracking_bias_combo)
+        self.gender_tracking_bias_combo.setToolTip(
+            "No Bias: suppress a gender variant when it appears at or below the rare-flip percentage.\n"
+            "Prefer Female: never suppress rare female readings, but still suppress rare male readings.\n"
+            "Prefer Male: never suppress rare male readings, but still suppress rare female readings."
+        )
+        gender_noise_layout.addWidget(self.gender_tracking_bias_combo)
+
+        gender_noise_hint = QLabel("(Default 15%: one-off AI misgenders are ignored during glossary compression)")
+        gender_noise_layout.addWidget(gender_noise_hint)
+        gender_noise_layout.addStretch()
         
         # Include description column toggle (below gender context)
         description_widget = QWidget()

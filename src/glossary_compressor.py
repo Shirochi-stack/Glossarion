@@ -130,13 +130,63 @@ def _chapter_ref_parts(chapter_ref):
     return chapter_num_f, os.path.basename(str(chapter_file or ""))
 
 
-def _tracker_gender_for_raw(tracker, raw_name, chapter_ref=None):
+def _tracker_entry_for_raw(tracker, raw_name):
     if not tracker or not raw_name:
         return None
     entry = tracker.get("entries", {}).get(str(raw_name).strip().casefold())
+    return entry if isinstance(entry, dict) else None
+
+
+def _gender_noise_threshold():
+    try:
+        value = float(os.getenv("GLOSSARY_GENDER_NOISE_THRESHOLD", "15"))
+    except Exception:
+        value = 15.0
+    return max(0.0, min(100.0, value)) / 100.0
+
+
+def _gender_bias():
+    bias = _normal_gender(os.getenv("GLOSSARY_GENDER_TRACKING_BIAS", "none"))
+    return bias if bias in {"male", "female"} else "none"
+
+
+def _rare_tracker_genders(entry):
+    if not entry:
+        return set()
+    threshold = _gender_noise_threshold()
+    if threshold <= 0:
+        return set()
+    bias = _gender_bias()
+    occurrences = [o for o in entry.get("occurrences", []) if isinstance(o, dict)]
+    genders = [_normal_gender(o.get("gender")) for o in occurrences]
+    genders = [g for g in genders if g not in {"", "unknown", "n/a", "na", "none", "-"}]
+    if not genders:
+        return set()
+    rare = set()
+    for gender in set(genders):
+        if gender == bias:
+            continue
+        if (sum(1 for g in genders if g == gender) / len(genders)) <= threshold:
+            rare.add(gender)
+    return rare
+
+
+def _gender_is_rare_noise(entry, actual_gender):
+    actual_gender = _normal_gender(actual_gender)
+    if actual_gender in {"", "unknown", "n/a", "na", "none", "-"}:
+        return False
+    return actual_gender in _rare_tracker_genders(entry)
+
+
+def _tracker_gender_for_entry(entry, chapter_ref=None):
     if not isinstance(entry, dict):
         return None
     occurrences = [o for o in entry.get("occurrences", []) if isinstance(o, dict)]
+    rare_genders = _rare_tracker_genders(entry)
+    if rare_genders:
+        filtered_occurrences = [o for o in occurrences if _normal_gender(o.get("gender")) not in rare_genders]
+        if filtered_occurrences:
+            occurrences = filtered_occurrences
     if not occurrences:
         return None
     chapter_num, chapter_file = _chapter_ref_parts(chapter_ref)
@@ -161,11 +211,16 @@ def _tracker_gender_for_raw(tracker, raw_name, chapter_ref=None):
 
 
 def _gender_variant_allowed(tracker, raw_name, gender, chapter_ref=None):
-    wanted = _tracker_gender_for_raw(tracker, raw_name, chapter_ref)
+    actual = _normal_gender(gender)
+    if not actual or actual in {"unknown", "n/a", "na", "none", "-"}:
+        return True
+    entry = _tracker_entry_for_raw(tracker, raw_name)
+    if _gender_is_rare_noise(entry, actual):
+        return False
+    wanted = _tracker_gender_for_entry(entry, chapter_ref)
     if not wanted:
         return True
-    actual = _normal_gender(gender)
-    return not actual or actual in {"unknown", "n/a", "na", "none", "-"} or actual == wanted
+    return actual == wanted
 
 
 def compress_glossary(glossary_content, source_text, glossary_format='auto', glossary_path=None, chapter_ref=None):

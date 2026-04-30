@@ -11672,6 +11672,7 @@ def main(log_callback=None, stop_callback=None):
                         'GLOSSARY_INCLUDE_BOOK_TITLE', 'EPUB_PATH',
                         'GLOSSARY_CUSTOM_ENTRY_TYPES', 'GLOSSARY_CUSTOM_FIELDS', 'GLOSSARY_ENTRY_TYPE_FILTER_MODE',
                         'GLOSSARY_SKIP_GENDER_TRACKING',
+                        'GLOSSARY_GENDER_NOISE_THRESHOLD', 'GLOSSARY_GENDER_TRACKING_BIAS',
                         # Match GUI batching settings
                         'BATCH_TRANSLATION', 'BATCH_SIZE', 'BATCHING_MODE', 'BATCH_GROUP_SIZE',
                         # Keep submission staggering consistent with GUI
