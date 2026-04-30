@@ -3747,7 +3747,12 @@ class AsyncProcessingDialog:
                     try:
                         from glossary_compressor import compress_glossary
                         original_length = len(glossary_text)
-                        glossary_text = compress_glossary(glossary_text, content, glossary_format='auto')
+                        glossary_text = compress_glossary(
+                            glossary_text,
+                            content,
+                            glossary_format='auto',
+                            glossary_path=glossary_path,
+                        )
                         compressed_length = len(glossary_text)
                         reduction_pct = ((original_length - compressed_length) / original_length * 100) if original_length > 0 else 0
                         

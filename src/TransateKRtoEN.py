@@ -4186,6 +4186,7 @@ class TranslationProcessor:
                             glossary_block,
                             chapter_num=actual_num,
                             source_text=chunk_html,
+                            chapter_file=c.get("original_basename") or c.get("filename") or fname,
                         )
                 
                 # Enhanced mode workflow:
@@ -4678,7 +4679,18 @@ class BatchTranslationProcessor:
             # Build chapter-specific system prompt (glossary compression + logging handled by build_system_prompt).
             # Single Pass refreshes this again per request below so each request sees the latest persisted glossary.
             glossary_path = find_glossary_file(self.out_dir)
-            chapter_system_prompt = build_system_prompt(self.config.get_system_prompt(actual_merge_count=1), glossary_path, source_text=chapter_body)
+            chapter_ref = {
+                "chapter_num": actual_num,
+                "chapter_file": chapter.get("original_basename") or chapter.get("filename") or fname,
+            }
+            os.environ["CURRENT_CHAPTER_FILE"] = str(chapter_ref["chapter_file"] or "")
+            os.environ["CURRENT_CHAPTER_NUM"] = str(actual_num)
+            chapter_system_prompt = build_system_prompt(
+                self.config.get_system_prompt(actual_merge_count=1),
+                glossary_path,
+                source_text=chapter_body,
+                chapter_ref=chapter_ref,
+            )
             
             # Check if chapter needs chunking
             from chapter_splitter import ChapterSplitter
@@ -4859,6 +4871,7 @@ class BatchTranslationProcessor:
                         self.config.get_system_prompt(actual_merge_count=1),
                         current_glossary_path,
                         source_text=chunk_html,
+                        chapter_ref=chapter_ref,
                     )
 
                 chapter_msgs = (
@@ -4975,6 +4988,7 @@ class BatchTranslationProcessor:
                                     glossary_block,
                                     chapter_num=actual_num,
                                     source_text=chunk_html,
+                                    chapter_file=chapter_ref.get("chapter_file"),
                                 )
                         break  # Success, exit retry loop
                     except UnifiedClientError as e:
@@ -5182,6 +5196,7 @@ class BatchTranslationProcessor:
                                             glossary_block_retry,
                                             chapter_num=actual_num,
                                             source_text=chunk_html,
+                                            chapter_file=chapter_ref.get("chapter_file"),
                                         )
                             except UnifiedClientError as e:
                                 # Treat timeout during char-ratio retry as a timeout for the chunk
@@ -6080,10 +6095,20 @@ class BatchTranslationProcessor:
             # Use get_system_prompt() with actual merge count to conditionally include split marker instruction
             glossary_path = find_glossary_file(self.out_dir)
             base_system_prompt = self.config.get_system_prompt(actual_merge_count=len(merge_group))
+            parent_actual_num = chapters_data[0][0] if chapters_data else None
+            parent_chapter = chapters_data[0][3] if chapters_data else {}
+            parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num) if parent_actual_num is not None else ""
+            chapter_ref = {
+                "chapter_num": parent_actual_num,
+                "chapter_file": parent_chapter.get("original_basename") or parent_chapter.get("filename") or parent_fname,
+            }
+            os.environ["CURRENT_CHAPTER_FILE"] = str(chapter_ref["chapter_file"] or "")
+            os.environ["CURRENT_CHAPTER_NUM"] = str(parent_actual_num or "")
             chapter_system_prompt = build_system_prompt(
                 base_system_prompt, 
                 glossary_path, 
-                source_text=merged_content
+                source_text=merged_content,
+                chapter_ref=chapter_ref,
             )
             
             # Build messages
@@ -6248,6 +6273,7 @@ class BatchTranslationProcessor:
                             glossary_block,
                             chapter_num=parent_actual_num,
                             source_text=merged_content,
+                            chapter_file=chapter_ref.get("chapter_file"),
                         )
                 # Preserve the finish reason from the merged API call for later status decisions.
                 merged_finish_reason = finish_reason
@@ -6377,6 +6403,7 @@ class BatchTranslationProcessor:
                                             glossary_block_retry,
                                             chapter_num=parent_actual_num,
                                             source_text=merged_content,
+                                            chapter_file=chapter_ref.get("chapter_file"),
                                         )
                             finally:
                                 if tls_retry_client is not None:
@@ -6991,7 +7018,7 @@ def _single_pass_glossary_paths(output_dir):
         os.path.join(glossary_dir, f"{base}_glossary_progress.json"),
     )
 
-def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, source_text=None):
+def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, source_text=None, chapter_file=None):
     """Parse, dedupe, and save inline glossary output using the glossary pipeline."""
     if not glossary_block or not _single_pass_glossary_mode():
         return 0
@@ -7015,6 +7042,17 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
             if not valid:
                 print("📑 Single Pass Glossary: no valid glossary entries found in response")
                 return 0
+
+            try:
+                glossary_extractor.update_gender_tracker(
+                    valid,
+                    json_path,
+                    source_path=os.getenv("EPUB_PATH", ""),
+                    chapter_num=chapter_num,
+                    chapter_file=chapter_file or os.getenv("CURRENT_CHAPTER_FILE", ""),
+                )
+            except Exception as e:
+                print(f"⚠️ Single Pass Glossary: failed to update gender tracker: {e}")
 
             existing = glossary_extractor._load_glossary_file(csv_path)
             progress_existing = progress.get("glossary", []) if isinstance(progress, dict) else []
@@ -9270,7 +9308,7 @@ def parse_token_limit(env_value):
     
     return 1000000, "1000000 (default)"
 
-def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
+def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapter_ref=None):
     """Build the system prompt with glossary - TRUE BRUTE FORCE VERSION"""
     append_glossary = os.getenv("APPEND_GLOSSARY", "1") == "1"
     actual_glossary_path = glossary_path
@@ -9310,7 +9348,13 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
                     from glossary_compressor import compress_glossary
                     original_glossary_text = glossary_text  # Store original for token counting
                     original_length = len(glossary_text)
-                    glossary_text = compress_glossary(glossary_text, source_text, glossary_format='auto')
+                    glossary_text = compress_glossary(
+                        glossary_text,
+                        source_text,
+                        glossary_format='auto',
+                        glossary_path=actual_glossary_path,
+                        chapter_ref=chapter_ref,
+                    )
                     compressed_length = len(glossary_text)
                     reduction_pct = ((original_length - compressed_length) / original_length * 100) if original_length > 0 else 0
                     
@@ -9374,7 +9418,13 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
                             try:
                                 from glossary_compressor import compress_glossary
                                 original_add_length = len(additional_glossary_text)
-                                additional_glossary_text = compress_glossary(additional_glossary_text, source_text, glossary_format='auto')
+                                additional_glossary_text = compress_glossary(
+                                    additional_glossary_text,
+                                    source_text,
+                                    glossary_format='auto',
+                                    glossary_path=additional_glossary_path,
+                                    chapter_ref=chapter_ref,
+                                )
                                 compressed_add_length = len(additional_glossary_text)
                                 add_reduction_pct = ((original_add_length - compressed_add_length) / original_add_length * 100) if original_add_length > 0 else 0
                                 defer_batch_log(f"🗃️ Glossary extension compressed: {original_add_length:,} → {compressed_add_length:,} chars ({add_reduction_pct:.1f}% reduction)")
@@ -14353,12 +14403,28 @@ def main(log_callback=None, stop_callback=None):
                 actual_merge_count = len(merge_info['group']) if merge_info else 1
                 base_prompt = config.get_system_prompt(actual_merge_count=actual_merge_count)
                 current_glossary_path = find_glossary_file(out) if _single_pass_glossary_mode() else glossary_path
+                current_chapter_ref = {
+                    "chapter_num": actual_num,
+                    "chapter_file": c.get("original_basename") or c.get("filename") or FileUtilities.create_chapter_filename(c, actual_num),
+                }
+                os.environ["CURRENT_CHAPTER_FILE"] = str(current_chapter_ref["chapter_file"] or "")
+                os.environ["CURRENT_CHAPTER_NUM"] = str(actual_num)
                 if os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1" and current_glossary_path and os.path.exists(current_glossary_path):
                     # Rebuild system prompt with compressed glossary for THIS SPECIFIC CHUNK
-                    current_system_content = build_system_prompt(base_prompt, current_glossary_path, source_text=chunk_html)
+                    current_system_content = build_system_prompt(
+                        base_prompt,
+                        current_glossary_path,
+                        source_text=chunk_html,
+                        chapter_ref=current_chapter_ref,
+                    )
                 else:
                     # Use base prompt with glossary from original_system_prompt but without stale split marker
-                    current_system_content = build_system_prompt(base_prompt, current_glossary_path, source_text=None)
+                    current_system_content = build_system_prompt(
+                        base_prompt,
+                        current_glossary_path,
+                        source_text=None,
+                        chapter_ref=current_chapter_ref,
+                    )
                 
                 current_base = [{"role": "system", "content": current_system_content}]
 

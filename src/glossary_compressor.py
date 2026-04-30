@@ -68,7 +68,105 @@ _SECTION_HEADER_RE = re.compile(
 )
 
 
-def compress_glossary(glossary_content, source_text, glossary_format='auto'):
+def _gender_tracker_path_for_glossary(glossary_path):
+    if not glossary_path:
+        return None
+    stem, _ext = os.path.splitext(glossary_path)
+    if stem.endswith("_glossary"):
+        stem = stem[:-len("_glossary")]
+    elif os.path.basename(stem).lower() == "glossary":
+        stem = os.path.join(os.path.dirname(stem), "gender")
+    return f"{stem}_gender_tracker.json"
+
+
+def _load_gender_tracker(glossary_path):
+    tracker_path = _gender_tracker_path_for_glossary(glossary_path)
+    if not tracker_path or not os.path.exists(tracker_path):
+        return None
+    try:
+        with open(tracker_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("entries"), dict):
+            return data
+    except Exception as e:
+        print(f"⚠️ Glossary compression: could not load gender tracker: {e}")
+    return None
+
+
+def _normal_gender(value):
+    gender = str(value or "").strip().lower()
+    aliases = {
+        "m": "male",
+        "man": "male",
+        "boy": "male",
+        "masc": "male",
+        "masculine": "male",
+        "f": "female",
+        "woman": "female",
+        "girl": "female",
+        "fem": "female",
+        "feminine": "female",
+    }
+    return aliases.get(gender, gender)
+
+
+def _chapter_ref_parts(chapter_ref):
+    if isinstance(chapter_ref, dict):
+        chapter_num = chapter_ref.get("chapter_num")
+        chapter_file = chapter_ref.get("chapter_file")
+    else:
+        chapter_num = chapter_ref
+        chapter_file = None
+    if chapter_num is None:
+        chapter_num = os.getenv("CURRENT_CHAPTER_NUM")
+    if not chapter_file:
+        chapter_file = os.getenv("CURRENT_CHAPTER_FILE")
+    try:
+        chapter_num_f = float(chapter_num)
+    except Exception:
+        chapter_num_f = None
+    return chapter_num_f, os.path.basename(str(chapter_file or ""))
+
+
+def _tracker_gender_for_raw(tracker, raw_name, chapter_ref=None):
+    if not tracker or not raw_name:
+        return None
+    entry = tracker.get("entries", {}).get(str(raw_name).strip().casefold())
+    if not isinstance(entry, dict):
+        return None
+    occurrences = [o for o in entry.get("occurrences", []) if isinstance(o, dict)]
+    if not occurrences:
+        return None
+    chapter_num, chapter_file = _chapter_ref_parts(chapter_ref)
+    if chapter_file:
+        for occ in reversed(occurrences):
+            if os.path.basename(str(occ.get("chapter_file", ""))) == chapter_file:
+                return _normal_gender(occ.get("gender"))
+    if chapter_num is not None:
+        best = None
+        best_num = None
+        for occ in occurrences:
+            try:
+                occ_num = float(occ.get("chapter_num"))
+            except Exception:
+                continue
+            if occ_num <= chapter_num and (best_num is None or occ_num >= best_num):
+                best = occ
+                best_num = occ_num
+        if best:
+            return _normal_gender(best.get("gender"))
+    return _normal_gender(occurrences[-1].get("gender"))
+
+
+def _gender_variant_allowed(tracker, raw_name, gender, chapter_ref=None):
+    wanted = _tracker_gender_for_raw(tracker, raw_name, chapter_ref)
+    if not wanted:
+        return True
+    actual = _normal_gender(gender)
+    return not actual or actual in {"unknown", "n/a", "na", "none", "-"} or actual == wanted
+
+
+def compress_glossary(glossary_content, source_text, glossary_format='auto', glossary_path=None, chapter_ref=None):
     """
     Compress glossary by excluding entries that don't appear in the source text.
     
@@ -109,9 +207,9 @@ def compress_glossary(glossary_content, source_text, glossary_format='auto'):
             return glossary_content
     
     if glossary_format == 'csv':
-        return _compress_csv_glossary(glossary_content, source_text)
+        return _compress_csv_glossary(glossary_content, source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
     elif glossary_format == 'json':
-        return _compress_json_glossary(glossary_content, source_text)
+        return _compress_json_glossary(glossary_content, source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
     elif glossary_format == 'text':
         print("⚠️ Glossary compression: using fallback raw-name scan (unrecognized format)")
         return _compress_fallback_text(glossary_content, source_text)
@@ -119,7 +217,7 @@ def compress_glossary(glossary_content, source_text, glossary_format='auto'):
         return glossary_content
 
 
-def _compress_csv_glossary(csv_content, source_text):
+def _compress_csv_glossary(csv_content, source_text, glossary_path=None, chapter_ref=None):
     """
     Compress CSV glossary by excluding entries not found in source text.
     Handles both legacy CSV format and token-efficient format.
@@ -136,9 +234,9 @@ def _compress_csv_glossary(csv_content, source_text):
     is_token_efficient = any(line.strip().startswith('===') for line in lines)
     
     if is_token_efficient:
-        result = _compress_token_efficient_format(lines, source_text)
+        result = _compress_token_efficient_format(lines, source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
     else:
-        result = _compress_legacy_csv_format(lines, source_text)
+        result = _compress_legacy_csv_format(lines, source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
     
     # If CSV parsing produced 0 data entries, fall back to text scan
     if isinstance(result, str):
@@ -161,12 +259,31 @@ def _compress_csv_glossary(csv_content, source_text):
     return result
 
 
-def _compress_token_efficient_format(lines, source_text):
+def _token_entry_identity(line):
+    body = line.strip()[2:].strip()
+    custom_tail = re.search(r"\s+\(([^()]*)\)\s*$", body)
+    if custom_tail and ":" in custom_tail.group(1):
+        body = body[:custom_tail.start()].rstrip()
+    desc_match = re.match(r"^(?P<head>.*\)\s*(?:\[[^\]]*\])?)\s*:\s*(?P<desc>.*)$", body)
+    head = desc_match.group("head").rstrip() if desc_match else body
+    gender = ""
+    gender_match = re.search(r"\s*\[([^\]]*)\]\s*$", head)
+    if gender_match:
+        gender = gender_match.group(1).strip()
+        head = head[:gender_match.start()].rstrip()
+    name_match = re.match(r"^(?P<translated>.*)\s+\((?P<raw>.*?)\)\s*$", head)
+    if not name_match:
+        return "", ""
+    return name_match.group("raw").strip(), gender
+
+
+def _compress_token_efficient_format(lines, source_text, glossary_path=None, chapter_ref=None):
     """Compress token-efficient glossary format with section headers."""
     filtered_lines = []
     current_section = None
     current_section_has_gender = False
     _gender_types = _get_gender_types()
+    gender_tracker = _load_gender_tracker(glossary_path)
     
     for line in lines:
         stripped = line.strip()
@@ -188,18 +305,15 @@ def _compress_token_efficient_format(lines, source_text):
         
         # Process entry lines (start with "* ")
         if stripped.startswith('* '):
-            # Extract the raw name from the entry
-            # Format: * TranslatedName (RawName) [Gender]
-            match = re.search(r'\(([^)]+)\)', stripped)
-            if match:
-                raw_name = match.group(1).strip()
-                # Check if raw name appears in source text
-                if _text_contains_term(source_text, raw_name, is_character=current_section_has_gender):
-                    # Add section header if this is the first entry in section
-                    if current_section:
-                        filtered_lines.append(current_section)
-                        current_section = None
-                    filtered_lines.append(line)
+            raw_name, gender = _token_entry_identity(stripped)
+            if raw_name and _text_contains_term(source_text, raw_name, is_character=current_section_has_gender):
+                if not _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref):
+                    continue
+                # Add section header if this is the first entry in section
+                if current_section:
+                    filtered_lines.append(current_section)
+                    current_section = None
+                filtered_lines.append(line)
         elif not stripped:
             # Keep blank lines
             filtered_lines.append(line)
@@ -207,7 +321,7 @@ def _compress_token_efficient_format(lines, source_text):
     return '\n'.join(filtered_lines)
 
 
-def _compress_legacy_csv_format(lines, source_text):
+def _compress_legacy_csv_format(lines, source_text, glossary_path=None, chapter_ref=None):
     """Compress legacy CSV format with type,raw_name,translated_name columns."""
     if not lines:
         return ''
@@ -217,12 +331,15 @@ def _compress_legacy_csv_format(lines, source_text):
     has_header = _is_glossary_header(lines[0]) or first_line.startswith('type,') or 'raw_name' in first_line
     
     filtered_lines = []
+    gender_tracker = _load_gender_tracker(glossary_path)
     
     # Keep header if present
     if has_header:
         filtered_lines.append(lines[0])
+        header_parts = [p.strip().lower() for p in lines[0].split(_gsep(lines[0]))]
         data_lines = lines[1:]
     else:
+        header_parts = []
         data_lines = lines
     
     # Auto-detect separator from content
@@ -241,10 +358,18 @@ def _compress_legacy_csv_format(lines, source_text):
                 entry_type = parts[0].strip().lower()
                 raw_name = parts[1].strip()
                 translated_name = parts[2].strip()
+                if header_parts:
+                    raw_idx = header_parts.index("raw_name") if "raw_name" in header_parts else 1
+                    gender_idx = header_parts.index("gender") if "gender" in header_parts else 3
+                else:
+                    raw_idx = 1
+                    gender_idx = 3
+                raw_name = parts[raw_idx].strip() if len(parts) > raw_idx else raw_name
+                gender = parts[gender_idx].strip() if len(parts) > gender_idx else ""
                 
                 is_char = entry_type in _get_gender_types()
                 # Check if raw name appears in source text
-                if _text_contains_term(source_text, raw_name, is_character=is_char):
+                if _text_contains_term(source_text, raw_name, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref):
                     filtered_lines.append(line)
         except Exception:
             # If parsing fails, keep the line to be safe
@@ -253,7 +378,7 @@ def _compress_legacy_csv_format(lines, source_text):
     return '\n'.join(filtered_lines)
 
 
-def _compress_json_glossary(json_data, source_text):
+def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_ref=None):
     """
     Compress JSON glossary by excluding entries not found in source text.
     Handles both dict format and list format.
@@ -265,6 +390,7 @@ def _compress_json_glossary(json_data, source_text):
         except json.JSONDecodeError:
             print("⚠️ Glossary compression: JSON parsing failed, falling back to raw-name scan")
             return _compress_fallback_text(json_data, source_text)
+    gender_tracker = _load_gender_tracker(glossary_path)
     
     def _is_char_entry(val):
         """Check if a JSON entry value represents a gender-enabled type."""
@@ -278,7 +404,8 @@ def _compress_json_glossary(json_data, source_text):
             filtered_entries = {}
             for key, value in json_data['entries'].items():
                 is_char = _is_char_entry(value)
-                if _text_contains_term(source_text, key, is_character=is_char):
+                gender = value.get("gender", "") if isinstance(value, dict) else ""
+                if _text_contains_term(source_text, key, is_character=is_char) and _gender_variant_allowed(gender_tracker, key, gender, chapter_ref):
                     filtered_entries[key] = value
             
             result = json_data.copy()
@@ -292,7 +419,8 @@ def _compress_json_glossary(json_data, source_text):
                     filtered_dict[key] = value
                 else:
                     is_char = _is_char_entry(value)
-                    if _text_contains_term(source_text, key, is_character=is_char):
+                    gender = value.get("gender", "") if isinstance(value, dict) else ""
+                    if _text_contains_term(source_text, key, is_character=is_char) and _gender_variant_allowed(gender_tracker, key, gender, chapter_ref):
                         filtered_dict[key] = value
             return filtered_dict
     
@@ -304,7 +432,7 @@ def _compress_json_glossary(json_data, source_text):
                 # Check various possible keys for the raw term
                 raw_term = entry.get('raw_name') or entry.get('original_name') or entry.get('original') or ''
                 is_char = entry.get('type', '').lower() in _get_gender_types()
-                if raw_term and _text_contains_term(source_text, raw_term, is_character=is_char):
+                if raw_term and _text_contains_term(source_text, raw_term, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_term, entry.get("gender", ""), chapter_ref):
                     filtered_list.append(entry)
         return filtered_list
     
@@ -571,10 +699,10 @@ def compress_glossary_file(glossary_path, source_text):
         # Determine format from file extension
         ext = os.path.splitext(glossary_path)[1].lower()
         if ext == '.csv':
-            return compress_glossary(content, source_text, glossary_format='csv')
+            return compress_glossary(content, source_text, glossary_format='csv', glossary_path=glossary_path)
         elif ext == '.json':
             json_data = json.loads(content)
-            compressed_data = compress_glossary(json_data, source_text, glossary_format='json')
+            compressed_data = compress_glossary(json_data, source_text, glossary_format='json', glossary_path=glossary_path)
             # Return as JSON string
             return json.dumps(compressed_data, ensure_ascii=False, indent=2)
         else:

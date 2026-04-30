@@ -22,6 +22,7 @@ from unified_api_client import UnifiedClient, UnifiedClientError
 # Thread submission throttling (glossary batch) — mirrors translation behavior
 _glossary_thread_submit_lock = threading.Lock()
 _glossary_last_thread_submit = 0.0
+_gender_tracker_lock = threading.Lock()
 
 # Fix for PyInstaller - handle stdout reconfigure more carefully
 if sys.platform.startswith("win"):
@@ -1043,12 +1044,199 @@ def get_custom_entry_types():
             'term': {'enabled': True, 'has_gender': False}
         }
 
+def _normalize_gender_value(value) -> str:
+    gender = str(value or "").strip().lower()
+    aliases = {
+        "m": "male",
+        "man": "male",
+        "boy": "male",
+        "masc": "male",
+        "masculine": "male",
+        "f": "female",
+        "woman": "female",
+        "girl": "female",
+        "fem": "female",
+        "feminine": "female",
+    }
+    return aliases.get(gender, gender)
+
+def _gender_is_trackable(gender: str) -> bool:
+    return bool(gender) and gender not in {"unknown", "n/a", "na", "none", "-"}
+
+def _entry_type_has_gender(entry: Dict) -> bool:
+    try:
+        custom_types = get_custom_entry_types()
+        entry_type = str(entry.get("type", "character")).strip()
+        return bool(custom_types.get(entry_type, {}).get("has_gender", False))
+    except Exception:
+        return str(entry.get("type", "")).strip().lower() == "character"
+
+def _entry_gender(entry: Dict) -> str:
+    return _normalize_gender_value(entry.get("gender", ""))
+
+def _raw_exact_key(raw_name) -> str:
+    return str(raw_name or "").strip()
+
+def _raw_tracker_key(raw_name) -> str:
+    return _raw_exact_key(raw_name).casefold()
+
+def _strip_private_glossary_keys(entry: Dict) -> Dict:
+    if not isinstance(entry, dict):
+        return entry
+    return {k: v for k, v in entry.items() if not str(k).startswith("_gender_tracker_")}
+
+def _gender_tracker_path_for_output(output_path: str) -> str:
+    stem, _ext = os.path.splitext(output_path)
+    if stem.endswith("_glossary"):
+        stem = stem[:-len("_glossary")]
+    elif os.path.basename(stem).lower() == "glossary":
+        stem = os.path.join(os.path.dirname(stem), "gender")
+    return f"{stem}_gender_tracker.json"
+
+def _load_gender_tracker(path: str) -> Dict:
+    if not path or not os.path.exists(path):
+        return {"version": 1, "entries": {}}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            data.setdefault("version", 1)
+            data.setdefault("entries", {})
+            return data
+    except Exception:
+        pass
+    return {"version": 1, "entries": {}}
+
+def _write_gender_tracker(path: str, tracker: Dict):
+    if not path or not isinstance(tracker, dict):
+        return
+    try:
+        output_dir = os.path.dirname(path) or "."
+        os.makedirs(output_dir, exist_ok=True)
+        tracker["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output_dir, delete=False, suffix=".tmp") as temp_f:
+            temp_path = temp_f.name
+            json.dump(tracker, temp_f, ensure_ascii=False, indent=2)
+            temp_f.flush()
+            os.fsync(temp_f.fileno())
+        _atomic_replace_file(temp_path, path)
+    except Exception as e:
+        print(f"⚠️ Could not write gender tracker: {e}")
+
+def update_gender_tracker(entries: List[Dict], output_path: str, source_path: str = None,
+                          chapter_index=None, chapter_num=None, chapter_file: str = None):
+    """Record which chapter/file observed each gendered raw-name variant."""
+    if not entries or not output_path:
+        return
+    tracker_path = _gender_tracker_path_for_output(output_path)
+    source_path = source_path or os.getenv("EPUB_PATH", "")
+    with _gender_tracker_lock:
+        tracker = _load_gender_tracker(tracker_path)
+        tracker["source_path"] = source_path
+        tracker["glossary_path"] = output_path
+        tracker_entries = tracker.setdefault("entries", {})
+
+        changed = False
+        for entry in entries:
+            if not isinstance(entry, dict) or not _entry_type_has_gender(entry):
+                continue
+            raw_name = _raw_exact_key(entry.get("raw_name"))
+            gender = _entry_gender(entry)
+            if not raw_name or not _gender_is_trackable(gender):
+                continue
+
+            key = _raw_tracker_key(raw_name)
+            item = tracker_entries.setdefault(key, {
+                "raw_name": raw_name,
+                "translated_name": entry.get("translated_name", ""),
+                "genders": {},
+                "occurrences": [],
+                "changes": [],
+            })
+            if entry.get("translated_name") and not item.get("translated_name"):
+                item["translated_name"] = entry.get("translated_name", "")
+            item.setdefault("genders", {}).setdefault(gender, {
+                "first_seen_chapter": chapter_num,
+                "first_seen_file": chapter_file or "",
+            })
+
+            occurrence = {
+                "gender": gender,
+                "chapter_index": chapter_index,
+                "chapter_num": chapter_num,
+                "chapter_file": os.path.basename(str(chapter_file or "")),
+                "source_path": source_path,
+                "translated_name": entry.get("translated_name", ""),
+            }
+            sig = (
+                occurrence["gender"],
+                str(occurrence["chapter_num"]),
+                occurrence["chapter_file"],
+            )
+            existing_sigs = {
+                (o.get("gender"), str(o.get("chapter_num")), o.get("chapter_file", ""))
+                for o in item.get("occurrences", [])
+                if isinstance(o, dict)
+            }
+            if sig not in existing_sigs:
+                previous = item["occurrences"][-1] if item.get("occurrences") else None
+                item.setdefault("occurrences", []).append(occurrence)
+                if previous and previous.get("gender") != gender:
+                    item.setdefault("changes", []).append({
+                        "from": previous.get("gender"),
+                        "to": gender,
+                        "chapter_num": chapter_num,
+                        "chapter_file": occurrence["chapter_file"],
+                    })
+                changed = True
+
+        if changed:
+            _write_gender_tracker(tracker_path, tracker)
+
+def _align_gender_variant_translation(existing_entry: Dict, new_entry: Dict):
+    canonical = existing_entry.get("translated_name") or new_entry.get("translated_name")
+    if canonical:
+        existing_entry["translated_name"] = canonical
+        new_entry["translated_name"] = canonical
+
+def _is_exact_raw_gender_variant(existing_entry: Dict, new_entry: Dict) -> bool:
+    if _raw_exact_key(existing_entry.get("raw_name")) != _raw_exact_key(new_entry.get("raw_name")):
+        return False
+    if not (_entry_type_has_gender(existing_entry) or _entry_type_has_gender(new_entry)):
+        return False
+    existing_gender = _entry_gender(existing_entry)
+    new_gender = _entry_gender(new_entry)
+    return (
+        _gender_is_trackable(existing_gender)
+        and _gender_is_trackable(new_gender)
+        and existing_gender != new_gender
+    )
+
+def _harmonize_gender_variant_translations(glossary: List[Dict]) -> List[Dict]:
+    groups = {}
+    for entry in glossary or []:
+        if not isinstance(entry, dict) or not _entry_type_has_gender(entry):
+            continue
+        raw_name = _raw_exact_key(entry.get("raw_name"))
+        gender = _entry_gender(entry)
+        if raw_name and _gender_is_trackable(gender):
+            groups.setdefault(raw_name, []).append(entry)
+    for entries in groups.values():
+        genders = {_entry_gender(e) for e in entries}
+        if len(genders) < 2:
+            continue
+        canonical = next((e.get("translated_name") for e in entries if e.get("translated_name")), "")
+        if canonical:
+            for entry in entries:
+                entry["translated_name"] = canonical
+    return glossary
+
 def save_glossary_json(glossary: List[Dict], output_path: str):
     """Save glossary in the new simple format with automatic sorting by type"""
     # Check if legacy JSON output is enabled (default disabled)
     if os.getenv('GLOSSARY_OUTPUT_LEGACY_JSON', '0') != '1':
         return
-    glossary = _ensure_book_title_entry(glossary)
+    glossary = [_strip_private_glossary_keys(e) for e in _ensure_book_title_entry(glossary)]
 
     global _glossary_json_lock
     
@@ -1104,7 +1292,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
             except Exception:
                 pass
 
-        glossary = _ensure_book_title_entry(glossary)
+        glossary = [_strip_private_glossary_keys(e) for e in _ensure_book_title_entry(glossary)]
         custom_types = get_custom_entry_types()
         type_order = {'book': -1, 'character': 0, 'term': 1}
         other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
@@ -2537,6 +2725,7 @@ def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):
         print(f"[Dedup] ⏭️ PASS 2 skipped (translation deduplication disabled)")
     
     total_removed = original_count - len(final_results)
+    final_results = _harmonize_gender_variant_translations(final_results)
     print(f"[Dedup] ✨ Deduplication complete: {total_removed} total duplicates removed, {len(final_results)} unique entries kept")
     
     if dry_run:
@@ -2992,7 +3181,7 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
         import difflib
     
     seen_raw_names = []  # List of (cleaned_name, original_raw_name) tuples
-    raw_name_to_idx = {}  # raw_name -> index in deduplicated (O(1) lookup)
+    raw_name_to_indices = {}  # raw_name -> list of indices in deduplicated
     # Reverse map: for a given index in deduplicated, which index in seen_raw_names?
     dedup_idx_to_seen_idx = {}
     deduplicated = []
@@ -3007,6 +3196,58 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
         # Remove honorifics + NFC normalize for comparison (unless disabled)
         cleaned_name = unicodedata.normalize('NFC', remove_honorifics(raw_name))
         
+        exact_indices = raw_name_to_indices.get(raw_name, [])
+        if exact_indices:
+            same_gender_idx = None
+            variant_idx = None
+            current_gender = _entry_gender(entry)
+            for candidate_idx in exact_indices:
+                candidate = deduplicated[candidate_idx]
+                if _entry_gender(candidate) == current_gender:
+                    same_gender_idx = candidate_idx
+                    break
+                if _is_exact_raw_gender_variant(candidate, entry):
+                    variant_idx = candidate_idx
+
+            if same_gender_idx is None and variant_idx is not None:
+                _align_gender_variant_translation(deduplicated[variant_idx], entry)
+                deduplicated.append(entry)
+                raw_name_to_indices.setdefault(raw_name, []).append(len(deduplicated) - 1)
+                if dedup_log is not None:
+                    dedup_log.append({
+                        "pass": 1,
+                        "action": "kept_gender_variant",
+                        "kept": raw_name,
+                        "gender": current_gender,
+                        "reason": "exact raw_name match with different gender",
+                    })
+                continue
+
+            existing_index = same_gender_idx if same_gender_idx is not None else exact_indices[0]
+            existing_entry = deduplicated[existing_index]
+            current_field_count = len([v for k, v in entry.items() if not str(k).startswith("_") and v and str(v).strip()])
+            existing_field_count = len([v for k, v in existing_entry.items() if not str(k).startswith("_") and v and str(v).strip()])
+            if current_field_count > existing_field_count:
+                deduplicated[existing_index] = entry
+                skipped_count += 1
+                if dedup_log is not None:
+                    dedup_log.append({
+                        "pass": 1, "action": "replaced",
+                        "kept": raw_name, "dropped": raw_name,
+                        "score": 1.0,
+                        "reason": f"richer exact raw entry ({current_field_count} vs {existing_field_count} fields)"
+                    })
+            else:
+                skipped_count += 1
+                if dedup_log is not None:
+                    dedup_log.append({
+                        "pass": 1, "action": "dropped",
+                        "kept": raw_name, "dropped": raw_name,
+                        "score": 1.0,
+                        "reason": "exact raw duplicate"
+                    })
+            continue
+
         # Check for fuzzy matches with seen names
         is_duplicate, best_score, best_match = _find_best_duplicate_match(
             cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz
@@ -3014,21 +3255,22 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
         
         if is_duplicate:
             # Use O(1) dictionary lookup
-            existing_index = raw_name_to_idx.get(best_match)
+            best_indices = raw_name_to_indices.get(best_match, [])
+            existing_index = best_indices[0] if best_indices else None
             
             if existing_index is not None:
                 existing_entry = deduplicated[existing_index]
                 # Count non-empty fields (excluding internal keys starting with _)
-                current_field_count = len([v for v in entry.values() if v and str(v).strip()])
-                existing_field_count = len([v for v in existing_entry.values() if v and str(v).strip()])
+                current_field_count = len([v for k, v in entry.items() if not str(k).startswith("_") and v and str(v).strip()])
+                existing_field_count = len([v for k, v in existing_entry.items() if not str(k).startswith("_") and v and str(v).strip()])
                 
                 # If current entry has more fields, replace the existing one
                 if current_field_count > existing_field_count:
                     # Replace existing entry in deduplicated list
                     deduplicated[existing_index] = entry
-                    # Update raw_name_to_idx: add new key, remove old key
-                    raw_name_to_idx[raw_name] = existing_index
-                    del raw_name_to_idx[best_match]
+                    raw_name_to_indices[raw_name] = [existing_index]
+                    if best_match in raw_name_to_indices:
+                        del raw_name_to_indices[best_match]
                     # FIX: Update seen_raw_names at the correct index so future
                     # fuzzy comparisons use the new entry's cleaned name / raw name.
                     seen_idx = dedup_idx_to_seen_idx.get(existing_index)
@@ -3069,7 +3311,7 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
             seen_idx = len(seen_raw_names)
             seen_raw_names.append((cleaned_name, raw_name))
             dedup_idx = len(deduplicated)
-            raw_name_to_idx[raw_name] = dedup_idx
+            raw_name_to_indices.setdefault(raw_name, []).append(dedup_idx)
             dedup_idx_to_seen_idx[dedup_idx] = seen_idx
             deduplicated.append(entry)
     
@@ -3099,10 +3341,22 @@ def _skip_translated_name_duplicates(glossary, dedup_log=None):
         if translated_lower in seen_translations:
             existing_raw, existing_entry, existing_idx = seen_translations[translated_lower]
             existing_translated = existing_entry.get('translated_name', translated_name)
+            if _is_exact_raw_gender_variant(existing_entry, entry):
+                _align_gender_variant_translation(existing_entry, entry)
+                deduplicated.append(entry)
+                if dedup_log is not None:
+                    dedup_log.append({
+                        "pass": 2,
+                        "action": "kept_gender_variant",
+                        "kept": raw_name,
+                        "translation": translated_name,
+                        "reason": "same raw_name and translation but different gender",
+                    })
+                continue
             
             # Count fields in both entries (more fields = higher priority)
-            current_field_count = len([v for v in entry.values() if v and str(v).strip()])
-            existing_field_count = len([v for v in existing_entry.values() if v and str(v).strip()])
+            current_field_count = len([v for k, v in entry.items() if not str(k).startswith("_") and v and str(v).strip()])
+            existing_field_count = len([v for k, v in existing_entry.items() if not str(k).startswith("_") and v and str(v).strip()])
             
             # If current entry has more fields, replace the existing one
             if current_field_count > existing_field_count:
@@ -4822,6 +5076,25 @@ def main(log_callback=None, stop_callback=None):
                                 
                                 # Process entries
                                 if data and len(data) > 0:
+                                    tracker_buckets = {}
+                                    for entry in data:
+                                        raw_for_tracker = str(entry.get("raw_name", "")).strip()
+                                        matched_idx = idx
+                                        if raw_for_tracker:
+                                            for cand_idx, cand_chap in unit:
+                                                if raw_for_tracker in str(cand_chap or ""):
+                                                    matched_idx = cand_idx
+                                                    break
+                                        tracker_buckets.setdefault(matched_idx, []).append(entry)
+                                    for tracker_idx, tracker_entries in tracker_buckets.items():
+                                        update_gender_tracker(
+                                            tracker_entries,
+                                            os.path.join(glossary_dir, os.path.basename(args.output)),
+                                            source_path=epub_path,
+                                            chapter_index=tracker_idx,
+                                            chapter_num=_chapter_positions.get(tracker_idx, tracker_idx + 1),
+                                            chapter_file=_chapter_filenames.get(tracker_idx, ""),
+                                        )
                                     total_ent = len(data)
                                     batch_entry_count += total_ent
                                     
@@ -4886,6 +5159,14 @@ def main(log_callback=None, stop_callback=None):
                             
                             # Process entries as each chapter completes
                             if data and len(data) > 0:
+                                update_gender_tracker(
+                                    data,
+                                    os.path.join(glossary_dir, os.path.basename(args.output)),
+                                    source_path=epub_path,
+                                    chapter_index=idx,
+                                    chapter_num=_chapter_positions.get(idx, idx + 1),
+                                    chapter_file=_chapter_filenames.get(idx, ""),
+                                )
                                 total_ent = len(data)
                                 batch_entry_count += total_ent
                                 
@@ -5843,6 +6124,26 @@ def main(log_callback=None, stop_callback=None):
                                 merged_indices.append(g_idx)
                 else:
                     # Apply skip logic and save
+                    tracker_units = merge_groups.get(idx, [(idx, chap)]) if isinstance(merge_groups, dict) else [(idx, chap)]
+                    tracker_buckets = {}
+                    for entry in data:
+                        raw_for_tracker = str(entry.get("raw_name", "")).strip()
+                        matched_idx = idx
+                        if raw_for_tracker:
+                            for cand_idx, cand_chap in tracker_units:
+                                if raw_for_tracker in str(cand_chap or ""):
+                                    matched_idx = cand_idx
+                                    break
+                        tracker_buckets.setdefault(matched_idx, []).append(entry)
+                    for tracker_idx, tracker_entries in tracker_buckets.items():
+                        update_gender_tracker(
+                            tracker_entries,
+                            os.path.join(glossary_dir, os.path.basename(args.output)),
+                            source_path=epub_path,
+                            chapter_index=tracker_idx,
+                            chapter_num=_chapter_positions.get(tracker_idx, tracker_idx + 1),
+                            chapter_file=_chapter_filenames.get(tracker_idx, ""),
+                        )
                     glossary.extend(data)
                     glossary[:] = skip_duplicate_entries(glossary)
                     completed.append(idx)
