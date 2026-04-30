@@ -15571,6 +15571,7 @@ class UnifiedClient:
                             # print("⚠️ Gemini client is None. This typically happens when stop was requested.")
                             raise UnifiedClientError("Gemini client not initialized - operation may have been cancelled", error_type="cancelled")
 
+                        image_data = None
                         if use_streaming:
                             if not self._is_stop_requested():
                                 print(f"🛰️ [gemini-native] Stream start (model={self.model})")
@@ -15774,9 +15775,6 @@ class UnifiedClient:
                                 raw_content_obj = cand0.content
                         except Exception:
                             pass
-                    if not use_streaming:
-                        image_data = None  # Store extracted image data (non-streaming only; streaming already set it)
-                    
                     # Try the simple .text property first (most common)
                     # IMPORTANT: when streaming, keep the aggregated text_parts; only fill in if empty
                     if hasattr(response, 'text') and not text_content:

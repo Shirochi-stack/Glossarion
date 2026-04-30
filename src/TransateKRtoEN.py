@@ -8141,7 +8141,12 @@ def _is_root_output_html_path(path_or_name: str, out_dir: str) -> bool:
         return False
     try:
         path = str(path_or_name)
-        rel = os.path.relpath(path, out_dir) if os.path.isabs(path) else path
+        if os.path.isabs(path):
+            abs_path = os.path.abspath(path)
+        else:
+            abs_path = os.path.abspath(os.path.join(os.getcwd(), path))
+        abs_out = os.path.abspath(out_dir)
+        rel = os.path.relpath(abs_path, abs_out)
         rel = rel.replace("\\", "/").strip("/")
         if not rel or rel.startswith("../") or rel == "..":
             return False
@@ -8278,6 +8283,128 @@ def _tts_stem_variants(output_file: str):
     else:
         variants.append(f"response_{stem}")
     return list(dict.fromkeys(variants))
+
+def _postprocess_output_candidates(input_path: str, file_base: str, current_out: str):
+    candidates = []
+
+    def _add(path):
+        if not path:
+            return
+        try:
+            path = os.path.abspath(os.path.expanduser(str(path)))
+        except Exception:
+            path = str(path)
+        if path and path not in candidates:
+            candidates.append(path)
+
+    override_root = (os.getenv("OUTPUT_DIRECTORY") or os.getenv("OUTPUT_DIR") or "").strip()
+    if override_root:
+        if file_base:
+            _add(os.path.join(override_root, file_base))
+        _add(override_root)
+        return candidates
+
+    try:
+        if getattr(sys, "frozen", False):
+            runtime_dir = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            runtime_dir = os.path.dirname(os.path.abspath(__file__))
+        if file_base:
+            _add(os.path.join(runtime_dir, file_base))
+    except Exception:
+        pass
+
+    if not candidates:
+        _add(current_out)
+    return candidates
+
+def _score_postprocess_output_dir(candidate_dir: str, chapters, input_path: str = "", file_base: str = "") -> int:
+    if not candidate_dir or not os.path.isdir(candidate_dir):
+        return -1
+
+    score = 0
+    if file_base and os.path.basename(os.path.normpath(candidate_dir)) == file_base:
+        score += 50000
+    try:
+        root_files = {
+            f for f in os.listdir(candidate_dir)
+            if os.path.isfile(os.path.join(candidate_dir, f))
+        }
+    except Exception:
+        root_files = set()
+
+    html_files = [f for f in root_files if f.lower().endswith((".html", ".xhtml", ".htm"))]
+    if html_files:
+        score += min(len(html_files), 50) * 10
+
+    if "translation_progress.json" in root_files:
+        score += 25
+    if "content.opf" in root_files:
+        score += 10
+
+    source_epub_path = os.path.join(candidate_dir, "source_epub.txt")
+    input_path_norm = os.path.normcase(os.path.abspath(input_path)) if input_path else ""
+    if input_path_norm and os.path.isfile(source_epub_path):
+        try:
+            with open(source_epub_path, "r", encoding="utf-8", errors="ignore") as f:
+                source_ref = f.read().strip()
+            if source_ref and os.path.normcase(os.path.abspath(source_ref)) == input_path_norm:
+                score += 75
+        except Exception:
+            pass
+
+    expected_norms = set()
+    for idx, chapter in enumerate(chapters or []):
+        actual_num = chapter.get("actual_chapter_num", chapter.get("num", idx + 1))
+        try:
+            expected_norms.add(_normalize_output_basename(FileUtilities.create_chapter_filename(chapter, actual_num)))
+        except Exception:
+            pass
+
+    root_norms = {_normalize_output_basename(f) for f in html_files}
+    score += len(expected_norms & root_norms) * 100
+
+    progress_path = os.path.join(candidate_dir, "translation_progress.json")
+    if os.path.isfile(progress_path):
+        try:
+            with open(progress_path, "r", encoding="utf-8") as f:
+                prog = json.load(f)
+            tracked = prog.get("chapters", {}) if isinstance(prog, dict) else {}
+            for entry in tracked.values():
+                if not isinstance(entry, dict):
+                    continue
+                output_file = entry.get("output_file")
+                if not output_file:
+                    continue
+                output_name = os.path.basename(str(output_file))
+                if output_name in root_files:
+                    score += 20
+                elif _normalize_output_basename(output_name) in root_norms:
+                    score += 10
+        except Exception:
+            pass
+
+    return score
+
+def _resolve_postprocess_output_dir(input_path: str, file_base: str, current_out: str, chapters):
+    best_dir = None
+    best_score = -1
+    scored = []
+    for candidate in _postprocess_output_candidates(input_path, file_base, current_out):
+        score = _score_postprocess_output_dir(candidate, chapters, input_path, file_base)
+        scored.append((score, candidate))
+        if score > best_score:
+            best_score = score
+            best_dir = candidate
+
+    if not best_dir:
+        best_dir = os.path.abspath(current_out)
+    if os.path.abspath(best_dir) != os.path.abspath(current_out):
+        print(f"📁 Post-processing output folder: {best_dir}")
+    if best_score <= 0:
+        checked = ", ".join(path for _score, path in scored)
+        print(f"⚠️ Post-processing could not find translated root HTML in candidate output folders. Checked: {checked}")
+    return best_dir
 
 def _process_refinement_or_tts_mode(config, client, chapters, out, progress_manager, check_stop):
     mode = config.OUTPUT_MODE
@@ -12187,6 +12314,12 @@ def main(log_callback=None, stop_callback=None):
                 if not bool(re.search(r'\d', _name_noext)):
                     continue
             post_mode_chapters.append(_chapter)
+        post_out = _resolve_postprocess_output_dir(input_path, file_base, out, post_mode_chapters)
+        if os.path.abspath(post_out) != os.path.abspath(out):
+            out = post_out
+            payloads_dir = out
+            os.environ["EPUB_OUTPUT_DIR"] = out
+            progress_manager = ProgressManager(payloads_dir)
         _process_refinement_or_tts_mode(config, client, post_mode_chapters, out, progress_manager, check_stop)
         return
 
