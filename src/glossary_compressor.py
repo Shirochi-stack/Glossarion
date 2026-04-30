@@ -139,6 +139,19 @@ def _tracker_entry_for_raw(tracker, raw_name):
     return entry if isinstance(entry, dict) else None
 
 
+def _remember_available_gender(available_genders, raw_name, gender):
+    raw_key = str(raw_name or "").strip().casefold()
+    gender = _normal_gender(gender)
+    if raw_key and gender not in {"", "unknown", "n/a", "na", "none", "-"}:
+        available_genders.setdefault(raw_key, set()).add(gender)
+
+
+def _available_gender_set(available_genders, raw_name):
+    if not available_genders:
+        return set()
+    return set(available_genders.get(str(raw_name or "").strip().casefold(), set()))
+
+
 def _gender_noise_threshold():
     try:
         value = float(os.getenv("GLOSSARY_GENDER_NOISE_THRESHOLD", "10"))
@@ -252,15 +265,23 @@ def _tracker_gender_for_entry(entry, chapter_ref=None):
     return _normal_gender(occurrences[-1].get("gender"))
 
 
-def _gender_variant_allowed(tracker, raw_name, gender, chapter_ref=None):
+def _gender_variant_allowed(tracker, raw_name, gender, chapter_ref=None, available_genders=None):
     actual = _normal_gender(gender)
     if not actual or actual in {"unknown", "n/a", "na", "none", "-"}:
         return True
+    bias = _gender_bias()
+    available = _available_gender_set(available_genders, raw_name)
+    if _gender_noise_threshold() >= 1.0 and bias == "none":
+        return True
     entry = _tracker_entry_for_raw(tracker, raw_name)
     if _gender_is_rare_noise(entry, actual, raw_name):
+        if bias != "none" and bias not in available:
+            return True
         return False
     wanted = _tracker_gender_for_entry(entry, chapter_ref)
     if not wanted:
+        return True
+    if wanted not in available:
         return True
     return actual == wanted
 
@@ -383,6 +404,17 @@ def _compress_token_efficient_format(lines, source_text, glossary_path=None, cha
     current_section_has_gender = False
     _gender_types = _get_gender_types()
     gender_tracker = _load_gender_tracker(glossary_path)
+    available_genders = {}
+    scan_section_has_gender = False
+    for scan_line in lines:
+        scan_stripped = scan_line.strip()
+        if scan_stripped.startswith('==='):
+            header_upper = scan_stripped.upper()
+            scan_section_has_gender = any(t.upper() in header_upper for t in _gender_types)
+            continue
+        if scan_section_has_gender and scan_stripped.startswith('* '):
+            raw_name, gender = _token_entry_identity(scan_stripped)
+            _remember_available_gender(available_genders, raw_name, gender)
     
     for line in lines:
         stripped = line.strip()
@@ -406,7 +438,7 @@ def _compress_token_efficient_format(lines, source_text, glossary_path=None, cha
         if stripped.startswith('* '):
             raw_name, gender = _token_entry_identity(stripped)
             if raw_name and _text_contains_term(source_text, raw_name, is_character=current_section_has_gender):
-                if not _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref):
+                if not _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
                     continue
                 # Add section header if this is the first entry in section
                 if current_section:
@@ -444,6 +476,24 @@ def _compress_legacy_csv_format(lines, source_text, glossary_path=None, chapter_
     # Auto-detect separator from content
     sample = '\n'.join(lines[:5])
     sep = _gsep(sample)
+    available_genders = {}
+    for scan_line in data_lines:
+        try:
+            parts = [p.strip() for p in scan_line.split(sep)]
+            if len(parts) >= 3:
+                entry_type = parts[0].strip().lower()
+                if header_parts:
+                    raw_idx = header_parts.index("raw_name") if "raw_name" in header_parts else 1
+                    gender_idx = header_parts.index("gender") if "gender" in header_parts else 3
+                else:
+                    raw_idx = 1
+                    gender_idx = 3
+                if entry_type in _get_gender_types():
+                    raw_name = parts[raw_idx].strip() if len(parts) > raw_idx else ""
+                    gender = parts[gender_idx].strip() if len(parts) > gender_idx else ""
+                    _remember_available_gender(available_genders, raw_name, gender)
+        except Exception:
+            pass
     
     # Process each CSV row
     for line in data_lines:
@@ -468,7 +518,7 @@ def _compress_legacy_csv_format(lines, source_text, glossary_path=None, chapter_
                 
                 is_char = entry_type in _get_gender_types()
                 # Check if raw name appears in source text
-                if _text_contains_term(source_text, raw_name, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref):
+                if _text_contains_term(source_text, raw_name, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
                     filtered_lines.append(line)
         except Exception:
             # If parsing fails, keep the line to be safe
@@ -496,6 +546,23 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
         if isinstance(val, dict):
             return val.get('type', '').lower() in _get_gender_types()
         return False
+
+    def _json_available_genders(container):
+        available_genders = {}
+        if isinstance(container, dict):
+            items = container.get('entries', container).items()
+            for key, value in items:
+                if isinstance(value, dict) and _is_char_entry(value):
+                    raw_name = value.get('raw_name') or value.get('original_name') or value.get('original') or key
+                    _remember_available_gender(available_genders, raw_name, value.get("gender", ""))
+        elif isinstance(container, list):
+            for entry in container:
+                if isinstance(entry, dict) and _is_char_entry(entry):
+                    raw_name = entry.get('raw_name') or entry.get('original_name') or entry.get('original') or ''
+                    _remember_available_gender(available_genders, raw_name, entry.get("gender", ""))
+        return available_genders
+
+    available_genders = _json_available_genders(json_data)
     
     if isinstance(json_data, dict):
         # Handle dict with 'entries' key
@@ -504,7 +571,9 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
             for key, value in json_data['entries'].items():
                 is_char = _is_char_entry(value)
                 gender = value.get("gender", "") if isinstance(value, dict) else ""
-                if _text_contains_term(source_text, key, is_character=is_char) and _gender_variant_allowed(gender_tracker, key, gender, chapter_ref):
+                raw_name = value.get('raw_name') if isinstance(value, dict) else key
+                raw_name = raw_name or key
+                if _text_contains_term(source_text, key, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
                     filtered_entries[key] = value
             
             result = json_data.copy()
@@ -519,7 +588,9 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
                 else:
                     is_char = _is_char_entry(value)
                     gender = value.get("gender", "") if isinstance(value, dict) else ""
-                    if _text_contains_term(source_text, key, is_character=is_char) and _gender_variant_allowed(gender_tracker, key, gender, chapter_ref):
+                    raw_name = value.get('raw_name') if isinstance(value, dict) else key
+                    raw_name = raw_name or key
+                    if _text_contains_term(source_text, key, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
                         filtered_dict[key] = value
             return filtered_dict
     
@@ -531,7 +602,7 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
                 # Check various possible keys for the raw term
                 raw_term = entry.get('raw_name') or entry.get('original_name') or entry.get('original') or ''
                 is_char = entry.get('type', '').lower() in _get_gender_types()
-                if raw_term and _text_contains_term(source_text, raw_term, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_term, entry.get("gender", ""), chapter_ref):
+                if raw_term and _text_contains_term(source_text, raw_term, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_term, entry.get("gender", ""), chapter_ref, available_genders):
                     filtered_list.append(entry)
         return filtered_list
     
