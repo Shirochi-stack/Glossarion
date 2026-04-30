@@ -2005,7 +2005,7 @@ Rules:
 - The translation must strictly follow the translation prompt and utilize the generated glossary.
 - Output the <glossary> block first, then output only the translated content after </glossary>.
 
-[Balanced/Full Glossary Prompt]
+[Glossary Prompt]
 {glossary_prompt}
 
 [Translation Prompt]
