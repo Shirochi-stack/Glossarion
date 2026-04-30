@@ -2416,6 +2416,25 @@ CRITICAL EXTRACTION RULES:
     
     return (system_prompt, user_prompt)
 
+DEFAULT_SINGLE_PASS_GLOSSARY_HEADER_PROMPT = """You have 2 roles to complete.
+
+1. Perform glossary extraction using the Balanced/Full glossary logic.
+2. Perform translation using the provided glossary.
+
+Rules:
+- Wrap the generated glossary in <glossary>...</glossary> tags.
+- The glossary must follow the same structure and formatting as standard Balanced/Full extraction.
+- Any glossary prompt instruction to return only CSV/JSON applies only inside the <glossary> block.
+- The translation must strictly follow the translation prompt and utilize the generated glossary.
+- Output the <glossary> block first, then output only the translated content after </glossary>.
+
+[Balanced/Full Glossary Prompt]
+{glossary_prompt}
+
+[Translation Prompt]
+{translation_prompt}"""
+
+
 def build_single_pass_translation_system_prompt(translation_prompt: str, source_text: str) -> str:
     """Build a combined glossary-extraction + translation system prompt.
 
@@ -2425,21 +2444,16 @@ def build_single_pass_translation_system_prompt(translation_prompt: str, source_
     """
     glossary_system_prompt, _ = build_prompt(source_text or "")
     translation_prompt = translation_prompt or ""
-    return (
-        "You have 2 roles to complete.\n\n"
-        "1. Perform glossary extraction using the Balanced/Full glossary logic.\n"
-        "2. Perform translation using the provided glossary.\n\n"
-        "Rules:\n"
-        "- Wrap the generated glossary in <glossary>...</glossary> tags.\n"
-        "- The glossary must follow the same structure and formatting as standard Balanced/Full extraction.\n"
-        "- Any glossary prompt instruction to return only CSV/JSON applies only inside the <glossary> block.\n"
-        "- The translation must strictly follow the translation prompt and utilize the generated glossary.\n"
-        "- Output the <glossary> block first, then output only the translated content after </glossary>.\n\n"
-        "[Balanced/Full Glossary Prompt]\n"
-        f"{glossary_system_prompt}\n\n"
-        "[Translation Prompt]\n"
-        f"{translation_prompt}"
-    )
+    header = (os.getenv("SINGLE_PASS_GLOSSARY_HEADER_PROMPT", "") or "").strip()
+    if not header:
+        header = DEFAULT_SINGLE_PASS_GLOSSARY_HEADER_PROMPT
+    if "{glossary_prompt}" in header or "{translation_prompt}" in header:
+        return (
+            header
+            .replace("{glossary_prompt}", glossary_system_prompt)
+            .replace("{translation_prompt}", translation_prompt)
+        )
+    return f"{header}\n\n[Balanced/Full Glossary Prompt]\n{glossary_system_prompt}\n\n[Translation Prompt]\n{translation_prompt}"
 
 def split_single_pass_response(response_text: str) -> tuple:
     """Split a single-pass response into (translation_text, glossary_block)."""

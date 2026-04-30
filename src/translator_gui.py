@@ -13899,6 +13899,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'TRANSLATION_TEMPERATURE': str(self.trans_temp.text()),
             'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.text()),
             'EPUB_OUTPUT_DIR': _get_app_dir(),
+            'GLOSSARY_SHARED_DIR': os.path.join(_get_app_dir(), 'Glossary'),
             # Whether to include previous source text as memory context
             'INCLUDE_SOURCE_IN_HISTORY': "1" if getattr(self, 'include_source_in_history_var', False) else "0",
             'APPEND_GLOSSARY': "0" if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ("1" if self.append_glossary_var else "0"),
@@ -13933,6 +13934,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ENABLE_AUTO_GLOSSARY': "1" if (self.config.get('auto_glossary_mode', 'off') == 'minimal' or (self.config.get('auto_glossary_mode') is None and self.enable_auto_glossary_var)) else "0",
             'AUTO_GLOSSARY_MODE': self.config.get('auto_glossary_mode', 'off'),
             'SINGLE_PASS_GLOSSARY_MODE': '1' if self.config.get('auto_glossary_mode', 'off') == 'single_pass' else '',
+            'SINGLE_PASS_GLOSSARY_HEADER_PROMPT': self.config.get('single_pass_glossary_header_prompt', ''),
             'AUTO_GLOSSARY_PROMPT': self.unified_auto_glosary_prompt3 if hasattr(self, 'unified_auto_glosary_prompt3') else '',
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
             'GLOSSARY_TRANSLATION_PROMPT': self.glossary_translation_prompt if hasattr(self, 'glossary_translation_prompt') else '',
@@ -15381,9 +15383,11 @@ Important rules:
                     'GLOSSARY_MAX_NAMES': str(self.glossary_max_names_var),
                     'GLOSSARY_MAX_TITLES': str(self.glossary_max_titles_var),
                     'CONTEXT_WINDOW_SIZE': str(self.context_window_size_var),
+                    'GLOSSARY_SHARED_DIR': os.path.join(_get_app_dir(), 'Glossary'),
                     'ENABLE_AUTO_GLOSSARY': "1" if (self.config.get('auto_glossary_mode', 'off') == 'minimal' or (self.config.get('auto_glossary_mode') is None and self.enable_auto_glossary_var)) else "0",
                     'AUTO_GLOSSARY_MODE': self.config.get('auto_glossary_mode', 'off'),
                     'SINGLE_PASS_GLOSSARY_MODE': '1' if self.config.get('auto_glossary_mode', 'off') == 'single_pass' else '',
+                    'SINGLE_PASS_GLOSSARY_HEADER_PROMPT': self.config.get('single_pass_glossary_header_prompt', ''),
                     'APPEND_GLOSSARY': "0" if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ("1" if self.append_glossary_var else "0"),
                     'GLOSSARY_STRIP_HONORIFICS': '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var else '1',
                     'AUTO_GLOSSARY_PROMPT': getattr(self, 'unified_auto_glosary_prompt3', ''),
@@ -22045,6 +22049,7 @@ Important rules:
                 'manual_glossary_prompt': 'manual_prompt_text',
                 'unified_auto_glosary_prompt3': 'auto_prompt_text',
                 'append_glossary_prompt': 'append_prompt_text',
+                'single_pass_glossary_header_prompt': 'single_pass_header_prompt_text',
                 'glossary_translation_prompt': 'translation_prompt_text',
                 'glossary_format_instructions': 'format_instructions_text',
             }
@@ -22103,7 +22108,7 @@ Important rules:
             if show_message and debug_enabled: self.append_log("🔍 [DEBUG] Setting glossary environment variables...")
             try:
                 # Normalize and align glossary prompts
-                prompt_keys = ['manual_glossary_prompt', 'append_glossary_prompt', 'unified_auto_glosary_prompt3', 'glossary_translation_prompt', 'glossary_format_instructions']
+                prompt_keys = ['manual_glossary_prompt', 'append_glossary_prompt', 'single_pass_glossary_header_prompt', 'unified_auto_glosary_prompt3', 'glossary_translation_prompt', 'glossary_format_instructions']
                 for key in prompt_keys:
                     self.config[key] = self.config.get(key, '') or ''
 
@@ -22114,9 +22119,11 @@ Important rules:
                     ('APPEND_GLOSSARY', '0' if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ('1' if self.config.get('append_glossary') else '0')),
                     ('ADD_ADDITIONAL_GLOSSARY', '1' if self.config.get('add_additional_glossary') else '0'),
                     ('ADDITIONAL_GLOSSARY_PATH', self.config.get('additional_glossary_path', '')),
+                    ('GLOSSARY_SHARED_DIR', os.path.join(_get_app_dir(), 'Glossary')),
                     ('ENABLE_AUTO_GLOSSARY', '1' if self.config.get('auto_glossary_mode', 'off') == 'minimal' else '0'),
                     ('AUTO_GLOSSARY_MODE', self.config.get('auto_glossary_mode', 'off')),
                     ('SINGLE_PASS_GLOSSARY_MODE', '1' if self.config.get('auto_glossary_mode', 'off') == 'single_pass' else ''),
+                    ('SINGLE_PASS_GLOSSARY_HEADER_PROMPT', self.config.get('single_pass_glossary_header_prompt', '')),
                     ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
                     ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),
                     ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter') else '0'),

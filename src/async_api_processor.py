@@ -3286,6 +3286,7 @@ class AsyncProcessingDialog:
         auto_glossary_mode = self.gui.config.get('auto_glossary_mode', 'off')
         env_vars['AUTO_GLOSSARY_MODE'] = auto_glossary_mode
         env_vars['SINGLE_PASS_GLOSSARY_MODE'] = '1' if auto_glossary_mode == 'single_pass' else ''
+        env_vars['SINGLE_PASS_GLOSSARY_HEADER_PROMPT'] = self.gui.config.get('single_pass_glossary_header_prompt', '')
         env_vars['GLOSSARY_MIN_FREQUENCY'] = _val(self.gui.glossary_min_frequency_var, 0)
         env_vars['GLOSSARY_MAX_NAMES'] = _val(self.gui.glossary_max_names_var, 0)
         env_vars['GLOSSARY_MAX_TITLES'] = _val(self.gui.glossary_max_titles_var, 0)
@@ -3375,6 +3376,7 @@ class AsyncProcessingDialog:
         
         # Output settings
         env_vars['EPUB_OUTPUT_DIR'] = os.getcwd()
+        env_vars['GLOSSARY_SHARED_DIR'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Glossary')
         output_path = self.gui.output_entry.get().strip() if hasattr(self.gui, 'output_entry') else ''
         if output_path:
             env_vars['OUTPUT_DIR'] = output_path

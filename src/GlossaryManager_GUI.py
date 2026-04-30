@@ -1976,12 +1976,41 @@ CRITICAL EXTRACTION RULES:
                     # Always print this one since it's the problematic field
                     #print(f"Updated append_glossary_prompt from UI: '{self.append_glossary_prompt[:80]}...' ({len(self.append_glossary_prompt)} chars)")
                     pass
+
+            if hasattr(self, 'single_pass_header_prompt_text'):
+                self.single_pass_glossary_header_prompt = self._sep_from_display(
+                    self.single_pass_header_prompt_text.toPlainText()
+                ).strip()
+                if not self.single_pass_glossary_header_prompt:
+                    self.single_pass_glossary_header_prompt = self._default_single_pass_header_prompt()
+                self.config['single_pass_glossary_header_prompt'] = self.single_pass_glossary_header_prompt
+                if debug_enabled:
+                    print(f"🔍 [UPDATE] single_pass_glossary_header_prompt: {len(self.single_pass_glossary_header_prompt)} chars")
             
         except Exception as e:
             print(f"❌ Error updating glossary prompts: {e}")
             import traceback
             traceback.print_exc()
     
+    def _default_single_pass_header_prompt(self):
+        return """You have 2 roles to complete.
+
+1. Perform glossary extraction using the Balanced/Full glossary logic.
+2. Perform translation using the provided glossary.
+
+Rules:
+- Wrap the generated glossary in <glossary>...</glossary> tags.
+- The glossary must follow the same structure and formatting as standard Balanced/Full extraction.
+- Any glossary prompt instruction to return only CSV/JSON applies only inside the <glossary> block.
+- The translation must strictly follow the translation prompt and utilize the generated glossary.
+- Output the <glossary> block first, then output only the translated content after </glossary>.
+
+[Balanced/Full Glossary Prompt]
+{glossary_prompt}
+
+[Translation Prompt]
+{translation_prompt}"""
+
     def _load_additional_glossary(self):
         """Load an additional glossary file (CSV/TXT/JSON/PDF) to append to auto-generated glossary"""
         from PySide6.QtWidgets import QFileDialog, QMessageBox
@@ -2638,6 +2667,61 @@ CRITICAL EXTRACTION RULES:
         """)
         append_prompt_controls_layout.addWidget(reset_append_btn)
         append_prompt_controls_layout.addStretch()
+
+        single_pass_header_frame = QGroupBox("Single Pass Header Prompt")
+        single_pass_header_layout = QVBoxLayout(single_pass_header_frame)
+        single_pass_header_layout.setContentsMargins(10, 10, 10, 10)
+        single_pass_header_layout.setSpacing(5)
+        auto_layout.addWidget(single_pass_header_frame)
+
+        self.single_pass_header_prompt_text = QTextEdit()
+        self.single_pass_header_prompt_text.setFixedHeight(130)
+        self.single_pass_header_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        single_pass_header_layout.addWidget(self.single_pass_header_prompt_text)
+
+        default_single_pass_header = self._default_single_pass_header_prompt()
+        single_pass_header_from_config = self.config.get(
+            'single_pass_glossary_header_prompt',
+            default_single_pass_header,
+        )
+        if not single_pass_header_from_config or not str(single_pass_header_from_config).strip():
+            self.single_pass_glossary_header_prompt = default_single_pass_header
+        else:
+            self.single_pass_glossary_header_prompt = single_pass_header_from_config
+        self.single_pass_header_prompt_text.setPlainText(
+            self._sep_for_display(self.single_pass_glossary_header_prompt)
+        )
+
+        single_pass_header_controls_widget = QWidget()
+        single_pass_header_controls_layout = QHBoxLayout(single_pass_header_controls_widget)
+        single_pass_header_controls_layout.setContentsMargins(0, 5, 0, 0)
+        single_pass_header_layout.addWidget(single_pass_header_controls_widget)
+
+        def reset_single_pass_header_prompt():
+            reply = QMessageBox.question(parent, "Reset Prompt", "Reset to default single pass header prompt?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.single_pass_header_prompt_text.setPlainText(default_single_pass_header)
+
+        reset_single_pass_header_btn = QPushButton("Reset to Default")
+        reset_single_pass_header_btn.clicked.connect(reset_single_pass_header_prompt)
+        reset_single_pass_header_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b8860b;
+                color: black;
+                padding: 5px;
+                border: 1px solid #8a6a08;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #9a6d07; }
+            QPushButton:pressed { background-color: #8a6106; }
+        """)
+        single_pass_header_controls_layout.addWidget(reset_single_pass_header_btn)
+        single_pass_header_hint = QLabel("Use {glossary_prompt} and {translation_prompt} placeholders.")
+        single_pass_header_hint.setStyleSheet("color: gray; font-size: 9pt;")
+        single_pass_header_controls_layout.addWidget(single_pass_header_hint)
+        single_pass_header_controls_layout.addStretch()
         
         # Create notebook for tabs
         notebook = QTabWidget()

@@ -4675,7 +4675,8 @@ class BatchTranslationProcessor:
                     image_translations = {}
                     print(f"✅ Processed {len(image_translations)} images for Chapter {actual_num}")
             
-            # Build chapter-specific system prompt (glossary compression + logging handled by build_system_prompt)
+            # Build chapter-specific system prompt (glossary compression + logging handled by build_system_prompt).
+            # Single Pass refreshes this again per request below so each request sees the latest persisted glossary.
             glossary_path = find_glossary_file(self.out_dir)
             chapter_system_prompt = build_system_prompt(self.config.get_system_prompt(actual_merge_count=1), glossary_path, source_text=chapter_body)
             
@@ -4851,8 +4852,17 @@ class BatchTranslationProcessor:
                 if getattr(self.config, 'ASSISTANT_PROMPT', '') and self.config.ASSISTANT_PROMPT.strip():
                     assistant_prefill_msgs = [{"role": "assistant", "content": self.config.ASSISTANT_PROMPT.strip()}]
 
+                current_chapter_system_prompt = chapter_system_prompt
+                if _single_pass_glossary_mode():
+                    current_glossary_path = find_glossary_file(self.out_dir)
+                    current_chapter_system_prompt = build_system_prompt(
+                        self.config.get_system_prompt(actual_merge_count=1),
+                        current_glossary_path,
+                        source_text=chunk_html,
+                    )
+
                 chapter_msgs = (
-                    [{"role": "system", "content": chapter_system_prompt}]
+                    [{"role": "system", "content": current_chapter_system_prompt}]
                     + rolling_summary_msgs
                     + memory_msgs
                     + assistant_prefill_msgs
@@ -6849,28 +6859,57 @@ def clean_ai_artifacts(text, remove_artifacts=True):
 
 def find_glossary_file(output_dir):
     """Return path to glossary file preferring CSV/MD/TXT over JSON, or None if not found"""
+    def _matching_glossary_candidates(glossary_dir):
+        if not glossary_dir or not os.path.isdir(glossary_dir):
+            return []
+        epub_path = os.getenv("EPUB_PATH", "")
+        base = os.path.splitext(os.path.basename(epub_path))[0] if epub_path else ""
+        if not base and output_dir:
+            base = os.path.basename(os.path.abspath(output_dir))
+        base_cf = base.casefold()
+        preferred = [f"{base}_glossary".casefold(), base_cf] if base else []
+        ext_priority = [".csv", ".md", ".txt", ".json"]
+        direct = []
+        fallback = []
+        try:
+            for name in os.listdir(glossary_dir):
+                full = os.path.join(glossary_dir, name)
+                if not os.path.isfile(full):
+                    continue
+                stem, ext = os.path.splitext(name)
+                stem_cf = stem.casefold()
+                ext_l = ext.lower()
+                if ext_l not in ext_priority:
+                    continue
+                if "progress" in stem_cf or "dedup_report" in stem_cf:
+                    continue
+                if preferred and stem_cf in preferred:
+                    direct.append((preferred.index(stem_cf), ext_priority.index(ext_l), full))
+                elif "glossary" in stem_cf:
+                    fallback.append((ext_priority.index(ext_l), full))
+        except Exception:
+            return []
+        direct.sort(key=lambda item: (item[0], item[1]))
+        fallback.sort(key=lambda item: item[0])
+        return [item[2] for item in direct] + [item[1] for item in fallback]
+
+    shared_glossary_dir = _single_pass_shared_glossary_dir()
+    auto_mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower()
+    prefer_shared = auto_mode in ("balanced", "full", "single_pass") or bool(_single_pass_glossary_mode())
+
     candidates = [
         os.path.join(output_dir, "glossary.csv"),
         os.path.join(output_dir, "glossary.md"),
         os.path.join(output_dir, "glossary.txt"),
         os.path.join(output_dir, "glossary.json"),
     ]
+    if prefer_shared:
+        candidates = _matching_glossary_candidates(shared_glossary_dir) + candidates
     glossary_dir = os.path.join(output_dir, "Glossary")
     if os.path.isdir(glossary_dir):
-        try:
-            grouped = []
-            for ext in (".csv", ".md", ".txt", ".json"):
-                grouped.extend(
-                    os.path.join(glossary_dir, name)
-                    for name in sorted(os.listdir(glossary_dir))
-                    if name.lower().endswith(ext)
-                    and "glossary" in name.lower()
-                    and "progress" not in name.lower()
-                    and "dedup_report" not in name.lower()
-                )
-            candidates.extend(grouped)
-        except Exception:
-            pass
+        candidates.extend(_matching_glossary_candidates(glossary_dir))
+    if not prefer_shared:
+        candidates.extend(_matching_glossary_candidates(shared_glossary_dir))
     for p in candidates:
         if os.path.exists(p):
             return p
@@ -6931,13 +6970,19 @@ def _split_single_pass_glossary_response(response_text):
         return response_text, ""
     return (response_text[:match.start()] + response_text[match.end():]).strip(), (match.group(1) or "").strip()
 
+def _single_pass_shared_glossary_dir():
+    override = os.getenv("GLOSSARY_SHARED_DIR", "").strip()
+    if override:
+        return override
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "Glossary")
+
 def _single_pass_glossary_paths(output_dir):
     epub_path = os.getenv("EPUB_PATH", "")
     if epub_path:
         base = os.path.splitext(os.path.basename(epub_path))[0]
     else:
         base = os.path.basename(os.path.abspath(output_dir)) or "book"
-    glossary_dir = os.path.join(output_dir, "Glossary")
+    glossary_dir = _single_pass_shared_glossary_dir()
     os.makedirs(glossary_dir, exist_ok=True)
     return (
         glossary_dir,
@@ -14308,12 +14353,13 @@ def main(log_callback=None, stop_callback=None):
                 # Use get_system_prompt() with actual merge count to conditionally include split marker instruction
                 actual_merge_count = len(merge_info['group']) if merge_info else 1
                 base_prompt = config.get_system_prompt(actual_merge_count=actual_merge_count)
-                if os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1" and glossary_path and os.path.exists(glossary_path):
+                current_glossary_path = find_glossary_file(out) if _single_pass_glossary_mode() else glossary_path
+                if os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1" and current_glossary_path and os.path.exists(current_glossary_path):
                     # Rebuild system prompt with compressed glossary for THIS SPECIFIC CHUNK
-                    current_system_content = build_system_prompt(base_prompt, glossary_path, source_text=chunk_html)
+                    current_system_content = build_system_prompt(base_prompt, current_glossary_path, source_text=chunk_html)
                 else:
                     # Use base prompt with glossary from original_system_prompt but without stale split marker
-                    current_system_content = build_system_prompt(base_prompt, glossary_path, source_text=None)
+                    current_system_content = build_system_prompt(base_prompt, current_glossary_path, source_text=None)
                 
                 current_base = [{"role": "system", "content": current_system_content}]
 
