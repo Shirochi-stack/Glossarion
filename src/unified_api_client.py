@@ -2811,7 +2811,7 @@ class UnifiedClient:
             check_interval = 0.1
             while elapsed < wait:
                 # Use comprehensive stop check
-                if self._is_stop_requested():
+                if self._should_abort_retry():
                     self._cancelled = True
                     # print(f"🛑 Thread delay cancelled")  # Redundant - summary will show stop
                     return
@@ -5868,7 +5868,7 @@ class UnifiedClient:
             # Match normal send(): reserve a batch submission slot before the
             # request is even queued in the watchdog.
             self._apply_thread_submission_delay()
-            if self._is_stop_requested():
+            if self._should_abort_retry():
                 self._cancelled = True
                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
             if os.environ.get("GRACEFUL_STOP") == "1":
@@ -5913,7 +5913,7 @@ class UnifiedClient:
             self._apply_api_call_stagger()
             if os.environ.get("GRACEFUL_STOP") == "1":
                 raise UnifiedClientError("Graceful stop active - not starting new TTS call", error_type="cancelled")
-            if self._is_stop_requested():
+            if self._should_abort_retry():
                 self._cancelled = True
                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
             _api_watchdog_mark_in_flight(request_id, getattr(self, "model", None))
@@ -5990,7 +5990,7 @@ class UnifiedClient:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         for attempt in range(max_retries):
             try:
-                if self._is_stop_requested():
+                if self._should_abort_retry():
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 resp = self._tts_post_json(endpoint, payload, headers, timeout)
                 if resp.status_code == 429 and attempt < max_retries - 1:
@@ -6006,13 +6006,15 @@ class UnifiedClient:
                     except Exception:
                         pass
                     raise UnifiedClientError(f"TTS API error ({resp.status_code}): {err}", error_type="api_error", http_status=resp.status_code)
+                if self._is_force_stop_requested():
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 with open(output_path, "wb") as f:
                     f.write(resp.content)
                 return output_path
             except UnifiedClientError:
                 raise
             except Exception as exc:
-                if self._is_stop_requested():
+                if self._should_abort_retry():
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 if attempt >= max_retries - 1:
                     raise UnifiedClientError(f"TTS request failed after {max_retries} attempts: {exc}", error_type="api_error")
@@ -6028,22 +6030,89 @@ class UnifiedClient:
         except Exception:
             return getattr(self, "request_timeout", None)
 
-    def _tts_post_json(self, url: str, payload: dict, headers: dict, timeout):
-        """POST JSON through the tracked session pool so hard-cancel can abort TTS too."""
-        if self._is_stop_requested():
-            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+    def _is_force_stop_requested(self) -> bool:
+        """Immediate-stop check that does not treat graceful stop as cancellation."""
         try:
-            from urllib.parse import urlsplit
-            parts = urlsplit(url)
-            base_url = f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else None
+            if os.environ.get("TRANSLATION_CANCELLED") == "1" and os.environ.get("GRACEFUL_STOP") != "1":
+                self._cancelled = True
+                return True
         except Exception:
-            base_url = None
-        session = self._get_session(base_url) if base_url else requests
-        return session.post(url, json=payload, headers=headers, timeout=timeout)
+            pass
+        return self._is_stop_requested()
+
+    def _tts_post_json(self, url: str, payload: dict, headers: dict, timeout):
+        """POST JSON for TTS with immediate client-side force-stop.
+
+        requests.post() can block inside socket I/O even after another thread
+        closes a shared Session. For TTS we run the blocking call in a daemon
+        helper and poll the force-stop flag here; on force stop we close the
+        request session and return cancellation immediately.
+        """
+        if self._should_abort_retry():
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+        session = requests.Session()
+        try:
+            adapter = HTTPAdapter(
+                pool_connections=int(os.getenv("HTTP_POOL_CONNECTIONS", "20")),
+                pool_maxsize=int(os.getenv("HTTP_POOL_MAXSIZE", "50")),
+                max_retries=Retry(total=0) if Retry is not None else 0,
+            )
+        except Exception:
+            adapter = HTTPAdapter(
+                pool_connections=int(os.getenv("HTTP_POOL_CONNECTIONS", "20")),
+                pool_maxsize=int(os.getenv("HTTP_POOL_MAXSIZE", "50")),
+            )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        try:
+            with self._all_sessions_lock:
+                self._all_sessions.add(session)
+        except Exception:
+            pass
+
+        done = threading.Event()
+        result = {}
+
+        def _send():
+            try:
+                result["response"] = session.post(url, json=payload, headers=headers, timeout=timeout)
+            except Exception as exc:
+                result["exception"] = exc
+            finally:
+                done.set()
+                try:
+                    with self._all_sessions_lock:
+                        self._all_sessions.discard(session)
+                except Exception:
+                    pass
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
+        sender = threading.Thread(target=_send, name=f"{threading.current_thread().name}-TTSHTTP", daemon=True)
+        sender.start()
+
+        while not done.wait(0.1):
+            if self._is_force_stop_requested():
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+        if self._is_force_stop_requested():
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+        if "exception" in result:
+            raise result["exception"]
+        return result["response"]
 
     def _write_wav_file(self, output_path: str, pcm_data: bytes, channels: int = 1, rate: int = 24000, sample_width: int = 2) -> str:
         import wave
 
+        if self._is_force_stop_requested():
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with wave.open(output_path, "wb") as wf:
             wf.setnchannels(channels)
@@ -6097,7 +6166,7 @@ class UnifiedClient:
         except UnifiedClientError:
             raise
         except Exception as exc:
-            if self._is_stop_requested():
+            if self._should_abort_retry():
                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
             raise UnifiedClientError(f"Gemini TTS request failed: {exc}", error_type="api_error")
         if resp.status_code not in (200, 201):
@@ -6118,6 +6187,8 @@ class UnifiedClient:
         if not audio_b64:
             raise UnifiedClientError("Gemini TTS API returned no audio data", error_type="api_error")
 
+        if self._is_force_stop_requested():
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
         audio_bytes = base64.b64decode(audio_b64)
         ext = os.path.splitext(output_path)[1].lower()
         if ext == ".pcm":
@@ -6143,6 +6214,8 @@ class UnifiedClient:
         if api_key:
             print("⚠️ Google Cloud Text-to-Speech requires OAuth/service-account credentials. Ignoring API key and trying ADC/client credentials.")
 
+        if self._should_abort_retry():
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
         try:
             from google.cloud import texttospeech
         except Exception as exc:
@@ -6157,6 +6230,8 @@ class UnifiedClient:
             voice=texttospeech.VoiceSelectionParams(language_code=language_code, name=voice_name),
             audio_config=texttospeech.AudioConfig(audio_encoding=encoding),
         )
+        if self._is_force_stop_requested():
+            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "wb") as f:
             f.write(response.audio_content)
@@ -12049,7 +12124,7 @@ class UnifiedClient:
             while elapsed < sleep_time:
                 if os.environ.get('GRACEFUL_STOP') == '1':
                     raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
-                if self._is_stop_requested() or getattr(self, '_cancelled', False):
+                if self._should_abort_retry() or getattr(self, '_cancelled', False):
                     self._cancelled = True
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 dt = min(step, sleep_time - elapsed)

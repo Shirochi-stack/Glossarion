@@ -42,7 +42,7 @@ from ai_hunter_enhanced import ImprovedAIHunterDetection
 import GlossaryManager  # Module with glossary functions
 from _empty_attr_fix import fix_empty_attr_tags as _fix_empty_attr_tags_bs
 import csv
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 # Module-level functions for ProcessPoolExecutor compatibility
 from tqdm import tqdm
@@ -2075,6 +2075,25 @@ class ProgressManager:
         # Use helper method to get consistent key
         chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
         existing_info = self.prog.get("chapters", {}).get(chapter_key, {})
+        if not existing_info and output_file:
+            def _norm_out(fname):
+                base = os.path.basename(str(fname or ""))
+                if base.startswith("response_"):
+                    base = base[len("response_"):]
+                return os.path.splitext(base)[0].lower()
+            target_norm = _norm_out(output_file)
+            for existing_key, candidate in self.prog.get("chapters", {}).items():
+                if not isinstance(candidate, dict):
+                    continue
+                candidate_out = candidate.get("output_file")
+                if not candidate_out:
+                    continue
+                same_output = candidate_out == output_file or _norm_out(candidate_out) == target_norm
+                same_num = str(candidate.get("actual_num", candidate.get("chapter_num"))) == str(actual_num)
+                if same_output and same_num:
+                    chapter_key = existing_key
+                    existing_info = candidate
+                    break
         
         # Log if we're using a composite key
         if "_" in chapter_key and chapter_key != str(actual_num):
@@ -2184,6 +2203,25 @@ class ProgressManager:
     def update_tts_status(self, idx, actual_num, content_hash, output_file, tts_status, chapter_obj=None, tts_file=None, error=None):
         chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
         info = dict(self.prog.get("chapters", {}).get(chapter_key, {}))
+        if not info and output_file:
+            def _norm_out(fname):
+                base = os.path.basename(str(fname or ""))
+                if base.startswith("response_"):
+                    base = base[len("response_"):]
+                return os.path.splitext(base)[0].lower()
+            target_norm = _norm_out(output_file)
+            for existing_key, candidate in self.prog.get("chapters", {}).items():
+                if not isinstance(candidate, dict):
+                    continue
+                candidate_out = candidate.get("output_file")
+                if not candidate_out:
+                    continue
+                same_output = candidate_out == output_file or _norm_out(candidate_out) == target_norm
+                same_num = str(candidate.get("actual_num", candidate.get("chapter_num"))) == str(actual_num)
+                if same_output and same_num:
+                    chapter_key = existing_key
+                    info = dict(candidate)
+                    break
         info.update({
             "actual_num": actual_num,
             "content_hash": content_hash,
@@ -8219,6 +8257,57 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
     if use_batch and len(chapters) > 1:
         print(f"⚡ Batch mode enabled for {mode}: {batch_size} parallel workers")
 
+    def _force_stop_requested():
+        return (
+            os.environ.get("TRANSLATION_CANCELLED") == "1"
+            and os.environ.get("GRACEFUL_STOP") != "1"
+        ) or (check_stop() and os.environ.get("GRACEFUL_STOP") != "1")
+
+    def _find_progress_entry_for_output(output_file, actual_num=None):
+        if not output_file:
+            return None, {}
+        best_key = None
+        best_entry = {}
+        for key, entry in progress_manager.prog.get("chapters", {}).items():
+            if not isinstance(entry, dict) or entry.get("output_file") != output_file:
+                continue
+            entry_num = entry.get("actual_num", entry.get("chapter_num"))
+            if actual_num is not None and entry_num is not None and str(entry_num) == str(actual_num):
+                return key, entry
+            if best_key is None:
+                best_key = key
+                best_entry = entry
+        return best_key, best_entry
+
+    def _audio_candidates_for_output(output_file, preferred_path=None, entry=None):
+        candidates = []
+        if entry and entry.get("tts_file"):
+            candidates.append(entry.get("tts_file"))
+        if preferred_path:
+            candidates.append(preferred_path)
+        if output_file:
+            stem = os.path.splitext(os.path.basename(output_file))[0]
+            for ext in ("wav", "mp3", "pcm", "m4a", "ogg", "flac"):
+                candidates.append(os.path.join("text_to_speech", f"{stem}.{ext}"))
+
+        seen = set()
+        for candidate in candidates:
+            if not candidate:
+                continue
+            normalized = str(candidate).replace("\\", "/")
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            abs_path = normalized if os.path.isabs(normalized) else os.path.join(out, normalized)
+            rel_path = os.path.relpath(abs_path, out).replace("\\", "/") if os.path.isabs(normalized) else normalized
+            yield rel_path, abs_path
+
+    def _existing_audio_for_output(output_file, preferred_path=None, entry=None):
+        for rel_path, abs_path in _audio_candidates_for_output(output_file, preferred_path, entry):
+            if os.path.exists(abs_path):
+                return rel_path, abs_path
+        return None, None
+
     def _process_one(idx, chapter):
         if check_stop():
             return "skipped", f"⏹️ Post-processing stopped before item {idx + 1}"
@@ -8242,6 +8331,10 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
 
             chapter_key = progress_manager._get_chapter_key(actual_num, output_file, chapter, content_hash)
             entry = dict(progress_manager.prog.get("chapters", {}).get(chapter_key, {}))
+            if not entry or (mode == "audio" and entry.get("tts_status") in (None, "no_tts")):
+                _existing_key, existing_entry = _find_progress_entry_for_output(output_file, actual_num)
+                if existing_entry:
+                    entry = dict(existing_entry)
 
         if mode == "refinement":
             if entry.get("refinement_status") == "refined":
@@ -8284,10 +8377,16 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             audio_base = os.path.splitext(os.path.basename(output_file))[0] + f".{audio_ext}"
             audio_path = os.path.join(tts_dir, audio_base)
             rel_audio = os.path.relpath(audio_path, out).replace("\\", "/")
-            existing_audio = entry.get("tts_file")
-            existing_audio_path = os.path.join(out, existing_audio) if existing_audio and not os.path.isabs(existing_audio) else existing_audio
-            if entry.get("tts_status") == "tts_completed" and os.path.exists(existing_audio_path or audio_path):
-                return "skipped", f"🔊 Chapter {actual_num}: TTS already exists"
+            existing_audio_rel, existing_audio_path = _existing_audio_for_output(output_file, preferred_path=rel_audio, entry=entry)
+            if existing_audio_path:
+                with progress_lock:
+                    progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "tts_completed", chapter_obj=chapter, tts_file=existing_audio_rel)
+                    progress_manager.save()
+                return "skipped", f"🔊 Chapter {actual_num}: TTS already exists ({existing_audio_rel})"
+            if entry.get("tts_status") == "tts_completed":
+                with progress_lock:
+                    progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "no_tts", chapter_obj=chapter)
+                    progress_manager.save()
             with progress_lock:
                 progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "in_progress", chapter_obj=chapter, tts_file=rel_audio)
                 progress_manager.save()
@@ -8306,6 +8405,11 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     progress_manager.save()
                 return "processed", f"🔊 TTS Chapter {actual_num}: {rel_audio}"
             except Exception as exc:
+                if getattr(exc, "error_type", None) == "cancelled" or "cancelled" in str(exc).lower():
+                    with progress_lock:
+                        progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "no_tts", chapter_obj=chapter, tts_file=rel_audio)
+                        progress_manager.save()
+                    return "skipped", f"⏹️ TTS cancelled for Chapter {actual_num}"
                 with progress_lock:
                     progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "failed", chapter_obj=chapter, tts_file=rel_audio, error=exc)
                     progress_manager.save()
@@ -8330,23 +8434,45 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             print(message)
 
     if use_batch and len(chapters) > 1:
-        with ThreadPoolExecutor(max_workers=batch_size, thread_name_prefix=f"{mode.title()}Worker") as executor:
-            futures = {
-                executor.submit(_process_one, idx, chapter): (idx, chapter)
-                for idx, chapter in enumerate(chapters)
-            }
-            for future in as_completed(futures):
-                if check_stop():
-                    print("⏹️ Post-processing stop requested; waiting for already-started items to settle...")
-                try:
-                    _record_result(future.result())
-                except Exception as exc:
-                    failed += 1
-                    idx, chapter = futures[future]
-                    actual_num = chapter.get("actual_chapter_num", chapter.get("num", idx + 1))
-                    print(f"❌ {mode.title()} failed for Chapter {actual_num}: {exc}")
+        executor = ThreadPoolExecutor(max_workers=batch_size, thread_name_prefix=f"{mode.title()}Worker")
+        futures = {
+            executor.submit(_process_one, idx, chapter): (idx, chapter)
+            for idx, chapter in enumerate(chapters)
+        }
+        pending = set(futures.keys())
+        try:
+            while pending:
+                if _force_stop_requested():
+                    for future in pending:
+                        future.cancel()
+                    print("⏹️ Force stop requested; cancelling queued post-processing items...")
+                    break
+
+                done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+                if not done:
+                    continue
+                for future in done:
+                    try:
+                        _record_result(future.result())
+                    except Exception as exc:
+                        if getattr(exc, "error_type", None) == "cancelled" or "cancelled" in str(exc).lower():
+                            skipped += 1
+                            idx, chapter = futures[future]
+                            actual_num = chapter.get("actual_chapter_num", chapter.get("num", idx + 1))
+                            print(f"⏹️ {mode.title()} cancelled for Chapter {actual_num}")
+                            continue
+                        failed += 1
+                        idx, chapter = futures[future]
+                        actual_num = chapter.get("actual_chapter_num", chapter.get("num", idx + 1))
+                        print(f"❌ {mode.title()} failed for Chapter {actual_num}: {exc}")
+        finally:
+            force_stop = _force_stop_requested()
+            executor.shutdown(wait=not force_stop, cancel_futures=force_stop)
     else:
         for idx, chapter in enumerate(chapters):
+            if _force_stop_requested():
+                print("⏹️ Force stop requested; stopping post-processing.")
+                break
             _record_result(_process_one(idx, chapter))
 
     print(f"\n📊 {mode.title()} summary: {processed} processed, {skipped} skipped, {failed} failed")

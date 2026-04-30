@@ -3510,6 +3510,27 @@ class RetranslationMixin:
                     return path
             return None
 
+        def _reset_tts_progress_for_output(output_file):
+            if not output_file:
+                return 0
+            updated = 0
+            now = time.time()
+            for _key, tracked in data.get('prog', {}).get('chapters', {}).items():
+                if not isinstance(tracked, dict):
+                    continue
+                if tracked.get('output_file') != output_file:
+                    continue
+                tracked['tts_status'] = 'no_tts'
+                tracked.pop('tts_file', None)
+                tracked.pop('tts_at', None)
+                tracked.pop('tts_error', None)
+                tracked['last_updated'] = now
+                updated += 1
+            if updated:
+                with open(data['progress_file'], 'w', encoding='utf-8') as f:
+                    json.dump(data['prog'], f, ensure_ascii=False, indent=2)
+            return updated
+
         def _open_audio_file_for_item(display_info):
             audio_path = _find_audio_file_for_item(display_info)
             if not audio_path:
@@ -3519,6 +3540,30 @@ class RetranslationMixin:
                 QDesktopServices.openUrl(QUrl.fromLocalFile(audio_path))
             except Exception as e:
                 self._show_message('error', "Open Failed", str(e), parent=data.get('dialog', self))
+
+        def _delete_audio_file_for_item(display_info):
+            audio_path = _find_audio_file_for_item(display_info)
+            if not audio_path:
+                self._show_message('info', "Audio Missing", "No generated audio file was found for this HTML entry.", parent=data.get('dialog', self))
+                return
+            reply = self._styled_msgbox(
+                QMessageBox.Question,
+                data.get('dialog', self),
+                "Delete Audio File",
+                f"Delete this generated audio file?\n\n{audio_path}",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+            try:
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
+            except Exception as e:
+                self._show_message('error', "Delete Failed", str(e), parent=data.get('dialog', self))
+                return
+            _reset_tts_progress_for_output(display_info.get('output_file'))
+            self._refresh_retranslation_data(data)
+            self._show_message('info', "Audio Deleted", "Audio file deleted and TTS status reset to No TTS.", parent=data.get('dialog', self))
 
         def show_context_menu(pos):
             item = listbox.itemAt(pos)
@@ -3581,8 +3626,10 @@ class RetranslationMixin:
             )
             act_open = menu.addAction("📂 Open File")
             act_open_audio = None
+            act_delete_audio = None
             if _find_audio_file_for_item(display_info):
                 act_open_audio = menu.addAction("🔊 Open Audio File")
+                act_delete_audio = menu.addAction("🗑️ Delete Audio File")
             act_notepad_qa = None
             if qa_file_path:
                 _label = "✏️ Edit File (find QA issue)" if qa_issues else "✏️ Edit File"
@@ -3599,6 +3646,8 @@ class RetranslationMixin:
                 _open_file_for_item(display_info)
             elif act_open_audio and chosen == act_open_audio:
                 _open_audio_file_for_item(display_info)
+            elif act_delete_audio and chosen == act_delete_audio:
+                _delete_audio_file_for_item(display_info)
             elif chosen == act_retranslate:
                 retranslate_selected()
             elif act_insert_img and chosen == act_insert_img:
@@ -4042,6 +4091,18 @@ class RetranslationMixin:
                 data['prog'] = temp_progress.prog
                 
                 # Save the cleaned progress back to file (with retry for file locks)
+                for _attempt in range(5):
+                    try:
+                        with open(data['progress_file'], 'w', encoding='utf-8') as f:
+                            json.dump(data['prog'], f, ensure_ascii=False, indent=2)
+                        break
+                    except PermissionError:
+                        if _attempt < 4:
+                            import time as _time; _time.sleep(0.1 * (2 ** _attempt))
+                        else:
+                            raise
+
+            if self._reconcile_tts_audio_files(data):
                 for _attempt in range(5):
                     try:
                         with open(data['progress_file'], 'w', encoding='utf-8') as f:
@@ -4617,6 +4678,83 @@ class RetranslationMixin:
             if mode in ('text', 'vision', 'image', 'video'):
                 return mode
         return 'text'
+
+    def _audio_candidates_for_entry(self, output_dir, entry):
+        """Return possible audio files for a progress entry as (relative, absolute) pairs."""
+        candidates = []
+        if not isinstance(entry, dict):
+            return candidates
+
+        stored = entry.get('tts_file')
+        if stored:
+            candidates.append(stored)
+
+        output_file = entry.get('output_file')
+        if output_file:
+            stem = os.path.splitext(os.path.basename(output_file))[0]
+            for ext in ("wav", "mp3", "pcm", "m4a", "ogg", "flac"):
+                candidates.append(os.path.join("text_to_speech", f"{stem}.{ext}"))
+
+        seen = set()
+        resolved = []
+        for candidate in candidates:
+            if not candidate:
+                continue
+            normalized = str(candidate).replace("\\", "/")
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            abs_path = normalized if os.path.isabs(normalized) else os.path.join(output_dir, normalized)
+            rel_path = os.path.relpath(abs_path, output_dir).replace("\\", "/") if os.path.isabs(normalized) else normalized
+            resolved.append((rel_path, abs_path))
+        return resolved
+
+    def _existing_audio_for_entry(self, output_dir, entry):
+        for rel_path, abs_path in self._audio_candidates_for_entry(output_dir, entry):
+            if os.path.exists(abs_path):
+                return rel_path, abs_path
+        return None, None
+
+    def _reconcile_tts_audio_files(self, data):
+        """Keep progress TTS status aligned with generated audio files on disk."""
+        prog = data.get('prog') or {}
+        output_dir = data.get('output_dir')
+        if not output_dir:
+            return False
+
+        changed = False
+        now = time.time()
+        for _key, entry in prog.get('chapters', {}).items():
+            if not isinstance(entry, dict):
+                continue
+            output_file = entry.get('output_file')
+            if not output_file:
+                continue
+            rel_audio, _abs_audio = self._existing_audio_for_entry(output_dir, entry)
+            tts_status = str(entry.get('tts_status') or 'no_tts').lower().strip()
+
+            if rel_audio:
+                if tts_status not in ('tts_completed', 'completed') or entry.get('tts_file') != rel_audio:
+                    entry['tts_status'] = 'tts_completed'
+                    entry['tts_file'] = rel_audio
+                    entry.pop('tts_error', None)
+                    entry.setdefault('tts_at', now)
+                    entry['last_updated'] = now
+                    changed = True
+                continue
+
+            had_audio_state = (
+                entry.get('tts_file')
+                or tts_status in ('tts_completed', 'completed', 'in_progress')
+            )
+            if had_audio_state:
+                entry['tts_status'] = 'no_tts'
+                entry.pop('tts_file', None)
+                entry.pop('tts_at', None)
+                entry.pop('tts_error', None)
+                entry['last_updated'] = now
+                changed = True
+        return changed
 
     def _progress_display_status(self, info, data=None):
         """Derive the status shown in Progress Manager for post-processing modes."""
