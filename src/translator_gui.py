@@ -3321,103 +3321,6 @@ Recent translations to summarize:
             mode = 'refinement'
         return mode if mode in ('text', 'vision', 'image', 'video', 'audio', 'refinement') else 'text'
 
-    def _get_prompt_profile_text(self, profile_name: str, fallback: str = "") -> str:
-        """Return prompt text from a profile, supporting legacy string and dict formats."""
-        try:
-            profiles = getattr(self, 'prompt_profiles', None) or self.config.get('prompt_profiles', {})
-            profile_data = profiles.get(profile_name) if isinstance(profiles, dict) else None
-            if isinstance(profile_data, str):
-                return profile_data
-            if isinstance(profile_data, dict):
-                return str(profile_data.get('prompt', '') or '')
-        except Exception:
-            pass
-
-        try:
-            default_data = getattr(self, 'default_prompts', {}).get(profile_name)
-            if isinstance(default_data, str):
-                return default_data
-            if isinstance(default_data, dict):
-                return str(default_data.get('prompt', '') or '')
-        except Exception:
-            pass
-
-        return fallback
-
-    def _get_refinement_profile_name(self) -> str:
-        """Profile name used as the refinement-mode system prompt."""
-        try:
-            name = str(self.config.get('refinement_profile', 'Refinement') or '').strip()
-        except Exception:
-            name = ''
-        return name or 'Refinement'
-
-    def _get_refinement_system_prompt(self) -> str:
-        """Resolve the refinement prompt from the profile system."""
-        default_prompt = (
-            "You are refining an existing English translation. Improve clarity, flow, "
-            "consistency, and readability while preserving all HTML structure, tags, "
-            "images, links, ids, and meaning. Return only the refined HTML."
-        )
-        prompt = self._get_prompt_profile_text(self._get_refinement_profile_name(), default_prompt).strip()
-        return prompt or default_prompt
-
-    def _activate_refinement_profile(self):
-        """Switch the visible prompt editor to the refinement profile."""
-        try:
-            profile_name = self._get_refinement_profile_name()
-            if profile_name not in self.prompt_profiles:
-                self.prompt_profiles[profile_name] = self._get_refinement_system_prompt()
-                self.config['prompt_profiles'] = self.prompt_profiles
-
-            current = ''
-            if hasattr(self, 'profile_menu'):
-                current = self.profile_menu.currentText().strip()
-            else:
-                current = str(getattr(self, 'profile_var', '') or '').strip()
-
-            if current and current != profile_name:
-                self.config['_previous_non_refinement_profile'] = current
-
-            if hasattr(self, 'profile_menu'):
-                items = [self.profile_menu.itemText(i) for i in range(self.profile_menu.count())]
-                if profile_name not in items:
-                    self.profile_menu.addItem(profile_name)
-                if self.profile_menu.currentText().strip() != profile_name:
-                    self.profile_menu.setCurrentText(profile_name)
-                else:
-                    self.on_profile_select()
-            else:
-                self.profile_var = profile_name
-                self.config['active_profile'] = profile_name
-        except Exception:
-            pass
-
-    def _restore_profile_after_refinement_mode(self):
-        """Restore the last non-refinement profile when leaving refinement mode."""
-        try:
-            refinement_profile = self._get_refinement_profile_name()
-            previous = str(self.config.get('_previous_non_refinement_profile', '') or '').strip()
-            if not previous or previous == refinement_profile or previous not in self.prompt_profiles:
-                return
-
-            current = ''
-            if hasattr(self, 'profile_menu'):
-                current = self.profile_menu.currentText().strip()
-            else:
-                current = str(getattr(self, 'profile_var', '') or '').strip()
-
-            if current != refinement_profile:
-                return
-
-            if hasattr(self, 'profile_menu'):
-                self.profile_menu.setCurrentText(previous)
-            else:
-                self.profile_var = previous
-                self.config['active_profile'] = previous
-        except Exception:
-            pass
-
     def _get_allowed_image_output_mode(self):
         """Check if image output mode should be enabled based on dependencies.
         Returns '1' if allowed and enabled, '0' otherwise.
@@ -3702,12 +3605,6 @@ Recent translations to summarize:
             self.prompt_profiles = new_profiles
         
         active = self.config.get('active_profile', next(iter(self.prompt_profiles)))
-        if str(self.config.get('output_mode', '')).lower().strip() in ('refine', 'refinement'):
-            refinement_profile = self._get_refinement_profile_name()
-            if active != refinement_profile and active in self.prompt_profiles:
-                self.config['_previous_non_refinement_profile'] = active
-            if refinement_profile in self.prompt_profiles:
-                active = refinement_profile
         self.profile_var = active
         # Initialize lang_var to the actual target language from config, not the profile name
         # This will be properly synced when update_target_language is called during GUI setup
@@ -13879,7 +13776,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'OPENAI_OR_Gemini_API_KEY': api_key,
             'GEMINI_API_KEY': api_key,
             'SYSTEM_PROMPT': self.prompt_text.toPlainText().strip(),
-            'REFINEMENT_SYSTEM_PROMPT': self._get_refinement_system_prompt(),
             'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',  # Optional assistant prefill
             'TRANSLATE_BOOK_TITLE': "1" if self.translate_book_title_var else "0",
             'SKIP_TXT_TITLE_TRANSLATION': "1" if getattr(self, 'skip_txt_title_translation_var', True) else "0",
@@ -15791,8 +15687,6 @@ Important rules:
             # Set prompts
             import large_env
             large_env.set_env('SYSTEM_PROMPT', self.prompt_text.toPlainText().strip())
-            large_env.set_env('REFINEMENT_SYSTEM_PROMPT', self._get_refinement_system_prompt())
-            os.environ['REFINEMENT_SYSTEM_PROMPT'] = self._get_refinement_system_prompt()
 
             # PDF output settings
             os.environ['ENABLE_PDF_OUTPUT'] = '1' if getattr(self, 'enable_pdf_output_var', self.config.get('enable_pdf_output', False)) else '0'
@@ -22766,7 +22660,6 @@ Important rules:
                 # Prompts
                 ('TRANSLATION_CHUNK_PROMPT', str(getattr(self, 'translation_chunk_prompt', ''))),
                 ('IMAGE_CHUNK_PROMPT', str(getattr(self, 'image_chunk_prompt', ''))),
-                ('REFINEMENT_SYSTEM_PROMPT', self._get_refinement_system_prompt()),
                 ('ASSISTANT_PROMPT', str(getattr(self, 'assistant_prompt', ''))),  # Optional assistant prefill
 
                 # Safety flags

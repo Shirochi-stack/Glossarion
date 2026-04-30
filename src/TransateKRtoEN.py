@@ -8757,15 +8757,8 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 progress_manager.update_refinement_status(idx, actual_num, content_hash, output_file, "in_progress", chapter_obj=chapter)
                 progress_manager.save()
             try:
-                try:
-                    import large_env as _large_env
-                    refine_env_prompt = (_large_env.get_env("REFINEMENT_SYSTEM_PROMPT", "") or "").strip()
-                except Exception:
-                    refine_env_prompt = ""
                 refine_system = (
-                    refine_env_prompt
-                    or os.getenv("REFINEMENT_SYSTEM_PROMPT", "").strip()
-                    or getattr(config, "SYSTEM_PROMPT", "").strip()
+                    getattr(config, "SYSTEM_PROMPT", "").strip()
                     or "You are refining an existing English translation. Improve clarity, flow, consistency, and readability while preserving all HTML structure, tags, images, links, ids, and meaning. Return only the refined HTML."
                 )
                 messages = [

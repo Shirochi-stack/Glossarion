@@ -3186,8 +3186,6 @@ class AsyncProcessingDialog:
         else:
             system_prompt = self.gui.prompt_text.toPlainText().strip()
         env_vars['SYSTEM_PROMPT'] = system_prompt.replace('{target_lang}', target_lang).replace('{split_marker_instruction}', '')
-        if hasattr(self.gui, '_get_refinement_system_prompt'):
-            env_vars['REFINEMENT_SYSTEM_PROMPT'] = self.gui._get_refinement_system_prompt()
         
         # Async processing does not support request merging logic, so force it off
         env_vars['REQUEST_MERGING_ENABLED'] = '0'

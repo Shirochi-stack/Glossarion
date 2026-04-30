@@ -9152,10 +9152,6 @@ def _set_output_mode(self, mode: str):
         if mode not in ('text', 'vision', 'image', 'video', 'audio', 'refinement'):
             mode = 'text'
 
-        previous_mode = str(getattr(self, 'output_mode_var', self.config.get('output_mode', 'text')) or 'text').lower().strip()
-        if previous_mode == 'refine':
-            previous_mode = 'refinement'
-
         # --- set legacy booleans ---
         self.enable_image_output_mode_var = (mode == 'image')
         self.enable_video_output_mode_var = (mode == 'video')
@@ -9179,14 +9175,6 @@ def _set_output_mode(self, mode: str):
         _os.environ['ENABLE_REFINEMENT_OUTPUT_MODE'] = '1' if self.enable_refinement_output_mode_var else '0'
         _os.environ['ENABLE_IMAGE_TRANSLATION'] = '1' if self.enable_image_translation_var else '0'
         _os.environ['OUTPUT_MODE'] = mode
-
-        if mode == 'refinement':
-            if hasattr(self, '_activate_refinement_profile'):
-                self._activate_refinement_profile()
-            if hasattr(self, '_get_refinement_system_prompt'):
-                _os.environ['REFINEMENT_SYSTEM_PROMPT'] = self._get_refinement_system_prompt()
-        elif previous_mode == 'refinement' and hasattr(self, '_restore_profile_after_refinement_mode'):
-            self._restore_profile_after_refinement_mode()
 
         # Toggle visibility of the image-translation sub-section
         try:
