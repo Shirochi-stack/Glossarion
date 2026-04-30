@@ -5857,8 +5857,26 @@ class UnifiedClient:
             raise UnifiedClientError("TTS input text is empty", error_type="validation")
 
         provider = os.getenv("TTS_PROVIDER", "").lower().strip()
-        model_name = (self.model or os.getenv("TTS_MODEL", "tts-1")).strip() or "tts-1"
-        if provider == "google" or model_name.lower().startswith(("google-tts", "google/cloud-tts")):
+        model_name = (os.getenv("TTS_MODEL", "") or self.model or "tts-1").strip() or "tts-1"
+        model_l = model_name.lower()
+        explicit_openai_endpoint = bool((os.getenv("OPENAI_TTS_ENDPOINT") or "").strip())
+        custom_base_url = (os.getenv("OPENAI_CUSTOM_BASE_URL") or "").strip()
+        use_custom_endpoint = os.getenv("USE_CUSTOM_OPENAI_ENDPOINT", "0") == "1"
+        google_key = (
+            os.getenv("GOOGLE_TTS_API_KEY")
+            or os.getenv("GOOGLE_API_KEY")
+            or os.getenv("GEMINI_API_KEY")
+            or (self.api_key if str(self.api_key or "").startswith("AIza") else "")
+        )
+
+        # If the user explicitly configured an OpenAI-compatible/custom endpoint,
+        # honor that first. Otherwise, Google-looking keys/models should not fall
+        # through to api.openai.com and produce a misleading 401.
+        if (
+            provider == "google"
+            or model_l.startswith(("google-tts", "google/cloud-tts", "gemini-"))
+            or (google_key and not explicit_openai_endpoint and not (use_custom_endpoint and custom_base_url))
+        ):
             return self._text_to_speech_google(text, output_path, voice=voice, audio_format=audio_format)
         return self._text_to_speech_openai_compatible(text, output_path, voice=voice, audio_format=audio_format)
 
@@ -5931,14 +5949,54 @@ class UnifiedClient:
         raise UnifiedClientError("TTS request failed", error_type="api_error")
 
     def _text_to_speech_google(self, text: str, output_path: str, voice: Optional[str] = None, audio_format: Optional[str] = None) -> str:
-        try:
-            from google.cloud import texttospeech
-        except Exception as exc:
-            raise UnifiedClientError(f"Google Cloud Text-to-Speech is unavailable: {exc}", error_type="dependency")
-
         language_code = os.getenv("TTS_LANGUAGE_CODE", "en-US")
         voice_name = voice or os.getenv("TTS_VOICE", "en-US-Neural2-J")
         audio_format = (audio_format or os.getenv("TTS_AUDIO_FORMAT", "mp3")).lower().strip()
+        api_key = (
+            os.getenv("GOOGLE_TTS_API_KEY")
+            or os.getenv("GOOGLE_API_KEY")
+            or os.getenv("GEMINI_API_KEY")
+            or (self.api_key if str(self.api_key or "").startswith("AIza") else "")
+        )
+
+        if api_key:
+            import requests as _req
+
+            encoding = "MP3" if audio_format == "mp3" else "LINEAR16"
+            url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={api_key}"
+            payload = {
+                "input": {"text": text},
+                "voice": {
+                    "languageCode": language_code,
+                    "name": voice_name,
+                },
+                "audioConfig": {
+                    "audioEncoding": encoding,
+                },
+            }
+            timeout = int(os.getenv("TTS_TIMEOUT_SECONDS", "300"))
+            resp = _req.post(url, json=payload, timeout=timeout)
+            if resp.status_code not in (200, 201):
+                err = resp.text[:500]
+                try:
+                    err = resp.json().get("error", {}).get("message", err)
+                except Exception:
+                    pass
+                raise UnifiedClientError(f"Google TTS API error ({resp.status_code}): {err}", error_type="api_error", http_status=resp.status_code)
+            data = resp.json()
+            audio_b64 = data.get("audioContent")
+            if not audio_b64:
+                raise UnifiedClientError("Google TTS API returned no audioContent", error_type="api_error")
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            with open(output_path, "wb") as f:
+                f.write(base64.b64decode(audio_b64))
+            return output_path
+
+        try:
+            from google.cloud import texttospeech
+        except Exception as exc:
+            raise UnifiedClientError(f"Google Cloud Text-to-Speech is unavailable and no Google API key was found: {exc}", error_type="dependency")
+
         encoding = texttospeech.AudioEncoding.MP3 if audio_format == "mp3" else texttospeech.AudioEncoding.LINEAR16
 
         client = texttospeech.TextToSpeechClient()

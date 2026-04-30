@@ -8229,7 +8229,10 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             try:
                 text = _html_to_tts_text(html_content)
                 if not text:
-                    raise RuntimeError("No readable text found in translated HTML")
+                    with progress_lock:
+                        progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "no_tts", chapter_obj=chapter, tts_file=rel_audio)
+                        progress_manager.save()
+                    return "skipped", f"🔊 Chapter {actual_num}: no readable text found; left as No TTS"
                 client.text_to_speech(text, audio_path)
                 with progress_lock:
                     progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "tts_completed", chapter_obj=chapter, tts_file=rel_audio)
