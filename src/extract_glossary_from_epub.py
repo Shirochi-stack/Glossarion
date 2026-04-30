@@ -1161,6 +1161,7 @@ def update_gender_tracker(entries: List[Dict], output_path: str, source_path: st
             })
 
             occurrence = {
+                "raw_name": raw_name,
                 "gender": gender,
                 "chapter_index": chapter_index,
                 "chapter_num": chapter_num,
@@ -1190,6 +1191,54 @@ def update_gender_tracker(entries: List[Dict], output_path: str, source_path: st
                     })
                 changed = True
 
+        if changed:
+            _write_gender_tracker(tracker_path, tracker)
+
+def sync_gender_tracker_with_glossary(glossary: List[Dict], output_path: str):
+    """Keep tracker raw/translated names aligned with the final saved glossary."""
+    if not glossary or not output_path:
+        return
+    tracker_path = _gender_tracker_path_for_output(output_path)
+    if not os.path.exists(tracker_path):
+        return
+
+    canonical_by_key = {}
+    for entry in glossary:
+        if not isinstance(entry, dict) or not _entry_type_has_gender(entry):
+            continue
+        raw_name = _raw_exact_key(entry.get("raw_name"))
+        translated_name = str(entry.get("translated_name", "") or "").strip()
+        if raw_name and translated_name:
+            canonical_by_key.setdefault(_raw_tracker_key(raw_name), {
+                "raw_name": raw_name,
+                "translated_name": translated_name,
+            })
+    if not canonical_by_key:
+        return
+
+    with _gender_tracker_lock:
+        tracker = _load_gender_tracker(tracker_path)
+        tracker_entries = tracker.get("entries", {})
+        changed = False
+        for key, canonical in canonical_by_key.items():
+            item = tracker_entries.get(key)
+            if not isinstance(item, dict):
+                continue
+            if item.get("raw_name") != canonical["raw_name"]:
+                item["raw_name"] = canonical["raw_name"]
+                changed = True
+            if item.get("translated_name") != canonical["translated_name"]:
+                item["translated_name"] = canonical["translated_name"]
+                changed = True
+            for occurrence in item.get("occurrences", []):
+                if not isinstance(occurrence, dict):
+                    continue
+                if occurrence.get("raw_name") != canonical["raw_name"]:
+                    occurrence["raw_name"] = canonical["raw_name"]
+                    changed = True
+                if occurrence.get("translated_name") != canonical["translated_name"]:
+                    occurrence["translated_name"] = canonical["translated_name"]
+                    changed = True
         if changed:
             _write_gender_tracker(tracker_path, tracker)
 
@@ -1236,7 +1285,9 @@ def save_glossary_json(glossary: List[Dict], output_path: str):
     # Check if legacy JSON output is enabled (default disabled)
     if os.getenv('GLOSSARY_OUTPUT_LEGACY_JSON', '0') != '1':
         return
-    glossary = [_strip_private_glossary_keys(e) for e in _ensure_book_title_entry(glossary)]
+    glossary = _harmonize_gender_variant_translations([
+        _strip_private_glossary_keys(e) for e in _ensure_book_title_entry(glossary)
+    ])
 
     global _glossary_json_lock
     
@@ -1292,7 +1343,9 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
             except Exception:
                 pass
 
-        glossary = [_strip_private_glossary_keys(e) for e in _ensure_book_title_entry(glossary)]
+        glossary = _harmonize_gender_variant_translations([
+            _strip_private_glossary_keys(e) for e in _ensure_book_title_entry(glossary)
+        ])
         custom_types = get_custom_entry_types()
         type_order = {'book': -1, 'character': 0, 'term': 1}
         other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
@@ -1303,6 +1356,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
             type_order.get(x.get('type', 'term'), 999),
             x.get('raw_name', '').lower()
         ))
+        sync_gender_tracker_with_glossary(sorted_glossary, output_path)
         
         use_legacy_format = os.getenv('GLOSSARY_USE_LEGACY_CSV', '0') == '1'
         csv_dir = os.path.dirname(csv_path) or '.'
