@@ -3281,6 +3281,12 @@ class AsyncProcessingDialog:
         env_vars['DISABLE_GLOSSARY_TRANSLATION'] = "0" if _val(self.gui.enable_auto_glossary_var, False) else "1"
         env_vars['APPEND_GLOSSARY'] = "1" if _val(self.gui.append_glossary_var, False) else "0"
         env_vars['APPEND_GLOSSARY_PROMPT'] = self.gui.append_glossary_prompt if hasattr(self.gui, 'append_glossary_prompt') else ''
+        auto_glossary_mode = self.gui.config.get('auto_glossary_mode', 'off')
+        env_vars['AUTO_GLOSSARY_MODE'] = auto_glossary_mode
+        env_vars['SINGLE_PASS_GLOSSARY_MODE'] = (
+            'balanced' if auto_glossary_mode == 'single_pass_balanced'
+            else ('full' if auto_glossary_mode == 'single_pass_full' else '')
+        )
         env_vars['GLOSSARY_MIN_FREQUENCY'] = _val(self.gui.glossary_min_frequency_var, 0)
         env_vars['GLOSSARY_MAX_NAMES'] = _val(self.gui.glossary_max_names_var, 0)
         env_vars['GLOSSARY_MAX_TITLES'] = _val(self.gui.glossary_max_titles_var, 0)

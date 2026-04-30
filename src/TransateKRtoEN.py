@@ -26,6 +26,7 @@ from unified_api_client import UnifiedClient, UnifiedClientError, defer_batch_lo
 # Translation thread submission throttling (batch) to align queued logs with actual delay
 _translation_thread_submit_lock = threading.Lock()
 _translation_last_thread_submit = 0.0
+_single_pass_glossary_lock = threading.Lock()
 import hashlib
 import tempfile
 import unicodedata
@@ -3993,6 +3994,7 @@ class TranslationProcessor:
         original_max_tokens = self.config.MAX_OUTPUT_TOKENS
         original_temp = self.config.TEMP
         original_user_prompt = msgs[-1]["content"]
+        msgs = _build_single_pass_glossary_messages(msgs, chunk_html)
 
         # Determine stable chapter number for this chunk (used for payload metadata)
         idx = c.get('__index', 0)
@@ -4171,6 +4173,16 @@ class TranslationProcessor:
                     chapter_context=chapter_ctx,
                     bypass_graceful_stop=True
                 )
+
+                if _single_pass_glossary_mode() and isinstance(result, str):
+                    result, glossary_block = _split_single_pass_glossary_response(result)
+                    if glossary_block:
+                        _persist_single_pass_glossary(
+                            self.out_dir,
+                            glossary_block,
+                            chapter_num=actual_num,
+                            source_text=chunk_html,
+                        )
                 
                 # Enhanced mode workflow:
                 # 1. Original HTML -> html2text -> Markdown/plain text (during extraction)
@@ -4842,6 +4854,7 @@ class BatchTranslationProcessor:
                     + assistant_prefill_msgs
                     + [{"role": "user", "content": user_prompt}]
                 )
+                chapter_msgs = _build_single_pass_glossary_messages(chapter_msgs, chunk_html)
 
                 # Abort immediately if a prior chunk triggered prohibition (NOT for user stop)
                 if chunk_abort_event.is_set():
@@ -4940,6 +4953,15 @@ class BatchTranslationProcessor:
                             chapter_context=chapter_ctx,
                             bypass_graceful_stop=True
                         )
+                        if _single_pass_glossary_mode() and isinstance(result, str):
+                            result, glossary_block = _split_single_pass_glossary_response(result)
+                            if glossary_block:
+                                _persist_single_pass_glossary(
+                                    self.out_dir,
+                                    glossary_block,
+                                    chapter_num=actual_num,
+                                    source_text=chunk_html,
+                                )
                         break  # Success, exit retry loop
                     except UnifiedClientError as e:
                         error_msg = str(e)
@@ -5138,6 +5160,15 @@ class BatchTranslationProcessor:
                                     chapter_context=chapter_ctx,
                                     bypass_graceful_stop=True
                                 )
+                                if _single_pass_glossary_mode() and isinstance(result_retry, str):
+                                    result_retry, glossary_block_retry = _split_single_pass_glossary_response(result_retry)
+                                    if glossary_block_retry:
+                                        _persist_single_pass_glossary(
+                                            self.out_dir,
+                                            glossary_block_retry,
+                                            chapter_num=actual_num,
+                                            source_text=chunk_html,
+                                        )
                             except UnifiedClientError as e:
                                 # Treat timeout during char-ratio retry as a timeout for the chunk
                                 error_msg = str(e)
@@ -6102,6 +6133,7 @@ class BatchTranslationProcessor:
             msgs = [{"role": "system", "content": chapter_system_prompt}] + rolling_summary_msgs + memory_msgs + assistant_prefill_msgs + [
                 {"role": "user", "content": merged_content}
             ]
+            msgs = _build_single_pass_glossary_messages(msgs, merged_content)
 
             # Prepare split-failed retry controls
             try:
@@ -6194,6 +6226,15 @@ class BatchTranslationProcessor:
                     context='translation',
                     chapter_context=chapter_ctx,
                 )
+                if _single_pass_glossary_mode() and isinstance(merged_response, str):
+                    merged_response, glossary_block = _split_single_pass_glossary_response(merged_response)
+                    if glossary_block:
+                        _persist_single_pass_glossary(
+                            self.out_dir,
+                            glossary_block,
+                            chapter_num=parent_actual_num,
+                            source_text=merged_content,
+                        )
                 # Preserve the finish reason from the merged API call for later status decisions.
                 merged_finish_reason = finish_reason
                 truncation_exhausted = getattr(self.client, "_truncation_retries_exhausted", False)
@@ -6314,6 +6355,15 @@ class BatchTranslationProcessor:
                                     context='translation',
                                     chapter_context=chapter_ctx,
                                 )
+                                if _single_pass_glossary_mode() and isinstance(merged_response_retry, str):
+                                    merged_response_retry, glossary_block_retry = _split_single_pass_glossary_response(merged_response_retry)
+                                    if glossary_block_retry:
+                                        _persist_single_pass_glossary(
+                                            self.out_dir,
+                                            glossary_block_retry,
+                                            chapter_num=parent_actual_num,
+                                            source_text=merged_content,
+                                        )
                             finally:
                                 if tls_retry_client is not None:
                                     try:
@@ -6801,10 +6851,153 @@ def find_glossary_file(output_dir):
         os.path.join(output_dir, "glossary.txt"),
         os.path.join(output_dir, "glossary.json"),
     ]
+    glossary_dir = os.path.join(output_dir, "Glossary")
+    if os.path.isdir(glossary_dir):
+        try:
+            grouped = []
+            for ext in (".csv", ".md", ".txt", ".json"):
+                grouped.extend(
+                    os.path.join(glossary_dir, name)
+                    for name in sorted(os.listdir(glossary_dir))
+                    if name.lower().endswith(ext)
+                    and "glossary" in name.lower()
+                    and "progress" not in name.lower()
+                    and "dedup_report" not in name.lower()
+                )
+            candidates.extend(grouped)
+        except Exception:
+            pass
     for p in candidates:
         if os.path.exists(p):
             return p
     return None
+
+def _single_pass_glossary_mode():
+    """Return the requested single-pass glossary depth, or None when disabled."""
+    mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower()
+    explicit = (os.getenv("SINGLE_PASS_GLOSSARY_MODE") or "").strip().lower()
+    if explicit in ("balanced", "full"):
+        return explicit
+    if mode in ("single_pass_balanced", "single-pass-balanced"):
+        return "balanced"
+    if mode in ("single_pass_full", "single-pass-full"):
+        return "full"
+    return None
+
+def _build_single_pass_glossary_messages(messages, source_text):
+    """Merge glossary extraction and translation instructions into one request."""
+    depth = _single_pass_glossary_mode()
+    if not depth or not messages:
+        return messages
+    try:
+        import extract_glossary_from_epub as glossary_extractor
+    except Exception as e:
+        print(f"⚠️ Single Pass Glossary: failed to build glossary prompt: {e}")
+        return messages
+
+    wrapped = []
+    system_wrapped = False
+    mode_label = depth.capitalize()
+    for msg in messages:
+        if msg.get("role") == "system" and not system_wrapped:
+            translation_prompt = msg.get("content", "") or ""
+            combined = glossary_extractor.build_single_pass_translation_system_prompt(
+                translation_prompt,
+                source_text or "",
+                mode=depth,
+            )
+            new_msg = dict(msg)
+            new_msg["content"] = combined
+            wrapped.append(new_msg)
+            system_wrapped = True
+        else:
+            wrapped.append(msg)
+
+    if system_wrapped:
+        print(f"📑 Single Pass Glossary: {mode_label} prompt merged into translation request")
+    return wrapped
+
+def _split_single_pass_glossary_response(response_text):
+    """Return (translation_text, glossary_block) from a single-pass response."""
+    try:
+        import extract_glossary_from_epub as glossary_extractor
+        return glossary_extractor.split_single_pass_response(response_text)
+    except Exception:
+        pass
+    if not isinstance(response_text, str) or "<glossary" not in response_text.lower():
+        return response_text, ""
+    match = re.search(r"<glossary\b[^>]*>(.*?)</glossary>", response_text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return response_text, ""
+    return (response_text[:match.start()] + response_text[match.end():]).strip(), (match.group(1) or "").strip()
+
+def _single_pass_glossary_paths(output_dir):
+    epub_path = os.getenv("EPUB_PATH", "")
+    if epub_path:
+        base = os.path.splitext(os.path.basename(epub_path))[0]
+    else:
+        base = os.path.basename(os.path.abspath(output_dir)) or "book"
+    glossary_dir = os.path.join(output_dir, "Glossary")
+    os.makedirs(glossary_dir, exist_ok=True)
+    return (
+        glossary_dir,
+        os.path.join(glossary_dir, f"{base}_glossary.json"),
+        os.path.join(glossary_dir, f"{base}_glossary.csv"),
+        os.path.join(glossary_dir, f"{base}_glossary_progress.json"),
+    )
+
+def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, source_text=None):
+    """Parse, dedupe, and save inline glossary output using the glossary pipeline."""
+    if not glossary_block or not _single_pass_glossary_mode():
+        return 0
+
+    with _single_pass_glossary_lock:
+        original_progress_file = None
+        try:
+            import extract_glossary_from_epub as glossary_extractor
+            glossary_dir, json_path, csv_path, progress_path = _single_pass_glossary_paths(output_dir)
+            parsed = glossary_extractor.parse_api_response(glossary_block)
+            valid = []
+            for entry in parsed:
+                if glossary_extractor.validate_extracted_entry(entry):
+                    if "raw_name" in entry and isinstance(entry["raw_name"], str):
+                        entry["raw_name"] = entry["raw_name"].strip()
+                    valid.append(entry)
+            if not valid:
+                print("📑 Single Pass Glossary: no valid glossary entries found in response")
+                return 0
+
+            existing = glossary_extractor._load_glossary_file(csv_path)
+            combined = existing + valid
+            deduped = glossary_extractor.skip_duplicate_entries(combined, output_dir=glossary_dir)
+
+            original_progress_file = getattr(glossary_extractor, "PROGRESS_FILE", None)
+            glossary_extractor.PROGRESS_FILE = progress_path
+            progress = glossary_extractor.load_progress()
+            completed = list(progress.get("completed", []))
+            if chapter_num is not None and chapter_num not in completed:
+                completed.append(chapter_num)
+            merged_indices = list(progress.get("merged_indices", []))
+            failed = list(progress.get("failed", []))
+
+            glossary_extractor.save_glossary_json(deduped, json_path)
+            glossary_extractor.save_glossary_csv(deduped, json_path)
+            glossary_extractor.save_progress(completed, deduped, merged_indices, failed=failed)
+
+            print(
+                f"📑 Single Pass Glossary: saved {len(valid)} new entr"
+                f"{'y' if len(valid) == 1 else 'ies'} ({len(deduped)} total) to {csv_path}"
+            )
+            return len(valid)
+        except Exception as e:
+            print(f"⚠️ Single Pass Glossary: failed to persist glossary: {e}")
+            return 0
+        finally:
+            try:
+                if original_progress_file is not None:
+                    glossary_extractor.PROGRESS_FILE = original_progress_file
+            except Exception:
+                pass
 
 def apply_emergency_glossary_compliance(content, output_dir):
     """Pre-edit source text by replacing glossary raw_names with translated_names.

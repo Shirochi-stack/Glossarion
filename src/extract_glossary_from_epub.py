@@ -2416,6 +2416,43 @@ CRITICAL EXTRACTION RULES:
     
     return (system_prompt, user_prompt)
 
+def build_single_pass_translation_system_prompt(translation_prompt: str, source_text: str, mode: str = "balanced") -> str:
+    """Build a combined glossary-extraction + translation system prompt.
+
+    The glossary extraction half reuses build_prompt(), so custom fields,
+    entry types, description rules, and Balanced/Full formatting stay aligned
+    with the normal glossary pipeline.
+    """
+    glossary_system_prompt, _ = build_prompt(source_text or "")
+    mode_label = (mode or "balanced").strip().capitalize()
+    translation_prompt = translation_prompt or ""
+    return (
+        "You have 2 roles to complete.\n\n"
+        f"1. Perform glossary extraction using the {mode_label} glossary logic.\n"
+        "2. Perform translation using the provided glossary.\n\n"
+        "Rules:\n"
+        "- Wrap the generated glossary in <glossary>...</glossary> tags.\n"
+        "- The glossary must follow the same structure and formatting as standard Balanced/Full extraction.\n"
+        "- Any glossary prompt instruction to return only CSV/JSON applies only inside the <glossary> block.\n"
+        "- The translation must strictly follow the translation prompt and utilize the generated glossary.\n"
+        "- Output the <glossary> block first, then output only the translated content after </glossary>.\n\n"
+        "[Balanced/Full Glossary Prompt]\n"
+        f"{glossary_system_prompt}\n\n"
+        "[Translation Prompt]\n"
+        f"{translation_prompt}"
+    )
+
+def split_single_pass_response(response_text: str) -> tuple:
+    """Split a single-pass response into (translation_text, glossary_block)."""
+    if not isinstance(response_text, str) or "<glossary" not in response_text.lower():
+        return response_text, ""
+    match = re.search(r"<glossary\b[^>]*>(.*?)</glossary>", response_text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return response_text, ""
+    glossary_block = (match.group(1) or "").strip()
+    translation = (response_text[:match.start()] + response_text[match.end():]).strip()
+    return translation, glossary_block
+
 
 def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):
     """

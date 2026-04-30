@@ -1775,7 +1775,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
 
         # Force-sync auto-mapping/fuzzy states based on auto_glossary_mode
         _agm = self.config.get('auto_glossary_mode', 'off')
-        if _agm in ('off', 'off_fuzzy_automap', 'balanced', 'full'):
+        if _agm in ('off', 'off_fuzzy_automap', 'balanced', 'full', 'single_pass_balanced', 'single_pass_full'):
             self.append_glossary_auto_load_var = True
             self.config['append_glossary_auto_load'] = True
         elif _agm in ('off_no_automap', 'minimal'):
@@ -7160,7 +7160,7 @@ Recent translations to summarize:
         auto_glossary_label.setStyleSheet("color: #e8f0ff; font-size: 10pt; font-weight: bold;")
         batch_right_layout.addWidget(auto_glossary_label)
         self.auto_glossary_shortcut_combo = QComboBox()
-        self.auto_glossary_shortcut_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Manual Glossary Only", "No Glossary", "Minimal", "Balanced", "Full"])
+        self.auto_glossary_shortcut_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Manual Glossary Only", "No Glossary", "Minimal", "Balanced", "Full", "Single Pass Balanced", "Single Pass Full"])
         # Add Halgakos icon to each item
         try:
             _ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
@@ -7175,7 +7175,7 @@ Recent translations to summarize:
         _auto_mode = self.config.get('auto_glossary_mode', None)
         if _auto_mode is None:
             _auto_mode = 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
-        _mode_idx = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6}.get(_auto_mode.lower(), 0)
+        _mode_idx = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6, 'single_pass_balanced': 7, 'single_pass_full': 8}.get(_auto_mode.lower(), 0)
         self.auto_glossary_shortcut_combo.setCurrentIndex(_mode_idx)
         self.auto_glossary_shortcut_combo.setToolTip(
             "Off: No automatic glossary extraction + enables Auto-Mapping\n"
@@ -7184,7 +7184,8 @@ Recent translations to summarize:
             "No Glossary: Runs without glossary\n"
             "Minimal: Lightweight extraction during translation (in-process)\n"
             "Balanced: Smarter extraction with request merging & chapter splitting (recommended)\n"
-            "Full: Chapter-by-chapter extraction for maximum context (most expensive)"
+            "Full: Chapter-by-chapter extraction for maximum context (most expensive)\n"
+            "Single Pass Balanced/Full: Extract glossary inline during each translation request"
         )
         self.auto_glossary_shortcut_combo.setFixedWidth(185)
         self.auto_glossary_shortcut_combo.setIconSize(QSize(18, 18))
@@ -7223,7 +7224,7 @@ Recent translations to summarize:
         
         def _on_auto_glossary_shortcut_changed(index):
             """Sync shortcut dropdown → main auto_glossary_mode_combo."""
-            mode_map = {0: 'off', 1: 'off_fuzzy_automap', 2: 'off_no_automap', 3: 'no_glossary', 4: 'minimal', 5: 'balanced', 6: 'full'}
+            mode_map = {0: 'off', 1: 'off_fuzzy_automap', 2: 'off_no_automap', 3: 'no_glossary', 4: 'minimal', 5: 'balanced', 6: 'full', 7: 'single_pass_balanced', 8: 'single_pass_full'}
             new_mode = mode_map.get(index, 'off')
             is_on = new_mode not in ('off', 'off_fuzzy_automap', 'off_no_automap', 'no_glossary')
             self.config['auto_glossary_mode'] = new_mode
@@ -7242,7 +7243,7 @@ Recent translations to summarize:
                     self.append_glossary_checkbox.style().polish(self.append_glossary_checkbox)
                     self.append_glossary_checkbox.update()
             # Auto-enable auto map when off/off_fuzzy_automap/balanced/full is selected
-            if new_mode in ('off', 'off_fuzzy_automap', 'balanced', 'full'):
+            if new_mode in ('off', 'off_fuzzy_automap', 'balanced', 'full', 'single_pass_balanced', 'single_pass_full'):
                 self.config['append_glossary_auto_load'] = True
                 self.append_glossary_auto_load_var = True
                 if hasattr(self, 'append_glossary_auto_load_checkbox'):
@@ -7287,7 +7288,7 @@ Recent translations to summarize:
             # (blockSignals above prevents _on_auto_mapping_toggled from firing,
             #  so we do the path switch inline here.)
             try:
-                automap_now = new_mode in ('balanced', 'full') or (
+                automap_now = new_mode in ('balanced', 'full', 'single_pass_balanced', 'single_pass_full') or (
                     new_mode != 'minimal' and
                     hasattr(self, 'append_glossary_auto_load_checkbox') and self.append_glossary_auto_load_checkbox.isChecked()
                 )
@@ -13818,6 +13819,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_AUTO_INJECT_BOOK_TITLE': "1" if auto_inject_book_title else "0",
             'ENABLE_AUTO_GLOSSARY': "1" if (self.config.get('auto_glossary_mode', 'off') == 'minimal' or (self.config.get('auto_glossary_mode') is None and self.enable_auto_glossary_var)) else "0",
             'AUTO_GLOSSARY_MODE': self.config.get('auto_glossary_mode', 'off'),
+            'SINGLE_PASS_GLOSSARY_MODE': 'balanced' if self.config.get('auto_glossary_mode', 'off') == 'single_pass_balanced' else ('full' if self.config.get('auto_glossary_mode', 'off') == 'single_pass_full' else ''),
             'AUTO_GLOSSARY_PROMPT': self.unified_auto_glosary_prompt3 if hasattr(self, 'unified_auto_glosary_prompt3') else '',
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
             'GLOSSARY_TRANSLATION_PROMPT': self.glossary_translation_prompt if hasattr(self, 'glossary_translation_prompt') else '',
@@ -15266,6 +15268,7 @@ Important rules:
                     'CONTEXT_WINDOW_SIZE': str(self.context_window_size_var),
                     'ENABLE_AUTO_GLOSSARY': "1" if (self.config.get('auto_glossary_mode', 'off') == 'minimal' or (self.config.get('auto_glossary_mode') is None and self.enable_auto_glossary_var)) else "0",
                     'AUTO_GLOSSARY_MODE': self.config.get('auto_glossary_mode', 'off'),
+                    'SINGLE_PASS_GLOSSARY_MODE': 'balanced' if self.config.get('auto_glossary_mode', 'off') == 'single_pass_balanced' else ('full' if self.config.get('auto_glossary_mode', 'off') == 'single_pass_full' else ''),
                     'APPEND_GLOSSARY': "0" if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ("1" if self.append_glossary_var else "0"),
                     'GLOSSARY_STRIP_HONORIFICS': '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var else '1',
                     'AUTO_GLOSSARY_PROMPT': getattr(self, 'unified_auto_glosary_prompt3', ''),
@@ -19886,14 +19889,14 @@ Important rules:
                     # Final: save config
                     mode_val = selected_mode[0]
                     self.config['auto_glossary_mode'] = mode_val
-                    self.config['enable_auto_glossary'] = (mode_val not in ('off', 'off_no_automap'))
+                    self.config['enable_auto_glossary'] = (mode_val not in ('off', 'off_fuzzy_automap', 'off_no_automap', 'no_glossary'))
                     setattr(self, 'auto_glossary_mode_var', mode_val)
-                    setattr(self, 'enable_auto_glossary_var', (mode_val not in ('off', 'off_no_automap')))
+                    setattr(self, 'enable_auto_glossary_var', (mode_val not in ('off', 'off_fuzzy_automap', 'off_no_automap', 'no_glossary')))
                     if hasattr(self, 'auto_glossary_mode_combo'):
-                        idx = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6}.get(mode_val, 5)
+                        idx = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6, 'single_pass_balanced': 7, 'single_pass_full': 8}.get(mode_val, 5)
                         self.auto_glossary_mode_combo.setCurrentIndex(idx)
                     if hasattr(self, 'auto_glossary_shortcut_combo'):
-                        _shortcut_idx = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6}.get(mode_val, 5)
+                        _shortcut_idx = {'off': 0, 'off_fuzzy_automap': 1, 'off_no_automap': 2, 'no_glossary': 3, 'minimal': 4, 'balanced': 5, 'full': 6, 'single_pass_balanced': 7, 'single_pass_full': 8}.get(mode_val, 5)
                         self.auto_glossary_shortcut_combo.blockSignals(True)
                         self.auto_glossary_shortcut_combo.setCurrentIndex(_shortcut_idx)
                         self.auto_glossary_shortcut_combo.blockSignals(False)
@@ -21996,6 +21999,7 @@ Important rules:
                     ('ADDITIONAL_GLOSSARY_PATH', self.config.get('additional_glossary_path', '')),
                     ('ENABLE_AUTO_GLOSSARY', '1' if self.config.get('auto_glossary_mode', 'off') == 'minimal' else '0'),
                     ('AUTO_GLOSSARY_MODE', self.config.get('auto_glossary_mode', 'off')),
+                    ('SINGLE_PASS_GLOSSARY_MODE', 'balanced' if self.config.get('auto_glossary_mode', 'off') == 'single_pass_balanced' else ('full' if self.config.get('auto_glossary_mode', 'off') == 'single_pass_full' else '')),
                     ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
                     ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),
                     ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter') else '0'),
