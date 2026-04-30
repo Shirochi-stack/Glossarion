@@ -483,6 +483,9 @@ class TranslationConfig:
     """Centralized configuration management"""
     def __init__(self):
         self.MODEL = os.getenv("MODEL", "gemini-1.5-flash")
+        self.OUTPUT_MODE = os.getenv("OUTPUT_MODE", "text").lower().strip()
+        if self.OUTPUT_MODE not in ("text", "vision", "image", "video", "audio", "refinement"):
+            self.OUTPUT_MODE = "text"
         self.input_path = os.getenv("input_path", "default.epub")
         self.PROFILE_NAME = os.getenv("PROFILE_NAME", "korean").lower()
         self.CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
@@ -1844,6 +1847,12 @@ class ProgressManager:
                 "image_chunks": {},
                 "version": "2.1"
             }
+
+        _env_output_mode = os.getenv("OUTPUT_MODE", "").lower().strip()
+        if _env_output_mode in ("text", "vision", "image", "video", "audio", "refinement"):
+            prog["output_mode"] = _env_output_mode
+        else:
+            prog.setdefault("output_mode", "text")
         
         return prog
 
@@ -2065,6 +2074,7 @@ class ProgressManager:
         """Update progress for a chapter"""
         # Use helper method to get consistent key
         chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
+        existing_info = self.prog.get("chapters", {}).get(chapter_key, {})
         
         # Log if we're using a composite key
         if "_" in chapter_key and chapter_key != str(actual_num):
@@ -2094,6 +2104,16 @@ class ProgressManager:
             "status": status,
             "last_updated": time.time()
         }
+
+        # Preserve post-processing checks when the base translation status changes.
+        chapter_info["refinement_status"] = existing_info.get("refinement_status", "not_refined")
+        chapter_info["tts_status"] = existing_info.get("tts_status", "no_tts")
+        if existing_info.get("refined_at") is not None:
+            chapter_info["refined_at"] = existing_info.get("refined_at")
+        if existing_info.get("tts_file"):
+            chapter_info["tts_file"] = existing_info.get("tts_file")
+        if existing_info.get("tts_at") is not None:
+            chapter_info["tts_at"] = existing_info.get("tts_at")
         
         # CRITICAL: Store original_basename for OPF->output mapping in GUI
         if chapter_obj:
@@ -2136,6 +2156,56 @@ class ProgressManager:
             pass
         
         self.prog["chapters"][chapter_key] = chapter_info
+
+    def update_refinement_status(self, idx, actual_num, content_hash, output_file, refinement_status, chapter_obj=None, error=None):
+        chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
+        info = dict(self.prog.get("chapters", {}).get(chapter_key, {}))
+        info.update({
+            "actual_num": actual_num,
+            "content_hash": content_hash,
+            "output_file": output_file,
+            "status": info.get("status", "completed"),
+            "refinement_status": refinement_status,
+            "last_updated": time.time(),
+        })
+        if refinement_status in ("refined", "completed"):
+            info["refinement_status"] = "refined"
+            info["refined_at"] = time.time()
+            info.pop("refinement_error", None)
+        elif error:
+            info["refinement_error"] = str(error)
+        if chapter_obj:
+            if chapter_obj.get('original_basename'):
+                info["original_basename"] = chapter_obj['original_basename']
+            elif chapter_obj.get('original_filename'):
+                info["original_basename"] = os.path.basename(chapter_obj['original_filename'])
+        self.prog["chapters"][chapter_key] = info
+
+    def update_tts_status(self, idx, actual_num, content_hash, output_file, tts_status, chapter_obj=None, tts_file=None, error=None):
+        chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
+        info = dict(self.prog.get("chapters", {}).get(chapter_key, {}))
+        info.update({
+            "actual_num": actual_num,
+            "content_hash": content_hash,
+            "output_file": output_file,
+            "status": info.get("status", "completed"),
+            "tts_status": tts_status,
+            "last_updated": time.time(),
+        })
+        if tts_file:
+            info["tts_file"] = tts_file
+        if tts_status in ("tts_completed", "completed"):
+            info["tts_status"] = "tts_completed"
+            info["tts_at"] = time.time()
+            info.pop("tts_error", None)
+        elif error:
+            info["tts_error"] = str(error)
+        if chapter_obj:
+            if chapter_obj.get('original_basename'):
+                info["original_basename"] = chapter_obj['original_basename']
+            elif chapter_obj.get('original_filename'):
+                info["original_basename"] = os.path.basename(chapter_obj['original_filename'])
+        self.prog["chapters"][chapter_key] = info
     
     def mark_as_merged(self, idx, actual_num, content_hash, parent_chapter_num, chapter_obj=None, parent_output_file=None):
         """Mark a chapter as merged into a parent chapter"""
@@ -7998,6 +8068,181 @@ def cleanup_previous_extraction(output_dir):
     
     return cleaned_count
 
+def _normalize_output_basename(fname: str) -> str:
+    if not fname:
+        return ""
+    base = os.path.basename(str(fname))
+    if base.startswith("response_"):
+        base = base[len("response_"):]
+    while True:
+        stem, ext = os.path.splitext(base)
+        if not ext:
+            break
+        base = stem
+    return base.lower()
+
+def _find_existing_translated_output(out_dir, chapter, actual_num, progress_manager):
+    expected = FileUtilities.create_chapter_filename(chapter, actual_num)
+    candidates = [expected]
+
+    try:
+        chapter_key = progress_manager._get_chapter_key(actual_num, expected, chapter, chapter.get("content_hash"))
+        tracked = progress_manager.prog.get("chapters", {}).get(chapter_key, {})
+        if tracked.get("output_file"):
+            candidates.insert(0, tracked["output_file"])
+    except Exception:
+        pass
+
+    for cand in candidates:
+        if not cand:
+            continue
+        path = cand if os.path.isabs(cand) else os.path.join(out_dir, cand)
+        if os.path.exists(path) and path.lower().endswith((".html", ".xhtml", ".htm")):
+            return os.path.basename(path), path
+
+    expected_norm = _normalize_output_basename(expected)
+    try:
+        for fname in os.listdir(out_dir):
+            if not fname.lower().endswith((".html", ".xhtml", ".htm")):
+                continue
+            if _normalize_output_basename(fname) == expected_norm:
+                return fname, os.path.join(out_dir, fname)
+    except Exception:
+        pass
+    return expected, None
+
+def _html_to_tts_text(html_content: str) -> str:
+    try:
+        soup = BeautifulSoup(html_content or "", "html.parser")
+        for tag in soup(["script", "style", "nav"]):
+            tag.decompose()
+        return soup.get_text("\n", strip=True)
+    except Exception:
+        return re.sub(r"<[^>]+>", " ", html_content or "").strip()
+
+def _backup_unrefined_file(source_path: str, backup_dir: str) -> str:
+    os.makedirs(backup_dir, exist_ok=True)
+    base = os.path.basename(source_path)
+    target = os.path.join(backup_dir, base)
+    if os.path.exists(target):
+        stem, ext = os.path.splitext(base)
+        target = os.path.join(backup_dir, f"{stem}_{int(time.time())}{ext}")
+    shutil.move(source_path, target)
+    return target
+
+def _process_refinement_or_tts_mode(config, client, chapters, out, progress_manager, check_stop):
+    mode = config.OUTPUT_MODE
+    progress_manager.prog["output_mode"] = mode
+    progress_manager.save()
+
+    if mode == "refinement":
+        backup_dir = os.path.join(out, "unrefined_backup")
+        print("\n" + "=" * 50)
+        print("✨ REFINEMENT MODE")
+        print("=" * 50)
+        print("Using existing translated HTML files as input; raw extracted HTML is only used for OPF mapping.")
+    elif mode == "audio":
+        tts_dir = os.path.join(out, "text_to_speech")
+        os.makedirs(tts_dir, exist_ok=True)
+        print("\n" + "=" * 50)
+        print("🔊 AUDIO / TTS MODE")
+        print("=" * 50)
+        print("Generating audio from existing translated HTML files.")
+    else:
+        return False
+
+    processed = 0
+    skipped = 0
+    failed = 0
+    total = len(chapters)
+
+    for idx, chapter in enumerate(chapters):
+        if check_stop():
+            print("⏹️ Post-processing stopped by user")
+            break
+
+        actual_num = chapter.get("actual_chapter_num", chapter.get("num"))
+        if actual_num is None:
+            actual_num = FileUtilities.extract_actual_chapter_number(chapter, patterns=None, config=config) or idx + 1
+        output_file, output_path = _find_existing_translated_output(out, chapter, actual_num, progress_manager)
+        if not output_path:
+            skipped += 1
+            print(f"⬜ Chapter {actual_num}: translated output not found ({output_file})")
+            continue
+
+        with open(output_path, "r", encoding="utf-8", errors="ignore") as f:
+            html_content = f.read()
+        content_hash = ContentProcessor.get_content_hash(html_content)
+
+        # Ensure a base completed entry exists so the two post-process checks are visible.
+        progress_manager.update(idx, actual_num, content_hash, output_file, status="completed", chapter_obj=chapter)
+
+        chapter_key = progress_manager._get_chapter_key(actual_num, output_file, chapter, content_hash)
+        entry = progress_manager.prog.get("chapters", {}).get(chapter_key, {})
+
+        if mode == "refinement":
+            if entry.get("refinement_status") == "refined":
+                skipped += 1
+                continue
+            progress_manager.update_refinement_status(idx, actual_num, content_hash, output_file, "in_progress", chapter_obj=chapter)
+            progress_manager.save()
+            try:
+                refine_system = os.getenv(
+                    "REFINEMENT_SYSTEM_PROMPT",
+                    "You are refining an existing English translation. Improve clarity, flow, consistency, and readability while preserving all HTML structure, tags, images, links, ids, and meaning. Return only the refined HTML."
+                )
+                messages = [
+                    {"role": "system", "content": refine_system},
+                    {"role": "user", "content": html_content},
+                ]
+                refined, finish_reason = client.send(messages, temperature=config.TEMP, max_tokens=config.MAX_OUTPUT_TOKENS, context="refinement")
+                if not refined or not str(refined).strip() or finish_reason in ("content_filter", "prohibited_content", "error"):
+                    raise RuntimeError(f"Refinement returned no usable HTML (finish_reason={finish_reason})")
+                refined = re.sub(r"^```(?:html)?\s*\n?", "", refined, count=1, flags=re.MULTILINE)
+                refined = re.sub(r"\n?```\s*$", "", refined, count=1, flags=re.MULTILINE)
+                backup_path = _backup_unrefined_file(output_path, backup_dir)
+                with open(output_path, "w", encoding="utf-8") as f:
+                    f.write(refined)
+                new_hash = ContentProcessor.get_content_hash(refined)
+                progress_manager.update(idx, actual_num, new_hash, output_file, status="completed", chapter_obj=chapter)
+                progress_manager.update_refinement_status(idx, actual_num, new_hash, output_file, "refined", chapter_obj=chapter)
+                progress_manager.prog["chapters"][progress_manager._get_chapter_key(actual_num, output_file, chapter, new_hash)]["unrefined_backup_file"] = os.path.relpath(backup_path, out).replace("\\", "/")
+                progress_manager.save()
+                processed += 1
+                print(f"✨ Refined Chapter {actual_num}: {output_file}")
+            except Exception as exc:
+                failed += 1
+                progress_manager.update_refinement_status(idx, actual_num, content_hash, output_file, "failed", chapter_obj=chapter, error=exc)
+                progress_manager.save()
+                print(f"❌ Refinement failed for Chapter {actual_num}: {exc}")
+
+        elif mode == "audio":
+            audio_base = os.path.splitext(os.path.basename(output_file))[0] + ".mp3"
+            audio_path = os.path.join(tts_dir, audio_base)
+            rel_audio = os.path.relpath(audio_path, out).replace("\\", "/")
+            if entry.get("tts_status") == "tts_completed" and os.path.exists(audio_path):
+                skipped += 1
+                continue
+            progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "in_progress", chapter_obj=chapter, tts_file=rel_audio)
+            progress_manager.save()
+            try:
+                text = _html_to_tts_text(html_content)
+                if not text:
+                    raise RuntimeError("No readable text found in translated HTML")
+                client.text_to_speech(text, audio_path)
+                progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "tts_completed", chapter_obj=chapter, tts_file=rel_audio)
+                progress_manager.save()
+                processed += 1
+                print(f"🔊 TTS Chapter {actual_num}: {rel_audio}")
+            except Exception as exc:
+                failed += 1
+                progress_manager.update_tts_status(idx, actual_num, content_hash, output_file, "failed", chapter_obj=chapter, tts_file=rel_audio, error=exc)
+                progress_manager.save()
+                print(f"❌ TTS failed for Chapter {actual_num}: {exc}")
+
+    print(f"\n📊 {mode.title()} summary: {processed} processed, {skipped} skipped, {failed} failed")
+    return True
+
 # =====================================================
 # SKIP THINKING CONTEXT MANAGER
 # =====================================================
@@ -11640,6 +11885,27 @@ def main(log_callback=None, stop_callback=None):
             for file in skipped:
                 print(f"   • {file}")
     
+    if config.OUTPUT_MODE in ("refinement", "audio"):
+        post_mode_chapters = []
+        for _idx, _chapter in enumerate(chapters):
+            _actual = _chapter.get('actual_chapter_num', _chapter.get('num'))
+            if start is not None:
+                if use_spine_order:
+                    _spine_1based = _spine_pos_by_idx.get(_idx)
+                    if _spine_1based is None or not (start <= _spine_1based <= end):
+                        continue
+                elif not (start <= _actual <= end):
+                    continue
+            _raw_num = _chapter.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(_chapter, patterns=None, config=config))
+            if not translate_special and _raw_num == 0 and not is_text_file:
+                _name = _chapter.get('original_basename') or os.path.basename(_chapter.get('filename', ''))
+                _name_noext = os.path.splitext(_name)[0] if _name else ''
+                if not bool(re.search(r'\d', _name_noext)):
+                    continue
+            post_mode_chapters.append(_chapter)
+        _process_refinement_or_tts_mode(config, client, post_mode_chapters, out, progress_manager, check_stop)
+        return
+
     # Check if no chapters will be processed and provide helpful error
     if chapters_to_process == 0:
         if start is not None and end is not None:

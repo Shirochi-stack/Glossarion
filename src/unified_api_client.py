@@ -5844,6 +5844,114 @@ class UnifiedClient:
         """Backwards-compatible public API; now delegates to unified _send_core."""
         return self._send_core(messages, temperature, max_tokens, max_completion_tokens, context, image_data=None)
 
+    def text_to_speech(self, text: str, output_path: str, voice: Optional[str] = None, audio_format: Optional[str] = None) -> str:
+        """Generate speech audio from text and write it to output_path.
+
+        Supports OpenAI-compatible /audio/speech endpoints, including local
+        FastAPI servers such as http://localhost:8000/v1/audio/speech. A
+        Google Cloud TTS path is also available when TTS_PROVIDER=google or
+        the model name starts with google-tts.
+        """
+        text = text or ""
+        if not text.strip():
+            raise UnifiedClientError("TTS input text is empty", error_type="validation")
+
+        provider = os.getenv("TTS_PROVIDER", "").lower().strip()
+        model_name = (self.model or os.getenv("TTS_MODEL", "tts-1")).strip() or "tts-1"
+        if provider == "google" or model_name.lower().startswith(("google-tts", "google/cloud-tts")):
+            return self._text_to_speech_google(text, output_path, voice=voice, audio_format=audio_format)
+        return self._text_to_speech_openai_compatible(text, output_path, voice=voice, audio_format=audio_format)
+
+    def _text_to_speech_openai_compatible(self, text: str, output_path: str, voice: Optional[str] = None, audio_format: Optional[str] = None) -> str:
+        import requests as _req
+
+        endpoint = (os.getenv("OPENAI_TTS_ENDPOINT") or "").strip()
+        custom_base_url = (os.getenv("OPENAI_CUSTOM_BASE_URL") or "").strip()
+        use_custom_endpoint = os.getenv("USE_CUSTOM_OPENAI_ENDPOINT", "0") == "1"
+        if not endpoint:
+            if custom_base_url and custom_base_url.rstrip("/").endswith("/audio/speech"):
+                endpoint = custom_base_url.rstrip("/")
+            elif custom_base_url and use_custom_endpoint:
+                endpoint = f"{custom_base_url.rstrip('/')}/audio/speech"
+            else:
+                endpoint = "https://api.openai.com/v1/audio/speech"
+
+        configured_tts_model = os.getenv("TTS_MODEL", "").strip()
+        model = configured_tts_model or self.model or "tts-1"
+        model_l = model.lower()
+        if not configured_tts_model and not any(token in model_l for token in ("tts", "speech", "playai")):
+            model = "tts-1"
+            model_l = model
+        if "/" in model and not model_l.startswith(("tts-", "gpt-", "gemini-", "playai-")):
+            model = model.split("/")[-1]
+        voice = voice or os.getenv("TTS_VOICE", "alloy")
+        audio_format = (audio_format or os.getenv("TTS_AUDIO_FORMAT", "mp3")).lower().strip()
+
+        headers = {"Content-Type": "application/json"}
+        api_key = self.api_key or os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY") or ""
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        payload = {
+            "model": model,
+            "voice": voice,
+            "input": text,
+            "response_format": audio_format,
+        }
+
+        timeout = int(os.getenv("TTS_TIMEOUT_SECONDS", "300"))
+        max_retries = self._get_max_retries()
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        for attempt in range(max_retries):
+            try:
+                if self._is_stop_requested():
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                resp = _req.post(endpoint, json=payload, headers=headers, timeout=timeout)
+                if resp.status_code == 429 and attempt < max_retries - 1:
+                    wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                    print(f"⏳ TTS rate-limited, retrying in {wait:.1f}s")
+                    time.sleep(wait)
+                    continue
+                if resp.status_code not in (200, 201):
+                    err = resp.text[:500]
+                    try:
+                        err = resp.json().get("error", {}).get("message", err)
+                    except Exception:
+                        pass
+                    raise UnifiedClientError(f"TTS API error ({resp.status_code}): {err}", error_type="api_error", http_status=resp.status_code)
+                with open(output_path, "wb") as f:
+                    f.write(resp.content)
+                return output_path
+            except UnifiedClientError:
+                raise
+            except Exception as exc:
+                if attempt >= max_retries - 1:
+                    raise UnifiedClientError(f"TTS request failed after {max_retries} attempts: {exc}", error_type="api_error")
+                time.sleep(min(2 ** attempt + random.uniform(0, 1), 30))
+        raise UnifiedClientError("TTS request failed", error_type="api_error")
+
+    def _text_to_speech_google(self, text: str, output_path: str, voice: Optional[str] = None, audio_format: Optional[str] = None) -> str:
+        try:
+            from google.cloud import texttospeech
+        except Exception as exc:
+            raise UnifiedClientError(f"Google Cloud Text-to-Speech is unavailable: {exc}", error_type="dependency")
+
+        language_code = os.getenv("TTS_LANGUAGE_CODE", "en-US")
+        voice_name = voice or os.getenv("TTS_VOICE", "en-US-Neural2-J")
+        audio_format = (audio_format or os.getenv("TTS_AUDIO_FORMAT", "mp3")).lower().strip()
+        encoding = texttospeech.AudioEncoding.MP3 if audio_format == "mp3" else texttospeech.AudioEncoding.LINEAR16
+
+        client = texttospeech.TextToSpeechClient()
+        response = client.synthesize_speech(
+            input=texttospeech.SynthesisInput(text=text),
+            voice=texttospeech.VoiceSelectionParams(language_code=language_code, name=voice_name),
+            audio_config=texttospeech.AudioConfig(audio_encoding=encoding),
+        )
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(response.audio_content)
+        return output_path
+
     def get_last_response_object(self) -> Optional[UnifiedResponse]:
         """Get the full UnifiedResponse object from the last API call in this thread"""
         try:

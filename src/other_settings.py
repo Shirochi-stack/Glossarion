@@ -9134,27 +9134,34 @@ def on_extraction_method_change(self):
             pass
             
 def _set_output_mode(self, mode: str):
-    """Central setter for output mode ('text', 'vision', 'image', or 'video').
+    """Central setter for output mode.
 
     Text   = image translation OFF, normal text output.
     Vision = image translation ON, text output (OCR from images).
     Image  = image translation ON, image-gen output.
     Video  = image translation ON, video-gen output.
+    Audio  = text-to-speech from existing translated output.
+    Refinement = improve existing translated output.
 
     Updates legacy boolean vars, config, syncs radio buttons and GUI dropdown.
     """
     try:
         mode = mode.lower().strip()
-        if mode not in ('text', 'vision', 'image', 'video'):
+        if mode not in ('text', 'vision', 'image', 'video', 'audio', 'refinement'):
             mode = 'text'
 
         # --- set legacy booleans ---
         self.enable_image_output_mode_var = (mode == 'image')
         self.enable_video_output_mode_var = (mode == 'video')
-        self.enable_image_translation_var = (mode != 'text')
+        self.enable_audio_output_mode_var = (mode == 'audio')
+        self.enable_refinement_output_mode_var = (mode == 'refinement')
+        self.enable_image_translation_var = mode in ('vision', 'image', 'video')
+        self.output_mode_var = mode
 
         self.config['enable_image_output_mode'] = self.enable_image_output_mode_var
         self.config['enable_video_output_mode'] = self.enable_video_output_mode_var
+        self.config['enable_audio_output_mode'] = self.enable_audio_output_mode_var
+        self.config['enable_refinement_output_mode'] = self.enable_refinement_output_mode_var
         self.config['enable_image_translation'] = self.enable_image_translation_var
         self.config['output_mode'] = mode
 
@@ -9162,7 +9169,10 @@ def _set_output_mode(self, mode: str):
         import os as _os
         _os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = '1' if self.enable_image_output_mode_var else '0'
         _os.environ['ENABLE_VIDEO_OUTPUT_MODE'] = '1' if self.enable_video_output_mode_var else '0'
+        _os.environ['ENABLE_AUDIO_OUTPUT_MODE'] = '1' if self.enable_audio_output_mode_var else '0'
+        _os.environ['ENABLE_REFINEMENT_OUTPUT_MODE'] = '1' if self.enable_refinement_output_mode_var else '0'
         _os.environ['ENABLE_IMAGE_TRANSLATION'] = '1' if self.enable_image_translation_var else '0'
+        _os.environ['OUTPUT_MODE'] = mode
 
         # Toggle visibility of the image-translation sub-section
         try:
@@ -9186,7 +9196,7 @@ def _set_output_mode(self, mode: str):
         # Sync main GUI dropdown (if it exists)
         combo = getattr(self, '_output_mode_combo', None)
         if combo:
-            _map = {'text': 0, 'vision': 1, 'image': 2, 'video': 3}
+            _map = {'text': 0, 'vision': 1, 'image': 2, 'video': 3, 'audio': 4, 'refinement': 5}
             idx = _map.get(mode, 0)
             if combo.currentIndex() != idx:
                 combo.blockSignals(True)
@@ -9206,17 +9216,18 @@ def _enforce_image_output_dependency(self):
     try:
         model = str(getattr(self, 'model_var', ''))
         model_lower = model.lower()
+        current_mode = getattr(self, 'config', {}).get('output_mode', 'text')
+        if current_mode in ('audio', 'refinement'):
+            return
 
         # Auto-enable video mode for video-gen models
         if self._model_is_video_gen(model):
-            current_mode = getattr(self, 'config', {}).get('output_mode', 'text')
             if current_mode != 'video':
                 self._set_output_mode('video')
             return
 
         # Auto-enable image mode for image-gen models
         if self._model_is_image_gen(model):
-            current_mode = getattr(self, 'config', {}).get('output_mode', 'text')
             if current_mode != 'image':
                 self._set_output_mode('image')
             return
@@ -9270,32 +9281,51 @@ def _create_image_translation_section(self, parent):
     rb_image.setToolTip("Image generation output — enables image translation")
     rb_video = QRadioButton("🎬 Video")
     rb_video.setToolTip("Video generation output — enables image translation")
+    rb_audio = QRadioButton("🔊 Audio")
+    rb_audio.setToolTip("Generate TTS audio files from existing translated output")
+    rb_refinement = QRadioButton("✨ Refinement")
+    rb_refinement.setToolTip("Improve existing translated output without using raw source HTML")
 
     mode_group.addButton(rb_text, 0)
     mode_group.addButton(rb_vision, 1)
     mode_group.addButton(rb_image, 2)
     mode_group.addButton(rb_video, 3)
+    mode_group.addButton(rb_audio, 4)
+    mode_group.addButton(rb_refinement, 5)
 
     mode_h.addWidget(rb_text)
     mode_h.addWidget(rb_vision)
     mode_h.addWidget(rb_image)
     mode_h.addWidget(rb_video)
+    mode_h.addWidget(rb_audio)
+    mode_h.addWidget(rb_refinement)
     mode_h.addStretch()
     section_v.addWidget(mode_row)
 
     # Store refs for sync
-    self._output_mode_radios = {'text': rb_text, 'vision': rb_vision, 'image': rb_image, 'video': rb_video}
+    self._output_mode_radios = {
+        'text': rb_text,
+        'vision': rb_vision,
+        'image': rb_image,
+        'video': rb_video,
+        'audio': rb_audio,
+        'refinement': rb_refinement,
+    }
 
     # Determine initial mode from legacy booleans
     if not hasattr(self, 'enable_video_output_mode_var'):
         self.enable_video_output_mode_var = self.config.get('enable_video_output_mode', False)
 
     _init_mode = self.config.get('output_mode', None)
-    if _init_mode not in ('text', 'vision', 'image', 'video'):
+    if _init_mode not in ('text', 'vision', 'image', 'video', 'audio', 'refinement'):
         if bool(getattr(self, 'enable_image_output_mode_var', False)):
             _init_mode = 'image'
         elif bool(getattr(self, 'enable_video_output_mode_var', False)):
             _init_mode = 'video'
+        elif bool(getattr(self, 'enable_audio_output_mode_var', self.config.get('enable_audio_output_mode', False))):
+            _init_mode = 'audio'
+        elif bool(getattr(self, 'enable_refinement_output_mode_var', self.config.get('enable_refinement_output_mode', False))):
+            _init_mode = 'refinement'
         elif bool(getattr(self, 'enable_image_translation_var', False)):
             _init_mode = 'vision'
         else:
@@ -9305,9 +9335,11 @@ def _create_image_translation_section(self, parent):
     rb_vision.setChecked(_init_mode == 'vision')
     rb_image.setChecked(_init_mode == 'image')
     rb_video.setChecked(_init_mode == 'video')
+    rb_audio.setChecked(_init_mode == 'audio')
+    rb_refinement.setChecked(_init_mode == 'refinement')
 
     mode_desc = QLabel(
-        "Text = normal · Vision = OCR from images · Image = image-gen · Video = video-gen"
+        "Text = normal · Vision = OCR from images · Image = image-gen · Video = video-gen · Audio = TTS · Refinement = improve output"
     )
     mode_desc.setStyleSheet("color: gray; font-size: 10pt;")
     mode_desc.setContentsMargins(0, 0, 0, 5)
@@ -9508,13 +9540,15 @@ def _create_image_translation_section(self, parent):
 
     def _on_mode_radio_toggled(btn):
         bid = mode_group.id(btn)
-        mode = {0: 'text', 1: 'vision', 2: 'image', 3: 'video'}.get(bid, 'text')
+        mode = {0: 'text', 1: 'vision', 2: 'image', 3: 'video', 4: 'audio', 5: 'refinement'}.get(bid, 'text')
         if btn.isChecked():
             self._set_output_mode(mode)
     rb_text.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_text) if checked else None)
     rb_vision.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_vision) if checked else None)
     rb_image.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_image) if checked else None)
     rb_video.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_video) if checked else None)
+    rb_audio.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_audio) if checked else None)
+    rb_refinement.toggled.connect(lambda checked: _on_mode_radio_toggled(rb_refinement) if checked else None)
 
     # Set initial visibility
     _update_output_mode_sub_settings(_init_mode)
@@ -10294,6 +10328,8 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     def _on_openai_url_changed(text):
         try:
             self.openai_base_url_var = text
+            if str(text).rstrip('/').endswith('/audio/speech'):
+                self.openai_tts_endpoint_var = text
             self._check_azure_endpoint()
         except Exception:
             pass
@@ -10304,6 +10340,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     self.openai_clear_button.setFixedWidth(80)
     def _clear_openai_url():
         self.openai_base_url_var = ""
+        self.openai_tts_endpoint_var = ""
         self.openai_base_url_entry.setText("")
     self.openai_clear_button.clicked.connect(_clear_openai_url)
     openai_h.addWidget(self.openai_clear_button)
@@ -10314,6 +10351,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     from PySide6.QtCore import QTimer
     _ollama_url = "http://localhost:11434/v1"
     _lmstudio_url = "http://localhost:1234/v1"
+    _tts_url = "http://localhost:8000/v1/audio/speech"
 
     help_row = QWidget()
     help_h = QHBoxLayout(help_row)
@@ -10336,6 +10374,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     def _dbl_click_ollama(event):
         self.openai_base_url_entry.setText(_ollama_url)
         self.openai_base_url_var = _ollama_url
+        self.openai_tts_endpoint_var = ""
         try:
             QGuiApplication.clipboard().setText(_ollama_url)
         except Exception:
@@ -10370,6 +10409,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     def _dbl_click_lmstudio(event):
         self.openai_base_url_entry.setText(_lmstudio_url)
         self.openai_base_url_var = _lmstudio_url
+        self.openai_tts_endpoint_var = ""
         try:
             QGuiApplication.clipboard().setText(_lmstudio_url)
         except Exception:
@@ -10387,6 +10427,40 @@ def _create_custom_api_endpoints_section(self, parent_frame):
             pass
     lmstudio_lbl.mouseDoubleClickEvent = _dbl_click_lmstudio
     help_h.addWidget(lmstudio_lbl)
+
+    sep2_lbl = QLabel("  |  ")
+    sep2_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+    help_h.addWidget(sep2_lbl)
+
+    tts_lbl = QLabel(f"TTS: <a href='#'>{_tts_url}</a>")
+    tts_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+    tts_lbl.setTextFormat(Qt.RichText)
+    tts_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+    tts_lbl.setOpenExternalLinks(False)
+    tts_lbl.setToolTip("Double-click to paste the OpenAI-compatible TTS endpoint")
+    _tts_orig_style = tts_lbl.styleSheet()
+    _tts_orig_text = tts_lbl.text()
+    def _dbl_click_tts(event):
+        self.openai_base_url_entry.setText(_tts_url)
+        self.openai_base_url_var = _tts_url
+        self.openai_tts_endpoint_var = _tts_url
+        try:
+            QGuiApplication.clipboard().setText(_tts_url)
+        except Exception:
+            pass
+        try:
+            tts_lbl.setStyleSheet(_tts_orig_style + " color: #00d084;")
+            tts_lbl.setTextFormat(Qt.PlainText)
+            tts_lbl.setText(f"✓ Pasted: {_tts_url}")
+            QTimer.singleShot(900, lambda: (
+                tts_lbl.setStyleSheet(_tts_orig_style),
+                tts_lbl.setTextFormat(Qt.RichText),
+                tts_lbl.setText(_tts_orig_text),
+            ))
+        except Exception:
+            pass
+    tts_lbl.mouseDoubleClickEvent = _dbl_click_tts
+    help_h.addWidget(tts_lbl)
 
     help_h.addStretch()
     section_v.addWidget(help_row)

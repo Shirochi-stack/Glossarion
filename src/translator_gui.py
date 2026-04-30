@@ -1943,6 +1943,7 @@ Text to analyze:
         
         # Initialize custom API endpoint variables
         self.openai_base_url_var = self.config.get('openai_base_url', '')
+        self.openai_tts_endpoint_var = self.config.get('openai_tts_endpoint', '')
         self.groq_base_url_var = self.config.get('groq_base_url', '')
         self.fireworks_base_url_var = self.config.get('fireworks_base_url', '')
         self.use_custom_openai_endpoint_var = self.config.get('use_custom_openai_endpoint', False)
@@ -3304,6 +3305,14 @@ Recent translations to summarize:
             or getattr(self, 'enable_video_output_mode_var', False)
         )
 
+    def _get_output_mode(self) -> str:
+        """Return the normalized output mode selected in the UI/config."""
+        try:
+            mode = str(getattr(self, 'output_mode_var', None) or self.config.get('output_mode', 'text')).lower().strip()
+        except Exception:
+            mode = 'text'
+        return mode if mode in ('text', 'vision', 'image', 'video', 'audio', 'refinement') else 'text'
+
     def _get_allowed_image_output_mode(self):
         """Check if image output mode should be enabled based on dependencies.
         Returns '1' if allowed and enabled, '0' otherwise.
@@ -3447,6 +3456,8 @@ Recent translations to summarize:
             ('single_api_image_chunks_var', 'single_api_image_chunks', False),
             ('enable_image_output_mode_var', 'enable_image_output_mode', False),
             ('enable_video_output_mode_var', 'enable_video_output_mode', False),
+            ('enable_audio_output_mode_var', 'enable_audio_output_mode', False),
+            ('enable_refinement_output_mode_var', 'enable_refinement_output_mode', False),
             ('enable_streaming_var', 'enable_streaming', False),
             # Preserve streaming logs during batch mode; must be initialized here so save_config
             # keeps the user's choice even if the Other Settings dialog is never opened.
@@ -8216,15 +8227,17 @@ Recent translations to summarize:
 
         # ── Output mode dropdown (synced with Other Settings radio buttons) ──
         self._output_mode_combo = QComboBox()
-        self._output_mode_combo.addItems(["📝Text", "👁️Vision", "🖼️Image", "🎬Video"])
-        self._output_mode_combo.setFixedWidth(60)
+        self._output_mode_combo.addItems(["📝Text", "👁️Vision", "🖼️Image", "🎬Video", "🔊Audio", "✨Refine"])
+        self._output_mode_combo.setFixedWidth(78)
         self._output_mode_combo.setToolTip(
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
             "<b>Output Mode</b><br>"
             "📝 Text – Normal text translation<br>"
             "👁️ Vision – Translate text from images (OCR)<br>"
             "🖼️ Image – Image generation output<br>"
-            "🎬 Video – Video generation output<br><br>"
+            "🎬 Video – Video generation output<br>"
+            "🔊 Audio – Generate TTS audio from translated output<br>"
+            "✨ Refinement – Improve existing translated output<br><br>"
             "Synced with Other Settings → Image Translation section."
             "</p></qt>"
         )
@@ -8257,20 +8270,24 @@ Recent translations to summarize:
 
         # Set initial value from config
         _init_mode = self.config.get('output_mode', 'text')
-        if _init_mode not in ('text', 'vision', 'image', 'video'):
+        if _init_mode not in ('text', 'vision', 'image', 'video', 'audio', 'refinement'):
             if self.config.get('enable_image_output_mode', False):
                 _init_mode = 'image'
             elif self.config.get('enable_video_output_mode', False):
                 _init_mode = 'video'
+            elif self.config.get('enable_audio_output_mode', False):
+                _init_mode = 'audio'
+            elif self.config.get('enable_refinement_output_mode', False):
+                _init_mode = 'refinement'
             elif self.config.get('enable_image_translation', False):
                 _init_mode = 'vision'
             else:
                 _init_mode = 'text'
-        _mode_idx = {'text': 0, 'vision': 1, 'image': 2, 'video': 3}.get(_init_mode, 0)
+        _mode_idx = {'text': 0, 'vision': 1, 'image': 2, 'video': 3, 'audio': 4, 'refinement': 5}.get(_init_mode, 0)
         self._output_mode_combo.setCurrentIndex(_mode_idx)
 
         def _on_output_mode_combo_changed(index):
-            mode = {0: 'text', 1: 'vision', 2: 'image', 3: 'video'}.get(index, 'text')
+            mode = {0: 'text', 1: 'vision', 2: 'image', 3: 'video', 4: 'audio', 5: 'refinement'}.get(index, 'text')
             self._set_output_mode(mode)
         self._output_mode_combo.currentIndexChanged.connect(_on_output_mode_combo_changed)
 
@@ -13929,6 +13946,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'OPENROUTER_PREFERRED_PROVIDER': self.config.get('openrouter_preferred_provider', 'Auto'),
             # Custom API endpoints
             'OPENAI_CUSTOM_BASE_URL': self.openai_base_url_var if self.openai_base_url_var else '',
+            'OPENAI_TTS_ENDPOINT': getattr(self, 'openai_tts_endpoint_var', '') or (self.openai_base_url_var if str(self.openai_base_url_var).rstrip('/').endswith('/audio/speech') else ''),
             'GROQ_API_URL': self.groq_base_url_var if self.groq_base_url_var else '',
             'FIREWORKS_API_URL': self.fireworks_base_url_var if hasattr(self, 'fireworks_base_url_var') and self.fireworks_base_url_var else '',
             'USE_CUSTOM_OPENAI_ENDPOINT': '1' if self.use_custom_openai_endpoint_var else '0',
@@ -14419,6 +14437,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT'] = '1' if getattr(self, 'override_gemma_for_custom_endpoint_var', True) else '0'
                 os.environ['USE_CUSTOM_OPENAI_ENDPOINT'] = '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0'
                 os.environ['OPENAI_CUSTOM_BASE_URL'] = getattr(self, 'openai_base_url_var', '') or ''
+                os.environ['OPENAI_TTS_ENDPOINT'] = getattr(self, 'openai_tts_endpoint_var', '') or (getattr(self, 'openai_base_url_var', '') if str(getattr(self, 'openai_base_url_var', '')).rstrip('/').endswith('/audio/speech') else '')
                 os.environ['GROQ_API_URL'] = getattr(self, 'groq_base_url_var', '') or ''
                 os.environ['FIREWORKS_API_URL'] = getattr(self, 'fireworks_base_url_var', '') or ''
                 os.environ['FORCE_NATIVE_ANTHROPIC'] = '1' if getattr(self, 'force_native_anthropic_var', False) else '0'
@@ -15294,6 +15313,7 @@ Important rules:
                     'OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT': '1' if getattr(self, 'override_gemma_for_custom_endpoint_var', True) else '0',
                     'USE_CUSTOM_OPENAI_ENDPOINT': '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0',
                     'OPENAI_CUSTOM_BASE_URL': getattr(self, 'openai_base_url_var', '') or '',
+                    'OPENAI_TTS_ENDPOINT': getattr(self, 'openai_tts_endpoint_var', '') or (getattr(self, 'openai_base_url_var', '') if str(getattr(self, 'openai_base_url_var', '')).rstrip('/').endswith('/audio/speech') else ''),
                     'GROQ_API_URL': getattr(self, 'groq_base_url_var', '') or '',
                     'FIREWORKS_API_URL': getattr(self, 'fireworks_base_url_var', '') or '',
                     'FORCE_NATIVE_ANTHROPIC': '1' if getattr(self, 'force_native_anthropic_var', False) else '0',
@@ -21567,6 +21587,7 @@ Important rules:
                 ('assistant_prompt', ['assistant_prompt'], '', str),  # Optional assistant prefill
                 ('vertex_ai_location', ['vertex_location_entry', 'vertex_location_var'], 'global', str),
                 ('openai_base_url', ['openai_base_url_var'], '', str),
+                ('openai_tts_endpoint', ['openai_tts_endpoint_var'], '', str),
                 ('groq_base_url', ['groq_base_url_var'], '', str),
                 ('fireworks_base_url', ['fireworks_base_url_var'], '', str),
                 ('gemini_openai_endpoint', ['gemini_openai_endpoint_var'], 'generativelanguage.googleapis.com', str),
@@ -21593,6 +21614,9 @@ Important rules:
                 # Image output mode
                 ('enable_image_output_mode', ['enable_image_output_mode_var'], False, bool),
                 ('enable_video_output_mode', ['enable_video_output_mode_var'], False, bool),
+                ('enable_audio_output_mode', ['enable_audio_output_mode_var'], False, bool),
+                ('enable_refinement_output_mode', ['enable_refinement_output_mode_var'], False, bool),
+                ('output_mode', ['output_mode_var'], 'text', str),
                 ('image_output_resolution', ['image_output_resolution_var'], '1K', str),
                 ('nanogpt_video_duration', ['nanogpt_video_duration_var'], '60', str),
                 ('nanogpt_video_resolution', ['nanogpt_video_resolution_var'], '720p', str),
@@ -22601,8 +22625,11 @@ Important rules:
                 # Watermark/image toggles
                 ('ENABLE_WATERMARK_REMOVAL', '1' if getattr(self, 'enable_watermark_removal_var', True) else '0'),
                 ('SAVE_CLEANED_IMAGES', '1' if getattr(self, 'save_cleaned_images_var', False) else '0'),
+                ('OUTPUT_MODE', self._get_output_mode()),
                 ('ENABLE_IMAGE_OUTPUT_MODE', self._get_allowed_image_output_mode()),
                 ('ENABLE_VIDEO_OUTPUT_MODE', self._get_allowed_video_output_mode()),
+                ('ENABLE_AUDIO_OUTPUT_MODE', '1' if self._get_output_mode() == 'audio' else '0'),
+                ('ENABLE_REFINEMENT_OUTPUT_MODE', '1' if self._get_output_mode() == 'refinement' else '0'),
                 # Normalize to uppercase so validation in unified_api_client accepts 1K/2K/4K
                 ('IMAGE_OUTPUT_RESOLUTION', str(getattr(self, 'image_output_resolution_var', '1K')).upper()),
                 ('NANOGPT_VIDEO_DURATION', str(getattr(self, 'nanogpt_video_duration_var', '60')) + 's'),
@@ -22636,6 +22663,7 @@ Important rules:
 
                 # Custom API endpoints
                 ('OPENAI_CUSTOM_BASE_URL', getattr(self, 'openai_base_url_var', '')),
+                ('OPENAI_TTS_ENDPOINT', getattr(self, 'openai_tts_endpoint_var', '') or (getattr(self, 'openai_base_url_var', '') if str(getattr(self, 'openai_base_url_var', '')).rstrip('/').endswith('/audio/speech') else '')),
                 ('GROQ_API_URL', getattr(self, 'groq_base_url_var', '')),
                 ('FIREWORKS_API_URL', getattr(self, 'fireworks_base_url_var', '')),
                 ('USE_CUSTOM_OPENAI_ENDPOINT', '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0'),

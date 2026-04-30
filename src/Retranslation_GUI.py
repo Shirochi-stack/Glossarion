@@ -2520,23 +2520,24 @@ class RetranslationMixin:
         container_layout.addWidget(stats_frame)
         
         # Calculate stats from the appropriate source
+        _stats_data = {'prog': prog}
         if spine_chapters:
             total_chapters = len(spine_chapters)
-            completed = sum(1 for ch in spine_chapters if ch['status'] == 'completed')
-            merged = sum(1 for ch in spine_chapters if ch['status'] == 'merged')
-            in_progress = sum(1 for ch in spine_chapters if ch['status'] == 'in_progress')
-            pending = sum(1 for ch in spine_chapters if ch['status'] == 'pending')
-            missing = sum(1 for ch in spine_chapters if ch['status'] == 'not_translated')
-            failed = sum(1 for ch in spine_chapters if ch['status'] in ['failed', 'qa_failed'])
+            completed = sum(1 for ch in spine_chapters if self._progress_display_status(ch, _stats_data) == 'completed')
+            merged = sum(1 for ch in spine_chapters if self._progress_display_status(ch, _stats_data) == 'merged')
+            in_progress = sum(1 for ch in spine_chapters if self._progress_display_status(ch, _stats_data) == 'in_progress')
+            pending = sum(1 for ch in spine_chapters if self._progress_display_status(ch, _stats_data) == 'pending')
+            missing = sum(1 for ch in spine_chapters if self._progress_display_status(ch, _stats_data) in ['not_translated', 'not_refined', 'no_tts'])
+            failed = sum(1 for ch in spine_chapters if self._progress_display_status(ch, _stats_data) in ['failed', 'qa_failed'])
         else:
             # For non-OPF files, calculate from chapter_display_info
             total_chapters = len(chapter_display_info)
-            completed = sum(1 for ch in chapter_display_info if ch['status'] == 'completed')
-            merged = sum(1 for ch in chapter_display_info if ch['status'] == 'merged')
-            in_progress = sum(1 for ch in chapter_display_info if ch['status'] == 'in_progress')
-            pending = sum(1 for ch in chapter_display_info if ch['status'] == 'pending')
-            missing = sum(1 for ch in chapter_display_info if ch['status'] == 'not_translated')
-            failed = sum(1 for ch in chapter_display_info if ch['status'] in ['failed', 'qa_failed'])
+            completed = sum(1 for ch in chapter_display_info if self._progress_display_status(ch, _stats_data) == 'completed')
+            merged = sum(1 for ch in chapter_display_info if self._progress_display_status(ch, _stats_data) == 'merged')
+            in_progress = sum(1 for ch in chapter_display_info if self._progress_display_status(ch, _stats_data) == 'in_progress')
+            pending = sum(1 for ch in chapter_display_info if self._progress_display_status(ch, _stats_data) == 'pending')
+            missing = sum(1 for ch in chapter_display_info if self._progress_display_status(ch, _stats_data) in ['not_translated', 'not_refined', 'no_tts'])
+            failed = sum(1 for ch in chapter_display_info if self._progress_display_status(ch, _stats_data) in ['failed', 'qa_failed'])
         
         # Create labels (outside the if/else so they always appear)
         stats_font = QFont('Arial', 10)
@@ -2578,7 +2579,8 @@ class RetranslationMixin:
             lbl_pending.setVisible(False)
         
         # Not Translated: unique emoji/color (distinct from failures)
-        lbl_missing = QLabel(f"⬜ Not Translated: {missing} | ")
+        _missing_label_text = "✨ Not Refined" if str(prog.get('output_mode', '')).lower() == 'refinement' else ("🔊 No TTS" if str(prog.get('output_mode', '')).lower() == 'audio' else "⬜ Not Translated")
+        lbl_missing = QLabel(f"{_missing_label_text}: {missing} | ")
         lbl_missing.setFont(stats_font)
         lbl_missing.setStyleSheet("color: #2b6cb0;")
         lbl_missing.setCursor(Qt.PointingHandCursor)
@@ -4402,6 +4404,33 @@ class RetranslationMixin:
         # Update data with rebuilt list
         data['chapter_display_info'] = chapter_display_info
     
+    def _progress_display_status(self, info, data=None):
+        """Derive the status shown in Progress Manager for post-processing modes."""
+        status = info.get('status', 'unknown')
+        entry = info.get('progress_entry') or info.get('info') or {}
+        prog = (data or {}).get('prog') or {}
+        mode = str(prog.get('output_mode') or entry.get('output_mode') or '').lower().strip()
+
+        if status in ('failed', 'qa_failed', 'in_progress', 'pending', 'merged', 'not_translated'):
+            return status
+        if mode == 'refinement':
+            ref_status = str(entry.get('refinement_status') or 'not_refined').lower().strip()
+            if ref_status in ('failed', 'error'):
+                return 'failed'
+            if ref_status == 'in_progress':
+                return 'in_progress'
+            if ref_status not in ('refined', 'completed'):
+                return 'not_refined'
+        if mode == 'audio':
+            tts_status = str(entry.get('tts_status') or 'no_tts').lower().strip()
+            if tts_status in ('failed', 'error'):
+                return 'failed'
+            if tts_status == 'in_progress':
+                return 'in_progress'
+            if tts_status not in ('tts_completed', 'completed'):
+                return 'no_tts'
+        return status
+
     def _update_chapter_status_info(self, data):
         """Update chapter status information after refresh"""
         # Re-check file existence and update status for each chapter
@@ -4492,6 +4521,8 @@ class RetranslationMixin:
             'qa_failed': '❌',
             'in_progress': '🔄',
             'not_translated': '⬜',
+            'not_refined': '✨',
+            'no_tts': '🔊',
             'unknown': '❓'
         }
         
@@ -4502,6 +4533,8 @@ class RetranslationMixin:
             'qa_failed': 'QA Failed',
             'in_progress': 'In Progress',
             'not_translated': 'Not Translated',
+            'not_refined': 'Not Refined',
+            'no_tts': 'No TTS',
             'unknown': 'Unknown'
         }
         
@@ -4529,7 +4562,7 @@ class RetranslationMixin:
 
         def build_display(info, max_original_len, max_output_len):
             chapter_num = info['num']
-            status = info['status']
+            status = self._progress_display_status(info, data)
             output_file = info['output_file']
             icon = status_icons.get(status, '❓')
             status_label = status_labels.get(status, status)
@@ -4577,6 +4610,8 @@ class RetranslationMixin:
                 item.setForeground(QColor('red'))
             elif status == 'not_translated':
                 item.setForeground(QColor('#2b6cb0'))
+            elif status in ['not_refined', 'no_tts']:
+                item.setForeground(QColor('#8a63d2'))
             elif status == 'in_progress':
                 item.setForeground(QColor('orange'))
 
@@ -4596,7 +4631,7 @@ class RetranslationMixin:
                 if not item:
                     continue
                 item.setText(build_display(info, max_original_len, max_output_len))
-                apply_item_visuals(item, info['status'])
+                apply_item_visuals(item, self._progress_display_status(info, data))
                 is_special = info.get('is_special', False)
                 item.setData(Qt.UserRole, {'is_special': is_special, 'info': info, 'progress_key': info.get('progress_key')})
                 item.setHidden(is_special and not show_special_files)
@@ -4609,7 +4644,7 @@ class RetranslationMixin:
                 if idx % 120 == 0:
                     self._ui_yield()
                 item = QListWidgetItem(build_display(info, max_original_len, max_output_len))
-                apply_item_visuals(item, info['status'])
+                apply_item_visuals(item, self._progress_display_status(info, data))
                 is_special = info.get('is_special', False)
                 item.setData(Qt.UserRole, {'is_special': is_special, 'info': info, 'progress_key': info.get('progress_key')})
                 item.setHidden(is_special and not show_special_files)
@@ -4640,7 +4675,7 @@ class RetranslationMixin:
                             labels['in_progress'] = child
                         elif text.startswith('❓ Pending:'):
                             labels['pending'] = child
-                        elif text.startswith('⬜ Not Translated:'):
+                        elif text.startswith('⬜ Not Translated:') or text.startswith('✨ Not Refined:') or text.startswith('🔊 No TTS:'):
                             labels['missing'] = child
                         elif text.startswith('❌ Failed:'):
                             labels['failed'] = child
@@ -4655,12 +4690,13 @@ class RetranslationMixin:
             # Recalculate statistics from chapter_display_info (works for both OPF and non-OPF)
             chapter_display_info = data.get('chapter_display_info', [])
             total_chapters = len(chapter_display_info)
-            completed = sum(1 for info in chapter_display_info if info['status'] == 'completed')
-            merged = sum(1 for info in chapter_display_info if info['status'] == 'merged')
-            in_progress = sum(1 for info in chapter_display_info if info['status'] == 'in_progress')
-            pending = sum(1 for info in chapter_display_info if info['status'] == 'pending')
-            missing = sum(1 for info in chapter_display_info if info['status'] == 'not_translated')
-            failed = sum(1 for info in chapter_display_info if info['status'] in ['failed', 'qa_failed'])
+            display_statuses = [self._progress_display_status(info, data) for info in chapter_display_info]
+            completed = sum(1 for status in display_statuses if status == 'completed')
+            merged = sum(1 for status in display_statuses if status == 'merged')
+            in_progress = sum(1 for status in display_statuses if status == 'in_progress')
+            pending = sum(1 for status in display_statuses if status == 'pending')
+            missing = sum(1 for status in display_statuses if status in ['not_translated', 'not_refined', 'no_tts'])
+            failed = sum(1 for status in display_statuses if status in ['failed', 'qa_failed'])
             
             # Update labels
             if 'total' in stats_labels:
@@ -4686,7 +4722,9 @@ class RetranslationMixin:
                 else:
                     stats_labels['pending'].setVisible(False)
             if 'missing' in stats_labels:
-                stats_labels['missing'].setText(f"⬜ Not Translated: {missing} | ")
+                mode = str(data.get('prog', {}).get('output_mode', '')).lower()
+                missing_label = "✨ Not Refined" if mode == 'refinement' else ("🔊 No TTS" if mode == 'audio' else "⬜ Not Translated")
+                stats_labels['missing'].setText(f"{missing_label}: {missing} | ")
             if 'failed' in stats_labels:
                 stats_labels['failed'].setText(f"❌ Failed: {failed} | ")
 
