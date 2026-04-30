@@ -596,6 +596,7 @@ class GlossaryManagerMixin:
                     ('glossary_json_output_checkbox', 'glossary_output_legacy_json_var'),
                     ('include_all_characters_checkbox', 'glossary_include_all_characters_var'),
                     ('skip_identical_entries_checkbox', 'glossary_skip_identical_entries_var'),
+                    ('skip_gender_tracking_checkbox', 'glossary_skip_gender_tracking_var'),
                 ]
                 
                 # Handle inverted logic for disable_smart_filtering_checkbox
@@ -647,6 +648,9 @@ class GlossaryManagerMixin:
                             self.config['glossary_include_all_characters'] = bool(checked)
                         elif checkbox_name == 'skip_identical_entries_checkbox':
                             self.config['glossary_skip_identical_entries'] = bool(checked)
+                        elif checkbox_name == 'skip_gender_tracking_checkbox':
+                            self.config['glossary_skip_gender_tracking'] = bool(checked)
+                            os.environ['GLOSSARY_SKIP_GENDER_TRACKING'] = '1' if checked else '0'
 
                 # If Append Glossary + Auto-load are enabled, auto-fill glossary selection/mapping
                 # (Skip if a glossary is already mapped — dialog is recreated each open)
@@ -2564,6 +2568,25 @@ Rules:
         gender_nuance_label = QLabel("(Prioritizes pronoun/honorific cues to improve gender assignment; adds a scoring pass)")
         gender_nuance_layout.addWidget(gender_nuance_label)
         gender_nuance_layout.addStretch()
+
+        # Optional tracker file toggle
+        skip_gender_tracking_widget = QWidget()
+        skip_gender_tracking_layout = QHBoxLayout(skip_gender_tracking_widget)
+        skip_gender_tracking_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(skip_gender_tracking_widget)
+
+        if not hasattr(self, 'skip_gender_tracking_checkbox'):
+            self.skip_gender_tracking_checkbox = self._create_styled_checkbox("Skip Gender Tracking")
+            self.skip_gender_tracking_checkbox.setChecked(self.config.get('glossary_skip_gender_tracking', False))
+        self.skip_gender_tracking_checkbox.setToolTip(
+            "Do not create or use the *_gender_tracker.json sidecar file.\n"
+            "Gender entries still save normally in the glossary itself."
+        )
+        skip_gender_tracking_layout.addWidget(self.skip_gender_tracking_checkbox)
+
+        skip_gender_tracking_label = QLabel("(Disables the per-chapter gender tracker sidecar file)")
+        skip_gender_tracking_layout.addWidget(skip_gender_tracking_label)
+        skip_gender_tracking_layout.addStretch()
         
         # Include description column toggle (below gender context)
         description_widget = QWidget()

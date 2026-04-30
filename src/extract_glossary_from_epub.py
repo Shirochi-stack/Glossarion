@@ -1093,6 +1093,9 @@ def _gender_tracker_path_for_output(output_path: str) -> str:
         stem = os.path.join(os.path.dirname(stem), "gender")
     return f"{stem}_gender_tracker.json"
 
+def _gender_tracking_disabled() -> bool:
+    return os.getenv("GLOSSARY_SKIP_GENDER_TRACKING", "0").strip().lower() in ("1", "true", "yes", "on")
+
 def _load_gender_tracker(path: str) -> Dict:
     if not path or not os.path.exists(path):
         return {"version": 1, "entries": {}}
@@ -1126,7 +1129,7 @@ def _write_gender_tracker(path: str, tracker: Dict):
 def update_gender_tracker(entries: List[Dict], output_path: str, source_path: str = None,
                           chapter_index=None, chapter_num=None, chapter_file: str = None):
     """Record which chapter/file observed each gendered raw-name variant."""
-    if not entries or not output_path:
+    if _gender_tracking_disabled() or not entries or not output_path:
         return
     tracker_path = _gender_tracker_path_for_output(output_path)
     source_path = source_path or os.getenv("EPUB_PATH", "")
@@ -1196,7 +1199,7 @@ def update_gender_tracker(entries: List[Dict], output_path: str, source_path: st
 
 def sync_gender_tracker_with_glossary(glossary: List[Dict], output_path: str):
     """Keep tracker raw/translated names aligned with the final saved glossary."""
-    if not glossary or not output_path:
+    if _gender_tracking_disabled() or not glossary or not output_path:
         return
     tracker_path = _gender_tracker_path_for_output(output_path)
     if not os.path.exists(tracker_path):

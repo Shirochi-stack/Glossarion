@@ -226,6 +226,7 @@ def generate_glossary_async(output_dir, chapters, instructions, extraction_worke
         'GLOSSARY_SKIP_ALL_VALIDATION', 'MODEL', 'API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY',
         'MAX_OUTPUT_TOKENS', 'GLOSSARY_TEMPERATURE', 'MANUAL_GLOSSARY', 'ENABLE_AUTO_GLOSSARY',
         'GLOSSARY_INCLUDE_BOOK_TITLE', 'EPUB_PATH', 'GLOSSARY_STOP_FILE',
+        'GLOSSARY_SKIP_GENDER_TRACKING',
         # Batching configuration
         'BATCHING_MODE', 'BATCH_GROUP_SIZE', 'CONSERVATIVE_BATCHING', 'BATCH_TRANSLATION', 'BATCH_SIZE',
         # Thinking parameters for Gemini 3/2.5

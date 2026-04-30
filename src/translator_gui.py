@@ -1692,6 +1692,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.glossary_include_all_characters_var = self.config.get('glossary_include_all_characters', False)
         # Skip identical entries toggle (translated_name == raw_name)
         self.glossary_skip_identical_entries_var = self.config.get('glossary_skip_identical_entries', True)
+        # Skip gender tracker sidecar generation/use
+        self.glossary_skip_gender_tracking_var = self.config.get('glossary_skip_gender_tracking', False)
         # Entry type filter mode
         self.glossary_entry_type_filter_mode_var = self.config.get('glossary_entry_type_filter_mode', 'none')
 
@@ -13837,6 +13839,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_FORMAT_INSTRUCTIONS': self.glossary_format_instructions if hasattr(self, 'glossary_format_instructions') else '',
             'GLOSSARY_USE_LEGACY_CSV': '1' if self.use_legacy_csv_var else '0',
             'GLOSSARY_OUTPUT_LEGACY_JSON': '1' if getattr(self, 'glossary_output_legacy_json_var', False) else '0',
+            'GLOSSARY_SKIP_GENDER_TRACKING': '1' if getattr(self, 'glossary_skip_gender_tracking_var', False) else '0',
             'GLOSSARY_CUSTOM_ENTRY_TYPES': json.dumps(getattr(self, 'custom_entry_types', self.config.get('custom_entry_types', {}))),
             'GLOSSARY_CUSTOM_FIELDS': json.dumps(getattr(self, 'custom_glossary_fields', self.config.get('custom_glossary_fields', []))),
             'OUTPUT_MODE': self._get_output_mode(),
@@ -15303,6 +15306,7 @@ Important rules:
                     'COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', getattr(self, 'compression_factor_var', 1.0))),
                     'GLOSSARY_INCLUDE_ALL_CHARACTERS': '1' if getattr(self, 'glossary_include_all_characters_var', False) else '0',
                     'GLOSSARY_SKIP_IDENTICAL_ENTRIES': '1' if getattr(self, 'glossary_skip_identical_entries_var', True) else '0',
+                    'GLOSSARY_SKIP_GENDER_TRACKING': '1' if getattr(self, 'glossary_skip_gender_tracking_var', False) else '0',
                     'USE_MAIN_KEY_FALLBACK': '1' if self.config.get('use_main_key_fallback', True) else '0',
                     'USE_FALLBACK_KEYS': '1' if getattr(self, 'use_fallback_keys_var', False) else '0',
                     'FALLBACK_KEY_SHUFFLE': '1' if self.config.get('fallback_key_shuffle', False) else '0',
@@ -21703,6 +21707,7 @@ Important rules:
                 ('glossary_output_legacy_json', ['glossary_output_legacy_json_var'], False, bool),
                 ('glossary_include_all_characters', ['glossary_include_all_characters_var'], False, bool),
                 ('glossary_skip_identical_entries', ['glossary_skip_identical_entries_var'], True, bool),
+                ('glossary_skip_gender_tracking', ['skip_gender_tracking_checkbox', 'glossary_skip_gender_tracking_var'], False, bool),
                 ('glossary_filter_mode', ['glossary_filter_mode_var'], 'strict', str),
                 ('scan_phase_mode', ['scan_phase_mode_var'], 'translate', str),
 
@@ -22030,6 +22035,7 @@ Important rules:
                     ('GLOSSARY_OUTPUT_LEGACY_JSON', '1' if self.config.get('glossary_output_legacy_json') else '0'),
                     ('GLOSSARY_INCLUDE_ALL_CHARACTERS', '1' if self.config.get('glossary_include_all_characters') else '0'),
                     ('GLOSSARY_SKIP_IDENTICAL_ENTRIES', '1' if self.config.get('glossary_skip_identical_entries', True) else '0'),
+                    ('GLOSSARY_SKIP_GENDER_TRACKING', '1' if self.config.get('glossary_skip_gender_tracking', False) else '0'),
                     ('GLOSSARY_USE_SMART_FILTER', '1' if self.config.get('glossary_use_smart_filter', True) else '0'),
                     ('GLOSSARY_MAX_SENTENCES', str(self.config.get('glossary_max_sentences', 200))),
                     ('COMPRESS_GLOSSARY_PROMPT', '1' if self.config.get('compress_glossary_prompt') else '0'),

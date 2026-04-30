@@ -80,6 +80,8 @@ def _gender_tracker_path_for_glossary(glossary_path):
 
 
 def _load_gender_tracker(glossary_path):
+    if str(os.getenv("GLOSSARY_SKIP_GENDER_TRACKING", "0")).strip().lower() in ("1", "true", "yes", "on"):
+        return None
     tracker_path = _gender_tracker_path_for_glossary(glossary_path)
     if not tracker_path or not os.path.exists(tracker_path):
         return None
