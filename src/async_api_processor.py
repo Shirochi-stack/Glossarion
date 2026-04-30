@@ -3285,6 +3285,13 @@ class AsyncProcessingDialog:
         env_vars['AUTO_GLOSSARY_MODE'] = auto_glossary_mode
         env_vars['SINGLE_PASS_GLOSSARY_MODE'] = '1' if auto_glossary_mode == 'single_pass' else ''
         env_vars['SINGLE_PASS_GLOSSARY_HEADER_PROMPT'] = self.gui.config.get('single_pass_glossary_header_prompt', '')
+        env_vars['GLOSSARY_CUSTOM_ENTRY_TYPES'] = json.dumps(
+            getattr(self.gui, 'custom_entry_types', self.gui.config.get('custom_entry_types', {}))
+        )
+        env_vars['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(
+            getattr(self.gui, 'custom_glossary_fields', self.gui.config.get('custom_glossary_fields', []))
+        )
+        env_vars['GLOSSARY_ENTRY_TYPE_FILTER_MODE'] = self.gui.config.get('glossary_entry_type_filter_mode', 'none')
         env_vars['GLOSSARY_MIN_FREQUENCY'] = _val(self.gui.glossary_min_frequency_var, 0)
         env_vars['GLOSSARY_MAX_NAMES'] = _val(self.gui.glossary_max_names_var, 0)
         env_vars['GLOSSARY_MAX_TITLES'] = _val(self.gui.glossary_max_titles_var, 0)

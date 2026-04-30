@@ -6881,7 +6881,7 @@ def find_glossary_file(output_dir):
                 ext_l = ext.lower()
                 if ext_l not in ext_priority:
                     continue
-                if "progress" in stem_cf or "dedup_report" in stem_cf:
+                if "progress" in stem_cf:
                     continue
                 if preferred and stem_cf in preferred:
                     direct.append((preferred.index(stem_cf), ext_priority.index(ext_l), full))
@@ -7001,6 +7001,10 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
         try:
             import extract_glossary_from_epub as glossary_extractor
             glossary_dir, json_path, csv_path, progress_path = _single_pass_glossary_paths(output_dir)
+            original_progress_file = getattr(glossary_extractor, "PROGRESS_FILE", None)
+            glossary_extractor.PROGRESS_FILE = progress_path
+            progress = glossary_extractor.load_progress()
+
             parsed = glossary_extractor.parse_api_response(glossary_block)
             valid = []
             for entry in parsed:
@@ -7013,12 +7017,11 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
                 return 0
 
             existing = glossary_extractor._load_glossary_file(csv_path)
-            combined = existing + valid
+            progress_existing = progress.get("glossary", []) if isinstance(progress, dict) else []
+            json_existing = glossary_extractor._load_glossary_file(json_path)
+            combined = existing + progress_existing + json_existing + valid
             deduped = glossary_extractor.skip_duplicate_entries(combined, output_dir=glossary_dir)
 
-            original_progress_file = getattr(glossary_extractor, "PROGRESS_FILE", None)
-            glossary_extractor.PROGRESS_FILE = progress_path
-            progress = glossary_extractor.load_progress()
             completed = list(progress.get("completed", []))
             if chapter_num is not None and chapter_num not in completed:
                 completed.append(chapter_num)
@@ -7041,6 +7044,8 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
             try:
                 if original_progress_file is not None:
                     glossary_extractor.PROGRESS_FILE = original_progress_file
+                elif "glossary_extractor" in locals() and hasattr(glossary_extractor, "PROGRESS_FILE"):
+                    delattr(glossary_extractor, "PROGRESS_FILE")
             except Exception:
                 pass
 
@@ -11615,6 +11620,7 @@ def main(log_callback=None, stop_callback=None):
                         'MAX_OUTPUT_TOKENS', 'GLOSSARY_TEMPERATURE', 'MANUAL_GLOSSARY', 'ENABLE_AUTO_GLOSSARY',
                         'GLOSSARY_DUPLICATE_ALGORITHM', 'GLOSSARY_INCLUDE_GENDER_CONTEXT', 'GLOSSARY_CONTEXT_WINDOW',
                         'GLOSSARY_INCLUDE_BOOK_TITLE', 'EPUB_PATH',
+                        'GLOSSARY_CUSTOM_ENTRY_TYPES', 'GLOSSARY_CUSTOM_FIELDS', 'GLOSSARY_ENTRY_TYPE_FILTER_MODE',
                         # Match GUI batching settings
                         'BATCH_TRANSLATION', 'BATCH_SIZE', 'BATCHING_MODE', 'BATCH_GROUP_SIZE',
                         # Keep submission staggering consistent with GUI

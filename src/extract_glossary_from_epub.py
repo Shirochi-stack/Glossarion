@@ -2476,12 +2476,12 @@ def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):
     
     Args:
         glossary: List of entry dicts with 'raw_name', 'translated_name', etc.
-        dry_run: If True, return (original_entries, dedup_report) without modifying the list.
-        output_dir: If provided, write dedup_report.json to this directory.
+        dry_run: If True, return (original_entries, dedup_log) without modifying the list.
+        output_dir: Accepted for caller compatibility; no report file is written.
     
     Returns:
         list: Deduplicated entries (when dry_run=False)
-        tuple: (original_entries, dedup_report) when dry_run=True
+        tuple: (original_entries, dedup_log) when dry_run=True
     """
     # Try to use RapidFuzz for speed, fallback to difflib
     try:
@@ -2538,26 +2538,6 @@ def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):
     
     total_removed = original_count - len(final_results)
     print(f"[Dedup] ✨ Deduplication complete: {total_removed} total duplicates removed, {len(final_results)} unique entries kept")
-    
-    # Write structured dedup report if output_dir provided
-    if output_dir and dedup_log:
-        try:
-            report_path = os.path.join(output_dir, "dedup_report.json")
-            report = {
-                "original_count": original_count,
-                "final_count": len(final_results),
-                "total_removed": total_removed,
-                "pass1_removed": pass1_removed,
-                "pass2_removed": total_removed - pass1_removed,
-                "threshold": fuzzy_threshold,
-                "algorithm_mode": algo_mode,
-                "decisions": dedup_log,
-            }
-            with open(report_path, "w", encoding="utf-8") as f:
-                json.dump(report, f, ensure_ascii=False, indent=2)
-            print(f"[Dedup] 📄 Dedup report written to {report_path}")
-        except Exception as e:
-            print(f"[Dedup] ⚠️ Could not write dedup report: {e}")
     
     if dry_run:
         return glossary, dedup_log
@@ -2725,7 +2705,6 @@ def _parse_token_efficient_glossary(text: str) -> List[Dict]:
 
     header_cols = ['translated_name', 'raw_name', 'gender', 'description']
     section_re = re.compile(r"^===\s*(.+?)\s*===\s*$")
-    line_re = re.compile(r"^\*\s+(.*?)\s*(?:\((.*?)\))?\s*(?:\[(.*?)\])?\s*(?::\s*(.*))?$")
     entries: List[Dict] = []
     current_section = None
 
@@ -2736,6 +2715,66 @@ def _parse_token_efficient_glossary(text: str) -> List[Dict]:
         type_map[t.lower()] = t
         if not t.lower().endswith('s'):
             type_map[f"{t.lower()}s"] = t
+
+    def _split_custom_field_parts(field_text: str, known_fields: list) -> dict:
+        values = {}
+        if not field_text or not known_fields:
+            return values
+        known_by_lower = {str(f).strip().lower(): str(f).strip() for f in known_fields if str(f).strip()}
+        for part in re.split(r",\s*(?=[^,]+?:)", field_text):
+            if ":" not in part:
+                continue
+            key, value = part.split(":", 1)
+            key_l = key.strip().lower()
+            if key_l in known_by_lower:
+                values[known_by_lower[key_l]] = value.strip()
+        return values
+
+    def _parse_token_line(line: str, extra_cols: list):
+        body = line[2:].strip()
+        custom_values = {}
+
+        # Custom-only writer form:
+        #   * Translated (Raw) [gender] (Field: value)
+        custom_tail = re.search(r"\s+\(([^()]*)\)\s*$", body)
+        if custom_tail:
+            parsed_custom = _split_custom_field_parts(custom_tail.group(1), extra_cols)
+            if parsed_custom:
+                custom_values.update(parsed_custom)
+                body = body[:custom_tail.start()].rstrip()
+
+        desc = ""
+        desc_match = re.match(r"^(?P<head>.*\)\s*(?:\[[^\]]*\])?)\s*:\s*(?P<desc>.*)$", body)
+        if desc_match:
+            head = desc_match.group("head").rstrip()
+            desc = (desc_match.group("desc") or "").strip()
+        else:
+            head = body
+
+        gender = ""
+        gender_match = re.search(r"\s*\[([^\]]*)\]\s*$", head)
+        if gender_match:
+            gender = (gender_match.group(1) or "").strip()
+            head = head[:gender_match.start()].rstrip()
+
+        name_match = re.match(r"^(?P<translated>.*)\s+\((?P<raw>.*?)\)\s*$", head)
+        if not name_match:
+            return None
+
+        translated = (name_match.group("translated") or "").strip()
+        raw_name = (name_match.group("raw") or "").strip()
+
+        # Writer form with description plus custom fields:
+        #   : description text (Field: value)
+        if desc and extra_cols:
+            desc_custom_tail = re.search(r"\s+\(([^()]*)\)\s*$", desc)
+            if desc_custom_tail:
+                parsed_custom = _split_custom_field_parts(desc_custom_tail.group(1), extra_cols)
+                if parsed_custom:
+                    custom_values.update(parsed_custom)
+                    desc = desc[:desc_custom_tail.start()].strip()
+
+        return translated, raw_name, gender, desc, custom_values
 
     for raw_line in lines:
         line = raw_line.strip()
@@ -2760,14 +2799,13 @@ def _parse_token_efficient_glossary(text: str) -> List[Dict]:
         # Entry line
         if not line.startswith("* "):
             continue
-        m = line_re.match(line)
-        if not m:
+
+        standard_cols = {"translated_name", "raw_name", "gender", "description"}
+        extra_cols = [c for c in header_cols if str(c).strip().lower() not in standard_cols]
+        parsed_line = _parse_token_line(line, extra_cols)
+        if not parsed_line:
             continue
-        translated, raw_name, gender_field, desc = m.groups()
-        translated = (translated or "").strip()
-        raw_name = (raw_name or "").strip()
-        desc = (desc or "").strip()
-        gender = (gender_field or "").strip()
+        translated, raw_name, gender, desc, custom_values = parsed_line
 
         entry = {
             "type": type_map.get((current_section or "").lower(), type_map.get("terms", "terms")),
@@ -2778,19 +2816,9 @@ def _parse_token_efficient_glossary(text: str) -> List[Dict]:
             entry["gender"] = gender
         if desc:
             entry["description"] = desc
-
-        # Extra columns beyond the standard four
-        extra_cols = header_cols[4:] if len(header_cols) > 4 else []
-        if extra_cols and desc and " | " in desc:
-            desc_main, *extra_parts = desc.split(" | ")
-            entry["description"] = desc_main
-            for part in extra_parts:
-                if ":" in part:
-                    k, v = part.split(":", 1)
-                    k = k.strip()
-                    v = v.strip()
-                    if k in extra_cols:
-                        entry[k] = v
+        for k, v in custom_values.items():
+            if v:
+                entry[k] = v
 
         entries.append(entry)
 
@@ -2806,6 +2834,18 @@ def _load_glossary_file(path: str) -> List[Dict]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             text = f.read()
+        if path.lower().endswith(".json"):
+            try:
+                data = json.loads(text)
+                if isinstance(data, list):
+                    print(f"📂 Loaded JSON glossary: {len(data)} entries")
+                    return [entry for entry in data if isinstance(entry, dict)]
+                if isinstance(data, dict) and isinstance(data.get("glossary"), list):
+                    entries = [entry for entry in data.get("glossary", []) if isinstance(entry, dict)]
+                    print(f"📂 Loaded JSON glossary: {len(entries)} entries")
+                    return entries
+            except Exception:
+                pass
         token_entries = _parse_token_efficient_glossary(text)
         if token_entries:
             print(f"📂 Loaded token-efficient glossary: {len(token_entries)} entries")
