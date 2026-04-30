@@ -1110,6 +1110,77 @@ def _load_gender_tracker(path: str) -> Dict:
         pass
     return {"version": 1, "entries": {}}
 
+def _tracker_int(value, fallback=10**9):
+    try:
+        if value is None or value == "":
+            return fallback
+        return int(value)
+    except Exception:
+        return fallback
+
+def _tracker_occurrence_sort_key(occurrence: Dict):
+    chapter_file = str(occurrence.get("chapter_file", "") or "")
+    file_num_match = re.search(r"(\d+)", chapter_file)
+    file_num = int(file_num_match.group(1)) if file_num_match else 10**9
+    return (
+        _tracker_int(occurrence.get("chapter_index")),
+        _tracker_int(occurrence.get("chapter_num")),
+        file_num,
+        chapter_file,
+        str(occurrence.get("gender", "") or ""),
+    )
+
+def _normalize_gender_tracker_order(tracker: Dict):
+    if not isinstance(tracker, dict):
+        return tracker
+    entries = tracker.get("entries", {})
+    if not isinstance(entries, dict):
+        return tracker
+
+    def first_occurrence_key(item):
+        occurrences = item.get("occurrences", []) if isinstance(item, dict) else []
+        occurrences = [o for o in occurrences if isinstance(o, dict)]
+        return _tracker_occurrence_sort_key(occurrences[0]) if occurrences else (10**9, 10**9, 10**9, "", "")
+
+    normalized_entries = []
+    for key, item in entries.items():
+        if not isinstance(item, dict):
+            normalized_entries.append((key, item))
+            continue
+        occurrences = [o for o in item.get("occurrences", []) if isinstance(o, dict)]
+        occurrences.sort(key=_tracker_occurrence_sort_key)
+        item["occurrences"] = occurrences
+
+        changes = []
+        previous = None
+        for occurrence in occurrences:
+            if previous and previous.get("gender") != occurrence.get("gender"):
+                changes.append({
+                    "from": previous.get("gender"),
+                    "to": occurrence.get("gender"),
+                    "chapter_index": occurrence.get("chapter_index"),
+                    "chapter_num": occurrence.get("chapter_num"),
+                    "chapter_file": occurrence.get("chapter_file", ""),
+                })
+            previous = occurrence
+        item["changes"] = changes
+
+        genders = item.setdefault("genders", {})
+        if isinstance(genders, dict):
+            for gender, meta in genders.items():
+                if not isinstance(meta, dict):
+                    continue
+                first = next((o for o in occurrences if o.get("gender") == gender), None)
+                if first:
+                    meta["first_seen_chapter"] = first.get("chapter_num")
+                    meta["first_seen_file"] = first.get("chapter_file", "")
+
+        normalized_entries.append((key, item))
+
+    normalized_entries.sort(key=lambda pair: (first_occurrence_key(pair[1]), str(pair[0])))
+    tracker["entries"] = {key: item for key, item in normalized_entries}
+    return tracker
+
 def _write_gender_tracker(path: str, tracker: Dict):
     if not path or not isinstance(tracker, dict):
         return
@@ -1117,6 +1188,7 @@ def _write_gender_tracker(path: str, tracker: Dict):
         output_dir = os.path.dirname(path) or "."
         os.makedirs(output_dir, exist_ok=True)
         tracker["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        tracker = _normalize_gender_tracker_order(tracker)
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output_dir, delete=False, suffix=".tmp") as temp_f:
             temp_path = temp_f.name
             json.dump(tracker, temp_f, ensure_ascii=False, indent=2)
