@@ -1071,6 +1071,20 @@ def _entry_type_has_gender(entry: Dict) -> bool:
     except Exception:
         return str(entry.get("type", "")).strip().lower() == "character"
 
+def _entry_type_is_active(entry: Dict) -> bool:
+    try:
+        custom_types = get_custom_entry_types()
+        entry_type = str(entry.get("type", "character")).strip()
+        cfg = custom_types.get(entry_type)
+        if cfg is None:
+            return entry_type.strip().lower() in {"character", "term", "terms"}
+        return bool(cfg.get("enabled", True))
+    except Exception:
+        return True
+
+def _entry_type_has_active_gender(entry: Dict) -> bool:
+    return _entry_type_is_active(entry) and _entry_type_has_gender(entry)
+
 def _entry_gender(entry: Dict) -> str:
     return _normalize_gender_value(entry.get("gender", ""))
 
@@ -1101,6 +1115,14 @@ def _partial_ratio_gender_only() -> bool:
 
 def _alias_aware_name_matching_enabled() -> bool:
     return os.getenv("GLOSSARY_ALIAS_AWARE_NAME_MATCHING", "0").strip().lower() in ("1", "true", "yes", "on")
+
+def _alias_aware_gender_only() -> bool:
+    return os.getenv("GLOSSARY_ALIAS_AWARE_GENDER_ONLY", "1").strip().lower() in ("1", "true", "yes", "on")
+
+def _alias_entry_allowed(entry: Dict) -> bool:
+    if _alias_aware_gender_only():
+        return _entry_type_has_active_gender(entry)
+    return _entry_type_is_active(entry)
 
 def _load_gender_tracker(path: str) -> Dict:
     if not path or not os.path.exists(path):
@@ -1350,7 +1372,7 @@ def _alias_min_len(key: str) -> int:
     return 4 if key and all(ord(ch) < 128 for ch in key) else 2
 
 def _raw_alias_relation(existing_entry: Dict, new_entry: Dict):
-    if not (_alias_aware_name_matching_enabled() and _entry_type_has_gender(existing_entry) and _entry_type_has_gender(new_entry)):
+    if not (_alias_aware_name_matching_enabled() and _alias_entry_allowed(existing_entry) and _alias_entry_allowed(new_entry)):
         return None
     existing_raw = _alias_raw_key(existing_entry.get("raw_name"))
     new_raw = _alias_raw_key(new_entry.get("raw_name"))
@@ -1417,7 +1439,7 @@ def _align_alias_variant_translation(existing_entry: Dict, new_entry: Dict) -> b
 def _harmonize_alias_name_translations(glossary: List[Dict]) -> List[Dict]:
     if not _alias_aware_name_matching_enabled():
         return glossary
-    entries = [e for e in glossary or [] if isinstance(e, dict) and _entry_type_has_gender(e)]
+    entries = [e for e in glossary or [] if isinstance(e, dict) and _alias_entry_allowed(e)]
     for i, entry in enumerate(entries):
         for other in entries[i + 1:]:
             _align_alias_variant_translation(entry, other)
@@ -3032,8 +3054,8 @@ def _skip_raw_name_duplicates_matrix(glossary, fuzzy_threshold):
                         
                         compare_config = config
                         if _partial_ratio_gender_only() and not (
-                            _entry_type_has_gender(processed[idx1][0])
-                            and _entry_type_has_gender(processed[idx2][0])
+                            _entry_type_has_active_gender(processed[idx1][0])
+                            and _entry_type_has_active_gender(processed[idx2][0])
                         ):
                             compare_config = dict(config)
                             compare_config["algorithms"] = [a for a in config.get("algorithms", []) if a != "partial"]
@@ -3056,8 +3078,8 @@ def _skip_raw_name_duplicates_matrix(glossary, fuzzy_threshold):
                         
                         compare_config = config
                         if _partial_ratio_gender_only() and not (
-                            _entry_type_has_gender(processed[idx1][0])
-                            and _entry_type_has_gender(processed[idx2][0])
+                            _entry_type_has_active_gender(processed[idx1][0])
+                            and _entry_type_has_active_gender(processed[idx2][0])
                         ):
                             compare_config = dict(config)
                             compare_config["algorithms"] = [a for a in config.get("algorithms", []) if a != "partial"]
@@ -3338,8 +3360,8 @@ def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, us
                 seen_entry = seen_item[2] if len(seen_item) > 2 else None
                 compare_config = config
                 if _partial_ratio_gender_only() and not (
-                    _entry_type_has_gender(current_entry)
-                    and _entry_type_has_gender(seen_entry)
+                    _entry_type_has_active_gender(current_entry)
+                    and _entry_type_has_active_gender(seen_entry)
                 ):
                     compare_config = dict(config)
                     compare_config["algorithms"] = [a for a in config.get("algorithms", []) if a != "partial"]
@@ -3494,9 +3516,9 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
 
         # Check for fuzzy matches with seen names
         alias_matched = False
-        if _alias_aware_name_matching_enabled() and _entry_type_has_gender(entry):
+        if _alias_aware_name_matching_enabled() and _alias_entry_allowed(entry):
             for existing_idx, existing_entry in enumerate(deduplicated):
-                if not _entry_type_has_gender(existing_entry):
+                if not _alias_entry_allowed(existing_entry):
                     continue
                 if _align_alias_variant_translation(existing_entry, entry):
                     alias_matched = True

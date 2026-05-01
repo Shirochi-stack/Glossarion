@@ -229,6 +229,7 @@ def generate_glossary_async(output_dir, chapters, instructions, extraction_worke
         'GLOSSARY_SKIP_GENDER_TRACKING',
         'GLOSSARY_GENDER_NOISE_THRESHOLD', 'GLOSSARY_GENDER_TRACKING_BIAS',
         'GLOSSARY_PARTIAL_RATIO_GENDER_ONLY', 'GLOSSARY_ALIAS_AWARE_NAME_MATCHING',
+        'GLOSSARY_ALIAS_AWARE_GENDER_ONLY',
         # Batching configuration
         'BATCHING_MODE', 'BATCH_GROUP_SIZE', 'CONSERVATIVE_BATCHING', 'BATCH_TRANSLATION', 'BATCH_SIZE',
         # Thinking parameters for Gemini 3/2.5

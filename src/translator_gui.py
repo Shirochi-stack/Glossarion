@@ -1698,6 +1698,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.glossary_gender_tracking_bias_var = self.config.get('glossary_gender_tracking_bias', 'none')
         self.glossary_partial_ratio_gender_only_var = self.config.get('glossary_partial_ratio_gender_only', False)
         self.glossary_alias_aware_name_matching_var = self.config.get('glossary_alias_aware_name_matching', False)
+        self.glossary_alias_aware_gender_only_var = self.config.get('glossary_alias_aware_gender_only', True)
         # Entry type filter mode
         self.glossary_entry_type_filter_mode_var = self.config.get('glossary_entry_type_filter_mode', 'none')
 
@@ -13848,6 +13849,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_GENDER_TRACKING_BIAS': str(getattr(self, 'glossary_gender_tracking_bias_var', self.config.get('glossary_gender_tracking_bias', 'none'))),
             'GLOSSARY_PARTIAL_RATIO_GENDER_ONLY': '1' if getattr(self, 'glossary_partial_ratio_gender_only_var', False) else '0',
             'GLOSSARY_ALIAS_AWARE_NAME_MATCHING': '1' if getattr(self, 'glossary_alias_aware_name_matching_var', False) else '0',
+            'GLOSSARY_ALIAS_AWARE_GENDER_ONLY': '1' if getattr(self, 'glossary_alias_aware_gender_only_var', True) else '0',
             'GLOSSARY_CUSTOM_ENTRY_TYPES': json.dumps(getattr(self, 'custom_entry_types', self.config.get('custom_entry_types', {}))),
             'GLOSSARY_CUSTOM_FIELDS': json.dumps(getattr(self, 'custom_glossary_fields', self.config.get('custom_glossary_fields', []))),
             'OUTPUT_MODE': self._get_output_mode(),
@@ -15319,6 +15321,7 @@ Important rules:
                     'GLOSSARY_GENDER_TRACKING_BIAS': str(getattr(self, 'glossary_gender_tracking_bias_var', self.config.get('glossary_gender_tracking_bias', 'none'))),
                     'GLOSSARY_PARTIAL_RATIO_GENDER_ONLY': '1' if getattr(self, 'glossary_partial_ratio_gender_only_var', False) else '0',
                     'GLOSSARY_ALIAS_AWARE_NAME_MATCHING': '1' if getattr(self, 'glossary_alias_aware_name_matching_var', False) else '0',
+                    'GLOSSARY_ALIAS_AWARE_GENDER_ONLY': '1' if getattr(self, 'glossary_alias_aware_gender_only_var', True) else '0',
                     'USE_MAIN_KEY_FALLBACK': '1' if self.config.get('use_main_key_fallback', True) else '0',
                     'USE_FALLBACK_KEYS': '1' if getattr(self, 'use_fallback_keys_var', False) else '0',
                     'FALLBACK_KEY_SHUFFLE': '1' if self.config.get('fallback_key_shuffle', False) else '0',
@@ -21928,6 +21931,10 @@ Important rules:
                 self.config['glossary_alias_aware_name_matching'] = bool(self.alias_aware_name_matching_checkbox.isChecked())
             elif hasattr(self, 'glossary_alias_aware_name_matching_var'):
                 self.config['glossary_alias_aware_name_matching'] = bool(self.glossary_alias_aware_name_matching_var)
+            if hasattr(self, 'alias_aware_gender_only_checkbox'):
+                self.config['glossary_alias_aware_gender_only'] = bool(self.alias_aware_gender_only_checkbox.isChecked())
+            elif hasattr(self, 'glossary_alias_aware_gender_only_var'):
+                self.config['glossary_alias_aware_gender_only'] = bool(self.glossary_alias_aware_gender_only_var)
             
             # Target language from combo box
             if hasattr(self, 'glossary_target_language_combo'):
@@ -22091,6 +22098,7 @@ Important rules:
                     ('GLOSSARY_PARTIAL_RATIO_WEIGHT', str(self.config.get('glossary_partial_ratio_weight', 0.45))),
                     ('GLOSSARY_PARTIAL_RATIO_GENDER_ONLY', '1' if self.config.get('glossary_partial_ratio_gender_only', False) else '0'),
                     ('GLOSSARY_ALIAS_AWARE_NAME_MATCHING', '1' if self.config.get('glossary_alias_aware_name_matching', False) else '0'),
+                    ('GLOSSARY_ALIAS_AWARE_GENDER_ONLY', '1' if self.config.get('glossary_alias_aware_gender_only', True) else '0'),
                     ('GLOSSARY_TARGET_LANGUAGE', self.config.get('glossary_target_language', 'English')),
                     # Glossary anti-duplicate parameters
                     ('GLOSSARY_ENABLE_ANTI_DUPLICATE', '1' if self.config.get('glossary_enable_anti_duplicate', False) else '0'),

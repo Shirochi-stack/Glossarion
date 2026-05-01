@@ -793,6 +793,11 @@ class GlossaryManagerMixin:
                     self.config['glossary_alias_aware_name_matching'] = alias_matching
                     self.glossary_alias_aware_name_matching_var = alias_matching
                     os.environ['GLOSSARY_ALIAS_AWARE_NAME_MATCHING'] = '1' if alias_matching else '0'
+                if hasattr(self, 'alias_aware_gender_only_checkbox'):
+                    alias_gender_only = self.alias_aware_gender_only_checkbox.isChecked()
+                    self.config['glossary_alias_aware_gender_only'] = alias_gender_only
+                    self.glossary_alias_aware_gender_only_var = alias_gender_only
+                    os.environ['GLOSSARY_ALIAS_AWARE_GENDER_ONLY'] = '1' if alias_gender_only else '0'
 
                 # Entry type filter mode
                 if hasattr(self, 'entry_type_filter_combo'):
@@ -1434,10 +1439,19 @@ class GlossaryManagerMixin:
             self.alias_aware_name_matching_checkbox = self._create_styled_checkbox("Alias-aware name matching")
             self.alias_aware_name_matching_checkbox.setChecked(self.config.get('glossary_alias_aware_name_matching', False))
         self.alias_aware_name_matching_checkbox.setToolTip(
-            "Uses raw-name containment to identify given-name/full-name aliases for active gendered entry types.\n"
+            "Uses raw-name containment to identify given-name/full-name aliases.\n"
             "Keeps both raw forms for glossary matching, but normalizes the shorter translated alias when the full name reveals the better romanization."
         )
         duplicate_frame_layout.addWidget(self.alias_aware_name_matching_checkbox)
+
+        if not hasattr(self, 'alias_aware_gender_only_checkbox'):
+            self.alias_aware_gender_only_checkbox = self._create_styled_checkbox("Limit alias-aware matching to gendered active types")
+            self.alias_aware_gender_only_checkbox.setChecked(self.config.get('glossary_alias_aware_gender_only', True))
+        self.alias_aware_gender_only_checkbox.setToolTip(
+            "When enabled, alias-aware matching only applies when both compared entries belong to active entry types with a gender field.\n"
+            "Disable this if you want raw-name alias matching for non-gendered active types too."
+        )
+        duplicate_frame_layout.addWidget(self.alias_aware_gender_only_checkbox)
         
         # Honorifics filter toggle
         if not hasattr(self, 'disable_honorifics_checkbox'):
