@@ -11368,6 +11368,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 if auto_glossary_mode is None:
                     # Backward compat: derive from old boolean
                     auto_glossary_mode = 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
+
+                current_output_mode = self._get_output_mode()
+                if current_output_mode == 'audio' and auto_glossary_mode in ('balanced', 'full'):
+                    self.append_log("📑 Skipping auto glossary extraction for Audio output mode")
+                    auto_glossary_mode = 'off'
                 
                 if auto_glossary_mode in ('balanced', 'full'):
                     # Check if a glossary was MANUALLY loaded by the user for this file

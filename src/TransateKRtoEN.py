@@ -11390,6 +11390,11 @@ def main(log_callback=None, stop_callback=None):
     print("\n" + "="*50)
     print("📑 GLOSSARY GENERATION PHASE")
     print("="*50)
+
+    if config.OUTPUT_MODE == "audio" and os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1":
+        os.environ["ENABLE_AUTO_GLOSSARY"] = "0"
+        os.environ["AUTO_GLOSSARY_MODE"] = "off"
+        print("📑 Skipping auto glossary extraction for Audio output mode")
     
     # Skip glossary generation for CSV/JSON/MD files (they are typically glossaries themselves)
     if input_path.lower().endswith(('.csv', '.json', '.md')):
