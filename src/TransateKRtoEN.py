@@ -11408,6 +11408,8 @@ def main(log_callback=None, stop_callback=None):
         print(f"📑 DEBUG: Skip gender tracking = '{os.getenv('GLOSSARY_SKIP_GENDER_TRACKING', '0')}'")
         print(f"📑 DEBUG: Gender noise slider = '{os.getenv('GLOSSARY_GENDER_NOISE_THRESHOLD', '10')}%'")
         print(f"📑 DEBUG: Gender tracking bias = '{os.getenv('GLOSSARY_GENDER_TRACKING_BIAS', 'none')}'")
+        print(f"📑 DEBUG: Partial ratio gender-only = '{os.getenv('GLOSSARY_PARTIAL_RATIO_GENDER_ONLY', '0')}'")
+        print(f"📑 DEBUG: Alias-aware name matching = '{os.getenv('GLOSSARY_ALIAS_AWARE_NAME_MATCHING', '0')}'")
         print(f"📑 DEBUG: Min frequency = '{os.getenv('GLOSSARY_MIN_FREQUENCY', '1')}'")
         print(f"📑 DEBUG: Max names = '{os.getenv('GLOSSARY_MAX_NAMES', '50')}'")
         print(f"📑 DEBUG: Max titles = '{os.getenv('GLOSSARY_MAX_TITLES', '50')}'")
@@ -11676,6 +11678,7 @@ def main(log_callback=None, stop_callback=None):
                         'GLOSSARY_CUSTOM_ENTRY_TYPES', 'GLOSSARY_CUSTOM_FIELDS', 'GLOSSARY_ENTRY_TYPE_FILTER_MODE',
                         'GLOSSARY_SKIP_GENDER_TRACKING',
                         'GLOSSARY_GENDER_NOISE_THRESHOLD', 'GLOSSARY_GENDER_TRACKING_BIAS',
+                        'GLOSSARY_PARTIAL_RATIO_GENDER_ONLY', 'GLOSSARY_ALIAS_AWARE_NAME_MATCHING',
                         # Match GUI batching settings
                         'BATCH_TRANSLATION', 'BATCH_SIZE', 'BATCHING_MODE', 'BATCH_GROUP_SIZE',
                         # Keep submission staggering consistent with GUI

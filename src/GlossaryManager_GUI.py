@@ -783,6 +783,16 @@ class GlossaryManagerMixin:
                     self.partial_ratio_weight = self.partial_ratio_slider.value() / 100.0
                     self.config['glossary_partial_ratio_weight'] = self.partial_ratio_weight
                     self.glossary_partial_ratio_weight_var = self.partial_ratio_weight
+                if hasattr(self, 'partial_ratio_gender_only_checkbox'):
+                    gender_only = self.partial_ratio_gender_only_checkbox.isChecked()
+                    self.config['glossary_partial_ratio_gender_only'] = gender_only
+                    self.glossary_partial_ratio_gender_only_var = gender_only
+                    os.environ['GLOSSARY_PARTIAL_RATIO_GENDER_ONLY'] = '1' if gender_only else '0'
+                if hasattr(self, 'alias_aware_name_matching_checkbox'):
+                    alias_matching = self.alias_aware_name_matching_checkbox.isChecked()
+                    self.config['glossary_alias_aware_name_matching'] = alias_matching
+                    self.glossary_alias_aware_name_matching_var = alias_matching
+                    os.environ['GLOSSARY_ALIAS_AWARE_NAME_MATCHING'] = '1' if alias_matching else '0'
 
                 # Entry type filter mode
                 if hasattr(self, 'entry_type_filter_combo'):
@@ -1410,6 +1420,24 @@ class GlossaryManagerMixin:
 
         self.partial_ratio_slider.valueChanged.connect(update_partial_ratio_label)
         update_partial_ratio_label(self.partial_ratio_slider.value())
+
+        if not hasattr(self, 'partial_ratio_gender_only_checkbox'):
+            self.partial_ratio_gender_only_checkbox = self._create_styled_checkbox("Limit substring matcher to gendered active types")
+            self.partial_ratio_gender_only_checkbox.setChecked(self.config.get('glossary_partial_ratio_gender_only', False))
+        self.partial_ratio_gender_only_checkbox.setToolTip(
+            "When enabled, the partial-ratio substring matcher only applies when both compared entries belong to active entry types with a gender field.\n"
+            "Other duplicate algorithms still run normally for terms, locations, items, and non-gendered custom types."
+        )
+        duplicate_frame_layout.addWidget(self.partial_ratio_gender_only_checkbox)
+
+        if not hasattr(self, 'alias_aware_name_matching_checkbox'):
+            self.alias_aware_name_matching_checkbox = self._create_styled_checkbox("Alias-aware name matching")
+            self.alias_aware_name_matching_checkbox.setChecked(self.config.get('glossary_alias_aware_name_matching', False))
+        self.alias_aware_name_matching_checkbox.setToolTip(
+            "Uses raw-name containment to identify given-name/full-name aliases for active gendered entry types.\n"
+            "Keeps both raw forms for glossary matching, but normalizes the shorter translated alias when the full name reveals the better romanization."
+        )
+        duplicate_frame_layout.addWidget(self.alias_aware_name_matching_checkbox)
         
         # Honorifics filter toggle
         if not hasattr(self, 'disable_honorifics_checkbox'):

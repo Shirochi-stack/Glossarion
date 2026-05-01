@@ -1096,6 +1096,12 @@ def _gender_tracker_path_for_output(output_path: str) -> str:
 def _gender_tracking_disabled() -> bool:
     return os.getenv("GLOSSARY_SKIP_GENDER_TRACKING", "0").strip().lower() in ("1", "true", "yes", "on")
 
+def _partial_ratio_gender_only() -> bool:
+    return os.getenv("GLOSSARY_PARTIAL_RATIO_GENDER_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
+
+def _alias_aware_name_matching_enabled() -> bool:
+    return os.getenv("GLOSSARY_ALIAS_AWARE_NAME_MATCHING", "0").strip().lower() in ("1", "true", "yes", "on")
+
 def _load_gender_tracker(path: str) -> Dict:
     if not path or not os.path.exists(path):
         return {"version": 1, "entries": {}}
@@ -1336,6 +1342,87 @@ def _is_exact_raw_gender_variant(existing_entry: Dict, new_entry: Dict) -> bool:
         and existing_gender != new_gender
     )
 
+def _alias_raw_key(value) -> str:
+    text = unicodedata.normalize('NFC', remove_honorifics(str(value or ""))).strip().casefold()
+    return re.sub(r"[\s\-_.'’·・・]+", "", text)
+
+def _alias_min_len(key: str) -> int:
+    return 4 if key and all(ord(ch) < 128 for ch in key) else 2
+
+def _raw_alias_relation(existing_entry: Dict, new_entry: Dict):
+    if not (_alias_aware_name_matching_enabled() and _entry_type_has_gender(existing_entry) and _entry_type_has_gender(new_entry)):
+        return None
+    existing_raw = _alias_raw_key(existing_entry.get("raw_name"))
+    new_raw = _alias_raw_key(new_entry.get("raw_name"))
+    if not existing_raw or not new_raw or existing_raw == new_raw:
+        return None
+    if len(existing_raw) < len(new_raw):
+        short_entry, long_entry = existing_entry, new_entry
+        short_key, long_key = existing_raw, new_raw
+    else:
+        short_entry, long_entry = new_entry, existing_entry
+        short_key, long_key = new_raw, existing_raw
+    if len(short_key) < _alias_min_len(short_key):
+        return None
+    if long_key.endswith(short_key):
+        position = "suffix"
+    elif long_key.startswith(short_key):
+        position = "prefix"
+    else:
+        return None
+    return short_entry, long_entry, position
+
+def _translation_similarity(a: str, b: str) -> float:
+    a_norm = re.sub(r"[^a-z0-9]+", "", str(a or "").casefold())
+    b_norm = re.sub(r"[^a-z0-9]+", "", str(b or "").casefold())
+    if not a_norm or not b_norm:
+        return 0.0
+    if a_norm == b_norm:
+        return 1.0
+    try:
+        from rapidfuzz import fuzz
+        return fuzz.ratio(a_norm, b_norm) / 100.0
+    except Exception:
+        import difflib
+        return difflib.SequenceMatcher(None, a_norm, b_norm).ratio()
+
+def _alias_tail_translation(long_translation: str, position: str) -> str:
+    text = str(long_translation or "").strip()
+    parts = [p for p in re.split(r"\s+", text) if p]
+    if len(parts) < 2:
+        return ""
+    if position == "suffix":
+        return " ".join(parts[1:]).strip()
+    if position == "prefix":
+        return " ".join(parts[:-1]).strip()
+    return ""
+
+def _align_alias_variant_translation(existing_entry: Dict, new_entry: Dict) -> bool:
+    relation = _raw_alias_relation(existing_entry, new_entry)
+    if not relation:
+        return False
+    short_entry, long_entry, position = relation
+    long_translation = str(long_entry.get("translated_name", "") or "").strip()
+    short_translation = str(short_entry.get("translated_name", "") or "").strip()
+    alias_translation = _alias_tail_translation(long_translation, position)
+    if not alias_translation:
+        return True
+    if short_translation and _translation_similarity(short_translation, alias_translation) < 0.60:
+        return True
+    if short_entry.get("translated_name") == alias_translation:
+        return True
+    short_entry["translated_name"] = alias_translation
+    return True
+
+def _harmonize_alias_name_translations(glossary: List[Dict]) -> List[Dict]:
+    if not _alias_aware_name_matching_enabled():
+        return glossary
+    entries = [e for e in glossary or [] if isinstance(e, dict) and _entry_type_has_gender(e)]
+    for i, entry in enumerate(entries):
+        for other in entries[i + 1:]:
+            _align_alias_variant_translation(entry, other)
+    return glossary
+
 def _harmonize_gender_variant_translations(glossary: List[Dict]) -> List[Dict]:
     groups = {}
     for entry in glossary or []:
@@ -1360,9 +1447,9 @@ def save_glossary_json(glossary: List[Dict], output_path: str):
     # Check if legacy JSON output is enabled (default disabled)
     if os.getenv('GLOSSARY_OUTPUT_LEGACY_JSON', '0') != '1':
         return
-    glossary = _harmonize_gender_variant_translations([
+    glossary = _harmonize_gender_variant_translations(_harmonize_alias_name_translations([
         _strip_private_glossary_keys(e) for e in _ensure_book_title_entry(glossary)
-    ])
+    ]))
 
     global _glossary_json_lock
     
@@ -1418,9 +1505,9 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
             except Exception:
                 pass
 
-        glossary = _harmonize_gender_variant_translations([
+        glossary = _harmonize_gender_variant_translations(_harmonize_alias_name_translations([
             _strip_private_glossary_keys(e) for e in _ensure_book_title_entry(glossary)
-        ])
+        ]))
         custom_types = get_custom_entry_types()
         type_order = {'book': -1, 'character': 0, 'term': 1}
         other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
@@ -2854,7 +2941,7 @@ def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):
         print(f"[Dedup] ⏭️ PASS 2 skipped (translation deduplication disabled)")
     
     total_removed = original_count - len(final_results)
-    final_results = _harmonize_gender_variant_translations(final_results)
+    final_results = _harmonize_gender_variant_translations(_harmonize_alias_name_translations(final_results))
     print(f"[Dedup] ✨ Deduplication complete: {total_removed} total duplicates removed, {len(final_results)} unique entries kept")
     
     if dry_run:
@@ -2943,8 +3030,15 @@ def _skip_raw_name_duplicates_matrix(glossary, fuzzy_threshold):
                         if is_duplicate[idx2]:
                             continue
                         
+                        compare_config = config
+                        if _partial_ratio_gender_only() and not (
+                            _entry_type_has_gender(processed[idx1][0])
+                            and _entry_type_has_gender(processed[idx2][0])
+                        ):
+                            compare_config = dict(config)
+                            compare_config["algorithms"] = [a for a in config.get("algorithms", []) if a != "partial"]
                         score = calculate_similarity_with_config(
-                            cleaned_names[idx1], cleaned_names[idx2], config
+                            cleaned_names[idx1], cleaned_names[idx2], compare_config
                         )
                         total_comparisons += 1
                         
@@ -2960,8 +3054,15 @@ def _skip_raw_name_duplicates_matrix(glossary, fuzzy_threshold):
                         if is_duplicate[idx2]:
                             continue
                         
+                        compare_config = config
+                        if _partial_ratio_gender_only() and not (
+                            _entry_type_has_gender(processed[idx1][0])
+                            and _entry_type_has_gender(processed[idx2][0])
+                        ):
+                            compare_config = dict(config)
+                            compare_config["algorithms"] = [a for a in config.get("algorithms", []) if a != "partial"]
                         score = calculate_similarity_with_config(
-                            cleaned_names[idx1], cleaned_names[idx2], config
+                            cleaned_names[idx1], cleaned_names[idx2], compare_config
                         )
                         total_comparisons += 1
                         
@@ -3201,19 +3302,19 @@ def _dedupe_worker(item, all_items, fuzzy_threshold, use_rapidfuzz):
         if other_raw == raw_name:  # Exclude self
             continue
         
-        candidates.append((other_cleaned, other_raw))
+        candidates.append((other_cleaned, other_raw, other_entry))
     
     if not candidates:
         return (entry, raw_name, cleaned_name, False, 0.0, None)
     
     is_dup, best_score, best_match = _find_best_duplicate_match(
-        cleaned_name, candidates, fuzzy_threshold, use_rapidfuzz
+        cleaned_name, candidates, fuzzy_threshold, use_rapidfuzz, entry
     )
     
     return (entry, raw_name, cleaned_name, is_dup, best_score, best_match)
 
 
-def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz):
+def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz, current_entry=None):
     """Find the best duplicate match using multi-algorithm fuzzy matching"""
     if not seen_raw_names:
         return (False, 0.0, None)
@@ -3231,9 +3332,19 @@ def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, us
             best_score = 0.0
             best_match = None
             
-            for seen_clean, seen_original in seen_raw_names:
+            for seen_item in seen_raw_names:
+                seen_clean = seen_item[0]
+                seen_original = seen_item[1]
+                seen_entry = seen_item[2] if len(seen_item) > 2 else None
+                compare_config = config
+                if _partial_ratio_gender_only() and not (
+                    _entry_type_has_gender(current_entry)
+                    and _entry_type_has_gender(seen_entry)
+                ):
+                    compare_config = dict(config)
+                    compare_config["algorithms"] = [a for a in config.get("algorithms", []) if a != "partial"]
                 # Use multi-algorithm similarity scoring
-                score = calculate_similarity_with_config(cleaned_name, seen_clean, config)
+                score = calculate_similarity_with_config(cleaned_name, seen_clean, compare_config)
                 
                 if score >= fuzzy_threshold and score > best_score:
                     best_score = score
@@ -3251,7 +3362,7 @@ def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, us
         # For large candidate lists, use batch processing (much faster)
         if len(seen_raw_names) > 50:
             # Extract just the cleaned names for batch comparison
-            candidate_names = [seen_clean.lower() for seen_clean, _ in seen_raw_names]
+            candidate_names = [seen_item[0].lower() for seen_item in seen_raw_names]
             
             # Use extractOne for fast best-match finding
             result = process.extractOne(
@@ -3272,7 +3383,9 @@ def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, us
         best_score = 0.0
         best_match = None
         
-        for seen_clean, seen_original in seen_raw_names:
+        for seen_item in seen_raw_names:
+            seen_clean = seen_item[0]
+            seen_original = seen_item[1]
             score = fuzz.ratio(name_lower, seen_clean.lower()) / 100.0
             if score >= fuzzy_threshold and score > best_score:
                 best_score = score
@@ -3286,7 +3399,9 @@ def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, us
         best_score = 0.0
         best_match = None
         
-        for seen_clean, seen_original in seen_raw_names:
+        for seen_item in seen_raw_names:
+            seen_clean = seen_item[0]
+            seen_original = seen_item[1]
             score = difflib.SequenceMatcher(None, name_lower, seen_clean.lower()).ratio()
             if score >= fuzzy_threshold and score > best_score:
                 best_score = score
@@ -3378,8 +3493,33 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
             continue
 
         # Check for fuzzy matches with seen names
+        alias_matched = False
+        if _alias_aware_name_matching_enabled() and _entry_type_has_gender(entry):
+            for existing_idx, existing_entry in enumerate(deduplicated):
+                if not _entry_type_has_gender(existing_entry):
+                    continue
+                if _align_alias_variant_translation(existing_entry, entry):
+                    alias_matched = True
+                    if dedup_log is not None:
+                        dedup_log.append({
+                            "pass": 1,
+                            "action": "kept_alias_variant",
+                            "kept": entry.get("raw_name", ""),
+                            "matched": existing_entry.get("raw_name", ""),
+                            "reason": "alias-aware raw-name containment",
+                        })
+                    break
+            if alias_matched:
+                seen_idx = len(seen_raw_names)
+                seen_raw_names.append((cleaned_name, raw_name, entry))
+                dedup_idx = len(deduplicated)
+                raw_name_to_indices.setdefault(raw_name, []).append(dedup_idx)
+                dedup_idx_to_seen_idx[dedup_idx] = seen_idx
+                deduplicated.append(entry)
+                continue
+
         is_duplicate, best_score, best_match = _find_best_duplicate_match(
-            cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz
+            cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz, entry
         )
         
         if is_duplicate:
@@ -3404,7 +3544,7 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
                     # fuzzy comparisons use the new entry's cleaned name / raw name.
                     seen_idx = dedup_idx_to_seen_idx.get(existing_index)
                     if seen_idx is not None:
-                        seen_raw_names[seen_idx] = (cleaned_name, raw_name)
+                        seen_raw_names[seen_idx] = (cleaned_name, raw_name, entry)
                     skipped_count += 1
                     if skipped_count <= 10:
                         print(f"[Skip] Pass 1: Replacing {best_match} ({existing_field_count} fields) with {raw_name} ({current_field_count} fields) - {best_score*100:.1f}% match, more detailed entry")
@@ -3438,7 +3578,7 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
         else:
             # Add to seen list and keep the entry
             seen_idx = len(seen_raw_names)
-            seen_raw_names.append((cleaned_name, raw_name))
+            seen_raw_names.append((cleaned_name, raw_name, entry))
             dedup_idx = len(deduplicated)
             raw_name_to_indices.setdefault(raw_name, []).append(dedup_idx)
             dedup_idx_to_seen_idx[dedup_idx] = seen_idx
