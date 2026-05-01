@@ -3415,6 +3415,7 @@ class AsyncProcessingDialog:
         chapters = []
         original_basename = None
         chapter_mapping = {}  # Map custom_id to chapter info
+        markdown_provenance_by_file = {}
 
         # Respect GUI extraction mode/radio
         extraction_method = env_vars.get('TEXT_EXTRACTION_METHOD', env_vars.get('EXTRACTION_MODE', 'standard')).lower()
@@ -3480,6 +3481,7 @@ class AsyncProcessingDialog:
                                     try:
                                         cleaned_text, _, _ = extractor.extract_chapter_content(chapter_html, extraction_mode=extraction_method)
                                         chapter_payload = cleaned_text
+                                        markdown_provenance_by_file[html_file] = getattr(extractor, "last_markdown_provenance", {})
                                     except Exception as e:
                                         print(f"⚠️ html2text extraction failed, using HTML: {e}")
                                         chapter_payload = chapter_html
@@ -3574,7 +3576,16 @@ class AsyncProcessingDialog:
                         chunk_list = splitter.split_chapter(content, max_tokens=chunk_target, filename=original_filename)
                         total_chunks = len(chunk_list)
                         base_slug = Path(original_filename).stem if original_filename else f"ch{ordered_num}"
+                        base_provenance = markdown_provenance_by_file.get(original_filename, {})
+                        base_atx_headings = base_provenance.get('atx_headings', []) if isinstance(base_provenance, dict) else []
+                        chunk_heading_offset = 0
                         for ci, (chunk_html, chunk_idx, total) in enumerate(chunk_list, start=1):
+                            chunk_heading_count = len(re.findall(r'(?m)^\s{0,3}#{1,6}(?:\s+|$)', chunk_html))
+                            chunk_provenance = {
+                                'version': base_provenance.get('version', 1) if isinstance(base_provenance, dict) else 1,
+                                'atx_headings': base_atx_headings[chunk_heading_offset:chunk_heading_offset + chunk_heading_count],
+                            } if base_atx_headings else {}
+                            chunk_heading_offset += chunk_heading_count
                             part_custom_id = f"{ordered_num:04d}_{base_slug}_part{chunk_idx}"
                             messages = self._prepare_chapter_messages(chunk_html, env_vars)
                             chapter_data = {
@@ -3600,6 +3611,7 @@ class AsyncProcessingDialog:
                                 'chapter_num': ordered_num,
                                 'extraction_method': extraction_method,
                                 'preserve_structure': preserve_structure,
+                                'markdown_provenance': chunk_provenance,
                                 'opf_spine_position': spine_pos,
                                 'detected_chapter_num': chapter_num,
                                 'chunk_index': chunk_idx,
@@ -3640,6 +3652,7 @@ class AsyncProcessingDialog:
                     'chapter_num': ordered_num,
                     'extraction_method': extraction_method,
                     'preserve_structure': preserve_structure,
+                    'markdown_provenance': markdown_provenance_by_file.get(original_filename, {}),
                     'opf_spine_position': spine_pos,
                     'detected_chapter_num': chapter_num
                 }
@@ -4313,7 +4326,10 @@ class AsyncProcessingDialog:
                     try:
                         from TransateKRtoEN import convert_enhanced_text_to_html
                         preserve_structure = chapter_meta.get('preserve_structure', True)
-                        content = convert_enhanced_text_to_html(content, {'preserve_structure': preserve_structure})
+                        content = convert_enhanced_text_to_html(content, {
+                            'preserve_structure': preserve_structure,
+                            'markdown_provenance': chapter_meta.get('markdown_provenance', {}),
+                        })
                     except Exception as e:
                         print(f"⚠️ Could not convert enhanced text to HTML: {e}")
                         if content and '<' not in content[:200].lower():

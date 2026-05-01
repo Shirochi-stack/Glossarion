@@ -154,8 +154,49 @@ class EnhancedTextExtractor:
         self.preserve_structure = preserve_structure
         self.h2t = None
         self.detected_language = None
+        self.last_markdown_provenance = {}
         
         self._configure_html2text()
+
+    def _mark_html_headings_for_provenance(self, soup: BeautifulSoup) -> None:
+        """Add temporary markers so we can distinguish real HTML headings later."""
+        self.last_markdown_provenance = {}
+        heading_index = 0
+        for heading in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+            try:
+                level = int(heading.name[1])
+            except Exception:
+                continue
+            start = f"GLXMDH{heading_index:05d}L{level}START"
+            end = f"GLXMDH{heading_index:05d}END"
+            heading.insert(0, start)
+            heading.append(end)
+            heading_index += 1
+
+    def _strip_heading_markers_and_record_provenance(self, text: str) -> str:
+        """Remove temporary heading markers and record ATX-heading origin order."""
+        heading_line_re = re.compile(r'^\s{0,3}(#{1,6})(?:\s+|$)')
+        marker_re = re.compile(r'GLXMDH(\d{5})L([1-6])START|GLXMDH(\d{5})END')
+        provenance = []
+        cleaned_lines = []
+
+        for line in text.splitlines(keepends=True):
+            candidate = heading_line_re.match(line)
+            marker_match = re.search(r'GLXMDH(\d{5})L([1-6])START', line)
+            if candidate:
+                provenance.append({
+                    'type': 'atx_heading',
+                    'level': int(candidate.group(1).count('#')),
+                    'html_heading': bool(marker_match),
+                    'html_level': int(marker_match.group(2)) if marker_match else None,
+                })
+            cleaned_lines.append(marker_re.sub('', line))
+
+        self.last_markdown_provenance = {
+            'version': 1,
+            'atx_headings': provenance,
+        }
+        return ''.join(cleaned_lines)
     
     def _detect_encoding(self, content: bytes) -> str:
         """Detect the encoding of the content"""
@@ -688,6 +729,7 @@ class EnhancedTextExtractor:
                 pass
             
             # Determine content to convert (after removals)
+            self._mark_html_headings_for_provenance(soup)
             if extraction_mode == "full":
                 content_to_convert = str(soup)
             else:
@@ -750,6 +792,9 @@ class EnhancedTextExtractor:
             
             # Restore ruby/furigana placeholders back to HTML
             clean_text = self._restore_ruby_tags(clean_text)
+
+            # Strip internal provenance markers before the model sees the text.
+            clean_text = self._strip_heading_markers_and_record_provenance(clean_text)
             
             # Remove markdown duplicate headers if enabled
             # Pattern: "Title Text\n\n# Title Text" - remove the plain text line before markdown header

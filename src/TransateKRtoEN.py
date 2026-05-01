@@ -10168,6 +10168,35 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     import re
     
     preserve_structure = chapter_info.get('preserve_structure', False) if chapter_info else False
+    markdown_provenance = chapter_info.get('markdown_provenance') if chapter_info else None
+
+    def _escape_untracked_atx_headings(text, provenance):
+        """Keep only ATX headings that came from real HTML heading tags."""
+        if not isinstance(provenance, dict):
+            return text
+        atx_headings = provenance.get('atx_headings')
+        if not isinstance(atx_headings, list):
+            return text
+
+        heading_line_re = re.compile(r'^(\s{0,3})(#{1,6})(\s+|$)')
+        provenance_index = 0
+        escaped_lines = []
+
+        for line in text.splitlines(keepends=True):
+            match = heading_line_re.match(line)
+            if not match:
+                escaped_lines.append(line)
+                continue
+
+            source = atx_headings[provenance_index] if provenance_index < len(atx_headings) else {}
+            provenance_index += 1
+            if source.get('html_heading'):
+                escaped_lines.append(line)
+                continue
+
+            escaped_lines.append(f"{match.group(1)}\\{line[len(match.group(1)):]}")
+
+        return ''.join(escaped_lines)
 
     # -------------------------------------------------------------------------
     # ESCAPE PASS: Convert non-allowed angle-bracket sequences to HTML entities.
@@ -10305,6 +10334,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             print(f"⚠️  [HTML-in-translation] html2text strip pass failed: {_e}")
 
     # (escape_tag_like already ran above before the html2text pass)
+    plain_text = _escape_untracked_atx_headings(plain_text, markdown_provenance)
     
     # Check if user prefers markdown2 (legacy behavior)
     use_markdown2 = os.getenv('USE_MARKDOWN2_CONVERTER', '0') == '1'
