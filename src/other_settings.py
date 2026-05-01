@@ -10353,7 +10353,8 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     from PySide6.QtCore import QTimer
     _ollama_url = "http://localhost:11434/v1"
     _lmstudio_url = "http://localhost:1234/v1"
-    _tts_url = "http://localhost:8000/v1/audio/speech"
+    _tts_url = "http://localhost:8000/audio/speech"
+    _tts_v1_url = "http://localhost:8000/v1/audio/speech"
 
     help_row = QWidget()
     help_h = QHBoxLayout(help_row)
@@ -10439,7 +10440,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     tts_lbl.setTextFormat(Qt.RichText)
     tts_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
     tts_lbl.setOpenExternalLinks(False)
-    tts_lbl.setToolTip("Double-click to paste the OpenAI-compatible TTS endpoint")
+    tts_lbl.setToolTip("Double-click to paste the common local FastAPI TTS endpoint")
     _tts_orig_style = tts_lbl.styleSheet()
     _tts_orig_text = tts_lbl.text()
     def _dbl_click_tts(event):
@@ -10463,6 +10464,40 @@ def _create_custom_api_endpoints_section(self, parent_frame):
             pass
     tts_lbl.mouseDoubleClickEvent = _dbl_click_tts
     help_h.addWidget(tts_lbl)
+
+    sep3_lbl = QLabel("  |  ")
+    sep3_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+    help_h.addWidget(sep3_lbl)
+
+    tts_v1_lbl = QLabel(f"TTS v1: <a href='#'>{_tts_v1_url}</a>")
+    tts_v1_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+    tts_v1_lbl.setTextFormat(Qt.RichText)
+    tts_v1_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+    tts_v1_lbl.setOpenExternalLinks(False)
+    tts_v1_lbl.setToolTip("Double-click to paste the OpenAI-compatible /v1 TTS endpoint")
+    _tts_v1_orig_style = tts_v1_lbl.styleSheet()
+    _tts_v1_orig_text = tts_v1_lbl.text()
+    def _dbl_click_tts_v1(event):
+        self.openai_base_url_entry.setText(_tts_v1_url)
+        self.openai_base_url_var = _tts_v1_url
+        self.openai_tts_endpoint_var = _tts_v1_url
+        try:
+            QGuiApplication.clipboard().setText(_tts_v1_url)
+        except Exception:
+            pass
+        try:
+            tts_v1_lbl.setStyleSheet(_tts_v1_orig_style + " color: #00d084;")
+            tts_v1_lbl.setTextFormat(Qt.PlainText)
+            tts_v1_lbl.setText(f"✓ Pasted: {_tts_v1_url}")
+            QTimer.singleShot(900, lambda: (
+                tts_v1_lbl.setStyleSheet(_tts_v1_orig_style),
+                tts_v1_lbl.setTextFormat(Qt.RichText),
+                tts_v1_lbl.setText(_tts_v1_orig_text),
+            ))
+        except Exception:
+            pass
+    tts_v1_lbl.mouseDoubleClickEvent = _dbl_click_tts_v1
+    help_h.addWidget(tts_v1_lbl)
 
     help_h.addStretch()
     section_v.addWidget(help_row)
