@@ -5962,15 +5962,18 @@ class UnifiedClient:
                 endpoint = "https://api.openai.com/v1/audio/speech"
         print(f"🌐 [{threading.current_thread().name}] TTS POST {endpoint}")
 
+        endpoint_l = endpoint.lower()
+        is_openai_host = "api.openai.com" in endpoint_l
         configured_tts_model = os.getenv("TTS_MODEL", "").strip()
         model = configured_tts_model or self.model or "tts-1"
         model_l = model.lower()
-        if not configured_tts_model and not any(token in model_l for token in ("tts", "speech", "playai")):
+        if is_openai_host and not configured_tts_model and not any(token in model_l for token in ("tts", "speech", "playai")):
             model = "tts-1"
             model_l = model
-        if "/" in model and not model_l.startswith(("tts-", "gpt-", "gemini-", "playai-")):
+        if is_openai_host and "/" in model and not model_l.startswith(("tts-", "gpt-", "gemini-", "playai-")):
             model = model.split("/")[-1]
-        voice = voice or os.getenv("TTS_VOICE", "alloy")
+        tts_voice_env = os.getenv("TTS_VOICE", "").strip()
+        voice = voice or tts_voice_env or ("alloy" if is_openai_host else "")
         audio_format = (audio_format or os.getenv("TTS_AUDIO_FORMAT", "mp3")).lower().strip()
 
         headers = {"Content-Type": "application/json"}
@@ -5980,10 +5983,13 @@ class UnifiedClient:
 
         payload = {
             "model": model,
-            "voice": voice,
             "input": text,
             "response_format": audio_format,
         }
+        if voice:
+            payload["voice"] = voice
+        else:
+            print(f"🔊 [{threading.current_thread().name}] TTS voice omitted for local/custom endpoint")
 
         timeout = self._get_tts_timeout()
         max_retries = self._get_max_retries()
@@ -6007,9 +6013,17 @@ class UnifiedClient:
                 if resp.status_code not in (200, 201):
                     err = resp.text[:500]
                     try:
-                        err = resp.json().get("error", {}).get("message", err)
+                        data = resp.json()
+                        if isinstance(data, dict):
+                            if isinstance(data.get("error"), dict):
+                                err = data.get("error", {}).get("message", err)
+                            else:
+                                err = data.get("error") or data.get("detail") or data.get("message") or err
                     except Exception:
                         pass
+                    err_text = str(err)
+                    if "voice" in err_text.lower() and not os.getenv("TTS_VOICE", "").strip():
+                        err = f"{err_text} Set TTS_VOICE / TTS Voice File to a voice file or speaker name your local server recognizes."
                     raise UnifiedClientError(f"TTS API error ({resp.status_code}): {err}", error_type="api_error", http_status=resp.status_code)
                 content_type = (resp.headers.get("content-type") or "").lower()
                 body = resp.content or b""
@@ -6059,6 +6073,19 @@ class UnifiedClient:
             except Exception as exc:
                 if self._should_abort_retry():
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                exc_text = str(exc)
+                if (
+                    "connection refused" in exc_text.lower()
+                    or "actively refused" in exc_text.lower()
+                    or "WinError 10061" in exc_text
+                    or "Failed to establish a new connection" in exc_text
+                ):
+                    raise UnifiedClientError(
+                        f"TTS endpoint is not accepting connections at {endpoint}. "
+                        f"Start the local TTS server, check the port/path, or reduce input size if the server crashed. "
+                        f"Original error: {exc}",
+                        error_type="connection_error",
+                    )
                 if attempt >= max_retries - 1:
                     raise UnifiedClientError(f"TTS request failed after {max_retries} attempts: {exc}", error_type="api_error")
                 wait = min(2 ** attempt + random.uniform(0, 1), 30)

@@ -10347,6 +10347,29 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     self.openai_clear_button.clicked.connect(_clear_openai_url)
     openai_h.addWidget(self.openai_clear_button)
     section_v.addWidget(openai_row)
+
+    tts_voice_row = QWidget()
+    tts_voice_h = QHBoxLayout(tts_voice_row)
+    tts_voice_h.setContentsMargins(0, 0, 0, 5)
+    tts_voice_h.addWidget(QLabel("TTS Voice/File:"))
+    if not hasattr(self, 'tts_voice_var'):
+        self.tts_voice_var = self.config.get('tts_voice', '')
+    self.tts_voice_entry = QLineEdit()
+    self.tts_voice_entry.setPlaceholderText("Optional. For local TTS, use a voice file/name required by the server.")
+    try:
+        self.tts_voice_entry.setText(str(self.tts_voice_var or ''))
+    except Exception:
+        pass
+    def _on_tts_voice_changed(text):
+        try:
+            self.tts_voice_var = text
+            self.config['tts_voice'] = text
+            os.environ['TTS_VOICE'] = text
+        except Exception:
+            pass
+    self.tts_voice_entry.textChanged.connect(_on_tts_voice_changed)
+    tts_voice_h.addWidget(self.tts_voice_entry)
+    section_v.addWidget(tts_voice_row)
     
     # Help text with shortcut URLs for Ollama and LM Studio
     from PySide6.QtGui import QGuiApplication

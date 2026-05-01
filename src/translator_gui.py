@@ -1952,6 +1952,7 @@ Text to analyze:
         # Initialize custom API endpoint variables
         self.openai_base_url_var = self.config.get('openai_base_url', '')
         self.openai_tts_endpoint_var = self.config.get('openai_tts_endpoint', '')
+        self.tts_voice_var = self.config.get('tts_voice', '')
         self.groq_base_url_var = self.config.get('groq_base_url', '')
         self.fireworks_base_url_var = self.config.get('fireworks_base_url', '')
         self.use_custom_openai_endpoint_var = self.config.get('use_custom_openai_endpoint', False)
@@ -13982,6 +13983,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Custom API endpoints
             'OPENAI_CUSTOM_BASE_URL': self.openai_base_url_var if self.openai_base_url_var else '',
             'OPENAI_TTS_ENDPOINT': getattr(self, 'openai_tts_endpoint_var', '') or (self.openai_base_url_var if str(self.openai_base_url_var).rstrip('/').endswith('/audio/speech') else ''),
+            'TTS_VOICE': getattr(self, 'tts_voice_var', '') or '',
             'GROQ_API_URL': self.groq_base_url_var if self.groq_base_url_var else '',
             'FIREWORKS_API_URL': self.fireworks_base_url_var if hasattr(self, 'fireworks_base_url_var') and self.fireworks_base_url_var else '',
             'USE_CUSTOM_OPENAI_ENDPOINT': '1' if self.use_custom_openai_endpoint_var else '0',
@@ -21645,6 +21647,7 @@ Important rules:
                 ('vertex_ai_location', ['vertex_location_entry', 'vertex_location_var'], 'global', str),
                 ('openai_base_url', ['openai_base_url_var'], '', str),
                 ('openai_tts_endpoint', ['openai_tts_endpoint_var'], '', str),
+                ('tts_voice', ['tts_voice_var'], '', str),
                 ('groq_base_url', ['groq_base_url_var'], '', str),
                 ('fireworks_base_url', ['fireworks_base_url_var'], '', str),
                 ('gemini_openai_endpoint', ['gemini_openai_endpoint_var'], 'generativelanguage.googleapis.com', str),
@@ -22746,6 +22749,7 @@ Important rules:
                 # Custom API endpoints
                 ('OPENAI_CUSTOM_BASE_URL', getattr(self, 'openai_base_url_var', '')),
                 ('OPENAI_TTS_ENDPOINT', getattr(self, 'openai_tts_endpoint_var', '') or (getattr(self, 'openai_base_url_var', '') if str(getattr(self, 'openai_base_url_var', '')).rstrip('/').endswith('/audio/speech') else '')),
+                ('TTS_VOICE', getattr(self, 'tts_voice_var', '') or ''),
                 ('GROQ_API_URL', getattr(self, 'groq_base_url_var', '')),
                 ('FIREWORKS_API_URL', getattr(self, 'fireworks_base_url_var', '')),
                 ('USE_CUSTOM_OPENAI_ENDPOINT', '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0'),
