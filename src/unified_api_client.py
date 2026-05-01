@@ -5993,6 +5993,11 @@ class UnifiedClient:
                 if self._should_abort_retry():
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 resp = self._tts_post_json(endpoint, payload, headers, timeout)
+                print(
+                    f"🔊 [{threading.current_thread().name}] TTS HTTP response "
+                    f"status={resp.status_code} content-type={(resp.headers.get('content-type') or 'unknown')} "
+                    f"bytes={len(resp.content or b''):,}"
+                )
                 if resp.status_code == 429 and attempt < max_retries - 1:
                     wait = min(2 ** attempt + random.uniform(0, 1), 30)
                     print(f"⏳ TTS rate-limited, retrying in {wait:.1f}s")
@@ -6006,10 +6011,48 @@ class UnifiedClient:
                     except Exception:
                         pass
                     raise UnifiedClientError(f"TTS API error ({resp.status_code}): {err}", error_type="api_error", http_status=resp.status_code)
+                content_type = (resp.headers.get("content-type") or "").lower()
+                body = resp.content or b""
+                if not body:
+                    raise UnifiedClientError(
+                        f"TTS API returned empty audio body (status={resp.status_code}, content-type={content_type or 'unknown'})",
+                        error_type="api_error",
+                        http_status=resp.status_code,
+                    )
+                body_preview = body[:200].lstrip()
+                if "application/json" in content_type or body_preview.startswith((b"{", b"[")):
+                    err = body_preview.decode("utf-8", errors="replace")
+                    try:
+                        data = resp.json()
+                        if isinstance(data, dict):
+                            err = (
+                                data.get("error", {}).get("message")
+                                if isinstance(data.get("error"), dict)
+                                else data.get("error") or data.get("detail") or data.get("message") or str(data)
+                            )
+                    except Exception:
+                        pass
+                    raise UnifiedClientError(
+                        f"TTS API returned JSON instead of audio (status={resp.status_code}): {err}",
+                        error_type="api_error",
+                        http_status=resp.status_code,
+                    )
+                if content_type and not (
+                    content_type.startswith("audio/")
+                    or "octet-stream" in content_type
+                    or "binary" in content_type
+                ):
+                    preview = body_preview.decode("utf-8", errors="replace")
+                    raise UnifiedClientError(
+                        f"TTS API returned non-audio content-type '{content_type}' (status={resp.status_code}): {preview}",
+                        error_type="api_error",
+                        http_status=resp.status_code,
+                    )
                 if self._is_force_stop_requested():
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 with open(output_path, "wb") as f:
-                    f.write(resp.content)
+                    f.write(body)
+                print(f"🔊 [{threading.current_thread().name}] TTS received {len(body):,} bytes ({content_type or 'unknown content-type'})")
                 return output_path
             except UnifiedClientError:
                 raise
@@ -6094,6 +6137,8 @@ class UnifiedClient:
         sender = threading.Thread(target=_send, name=f"{threading.current_thread().name}-TTSHTTP", daemon=True)
         sender.start()
 
+        wait_started = time.time()
+        next_wait_log = wait_started + 10.0
         while not done.wait(0.1):
             if self._is_force_stop_requested():
                 try:
@@ -6101,6 +6146,13 @@ class UnifiedClient:
                 except Exception:
                     pass
                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+            now = time.time()
+            if now >= next_wait_log:
+                print(
+                    f"🔊 [{threading.current_thread().name}] Waiting for TTS HTTP response "
+                    f"({now - wait_started:.0f}s elapsed)"
+                )
+                next_wait_log = now + 10.0
 
         if self._is_force_stop_requested():
             raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
