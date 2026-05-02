@@ -608,6 +608,26 @@ class XHTMLConverter:
                 html_content = re.sub(r'<!DOCTYPE[^>]*>', '', html_content)
                 html_content = re.sub(r'</?html[^>]*>', '', html_content)
                 html_content = re.sub(r'<head[^>]*>.*?</head>', '', html_content, flags=re.DOTALL)
+
+            if os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1':
+                soup = BeautifulSoup(html_content, 'html.parser')
+                for h1_tag in soup.find_all(['h1', 'h2', 'h3']):
+                    h1_id = h1_tag.get('id', '')
+                    if h1_id and h1_id.startswith('split-'):
+                        continue
+                    h1_text = h1_tag.get_text(strip=True)
+                    if 'SPLIT MARKER' in h1_text:
+                        continue
+                    next_sibling = h1_tag.find_next_sibling()
+                    if next_sibling and next_sibling.name == 'p':
+                        if h1_text == next_sibling.get_text(strip=True):
+                            next_sibling.decompose()
+                            continue
+                    prev_sibling = h1_tag.find_previous_sibling()
+                    if prev_sibling and prev_sibling.name == 'p':
+                        if h1_text == prev_sibling.get_text(strip=True):
+                            prev_sibling.decompose()
+                html_content = str(soup)
             
             # Now process the content normally
             # Fix broken attributes with ="" pattern
