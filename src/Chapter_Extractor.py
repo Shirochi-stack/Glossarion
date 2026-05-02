@@ -2788,7 +2788,7 @@ def _process_single_html_file(
             
             # Remove duplicate H1+P pairs (where P immediately follows H1 with same text)
             if remove_duplicate_h1_p:
-                for h1_tag in content_soup.find_all('h1'):
+                for h1_tag in content_soup.find_all(['h1', 'h2', 'h3']):
                     # Skip split marker H1 tags
                     h1_id = h1_tag.get('id', '')
                     if h1_id and h1_id.startswith('split-'):

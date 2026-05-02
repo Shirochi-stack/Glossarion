@@ -2547,7 +2547,7 @@ class BatchHeaderTranslator:
                             from bs4 import BeautifulSoup as BS
                             temp_soup = BS(content, 'html.parser')
                             removed_any = False
-                            for h1_tag in temp_soup.find_all('h1'):
+                            for h1_tag in temp_soup.find_all(['h1', 'h2', 'h3']):
                                 # Skip split marker H1 tags
                                 h1_id = h1_tag.get('id', '')
                                 if h1_id and h1_id.startswith('split-'):
@@ -2711,7 +2711,7 @@ class BatchHeaderTranslator:
                             from bs4 import BeautifulSoup as BS
                             temp_soup = BS(content, 'html.parser')
                             removed_any = False
-                            for h1_tag in temp_soup.find_all('h1'):
+                            for h1_tag in temp_soup.find_all(['h1', 'h2', 'h3']):
                                 h1_id = h1_tag.get('id', '')
                                 if h1_id and h1_id.startswith('split-'):
                                     continue

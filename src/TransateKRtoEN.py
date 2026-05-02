@@ -5687,7 +5687,7 @@ class BatchTranslationProcessor:
                 # First: HTML-based duplicate removal
                 from bs4 import BeautifulSoup
                 output_soup = BeautifulSoup(cleaned, 'html.parser')
-                for h1_tag in output_soup.find_all('h1'):
+                for h1_tag in output_soup.find_all(['h1', 'h2', 'h3']):
                     h1_id = h1_tag.get('id', '')
                     if h1_id and h1_id.startswith('split-'):
                         continue
@@ -6016,7 +6016,7 @@ class BatchTranslationProcessor:
                 
                 # Remove duplicate H1+P pairs (where P is adjacent to H1 with same text)
                 if remove_duplicate_h1_p:
-                    for h1_tag in body_soup.find_all('h1'):
+                    for h1_tag in body_soup.find_all(['h1', 'h2', 'h3']):
                         # Skip split marker H1 tags
                         h1_id = h1_tag.get('id', '')
                         if h1_id and h1_id.startswith('split-'):
@@ -14951,7 +14951,7 @@ def main(log_callback=None, stop_callback=None):
                 # First: HTML-based duplicate removal
                 from bs4 import BeautifulSoup
                 output_soup = BeautifulSoup(cleaned, 'html.parser')
-                for h1_tag in output_soup.find_all('h1'):
+                for h1_tag in output_soup.find_all(['h1', 'h2', 'h3']):
                     h1_id = h1_tag.get('id', '')
                     if h1_id and h1_id.startswith('split-'):
                         continue

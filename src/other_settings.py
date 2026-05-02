@@ -6275,11 +6275,11 @@ def _create_prompt_management_section(self, parent):
     ignore_h2 = QHBoxLayout(ignore_row2)
     ignore_h2.setContentsMargins(20, 5, 0, 0)
     
-    # Remove duplicate H1+P pairs
+    # Remove duplicate H1/H2/H3+P pairs
     if not hasattr(self, 'remove_duplicate_h1_p_var'):
         self.remove_duplicate_h1_p_var = self.config.get('remove_duplicate_h1_p', False)
     
-    remove_dup_cb = self._create_styled_checkbox("Remove duplicate H1+P pairs")
+    remove_dup_cb = self._create_styled_checkbox("Remove duplicate H1/H2/H3+P pairs")
     try:
         remove_dup_cb.setChecked(bool(self.remove_duplicate_h1_p_var))
     except Exception:
@@ -6292,7 +6292,7 @@ def _create_prompt_management_section(self, parent):
             pass
     remove_dup_cb.toggled.connect(_on_remove_dup_toggle)
     remove_dup_cb.setToolTip(
-        "Remove paragraph tags that immediately follow H1 tags with identical text.\n"
+        "Remove paragraph tags that immediately follow H1, H2, or H3 tags with identical text.\n"
         "Useful for novels that repeat chapter titles."
     )
     ignore_h2.addWidget(remove_dup_cb)
