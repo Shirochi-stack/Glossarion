@@ -2139,9 +2139,11 @@ Text to analyze:
         self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned. {context}"
         self.default_vision_ocr_prompt = (
             "Extract only the readable text that is physically present in the image, in natural reading order. "
-            "Return only the original script text exactly as seen. Preserve line breaks when they help the reading order. "
+            "Return only the base source text exactly as seen. Preserve line breaks when they help the reading order. "
+            "For Chinese/Japanese/Korean text with small pronunciation guides above or beside the main characters, OCR only the main/base characters and ignore the pronunciation guides. "
+            "For pinyin-over-Chinese images, output the Chinese characters only; do not output the pinyin unless the pinyin is standalone text with no matching Chinese base text. "
             "Do not translate, summarize, explain, annotate, transliterate, romanize, or add pronunciation guides. "
-            "Do not output pinyin, romaji, furigana, Jyutping, Latin readings, or any parallel reading line unless that Latin text is visibly printed in the image. "
+            "Do not output duplicate reading lines such as pinyin, romaji, furigana, Jyutping, or Latin readings when they are attached to the same base text. "
             "If no readable text is present, return an empty response."
         )
         self.default_prompts = {

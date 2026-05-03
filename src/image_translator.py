@@ -8,6 +8,7 @@ import os
 import json
 import base64
 import zipfile
+import hashlib
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 import io
 from typing import List, Dict, Optional, Tuple
@@ -17,6 +18,8 @@ import logging
 import time
 import queue
 import threading
+import sys
+import unicodedata
 # OpenCV availability check
 try:
     import cv2
@@ -31,9 +34,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_VISION_OCR_PROMPT = (
     "Extract only the readable text that is physically present in the image, in natural reading order. "
-    "Return only the original script text exactly as seen. Preserve line breaks when they help the reading order. "
+    "Return only the base source text exactly as seen. Preserve line breaks when they help the reading order. "
+    "For Chinese/Japanese/Korean text with small pronunciation guides above or beside the main characters, OCR only the main/base characters and ignore the pronunciation guides. "
+    "For pinyin-over-Chinese images, output the Chinese characters only; do not output the pinyin unless the pinyin is standalone text with no matching Chinese base text. "
     "Do not translate, summarize, explain, annotate, transliterate, romanize, or add pronunciation guides. "
-    "Do not output pinyin, romaji, furigana, Jyutping, Latin readings, or any parallel reading line unless that Latin text is visibly printed in the image. "
+    "Do not output duplicate reading lines such as pinyin, romaji, furigana, Jyutping, or Latin readings when they are attached to the same base text. "
     "If no readable text is present, return an empty response."
 )
 
@@ -241,6 +246,7 @@ class ImageTranslator:
         self.chunk_height = int(os.getenv("IMAGE_CHUNK_HEIGHT", "2000"))
         self.vision_ocr_prompt = os.getenv("VISION_OCR_PROMPT", DEFAULT_VISION_OCR_PROMPT).strip() or DEFAULT_VISION_OCR_PROMPT
         self._vision_glossary_processed_hashes = set()
+        self._ensure_ocr_cache_valid()
         
         # DEBUG: Log the actual max tokens being used for image translation
         print(f"🔍 ImageTranslator initialized with max_output_tokens: {self.image_max_tokens}")
@@ -1851,16 +1857,16 @@ class ImageTranslator:
                 "role": "user",
                 "content": (
                     f"{assistant_prompt}\n\n"
-                    "OCR this image/chunk. Return only text visibly printed in the image. "
-                    "Do not add pinyin, romaji, romanization, readings, or translations."
+                    "OCR this image/chunk. Return only the main/base source text. "
+                    "Ignore pinyin/romaji/furigana/Jyutping pronunciation guides attached to base characters. Do not translate."
                 )
             })
         else:
             messages.append({
                 "role": "user",
                 "content": (
-                    "OCR this image. Return only text visibly printed in the image. "
-                    "Do not add pinyin, romaji, romanization, readings, or translations."
+                    "OCR this image. Return only the main/base source text. "
+                    "Ignore pinyin/romaji/furigana/Jyutping pronunciation guides attached to base characters. Do not translate."
                 )
             })
 
@@ -1908,6 +1914,7 @@ class ImageTranslator:
             print("   ❌ Stopped before OCR text translation")
             return None
 
+        ocr_text = self._inject_context_headers_into_ocr(ocr_text, assistant_prompt)
         system_prompt = self._prepare_vision_ocr_translation_prompt(ocr_text, check_stop_fn)
 
         user_parts = []
@@ -1977,6 +1984,31 @@ class ImageTranslator:
             translated = self._clean_translation_response(translated)
         translated = self._sanitize_unicode_characters(translated)
         return translated.strip() or None
+
+    def _extract_context_header_text(self, context):
+        if not context:
+            return ""
+        match = re.search(
+            r"\[CHAPTER_HEADER_TEXT\]\s*(.*?)\s*\[/CHAPTER_HEADER_TEXT\]",
+            str(context),
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return ""
+        lines = [line.strip() for line in match.group(1).splitlines() if line.strip()]
+        return "\n".join(lines).strip()
+
+    def _inject_context_headers_into_ocr(self, ocr_text, context):
+        header_text = self._extract_context_header_text(context)
+        if not header_text:
+            return ocr_text
+        source = (ocr_text or "").strip()
+        if not source:
+            return header_text
+        if header_text in source:
+            return source
+        print("   📝 Injected chapter header text into OCR text")
+        return f"{header_text}\n\n{source}"
 
     def _prepare_vision_ocr_translation_prompt(self, ocr_text, check_stop_fn):
         """Apply automatic glossary modes to OCR text before the final translation call."""
@@ -2301,10 +2333,99 @@ class ImageTranslator:
         except Exception:
             return 100
 
+    def _ocr_cache_signature(self):
+        """Settings that change which images/chunks the saved OCR text represents."""
+        return {
+            "cache_version": 1,
+            "webnovel_min_height": str(os.getenv("WEBNOVEL_MIN_HEIGHT", str(self.webnovel_min_height))),
+            "max_images_per_chapter": str(os.getenv("MAX_IMAGES_PER_CHAPTER", "10")),
+            "image_chunk_height": str(os.getenv("IMAGE_CHUNK_HEIGHT", str(self.chunk_height))),
+            "image_chunk_overlap_percent": str(os.getenv("IMAGE_CHUNK_OVERLAP_PERCENT", "1")),
+        }
+
+    def _ocr_cache_path(self):
+        return os.path.join(getattr(self, 'ocr_dir', os.path.join(self.output_dir, "OCR")), ".cache")
+
+    def _write_ocr_cache(self, signature=None):
+        try:
+            os.makedirs(self.ocr_dir, exist_ok=True)
+            payload = {
+                "settings": signature or self._ocr_cache_signature(),
+                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            with open(self._ocr_cache_path(), 'w', encoding='utf-8') as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"   ⚠️ Could not write OCR cache metadata: {e}")
+
+    def _clear_ocr_cache_outputs(self):
+        """Remove cached OCR artifacts while staying inside output/OCR."""
+        ocr_dir = os.path.abspath(getattr(self, 'ocr_dir', os.path.join(self.output_dir, "OCR")))
+        for name in ("chunks", "combined", "chapters", "full", "single"):
+            target = os.path.abspath(os.path.join(ocr_dir, name))
+            if not (target == ocr_dir or target.startswith(ocr_dir + os.sep)):
+                continue
+            if not os.path.isdir(target):
+                continue
+            for root, dirs, files in os.walk(target, topdown=False):
+                for filename in files:
+                    try:
+                        os.remove(os.path.join(root, filename))
+                    except Exception:
+                        pass
+                for dirname in dirs:
+                    try:
+                        os.rmdir(os.path.join(root, dirname))
+                    except Exception:
+                        pass
+            try:
+                os.rmdir(target)
+            except Exception:
+                pass
+
+    def _ensure_ocr_cache_valid(self):
+        signature = self._ocr_cache_signature()
+        cache_path = self._ocr_cache_path()
+        previous = None
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    previous = json.load(f).get("settings")
+            except Exception:
+                previous = None
+
+        if previous is None:
+            if any(os.path.isdir(os.path.join(self.ocr_dir, name)) for name in ("chunks", "combined", "chapters", "full", "single")):
+                print("   🔁 OCR cache metadata missing; invalidating saved OCR text")
+                self._clear_ocr_cache_outputs()
+            self._write_ocr_cache(signature)
+            return
+
+        if previous != signature:
+            print("   🔁 OCR cache settings changed; invalidating saved OCR text")
+            print(f"      Previous: {previous}")
+            print(f"      Current:  {signature}")
+            self._clear_ocr_cache_outputs()
+            self._write_ocr_cache(signature)
+
     def _safe_ocr_stem(self, image_basename=None):
         image_basename = image_basename or os.path.basename(getattr(self, 'current_image_path', 'image'))
         stem, _ = os.path.splitext(image_basename)
         stem = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', stem).strip(' ._') or 'image'
+        if sys.platform == "darwin":
+            stem = unicodedata.normalize("NFC", stem)
+            encoded = stem.encode("utf-8", errors="ignore")
+            if len(encoded) > 180:
+                digest = hashlib.sha1(encoded).hexdigest()[:10]
+                trimmed = []
+                byte_count = 0
+                for char in stem:
+                    char_bytes = char.encode("utf-8", errors="ignore")
+                    if byte_count + len(char_bytes) > 160:
+                        break
+                    trimmed.append(char)
+                    byte_count += len(char_bytes)
+                stem = (''.join(trimmed).rstrip(' ._') or 'image') + f"_{digest}"
         chapter_num = getattr(self, 'current_chapter_num', None)
         image_idx = getattr(self, 'current_image_index', None)
         parts = []
@@ -2455,7 +2576,7 @@ class ImageTranslator:
             chunk_prompt = image_chunk_prompt_template.format(
                 chunk_idx=i + 1,
                 total_chunks=num_chunks,
-                context="OCR this chunk only. Preserve visible source text order. Do not translate, romanize, or add pinyin/romaji/readings."
+                context="OCR this chunk only. Preserve visible source text order. Output main/base characters only; ignore attached pinyin/romaji/furigana/Jyutping readings. Do not translate."
             )
             chunk_jobs.append((i, chunk_bytes, chunk_prompt))
 
@@ -2535,6 +2656,7 @@ class ImageTranslator:
         if not combined_ocr:
             print("   Combined OCR was empty")
             return None
+        combined_ocr = self._inject_context_headers_into_ocr(combined_ocr, context)
         self._save_ocr_text(combined_ocr, kind="combined", image_basename=image_basename)
         if not translate_after:
             return combined_ocr
@@ -2795,6 +2917,8 @@ class ImageTranslator:
                 ocr_text = self._call_vision_ocr_api(image_data, assistant_prompt, check_stop_fn)
                 if not ocr_text:
                     return None
+                ocr_text = self._inject_context_headers_into_ocr(ocr_text, assistant_prompt)
+                self._save_ocr_text(ocr_text, kind="single")
                 print(f"   ✅ OCR complete ({len(ocr_text)} chars)")
                 print("   🌐 Step 2/2: Translating OCR text...")
                 translated = self._translate_ocr_text(ocr_text, assistant_prompt, check_stop_fn)

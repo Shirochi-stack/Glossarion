@@ -7793,6 +7793,11 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
     
     image_translations = {}
     translated_count = 0
+    vision_ocr_mode = (
+        os.getenv("OUTPUT_MODE", "").strip().lower() == "vision"
+        and os.getenv("VISION_OCR_FIRST", "auto").strip().lower() not in ("0", "false", "no", "off")
+    )
+    chapter_header_text = _extract_chapter_header_text(chapter_html) if vision_ocr_mode else ""
     
     max_images_per_chapter = int(os.getenv('MAX_IMAGES_PER_CHAPTER', '10'))
     if len(images) > max_images_per_chapter:
@@ -7872,6 +7877,8 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
         context = ""
         if img_info.get('alt'):
             context += f", Alt text: {img_info['alt']}"
+        if chapter_header_text:
+            context += f"\n\n[CHAPTER_HEADER_TEXT]\n{chapter_header_text}\n[/CHAPTER_HEADER_TEXT]"
             
         if translated_count > 0:
             delay = float(os.getenv('IMAGE_API_DELAY', '1.0'))
@@ -8080,6 +8087,31 @@ def _resolve_chapter_image_path(img_src, image_translator, actual_num, idx):
     return img_path if img_path and os.path.exists(img_path) else None
 
 
+def _extract_chapter_header_text(chapter_html):
+    """Return visible chapter header/title text for Vision OCR injection."""
+    try:
+        soup = BeautifulSoup(chapter_html or "", 'html.parser')
+        parts = []
+        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title']):
+            text = tag.get_text(" ", strip=True)
+            if text and text not in parts:
+                parts.append(text)
+        return "\n".join(parts).strip()
+    except Exception:
+        return ""
+
+
+def _remove_chapter_headers_from_html(chapter_html):
+    """Remove raw headers after they have been injected into Vision OCR text."""
+    try:
+        soup = BeautifulSoup(chapter_html or "", 'html.parser')
+        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title']):
+            tag.decompose()
+        return str(soup)
+    except Exception:
+        return chapter_html
+
+
 def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actual_num, check_stop_fn=None):
     """OCR chapter images for Vision-mode glossary prepasses without translating them."""
     images = image_translator.extract_images_from_chapter(chapter_html)
@@ -8087,6 +8119,7 @@ def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actua
         return ""
 
     chapter_ocr_parts = []
+    chapter_header_text = _extract_chapter_header_text(chapter_html)
     print(f"🔎 Vision glossary prepass: OCRing {len(images)} image(s) in {_chapter_term()} {actual_num}")
 
     for idx, img_info in enumerate(images, 1):
@@ -8103,6 +8136,8 @@ def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actua
         context = ""
         if img_info.get('alt'):
             context += f", Alt text: {img_info['alt']}"
+        if chapter_header_text:
+            context += f"\n\n[CHAPTER_HEADER_TEXT]\n{chapter_header_text}\n[/CHAPTER_HEADER_TEXT]"
         image_translator.current_chapter_num = actual_num
         image_translator.current_image_index = idx
         ocr_text = image_translator.ocr_image(img_path, context, check_stop_fn)
@@ -14104,9 +14139,17 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Look for headers
                 headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title'])
+                vision_ocr_mode = (
+                    os.getenv("OUTPUT_MODE", "").strip().lower() == "vision"
+                    and os.getenv("VISION_OCR_FIRST", "auto").strip().lower() not in ("0", "false", "no", "off")
+                )
                 
                 # If we have headers, we should translate them even in "image-only" chapters
-                if headers and any(h.get_text(strip=True) for h in headers):
+                if vision_ocr_mode and headers and any(h.get_text(strip=True) for h in headers):
+                    print("📝 Vision mode: injected headers into OCR text; skipping separate header translation")
+                    translated_html = _remove_chapter_headers_from_html(translated_html)
+                    status = "completed_image_only"
+                elif headers and any(h.get_text(strip=True) for h in headers):
                     print(f"📝 Found headers to translate in image-only chapter")
                     
                     # Create a minimal HTML with just the headers for translation
@@ -14216,6 +14259,25 @@ def main(log_callback=None, stop_callback=None):
                         # Remove images from the original to get pure text
                         for img in soup_clean.find_all('img'):
                             img.decompose()
+
+                        vision_ocr_mode = (
+                            os.getenv("OUTPUT_MODE", "").strip().lower() == "vision"
+                            and os.getenv("VISION_OCR_FIRST", "auto").strip().lower() not in ("0", "false", "no", "off")
+                        )
+                        if vision_ocr_mode:
+                            soup_without_headers = BeautifulSoup(str(soup_clean), 'html.parser')
+                            for header_tag in soup_without_headers.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title']):
+                                header_tag.decompose()
+                            remaining_non_header_text = soup_without_headers.get_text("", strip=True)
+                            if len(remaining_non_header_text) < 20:
+                                print("📝 Vision mode: headers were injected into OCR text; skipping separate header/text translation.")
+                                fname = FileUtilities.create_chapter_filename(c, actual_num)
+                                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                                    f.write(_remove_chapter_headers_from_html(body_with_images))
+                                progress_manager.update(idx, actual_num, content_hash, fname, status="completed_image_only", chapter_obj=c)
+                                progress_manager.save()
+                                chapters_completed += 1
+                                continue
 
                         # Set clean text for translation - use prettify() or str() on the full document
                         c["body"] = str(soup_clean) if soup_clean.body else original_body
