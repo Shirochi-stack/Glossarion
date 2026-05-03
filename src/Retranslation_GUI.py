@@ -1706,8 +1706,15 @@ class RetranslationMixin:
                 _nums = _re_display.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
                 ch_num = int(_nums[-1]) if _nums else ci + 1
                 status, issues = _gp_status_for(ci, _d)
-                icons = {'completed': 'âœ…', 'failed': 'âŒ', 'qa_failed': 'âŒ', 'merged': 'ðŸ”—', 'not_completed': 'â¬œ'}
-                display = f"Ch.{ch_num:03d} | {icons.get(status, 'â¬œ')} {status.replace('_', ' ').title():14s} | {fname}"
+                icons = {
+                    'completed': '\u2705',
+                    'failed': '\u274c',
+                    'qa_failed': '\u274c',
+                    'merged': '\U0001f517',
+                    'not_completed': '\u2b1c',
+                }
+                icon = icons.get(status) or '\u2b1c'
+                display = f"Ch.{ch_num:03d} | {icon} {status.replace('_', ' ').title():14s} | {fname}"
                 if issues:
                     issues_display = ', '.join(issues[:2])
                     if len(issues) > 2:
