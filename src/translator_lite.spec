@@ -32,7 +32,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = get_spec_app_name(__file__)  # Lite: no EPUB reader / Chromium
+APP_NAME = get_spec_app_name("translator_lite.spec")  # Lite: no EPUB reader / Chromium
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
