@@ -7799,6 +7799,13 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
         and os.getenv("VISION_OCR_FIRST", "auto").strip().lower() not in ("0", "false", "no", "off")
     )
     chapter_header_text = _extract_chapter_header_text(chapter_html) if vision_ocr_mode else ""
+    if chapter_header_text:
+        removed_headers = 0
+        for header_tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title']):
+            header_tag.decompose()
+            removed_headers += 1
+        if removed_headers:
+            print(f"   📝 Vision mode: removed {removed_headers} source header tag(s) before merging image translation")
     
     max_images_per_chapter = int(os.getenv('MAX_IMAGES_PER_CHAPTER', '10'))
     if len(images) > max_images_per_chapter:
@@ -8013,8 +8020,6 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
                 print(f"   ⚠️ Could not find image tag in HTML for: {img_src}")
     
     if translated_count > 0:
-        if vision_ocr_mode and chapter_header_text:
-            soup = BeautifulSoup(_remove_source_headers_outside_image_translation(str(soup)), 'html.parser')
         print(f"   🖼️ Successfully translated {translated_count} images")
         
         # Debug output
@@ -8109,31 +8114,6 @@ def _extract_chapter_header_text(chapter_html):
         return header.strip()
     except Exception:
         return ""
-
-
-def _remove_source_headers_outside_image_translation(chapter_html):
-    """Remove original source headers while preserving AI-generated image translation HTML."""
-    try:
-        soup = BeautifulSoup(chapter_html or "", 'html.parser')
-        generated_classes = {'image-translation', 'translated-text-only', 'image-with-translation'}
-
-        def _inside_generated_translation(tag):
-            parent = tag.parent
-            while parent is not None:
-                classes = parent.get('class', []) if hasattr(parent, 'get') else []
-                if isinstance(classes, str):
-                    classes = classes.split()
-                if generated_classes.intersection(classes):
-                    return True
-                parent = getattr(parent, 'parent', None)
-            return False
-
-        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title']):
-            if not _inside_generated_translation(tag):
-                tag.decompose()
-        return str(soup)
-    except Exception:
-        return chapter_html
 
 
 def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actual_num, check_stop_fn=None):
@@ -14171,7 +14151,6 @@ def main(log_callback=None, stop_callback=None):
                 # If we have headers, we should translate them even in "image-only" chapters
                 if vision_ocr_mode and headers and any(h.get_text(strip=True) for h in headers):
                     print("📝 Vision mode: injected headers into OCR text; skipping separate header translation")
-                    translated_html = _remove_source_headers_outside_image_translation(translated_html)
                     status = "completed"
                 elif headers and any(h.get_text(strip=True) for h in headers):
                     print(f"📝 Found headers to translate in image-only chapter")
@@ -14297,7 +14276,7 @@ def main(log_callback=None, stop_callback=None):
                                 print("📝 Vision mode: headers were injected into OCR text; skipping separate header/text translation.")
                                 fname = FileUtilities.create_chapter_filename(c, actual_num)
                                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                                    f.write(_remove_source_headers_outside_image_translation(body_with_images))
+                                    f.write(body_with_images)
                                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
                                 progress_manager.save()
                                 chapters_completed += 1
