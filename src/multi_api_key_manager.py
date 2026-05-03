@@ -1567,7 +1567,7 @@ class MultiAPIKeyDialog(QDialog):
             use_glossary = self.use_glossary_keys_checkbox.isChecked() if hasattr(self, 'use_glossary_keys_checkbox') else False
             self.translator_gui.config['use_glossary_keys'] = use_glossary
             
-            # Save QA scan keys toggle
+            # Save Vision keys toggle (stored under the legacy qa_scan config key)
             use_qa_scan = self.use_qa_scan_keys_checkbox.isChecked() if hasattr(self, 'use_qa_scan_keys_checkbox') else False
             self.translator_gui.config['use_qa_scan_keys'] = use_qa_scan
             
@@ -1886,7 +1886,7 @@ class MultiAPIKeyDialog(QDialog):
         # Create glossary keys container (hidden by default)
         self._create_glossary_section(scrollable_layout)
         
-        # Create QA scan keys container (hidden by default)
+        # Create Vision keys container (hidden by default)
         self._create_qa_scan_section(scrollable_layout)
         
         # Add stretch to fill remaining space in scroll area
@@ -6149,11 +6149,11 @@ class MultiAPIKeyDialog(QDialog):
     # ===================================================================
 
     # ===================================================================
-    # QA SCAN KEYS SECTION (For AI Truncation Detection)
+    # VISION KEYS SECTION
     # ===================================================================
 
     def _create_qa_scan_section(self, parent_layout):
-        """Create the QA scan keys section below glossary"""
+        """Create the Vision keys section below glossary."""
         # Container that can be hidden
         self.qa_scan_container = QWidget()
         qa_scan_container_layout = QVBoxLayout(self.qa_scan_container)
@@ -6165,16 +6165,16 @@ class MultiAPIKeyDialog(QDialog):
         self.qa_scan_separator.setFrameShadow(QFrame.Sunken)
         qa_scan_container_layout.addWidget(self.qa_scan_separator)
         
-        # Main QA scan frame
-        qa_scan_frame = QGroupBox("QA Scan Keys (For AI Truncation Detection)")
+        # Main Vision keys frame
+        qa_scan_frame = QGroupBox("Vision Keys")
         qa_scan_frame_layout = QVBoxLayout(qa_scan_frame)
         qa_scan_frame_layout.setContentsMargins(15, 15, 15, 15)
         
         # Description
         desc_label = QLabel(
-                "Configure dedicated keys for QA scan / AI truncation detection API calls.\n"
-                "These keys will be used exclusively when the translation context is 'Truncation'.\n"
-                "If no QA scan keys are configured or the pool is disabled, the main key pool is used instead.")
+                "Configure dedicated keys for vision OCR, image scans, and AI truncation detection calls.\n"
+                "These keys are used for Vision/OCR contexts before falling back to the main key pool.\n"
+                "If no Vision keys are configured or the pool is disabled, the main key pool is used instead.")
         desc_label.setStyleSheet("color: gray;")
         desc_label.setWordWrap(True)
         qa_scan_frame_layout.addWidget(desc_label)
@@ -6186,7 +6186,7 @@ class MultiAPIKeyDialog(QDialog):
         qa_scan_checkbox_layout.setSpacing(8)
         
         self.use_qa_scan_keys_var = self.translator_gui.config.get('use_qa_scan_keys', False)
-        self.use_qa_scan_keys_checkbox = self._create_styled_checkbox("Enable QA Scan Keys")
+        self.use_qa_scan_keys_checkbox = self._create_styled_checkbox("Enable Vision Keys")
         self.use_qa_scan_keys_checkbox.setChecked(self.use_qa_scan_keys_var)
         self.use_qa_scan_keys_checkbox.toggled.connect(self._toggle_qa_scan_section)
         
@@ -6224,13 +6224,13 @@ class MultiAPIKeyDialog(QDialog):
         
         qa_scan_frame_layout.addWidget(qa_scan_checkbox_container)
         
-        # Add QA scan key section
+        # Add Vision key section
         self.add_qa_scan_frame = QWidget()
         add_qa_scan_grid = QGridLayout(self.add_qa_scan_frame)
         add_qa_scan_grid.setContentsMargins(0, 0, 0, 10)
         
         # Row 0: API Key and Model
-        add_qa_scan_grid.addWidget(QLabel("QA Scan API Key:"), 0, 0, Qt.AlignLeft)
+        add_qa_scan_grid.addWidget(QLabel("Vision API Key:"), 0, 0, Qt.AlignLeft)
         self.qa_scan_key_entry = QLineEdit()
         self.qa_scan_key_entry.setEchoMode(QLineEdit.Password)
         add_qa_scan_grid.addWidget(self.qa_scan_key_entry, 0, 1)
@@ -6251,7 +6251,7 @@ class MultiAPIKeyDialog(QDialog):
         add_qa_scan_grid.addWidget(self.qa_scan_model_combo, 0, 4)
         
         # Add button
-        add_qa_scan_btn = QPushButton("Add QA Scan Key")
+        add_qa_scan_btn = QPushButton("Add Vision Key")
         add_qa_scan_btn.clicked.connect(self._add_qa_scan_key)
         add_qa_scan_grid.addWidget(add_qa_scan_btn, 0, 5, Qt.AlignRight)
         
@@ -6319,7 +6319,7 @@ class MultiAPIKeyDialog(QDialog):
         # Initially hide endpoint fields
         self._toggle_qa_scan_individual_endpoint_fields()
         
-        # QA scan keys list
+        # Vision keys list
         self._create_qa_scan_list(qa_scan_frame_layout)
         
         # Add container to parent
@@ -6330,8 +6330,8 @@ class MultiAPIKeyDialog(QDialog):
         self._toggle_qa_scan_section()
 
     def _create_qa_scan_list(self, parent_layout):
-        """Create the QA scan keys list"""
-        self.qa_scan_list_label = QLabel("QA Scan Keys (tried in order):")
+        """Create the Vision keys list."""
+        self.qa_scan_list_label = QLabel("Vision Keys (tried in order):")
         list_label_font = QFont()
         list_label_font.setBold(True)
         self.qa_scan_list_label.setFont(list_label_font)
@@ -6453,11 +6453,11 @@ class MultiAPIKeyDialog(QDialog):
         qa_scan_action_layout.addWidget(self.qa_scan_status_label)
         parent_layout.addWidget(self.qa_scan_action_frame)
         
-        # Load existing QA scan keys
+        # Load existing Vision keys
         self._load_qa_scan_keys()
 
     def _load_qa_scan_keys(self):
-        """Load QA scan keys from config"""
+        """Load Vision keys from config."""
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
         
         v_scroll = self.qa_scan_tree.verticalScrollBar().value()
@@ -6623,7 +6623,7 @@ class MultiAPIKeyDialog(QDialog):
         if azure_endpoint:
             extras.append(f"Azure: {azure_endpoint[:30]}...")
         extra_info = f" ({', '.join(extras)})" if extras else ""
-        self._show_qa_scan_status(f"Added QA scan key for model: {model}{extra_info}")
+        self._show_qa_scan_status(f"Added Vision key for model: {model}{extra_info}")
         
         self._notify_authgpt_visibility()
 
@@ -6669,7 +6669,7 @@ class MultiAPIKeyDialog(QDialog):
         """Test selected QA scan key"""
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
-            QMessageBox.warning(self, "Warning", "Please select a QA scan key to test")
+            QMessageBox.warning(self, "Warning", "Please select a Vision key to test")
             return
         
         index = self.qa_scan_tree.indexOfTopLevelItem(selected[0])
@@ -6694,11 +6694,11 @@ class MultiAPIKeyDialog(QDialog):
         QTimer.singleShot(100, lambda: self._test_single_qa_scan_key(key_data, index))
 
     def _test_all_qa_scan(self):
-        """Test all QA scan keys in parallel"""
+        """Test all Vision keys in parallel."""
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
         
         if not qa_scan_keys:
-            QMessageBox.warning(self, "Warning", "No QA scan keys to test")
+            QMessageBox.warning(self, "Warning", "No Vision keys to test")
             return
         
         for i in range(self.qa_scan_tree.topLevelItemCount()):
@@ -6772,7 +6772,7 @@ class MultiAPIKeyDialog(QDialog):
         api_key = key_data.get('api_key', '')
         model = key_data.get('model', '')
         
-        print(f"[DEBUG] Starting REAL QA scan key test for {model}")
+        print(f"[DEBUG] Starting REAL Vision key test for {model}")
         
         from concurrent.futures import ThreadPoolExecutor
         from unified_api_client import UnifiedClient
@@ -6828,7 +6828,7 @@ class MultiAPIKeyDialog(QDialog):
                 if response and isinstance(response, tuple):
                     content, _ = response
                     if content and "test successful" in content.lower():
-                        print(f"[DEBUG] QA scan key test completed for {model}: PASSED")
+                        print(f"[DEBUG] Vision key test completed for {model}: PASSED")
                         if not timed_out[0]:
                             if HAS_GUI:
                                 QMetaObject.invokeMethod(self, "_update_qa_scan_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
@@ -6836,14 +6836,14 @@ class MultiAPIKeyDialog(QDialog):
                                 self._update_qa_scan_test_result(index, True)
                         return
                 
-                print(f"[DEBUG] QA scan key test completed for {model}: FAILED")
+                print(f"[DEBUG] Vision key test completed for {model}: FAILED")
                 if not timed_out[0]:
                     if HAS_GUI:
                         QMetaObject.invokeMethod(self, "_update_qa_scan_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
                     else:
                         self._update_qa_scan_test_result(index, False)
             except Exception as e:
-                print(f"[DEBUG] QA scan key test error for {model}: {e}")
+                print(f"[DEBUG] Vision key test error for {model}: {e}")
                 if not timed_out[0]:
                     if HAS_GUI:
                         QMetaObject.invokeMethod(self, "_update_qa_scan_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
@@ -6858,7 +6858,7 @@ class MultiAPIKeyDialog(QDialog):
                     future.result(timeout=30)
                 except FuturesTimeout:
                     timed_out[0] = True
-                    print(f"[DEBUG] QA scan key test TIMED OUT for {model} (30s)")
+                    print(f"[DEBUG] Vision key test TIMED OUT for {model} (30s)")
                     _client = client_ref[0]
                     if _client:
                         try:
@@ -6889,12 +6889,12 @@ class MultiAPIKeyDialog(QDialog):
             thread.start()
 
     def _remove_selected_qa_scan(self):
-        """Remove selected QA scan keys"""
+        """Remove selected Vision keys."""
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
             return
         
-        reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected QA scan key(s)?",
+        reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected Vision key(s)?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             indices = sorted([self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
@@ -6908,12 +6908,12 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
             self.translator_gui.save_config(show_message=False)
             self._load_qa_scan_keys()
-            self._show_qa_scan_status(f"Removed {len(selected)} QA scan key(s)")
+            self._show_qa_scan_status(f"Removed {len(selected)} Vision key(s)")
             self._notify_authgpt_visibility()
 
 
     def _enable_selected_qa_scan(self):
-        """Enable selected QA scan keys"""
+        """Enable selected Vision keys."""
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
             return
@@ -6925,11 +6925,11 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
         self.translator_gui.save_config(show_message=False)
         self._load_qa_scan_keys()
-        self._show_qa_scan_status(f"Enabled {len(selected)} QA scan key(s)")
+        self._show_qa_scan_status(f"Enabled {len(selected)} Vision key(s)")
         self._notify_authgpt_visibility()
 
     def _disable_selected_qa_scan(self):
-        """Disable selected QA scan keys"""
+        """Disable selected Vision keys."""
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
             return
@@ -6941,21 +6941,21 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
         self.translator_gui.save_config(show_message=False)
         self._load_qa_scan_keys()
-        self._show_qa_scan_status(f"Disabled {len(selected)} QA scan key(s)")
+        self._show_qa_scan_status(f"Disabled {len(selected)} Vision key(s)")
         self._notify_authgpt_visibility()
 
     def _clear_all_qa_scan(self):
-        """Clear all QA scan keys"""
+        """Clear all Vision keys."""
         if self.qa_scan_tree.topLevelItemCount() == 0:
             return
         
-        reply = QMessageBox.question(self, "Confirm", "Remove ALL QA scan keys?",
+        reply = QMessageBox.question(self, "Confirm", "Remove ALL Vision keys?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             self.translator_gui.config['qa_scan_keys'] = []
             self.translator_gui.save_config(show_message=False)
             self._load_qa_scan_keys()
-            self._show_qa_scan_status("Cleared all QA scan keys")
+            self._show_qa_scan_status("Cleared all Vision keys")
             self._notify_authgpt_visibility()
 
     def _toggle_qa_scan_section(self):
@@ -6973,7 +6973,7 @@ class MultiAPIKeyDialog(QDialog):
         if hasattr(self, 'qa_scan_tree') and not enabled:
             self.qa_scan_tree.clearSelection()
         
-        self._show_qa_scan_status(f"QA Scan Keys {'enabled' if enabled else 'disabled'}")
+        self._show_qa_scan_status(f"Vision Keys {'enabled' if enabled else 'disabled'}")
         
         # Update in-memory config immediately
         self.translator_gui.config['use_qa_scan_keys'] = enabled
@@ -6983,9 +6983,9 @@ class MultiAPIKeyDialog(QDialog):
         if not getattr(self, '_initializing', False):
             qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
             if enabled:
-                msg = f"🔑 QA scan key pool: {len(qa_scan_keys)} keys loaded"
+                msg = f"🔑 Vision key pool: {len(qa_scan_keys)} keys loaded"
             else:
-                msg = f"🔑 QA scan key pool: disabled"
+                msg = f"🔑 Vision key pool: disabled"
             if hasattr(self.translator_gui, 'append_log'):
                 try:
                     self.translator_gui.append_log(msg)
@@ -6996,7 +6996,12 @@ class MultiAPIKeyDialog(QDialog):
         
         try:
             import os as _os
-            _os.environ['USE_QA_SCAN_KEYS'] = '1' if enabled else '0'
+            import json as _json
+            qk_list = self.translator_gui.config.get('qa_scan_keys', []) or []
+            _os.environ['USE_VISION_KEYS'] = '1' if enabled else '0'
+            _os.environ['USE_QA_SCAN_KEYS'] = _os.environ['USE_VISION_KEYS']
+            _os.environ['VISION_API_KEYS'] = _json.dumps(qk_list)
+            _os.environ['QA_SCAN_API_KEYS'] = _os.environ['VISION_API_KEYS']
         except Exception:
             pass
         
@@ -7005,30 +7010,37 @@ class MultiAPIKeyDialog(QDialog):
                 from unified_api_client import UnifiedClient
                 qk_list = self.translator_gui.config.get('qa_scan_keys', []) or []
                 if qk_list:
-                    UnifiedClient.set_in_memory_qa_scan_keys(qk_list)
+                    UnifiedClient.set_in_memory_vision_keys(qk_list)
             except Exception:
                 pass
         else:
             try:
                 from unified_api_client import UnifiedClient
-                UnifiedClient.clear_in_memory_qa_scan_keys()
+                UnifiedClient.clear_in_memory_vision_keys()
             except Exception:
                 pass
         
         self._notify_authgpt_visibility()
 
     def _refresh_qa_scan_pool(self):
-        """Refresh the in-memory QA scan key pool after any change."""
+        """Refresh the in-memory Vision key pool after any change."""
         try:
             use_qa_scan = self.use_qa_scan_keys_checkbox.isChecked() if hasattr(self, 'use_qa_scan_keys_checkbox') else False
             if not use_qa_scan:
                 return
             from unified_api_client import UnifiedClient
             qk_list = self.translator_gui.config.get('qa_scan_keys', []) or []
+            try:
+                import os as _os
+                import json as _json
+                _os.environ['VISION_API_KEYS'] = _json.dumps(qk_list)
+                _os.environ['QA_SCAN_API_KEYS'] = _os.environ['VISION_API_KEYS']
+            except Exception:
+                pass
             if qk_list:
-                UnifiedClient.set_in_memory_qa_scan_keys(qk_list)
+                UnifiedClient.set_in_memory_vision_keys(qk_list)
             else:
-                UnifiedClient.clear_in_memory_qa_scan_keys()
+                UnifiedClient.clear_in_memory_vision_keys()
         except Exception:
             pass
 
@@ -7058,7 +7070,7 @@ class MultiAPIKeyDialog(QDialog):
             self.qa_scan_azure_api_version_combo.setCurrentText('2025-01-01-preview')
 
     def _show_qa_scan_context_menu(self, position):
-        """Show context menu for QA scan keys"""
+        """Show context menu for Vision keys."""
         item = self.qa_scan_tree.itemAt(position)
         if not item:
             return
@@ -7130,7 +7142,7 @@ class MultiAPIKeyDialog(QDialog):
         clear_temp_action = menu.addAction("Clear Key Temperature")
         clear_temp_action.triggered.connect(self._clear_qa_scan_key_temperature_for_selected)
         
-        # Per-key API call delay options for QA scan keys
+        # Per-key API call delay options for Vision keys
         if selected_count > 1:
             set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
         else:
@@ -7158,7 +7170,7 @@ class MultiAPIKeyDialog(QDialog):
         menu.exec_(self.qa_scan_tree.viewport().mapToGlobal(position))
 
     def _change_qa_scan_model_for_selected(self):
-        """Change model name for selected QA scan keys"""
+        """Change model name for selected Vision keys."""
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
             return
@@ -7166,7 +7178,7 @@ class MultiAPIKeyDialog(QDialog):
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
         
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"Change Model for {len(selected)} QA Scan Keys")
+        dialog.setWindowTitle(f"Change Model for {len(selected)} Vision Keys")
         screen = QApplication.primaryScreen().geometry()
         width = int(screen.width() * 0.21)
         height = int(screen.height() * 0.13)
@@ -7201,7 +7213,7 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
                 self.translator_gui.save_config(show_message=False)
                 self._load_qa_scan_keys()
-                self._show_qa_scan_status(f"Changed model to '{new_model}' for {len(selected)} QA scan keys")
+                self._show_qa_scan_status(f"Changed model to '{new_model}' for {len(selected)} Vision keys")
                 dialog.accept()
         
         button_layout = QHBoxLayout()
@@ -7238,7 +7250,7 @@ class MultiAPIKeyDialog(QDialog):
         if len(new_order) == len(qa_scan_keys):
             self.translator_gui.config['qa_scan_keys'] = new_order
             self.translator_gui.save_config(show_message=False)
-            self._show_qa_scan_status("Reordered QA scan keys")
+            self._show_qa_scan_status("Reordered Vision keys")
 
     def _on_qa_scan_selection_change(self):
         """Update position label when QA scan selection changes"""
@@ -7359,7 +7371,7 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui.save_config(show_message=False)
             self._load_qa_scan_keys()
             status = "configured" if temp_key.use_individual_endpoint else "disabled"
-            self._show_qa_scan_status(f"Individual endpoint {status} for QA scan key")
+            self._show_qa_scan_status(f"Individual endpoint {status} for Vision key")
         
         if IndividualEndpointDialog is None:
             QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
@@ -7368,7 +7380,7 @@ class MultiAPIKeyDialog(QDialog):
         dialog.exec_()
     
     def _set_qa_scan_output_token_limit_for_selected(self):
-        """Set per-key output token limit for selected QA scan keys"""
+        """Set per-key output token limit for selected Vision keys."""
         from PySide6.QtWidgets import QInputDialog
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
@@ -7397,8 +7409,8 @@ class MultiAPIKeyDialog(QDialog):
                 default_val = 8192
         
         value, ok = QInputDialog.getInt(
-            self, "Set QA Scan Output Token Limit",
-            "Max output tokens for selected QA scan key(s):",
+            self, "Set Vision Key Output Token Limit",
+            "Max output tokens for selected Vision key(s):",
             default_val, 1, 2000000, 512,
         )
         if not ok or value <= 0:
@@ -7410,10 +7422,10 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
         self.translator_gui.save_config(show_message=False)
         self._load_qa_scan_keys()
-        self._show_qa_scan_status(f"Set QA scan output token limit to {value} for {len(selected_indices)} key(s)")
+        self._show_qa_scan_status(f"Set Vision key output token limit to {value} for {len(selected_indices)} key(s)")
     
     def _clear_qa_scan_output_token_limit_for_selected(self):
-        """Clear per-key output token limit for selected QA scan keys"""
+        """Clear per-key output token limit for selected Vision keys."""
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
             return
@@ -7427,10 +7439,10 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
         self.translator_gui.save_config(show_message=False)
         self._load_qa_scan_keys()
-        self._show_qa_scan_status(f"Cleared QA scan output token limit for {len(selected_indices)} key(s)")
+        self._show_qa_scan_status(f"Cleared Vision key output token limit for {len(selected_indices)} key(s)")
     
     def _set_qa_scan_key_temperature_for_selected(self):
-        """Set per-key temperature for selected QA scan keys"""
+        """Set per-key temperature for selected Vision keys."""
         from PySide6.QtWidgets import QInputDialog
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
@@ -7453,8 +7465,8 @@ class MultiAPIKeyDialog(QDialog):
         
         value, ok = QInputDialog.getDouble(
             self,
-            "Set QA Scan Key Temperature",
-            "Temperature for selected QA scan key(s) (0.0 - 1.0):",
+            "Set Vision Key Temperature",
+            "Temperature for selected Vision key(s) (0.0 - 1.0):",
             default_val,
             0.0,
             1.0,
@@ -7469,10 +7481,10 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
         self.translator_gui.save_config(show_message=False)
         self._load_qa_scan_keys()
-        self._show_qa_scan_status(f"Set QA scan key temperature to {value} for {len(selected_indices)} key(s)")
+        self._show_qa_scan_status(f"Set Vision key temperature to {value} for {len(selected_indices)} key(s)")
     
     def _clear_qa_scan_key_temperature_for_selected(self):
-        """Clear per-key temperature for selected QA scan keys"""
+        """Clear per-key temperature for selected Vision keys."""
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
             return
@@ -7486,10 +7498,10 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
         self.translator_gui.save_config(show_message=False)
         self._load_qa_scan_keys()
-        self._show_qa_scan_status(f"Cleared QA scan key temperature for {len(selected_indices)} key(s)")
+        self._show_qa_scan_status(f"Cleared Vision key temperature for {len(selected_indices)} key(s)")
     
     def _set_qa_scan_api_call_delay_for_selected(self):
-        """Set per-key API call delay for selected QA scan keys"""
+        """Set per-key API call delay for selected Vision keys."""
         from PySide6.QtWidgets import QInputDialog
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
@@ -7518,7 +7530,7 @@ class MultiAPIKeyDialog(QDialog):
             self._show_qa_scan_status(f"Set API call delay to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
 
     def _clear_qa_scan_api_call_delay_for_selected(self):
-        """Clear per-key API call delay for selected QA scan keys"""
+        """Clear per-key API call delay for selected Vision keys."""
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
             return
@@ -7545,10 +7557,10 @@ class MultiAPIKeyDialog(QDialog):
         
         status = "enabled" if enabled else "disabled"
         model = qa_scan_keys[qa_scan_index].get('model', 'unknown')
-        self._show_qa_scan_status(f"Individual endpoint {status} for QA scan key ({model})")
+        self._show_qa_scan_status(f"Individual endpoint {status} for Vision key ({model})")
 
     def _browse_qa_scan_google_credentials(self):
-        """Browse for Google Cloud credentials JSON file for QA scan keys"""
+        """Browse for Google Cloud credentials JSON file for Vision keys."""
         filename, _ = QFileDialog.getOpenFileName(
             self,
             "Select Google Cloud Credentials JSON for QA Scan",
@@ -7562,7 +7574,7 @@ class MultiAPIKeyDialog(QDialog):
                     creds_data = json.load(f)
                     if 'type' in creds_data and 'project_id' in creds_data:
                         self.qa_scan_google_creds_entry.setText(filename)
-                        self._show_qa_scan_status(f"Selected QA scan Google credentials: {os.path.basename(filename)}")
+                        self._show_qa_scan_status(f"Selected Vision key Google credentials: {os.path.basename(filename)}")
                     else:
                         QMessageBox.critical(
                             self,

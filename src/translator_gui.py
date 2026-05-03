@@ -13080,10 +13080,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['USE_MAIN_KEY_FALLBACK'] = '1' if self.config.get('use_main_key_fallback', True) else '0'
                 os.environ['FALLBACK_KEY_SHUFFLE'] = '1' if self.config.get('fallback_key_shuffle', False) else '0'
                 os.environ['USE_GLOSSARY_KEYS'] = '1' if self.config.get('use_glossary_keys', False) else '0'
-                os.environ['USE_QA_SCAN_KEYS'] = '1' if self.config.get('use_qa_scan_keys', False) else '0'
+                vision_keys_enabled = self.config.get('use_qa_scan_keys', False)
+                vision_keys = self.config.get('qa_scan_keys', [])
+                os.environ['USE_VISION_KEYS'] = '1' if vision_keys_enabled else '0'
+                os.environ['USE_QA_SCAN_KEYS'] = os.environ['USE_VISION_KEYS']
                 os.environ['FALLBACK_KEYS'] = json.dumps(self.config.get('fallback_keys', []))
                 os.environ['GLOSSARY_API_KEYS'] = json.dumps(self.config.get('glossary_keys', []))
-                os.environ['QA_SCAN_API_KEYS'] = json.dumps(self.config.get('qa_scan_keys', []))
+                os.environ['VISION_API_KEYS'] = json.dumps(vision_keys)
+                os.environ['QA_SCAN_API_KEYS'] = os.environ['VISION_API_KEYS']
 
                 # In-memory key pools
                 if self.config.get('use_multi_api_keys', False) and self.config.get('multi_api_keys', []):
@@ -13098,19 +13102,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         force_rotation=self.config.get('force_key_rotation', True),
                         rotation_frequency=self.config.get('rotation_frequency', 1),
                     )
-                if self.config.get('use_qa_scan_keys', False) and self.config.get('qa_scan_keys', []):
-                    qa_keys = self.config.get('qa_scan_keys', [])
-                    ok = UnifiedClient.set_in_memory_qa_scan_keys(
-                        qa_keys,
+                if vision_keys_enabled and vision_keys:
+                    ok = UnifiedClient.set_in_memory_vision_keys(
+                        vision_keys,
                         force_rotation=self.config.get('force_key_rotation', True),
                         rotation_frequency=self.config.get('rotation_frequency', 1),
                     )
                     pool = getattr(UnifiedClient, '_qa_scan_key_pool', None)
                     pool_count = len(getattr(pool, 'keys', [])) if pool else 0
-                    self.append_log(f"[GTool] QA scan key pool: {pool_count} keys loaded (setup={'OK' if ok else 'FAILED'})")
+                    self.append_log(f"[GTool] Vision key pool: {pool_count} keys loaded (setup={'OK' if ok else 'FAILED'})")
                 else:
-                    if self.config.get('use_qa_scan_keys', False):
-                        self.append_log("[GTool] QA scan keys enabled but no keys configured")
+                    if vision_keys_enabled:
+                        self.append_log("[GTool] Vision Keys enabled but no keys configured")
             except Exception as e:
                 self.append_log(f"[GTool] ⚠️ Key pool init error: {e}")
 
@@ -13722,9 +13725,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
             else:
                 os.environ['USE_GLOSSARY_KEYS'] = '0'
             if self.config.get('use_qa_scan_keys', False):
+                os.environ['USE_VISION_KEYS'] = '1'
                 os.environ['USE_QA_SCAN_KEYS'] = '1'
             else:
+                os.environ['USE_VISION_KEYS'] = '0'
                 os.environ['USE_QA_SCAN_KEYS'] = '0'
+            os.environ['VISION_API_KEYS'] = json.dumps(self.config.get('qa_scan_keys', []))
+            os.environ['QA_SCAN_API_KEYS'] = os.environ['VISION_API_KEYS']
         except Exception:
             pass
 
@@ -13750,15 +13757,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
             else:
                 UnifiedClient.clear_in_memory_glossary_keys()
             
-            # Configure QA scan key pool in memory (mirrors glossary-key setup)
+            # Configure Vision key pool in memory (mirrors glossary-key setup)
             if self.config.get('use_qa_scan_keys', False) and self.config.get('qa_scan_keys', []):
-                UnifiedClient.set_in_memory_qa_scan_keys(
+                UnifiedClient.set_in_memory_vision_keys(
                     self.config.get('qa_scan_keys', []),
                     force_rotation=self.config.get('force_key_rotation', True),
                     rotation_frequency=self.config.get('rotation_frequency', 1),
                 )
             else:
-                UnifiedClient.clear_in_memory_qa_scan_keys()
+                UnifiedClient.clear_in_memory_vision_keys()
         except Exception:
             pass
 
@@ -13905,6 +13912,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
             'USE_GLOSSARY_KEYS': '1' if self.config.get('use_glossary_keys', False) else '0',
             'GLOSSARY_API_KEYS': json.dumps(self.config.get('glossary_keys', [])),
+            'USE_VISION_KEYS': '1' if self.config.get('use_qa_scan_keys', False) else '0',
+            'VISION_API_KEYS': json.dumps(self.config.get('qa_scan_keys', [])),
             'USE_QA_SCAN_KEYS': '1' if self.config.get('use_qa_scan_keys', False) else '0',
             'QA_SCAN_API_KEYS': json.dumps(self.config.get('qa_scan_keys', [])),
 

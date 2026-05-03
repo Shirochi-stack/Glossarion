@@ -1720,7 +1720,7 @@ class ImageTranslator:
             self.image_max_tokens,
             check_stop_fn,
             chunk_timeout,
-            'image_ocr'
+            'vision_ocr'
         )
 
         if finish_reason in ["length", "max_tokens"]:

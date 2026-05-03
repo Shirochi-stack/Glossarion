@@ -2195,13 +2195,13 @@ class UnifiedClient:
 
             return True
 
-    # In-memory QA scan-key configuration (mirrors glossary-key pattern)
+    # In-memory Vision-key configuration (historically named QA scan keys).
     _in_memory_qa_scan_keys = None
     _in_memory_qa_scan_keys_lock = RLock()
 
     @classmethod
     def set_in_memory_qa_scan_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
-        """Configure QA scan-key mode without storing the full key list in environment variables."""
+        """Configure Vision-key mode without storing the full key list in environment variables."""
         try:
             with cls._in_memory_qa_scan_keys_lock:
                 cls._in_memory_qa_scan_keys = keys_list
@@ -2214,16 +2214,30 @@ class UnifiedClient:
         return True
 
     @classmethod
+    def set_in_memory_vision_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
+        """Alias for the Vision-key pool; keeps older QA scan storage compatible."""
+        return cls.set_in_memory_qa_scan_keys(
+            keys_list,
+            force_rotation=force_rotation,
+            rotation_frequency=rotation_frequency,
+        )
+
+    @classmethod
     def clear_in_memory_qa_scan_keys(cls):
-        """Clear in-memory QA scan-key configuration."""
+        """Clear in-memory Vision-key configuration."""
         with cls._in_memory_qa_scan_keys_lock:
             cls._in_memory_qa_scan_keys = None
         with cls._qa_scan_pool_lock:
             cls._qa_scan_key_pool = None
 
     @classmethod
+    def clear_in_memory_vision_keys(cls):
+        """Alias for clearing the Vision-key pool."""
+        cls.clear_in_memory_qa_scan_keys()
+
+    @classmethod
     def setup_qa_scan_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
-        """Setup the shared QA scan API key pool (mirrors setup_glossary_key_pool)."""
+        """Setup the shared Vision API key pool (mirrors setup_glossary_key_pool)."""
         with cls._qa_scan_pool_lock:
             if cls._qa_scan_key_pool is None:
                 cls._qa_scan_key_pool = APIKeyPool()
@@ -2268,9 +2282,9 @@ class UnifiedClient:
             existing_count = len(getattr(cls._qa_scan_key_pool, 'keys', [])) if cls._qa_scan_key_pool else 0
             if existing_count != len(validated_keys):
                 if encrypted_keys_fixed > 0:
-                    print(f"🔑 QA scan key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
+                    print(f"🔑 Vision key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
                 else:
-                    print(f"🔑 QA scan key pool: {len(validated_keys)} keys loaded")
+                    print(f"🔑 Vision key pool: {len(validated_keys)} keys loaded")
 
             return True
     
@@ -4741,20 +4755,29 @@ class UnifiedClient:
             # CONTEXT-SPECIFIC KEY OVERRIDES: When context matches a dedicated pool,
             # use that pool for full multi-key rotation (mirrors main multi-key mode).
             
-            # QA SCAN KEY OVERRIDE: When context is 'Truncation', 'qa_truncation', or 'image_scan' (GTool)
-            _is_qa_scan_context = context in ('Truncation', 'qa_truncation', 'image_scan') or (not context and 'Truncation' in threading.current_thread().name)
+            # VISION KEY OVERRIDE: shared pool for QA truncation checks and vision OCR/image scans.
+            _vision_key_contexts = ('Truncation', 'qa_truncation', 'image_scan', 'image_ocr', 'vision_ocr')
+            _is_qa_scan_context = context in _vision_key_contexts or (not context and 'Truncation' in threading.current_thread().name)
             if _is_qa_scan_context:
                 try:
-                    use_qa_scan_keys = os.getenv('USE_QA_SCAN_KEYS', '0') == '1'
+                    vision_keys_flag = os.getenv('USE_VISION_KEYS', '0')
+                    legacy_qa_keys_flag = os.getenv('USE_QA_SCAN_KEYS', '0')
+                    use_qa_scan_keys = vision_keys_flag == '1' or legacy_qa_keys_flag == '1'
                     if not use_qa_scan_keys:
                         if not getattr(self.__class__, '_qa_scan_env_warned', False):
-                            print(f"[QA SCAN KEYS] ℹ️ Context is '{context}' but USE_QA_SCAN_KEYS={os.getenv('USE_QA_SCAN_KEYS', '0')} — skipping override")
+                            print(f"[VISION KEYS] ℹ️ Context is '{context}' but USE_VISION_KEYS={vision_keys_flag}, USE_QA_SCAN_KEYS={legacy_qa_keys_flag} — skipping override")
                             self.__class__._qa_scan_env_warned = True
                     if use_qa_scan_keys:
                         qa_scan_pool = self.__class__._qa_scan_key_pool
                         if not qa_scan_pool or not getattr(qa_scan_pool, 'keys', []):
                             # Fallback: try loading from env var
-                            qa_scan_keys_json = os.getenv('QA_SCAN_API_KEYS', '[]')
+                            vision_keys_json = os.getenv('VISION_API_KEYS')
+                            legacy_qa_keys_json = os.getenv('QA_SCAN_API_KEYS', '[]')
+                            qa_scan_keys_json = (
+                                vision_keys_json
+                                if vision_keys_json and vision_keys_json != '[]'
+                                else legacy_qa_keys_json
+                            )
                             if qa_scan_keys_json != '[]':
                                 try:
                                     qa_scan_keys_list = json.loads(qa_scan_keys_json)
@@ -4792,7 +4815,7 @@ class UnifiedClient:
                                     self.api_key = key_entry.api_key
                                     self.model = key_entry.model
                                     self.current_key_index = key_idx
-                                    self.key_identifier = f"QAScanKey#{key_idx+1} ({key_entry.model})"
+                                    self.key_identifier = f"VisionKey#{key_idx+1} ({key_entry.model})"
                                     # Apply per-key settings
                                     qk_data = None
                                     try:
@@ -4862,18 +4885,18 @@ class UnifiedClient:
                                     except Exception:
                                         pass
                                     if not getattr(self.__class__, '_qa_scan_pool_logged', False):
-                                        print(f"[QA SCAN KEYS] 🔑 Using QA scan key pool ({len(qa_scan_pool.keys)} keys)")
+                                        print(f"[VISION KEYS] 🔑 Using Vision key pool ({len(qa_scan_pool.keys)} keys)")
                                         self.__class__._qa_scan_pool_logged = True
                             except Exception as e:
                                 if 'cancel' not in str(e).lower() and not self._is_stop_requested():
-                                    print(f"[QA SCAN KEYS] ⚠️ Failed to get QA scan key from pool: {e}")
+                                    print(f"[VISION KEYS] ⚠️ Failed to get Vision key from pool: {e}")
                                 if _had_instance_pool:
                                     self._api_key_pool = _original_instance_pool
                                 elif '_api_key_pool' in self.__dict__:
                                     del self._api_key_pool
                                 self._multi_key_mode = _original_multi_key_mode
                 except Exception as e:
-                    print(f"[QA SCAN KEYS] ⚠️ Failed to apply QA scan key override: {e}")
+                    print(f"[VISION KEYS] ⚠️ Failed to apply Vision key override: {e}")
             
             # GLOSSARY KEY OVERRIDE: When context is 'glossary' and glossary keys are enabled,
             # use the glossary key pool for full multi-key rotation (mirrors main multi-key mode).
@@ -5749,10 +5772,10 @@ class UnifiedClient:
 
         try:
             if getattr(self, '_multi_key_mode', False) and not self._is_stop_requested():
-                # Distinguish between real multi-key mode and glossary/QA pool overrides
+                # Distinguish between real multi-key mode and glossary/Vision pool overrides
                 _is_glossary_pool = (self._api_key_pool is getattr(self.__class__, '_glossary_key_pool', None))
                 _is_qa_pool = (self._api_key_pool is getattr(self.__class__, '_qa_scan_key_pool', None))
-                _pool_label = "(glossary-key)" if _is_glossary_pool else "(qa-key)" if _is_qa_pool else "(multi-key)"
+                _pool_label = "(glossary-key)" if _is_glossary_pool else "(vision-key)" if _is_qa_pool else "(multi-key)"
                 defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model} {_pool_label}")
             elif log_model != model_snapshot and not self._is_stop_requested():
                 defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model}")
