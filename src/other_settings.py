@@ -9618,6 +9618,54 @@ def _create_image_translation_section(self, parent):
     vision_ocr_desc.setStyleSheet("color: gray; font-size: 10pt;")
     vision_ocr_desc.setWordWrap(True)
     vision_sub_v.addWidget(vision_ocr_desc)
+
+    vision_batch_row = QWidget()
+    vision_batch_h = QHBoxLayout(vision_batch_row)
+    vision_batch_h.setContentsMargins(0, 0, 0, 0)
+    vision_batch_h.setSpacing(8)
+    vision_batch_cb = self._create_styled_checkbox("Batch Vision OCR chunk requests")
+    try:
+        vision_batch_cb.setChecked(bool(getattr(self, 'vision_ocr_batch_translation_var', False)))
+    except Exception:
+        pass
+    vision_batch_h.addWidget(vision_batch_cb)
+    vision_batch_h.addWidget(QLabel("Workers:"))
+    vision_batch_size_entry = QLineEdit()
+    vision_batch_size_entry.setFixedWidth(55)
+    try:
+        vision_batch_size_entry.setText(str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '3'))))
+    except Exception:
+        vision_batch_size_entry.setText("3")
+    vision_batch_h.addWidget(vision_batch_size_entry)
+    vision_batch_h.addStretch()
+
+    def _on_vision_ocr_batch_toggle(checked):
+        try:
+            self.vision_ocr_batch_translation_var = bool(checked)
+            self.config['vision_ocr_batch_translation'] = bool(checked)
+            os.environ['VISION_OCR_BATCH_TRANSLATION'] = '1' if checked else '0'
+            vision_batch_size_entry.setEnabled(bool(checked))
+        except Exception:
+            pass
+
+    def _on_vision_ocr_batch_size_changed(text):
+        try:
+            value = max(1, int(str(text).strip() or "1"))
+            self.vision_ocr_batch_size_var = str(value)
+            self.config['vision_ocr_batch_size'] = value
+            os.environ['VISION_OCR_BATCH_SIZE'] = str(value)
+        except Exception:
+            self.vision_ocr_batch_size_var = str(text)
+
+    vision_batch_cb.toggled.connect(_on_vision_ocr_batch_toggle)
+    vision_batch_size_entry.textChanged.connect(_on_vision_ocr_batch_size_changed)
+    vision_batch_size_entry.setEnabled(bool(getattr(self, 'vision_ocr_batch_translation_var', False)))
+    vision_sub_v.addWidget(vision_batch_row)
+
+    vision_batch_desc = QLabel("Only the OCR pass is batched. The combined OCR text is still translated in one final request.")
+    vision_batch_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    vision_batch_desc.setWordWrap(True)
+    vision_sub_v.addWidget(vision_batch_desc)
     left_v.addWidget(vision_sub)
 
     # ── Show/hide sub-settings based on mode ──
@@ -9765,7 +9813,7 @@ def _create_image_translation_section(self, parent):
     right_v.addSpacing(15)
     
     # Send tall image chunks in single API call
-    single_api_cb = self._create_styled_checkbox("Send tall image chunks in single API call (NOT RECOMMENDED)")
+    single_api_cb = self._create_styled_checkbox("Classic image mode: send tall chunks in single API call (NOT RECOMMENDED)")
     try:
         single_api_cb.setChecked(bool(self.single_api_image_chunks_var))
     except Exception:
@@ -9778,7 +9826,7 @@ def _create_image_translation_section(self, parent):
     single_api_cb.toggled.connect(_on_single_api_toggle)
     right_v.addWidget(single_api_cb)
     
-    single_api_desc = QLabel("All image chunks sent to 1 API call (Most AI models don't like this)")
+    single_api_desc = QLabel("Does not affect Vision mode. Vision now OCRs chunks first, then sends combined OCR to one translation request.")
     single_api_desc.setStyleSheet("color: gray; font-size: 10pt;")
     single_api_desc.setContentsMargins(20, 0, 0, 10)
     right_v.addWidget(single_api_desc)

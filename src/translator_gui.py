@@ -1619,6 +1619,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         except Exception:
             pass
         self.single_api_image_chunks_var = False
+        self.vision_ocr_batch_translation_var = self.config.get('vision_ocr_batch_translation', False)
+        self.vision_ocr_batch_size_var = str(self.config.get('vision_ocr_batch_size', '3'))
         self.enable_gemini_thinking_var = self.config.get('enable_gemini_thinking', True)
         self.thinking_budget_var = str(self.config.get('thinking_budget', '-1'))
         self.thinking_level_var = self.config.get('thinking_level', 'high')
@@ -3476,6 +3478,7 @@ Recent translations to summarize:
             ('enable_decimal_chapters_var', 'enable_decimal_chapters', True),
             ('disable_gemini_safety_var', 'disable_gemini_safety', True),
             ('single_api_image_chunks_var', 'single_api_image_chunks', False),
+            ('vision_ocr_batch_translation_var', 'vision_ocr_batch_translation', False),
             ('enable_image_output_mode_var', 'enable_image_output_mode', False),
             ('enable_video_output_mode_var', 'enable_video_output_mode', False),
             ('enable_audio_output_mode_var', 'enable_audio_output_mode', False),
@@ -3534,6 +3537,7 @@ Recent translations to summarize:
             ('chunk_timeout_var', 'chunk_timeout', '1800'),
             ('timeout_retry_attempts_var', 'timeout_retry_attempts', '2'),
             ('batch_size_var', 'batch_size', '3'),
+            ('vision_ocr_batch_size_var', 'vision_ocr_batch_size', '3'),
             ('batch_mode_var', 'batching_mode', 'aggressive'),
             ('batch_group_size_var', 'batch_group_size', '3'),
             ('chapter_number_offset_var', 'chapter_number_offset', '0'),
@@ -13860,6 +13864,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'OUTPUT_MODE': self._get_output_mode(),
             'VISION_OCR_FIRST': '1' if self._get_output_mode() == 'vision' else '0',
             'VISION_OCR_PROMPT': str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', ''))),
+            'VISION_OCR_BATCH_TRANSLATION': '1' if getattr(self, 'vision_ocr_batch_translation_var', self.config.get('vision_ocr_batch_translation', False)) else '0',
+            'VISION_OCR_BATCH_SIZE': str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '3'))),
             'ENABLE_REFINEMENT_OUTPUT_MODE': "1" if self._get_output_mode() == 'refinement' else "0",
             'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var else "0",
@@ -21615,6 +21621,7 @@ Important rules:
                 ('save_header_translations', ['save_header_translations_var'], False, bool),
                 ('use_sorted_fallback', ['use_sorted_fallback_var'], False, bool),
                 ('single_api_image_chunks', ['single_api_image_chunks_var'], False, bool),
+                ('vision_ocr_batch_translation', ['vision_ocr_batch_translation_var'], False, bool),
                 ('use_custom_openai_endpoint', ['use_custom_openai_endpoint_var'], False, bool),
                 ('disable_chapter_merging', ['disable_chapter_merging_var'], False, bool),
                 # Request merging settings
@@ -21690,6 +21697,7 @@ Important rules:
                 # Batching
                 ('batch_translation', ['batch_checkbox', 'batch_translation_var'], False, bool),
                 ('batch_size', ['batch_size_entry', 'batch_size_var'], 3, lambda v: safe_int(v, 3)),
+                ('vision_ocr_batch_size', ['vision_ocr_batch_size_var'], 3, lambda v: safe_int(v, 3)),
                 ('batching_mode', ['batch_mode_var'], 'aggressive', str),
                 ('batch_group_size', ['batch_group_size_var'], 3, lambda v: safe_int(v, 3)),
                 ('headers_per_batch', ['headers_per_batch_var'], -1, lambda v: safe_int(v, -1)),
@@ -22292,6 +22300,8 @@ Important rules:
             'PROGRESSIVE_ENCODING': 'Progressive image encoding',
             'SAVE_COMPRESSED_IMAGES': 'Save compressed images',
             'IMAGE_CHUNK_OVERLAP_PERCENT': 'Image chunk overlap percentage',
+            'VISION_OCR_BATCH_TRANSLATION': 'Batch Vision OCR chunk requests',
+            'VISION_OCR_BATCH_SIZE': 'Vision OCR batch worker count',
             
             # Metadata and Headers
             'TRANSLATE_METADATA_FIELDS': 'Metadata fields to translate (JSON)',
@@ -22717,6 +22727,8 @@ Important rules:
                 ('OUTPUT_MODE', self._get_output_mode()),
                 ('VISION_OCR_FIRST', '1' if self._get_output_mode() == 'vision' else '0'),
                 ('VISION_OCR_PROMPT', str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', '')))),
+                ('VISION_OCR_BATCH_TRANSLATION', '1' if getattr(self, 'vision_ocr_batch_translation_var', False) else '0'),
+                ('VISION_OCR_BATCH_SIZE', str(getattr(self, 'vision_ocr_batch_size_var', '3'))),
                 ('ENABLE_IMAGE_OUTPUT_MODE', self._get_allowed_image_output_mode()),
                 ('ENABLE_VIDEO_OUTPUT_MODE', self._get_allowed_video_output_mode()),
                 ('ENABLE_AUDIO_OUTPUT_MODE', '1' if self._get_output_mode() == 'audio' else '0'),

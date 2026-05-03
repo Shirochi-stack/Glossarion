@@ -1175,6 +1175,8 @@ class ImageTranslator:
             # Ensure image_chunks key exists
             if "image_chunks" not in prog:
                 prog["image_chunks"] = {}
+            if "image_ocr_chunks" not in prog:
+                prog["image_ocr_chunks"] = {}
             return prog
         else:
             # Fallback to original behavior if no progress manager provided
@@ -1186,6 +1188,8 @@ class ImageTranslator:
                     # Ensure image_chunks key exists
                     if "image_chunks" not in prog:
                         prog["image_chunks"] = {}
+                    if "image_ocr_chunks" not in prog:
+                        prog["image_ocr_chunks"] = {}
                     return prog
                 except Exception as e:
                     print(f"⚠️ Warning: Could not load progress file: {e}")
@@ -1195,6 +1199,7 @@ class ImageTranslator:
                         "content_hashes": {},
                         "chapter_chunks": {},
                         "image_chunks": {},
+                        "image_ocr_chunks": {},
                         "version": "2.1"
                     }
             # Return the same structure as TranslateKRtoEN expects
@@ -1203,6 +1208,7 @@ class ImageTranslator:
                 "content_hashes": {},
                 "chapter_chunks": {},
                 "image_chunks": {},
+                "image_ocr_chunks": {},
                 "version": "2.1"
             }
 
@@ -1211,6 +1217,7 @@ class ImageTranslator:
         if self.progress_manager:
             # Update the shared progress manager's data
             self.progress_manager.prog["image_chunks"] = prog.get("image_chunks", {})
+            self.progress_manager.prog["image_ocr_chunks"] = prog.get("image_ocr_chunks", {})
             # Save through the progress manager
             self.progress_manager.save()
         else:
@@ -1553,7 +1560,7 @@ class ImageTranslator:
                 if height > self.chunk_height:
                     # Check if single API mode is enabled
                     if self._use_ocr_first_pipeline():
-                        print("   🔎 Vision OCR-first mode enabled; processing tall image with one OCR call per chunk")
+                        print("   🔎 Vision OCR-first mode enabled; OCRing tall-image chunks, then translating combined OCR once")
                         translated_text = self._process_image_chunks(img, width, height, context, check_stop_fn)
                     elif os.getenv("SINGLE_API_IMAGE_CHUNKS", "1") == "1":
                         translated_text = self._process_image_chunks_single_api(img, width, height, context, check_stop_fn)
@@ -1690,7 +1697,7 @@ class ImageTranslator:
             return True
         return output_mode == "vision"
 
-    def _call_vision_ocr_api(self, image_data, assistant_prompt, check_stop_fn):
+    def _call_vision_ocr_api(self, image_data, assistant_prompt, check_stop_fn, chunk_idx=None):
         """OCR an image/chunk using the dedicated Vision OCR prompt."""
         messages = [{"role": "system", "content": self.vision_ocr_prompt}]
         if assistant_prompt and assistant_prompt.strip():
@@ -1707,7 +1714,8 @@ class ImageTranslator:
         if hasattr(self, 'current_chapter_num'):
             chapter_num = self.current_chapter_num
             image_idx = getattr(self, 'current_image_index', 0)
-            self.client.set_output_filename(f"ocr_{chapter_num:03d}_Chapter_{chapter_num}_image_{image_idx}.txt")
+            chunk_suffix = f"_chunk_{chunk_idx:03d}" if chunk_idx is not None else ""
+            self.client.set_output_filename(f"ocr_{chapter_num:03d}_Chapter_{chapter_num}_image_{image_idx}{chunk_suffix}.txt")
 
         retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
         chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "1800")) if retry_timeout_enabled else None
@@ -1960,8 +1968,231 @@ class ImageTranslator:
             
             return data
 
+    def _vision_ocr_batch_enabled(self) -> bool:
+        return os.getenv("VISION_OCR_BATCH_TRANSLATION", "0").strip().lower() in ("1", "true", "yes", "on")
+
+    def _vision_ocr_batch_size(self) -> int:
+        try:
+            return max(1, int(os.getenv("VISION_OCR_BATCH_SIZE", os.getenv("BATCH_SIZE", "3"))))
+        except Exception:
+            return 1
+
+    def _image_chunk_overlap_pixels(self) -> int:
+        try:
+            overlap_percentage = float(os.getenv('IMAGE_CHUNK_OVERLAP_PERCENT', '1'))
+            return max(0, int(self.chunk_height * (overlap_percentage / 100)))
+        except Exception:
+            return 100
+
+    def _make_image_progress_key(self, img, width, height):
+        image_basename = os.path.basename(self.current_image_path) if hasattr(self, 'current_image_path') else str(hash(str(img)))
+        chapter_num = getattr(self, 'current_chapter_num', None)
+        if chapter_num is None:
+            import re
+            match = re.search(r'ch(?:apter)?[\s_-]*(\d+)', image_basename, re.IGNORECASE)
+            if match:
+                chapter_num = match.group(1)
+        image_key = f"ch{chapter_num}_{image_basename}" if chapter_num else image_basename
+        return image_key, image_basename, chapter_num
+
+    def _combine_vision_ocr_chunks(self, ocr_chunks):
+        """Combine OCR chunks while trimming obvious overlap duplicates."""
+        combined_lines = []
+        for chunk_text in ocr_chunks:
+            lines = [line.rstrip() for line in (chunk_text or "").splitlines()]
+            lines = [line for line in lines if line.strip()]
+            if not lines:
+                continue
+            max_overlap = min(20, len(combined_lines), len(lines))
+            overlap = 0
+            for n in range(max_overlap, 0, -1):
+                if combined_lines[-n:] == lines[:n]:
+                    overlap = n
+                    break
+            if overlap:
+                lines = lines[overlap:]
+            for line in lines:
+                if combined_lines and combined_lines[-1].strip() == line.strip():
+                    continue
+                combined_lines.append(line)
+        return "\n".join(combined_lines).strip()
+
+    def _process_image_chunks_ocr_first_combined(self, img, width, height, context, check_stop_fn):
+        """OCR all chunks first, then translate the combined OCR text once."""
+        num_chunks = (height + self.chunk_height - 1) // self.chunk_height
+        overlap = self._image_chunk_overlap_pixels()
+        batch_enabled = self._vision_ocr_batch_enabled()
+        batch_size = min(num_chunks, self._vision_ocr_batch_size()) if batch_enabled else 1
+
+        print(f"   Vision OCR-first: splitting tall image into {num_chunks} OCR chunks, then translating combined OCR once")
+        if batch_enabled and batch_size > 1:
+            print(f"   Vision OCR batch mode enabled: {batch_size} parallel OCR workers")
+            print("   Stop will take effect after the current OCR batch completes")
+        else:
+            print("   Stop will take effect after the current OCR chunk completes")
+
+        save_debug_chunks = os.getenv('SAVE_CLEANED_IMAGES', '0') == '1'
+        save_compressed_chunks = os.getenv('SAVE_COMPRESSED_IMAGES', '0') == '1'
+        debug_dir = None
+        if save_debug_chunks or save_compressed_chunks:
+            debug_dir = os.path.join(self.output_dir, "translated_images", "debug_chunks")
+            os.makedirs(debug_dir, exist_ok=True)
+            print(f"   Debug mode: Saving OCR chunks to {debug_dir}")
+
+        prog = self.load_progress()
+        image_key, image_basename, chapter_num = self._make_image_progress_key(img, width, height)
+        if "image_ocr_chunks" not in prog:
+            prog["image_ocr_chunks"] = {}
+        if image_key not in prog["image_ocr_chunks"]:
+            prog["image_ocr_chunks"][image_key] = {
+                "total": num_chunks,
+                "completed": [],
+                "chunks": {},
+                "height": height,
+                "width": width,
+                "chapter": chapter_num,
+                "filename": image_basename
+            }
+
+        image_chunk_prompt_template = os.getenv(
+            "IMAGE_CHUNK_PROMPT",
+            "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned. {context}"
+        )
+
+        chunk_jobs = []
+        ocr_by_index = {}
+        was_stopped = False
+
+        for i in range(num_chunks):
+            saved_ocr = prog["image_ocr_chunks"][image_key]["chunks"].get(str(i))
+            if i in prog["image_ocr_chunks"][image_key]["completed"] and saved_ocr:
+                ocr_by_index[i] = saved_ocr
+                print(f"   Skipping OCR chunk {i+1}/{num_chunks}; already completed")
+                continue
+
+            if check_stop_fn and check_stop_fn():
+                print(f"   Stopped before OCR chunk {i+1}/{num_chunks}")
+                was_stopped = True
+                break
+
+            start_y = max(0, i * self.chunk_height - (overlap if i > 0 else 0))
+            end_y = min(height, (i + 1) * self.chunk_height)
+            current_filename = os.path.basename(self.current_image_path) if hasattr(self, 'current_image_path') else 'unknown'
+            print(f"   OCR chunk {i+1}/{num_chunks} (y: {start_y}-{end_y}) for {current_filename}")
+            if self.log_callback and hasattr(self.log_callback, '__self__') and hasattr(self.log_callback.__self__, 'append_chunk_progress'):
+                self.log_callback.__self__.append_chunk_progress(
+                    i + 1,
+                    num_chunks,
+                    "image",
+                    f"Image OCR: {current_filename}"
+                )
+
+            chunk = img.crop((0, start_y, width, end_y))
+            chunk_bytes = self._image_to_bytes_with_compression(chunk)
+
+            if save_debug_chunks and debug_dir:
+                chunk_path = os.path.join(debug_dir, f"ocr_chunk_{i+1}_original.png")
+                chunk.save(chunk_path)
+                print(f"   Saved OCR chunk: {chunk_path}")
+
+            if save_compressed_chunks and debug_dir and os.getenv("ENABLE_IMAGE_COMPRESSION", "0") == "1":
+                compressed_dir = os.path.join(self.output_dir, "translated_images", "compressed", "chunks")
+                os.makedirs(compressed_dir, exist_ok=True)
+                compressed_chunk_path = os.path.join(compressed_dir, f"ocr_chunk_{i+1}_compressed.bin")
+                with open(compressed_chunk_path, 'wb') as f:
+                    f.write(chunk_bytes)
+                print(f"   Saved compressed OCR chunk: {compressed_chunk_path}")
+
+            chunk_prompt = image_chunk_prompt_template.format(
+                chunk_idx=i + 1,
+                total_chunks=num_chunks,
+                context="OCR this chunk only. Preserve source text order; do not translate."
+            )
+            chunk_jobs.append((i, chunk_bytes, chunk_prompt))
+
+        def _ocr_job(job):
+            i, chunk_bytes, chunk_prompt = job
+            if check_stop_fn and check_stop_fn():
+                return i, None
+            print(f"   Step 1/2: OCR chunk {i+1}/{num_chunks} with dedicated Vision OCR prompt...")
+            ocr_text = self._call_vision_ocr_api(chunk_bytes, chunk_prompt, check_stop_fn, i + 1)
+            if ocr_text:
+                print(f"   OCR chunk {i+1}/{num_chunks} complete ({len(ocr_text)} chars)")
+            else:
+                print(f"   OCR chunk {i+1}/{num_chunks} returned no text")
+            return i, ocr_text
+
+        previous_batch_env = os.environ.get("BATCH_TRANSLATION")
+        try:
+            if batch_enabled and batch_size > 1 and len(chunk_jobs) > 1:
+                os.environ["BATCH_TRANSLATION"] = "1"
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                for batch_start in range(0, len(chunk_jobs), batch_size):
+                    if check_stop_fn and check_stop_fn():
+                        was_stopped = True
+                        break
+                    current_batch = chunk_jobs[batch_start:batch_start + batch_size]
+                    print(f"   OCR batch {batch_start // batch_size + 1}: {len(current_batch)} chunk request(s)")
+                    with ThreadPoolExecutor(max_workers=len(current_batch)) as executor:
+                        futures = [executor.submit(_ocr_job, job) for job in current_batch]
+                        for future in as_completed(futures):
+                            i, ocr_text = future.result()
+                            if ocr_text:
+                                ocr_by_index[i] = ocr_text
+                                if i not in prog["image_ocr_chunks"][image_key]["completed"]:
+                                    prog["image_ocr_chunks"][image_key]["completed"].append(i)
+                                prog["image_ocr_chunks"][image_key]["chunks"][str(i)] = ocr_text
+                                self.save_progress(prog)
+                    if check_stop_fn and check_stop_fn():
+                        was_stopped = True
+                        break
+            else:
+                for job in chunk_jobs:
+                    i, ocr_text = _ocr_job(job)
+                    if ocr_text:
+                        ocr_by_index[i] = ocr_text
+                        if i not in prog["image_ocr_chunks"][image_key]["completed"]:
+                            prog["image_ocr_chunks"][image_key]["completed"].append(i)
+                        prog["image_ocr_chunks"][image_key]["chunks"][str(i)] = ocr_text
+                        self.save_progress(prog)
+                    if i < num_chunks - 1 and not was_stopped:
+                        self._api_delay_with_stop_check(check_stop_fn)
+                    if check_stop_fn and check_stop_fn():
+                        was_stopped = True
+                        break
+        finally:
+            if previous_batch_env is None:
+                os.environ.pop("BATCH_TRANSLATION", None)
+            else:
+                os.environ["BATCH_TRANSLATION"] = previous_batch_env
+
+        ordered_ocr = [ocr_by_index[i] for i in range(num_chunks) if ocr_by_index.get(i)]
+        if not ordered_ocr:
+            print("   No successful OCR chunks from tall image")
+            return None
+
+        combined_ocr = self._combine_vision_ocr_chunks(ordered_ocr)
+        if not combined_ocr:
+            print("   Combined OCR was empty")
+            return None
+
+        print(f"   Step 2/2: Translating combined OCR from {len(ordered_ocr)}/{num_chunks} chunks ({len(combined_ocr)} chars)...")
+        combined_prompt = (
+            f"The OCR text below was assembled from {len(ordered_ocr)} tall-image chunk(s). "
+            "Translate it as one continuous passage, preserving narrative flow and removing OCR-only duplication from chunk overlap."
+        )
+        translated = self._translate_ocr_text(combined_ocr, combined_prompt, check_stop_fn)
+        if translated:
+            print(f"   Combined OCR text translated ({len(translated)} chars)")
+            if was_stopped:
+                translated += "\n\n[TRANSLATION STOPPED BY USER]"
+        return translated
+
     def _process_image_chunks(self, img, width, height, context, check_stop_fn):
         """Process a tall image by splitting it into chunks with contextual support"""
+        if self._use_ocr_first_pipeline():
+            return self._process_image_chunks_ocr_first_combined(img, width, height, context, check_stop_fn)
+
         num_chunks = (height + self.chunk_height - 1) // self.chunk_height
         overlap = 100  # Pixels of overlap between chunks
         
