@@ -1280,7 +1280,7 @@ class RetranslationMixin:
                         chapter_num = 999999
                 
                 status = chapter_info.get("status", "unknown")
-                if status == "completed_empty":
+                if status in ("completed_empty", "completed_image_only"):
                     status = "completed"
                 
                 # Check file existence
@@ -2780,11 +2780,17 @@ class RetranslationMixin:
                 if not lb:
                     return
                 status_data = {'prog': prog}
-                indices = [
-                    i for i in range(lb.count())
-                    if not lb.item(i).isHidden()
-                    and self._progress_display_status((lb.item(i).data(Qt.UserRole) or {}).get('info', {}), status_data) in statuses
-                ]
+                indices = []
+                for i in range(lb.count()):
+                    item = lb.item(i)
+                    if not item or item.isHidden():
+                        continue
+                    display_status = item.data(Qt.UserRole + 2)
+                    if not display_status:
+                        payload = item.data(Qt.UserRole) or {}
+                        display_status = self._progress_display_status(payload.get('info', {}), status_data)
+                    if display_status in statuses:
+                        indices.append(i)
                 if not indices:
                     return
                 current = lb.currentRow()
@@ -2910,6 +2916,7 @@ class RetranslationMixin:
             # Store metadata in item for filtering
             is_special = info.get('is_special', False)
             item.setData(Qt.UserRole, {'is_special': is_special, 'info': info})
+            item.setData(Qt.UserRole + 2, status)
             
             # Add item to listbox first
             listbox.addItem(item)
@@ -4740,7 +4747,7 @@ class RetranslationMixin:
                     chapter_num = 999999
             
             status = chapter_info.get("status", "unknown")
-            if status == "completed_empty":
+            if status in ("completed_empty", "completed_image_only"):
                 status = "completed"
             
             # Check file existence
@@ -4913,6 +4920,9 @@ class RetranslationMixin:
         entry = info.get('progress_entry') or info.get('info') or {}
         mode = self._current_progress_output_mode(data, entry)
 
+        if status in ('completed_empty', 'completed_image_only'):
+            status = 'completed'
+
         if status in ('failed', 'qa_failed', 'in_progress', 'pending', 'merged', 'not_translated'):
             return status
         if mode == 'refinement':
@@ -4975,8 +4985,8 @@ class RetranslationMixin:
             # Update status based on current state from progress file
             if matched_info:
                 new_status = matched_info.get('status', 'unknown')
-                # Handle completed_empty as completed for display
-                if new_status == 'completed_empty':
+                # Handle legacy completed variants as completed for display
+                if new_status in ('completed_empty', 'completed_image_only'):
                     new_status = 'completed'
                 # Verify file actually exists for completed status (but NOT for merged - merged chapters
                 # don't have their own output files, they point to parent's file)
@@ -5132,10 +5142,12 @@ class RetranslationMixin:
                 item = listbox.item(idx)
                 if not item:
                     continue
+                display_status = self._progress_display_status(info, data)
                 item.setText(build_display(info, max_original_len, max_output_len))
-                apply_item_visuals(item, self._progress_display_status(info, data))
+                apply_item_visuals(item, display_status)
                 is_special = info.get('is_special', False)
                 item.setData(Qt.UserRole, {'is_special': is_special, 'info': info, 'progress_key': info.get('progress_key')})
+                item.setData(Qt.UserRole + 2, display_status)
                 item.setHidden(is_special and not show_special_files)
         else:
             # Recreate items
@@ -5146,9 +5158,11 @@ class RetranslationMixin:
                 if idx % 120 == 0:
                     self._ui_yield()
                 item = QListWidgetItem(build_display(info, max_original_len, max_output_len))
-                apply_item_visuals(item, self._progress_display_status(info, data))
+                display_status = self._progress_display_status(info, data)
+                apply_item_visuals(item, display_status)
                 is_special = info.get('is_special', False)
                 item.setData(Qt.UserRole, {'is_special': is_special, 'info': info, 'progress_key': info.get('progress_key')})
+                item.setData(Qt.UserRole + 2, display_status)
                 item.setHidden(is_special and not show_special_files)
                 listbox.addItem(item)
 
