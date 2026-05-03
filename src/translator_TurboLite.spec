@@ -1,11 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion TurboLite v8.6.9 - PyInstaller Specification File
+Glossarion TurboLite - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, and AI Hunter
 """
 
 import sys
 import os
+
+SPEC_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+if SPEC_DIR not in sys.path:
+    sys.path.insert(0, SPEC_DIR)
+from app_version import get_spec_app_name
 
 # Fix DLL search path for WeasyPrint during build
 # Check GTK_FOLDER env var first (set by CI), then fallback to common locations
@@ -27,7 +32,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'L_Glossarion_TurboLite v8.6.9'  # Turbo Lite: no EPUB reader / Chromium / PDF / Vertex
+APP_NAME = get_spec_app_name(__file__)  # Turbo Lite: no EPUB reader / Chromium / PDF / Vertex
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)

@@ -4,6 +4,7 @@ import os
 import time
 import atexit
 import threading
+from app_version import APP_DISPLAY_NAME, APP_USER_MODEL_ID
 
 # Force UTF-8 console output to prevent UnicodeEncodeError on Windows cp1252
 try:
@@ -73,7 +74,7 @@ class SplashManager(QObject):
             
             if os.path.isfile(ico_path):
                 # Set app user model ID immediately
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.6.9')
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
                 
                 # Set app-level icon
                 if self.app:
@@ -186,7 +187,7 @@ class SplashManager(QObject):
             self._load_icon(layout)
             
             # Title
-            title_label = QLabel("Glossarion v8.6.9")
+            title_label = QLabel(APP_DISPLAY_NAME)
             title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             title_font = QFont("Arial", int(max(14, 20 * self._ui_scale)), QFont.Weight.Bold)
             title_label.setFont(title_font)
@@ -344,7 +345,7 @@ class SplashManager(QObject):
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.8.6.9')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
                         
                         # Load icon from file and set it on the window
                         hwnd = int(self.splash_window.winId())
