@@ -30,9 +30,11 @@ from unified_api_client import UnifiedClientError
 logger = logging.getLogger(__name__)
 
 DEFAULT_VISION_OCR_PROMPT = (
-    "Extract all readable source-language text from the image in natural reading order. "
-    "Return only the OCR text. Preserve line breaks when they help the reading order. "
-    "Do not translate, summarize, explain, or add commentary. If no readable text is present, return an empty response."
+    "Extract only the readable text that is physically present in the image, in natural reading order. "
+    "Return only the original script text exactly as seen. Preserve line breaks when they help the reading order. "
+    "Do not translate, summarize, explain, annotate, transliterate, romanize, or add pronunciation guides. "
+    "Do not output pinyin, romaji, furigana, Jyutping, Latin readings, or any parallel reading line unless that Latin text is visibly printed in the image. "
+    "If no readable text is present, return an empty response."
 )
 
 def requires_cv2(func):
@@ -1768,11 +1770,18 @@ class ImageTranslator:
                 "role": "user",
                 "content": (
                     f"{assistant_prompt}\n\n"
-                    "OCR this image/chunk. Return only the source text you can read."
+                    "OCR this image/chunk. Return only text visibly printed in the image. "
+                    "Do not add pinyin, romaji, romanization, readings, or translations."
                 )
             })
         else:
-            messages.append({"role": "user", "content": "OCR this image. Return only the source text you can read."})
+            messages.append({
+                "role": "user",
+                "content": (
+                    "OCR this image. Return only text visibly printed in the image. "
+                    "Do not add pinyin, romaji, romanization, readings, or translations."
+                )
+            })
 
         if hasattr(self, 'current_chapter_num'):
             chapter_num = self.current_chapter_num
@@ -2211,7 +2220,7 @@ class ImageTranslator:
             chunk_prompt = image_chunk_prompt_template.format(
                 chunk_idx=i + 1,
                 total_chunks=num_chunks,
-                context="OCR this chunk only. Preserve source text order; do not translate."
+                context="OCR this chunk only. Preserve visible source text order. Do not translate, romanize, or add pinyin/romaji/readings."
             )
             chunk_jobs.append((i, chunk_bytes, chunk_prompt))
 

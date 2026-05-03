@@ -2138,9 +2138,11 @@ Text to analyze:
         self.default_translation_chunk_prompt = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned.\n{chunk_html}"
         self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned. {context}"
         self.default_vision_ocr_prompt = (
-            "Extract all readable source-language text from the image in natural reading order. "
-            "Return only the OCR text. Preserve line breaks when they help the reading order. "
-            "Do not translate, summarize, explain, or add commentary. If no readable text is present, return an empty response."
+            "Extract only the readable text that is physically present in the image, in natural reading order. "
+            "Return only the original script text exactly as seen. Preserve line breaks when they help the reading order. "
+            "Do not translate, summarize, explain, annotate, transliterate, romanize, or add pronunciation guides. "
+            "Do not output pinyin, romaji, furigana, Jyutping, Latin readings, or any parallel reading line unless that Latin text is visibly printed in the image. "
+            "If no readable text is present, return an empty response."
         )
         self.default_prompts = {
             "Universal": (
