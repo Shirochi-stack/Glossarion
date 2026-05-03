@@ -3259,18 +3259,22 @@ class ContentProcessor:
             # - Doesn't have HTML tags
             content_stripped = html_content.strip()
             
-            # Quick check for plain text/markdown content
+            # Quick check for plain text/markdown content. Do not treat real HTML
+            # as plain text just because it lacks early <p>/<div> tags; image-only
+            # chapters often look like <body><h2>...</h2><img ... long-url ...>.
+            has_html_tags = bool(re.search(r'<[A-Za-z][^>]*>', content_stripped[:1000]))
             is_plain_text = False
             if content_stripped and (
-                not content_stripped.startswith('<') or  # Doesn't start with HTML tag
+                not has_html_tags or                    # Doesn't contain HTML tags
                 content_stripped.startswith('#') or      # Markdown header
-                '\n\n' in content_stripped[:500] or      # Markdown paragraphs
-                not '<p>' in content_stripped[:500] and not '<div>' in content_stripped[:500]  # No common HTML tags
+                (not has_html_tags and '\n\n' in content_stripped[:500])
             ):
                 # This looks like plain text or markdown from html2text
                 is_plain_text = True
                 
             if is_plain_text:
+                if ContentProcessor.is_only_image_links(content_stripped):
+                    return False
                 # For plain text, just check the length
                 text_length = len(content_stripped)
                 # Be more lenient with plain text since it's already extracted
@@ -3283,15 +3287,24 @@ class ContentProcessor:
             
             for img in soup_copy.find_all('img'):
                 img.decompose()
-            
-            text_elements = soup_copy.find_all(['p', 'div', 'span'])
-            text_content = ' '.join(elem.get_text(strip=True) for elem in text_elements)
-            
+            for tag in soup_copy.find_all(['image', 'object', 'video', 'svg']):
+                tag.decompose()
+            image_ext_re = re.compile(r'\.(?:png|jpe?g|gif|webp|svg|bmp)(?:[?#][^\s<>"\']*)?$', re.IGNORECASE)
+            for tag in soup_copy.find_all(['a', 'source']):
+                ref = tag.get('href') or tag.get('src') or tag.get('data') or ''
+                text = tag.get_text(" ", strip=True)
+                if image_ext_re.search(ref.strip()) or image_ext_re.search(text.strip()):
+                    tag.decompose()
+
             headers = soup_copy.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
             header_text = ' '.join(h.get_text(strip=True) for h in headers)
-            
-            if headers and len(text_content.strip()) > 1:
-                return True
+            for header in headers:
+                header.decompose()
+
+            text_elements = soup_copy.find_all(['p', 'div', 'span'])
+            text_content = ' '.join(elem.get_text(strip=True) for elem in text_elements)
+            text_content = re.sub(r'https?://\S+', ' ', text_content)
+            text_content = re.sub(r'\b\S+\.(?:png|jpe?g|gif|webp|svg|bmp)(?:[?#]\S*)?', ' ', text_content, flags=re.IGNORECASE)
             
             if len(text_content.strip()) > 200:
                 return True
