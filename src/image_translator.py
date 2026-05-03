@@ -2007,7 +2007,7 @@ class ImageTranslator:
             return header_text
         if header_text in source:
             return source
-        print("   📝 Injected chapter header text into OCR text")
+        print("   📝 Injected chapter header HTML into OCR text")
         return f"{header_text}\n\n{source}"
 
     def _prepare_vision_ocr_translation_prompt(self, ocr_text, check_stop_fn):

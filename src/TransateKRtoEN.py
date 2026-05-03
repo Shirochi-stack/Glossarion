@@ -7,6 +7,7 @@ import threading
 import queue
 import uuid
 import inspect
+import html
 import os, sys, io, zipfile, time, re, mimetypes, subprocess, tiktoken
 import builtins
 import ebooklib
@@ -8096,20 +8097,16 @@ def _extract_chapter_header_text(chapter_html):
             text = tag.get_text(" ", strip=True)
             if text and text not in parts:
                 parts.append(text)
-        return "\n".join(parts).strip()
+        if not parts:
+            return ""
+        title = parts[0]
+        extra = parts[1:]
+        header = f"<h1>{html.escape(title)}</h1>"
+        if extra:
+            header += "\n" + "\n".join(extra)
+        return header.strip()
     except Exception:
         return ""
-
-
-def _remove_chapter_headers_from_html(chapter_html):
-    """Remove raw headers after they have been injected into Vision OCR text."""
-    try:
-        soup = BeautifulSoup(chapter_html or "", 'html.parser')
-        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title']):
-            tag.decompose()
-        return str(soup)
-    except Exception:
-        return chapter_html
 
 
 def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actual_num, check_stop_fn=None):
@@ -14147,7 +14144,6 @@ def main(log_callback=None, stop_callback=None):
                 # If we have headers, we should translate them even in "image-only" chapters
                 if vision_ocr_mode and headers and any(h.get_text(strip=True) for h in headers):
                     print("📝 Vision mode: injected headers into OCR text; skipping separate header translation")
-                    translated_html = _remove_chapter_headers_from_html(translated_html)
                     status = "completed_image_only"
                 elif headers and any(h.get_text(strip=True) for h in headers):
                     print(f"📝 Found headers to translate in image-only chapter")
@@ -14273,7 +14269,7 @@ def main(log_callback=None, stop_callback=None):
                                 print("📝 Vision mode: headers were injected into OCR text; skipping separate header/text translation.")
                                 fname = FileUtilities.create_chapter_filename(c, actual_num)
                                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                                    f.write(_remove_chapter_headers_from_html(body_with_images))
+                                    f.write(body_with_images)
                                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed_image_only", chapter_obj=c)
                                 progress_manager.save()
                                 chapters_completed += 1
