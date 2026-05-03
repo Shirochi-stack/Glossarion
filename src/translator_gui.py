@@ -11387,7 +11387,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.append_log("📑 Skipping auto glossary extraction for Audio output mode")
                     auto_glossary_mode = 'off'
                 
-                if auto_glossary_mode in ('balanced', 'full'):
+                if current_output_mode == 'vision' and auto_glossary_mode in ('balanced', 'full'):
+                    self.append_log("📑 Vision mode: glossary extraction will run after OCR prepass inside translation")
+                elif auto_glossary_mode in ('balanced', 'full'):
                     # Check if a glossary was MANUALLY loaded by the user for this file
                     # Auto-loaded glossaries (from autofill) could be incomplete from a stopped extraction
                     has_existing_glossary = bool(

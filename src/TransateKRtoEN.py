@@ -8035,6 +8035,158 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
         
     return chapter_html, {}
 
+
+def _resolve_chapter_image_path(img_src, image_translator, actual_num, idx):
+    """Resolve an HTML image src to a local file path in the extracted output tree."""
+    img_path = None
+    if img_src.startswith('data:image'):
+        try:
+            import base64, uuid, mimetypes
+            header, b64data = img_src.split(',', 1)
+            mime = 'image/png'
+            if ':' in header and ';' in header:
+                mime = header.split(';')[0].split(':')[1] or mime
+            ext = mimetypes.guess_extension(mime) or '.png'
+            os.makedirs(image_translator.images_dir, exist_ok=True)
+            img_path = os.path.join(image_translator.images_dir, f"datauri_ocr_{actual_num}_{idx}_{uuid.uuid4().hex}{ext}")
+            with open(img_path, 'wb') as f:
+                f.write(base64.b64decode(b64data))
+            return img_path
+        except Exception as e:
+            print(f"   ❌ Failed to decode data URI image for OCR: {e}")
+            return None
+
+    if img_src.startswith('../'):
+        img_path = os.path.join(image_translator.output_dir, img_src[3:])
+    elif img_src.startswith('./'):
+        img_path = os.path.join(image_translator.output_dir, img_src[2:])
+    elif img_src.startswith('/'):
+        img_path = os.path.join(image_translator.output_dir, img_src[1:])
+    else:
+        possible_paths = [
+            os.path.join(image_translator.images_dir, os.path.basename(img_src)),
+            os.path.join(image_translator.output_dir, img_src),
+            os.path.join(image_translator.output_dir, 'images', os.path.basename(img_src)),
+            os.path.join(image_translator.output_dir, os.path.basename(img_src)),
+            os.path.join(image_translator.output_dir, os.path.dirname(img_src), os.path.basename(img_src)),
+        ]
+        for path in possible_paths:
+            if os.path.exists(path):
+                img_path = path
+                break
+
+    if img_path:
+        img_path = os.path.normpath(img_path)
+    return img_path if img_path and os.path.exists(img_path) else None
+
+
+def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actual_num, check_stop_fn=None):
+    """OCR chapter images for Vision-mode glossary prepasses without translating them."""
+    images = image_translator.extract_images_from_chapter(chapter_html)
+    if not images:
+        return ""
+
+    chapter_ocr_parts = []
+    print(f"🔎 Vision glossary prepass: OCRing {len(images)} image(s) in {_chapter_term()} {actual_num}")
+
+    for idx, img_info in enumerate(images, 1):
+        if check_stop_fn and check_stop_fn():
+            print("❌ Vision glossary OCR stopped by user")
+            break
+
+        img_src = img_info.get('src', '')
+        img_path = _resolve_chapter_image_path(img_src, image_translator, actual_num, idx)
+        if not img_path:
+            print(f"   ⚠️ Vision glossary OCR image not found: {img_src}")
+            continue
+
+        context = ""
+        if img_info.get('alt'):
+            context += f", Alt text: {img_info['alt']}"
+        image_translator.current_chapter_num = actual_num
+        image_translator.current_image_index = idx
+        ocr_text = image_translator.ocr_image(img_path, context, check_stop_fn)
+        if ocr_text:
+            chapter_ocr_parts.append(ocr_text)
+
+    chapter_ocr = "\n\n".join(part for part in chapter_ocr_parts if part and part.strip()).strip()
+    if chapter_ocr:
+        image_translator._save_ocr_text(chapter_ocr, kind="chapters", image_basename=f"chapter_{actual_num:03d}")
+    return chapter_ocr
+
+
+def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
+    """OCR image chapters and generate auto glossary before Vision translation starts."""
+    mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower()
+    if mode not in ("minimal", "balanced", "full"):
+        return
+    if os.getenv("OUTPUT_MODE", "").strip().lower() != "vision":
+        return
+
+    print("\n" + "="*50)
+    print(f"📑 Vision Auto Glossary Prepass: {mode.capitalize()}")
+    print("="*50)
+
+    merge_enabled = (
+        mode in ("balanced", "full")
+        and os.getenv('GLOSSARY_REQUEST_MERGING_ENABLED', os.getenv('REQUEST_MERGING_ENABLED', '0')) == '1'
+    )
+    try:
+        merge_count = int(os.getenv('GLOSSARY_REQUEST_MERGE_COUNT', os.getenv('REQUEST_MERGE_COUNT', '10')))
+    except Exception:
+        merge_count = 10
+    if merge_enabled:
+        merge_count = max(1, merge_count or 10)
+        print(f"📑 Vision glossary request merging enabled: OCR {merge_count} chapters before each glossary request")
+
+    all_ocr = []
+    merge_buffer = []
+    generated = 0
+
+    for idx, chapter in enumerate(chapters):
+        if check_stop_fn and check_stop_fn():
+            print("❌ Vision glossary prepass stopped by user")
+            break
+        actual_num = chapter.get('actual_chapter_num', chapter.get('num', idx + 1))
+        body = chapter.get('body') or chapter.get('content') or ""
+        if not body or '<img' not in body.lower():
+            continue
+
+        image_translator.current_chapter_num = actual_num
+        chapter_ocr = ocr_chapter_images_for_vision_glossary(body, image_translator, actual_num, check_stop_fn)
+        if not chapter_ocr:
+            continue
+
+        if mode == "minimal":
+            all_ocr.append((actual_num, chapter_ocr))
+            continue
+
+        if merge_enabled:
+            merge_buffer.append((actual_num, chapter_ocr))
+            if len(merge_buffer) < merge_count:
+                continue
+            merged_text = "\n\n".join(f"[Chapter {num}]\n{text}" for num, text in merge_buffer)
+            if image_translator._ensure_vision_ocr_glossary(merged_text, mode, check_stop_fn):
+                generated += 1
+            merge_buffer = []
+        else:
+            if image_translator._ensure_vision_ocr_glossary(chapter_ocr, mode, check_stop_fn):
+                generated += 1
+
+    if mode == "minimal" and all_ocr:
+        full_ocr = "\n\n".join(f"[Chapter {num}]\n{text}" for num, text in all_ocr)
+        image_translator._save_ocr_text(full_ocr, kind="full", image_basename="novel_vision_ocr")
+        if image_translator._ensure_vision_ocr_glossary(full_ocr, mode, check_stop_fn):
+            generated += 1
+    elif merge_enabled and merge_buffer:
+        merged_text = "\n\n".join(f"[Chapter {num}]\n{text}" for num, text in merge_buffer)
+        if image_translator._ensure_vision_ocr_glossary(merged_text, mode, check_stop_fn):
+            generated += 1
+
+    os.environ["VISION_GLOSSARY_PREPASS_DONE"] = "1"
+    print(f"📑 Vision glossary prepass complete ({generated} glossary request group(s))")
+    print("="*50 + "\n")
+
 def detect_novel_numbering(chapters):
     """Detect if the novel uses 0-based or 1-based chapter numbering with improved accuracy"""
     print("[DEBUG] Detecting novel numbering system...")
@@ -12364,6 +12516,12 @@ def main(log_callback=None, stop_callback=None):
         
         if config.MODEL.lower() not in known_vision_models:
             print(f"⚠️ Note: {config.MODEL} may not have vision capabilities. Image translation will be attempted anyway.")
+
+        try:
+            os.environ.pop("VISION_GLOSSARY_PREPASS_DONE", None)
+            run_vision_glossary_prepass(chapters, image_translator, check_stop)
+        except Exception as e:
+            print(f"⚠️ Vision auto glossary prepass failed: {e}")
     else:
         print("ℹ️ Image translation disabled by user")
     

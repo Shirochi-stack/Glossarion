@@ -110,6 +110,29 @@ def send_image_with_interrupt(client, messages, image_data, temperature, max_tok
             if chunk_timeout is not None and elapsed >= chunk_timeout:
                 raise UnifiedClientError(f"Image API call timed out after {chunk_timeout} seconds")
 
+def _clear_vision_key_context_for_text_request(client, context):
+    """Prevent Vision-key pool state from leaking into normal text/glossary calls."""
+    if context in ('vision_ocr', 'image_ocr', 'image_scan'):
+        return
+    try:
+        from unified_api_client import UnifiedClient
+        vision_pool = getattr(UnifiedClient, '_qa_scan_key_pool', None)
+        if vision_pool is not None and getattr(client, '_api_key_pool', None) is vision_pool:
+            if '_api_key_pool' in getattr(client, '__dict__', {}):
+                del client.__dict__['_api_key_pool']
+            try:
+                client._multi_key_mode = bool(getattr(client, 'use_multi_keys', client._multi_key_mode))
+            except Exception:
+                pass
+        try:
+            if vision_pool and hasattr(vision_pool, 'release_thread_assignment'):
+                vision_pool.release_thread_assignment()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def send_text_with_interrupt(client, messages, temperature, max_tokens, stop_check_fn, chunk_timeout=None, context='translation'):
     """Send text API request with graceful/force stop behavior matching image calls."""
     import queue
@@ -120,6 +143,7 @@ def send_text_with_interrupt(client, messages, temperature, max_tokens, stop_che
 
     def api_call():
         try:
+            _clear_vision_key_context_for_text_request(client, context)
             start_time = time.time()
             result = client.send(
                 messages=messages,
@@ -216,6 +240,7 @@ class ImageTranslator:
         self.image_max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
         self.chunk_height = int(os.getenv("IMAGE_CHUNK_HEIGHT", "2000"))
         self.vision_ocr_prompt = os.getenv("VISION_OCR_PROMPT", DEFAULT_VISION_OCR_PROMPT).strip() or DEFAULT_VISION_OCR_PROMPT
+        self._vision_glossary_processed_hashes = set()
         
         # DEBUG: Log the actual max tokens being used for image translation
         print(f"🔍 ImageTranslator initialized with max_output_tokens: {self.image_max_tokens}")
@@ -1722,6 +1747,62 @@ class ImageTranslator:
                     except Exception as e:
                         logger.warning(f"Could not delete temp processed file: {e}")
 
+    def ocr_image(self, image_path: str, context: str = "", check_stop_fn=None) -> Optional[str]:
+        """OCR an image and save/reuse OCR text without running the translation phase."""
+        processed_path = None
+        compressed_path = None
+        try:
+            self.current_image_path = image_path
+            print(f"   🔎 ocr_image called for: {image_path}")
+            if check_stop_fn and check_stop_fn():
+                print("   ❌ Image OCR stopped by user")
+                return None
+            if not os.path.exists(image_path):
+                print(f"   ❌ Image file does not exist: {image_path}")
+                return None
+
+            compressed_path = image_path
+            if os.getenv("ENABLE_IMAGE_COMPRESSION", "0") == "1":
+                compressed_path = self.compress_image(image_path)
+
+            processed_path = self.preprocess_image_for_watermarks(compressed_path)
+            with Image.open(processed_path) as img:
+                width, height = img.size
+                print(f"   📐 OCR image dimensions: {width}x{height}")
+                if img.mode not in ('RGB', 'RGBA'):
+                    img = img.convert('RGB')
+                if height > self.chunk_height:
+                    return self._process_image_chunks_ocr_first_combined(
+                        img, width, height, context, check_stop_fn, translate_after=False
+                    )
+                image_bytes = self._image_to_bytes_with_compression(img)
+                return self._call_vision_ocr_api(image_bytes, context, check_stop_fn)
+        except Exception as e:
+            is_cancelled = False
+            try:
+                is_cancelled = isinstance(e, UnifiedClientError) and getattr(e, "error_type", None) == "cancelled"
+            except Exception:
+                is_cancelled = False
+            if is_cancelled or "stopped by user" in str(e).lower() or "cancelled" in str(e).lower():
+                print(f"   ⏹️ Image OCR cancelled: {e}")
+                return None
+            print(f"   ❌ Exception in ocr_image: {e}")
+            logger.error(f"Error OCRing image {image_path}: {e}")
+            return None
+        finally:
+            if compressed_path and compressed_path != image_path and os.getenv("SAVE_COMPRESSED_IMAGES", "0") != "1":
+                try:
+                    if os.path.exists(compressed_path):
+                        os.unlink(compressed_path)
+                except Exception:
+                    pass
+            if processed_path and processed_path != image_path and processed_path != compressed_path and os.getenv("SAVE_CLEANED_IMAGES", "0") != "1":
+                try:
+                    if os.path.exists(processed_path):
+                        os.unlink(processed_path)
+                except Exception:
+                    pass
+
 
     def _process_single_image(self, img, context, check_stop_fn):
         """Process a single image that doesn't need chunking"""
@@ -1827,6 +1908,8 @@ class ImageTranslator:
             print("   ❌ Stopped before OCR text translation")
             return None
 
+        system_prompt = self._prepare_vision_ocr_translation_prompt(ocr_text, check_stop_fn)
+
         user_parts = []
         if assistant_prompt and assistant_prompt.strip():
             user_parts.append(assistant_prompt.strip())
@@ -1834,9 +1917,18 @@ class ImageTranslator:
         user_parts.append("<OCR_TEXT>\n" + ocr_text.strip() + "\n</OCR_TEXT>")
 
         messages = [
-            {"role": "system", "content": self.system_prompt},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": "\n\n".join(user_parts)}
         ]
+
+        single_pass_enabled = False
+        try:
+            from TransateKRtoEN import _build_single_pass_glossary_messages, _single_pass_glossary_mode
+            single_pass_enabled = bool(_single_pass_glossary_mode())
+            if single_pass_enabled:
+                messages = _build_single_pass_glossary_messages(messages, ocr_text)
+        except Exception as e:
+            print(f"   ⚠️ Vision Single Pass Glossary setup skipped: {e}")
 
         if hasattr(self, 'current_chapter_num'):
             chapter_num = self.current_chapter_num
@@ -1867,10 +1959,153 @@ class ImageTranslator:
             translated = str(response)
 
         translated = (translated or "").strip()
+        if single_pass_enabled:
+            try:
+                from TransateKRtoEN import _split_single_pass_glossary_response, _persist_single_pass_glossary
+                translated, glossary_block = _split_single_pass_glossary_response(translated)
+                if glossary_block:
+                    _persist_single_pass_glossary(
+                        self.output_dir,
+                        glossary_block,
+                        chapter_num=getattr(self, 'current_chapter_num', None),
+                        source_text=ocr_text,
+                        chapter_file=os.path.basename(getattr(self, 'current_image_path', '')),
+                    )
+            except Exception as e:
+                print(f"   ⚠️ Vision Single Pass Glossary persistence skipped: {e}")
         if self.remove_ai_artifacts != "off":
             translated = self._clean_translation_response(translated)
         translated = self._sanitize_unicode_characters(translated)
         return translated.strip() or None
+
+    def _prepare_vision_ocr_translation_prompt(self, ocr_text, check_stop_fn):
+        """Apply automatic glossary modes to OCR text before the final translation call."""
+        mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower()
+        if mode in ("single_pass", "single-pass", "off", "no_glossary", "off_fuzzy_automap", "off_no_automap", ""):
+            return self.system_prompt
+        if mode not in ("minimal", "balanced", "full"):
+            return self.system_prompt
+
+        glossary_path = None
+        if os.getenv("VISION_GLOSSARY_PREPASS_DONE", "0") != "1":
+            glossary_path = self._ensure_vision_ocr_glossary(ocr_text, mode, check_stop_fn)
+        if not glossary_path:
+            glossary_path = self._find_vision_glossary_file()
+        if not glossary_path:
+            return self.system_prompt
+
+        try:
+            with open(glossary_path, 'r', encoding='utf-8') as f:
+                glossary_text = f.read()
+            if not glossary_text.strip():
+                return self.system_prompt
+            append_prompt = os.getenv(
+                "GLOSSARY_APPEND_PROMPT",
+                "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
+            )
+            print(f"   📑 Vision OCR glossary applied: {os.path.basename(glossary_path)}")
+            return f"{self.system_prompt}\n\n{append_prompt}\n{glossary_text}"
+        except Exception as e:
+            print(f"   ⚠️ Failed to append Vision OCR glossary: {e}")
+            return self.system_prompt
+
+    def _find_vision_glossary_file(self):
+        try:
+            glossary_dir = os.path.join(self.output_dir, "Glossary")
+            candidates = [
+                os.path.join(self.output_dir, "glossary.csv"),
+                os.path.join(self.output_dir, "glossary.json"),
+                os.path.join(glossary_dir, "vision_ocr_glossary.csv"),
+                os.path.join(glossary_dir, "vision_ocr_glossary.json"),
+            ]
+            if os.path.isdir(glossary_dir):
+                for name in os.listdir(glossary_dir):
+                    if name.lower().endswith((".csv", ".json")):
+                        candidates.append(os.path.join(glossary_dir, name))
+            for path in candidates:
+                if os.path.exists(path) and os.path.getsize(path) > 0:
+                    return path
+        except Exception:
+            pass
+        return None
+
+    def _ensure_vision_ocr_glossary(self, ocr_text, mode, check_stop_fn):
+        """Generate/update glossary entries from OCR text for Vision mode."""
+        if not ocr_text or not ocr_text.strip():
+            return None
+        try:
+            import hashlib
+            text_hash = hashlib.sha256(ocr_text.encode('utf-8', errors='ignore')).hexdigest()
+            if text_hash in self._vision_glossary_processed_hashes:
+                return self._find_vision_glossary_file()
+
+            if check_stop_fn and check_stop_fn():
+                return None
+
+            import extract_glossary_from_epub as glossary_extractor
+            glossary_dir = os.path.join(self.output_dir, "Glossary")
+            os.makedirs(glossary_dir, exist_ok=True)
+            json_path = os.path.join(glossary_dir, "vision_ocr_glossary.json")
+            csv_path = os.path.join(glossary_dir, "vision_ocr_glossary.csv")
+
+            system_prompt, user_prompt = glossary_extractor.build_prompt(ocr_text)
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+
+            retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
+            chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "1800")) if retry_timeout_enabled else None
+            glossary_tokens = os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", "").strip()
+            max_tokens = int(glossary_tokens) if glossary_tokens and glossary_tokens != "-1" else self.image_max_tokens
+            temperature = float(os.getenv("GLOSSARY_TEMPERATURE", str(self.temperature)) or self.temperature)
+
+            print(f"   📑 Vision OCR auto glossary ({mode}): generating entries from OCR text...")
+            response = send_text_with_interrupt(
+                self.client,
+                messages,
+                temperature,
+                max_tokens,
+                stop_check_fn=check_stop_fn,
+                chunk_timeout=chunk_timeout,
+                context='glossary',
+            )
+            if isinstance(response, tuple):
+                response = response[0]
+            if hasattr(response, 'content'):
+                raw = response.content
+            elif hasattr(response, 'text'):
+                raw = response.text
+            else:
+                raw = str(response)
+
+            parsed = glossary_extractor.parse_api_response(raw or "")
+            valid = []
+            for entry in parsed:
+                if glossary_extractor.validate_extracted_entry(entry):
+                    if isinstance(entry.get("raw_name"), str):
+                        entry["raw_name"] = entry["raw_name"].strip()
+                    valid.append(entry)
+            if not valid:
+                print("   📑 Vision OCR auto glossary: no valid entries found")
+                return self._find_vision_glossary_file()
+
+            existing = []
+            for path in (csv_path, json_path):
+                if os.path.exists(path):
+                    try:
+                        existing.extend(glossary_extractor._load_glossary_file(path))
+                    except Exception:
+                        pass
+            deduped = glossary_extractor.skip_duplicate_entries(existing + valid, output_dir=glossary_dir)
+            glossary_extractor.save_glossary_json(deduped, json_path)
+            glossary_extractor.save_glossary_csv(deduped, json_path)
+            self._vision_glossary_processed_hashes.add(text_hash)
+            print(f"   📑 Vision OCR auto glossary: saved {len(valid)} new entries ({len(deduped)} total)")
+            return csv_path if os.path.exists(csv_path) else json_path
+        except Exception as e:
+            print(f"   ⚠️ Vision OCR auto glossary failed: {e}")
+            return self._find_vision_glossary_file()
 
 
     def _image_to_bytes_with_compression(self, img):
@@ -2144,7 +2379,7 @@ class ImageTranslator:
                 combined_lines.append(line)
         return "\n".join(combined_lines).strip()
 
-    def _process_image_chunks_ocr_first_combined(self, img, width, height, context, check_stop_fn):
+    def _process_image_chunks_ocr_first_combined(self, img, width, height, context, check_stop_fn, translate_after=True):
         """OCR all chunks first, then translate the combined OCR text once."""
         num_chunks = (height + self.chunk_height - 1) // self.chunk_height
         overlap = self._image_chunk_overlap_pixels()
@@ -2301,6 +2536,8 @@ class ImageTranslator:
             print("   Combined OCR was empty")
             return None
         self._save_ocr_text(combined_ocr, kind="combined", image_basename=image_basename)
+        if not translate_after:
+            return combined_ocr
 
         print(f"   Step 2/2: Translating combined OCR from {len(ordered_ocr)}/{num_chunks} chunks ({len(combined_ocr)} chars)...")
         combined_prompt = (
