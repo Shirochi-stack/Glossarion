@@ -531,14 +531,20 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller translator_lite_linux.spec
         working-directory: src
+
+      - name: Resolve Linux binary name
+        run: |
+          LINUX_BINARY="$(python -c "import sys; sys.path.insert(0, 'src'); from app_version import get_spec_app_name; print(get_spec_app_name('translator_lite_linux.spec'))")"
+          echo "LINUX_BINARY=$LINUX_BINARY" >> "$GITHUB_ENV"
+          echo "Linux binary: $LINUX_BINARY"
       
       - name: Make executable
-        run: chmod +x src/dist/L_Glossarion_Lite_v8.6.9_Linux
+        run: chmod +x "src/dist/$LINUX_BINARY"
       
       - name: Create tarball
         run: |
           cd src/dist
-          tar -czvf Glossarion-Lite-Linux.tar.gz L_Glossarion_Lite_v8.6.9_Linux
+          tar -czvf Glossarion-Lite-Linux.tar.gz "$LINUX_BINARY"
       
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
