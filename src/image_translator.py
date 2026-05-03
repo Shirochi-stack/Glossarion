@@ -79,6 +79,15 @@ def send_image_with_interrupt(client, messages, image_data, temperature, max_tok
     timeout = chunk_timeout
     check_interval = 0.5
     elapsed = 0
+
+    def _should_interrupt_wait():
+        # Graceful stop lets in-flight API calls finish; immediate stop sets
+        # TRANSLATION_CANCELLED and should abort the wait promptly.
+        if os.environ.get("GRACEFUL_STOP") == "1":
+            return os.environ.get("TRANSLATION_CANCELLED") == "1"
+        if os.environ.get("TRANSLATION_CANCELLED") == "1":
+            return True
+        return bool(stop_check_fn and stop_check_fn())
     
     while True:
         try:
@@ -93,8 +102,8 @@ def send_image_with_interrupt(client, messages, image_data, temperature, max_tok
                 return api_result
             return result
         except queue.Empty:
-            if stop_check_fn and stop_check_fn():
-                raise UnifiedClientError("Image translation stopped by user")
+            if _should_interrupt_wait():
+                raise UnifiedClientError("Image translation stopped by user", error_type="cancelled")
             elapsed += check_interval
             if chunk_timeout is not None and elapsed >= chunk_timeout:
                 raise UnifiedClientError(f"Image API call timed out after {chunk_timeout} seconds")
@@ -1603,6 +1612,15 @@ class ImageTranslator:
             return html_output
             
         except Exception as e:
+            is_cancelled = False
+            try:
+                is_cancelled = isinstance(e, UnifiedClientError) and getattr(e, "error_type", None) == "cancelled"
+            except Exception:
+                is_cancelled = False
+            if is_cancelled or "stopped by user" in str(e).lower() or "cancelled" in str(e).lower():
+                print(f"   ⏹️ Image translation cancelled: {e}")
+                return None
+
             logger.error(f"Error translating image {image_path}: {e}")
             print(f"   ❌ Exception in translate_image: {e}")
             import traceback
