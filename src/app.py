@@ -969,15 +969,6 @@ class GlossarionWeb:
                     os.environ['TEXT_EXTRACTION_METHOD'] = 'enhanced'
                     os.environ['EXTRACTION_MODE'] = 'enhanced'
                     translation_logs.append(f"🔄 Auto-switched to html2text extraction (profile: {profile_name})")
-                # Auto-toggle image translation for OCR profiles
-                if '_ocr' in profile_lower:
-                    os.environ['ENABLE_IMAGE_TRANSLATION'] = '1'
-                    translation_logs.append(f"📷 Auto-enabled image translation for OCR profile: {profile_name}")
-                elif 'beautifulsoup' in profile_lower or 'html2text' in profile_lower:
-                    # BeautifulSoup/html2text profiles don't need image translation
-                    if enable_image_trans:
-                        os.environ['ENABLE_IMAGE_TRANSLATION'] = '0'
-                        translation_logs.append(f"📷 Auto-disabled image translation for {profile_name}")
             
             # OVERRIDE critical safety features AFTER config load
             # CORRECT variable name is EMERGENCY_PARAGRAPH_RESTORE (no ATION)

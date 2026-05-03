@@ -8550,6 +8550,20 @@ class UnifiedClient:
         """
         Helper method to prepare messages with embedded image/video for providers that accept image_url parts
         """
+        # Internal retries can pass messages that were already prepared on the
+        # previous attempt. Keep this idempotent so we do not append the same
+        # image_url payload repeatedly.
+        try:
+            for msg in messages or []:
+                content = msg.get('content') if isinstance(msg, dict) else None
+                if isinstance(content, list) and any(
+                    isinstance(part, dict) and part.get('type') == 'image_url'
+                    for part in content
+                ):
+                    return messages
+        except Exception:
+            pass
+
         embedded_messages = []
         # Prepare base64 string
         try:
@@ -13708,6 +13722,13 @@ class UnifiedClient:
                 return self._send_vertex_model_garden_image(messages, img_b64, temperature, max_tokens or max_completion_tokens, response_name)
             if actual_provider == 'poe':
                 return self._send_poe_image(messages, img_b64, temperature, max_tokens or max_completion_tokens, response_name)
+            if actual_provider == 'deepseek' and os.getenv('DEEPSEEK_ALLOW_IMAGE_URL', '0') != '1':
+                raise UnifiedClientError(
+                    "DeepSeek OpenAI-compatible chat endpoints only accept text message parts. "
+                    "Vision mode must OCR images with a vision-capable endpoint first, then send "
+                    "the OCR text to DeepSeek for translation.",
+                    error_type="validation"
+                )
             # Otherwise fall through to default handler below (OpenAI-compatible providers handle images in messages)
 
         # Map client types to their handler methods

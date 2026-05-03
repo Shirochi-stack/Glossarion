@@ -1190,7 +1190,7 @@ if platform.system() == 'Darwin':
                     '--window-pos', '200', '120',
                     '--window-size', '600', '400',
                     '--icon-size', '100',
-                    '--app-drop-link', '425', '170',
+                    '--app-drop-link', '435', '170',
                     '--icon', APP_NAME.replace(' ', '_') + '.app', '175', '170',
                     dmg_path,
                     app_path,

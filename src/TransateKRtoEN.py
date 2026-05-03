@@ -531,14 +531,6 @@ class TranslationConfig:
         self.SYNTHETIC_MERGE_HEADERS = os.getenv("SYNTHETIC_MERGE_HEADERS", "1") == "1"
         self.ENABLE_IMAGE_TRANSLATION = os.getenv("ENABLE_IMAGE_TRANSLATION", "1") == "1"
         
-        # Auto-disable image translation for html2text and BeautifulSoup profiles
-        # These profiles are designed for text extraction and don't need image translation
-        if self.ENABLE_IMAGE_TRANSLATION and self.PROFILE_NAME:
-            profile_lower = self.PROFILE_NAME.lower()
-            if 'html2text' in profile_lower or 'beautifulsoup' in profile_lower:
-                self.ENABLE_IMAGE_TRANSLATION = False
-                print(f"ℹ️  Image translation disabled for {self.PROFILE_NAME} profile")
-        
         self.TRANSLATE_BOOK_TITLE = os.getenv("TRANSLATE_BOOK_TITLE", "1") == "1"
         self.DISABLE_ZERO_DETECTION = os.getenv("DISABLE_ZERO_DETECTION", "0") == "1"
         self.ENABLE_AUTO_GLOSSARY = os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1"
@@ -3370,6 +3362,53 @@ class ContentProcessor:
             return found_any
         except Exception:
             return False
+
+    @staticmethod
+    def is_mostly_image_html(html_content, min_images=1, max_text_chars=500, image_ratio=0.08):
+        """Return True when HTML is primarily image references with little readable text."""
+        try:
+            if not html_content:
+                return False
+            soup = BeautifulSoup(html_content, 'html.parser')
+            image_tags = list(soup.find_all('img'))
+            image_tags.extend(soup.find_all('image'))
+            image_tags.extend([tag for tag in soup.find_all('object') if tag.get('data')])
+            image_tags.extend([tag for tag in soup.find_all('video') if tag.get('poster')])
+            for tag in soup.find_all(style=True):
+                if 'url(' in (tag.get('style') or ''):
+                    image_tags.append(tag)
+
+            image_count = len(image_tags)
+            if image_count < min_images:
+                return False
+
+            soup_text = BeautifulSoup(str(soup), 'html.parser')
+            for tag in soup_text.find_all(['img', 'image', 'object', 'video', 'svg']):
+                tag.decompose()
+            text = soup_text.get_text(separator=' ', strip=True)
+            text_len = len(text)
+
+            total_refs_len = sum(len(str(tag)) for tag in image_tags)
+            total_len = max(len(str(soup)), 1)
+            if text_len <= 100:
+                return True
+            return text_len <= max_text_chars and (total_refs_len / total_len) >= image_ratio
+        except Exception:
+            return False
+
+    @staticmethod
+    def image_processing_html(chapter):
+        """Choose the best HTML source for image translation/OCR."""
+        body = chapter.get("body", "") or ""
+        original = (
+            chapter.get("original_html")
+            or chapter.get("source_html")
+            or chapter.get("raw_html")
+            or ""
+        )
+        if original and ContentProcessor.is_mostly_image_html(original):
+            return original
+        return body
         
 # =====================================================
 # UNIFIED TRANSLATION PROCESSOR
@@ -12863,7 +12902,13 @@ def main(log_callback=None, stop_callback=None):
                 continue
             
             # Check for empty or image-only chapters
-            has_images = c.get('has_images', False)
+            image_source_html = ContentProcessor.image_processing_html(c)
+            html_mostly_images = ContentProcessor.is_mostly_image_html(image_source_html)
+            has_images = c.get('has_images', False) or html_mostly_images
+            if html_mostly_images and image_source_html and image_source_html != c.get("body", ""):
+                c["body"] = image_source_html
+                c["has_images"] = True
+                c["image_count"] = max(c.get("image_count", 0), len(BeautifulSoup(image_source_html, 'html.parser').find_all('img')))
             has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
             text_size = c.get('file_size', 0)
             
@@ -13656,7 +13701,13 @@ def main(log_callback=None, stop_callback=None):
                         needs_translation = True
                 
                 # Skip empty/image-only chapters from merging
-                has_images = c.get('has_images', False)
+                image_source_html = ContentProcessor.image_processing_html(c)
+                html_mostly_images = ContentProcessor.is_mostly_image_html(image_source_html)
+                has_images = c.get('has_images', False) or html_mostly_images
+                if html_mostly_images and image_source_html and image_source_html != c.get("body", ""):
+                    c["body"] = image_source_html
+                    c["has_images"] = True
+                    c["image_count"] = max(c.get("image_count", 0), len(BeautifulSoup(image_source_html, 'html.parser').find_all('img')))
                 has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
                 text_size = c.get('file_size', 0)
                 is_image_link_only = ContentProcessor.is_only_image_links(c["body"])
@@ -13820,7 +13871,13 @@ def main(log_callback=None, stop_callback=None):
             # Initialize merge_info for this chapter (will be populated if this is a parent in a merge group)
             merge_info = None
             
-            has_images = c.get('has_images', False)
+            image_source_html = ContentProcessor.image_processing_html(c)
+            html_mostly_images = ContentProcessor.is_mostly_image_html(image_source_html)
+            has_images = c.get('has_images', False) or html_mostly_images
+            if html_mostly_images and image_source_html and image_source_html != c.get("body", ""):
+                c["body"] = image_source_html
+                c["has_images"] = True
+                c["image_count"] = max(c.get("image_count", 0), len(BeautifulSoup(image_source_html, 'html.parser').find_all('img')))
             has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
             text_size = c.get('file_size', 0)
 

@@ -2135,6 +2135,11 @@ Text to analyze:
         # Default prompts
         self.default_translation_chunk_prompt = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned.\n{chunk_html}"
         self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned. {context}"
+        self.default_vision_ocr_prompt = (
+            "Extract all readable source-language text from the image in natural reading order. "
+            "Return only the OCR text. Preserve line breaks when they help the reading order. "
+            "Do not translate, summarize, explain, or add commentary. If no readable text is present, return an empty response."
+        )
         self.default_prompts = {
             "Universal": (
                 "You are a professional novel translator. You MUST translate the following text to {target_lang}.\n"
@@ -3386,6 +3391,7 @@ Recent translations to summarize:
         self.append_glossary_prompt = self.config.get('append_glossary_prompt', "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
         self.translation_chunk_prompt = self.config.get('translation_chunk_prompt', self.default_translation_chunk_prompt)
         self.image_chunk_prompt = self.config.get('image_chunk_prompt', self.default_image_chunk_prompt)
+        self.vision_ocr_prompt = self.config.get('vision_ocr_prompt', self.default_vision_ocr_prompt)
         # Optional assistant prefill prompt (disabled by default)
         self.assistant_prompt = self.config.get('assistant_prompt', self.default_assistant_prompt)
         
@@ -4668,7 +4674,7 @@ Recent translations to summarize:
         if not claude_bin:
             dlg = QDialog(self)
             dlg.setWindowTitle("Claude Code Required")
-            dlg.setMinimumWidth(420)
+            dlg.setMinimumWidth(430)
             lay = QVBoxLayout(dlg)
             lay.addWidget(QLabel("Claude Code CLI is required for login.\nInstall it with:"))
             cmd_edit = QLineEdit("npm install -g @anthropic-ai/claude-code")
@@ -5007,7 +5013,7 @@ Recent translations to summarize:
                     "No API key needed.</p></qt>"
                 )
                 self.authgem_login_btn.setStyleSheet(
-                    "background-color: #4285f4; color: white; font-weight: bold; "
+                    "background-color: #4385f4; color: white; font-weight: bold; "
                     "font-size: 10pt; padding: 4px 12px; border-radius: 4px;"
                 )
                 if hasattr(self, 'authgem_project_combo'):
@@ -5514,7 +5520,7 @@ Recent translations to summarize:
             <li><b>authgem/gemini-2.5-pro</b> - Gemini 2.5 Pro (free quota)</li>
             <li><b>authgem/gemini-3-flash-preview</b> - Gemini 3 Flash Preview</li>
         </ul>
-        <p style="color: #4285f4; padding: 2px; font-size: 11px;">
+        <p style="color: #4385f4; padding: 2px; font-size: 11px;">
             <b>ℹ️</b> Uses Code Assist proxy (same as Gemini CLI). Free daily requests included.
             Preview models may require retries due to server capacity.
         </p>
@@ -5526,7 +5532,7 @@ Recent translations to summarize:
             <li><b>authgem-vertex/gemini-2.5-flash</b> - Vertex AI endpoint</li>
             <li><b>authgem-vertex/gemini-2.5-pro</b> - Vertex AI endpoint</li>
         </ul>
-        <p style="color: #4285f4; padding: 2px; font-size: 11px;">
+        <p style="color: #4385f4; padding: 2px; font-size: 11px;">
             <b>ℹ️</b> Click the <b>🔐 Gemini Login</b> button to authenticate.
             Select a GCP project with billing enabled from the dropdown.
         </p>
@@ -5902,7 +5908,7 @@ Recent translations to summarize:
         # AuthGem Login button (visible only for authgem/ models)
         self.authgem_login_btn = QPushButton("🔐 Gemini Login")
         self.authgem_login_btn.setStyleSheet(
-            "background-color: #4285f4; color: white; font-weight: bold; "
+            "background-color: #4385f4; color: white; font-weight: bold; "
             "font-size: 10pt; padding: 4px 8px; border-radius: 4px;"
         )
         self.authgem_login_btn.setToolTip(
@@ -5929,7 +5935,7 @@ Recent translations to summarize:
         self.authgem_status_btn.setStyleSheet(
             "background-color: #344c68; color: white; font-weight: bold; "
             "font-size: 11pt; padding: 4px 0px; border-radius: 4px; "
-            "border: 1px solid #4285f4;"
+            "border: 1px solid #4385f4;"
         )
         self.authgem_status_btn.setToolTip(
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
@@ -5944,11 +5950,11 @@ Recent translations to summarize:
         self.authgem_project_combo = QComboBox()
         self.authgem_project_combo.setStyleSheet(
             "QComboBox { background-color: #2a3a4a; color: #e0e0e0; "
-            "font-size: 9pt; padding: 3px 6px; border: 1px solid #4285f4; "
+            "font-size: 9pt; padding: 3px 6px; border: 1px solid #4385f4; "
             "border-radius: 4px; min-width: 160px; }"
             "QComboBox::drop-down { border: none; }"
             "QComboBox QAbstractItemView { background-color: #2a3a4a; "
-            "color: #e0e0e0; selection-background-color: #4285f4; }"
+            "color: #e0e0e0; selection-background-color: #4385f4; }"
         )
         self.authgem_project_combo.setToolTip("Select the GCP project for Gemini API calls")
         self.authgem_project_combo.currentIndexChanged.connect(self._authgem_project_changed)
@@ -6301,9 +6307,9 @@ Recent translations to summarize:
         # Info / naming conventions
         info = QLabel(
             "<span style='font-weight:600;'>Profile name tags</span> <span style='color:#94a3b8;'>(case-insensitive)</span>:<br>"
-            "• <span style='font-family: Consolas, \"Courier New\", monospace; font-weight:700; color:#e2e8f0;'>_beautifulsoup</span>: BeautifulSoup extraction <span style='color:#94a3b8;'>(image translation off)</span><br>"
-            "• <span style='font-family: Consolas, \"Courier New\", monospace; font-weight:700; color:#e2e8f0;'>_html2text</span>: html2text extraction <span style='color:#94a3b8;'>(image translation off)</span><br>"
-            "• <span style='font-family: Consolas, \"Courier New\", monospace; font-weight:700; color:#e2e8f0;'>_ocr</span>: <span style='color:#e2e8f0;'>image translation on</span><br><br>"
+            "• <span style='font-family: Consolas, \"Courier New\", monospace; font-weight:700; color:#e2e8f0;'>_beautifulsoup</span>: BeautifulSoup extraction<br>"
+            "• <span style='font-family: Consolas, \"Courier New\", monospace; font-weight:700; color:#e2e8f0;'>_html2text</span>: html2text extraction<br>"
+            "• <span style='font-family: Consolas, \"Courier New\", monospace; font-weight:700; color:#e2e8f0;'>_ocr</span>: OCR-focused prompt profile <span style='color:#94a3b8;'>(does not change output mode)</span><br><br>"
             "Built-in profiles are protected <span style='color:#94a3b8;'>(can’t be deleted)</span> and will restore themselves on restart."
         )
         info.setWordWrap(True)
@@ -7706,7 +7712,7 @@ Recent translations to summarize:
         self.restore_glossary_btn.setFixedWidth(32)
         self.restore_glossary_btn.setFixedHeight(32)
         self.restore_glossary_btn.setStyleSheet(
-            "QPushButton { background-color: #6f42c1; color: white; border-radius: 4px; font-size: 12pt; padding: 0; } "
+            "QPushButton { background-color: #6f43c1; color: white; border-radius: 4px; font-size: 12pt; padding: 0; } "
             "QPushButton:hover { background-color: #5a32a3; } "
             "QPushButton:disabled { background-color: #555; color: #888; }"
         )
@@ -7754,7 +7760,7 @@ Recent translations to summarize:
         except Exception:
             pass
         self.library_btn.setStyleSheet(
-            "QPushButton { background-color: #6f42c1; color: white; font-weight: bold; "
+            "QPushButton { background-color: #6f43c1; color: white; font-weight: bold; "
             "font-size: 10pt; padding: 6px 14px; border-radius: 4px; border: none; }"
             "QPushButton:hover { background-color: #5a32a3; }"
         )
@@ -11672,20 +11678,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         self.text_extraction_method_var = 'enhanced'
                         self.append_log(f"🔄 Auto-switched to html2text extraction (profile: {current_profile})")
             
-            # AUTO-TOGGLE IMAGE TRANSLATION BASED ON PROFILE
-            # Toggle OFF for BeautifulSoup and html2text profiles
-            if current_profile:
-                profile_lower = current_profile.lower()
-                if 'beautifulsoup' in profile_lower or 'html2text' in profile_lower:
-                    if hasattr(self, 'enable_image_translation_var') and self.enable_image_translation_var:
-                        self.enable_image_translation_var = False
-                        self.append_log(f"📷 Auto-disabled image translation for {current_profile}")
-                # Toggle ON for OCR profiles
-                elif '_ocr' in profile_lower:
-                    if hasattr(self, 'enable_image_translation_var') and not self.enable_image_translation_var:
-                        self.enable_image_translation_var = True
-                        self.append_log(f"📷 Auto-enabled image translation for {current_profile}")
-            
             # Re-attach GUI logging handlers to reclaim logs from standalone header translation
             try:
                 self._attach_gui_logging_handlers()
@@ -13859,6 +13851,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_CUSTOM_ENTRY_TYPES': json.dumps(getattr(self, 'custom_entry_types', self.config.get('custom_entry_types', {}))),
             'GLOSSARY_CUSTOM_FIELDS': json.dumps(getattr(self, 'custom_glossary_fields', self.config.get('custom_glossary_fields', []))),
             'OUTPUT_MODE': self._get_output_mode(),
+            'VISION_OCR_FIRST': '1' if self._get_output_mode() == 'vision' else '0',
+            'VISION_OCR_PROMPT': str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', ''))),
             'ENABLE_REFINEMENT_OUTPUT_MODE': "1" if self._get_output_mode() == 'refinement' else "0",
             'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var else "0",
@@ -19508,9 +19502,9 @@ Important rules:
             suffix_desc.setWordWrap(True)
             suffix_lay.addWidget(suffix_desc)
             for sfx, sdesc, scolor in [
-                ("_beautifulsoup", "BeautifulSoup extraction (image translation off)", "#5eedc0"),
-                ("_html2text", "html2text extraction (image translation off)", "#80b8ff"),
-                ("_ocr", "Image translation ON", "#ffd050"),
+                ("_beautifulsoup", "BeautifulSoup extraction", "#5eedc0"),
+                ("_html2text", "html2text extraction", "#80b8ff"),
+                ("_ocr", "OCR-focused prompt profile (does not change output mode)", "#ffd050"),
             ]:
                 sl = QLabel(f"<code style='color:{scolor}; font-weight:bold;'>{sfx}</code> — {sdesc}")
                 sl.setTextFormat(Qt.RichText)
@@ -19587,7 +19581,7 @@ Important rules:
                     "key": "enable_image_compression", "emoji": "🖼️", "title": "Image Compression",
                     "desc": "Compress images in the EPUB to reduce output file size.\nUses WebP for EPUB and JPEG for PDF.",
                     "default": False,
-                    "bg": "#142014", "accent": "#60d060",
+                    "bg": "#143014", "accent": "#60d060",
                 },
                 {
                     "key": "scan_phase_enabled", "emoji": "🧪", "title": "Post-Translation Scanning",
@@ -19746,14 +19740,14 @@ Important rules:
                 ("🔧", "groq/", "Groq", "Ultra-fast inference", "#241c0c", "#f5b820"),
                 ("☁️", "vertex/", "Google Vertex", "Enterprise Google Cloud AI", "#181e28", "#b0c0d8"),
                 ("🔑", "authgpt/", "AuthGPT", "ChatGPT via OAuth login", "#281418", "#e88080"),
-                ("🔒", "authcd/", "AuthCD", "Claude via CLI login", "#1e1428", "#d97706"),
-                ("🔐", "authgem/", "AuthGem", "Free quota via Code Assist", "#142840", "#4285f4"),
-                ("☁️", "authgem-vertex/", "AuthGem Vertex", "Vertex AI (GCP billing)", "#142840", "#34a853"),
+                ("🔒", "authcd/", "AuthCD", "Claude via CLI login", "#1e1438", "#d97706"),
+                ("🔐", "authgem/", "AuthGem", "Free quota via Code Assist", "#143840", "#4385f4"),
+                ("☁️", "authgem-vertex/", "AuthGem Vertex", "Vertex AI (GCP billing)", "#143840", "#34a853"),
                 ("🤖", "antigravity/", "Cloud Code", "Local proxy (localhost)", "#181830", "#a0a0f0"),
-                ("🟢", "nd/", "NVIDIA", "NVIDIA Integrate models", "#142014", "#60d060"),
+                ("🟢", "nd/", "NVIDIA", "NVIDIA Integrate models", "#143014", "#60d060"),
                 ("🇨🇳", "za/", "Zhipu Intl.", "GLM international endpoint", "#1e2030", "#60c0e0"),
                 ("🌌", "nan/", "NanoGPT", "Generative & text models", "#1a1025", "#c084fc"),
-                ("⚙️", "sam/", "SambaNova", "SambaNova Cloud API", "#1a1e14", "#7cb342"),
+                ("⚙️", "sam/", "SambaNova", "SambaNova Cloud API", "#1a1e14", "#7cb343"),
             ]
             
             pfx_w = QWidget()
@@ -20636,7 +20630,7 @@ Important rules:
         # Ratio-based sizing (consistent with other manager dialogs)
         try:
             screen = QApplication.primaryScreen().availableGeometry()
-            dialog_width = int(screen.width() * 0.42)
+            dialog_width = int(screen.width() * 0.43)
             dialog_height = int(screen.height() * 0.55)
             dialog.setMinimumWidth(int(screen.width() * 0.30))
             dialog.setMinimumHeight(int(screen.height() * 0.40))
@@ -21643,6 +21637,7 @@ Important rules:
                 ('book_title_prompt', ['book_title_prompt'], '', str),
                 ('translation_chunk_prompt', ['translation_chunk_prompt'], '', str),
                 ('image_chunk_prompt', ['image_chunk_prompt'], '', str),
+                ('vision_ocr_prompt', ['vision_ocr_prompt'], getattr(self, 'default_vision_ocr_prompt', ''), str),
                 ('assistant_prompt', ['assistant_prompt'], '', str),  # Optional assistant prefill
                 ('vertex_ai_location', ['vertex_location_entry', 'vertex_location_var'], 'global', str),
                 ('openai_base_url', ['openai_base_url_var'], '', str),
@@ -22711,6 +22706,8 @@ Important rules:
                 ('ENABLE_WATERMARK_REMOVAL', '1' if getattr(self, 'enable_watermark_removal_var', True) else '0'),
                 ('SAVE_CLEANED_IMAGES', '1' if getattr(self, 'save_cleaned_images_var', False) else '0'),
                 ('OUTPUT_MODE', self._get_output_mode()),
+                ('VISION_OCR_FIRST', '1' if self._get_output_mode() == 'vision' else '0'),
+                ('VISION_OCR_PROMPT', str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', '')))),
                 ('ENABLE_IMAGE_OUTPUT_MODE', self._get_allowed_image_output_mode()),
                 ('ENABLE_VIDEO_OUTPUT_MODE', self._get_allowed_video_output_mode()),
                 ('ENABLE_AUDIO_OUTPUT_MODE', '1' if self._get_output_mode() == 'audio' else '0'),

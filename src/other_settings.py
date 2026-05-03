@@ -418,7 +418,7 @@ def setup_other_settings_methods(gui_instance):
         'create_ai_hunter_section', 'test_api_connections',
         '_update_multi_key_status_label',
         # Prompt configuration dialogs
-        'configure_translation_chunk_prompt', 'configure_image_chunk_prompt',
+        'configure_translation_chunk_prompt', 'configure_image_chunk_prompt', 'configure_vision_ocr_prompt',
         'configure_image_compression',
         # Helper methods for styling
         '_create_styled_checkbox', '_disable_combobox_mousewheel', '_disable_spinbox_mousewheel',
@@ -5304,6 +5304,86 @@ def configure_image_chunk_prompt(self):
     except Exception:
         dialog.show()
 
+def configure_vision_ocr_prompt(self):
+    """Configure the OCR-only prompt used by Vision output mode before translation."""
+    from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit, QMessageBox, QGroupBox
+    from PySide6.QtCore import Qt
+
+    if hasattr(self, '_vision_ocr_prompt_dialog') and self._vision_ocr_prompt_dialog is not None:
+        try:
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(self._vision_ocr_prompt_dialog, duration=220)
+            except Exception:
+                self._vision_ocr_prompt_dialog.show()
+            self._vision_ocr_prompt_dialog.raise_()
+            self._vision_ocr_prompt_dialog.activateWindow()
+            return
+        except RuntimeError:
+            self._vision_ocr_prompt_dialog = None
+
+    dialog = QDialog(self)
+    dialog.setWindowTitle("Vision OCR Prompt")
+    dialog.setModal(False)
+    dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+    dialog.resize(640, 460)
+    dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
+    self._vision_ocr_prompt_dialog = dialog
+
+    main_layout = QVBoxLayout(dialog)
+    main_layout.setContentsMargins(20, 20, 20, 20)
+
+    title = QLabel("Vision OCR Prompt")
+    title.setStyleSheet("font-size: 14pt; font-weight: bold;")
+    main_layout.addWidget(title)
+
+    desc = QLabel("Used for the OCR pass in Vision mode. The translated pass still uses the active profile prompt.")
+    desc.setStyleSheet("color: gray; font-size: 10pt;")
+    desc.setWordWrap(True)
+    main_layout.addWidget(desc)
+    main_layout.addSpacing(10)
+
+    prompt_box = QGroupBox("OCR Prompt")
+    prompt_v = QVBoxLayout(prompt_box)
+    prompt_text = QTextEdit()
+    prompt_text.setAcceptRichText(False)
+    prompt_text.setPlainText(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', '')))
+    prompt_v.addWidget(prompt_text)
+    main_layout.addWidget(prompt_box)
+
+    button_layout = QHBoxLayout()
+
+    def save_prompt():
+        self.vision_ocr_prompt = prompt_text.toPlainText().strip()
+        self.config['vision_ocr_prompt'] = self.vision_ocr_prompt
+        QMessageBox.information(dialog, "Success", "Vision OCR prompt saved!")
+        dialog.hide()
+
+    def reset_prompt():
+        result = QMessageBox.question(dialog, "Reset Prompt", "Reset to the default Vision OCR prompt?",
+                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if result == QMessageBox.Yes:
+            prompt_text.setPlainText(getattr(self, 'default_vision_ocr_prompt', ''))
+
+    save_btn = QPushButton("Save")
+    save_btn.clicked.connect(save_prompt)
+    button_layout.addWidget(save_btn)
+
+    reset_btn = QPushButton("Reset to Default")
+    reset_btn.clicked.connect(reset_prompt)
+    button_layout.addWidget(reset_btn)
+
+    cancel_btn = QPushButton("Cancel")
+    cancel_btn.clicked.connect(dialog.hide)
+    button_layout.addWidget(cancel_btn)
+    main_layout.addLayout(button_layout)
+
+    try:
+        from dialog_animations import show_dialog_with_fade
+        show_dialog_with_fade(dialog, duration=220)
+    except Exception:
+        dialog.show()
+
 def configure_image_compression(self):
     """Open the image compression configuration dialog (PySide6)"""
     from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
@@ -9246,7 +9326,7 @@ def _enforce_image_output_dependency(self):
 
 def _create_image_translation_section(self, parent):
     """Create image translation section (PySide6)"""
-    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QWidget, QLineEdit, QGridLayout
+    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QWidget, QLineEdit, QGridLayout, QPushButton
     from PySide6.QtCore import Qt
     
     section_box = QGroupBox("Image Translation & Vision API")
@@ -9525,6 +9605,21 @@ def _create_image_translation_section(self, parent):
     vid_sub_v.addWidget(vid_res_desc)
     left_v.addWidget(vid_sub)
 
+    # Vision sub-settings container (visible when Vision mode selected)
+    vision_sub = QWidget()
+    vision_sub_v = QVBoxLayout(vision_sub)
+    vision_sub_v.setContentsMargins(10, 0, 0, 0)
+    vision_sub_v.setSpacing(4)
+    btn_vision_ocr = QPushButton("Configure Vision OCR Prompt")
+    btn_vision_ocr.setFixedWidth(230)
+    btn_vision_ocr.clicked.connect(lambda: self.configure_vision_ocr_prompt())
+    vision_sub_v.addWidget(btn_vision_ocr)
+    vision_ocr_desc = QLabel("Vision mode OCRs images first, then translates the extracted text")
+    vision_ocr_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    vision_ocr_desc.setWordWrap(True)
+    vision_sub_v.addWidget(vision_ocr_desc)
+    left_v.addWidget(vision_sub)
+
     # ── Show/hide sub-settings based on mode ──
     def _update_output_mode_sub_settings(mode=None):
         if mode is None:
@@ -9538,6 +9633,7 @@ def _create_image_translation_section(self, parent):
                 mode = 'text'
         img_sub.setVisible(mode == 'image')
         vid_sub.setVisible(mode == 'video')
+        vision_sub.setVisible(mode == 'vision')
     self._update_output_mode_sub_settings = _update_output_mode_sub_settings
 
     def _on_mode_radio_toggled(btn):

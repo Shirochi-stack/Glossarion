@@ -304,6 +304,13 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
         
         # Collect all image references from all supported formats
         image_srcs = _collect_image_srcs(soup)
+        if not image_srcs:
+            original_markup = chapter.get('original_html') or chapter.get('source_html') or chapter.get('raw_html') or ''
+            if original_markup:
+                try:
+                    image_srcs = _collect_image_srcs(BeautifulSoup(original_markup, 'html.parser'))
+                except Exception:
+                    image_srcs = []
         
         img_counter = 1
         for src in image_srcs:
@@ -415,6 +422,17 @@ def _rename_images_to_chapter_format(chapters, output_dir, progress_callback=Non
             if modified:
                 chapter['body'] = str(soup)
                 updated_chapters += 1
+
+            for html_key in ('original_html', 'source_html', 'raw_html'):
+                original_markup = chapter.get(html_key)
+                if not original_markup:
+                    continue
+                try:
+                    original_soup = BeautifulSoup(original_markup, 'html.parser')
+                    if _update_image_refs_in_soup(original_soup, successful_renames):
+                        chapter[html_key] = str(original_soup)
+                except Exception:
+                    pass
         except Exception as e:
             print(f"   ⚠️ Error updating chapter {chapter.get('num', '?')}: {e}")
     
@@ -712,6 +730,8 @@ def ensure_all_opf_chapters_extracted(zf, chapters, out):
                     with open(output_path, 'w', encoding='utf-8') as f:
                         f.write(content)
                     
+                    image_srcs = _collect_image_srcs(soup)
+
                     # Add to chapters list
                     new_chapter = {
                         'num': chapter_num,
@@ -720,7 +740,8 @@ def ensure_all_opf_chapters_extracted(zf, chapters, out):
                         'filename': href,
                         'original_basename': basename,
                         'file_size': len(content),
-                        'has_images': bool(soup.find_all('img')),
+                        'has_images': bool(image_srcs),
+                        'image_count': len(image_srcs),
                         'detection_method': 'opf_recovery',
                         'content_hash': None  # Will be calculated later
                     }
@@ -854,8 +875,7 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
         if chapter.get('has_images'):
             try:
                 soup = BeautifulSoup(chapter.get('body', ''), parser)
-                images = soup.find_all('img')
-                info['images'] = [img.get('src', '') for img in images]
+                info['images'] = _collect_image_srcs(soup)
             except:
                 info['images'] = []
         
@@ -2813,7 +2833,8 @@ def _process_single_html_file(
         protected_html = protect_angle_brackets_func(html_content)
         soup = BeautifulSoup(protected_html, parser)
         images = soup.find_all('img')
-        has_images = len(images) > 0
+        image_srcs = _collect_image_srcs(soup)
+        has_images = len(image_srcs) > 0
         is_image_only_chapter = has_images and len(content_text.strip()) < 500
         
         if is_image_only_chapter:
@@ -2846,7 +2867,7 @@ def _process_single_html_file(
             "detection_method": detection_method if detection_method else "pending",
             "file_size": file_size,
             "has_images": has_images,
-            "image_count": len(images),
+            "image_count": len(image_srcs),
             "is_empty": len(content_text.strip()) == 0,
             "is_image_only": is_image_only_chapter,
             "extraction_mode": extraction_mode,

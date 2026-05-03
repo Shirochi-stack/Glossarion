@@ -29,6 +29,12 @@ from unified_api_client import UnifiedClientError
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_VISION_OCR_PROMPT = (
+    "Extract all readable source-language text from the image in natural reading order. "
+    "Return only the OCR text. Preserve line breaks when they help the reading order. "
+    "Do not translate, summarize, explain, or add commentary. If no readable text is present, return an empty response."
+)
+
 def requires_cv2(func):
     """Decorator to skip methods that require OpenCV"""
     def wrapper(self, *args, **kwargs):
@@ -130,6 +136,7 @@ class ImageTranslator:
         self.webnovel_min_height = int(os.getenv("WEBNOVEL_MIN_HEIGHT", "1000"))
         self.image_max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
         self.chunk_height = int(os.getenv("IMAGE_CHUNK_HEIGHT", "2000"))
+        self.vision_ocr_prompt = os.getenv("VISION_OCR_PROMPT", DEFAULT_VISION_OCR_PROMPT).strip() or DEFAULT_VISION_OCR_PROMPT
         
         # DEBUG: Log the actual max tokens being used for image translation
         print(f"🔍 ImageTranslator initialized with max_output_tokens: {self.image_max_tokens}")
@@ -1536,7 +1543,10 @@ class ImageTranslator:
                 # Process chunks or single image
                 if height > self.chunk_height:
                     # Check if single API mode is enabled
-                    if os.getenv("SINGLE_API_IMAGE_CHUNKS", "1") == "1":
+                    if self._use_ocr_first_pipeline():
+                        print("   🔎 Vision OCR-first mode enabled; processing tall image with one OCR call per chunk")
+                        translated_text = self._process_image_chunks(img, width, height, context, check_stop_fn)
+                    elif os.getenv("SINGLE_API_IMAGE_CHUNKS", "1") == "1":
                         translated_text = self._process_image_chunks_single_api(img, width, height, context, check_stop_fn)
                     else:
                         translated_text = self._process_image_chunks(img, width, height, context, check_stop_fn)
@@ -1651,6 +1661,108 @@ class ImageTranslator:
         else:
             print(f"   ❌ Translation returned empty result")
             return None
+
+    def _use_ocr_first_pipeline(self) -> bool:
+        """Return True when Vision mode should OCR images before text translation."""
+        output_mode = os.getenv("OUTPUT_MODE", "").strip().lower()
+        force = os.getenv("VISION_OCR_FIRST", "auto").strip().lower()
+        if force in ("0", "false", "no", "off"):
+            return False
+        if force in ("1", "true", "yes", "on"):
+            return True
+        return output_mode == "vision"
+
+    def _call_vision_ocr_api(self, image_data, assistant_prompt, check_stop_fn):
+        """OCR an image/chunk using the dedicated Vision OCR prompt."""
+        messages = [{"role": "system", "content": self.vision_ocr_prompt}]
+        if assistant_prompt and assistant_prompt.strip():
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"{assistant_prompt}\n\n"
+                    "OCR this image/chunk. Return only the source text you can read."
+                )
+            })
+        else:
+            messages.append({"role": "user", "content": "OCR this image. Return only the source text you can read."})
+
+        if hasattr(self, 'current_chapter_num'):
+            chapter_num = self.current_chapter_num
+            image_idx = getattr(self, 'current_image_index', 0)
+            self.client.set_output_filename(f"ocr_{chapter_num:03d}_Chapter_{chapter_num}_image_{image_idx}.txt")
+
+        retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
+        chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "1800")) if retry_timeout_enabled else None
+
+        ocr_response, finish_reason = send_image_with_interrupt(
+            self.client,
+            messages,
+            image_data,
+            self.temperature,
+            self.image_max_tokens,
+            check_stop_fn,
+            chunk_timeout,
+            'image_ocr'
+        )
+
+        if finish_reason in ["length", "max_tokens"]:
+            print("   ⚠️ OCR response was truncated. Consider increasing Max tokens.")
+
+        ocr_text = (ocr_response or "").strip()
+        if self.remove_ai_artifacts != "off":
+            ocr_text = self._clean_translation_response(ocr_text)
+        ocr_text = self._normalize_unicode_width(ocr_text)
+        ocr_text = self._sanitize_unicode_characters(ocr_text)
+        return ocr_text.strip()
+
+    def _translate_ocr_text(self, ocr_text, assistant_prompt, check_stop_fn):
+        """Translate OCR text as a normal text request."""
+        if not ocr_text or not ocr_text.strip():
+            print("   ℹ️ OCR returned no readable text")
+            return None
+
+        if check_stop_fn and check_stop_fn():
+            print("   ❌ Stopped before OCR text translation")
+            return None
+
+        user_parts = []
+        if assistant_prompt and assistant_prompt.strip():
+            user_parts.append(assistant_prompt.strip())
+        user_parts.append("Translate the following OCR text according to the system prompt. Return only the translated text.")
+        user_parts.append("<OCR_TEXT>\n" + ocr_text.strip() + "\n</OCR_TEXT>")
+
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": "\n\n".join(user_parts)}
+        ]
+
+        if hasattr(self, 'current_chapter_num'):
+            chapter_num = self.current_chapter_num
+            image_idx = getattr(self, 'current_image_index', 0)
+            self.client.set_output_filename(f"response_{chapter_num:03d}_Chapter_{chapter_num}_image_{image_idx}.html")
+
+        response = self.client.send(
+            messages=messages,
+            temperature=self.temperature,
+            max_tokens=self.image_max_tokens
+        )
+
+        if isinstance(response, tuple):
+            response = response[0]
+
+        if hasattr(response, 'content'):
+            translated = response.content
+        elif hasattr(response, 'text'):
+            translated = response.text
+        else:
+            translated = str(response)
+
+        translated = (translated or "").strip()
+        if self.remove_ai_artifacts != "off":
+            translated = self._clean_translation_response(translated)
+        translated = self._normalize_unicode_width(translated)
+        translated = self._sanitize_unicode_characters(translated)
+        return translated.strip() or None
 
 
     def _image_to_bytes_with_compression(self, img):
@@ -2066,6 +2178,27 @@ class ImageTranslator:
 
     def _call_vision_api(self, image_data, assistant_prompt, check_stop_fn):
         """Make the actual API call for vision translation with retry support"""
+        if self._use_ocr_first_pipeline():
+            try:
+                print("   🔎 Step 1/2: OCR image with dedicated Vision OCR prompt...")
+                ocr_text = self._call_vision_ocr_api(image_data, assistant_prompt, check_stop_fn)
+                if not ocr_text:
+                    return None
+                print(f"   ✅ OCR complete ({len(ocr_text)} chars)")
+                print("   🌐 Step 2/2: Translating OCR text...")
+                translated = self._translate_ocr_text(ocr_text, assistant_prompt, check_stop_fn)
+                if translated:
+                    print(f"   ✅ OCR text translated ({len(translated)} chars)")
+                return translated
+            except Exception as e:
+                err = str(e)
+                if "DeepSeek OpenAI-compatible chat endpoints only accept text" in err:
+                    print(
+                        "   ❌ DeepSeek cannot perform the OCR image step. "
+                        "Use a vision-capable model/endpoint for Vision OCR, then DeepSeek can translate the OCR text."
+                    )
+                raise
+
         # Build messages - NO HARDCODED PROMPT
         messages = [
             {"role": "system", "content": self.system_prompt}
