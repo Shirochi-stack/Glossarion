@@ -1609,6 +1609,120 @@ class RetranslationMixin:
             failed_indices = gp_data.get('failed', [])
             merged_indices = gp_data.get('merged_indices', [])
             book_title = gp_data.get('book_title', '')
+
+            def _gp_qa_issue_map(_d):
+                issues = {}
+
+                def _add(idx, values):
+                    try:
+                        key = int(idx)
+                    except (TypeError, ValueError):
+                        return
+                    if isinstance(values, str):
+                        values = [values]
+                    if not isinstance(values, list):
+                        return
+                    bucket = issues.setdefault(key, [])
+                    for value in values:
+                        text = str(value).strip()
+                        if text and text not in bucket:
+                            bucket.append(text)
+
+                raw_map = _d.get('qa_issues_found', {})
+                if isinstance(raw_map, dict):
+                    for idx, values in raw_map.items():
+                        if isinstance(values, dict):
+                            values = values.get('qa_issues_found') or values.get('issues') or []
+                        _add(idx, values)
+
+                chapters = _d.get('chapters', {})
+                if isinstance(chapters, dict):
+                    for key, info in chapters.items():
+                        if not isinstance(info, dict):
+                            continue
+                        idx = info.get('chapter_index', key)
+                        _add(idx, info.get('qa_issues_found', []))
+                return issues
+
+            def _gp_sets(_d):
+                def _int_set(values):
+                    result = set()
+                    for value in values or []:
+                        try:
+                            result.add(int(value))
+                        except (TypeError, ValueError):
+                            continue
+                    return result
+
+                comp = _int_set(_d.get('completed', []))
+                fail = _int_set(_d.get('failed', []))
+                merg = _int_set(_d.get('merged_indices', []))
+                chapters = _d.get('chapters', {})
+                if isinstance(chapters, dict):
+                    for key, info in chapters.items():
+                        if not isinstance(info, dict):
+                            continue
+                        try:
+                            ci = int(info.get('chapter_index', key))
+                        except (TypeError, ValueError):
+                            continue
+                        status = str(info.get('status', '')).lower()
+                        if status in ('failed', 'qa_failed', 'error'):
+                            fail.add(ci)
+                        elif status == 'merged':
+                            merg.add(ci)
+                        elif status == 'completed':
+                            comp.add(ci)
+                # Failed should win over completed in the UI.
+                comp -= fail
+                return comp, fail, merg
+
+            def _gp_status_for(ci, _d):
+                comp, fail, merg = _gp_sets(_d)
+                issues = _gp_qa_issue_map(_d)
+                if ci in fail:
+                    chapter_status = ''
+                    chapters = _d.get('chapters', {})
+                    if isinstance(chapters, dict):
+                        for key, info in chapters.items():
+                            if not isinstance(info, dict):
+                                continue
+                            try:
+                                chapter_index = int(info.get('chapter_index', key))
+                            except (TypeError, ValueError):
+                                continue
+                            if chapter_index == ci:
+                                chapter_status = str(info.get('status', '')).lower()
+                                break
+                    return ('qa_failed' if issues.get(ci) or chapter_status == 'qa_failed' else 'failed'), issues.get(ci, [])
+                if ci in merg:
+                    return 'merged', []
+                if ci in comp:
+                    return 'completed', []
+                return 'not_completed', []
+
+            def _gp_display_for(ci, fname, _d):
+                import re as _re_display
+                _nums = _re_display.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
+                ch_num = int(_nums[-1]) if _nums else ci + 1
+                status, issues = _gp_status_for(ci, _d)
+                icons = {'completed': 'âœ…', 'failed': 'âŒ', 'qa_failed': 'âŒ', 'merged': 'ðŸ”—', 'not_completed': 'â¬œ'}
+                display = f"Ch.{ch_num:03d} | {icons.get(status, 'â¬œ')} {status.replace('_', ' ').title():14s} | {fname}"
+                if issues:
+                    issues_display = ', '.join(issues[:2])
+                    if len(issues) > 2:
+                        issues_display += f' (+{len(issues)-2} more)'
+                    display += f" | {issues_display}"
+                return display, status
+
+            def _gp_color_for(status):
+                if status == 'completed':
+                    return '#27ae60'
+                if status == 'merged':
+                    return '#17a2b8'
+                if status in ('failed', 'qa_failed'):
+                    return '#e74c3c'
+                return '#5a9fd4'
             
             # Lightweight spine reader — returns (chapter_map, total_chapters)
             def _read_spine_map(epub_path, translate_special):
@@ -1711,11 +1825,9 @@ class RetranslationMixin:
                 bt_label = None
             
             # Stats row (clickable)
-            _comp_set_init = set(completed_indices)
-            _merg_set_init = set(merged_indices)
-            _fail_set_init = set(failed_indices)
+            _comp_set_init, _fail_set_init, _merg_set_init = _gp_sets(gp_data)
             # Completed count excludes chapters that are also merged
-            n_completed = len(_comp_set_init - _merg_set_init)
+            n_completed = len(_comp_set_init - _merg_set_init - _fail_set_init)
             n_failed = len(_fail_set_init)
             n_merged = len(_merg_set_init)
             n_remaining = max(0, panel_state['total'] - len(_comp_set_init | _fail_set_init | _merg_set_init))
@@ -1767,9 +1879,7 @@ class RetranslationMixin:
             gp_listbox.setContextMenuPolicy(Qt.CustomContextMenu)
             gp_listbox.setSelectionMode(QListWidget.ExtendedSelection)
             
-            completed_set = set(completed_indices)
-            failed_set = set(failed_indices)
-            merged_set = set(merged_indices)
+            completed_set, failed_set, merged_set = _gp_sets(gp_data)
             
             chapter_map = panel_state['chapter_map']
             total_epub_chapters = panel_state['total']
@@ -1790,6 +1900,8 @@ class RetranslationMixin:
                     icon, status, color = '⬜', 'not_completed', '#5a9fd4'
                 
                 display = f"Ch.{ch_num:03d} | {icon} {status.replace('_', ' ').title():14s} | {fname}"
+                display, status = _gp_display_for(ci, fname, gp_data)
+                color = _gp_color_for(status)
                 item = QListWidgetItem(display)
                 item.setForeground(QColor(color))
                 item.setData(Qt.UserRole, status)
@@ -1798,9 +1910,7 @@ class RetranslationMixin:
             
             # Helper to refresh stats labels from a loaded progress dict
             def _refresh_stats_from_dict(_d):
-                _comp2 = set(_d.get('completed', []))
-                _fail2 = set(_d.get('failed', []))
-                _merg2 = set(_d.get('merged_indices', []))
+                _comp2, _fail2, _merg2 = _gp_sets(_d)
                 _total = panel_state['total']
                 lbl_total.setText(f"Total: {_total} | ")
                 lbl_gp_completed.setText(f"✅ Completed: {len(_comp2 - _merg2)} | ")
@@ -1813,7 +1923,7 @@ class RetranslationMixin:
             def _gp_context_menu(pos):
                 # Gather selected items that are deletable
                 selected = gp_listbox.selectedItems()
-                deletable_statuses = ('completed', 'merged', 'failed')
+                deletable_statuses = ('completed', 'merged', 'failed', 'qa_failed')
                 targets = [(it, it.data(Qt.UserRole + 1)) for it in selected
                            if it.data(Qt.UserRole) in deletable_statuses and it.data(Qt.UserRole + 1) is not None]
                 if not targets:
@@ -1854,6 +1964,35 @@ class RetranslationMixin:
                         if len(new_lst) != len(lst):
                             _d[key] = new_lst
                             changed = True
+
+                    qa_map = _d.get('qa_issues_found', {})
+                    if isinstance(qa_map, dict):
+                        new_qa_map = {}
+                        for k, v in qa_map.items():
+                            try:
+                                keep = int(k) not in indices_to_remove
+                            except (TypeError, ValueError):
+                                keep = True
+                            if keep:
+                                new_qa_map[k] = v
+                        if len(new_qa_map) != len(qa_map):
+                            _d['qa_issues_found'] = new_qa_map
+                            changed = True
+
+                    chapters = _d.get('chapters', {})
+                    if isinstance(chapters, dict):
+                        new_chapters = {}
+                        for k, v in chapters.items():
+                            try:
+                                ci = int(v.get('chapter_index', k) if isinstance(v, dict) else k)
+                                keep = ci not in indices_to_remove
+                            except (TypeError, ValueError):
+                                keep = True
+                            if keep:
+                                new_chapters[k] = v
+                        if len(new_chapters) != len(chapters):
+                            _d['chapters'] = new_chapters
+                            changed = True
                     
                     if changed:
                         with open(_rp, 'w', encoding='utf-8') as _f:
@@ -1891,7 +2030,7 @@ class RetranslationMixin:
                 return _handler
             
             lbl_gp_completed.mousePressEvent = _gp_make_cycle(('completed',), gp_listbox)
-            lbl_gp_failed.mousePressEvent = _gp_make_cycle(('failed',), gp_listbox)
+            lbl_gp_failed.mousePressEvent = _gp_make_cycle(('failed', 'qa_failed'), gp_listbox)
             lbl_gp_merged.mousePressEvent = _gp_make_cycle(('merged',), gp_listbox)
             lbl_gp_remaining.mousePressEvent = _gp_make_cycle(('not_completed',), gp_listbox)
             
@@ -2038,7 +2177,8 @@ class RetranslationMixin:
                     else:
                         icon, status, color = '⬜', 'not_completed', '#5a9fd4'
                     
-                    display = f"Ch.{ch_num:03d} | {icon} {status.replace('_', ' ').title():14s} | {fname}"
+                    display, status = _gp_display_for(ci, fname, _d)
+                    color = _gp_color_for(status)
                     item = QListWidgetItem(display)
                     item.setForeground(QColor(color))
                     item.setData(Qt.UserRole, status)
@@ -2069,9 +2209,7 @@ class RetranslationMixin:
                         _refresh_stats_from_dict(_d)
                         return
                     
-                    _comp = set(_d.get('completed', []))
-                    _fail = set(_d.get('failed', []))
-                    _merg = set(_d.get('merged_indices', []))
+                    _comp, _fail, _merg = _gp_sets(_d)
                     _total = panel_state['total']
                     _cmap = panel_state['chapter_map']
                     
@@ -2092,22 +2230,17 @@ class RetranslationMixin:
                         if not item:
                             continue
                         old_status = item.data(Qt.UserRole)
-                        if ci in _merg:
-                            new_status, new_color = 'merged', '#17a2b8'
-                        elif ci in _comp:
-                            new_status, new_color = 'completed', '#27ae60'
-                        elif ci in _fail:
-                            new_status, new_color = 'failed', '#e74c3c'
-                        else:
-                            new_status, new_color = 'not_completed', '#5a9fd4'
+                        new_status, _issues = _gp_status_for(ci, _d)
+                        new_color = _gp_color_for(new_status)
                         
-                        if new_status != old_status:
+                        if new_status != old_status or _issues:
                             fname = _cmap.get(ci, f'chapter {ci + 1}')
                             import re as _re2
                             _nums2 = _re2.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
                             ch_num2 = int(_nums2[-1]) if _nums2 else ci + 1
                             _icons = {'completed': '✅', 'failed': '❌', 'merged': '🔗', 'not_completed': '⬜'}
                             display2 = f"Ch.{ch_num2:03d} | {_icons.get(new_status, '⬜')} {new_status.replace('_', ' ').title():14s} | {fname}"
+                            display2, _ = _gp_display_for(ci, fname, _d)
                             item.setText(display2)
                             item.setForeground(QColor(new_color))
                             item.setData(Qt.UserRole, new_status)

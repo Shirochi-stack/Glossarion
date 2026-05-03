@@ -876,6 +876,74 @@ from typing import List, Dict
 import re
 
 PROGRESS_FILE = "glossary_progress.json"
+_GLOSSARY_QA_ISSUES_FOUND = {}
+
+def _unique_int_list(values):
+    """Return ints in first-seen order, ignoring values that cannot be parsed."""
+    seen = set()
+    result = []
+    for value in values or []:
+        try:
+            idx = int(value)
+        except (TypeError, ValueError):
+            continue
+        if idx not in seen:
+            seen.add(idx)
+            result.append(idx)
+    return result
+
+def _normalize_glossary_qa_issues(value=None, chapters=None):
+    """Normalize glossary QA issue storage to {chapter_index: [issue, ...]}."""
+    normalized = {}
+
+    def _add(idx, issues):
+        try:
+            key = int(idx)
+        except (TypeError, ValueError):
+            return
+        if isinstance(issues, str):
+            issues = [issues]
+        if not isinstance(issues, list):
+            return
+        bucket = normalized.setdefault(key, [])
+        for issue in issues:
+            issue_text = str(issue).strip()
+            if issue_text and issue_text not in bucket:
+                bucket.append(issue_text)
+
+    if isinstance(value, dict):
+        for idx, issues in value.items():
+            if isinstance(issues, dict):
+                issues = issues.get("qa_issues_found") or issues.get("issues") or []
+            _add(idx, issues)
+
+    if isinstance(chapters, dict):
+        for key, info in chapters.items():
+            if not isinstance(info, dict):
+                continue
+            idx = info.get("chapter_index", key)
+            issues = info.get("qa_issues_found") or []
+            _add(idx, issues)
+
+    return normalized
+
+def _mark_glossary_failed(failed, idx, issues=None):
+    """Mark a glossary chapter failed and optionally attach QA-style issue codes."""
+    global _GLOSSARY_QA_ISSUES_FOUND
+    try:
+        idx = int(idx)
+    except (TypeError, ValueError):
+        return
+    if idx not in failed:
+        failed.append(idx)
+    if issues:
+        if isinstance(issues, str):
+            issues = [issues]
+        bucket = _GLOSSARY_QA_ISSUES_FOUND.setdefault(idx, [])
+        for issue in issues:
+            issue_text = str(issue).strip()
+            if issue_text and issue_text not in bucket:
+                bucket.append(issue_text)
 
 def remove_honorifics(name):
     """Remove common honorifics from names"""
@@ -2100,6 +2168,16 @@ def load_progress() -> Dict:
                     data["merged_indices"] = []  # Track which chapters were merged into others
                 if "failed" not in data:
                     data["failed"] = []  # Track chapters that had errors (will be retried)
+                data["completed"] = _unique_int_list(data.get("completed", []))
+                data["failed"] = _unique_int_list(data.get("failed", []))
+                data["merged_indices"] = _unique_int_list(data.get("merged_indices", []))
+                failed_set = set(data["failed"])
+                if failed_set:
+                    data["completed"] = [idx for idx in data["completed"] if idx not in failed_set]
+                data["qa_issues_found"] = _normalize_glossary_qa_issues(
+                    data.get("qa_issues_found"),
+                    data.get("chapters")
+                )
                 
                 # Filter text from _raw_content_object in existing history to avoid duplication
                 # This cleans up history that was saved before we added filtering
@@ -5040,7 +5118,12 @@ def main(log_callback=None, stop_callback=None):
     if check_stop():
         return
 
+    global _GLOSSARY_QA_ISSUES_FOUND
     prog = load_progress()
+    _GLOSSARY_QA_ISSUES_FOUND = _normalize_glossary_qa_issues(
+        prog.get('qa_issues_found'),
+        prog.get('chapters')
+    )
     completed = prog['completed']
     failed = prog.get('failed', [])
     # Remove failed chapters from completed so they get retried
@@ -5050,6 +5133,7 @@ def main(log_callback=None, stop_callback=None):
         if before != len(completed):
             print(f"🔄 {len(failed)} previously failed chapter(s) will be retried: {[i+1 for i in sorted(failed)]}")
         failed.clear()  # Reset failed list for this run
+        _GLOSSARY_QA_ISSUES_FOUND.clear()
     # Load existing glossary from output file (if it exists) instead of progress file
     # This preserves manual edits to the glossary
     output_glossary_path = os.path.join(glossary_dir, os.path.basename(args.output))
@@ -5361,8 +5445,7 @@ def main(log_callback=None, stop_callback=None):
                                         stopped_early = True
                                         return
                                     print(f"[Chapter {idx+1}] Error: {error}")
-                                    if idx not in failed:
-                                        failed.append(idx)
+                                    _mark_glossary_failed(failed, idx, "API_ERROR")
                                     return
                                 
                                 # Process entries
@@ -5409,8 +5492,7 @@ def main(log_callback=None, stop_callback=None):
                                     
                                     if _is_empty_failure:
                                         print(f"⚠️ Chapter {idx+1} returned empty/refused content — marking as failed for retry")
-                                        if idx not in failed:
-                                            failed.append(idx)
+                                        _mark_glossary_failed(failed, idx, "EMPTY_OUTPUT")
                                     else:
                                         completed.append(idx)
                                         
@@ -5418,8 +5500,7 @@ def main(log_callback=None, stop_callback=None):
                                         ch_finish = result.get('finish_reason', 'stop')
                                         if ch_finish in ('length', 'MAX_TOKENS', 'max_tokens'):
                                             print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
-                                            if idx not in failed:
-                                                failed.append(idx)
+                                            _mark_glossary_failed(failed, idx, "TRUNCATED")
                                 
                                 # Store history for parent chapter only
                                 if contextual_enabled and resp and chap and 'merged_into' not in result:
@@ -5444,8 +5525,7 @@ def main(log_callback=None, stop_callback=None):
                                     stopped_early = True
                                     return
                                 print(f"[Chapter {idx+1}] Error: {error}")
-                                if idx not in failed:
-                                    failed.append(idx)
+                                _mark_glossary_failed(failed, idx, "API_ERROR")
                                 return
                             
                             # Process entries as each chapter completes
@@ -5480,8 +5560,7 @@ def main(log_callback=None, stop_callback=None):
                             
                             if _is_empty_failure:
                                 print(f"⚠️ Chapter {idx+1} returned empty/refused content — marking as failed for retry")
-                                if idx not in failed:
-                                    failed.append(idx)
+                                _mark_glossary_failed(failed, idx, "EMPTY_OUTPUT")
                             else:
                                 completed.append(idx)
                                 
@@ -5489,8 +5568,7 @@ def main(log_callback=None, stop_callback=None):
                                 ch_finish = result.get('finish_reason', 'stop')
                                 if ch_finish in ('length', 'MAX_TOKENS', 'max_tokens'):
                                     print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
-                                    if idx not in failed:
-                                        failed.append(idx)
+                                    _mark_glossary_failed(failed, idx, "TRUNCATED")
                             
                             # Store history entry for this chapter (will be added after batch completes)
                             if contextual_enabled and resp and chap:
@@ -5516,7 +5594,7 @@ def main(log_callback=None, stop_callback=None):
                                 if not _is_user_cancel:
                                     print(f"Error processing merged chapter {u_idx+1}: {e}")
                                 if u_idx not in completed and u_idx not in failed:
-                                    failed.append(u_idx)
+                                    _mark_glossary_failed(failed, u_idx, "API_ERROR")
                         else:
                             idx, chap = unit[0]
                             _err_lower = str(e).lower()
@@ -5524,7 +5602,7 @@ def main(log_callback=None, stop_callback=None):
                             if not _is_user_cancel:
                                 print(f"Error processing chapter {idx+1}: {e}")
                             if idx not in completed and idx not in failed:
-                                failed.append(idx)
+                                _mark_glossary_failed(failed, idx, "API_ERROR")
 
                 if aggressive_mode:
                     # Aggressive mode: keep pool full, auto-refill as futures complete.
@@ -6321,15 +6399,13 @@ def main(log_callback=None, stop_callback=None):
                     # NULL CHECK before checking if response is empty
                     if resp is None:
                         print(f"⚠️ Response is None for chapter {idx+1}, skipping...")
-                        if idx not in failed:
-                            failed.append(idx)
+                        _mark_glossary_failed(failed, idx, "EMPTY_OUTPUT")
                         continue
 
                     # Check if response is empty
                     if not resp or resp.strip() == "":
                         print(f"⚠️ Empty response for chapter {idx+1}, skipping...")
-                        if idx not in failed:
-                            failed.append(idx)
+                        _mark_glossary_failed(failed, idx, "EMPTY_OUTPUT")
                         continue
 
                     # Save the raw response with thread-safe location
@@ -6359,8 +6435,7 @@ def main(log_callback=None, stop_callback=None):
                     except Exception as e:
                         print(f"❌ Error parsing response for chapter {idx+1}: {e}")
                         print(f"   Response preview: {resp[:200] if resp else 'None'}...")
-                        if idx not in failed:
-                            failed.append(idx)
+                        _mark_glossary_failed(failed, idx, "PARSE_ERROR")
                         continue
                     
                     # Filter out invalid entries
@@ -6404,13 +6479,12 @@ def main(log_callback=None, stop_callback=None):
                 if _is_empty_failure:
                     # Empty/refused response — mark as failed so it gets retried
                     print(f"⚠️ Chapter {idx+1} returned empty/refused content — marking as failed for retry")
-                    if idx not in failed:
-                        failed.append(idx)
+                    _mark_glossary_failed(failed, idx, "EMPTY_OUTPUT")
                     # Also mark merged children as failed
                     if idx in merge_groups:
                         for g_idx, _ in merge_groups[idx]:
-                            if g_idx != idx and g_idx not in failed:
-                                failed.append(g_idx)
+                            if g_idx != idx:
+                                _mark_glossary_failed(failed, g_idx, "EMPTY_OUTPUT")
                             if g_idx != idx and g_idx not in merged_indices:
                                 merged_indices.append(g_idx)
                 else:
@@ -6444,8 +6518,7 @@ def main(log_callback=None, stop_callback=None):
                     _fr = locals().get('finish_reason') or locals().get('chunk_finish_reason', 'stop')
                     if _fr in ('length', 'MAX_TOKENS', 'max_tokens'):
                         print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
-                        if idx not in failed:
-                            failed.append(idx)
+                        _mark_glossary_failed(failed, idx, "TRUNCATED")
                     
                     # If this was a merged request, also mark child chapters as completed
                     if idx in merge_groups:
@@ -6510,8 +6583,7 @@ def main(log_callback=None, stop_callback=None):
                 print(f"Error at chapter {idx+1}: {e}")
                 import traceback
                 print(f"Full traceback: {traceback.format_exc()}")
-                if idx not in failed:
-                    failed.append(idx)
+                _mark_glossary_failed(failed, idx, "API_ERROR")
                 # Check for stop even after error
                 if check_stop():
                     print(f"❌ Glossary extraction stopped after error in chapter {idx+1}")
@@ -6573,22 +6645,70 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
 
     # Acquire lock to prevent concurrent writes
     with _progress_lock:
+        completed_clean = _unique_int_list(completed)
+        failed_clean = _unique_int_list(failed or [])
+        merged_clean = _unique_int_list(merged_indices or [])
+        failed_set = set(failed_clean)
+        merged_set = set(merged_clean)
+
+        # Failed chapters must not also be persisted as completed. The glossary
+        # extractor may keep partial entries, but the chapter itself still needs
+        # a retry and should render as failed in the progress dialog immediately.
+        completed_clean = [idx for idx in completed_clean if idx not in failed_set]
+
+        if completed is not None:
+            completed[:] = completed_clean
+        if failed is not None:
+            failed[:] = failed_clean
+        if merged_indices is not None:
+            merged_indices[:] = merged_clean
+
+        qa_issues_clean = {
+            int(idx): issues
+            for idx, issues in _normalize_glossary_qa_issues(_GLOSSARY_QA_ISSUES_FOUND).items()
+            if int(idx) in failed_set
+        }
+
+        chapters = {}
+        for idx in sorted(set(completed_clean) | failed_set | merged_set):
+            issue_list = qa_issues_clean.get(idx, [])
+            if idx in failed_set:
+                status = "qa_failed" if issue_list else "failed"
+            elif idx in merged_set:
+                status = "merged"
+            else:
+                status = "completed"
+
+            chapter_info = {
+                "chapter_index": idx,
+                "actual_num": idx + 1,
+                "status": status,
+                "last_updated": time.time(),
+            }
+            if issue_list:
+                chapter_info["qa_issues"] = True
+                chapter_info["qa_timestamp"] = time.time()
+                chapter_info["qa_issues_found"] = issue_list
+            chapters[str(idx)] = chapter_info
+
         progress_data = {
-            "completed": completed,
+            "completed": completed_clean,
             "book_title_present": bool(BOOK_TITLE_PRESENT),
             # Use value from entry if present, otherwise fallback to global translated title
             "book_title": BOOK_TITLE_VALUE if BOOK_TITLE_PRESENT else BOOK_TITLE_TRANSLATED,
+            "chapters": chapters,
+            "qa_issues_found": {str(idx): issues for idx, issues in sorted(qa_issues_clean.items())},
             # Glossary is saved separately to output files, not in progress
             # This prevents the progress file from overwriting manual edits
         }
         
         # Add merged_indices if provided
         if merged_indices is not None:
-            progress_data["merged_indices"] = merged_indices
+            progress_data["merged_indices"] = merged_clean
         
         # Add failed chapters list
         if failed is not None:
-            progress_data["failed"] = failed
+            progress_data["failed"] = failed_clean
         
         try:
             # Use atomic write with proper temp file handling
