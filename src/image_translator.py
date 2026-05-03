@@ -108,6 +108,72 @@ def send_image_with_interrupt(client, messages, image_data, temperature, max_tok
             if chunk_timeout is not None and elapsed >= chunk_timeout:
                 raise UnifiedClientError(f"Image API call timed out after {chunk_timeout} seconds")
 
+def send_text_with_interrupt(client, messages, temperature, max_tokens, stop_check_fn, chunk_timeout=None, context='translation'):
+    """Send text API request with graceful/force stop behavior matching image calls."""
+    import queue
+    import threading
+    from unified_api_client import UnifiedClient, UnifiedClientError
+
+    result_queue = queue.Queue()
+
+    def api_call():
+        try:
+            start_time = time.time()
+            result = client.send(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                context=context,
+            )
+            elapsed = time.time() - start_time
+            result_queue.put((result, elapsed))
+        except Exception as e:
+            result_queue.put(e)
+
+    api_thread = threading.Thread(target=api_call)
+    api_thread.daemon = True
+    api_thread.start()
+
+    check_interval = 0.5
+    elapsed = 0
+
+    def _force_cancel():
+        try:
+            if hasattr(client, 'cancel_current_operation'):
+                client.cancel_current_operation()
+        except Exception:
+            pass
+        try:
+            UnifiedClient.hard_cancel_all()
+        except Exception:
+            pass
+
+    def _should_interrupt_wait():
+        if os.environ.get("TRANSLATION_CANCELLED") == "1":
+            _force_cancel()
+            return True
+        if os.environ.get("GRACEFUL_STOP") == "1":
+            return False
+        return bool(stop_check_fn and stop_check_fn())
+
+    while True:
+        try:
+            result = result_queue.get(timeout=check_interval)
+            if isinstance(result, Exception):
+                raise result
+            if isinstance(result, tuple):
+                api_result, api_time = result
+                if chunk_timeout is not None and api_time > chunk_timeout:
+                    raise UnifiedClientError(f"Text API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
+                return api_result
+            return result
+        except queue.Empty:
+            if _should_interrupt_wait():
+                raise UnifiedClientError("Text translation stopped by user", error_type="cancelled")
+            elapsed += check_interval
+            if chunk_timeout is not None and elapsed >= chunk_timeout:
+                raise UnifiedClientError(f"Text API call timed out after {chunk_timeout} seconds")
+
 class ImageTranslator:
     def __init__(self, client, output_dir: str, profile_name: str = "", system_prompt: str = "", 
                  temperature: float = 0.3, log_callback=None, progress_manager=None,
@@ -132,8 +198,10 @@ class ImageTranslator:
         self.log_callback = log_callback
         self.progress_manager = progress_manager  # Use shared progress manager
         self.images_dir = os.path.join(output_dir, "images")
-        self.translated_images_dir = os.path.join(output_dir, "translated_images")
-        os.makedirs(self.translated_images_dir, exist_ok=True)
+        self.ocr_dir = os.path.join(output_dir, "OCR")
+        # Backward-compatible alias for callers that still reference translated_images_dir.
+        self.translated_images_dir = self.ocr_dir
+        os.makedirs(self.ocr_dir, exist_ok=True)
         self.api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
         
         # Track processed images to avoid duplicates
@@ -480,22 +548,22 @@ class ImageTranslator:
                                     # Fall back to using the directory of the source image
                                     base_output_dir = os.path.dirname(image_path)
                                     # Look for a typical output structure
-                                    if 'translated_images' not in base_output_dir:
-                                        # Try to find or create the translated_images directory
+                                    if 'OCR' not in base_output_dir:
+                                        # Try to find or create the OCR directory
                                         parent_dir = base_output_dir
-                                        while parent_dir and not os.path.exists(os.path.join(parent_dir, 'translated_images')):
+                                        while parent_dir and not os.path.exists(os.path.join(parent_dir, 'OCR')):
                                             new_parent = os.path.dirname(parent_dir)
                                             if new_parent == parent_dir:  # Reached root
                                                 break
                                             parent_dir = new_parent
                                         
-                                        if parent_dir and os.path.exists(os.path.join(parent_dir, 'translated_images')):
+                                        if parent_dir and os.path.exists(os.path.join(parent_dir, 'OCR')):
                                             base_output_dir = parent_dir
                                         else:
-                                            # Create translated_images in the same directory as the source
+                                            # Create OCR in the same directory as the source
                                             base_output_dir = os.path.dirname(image_path)
                                 
-                                compressed_dir = os.path.join(base_output_dir, "translated_images", "compressed")
+                                compressed_dir = os.path.join(base_output_dir, "OCR", "compressed")
                                 
                                 # Ensure the directory exists with proper error handling
                                 try:
@@ -666,7 +734,7 @@ class ImageTranslator:
                 # Check if we should save debug images
                 save_cleaned = os.getenv('SAVE_CLEANED_IMAGES', '0') == '1'
                 if save_cleaned:
-                    debug_dir = os.path.join(self.output_dir, "translated_images", "debug_chunks")
+                    debug_dir = os.path.join(self.ocr_dir, "debug_chunks")
                     os.makedirs(debug_dir, exist_ok=True)
                     print("   🔍 Debug mode: Saving chunks to " + debug_dir)
                     
@@ -997,8 +1065,7 @@ class ImageTranslator:
                     cleaned_translation = translation_response
                     print("   📝 Using raw translation (artifact removal off)")
 
-                # Normalize and sanitize to avoid squared/cubed glyphs
-                cleaned_translation = self._normalize_unicode_width(cleaned_translation)
+                # Sanitize invalid glyphs without changing valid punctuation width/forms.
                 cleaned_translation = self._sanitize_unicode_characters(cleaned_translation)
 
                 if not cleaned_translation:
@@ -1679,8 +1746,7 @@ class ImageTranslator:
         if translation:
             if self.remove_ai_artifacts != "off":
                 translation = self._clean_translation_response(translation)
-            # Normalize and sanitize output
-            translation = self._normalize_unicode_width(translation)
+            # Sanitize invalid glyphs without changing valid punctuation width/forms.
             translation = self._sanitize_unicode_characters(translation)
             return translation
         else:
@@ -1737,8 +1803,12 @@ class ImageTranslator:
         ocr_text = (ocr_response or "").strip()
         if self.remove_ai_artifacts != "off":
             ocr_text = self._clean_translation_response(ocr_text)
-        ocr_text = self._normalize_unicode_width(ocr_text)
         ocr_text = self._sanitize_unicode_characters(ocr_text)
+        self._save_ocr_text(
+            ocr_text,
+            kind="chunks" if chunk_idx is not None else "single",
+            chunk_idx=chunk_idx,
+        )
         return ocr_text.strip()
 
     def _translate_ocr_text(self, ocr_text, assistant_prompt, check_stop_fn):
@@ -1767,10 +1837,17 @@ class ImageTranslator:
             image_idx = getattr(self, 'current_image_index', 0)
             self.client.set_output_filename(f"response_{chapter_num:03d}_Chapter_{chapter_num}_image_{image_idx}.html")
 
-        response = self.client.send(
-            messages=messages,
-            temperature=self.temperature,
-            max_tokens=self.image_max_tokens
+        retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
+        chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "1800")) if retry_timeout_enabled else None
+
+        response = send_text_with_interrupt(
+            self.client,
+            messages,
+            self.temperature,
+            self.image_max_tokens,
+            stop_check_fn=check_stop_fn,
+            chunk_timeout=chunk_timeout,
+            context='translation',
         )
 
         if isinstance(response, tuple):
@@ -1786,7 +1863,6 @@ class ImageTranslator:
         translated = (translated or "").strip()
         if self.remove_ai_artifacts != "off":
             translated = self._clean_translation_response(translated)
-        translated = self._normalize_unicode_width(translated)
         translated = self._sanitize_unicode_characters(translated)
         return translated.strip() or None
 
@@ -1969,11 +2045,11 @@ class ImageTranslator:
             return data
 
     def _vision_ocr_batch_enabled(self) -> bool:
-        return os.getenv("VISION_OCR_BATCH_TRANSLATION", "0").strip().lower() in ("1", "true", "yes", "on")
+        return os.getenv("VISION_OCR_BATCH_TRANSLATION", "1").strip().lower() in ("1", "true", "yes", "on")
 
     def _vision_ocr_batch_size(self) -> int:
         try:
-            return max(1, int(os.getenv("VISION_OCR_BATCH_SIZE", os.getenv("BATCH_SIZE", "3"))))
+            return max(1, int(os.getenv("VISION_OCR_BATCH_SIZE", "10")))
         except Exception:
             return 1
 
@@ -1994,6 +2070,45 @@ class ImageTranslator:
                 chapter_num = match.group(1)
         image_key = f"ch{chapter_num}_{image_basename}" if chapter_num else image_basename
         return image_key, image_basename, chapter_num
+
+    def _safe_ocr_stem(self, image_basename=None):
+        image_basename = image_basename or os.path.basename(getattr(self, 'current_image_path', 'image'))
+        stem, _ = os.path.splitext(image_basename)
+        stem = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', stem).strip(' ._') or 'image'
+        chapter_num = getattr(self, 'current_chapter_num', None)
+        image_idx = getattr(self, 'current_image_index', None)
+        parts = []
+        if chapter_num is not None:
+            try:
+                parts.append(f"ch{int(chapter_num):03d}")
+            except Exception:
+                parts.append(f"ch{chapter_num}")
+        if image_idx is not None:
+            try:
+                parts.append(f"img{int(image_idx):02d}")
+            except Exception:
+                parts.append(f"img{image_idx}")
+        parts.append(stem)
+        return "_".join(str(part) for part in parts if str(part))
+
+    def _save_ocr_text(self, text, kind="chunks", image_basename=None, chunk_idx=None):
+        """Save OCR text under output/OCR for inspection and reuse."""
+        if not text:
+            return None
+        try:
+            ocr_dir = getattr(self, 'ocr_dir', os.path.join(self.output_dir, "OCR"))
+            target_dir = os.path.join(ocr_dir, kind)
+            os.makedirs(target_dir, exist_ok=True)
+            suffix = f"_chunk_{chunk_idx:03d}" if chunk_idx is not None else ""
+            filename = f"{self._safe_ocr_stem(image_basename)}{suffix}.txt"
+            path = os.path.join(target_dir, filename)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text)
+            print(f"   Saved OCR text: {path}")
+            return path
+        except Exception as e:
+            print(f"   Could not save OCR text: {e}")
+            return None
 
     def _combine_vision_ocr_chunks(self, ocr_chunks):
         """Combine OCR chunks while trimming obvious overlap duplicates."""
@@ -2035,7 +2150,7 @@ class ImageTranslator:
         save_compressed_chunks = os.getenv('SAVE_COMPRESSED_IMAGES', '0') == '1'
         debug_dir = None
         if save_debug_chunks or save_compressed_chunks:
-            debug_dir = os.path.join(self.output_dir, "translated_images", "debug_chunks")
+            debug_dir = os.path.join(self.ocr_dir, "debug_chunks")
             os.makedirs(debug_dir, exist_ok=True)
             print(f"   Debug mode: Saving OCR chunks to {debug_dir}")
 
@@ -2067,6 +2182,7 @@ class ImageTranslator:
             saved_ocr = prog["image_ocr_chunks"][image_key]["chunks"].get(str(i))
             if i in prog["image_ocr_chunks"][image_key]["completed"] and saved_ocr:
                 ocr_by_index[i] = saved_ocr
+                self._save_ocr_text(saved_ocr, kind="chunks", image_basename=image_basename, chunk_idx=i + 1)
                 print(f"   Skipping OCR chunk {i+1}/{num_chunks}; already completed")
                 continue
 
@@ -2096,7 +2212,7 @@ class ImageTranslator:
                 print(f"   Saved OCR chunk: {chunk_path}")
 
             if save_compressed_chunks and debug_dir and os.getenv("ENABLE_IMAGE_COMPRESSION", "0") == "1":
-                compressed_dir = os.path.join(self.output_dir, "translated_images", "compressed", "chunks")
+                compressed_dir = os.path.join(self.ocr_dir, "compressed", "chunks")
                 os.makedirs(compressed_dir, exist_ok=True)
                 compressed_chunk_path = os.path.join(compressed_dir, f"ocr_chunk_{i+1}_compressed.bin")
                 with open(compressed_chunk_path, 'wb') as f:
@@ -2126,23 +2242,42 @@ class ImageTranslator:
         try:
             if batch_enabled and batch_size > 1 and len(chunk_jobs) > 1:
                 os.environ["BATCH_TRANSLATION"] = "1"
-                from concurrent.futures import ThreadPoolExecutor, as_completed
+                from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+                from unified_api_client import UnifiedClient, UnifiedClientError
                 for batch_start in range(0, len(chunk_jobs), batch_size):
                     if check_stop_fn and check_stop_fn():
                         was_stopped = True
                         break
                     current_batch = chunk_jobs[batch_start:batch_start + batch_size]
                     print(f"   OCR batch {batch_start // batch_size + 1}: {len(current_batch)} chunk request(s)")
-                    with ThreadPoolExecutor(max_workers=len(current_batch)) as executor:
-                        futures = [executor.submit(_ocr_job, job) for job in current_batch]
-                        for future in as_completed(futures):
-                            i, ocr_text = future.result()
-                            if ocr_text:
-                                ocr_by_index[i] = ocr_text
-                                if i not in prog["image_ocr_chunks"][image_key]["completed"]:
-                                    prog["image_ocr_chunks"][image_key]["completed"].append(i)
-                                prog["image_ocr_chunks"][image_key]["chunks"][str(i)] = ocr_text
-                                self.save_progress(prog)
+                    executor = ThreadPoolExecutor(max_workers=len(current_batch))
+                    force_cancelled = False
+                    try:
+                        pending = {executor.submit(_ocr_job, job) for job in current_batch}
+                        while pending:
+                            done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                            for future in done:
+                                i, ocr_text = future.result()
+                                if ocr_text:
+                                    ocr_by_index[i] = ocr_text
+                                    if i not in prog["image_ocr_chunks"][image_key]["completed"]:
+                                        prog["image_ocr_chunks"][image_key]["completed"].append(i)
+                                    prog["image_ocr_chunks"][image_key]["chunks"][str(i)] = ocr_text
+                                    self.save_progress(prog)
+
+                            if os.environ.get("TRANSLATION_CANCELLED") == "1":
+                                force_cancelled = True
+                                was_stopped = True
+                                try:
+                                    UnifiedClient.hard_cancel_all()
+                                except Exception:
+                                    pass
+                                for future in pending:
+                                    future.cancel()
+                                raise UnifiedClientError("Vision OCR batch stopped by user", error_type="cancelled")
+                    finally:
+                        executor.shutdown(wait=not force_cancelled, cancel_futures=True)
+
                     if check_stop_fn and check_stop_fn():
                         was_stopped = True
                         break
@@ -2175,6 +2310,7 @@ class ImageTranslator:
         if not combined_ocr:
             print("   Combined OCR was empty")
             return None
+        self._save_ocr_text(combined_ocr, kind="combined", image_basename=image_basename)
 
         print(f"   Step 2/2: Translating combined OCR from {len(ordered_ocr)}/{num_chunks} chunks ({len(combined_ocr)} chars)...")
         combined_prompt = (
@@ -2214,7 +2350,7 @@ class ImageTranslator:
         save_compressed_chunks = os.getenv('SAVE_COMPRESSED_IMAGES', '0') == '1'
         
         if save_debug_chunks or save_compressed_chunks:
-            debug_dir = os.path.join(self.output_dir, "translated_images", "debug_chunks")
+            debug_dir = os.path.join(self.ocr_dir, "debug_chunks")
             os.makedirs(debug_dir, exist_ok=True)
             print(f"   🔍 Debug mode: Saving chunks to {debug_dir}")
         
@@ -2307,7 +2443,7 @@ class ImageTranslator:
                 
                 # Save compressed chunk if enabled
                 if save_compressed_chunks and os.getenv("ENABLE_IMAGE_COMPRESSION", "0") == "1":
-                    compressed_dir = os.path.join(self.output_dir, "translated_images", "compressed", "chunks")
+                    compressed_dir = os.path.join(self.ocr_dir, "compressed", "chunks")
                     os.makedirs(compressed_dir, exist_ok=True)
                     
                     # Use compression settings to save chunk
@@ -2377,8 +2513,7 @@ class ImageTranslator:
                     chunk_text = self._clean_translation_response(translation)
                 else:
                     chunk_text = translation
-                # Normalize and sanitize each chunk
-                chunk_text = self._normalize_unicode_width(chunk_text)
+                # Sanitize invalid glyphs without changing valid punctuation width/forms.
                 chunk_text = self._sanitize_unicode_characters(chunk_text)
                 all_translations.append(chunk_text)
                 print(f"   🔍 DEBUG: Chunk {i+1} length: {len(chunk_text)} chars")
@@ -2625,7 +2760,9 @@ class ImageTranslator:
     def _save_translation_debug(self, image_path, translated_text):
         """Save translation to file for debugging"""
         trans_filename = f"translated_{os.path.basename(image_path)}.txt"
-        trans_filepath = os.path.join(self.translated_images_dir, trans_filename)
+        trans_dir = os.path.join(self.ocr_dir, "translations")
+        os.makedirs(trans_dir, exist_ok=True)
+        trans_filepath = os.path.join(trans_dir, trans_filename)
         
         try:
             with open(trans_filepath, 'w', encoding='utf-8') as f:
@@ -2647,24 +2784,6 @@ class ImageTranslator:
         
         return cleaned_text
 
-    def _normalize_unicode_width(self, text: str) -> str:
-        """Normalize Unicode width and compatibility forms using NFKC"""
-        if not text:
-            return text
-        try:
-            import unicodedata
-            original = text
-            text = unicodedata.normalize('NFKC', text)
-            if text != original:
-                try:
-                    if self.log_callback:
-                        self.log_callback(f"🔤 Normalized width/compat: '{original[:30]}...' → '{text[:30]}...'")
-                except Exception:
-                    pass
-            return text
-        except Exception:
-            return text
-    
     def _sanitize_unicode_characters(self, text: str) -> str:
         """Remove invalid Unicode characters and common fallback boxes"""
         if not text:

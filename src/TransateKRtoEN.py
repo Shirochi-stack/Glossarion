@@ -7971,9 +7971,12 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
                 
                 translated_count += 1
                 
-                # Save to translated_images folder
+                # Save image translation debug output under OCR/translations.
                 trans_filename = f"ch{actual_num:03d}_img{idx:02d}_translation.html"
-                trans_filepath = os.path.join(image_translator.translated_images_dir, trans_filename)
+                trans_base_dir = getattr(image_translator, 'ocr_dir', None) or getattr(image_translator, 'translated_images_dir')
+                trans_dir = os.path.join(trans_base_dir, "translations")
+                os.makedirs(trans_dir, exist_ok=True)
+                trans_filepath = os.path.join(trans_dir, trans_filename)
                 
                 # Extract just the translation content for saving
                 save_soup = BeautifulSoup(translation_result, 'html.parser')

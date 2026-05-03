@@ -9625,7 +9625,7 @@ def _create_image_translation_section(self, parent):
     vision_batch_h.setSpacing(8)
     vision_batch_cb = self._create_styled_checkbox("Batch Vision OCR chunk requests")
     try:
-        vision_batch_cb.setChecked(bool(getattr(self, 'vision_ocr_batch_translation_var', False)))
+        vision_batch_cb.setChecked(bool(getattr(self, 'vision_ocr_batch_translation_var', True)))
     except Exception:
         pass
     vision_batch_h.addWidget(vision_batch_cb)
@@ -9633,9 +9633,9 @@ def _create_image_translation_section(self, parent):
     vision_batch_size_entry = QLineEdit()
     vision_batch_size_entry.setFixedWidth(55)
     try:
-        vision_batch_size_entry.setText(str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '3'))))
+        vision_batch_size_entry.setText(str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '10'))))
     except Exception:
-        vision_batch_size_entry.setText("3")
+        vision_batch_size_entry.setText("10")
     vision_batch_h.addWidget(vision_batch_size_entry)
     vision_batch_h.addStretch()
 
@@ -9659,7 +9659,7 @@ def _create_image_translation_section(self, parent):
 
     vision_batch_cb.toggled.connect(_on_vision_ocr_batch_toggle)
     vision_batch_size_entry.textChanged.connect(_on_vision_ocr_batch_size_changed)
-    vision_batch_size_entry.setEnabled(bool(getattr(self, 'vision_ocr_batch_translation_var', False)))
+    vision_batch_size_entry.setEnabled(bool(getattr(self, 'vision_ocr_batch_translation_var', True)))
     vision_sub_v.addWidget(vision_batch_row)
 
     vision_batch_desc = QLabel("Only the OCR pass is batched. The combined OCR text is still translated in one final request.")
@@ -9737,7 +9737,7 @@ def _create_image_translation_section(self, parent):
     self.save_cleaned_checkbox.setContentsMargins(20, 0, 0, 0)
     left_v.addWidget(self.save_cleaned_checkbox)
     
-    save_desc = QLabel("Keep watermark-removed images in translated_images/cleaned/")
+    save_desc = QLabel("Keep watermark-removed images in OCR/cleaned/")
     save_desc.setStyleSheet("color: gray; font-size: 10pt;")
     save_desc.setContentsMargins(40, 0, 0, 10)
     left_v.addWidget(save_desc)

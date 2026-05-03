@@ -1619,8 +1619,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         except Exception:
             pass
         self.single_api_image_chunks_var = False
-        self.vision_ocr_batch_translation_var = self.config.get('vision_ocr_batch_translation', False)
-        self.vision_ocr_batch_size_var = str(self.config.get('vision_ocr_batch_size', '3'))
+        self.vision_ocr_batch_translation_var = self.config.get('vision_ocr_batch_translation', True)
+        self.vision_ocr_batch_size_var = str(self.config.get('vision_ocr_batch_size', '10'))
         self.enable_gemini_thinking_var = self.config.get('enable_gemini_thinking', True)
         self.thinking_budget_var = str(self.config.get('thinking_budget', '-1'))
         self.thinking_level_var = self.config.get('thinking_level', 'high')
@@ -3462,7 +3462,7 @@ Recent translations to summarize:
             # REMOVED: ('comprehensive_extraction_var', 'comprehensive_extraction', False),
             ('hide_image_translation_label_var', 'hide_image_translation_label', True),
             ('retry_timeout_var', 'retry_timeout', True),
-            ('batch_translation_var', 'batch_translation', False),
+            ('batch_translation_var', 'batch_translation', True),
             ('disable_epub_gallery_var', 'disable_epub_gallery', False),
             # NEW: Disable automatic cover creation (affects extraction and EPUB cover page)
             ('disable_automatic_cover_creation_var', 'disable_automatic_cover_creation', False),
@@ -3478,7 +3478,7 @@ Recent translations to summarize:
             ('enable_decimal_chapters_var', 'enable_decimal_chapters', True),
             ('disable_gemini_safety_var', 'disable_gemini_safety', True),
             ('single_api_image_chunks_var', 'single_api_image_chunks', False),
-            ('vision_ocr_batch_translation_var', 'vision_ocr_batch_translation', False),
+            ('vision_ocr_batch_translation_var', 'vision_ocr_batch_translation', True),
             ('enable_image_output_mode_var', 'enable_image_output_mode', False),
             ('enable_video_output_mode_var', 'enable_video_output_mode', False),
             ('enable_audio_output_mode_var', 'enable_audio_output_mode', False),
@@ -3536,8 +3536,8 @@ Recent translations to summarize:
             ('nanogpt_video_resolution_var', 'nanogpt_video_resolution', '720p'),
             ('chunk_timeout_var', 'chunk_timeout', '1800'),
             ('timeout_retry_attempts_var', 'timeout_retry_attempts', '2'),
-            ('batch_size_var', 'batch_size', '3'),
-            ('vision_ocr_batch_size_var', 'vision_ocr_batch_size', '3'),
+            ('batch_size_var', 'batch_size', '5'),
+            ('vision_ocr_batch_size_var', 'vision_ocr_batch_size', '10'),
             ('batch_mode_var', 'batching_mode', 'aggressive'),
             ('batch_group_size_var', 'batch_group_size', '3'),
             ('chapter_number_offset_var', 'chapter_number_offset', '0'),
@@ -7990,7 +7990,7 @@ Recent translations to summarize:
         if len(image_files) > 1 and len(image_files) == len(files):
             # Batch image mode — single combined folder
             parent_dir = os.path.dirname(files[0])
-            folder_name = os.path.basename(parent_dir) if parent_dir else "translated_images"
+            folder_name = os.path.basename(parent_dir) if parent_dir else "OCR"
             if override_dir:
                 output_path = os.path.join(override_dir, folder_name)
             else:
@@ -11824,7 +11824,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     
                 # Get the common parent directory name or use timestamp
                 parent_dir = os.path.dirname(self.selected_files[0])
-                folder_name = os.path.basename(parent_dir) if parent_dir else f"translated_images_{int(time.time())}"
+                folder_name = os.path.basename(parent_dir) if parent_dir else f"OCR_{int(time.time())}"
                 
                 # Check for output directory override
                 override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
@@ -13135,8 +13135,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['SEND_INTERVAL_SECONDS'] = str(self.delay_entry.text() or '2.0')
 
                 # Determine parallelism from batch settings
-                use_batch = getattr(self, 'batch_translation_var', False)
-                batch_size = max(1, int(getattr(self, 'batch_size_var', 3))) if use_batch else 1
+                use_batch = getattr(self, 'batch_translation_var', True)
+                batch_size = max(1, int(getattr(self, 'batch_size_var', 5))) if use_batch else 1
                 if use_batch:
                     self.append_log(f"⚡ Batch mode: {batch_size} parallel workers")
 
@@ -13256,8 +13256,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             os.environ['THREAD_SUBMISSION_DELAY_SECONDS'] = self.thread_delay_entry.text().strip() or '0.0001'
 
             # Determine parallelism from batch settings
-            use_batch = getattr(self, 'batch_translation_var', False)
-            batch_size = max(1, int(getattr(self, 'batch_size_var', 3))) if use_batch else 1
+            use_batch = getattr(self, 'batch_translation_var', True)
+            batch_size = max(1, int(getattr(self, 'batch_size_var', 5))) if use_batch else 1
             if use_batch:
                 self.append_log(f"⚡ Batch mode: {batch_size} parallel workers")
 
@@ -13864,8 +13864,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'OUTPUT_MODE': self._get_output_mode(),
             'VISION_OCR_FIRST': '1' if self._get_output_mode() == 'vision' else '0',
             'VISION_OCR_PROMPT': str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', ''))),
-            'VISION_OCR_BATCH_TRANSLATION': '1' if getattr(self, 'vision_ocr_batch_translation_var', self.config.get('vision_ocr_batch_translation', False)) else '0',
-            'VISION_OCR_BATCH_SIZE': str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '3'))),
+            'VISION_OCR_BATCH_TRANSLATION': '1' if getattr(self, 'vision_ocr_batch_translation_var', self.config.get('vision_ocr_batch_translation', True)) else '0',
+            'VISION_OCR_BATCH_SIZE': str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '10'))),
             'ENABLE_REFINEMENT_OUTPUT_MODE': "1" if self._get_output_mode() == 'refinement' else "0",
             'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var else "0",
@@ -16549,9 +16549,9 @@ Important rules:
             if wait_for_chunks:
                 self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
             else:
-                self.append_log("🛑 Stop requested — cancelling queued/in-flight API calls (WAIT_FOR_CHUNKS=0)")
+                self.append_log("⏳ Graceful stop — waiting for the current in-flight API call; queued work will not continue (WAIT_FOR_CHUNKS=0)")
         else:
-            self.append_log("🛑 Stop requested — waiting for current operation to finish")
+            self.append_log("🛑 Force stop requested — aborting queued/in-flight API calls")
 
         # Schedule stop-flag reset once worker is idle
         QTimer.singleShot(500, self._reset_glossary_stop_flags_if_idle)
@@ -21621,7 +21621,7 @@ Important rules:
                 ('save_header_translations', ['save_header_translations_var'], False, bool),
                 ('use_sorted_fallback', ['use_sorted_fallback_var'], False, bool),
                 ('single_api_image_chunks', ['single_api_image_chunks_var'], False, bool),
-                ('vision_ocr_batch_translation', ['vision_ocr_batch_translation_var'], False, bool),
+                ('vision_ocr_batch_translation', ['vision_ocr_batch_translation_var'], True, bool),
                 ('use_custom_openai_endpoint', ['use_custom_openai_endpoint_var'], False, bool),
                 ('disable_chapter_merging', ['disable_chapter_merging_var'], False, bool),
                 # Request merging settings
@@ -21695,9 +21695,9 @@ Important rules:
                 ('image_chunk_overlap', ['image_chunk_overlap_var'], 1.0, lambda v: safe_float(v, 1.0)),
 
                 # Batching
-                ('batch_translation', ['batch_checkbox', 'batch_translation_var'], False, bool),
-                ('batch_size', ['batch_size_entry', 'batch_size_var'], 3, lambda v: safe_int(v, 3)),
-                ('vision_ocr_batch_size', ['vision_ocr_batch_size_var'], 3, lambda v: safe_int(v, 3)),
+                ('batch_translation', ['batch_checkbox', 'batch_translation_var'], True, bool),
+                ('batch_size', ['batch_size_entry', 'batch_size_var'], 5, lambda v: safe_int(v, 5)),
+                ('vision_ocr_batch_size', ['vision_ocr_batch_size_var'], 10, lambda v: safe_int(v, 10)),
                 ('batching_mode', ['batch_mode_var'], 'aggressive', str),
                 ('batch_group_size', ['batch_group_size_var'], 3, lambda v: safe_int(v, 3)),
                 ('headers_per_batch', ['headers_per_batch_var'], -1, lambda v: safe_int(v, -1)),
@@ -22727,8 +22727,8 @@ Important rules:
                 ('OUTPUT_MODE', self._get_output_mode()),
                 ('VISION_OCR_FIRST', '1' if self._get_output_mode() == 'vision' else '0'),
                 ('VISION_OCR_PROMPT', str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', '')))),
-                ('VISION_OCR_BATCH_TRANSLATION', '1' if getattr(self, 'vision_ocr_batch_translation_var', False) else '0'),
-                ('VISION_OCR_BATCH_SIZE', str(getattr(self, 'vision_ocr_batch_size_var', '3'))),
+                ('VISION_OCR_BATCH_TRANSLATION', '1' if getattr(self, 'vision_ocr_batch_translation_var', True) else '0'),
+                ('VISION_OCR_BATCH_SIZE', str(getattr(self, 'vision_ocr_batch_size_var', '10'))),
                 ('ENABLE_IMAGE_OUTPUT_MODE', self._get_allowed_image_output_mode()),
                 ('ENABLE_VIDEO_OUTPUT_MODE', self._get_allowed_video_output_mode()),
                 ('ENABLE_AUDIO_OUTPUT_MODE', '1' if self._get_output_mode() == 'audio' else '0'),
