@@ -1242,8 +1242,7 @@ class ImageTranslator:
             # Ensure image_chunks key exists
             if "image_chunks" not in prog:
                 prog["image_chunks"] = {}
-            if "image_ocr_chunks" not in prog:
-                prog["image_ocr_chunks"] = {}
+            prog.pop("image_ocr_chunks", None)
             return prog
         else:
             # Fallback to original behavior if no progress manager provided
@@ -1255,8 +1254,7 @@ class ImageTranslator:
                     # Ensure image_chunks key exists
                     if "image_chunks" not in prog:
                         prog["image_chunks"] = {}
-                    if "image_ocr_chunks" not in prog:
-                        prog["image_ocr_chunks"] = {}
+                    prog.pop("image_ocr_chunks", None)
                     return prog
                 except Exception as e:
                     print(f"⚠️ Warning: Could not load progress file: {e}")
@@ -1266,7 +1264,6 @@ class ImageTranslator:
                         "content_hashes": {},
                         "chapter_chunks": {},
                         "image_chunks": {},
-                        "image_ocr_chunks": {},
                         "version": "2.1"
                     }
             # Return the same structure as TranslateKRtoEN expects
@@ -1275,16 +1272,16 @@ class ImageTranslator:
                 "content_hashes": {},
                 "chapter_chunks": {},
                 "image_chunks": {},
-                "image_ocr_chunks": {},
                 "version": "2.1"
             }
 
     def save_progress(self, prog):
         """Save progress tracking - with safe writing"""
+        prog.pop("image_ocr_chunks", None)
         if self.progress_manager:
             # Update the shared progress manager's data
             self.progress_manager.prog["image_chunks"] = prog.get("image_chunks", {})
-            self.progress_manager.prog["image_ocr_chunks"] = prog.get("image_ocr_chunks", {})
+            self.progress_manager.prog.pop("image_ocr_chunks", None)
             # Save through the progress manager
             self.progress_manager.save()
         else:
@@ -2060,17 +2057,6 @@ class ImageTranslator:
         except Exception:
             return 100
 
-    def _make_image_progress_key(self, img, width, height):
-        image_basename = os.path.basename(self.current_image_path) if hasattr(self, 'current_image_path') else str(hash(str(img)))
-        chapter_num = getattr(self, 'current_chapter_num', None)
-        if chapter_num is None:
-            import re
-            match = re.search(r'ch(?:apter)?[\s_-]*(\d+)', image_basename, re.IGNORECASE)
-            if match:
-                chapter_num = match.group(1)
-        image_key = f"ch{chapter_num}_{image_basename}" if chapter_num else image_basename
-        return image_key, image_basename, chapter_num
-
     def _safe_ocr_stem(self, image_basename=None):
         image_basename = image_basename or os.path.basename(getattr(self, 'current_image_path', 'image'))
         stem, _ = os.path.splitext(image_basename)
@@ -2108,6 +2094,23 @@ class ImageTranslator:
             return path
         except Exception as e:
             print(f"   Could not save OCR text: {e}")
+            return None
+
+    def _ocr_text_path(self, kind="chunks", image_basename=None, chunk_idx=None):
+        ocr_dir = getattr(self, 'ocr_dir', os.path.join(self.output_dir, "OCR"))
+        suffix = f"_chunk_{chunk_idx:03d}" if chunk_idx is not None else ""
+        filename = f"{self._safe_ocr_stem(image_basename)}{suffix}.txt"
+        return os.path.join(ocr_dir, kind, filename)
+
+    def _load_saved_ocr_text(self, kind="chunks", image_basename=None, chunk_idx=None):
+        try:
+            path = self._ocr_text_path(kind=kind, image_basename=image_basename, chunk_idx=chunk_idx)
+            if not os.path.exists(path):
+                return None
+            with open(path, 'r', encoding='utf-8') as f:
+                text = f.read()
+            return text if text.strip() else None
+        except Exception:
             return None
 
     def _combine_vision_ocr_chunks(self, ocr_chunks):
@@ -2154,20 +2157,7 @@ class ImageTranslator:
             os.makedirs(debug_dir, exist_ok=True)
             print(f"   Debug mode: Saving OCR chunks to {debug_dir}")
 
-        prog = self.load_progress()
-        image_key, image_basename, chapter_num = self._make_image_progress_key(img, width, height)
-        if "image_ocr_chunks" not in prog:
-            prog["image_ocr_chunks"] = {}
-        if image_key not in prog["image_ocr_chunks"]:
-            prog["image_ocr_chunks"][image_key] = {
-                "total": num_chunks,
-                "completed": [],
-                "chunks": {},
-                "height": height,
-                "width": width,
-                "chapter": chapter_num,
-                "filename": image_basename
-            }
+        image_basename = os.path.basename(self.current_image_path) if hasattr(self, 'current_image_path') else str(hash(str(img)))
 
         image_chunk_prompt_template = os.getenv(
             "IMAGE_CHUNK_PROMPT",
@@ -2179,11 +2169,10 @@ class ImageTranslator:
         was_stopped = False
 
         for i in range(num_chunks):
-            saved_ocr = prog["image_ocr_chunks"][image_key]["chunks"].get(str(i))
-            if i in prog["image_ocr_chunks"][image_key]["completed"] and saved_ocr:
-                ocr_by_index[i] = saved_ocr
-                self._save_ocr_text(saved_ocr, kind="chunks", image_basename=image_basename, chunk_idx=i + 1)
-                print(f"   Skipping OCR chunk {i+1}/{num_chunks}; already completed")
+            disk_ocr = self._load_saved_ocr_text(kind="chunks", image_basename=image_basename, chunk_idx=i + 1)
+            if disk_ocr:
+                ocr_by_index[i] = disk_ocr
+                print(f"   Skipping OCR chunk {i+1}/{num_chunks}; found existing OCR/chunks file")
                 continue
 
             if check_stop_fn and check_stop_fn():
@@ -2260,10 +2249,6 @@ class ImageTranslator:
                                 i, ocr_text = future.result()
                                 if ocr_text:
                                     ocr_by_index[i] = ocr_text
-                                    if i not in prog["image_ocr_chunks"][image_key]["completed"]:
-                                        prog["image_ocr_chunks"][image_key]["completed"].append(i)
-                                    prog["image_ocr_chunks"][image_key]["chunks"][str(i)] = ocr_text
-                                    self.save_progress(prog)
 
                             if os.environ.get("TRANSLATION_CANCELLED") == "1":
                                 force_cancelled = True
@@ -2286,10 +2271,6 @@ class ImageTranslator:
                     i, ocr_text = _ocr_job(job)
                     if ocr_text:
                         ocr_by_index[i] = ocr_text
-                        if i not in prog["image_ocr_chunks"][image_key]["completed"]:
-                            prog["image_ocr_chunks"][image_key]["completed"].append(i)
-                        prog["image_ocr_chunks"][image_key]["chunks"][str(i)] = ocr_text
-                        self.save_progress(prog)
                     if i < num_chunks - 1 and not was_stopped:
                         self._api_delay_with_stop_check(check_stop_fn)
                     if check_stop_fn and check_stop_fn():
