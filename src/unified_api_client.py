@@ -5647,6 +5647,8 @@ class UnifiedClient:
  
         elif self.client_type == 'vertex_model_garden':
             # Vertex AI doesn't need a client created here
+            if hasattr(self, '_original_client_type'):
+                del self._original_client_type
             logger.info("Vertex AI Model Garden will initialize on demand")
         
         elif self.client_type == 'authgpt':
@@ -13726,6 +13728,10 @@ class UnifiedClient:
 
         # Determine actual provider (e.g., Gemini using OpenAI endpoint still reports 'gemini')
         actual_provider = self._get_actual_provider()
+        route_model = (getattr(self, 'model', '') or '').strip().lower()
+        if route_model.startswith('vertex/') or '@' in route_model:
+            actual_provider = 'vertex_model_garden'
+            self.client_type = 'vertex_model_garden'
 
         # Detect if this is an image request (messages contain image parts)
         has_images = False
@@ -13879,6 +13885,9 @@ class UnifiedClient:
         # the same UnifiedClient instance from Gemini/OpenAI mode to Vertex AI;
         # in that case a stale _original_client_type='gemini' must not reroute
         # vertex/gemini-* requests to the native AI Studio endpoint.
+        model_lower = (getattr(self, 'model', '') or '').strip().lower()
+        if model_lower.startswith('vertex/') or '@' in model_lower:
+            return 'vertex_model_garden'
         if client_type == 'openai' and getattr(self, '_original_client_type', None):
             return self._original_client_type
         return client_type
@@ -14965,6 +14974,16 @@ class UnifiedClient:
         
         Supports 'thought signatures' for Gemini 3.0 by checking for '_raw_content_object' in messages.
         """
+        model_for_route = (getattr(self, 'model', '') or '').strip().lower()
+        if model_for_route.startswith('vertex/') or '@' in model_for_route:
+            if image_base64 is not None:
+                return self._send_vertex_model_garden_image(
+                    messages, image_base64, temperature, max_tokens, response_name
+                )
+            return self._send_vertex_model_garden(
+                messages, temperature, max_tokens, response_name=response_name
+            )
+
         response = None
         
         # Check if we should use a custom Gemini endpoint (OpenAI-compatible or gRPC)
