@@ -667,7 +667,8 @@ def ensure_all_opf_chapters_extracted(zf, chapters, out):
                     # Files with numbers like 'nav01', 'toc05' are real chapters
                     import re
                     has_numbers = bool(re.search(r'\d', filename))
-                    if not has_numbers and any(skip in filename.lower() for skip in ['nav', 'toc', 'cover']):
+                    translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
+                    if not translate_special and not has_numbers and any(skip in filename.lower() for skip in ['nav', 'toc', 'cover']):
                         continue
                     
                     opf_chapters.append(href)
@@ -2731,8 +2732,10 @@ def _process_single_html_file(
         
         # Skip truly empty files in smart mode
         if effective_mode == "smart" and not disable_merging and len(content_text.strip()) < 10:
-            skipped_info = (file_path, 'empty', len(content_text))
-            return None, False, False, 0, '', skipped_info
+            empty_soup = BeautifulSoup(html_content, parser)
+            if not empty_soup.find('img'):
+                skipped_info = (file_path, 'empty', len(content_text))
+                return None, False, False, 0, '', skipped_info
         
         # Get actual chapter number based on original position
         actual_chapter_num = files_to_process.index(file_path) + 1

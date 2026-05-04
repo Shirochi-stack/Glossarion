@@ -3173,8 +3173,6 @@ class EPUBCompiler:
             if spine is not None:
                 # Build dynamic skip list based on TRANSLATE_SPECIAL_FILES toggle
                 translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
-                # Backward compatibility: also check old TRANSLATE_COVER_HTML
-                translate_special = translate_special or (os.environ.get('TRANSLATE_COVER_HTML', '0') == '1')
                 
                 if translate_special:
                     # When override is enabled, include ALL files in chapter ordering
@@ -3349,8 +3347,6 @@ class EPUBCompiler:
                     aux = {f for f in unmapped_files if not f.startswith('response_')}
                     # If special files override is enabled, do NOT treat special files as auxiliary
                     translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
-                    # Backward compatibility
-                    translate_special = translate_special or (os.environ.get('TRANSLATE_COVER_HTML', '0') == '1')
                     if translate_special:
                         # Don't exclude any special files when override is enabled
                         aux = set()
@@ -3400,8 +3396,6 @@ class EPUBCompiler:
                 aux_set = set(aux_files)
                 # If special files override is enabled, don't mark special files as auxiliary
                 translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
-                # Backward compatibility
-                translate_special = translate_special or (os.environ.get('TRANSLATE_COVER_HTML', '0') == '1')
                 if translate_special:
                     # Don't exclude any files when override is enabled
                     aux_set = set()

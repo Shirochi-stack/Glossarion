@@ -279,7 +279,6 @@ def print_env_var_status():
         'HIDE_IMAGE_TRANSLATION_LABEL': 'Hide image translation label',
         'DISABLE_EPUB_GALLERY': 'Disable EPUB gallery',
         'DISABLE_AUTOMATIC_COVER_CREATION': 'Disable automatic cover creation',
-        'TRANSLATE_COVER_HTML': 'Translate cover.html',
         'DISABLE_ZERO_DETECTION': 'Disable zero detection',
         'DUPLICATE_DETECTION_MODE': 'Duplicate detection mode',
         'ENABLE_DECIMAL_CHAPTERS': 'Enable decimal chapter numbers',
