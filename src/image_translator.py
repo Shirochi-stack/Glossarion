@@ -2589,8 +2589,53 @@ class ImageTranslator:
     def _smart_image_chunking_enabled(self) -> bool:
         return os.getenv("IMAGE_SMART_CHUNKING", "0").strip().lower() in ("1", "true", "yes", "on")
 
+    def _smart_row_foreground_counts(self, img) -> List[int]:
+        """Count likely foreground/text pixels per row, alpha-aware when possible."""
+        try:
+            import numpy as _np
+            rgba = img.convert("RGBA")
+            arr = _np.asarray(rgba)
+            rgb = arr[:, :, :3].astype(_np.int16)
+            alpha = arr[:, :, 3]
+
+            if alpha.max() > alpha.min():
+                visible = alpha > 16
+                if visible.any():
+                    return visible.sum(axis=1).astype(int).tolist()
+
+            gray = _np.asarray(img.convert("L")).astype(_np.int16)
+            sample = gray.reshape(-1)
+            low = float(_np.percentile(sample, 5))
+            high = float(_np.percentile(sample, 95))
+            median_value = float(_np.median(sample))
+            contrast = high - low
+
+            if contrast < 18:
+                # Very low contrast page; no reliable whitespace map.
+                return [img.width] * img.height
+
+            if median_value >= 128:
+                # Light page: foreground is dark ink.
+                threshold = min(245.0, low + max(25.0, contrast * 0.35))
+                foreground = gray <= threshold
+            else:
+                # Dark page: foreground is light ink.
+                threshold = max(10.0, high - max(25.0, contrast * 0.35))
+                foreground = gray >= threshold
+
+            return foreground.sum(axis=1).astype(int).tolist()
+        except Exception:
+            gray = img.convert("L")
+            width, height = gray.size
+            data = gray.tobytes()
+            counts = []
+            for y in range(height):
+                row = data[y * width:(y + 1) * width]
+                counts.append(sum(1 for value in row if value < 220))
+            return counts
+
     def _smart_image_chunk_ranges(self, img, height: int) -> List[Tuple[int, int]]:
-        """Return chunk ranges whose cuts land near horizontal whitespace gaps."""
+        """Return chunk ranges whose cuts land near low-foreground whitespace gaps."""
         try:
             target_height = max(1, int(self.chunk_height))
         except Exception:
@@ -2601,29 +2646,31 @@ class ImageTranslator:
             min_chunk_height = 600
         min_chunk_height = min(min_chunk_height, target_height)
         try:
-            line_brightness = float(os.getenv("IMAGE_SMART_CHUNK_LINE_BRIGHTNESS", "220"))
+            max_foreground_ratio = float(os.getenv("IMAGE_SMART_CHUNK_MAX_FOREGROUND_RATIO", "0.01"))
         except Exception:
-            line_brightness = 220.0
+            max_foreground_ratio = 0.01
         try:
-            min_gap_rows = max(1, int(os.getenv("IMAGE_SMART_CHUNK_MIN_GAP_ROWS", "3")))
+            min_gap_rows = max(1, int(os.getenv("IMAGE_SMART_CHUNK_MIN_GAP_ROWS", "12")))
         except Exception:
-            min_gap_rows = 3
+            min_gap_rows = 12
+        try:
+            cut_padding_rows = max(0, int(os.getenv("IMAGE_SMART_CHUNK_CUT_PADDING_ROWS", "4")))
+        except Exception:
+            cut_padding_rows = 4
 
-        gray = img.convert("L")
-        width, actual_height = gray.size
+        width, actual_height = img.size
         height = min(height, actual_height)
         if height <= target_height:
             return [(0, height)]
 
-        data = gray.tobytes()
+        foreground_counts = self._smart_row_foreground_counts(img)[:height]
+        max_foreground_pixels = max(0, int(width * max_foreground_ratio))
         candidates = []
         in_gap = False
         gap_start = 0
 
-        for y in range(height):
-            row_start = y * width
-            row_mean = sum(data[row_start:row_start + width]) / width
-            if row_mean >= line_brightness:
+        for y, foreground_count in enumerate(foreground_counts):
+            if foreground_count <= max_foreground_pixels:
                 if not in_gap:
                     in_gap = True
                     gap_start = y
@@ -2643,7 +2690,13 @@ class ImageTranslator:
             reachable = [c for c in candidates if c > min_next]
             if not reachable:
                 break
-            best = min(reachable, key=lambda c: abs(c - target))
+            best = min(
+                reachable,
+                key=lambda c: (
+                    abs(c - target),
+                    max(foreground_counts[max(0, c - cut_padding_rows):min(height, c + cut_padding_rows + 1)] or [width]),
+                ),
+            )
             if best >= height:
                 break
             cuts.append(best)
@@ -2653,6 +2706,12 @@ class ImageTranslator:
             return []
 
         ranges = list(zip([0] + cuts, cuts + [height]))
+        for cut in cuts:
+            start = max(0, cut - cut_padding_rows)
+            end = min(height, cut + cut_padding_rows + 1)
+            if any(count > max_foreground_pixels for count in foreground_counts[start:end]):
+                return []
+
         # A single huge whitespace-picked chunk is usually a bad cut; keep the
         # older overlap splitter as the fallback for dense or dark pages.
         max_reasonable_height = max(target_height * 2, target_height + min_chunk_height)
@@ -2708,8 +2767,9 @@ class ImageTranslator:
             "image_chunk_min_overlap_pixels": str(os.getenv("IMAGE_CHUNK_MIN_OVERLAP_PIXELS", "80")),
             "image_smart_chunking": str(os.getenv("IMAGE_SMART_CHUNKING", "0")),
             "image_smart_chunk_min_height": str(os.getenv("IMAGE_SMART_CHUNK_MIN_HEIGHT", "600")),
-            "image_smart_chunk_line_brightness": str(os.getenv("IMAGE_SMART_CHUNK_LINE_BRIGHTNESS", "220")),
-            "image_smart_chunk_min_gap_rows": str(os.getenv("IMAGE_SMART_CHUNK_MIN_GAP_ROWS", "3")),
+            "image_smart_chunk_max_foreground_ratio": str(os.getenv("IMAGE_SMART_CHUNK_MAX_FOREGROUND_RATIO", "0.01")),
+            "image_smart_chunk_min_gap_rows": str(os.getenv("IMAGE_SMART_CHUNK_MIN_GAP_ROWS", "12")),
+            "image_smart_chunk_cut_padding_rows": str(os.getenv("IMAGE_SMART_CHUNK_CUT_PADDING_ROWS", "4")),
             "vision_ocr_fuzzy_chunk_dedupe": str(os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE", "0")),
             "vision_ocr_fuzzy_chunk_dedupe_threshold": str(os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE_THRESHOLD", "0.85")),
             "vision_ocr_fuzzy_chunk_dedupe_min_length": str(os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE_MIN_LENGTH", "30")),
@@ -2974,6 +3034,12 @@ class ImageTranslator:
         if save_debug_chunks or save_compressed_chunks:
             debug_dir = os.path.join(self.ocr_dir, "debug_chunks")
             os.makedirs(debug_dir, exist_ok=True)
+            for debug_name in os.listdir(debug_dir):
+                if re.match(r"^ocr_chunk_\d+_original\.png$", debug_name):
+                    try:
+                        os.remove(os.path.join(debug_dir, debug_name))
+                    except Exception:
+                        pass
             print(f"   Debug mode: Saving OCR chunks to {debug_dir}")
 
         image_basename = os.path.basename(self.current_image_path) if hasattr(self, 'current_image_path') else str(hash(str(img)))
