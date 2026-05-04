@@ -15848,16 +15848,33 @@ class EpubReaderDialog(QDialog):
                         with open(img_path, "wb") as f:
                             f.write(image_data)
                     img_tag["src"] = QUrl.fromLocalFile(img_path).toString()
-                    # Wrap sizeable images in full-page containers
-                    # (skip tiny icons/bullets — use byte-size as fast proxy)
-                    if len(image_data) > 5120:
+                    # Wrap sizeable images in full-page containers. Byte size
+                    # alone misses flat/white page images that compress tiny.
+                    image_is_sizeable = len(image_data) > 5120
+                    try:
+                        probe = QImage.fromData(image_data)
+                        if not probe.isNull():
+                            image_is_sizeable = image_is_sizeable or (
+                                probe.width() >= 220 and probe.height() >= 220
+                            )
+                    except Exception:
+                        pass
+                    if image_is_sizeable:
                         wrapper = soup.new_tag("div")
                         wrapper["class"] = "full-page-img"
                         # Find the block-level container of this img
-                        # (typically <p><img/></p> or <div><img/></div>)
+                        # (typically <p><img/></p> or <div><img/></div>).
+                        # Do not wrap a mixed content parent like:
+                        #   <div><img/><img/><h1>...</h1><p>...</p></div>
+                        # because the full-page wrapper clips overflow in
+                        # paginated modes and would hide the translated text.
                         container = img_tag
                         if img_tag.parent and img_tag.parent.name in ('p', 'div', 'figure'):
-                            container = img_tag.parent
+                            parent = img_tag.parent
+                            parent_imgs = parent.find_all('img')
+                            parent_text = parent.get_text(" ", strip=True)
+                            if len(parent_imgs) == 1 and len(parent_text) <= 240:
+                                container = parent
                         # Collect preceding siblings to pull into the wrapper:
                         #   header + p + img, header + img, p + img, or just img
                         _HEADERS = ('h1', 'h2', 'h3', 'h4', 'h5', 'h6')
