@@ -14680,7 +14680,7 @@ def main(log_callback=None, stop_callback=None):
                 if image_translator and config.ENABLE_IMAGE_TRANSLATION:
                     image_processing_attempted = True
                     print(f"🖼️ Translating {c.get('image_count', 0)} images...")
-                    image_translator.set_current_chapter(chap_num)
+                    image_translator.set_current_chapter(actual_num)
                     
                     translated_html, image_translations = process_chapter_images(
                         c["body"], 
@@ -14826,7 +14826,7 @@ def main(log_callback=None, stop_callback=None):
                     print(f"[DEBUG] Has h1 tags: {'<h1>' in c['body']}")
                     print(f"[DEBUG] Has h2 tags: {'<h2>' in c['body']}")
                     
-                    image_translator.set_current_chapter(chap_num)
+                    image_translator.set_current_chapter(actual_num)
                     
                     # Store the original body before processing
                     original_body = c["body"]
