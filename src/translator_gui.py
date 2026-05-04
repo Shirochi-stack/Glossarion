@@ -2140,7 +2140,7 @@ Text to analyze:
         self.default_vision_ocr_prompt = (
             "Extract only the readable text that is physically present in the image, in natural reading order. "
             "If the image itself is a cover page, character art, scene illustration, decorative image, or otherwise not a page of readable story text, reply with exactly: No. "
-            "Return only the base source text exactly as seen. Preserve the original line breaks as faithfully as possible; do not collapse separate visual lines into one paragraph. "
+            "Return only the base source text. Preserve paragraph breaks and intentional textual layout when they affect meaning, but do not reproduce every visual wrap from the image; merge wrapped lines that belong to the same sentence or paragraph. "
             "Preserve visible textual styling and marks when possible, including brackets, parentheses, quote marks, emphasis, strikethrough/deleted text, symbols, and emotes/emoticons. "
             "For Chinese/Japanese/Korean text with small pronunciation guides above or beside the main characters, OCR only the main/base characters and ignore the pronunciation guides. "
             "For pinyin-over-Chinese images, output the Chinese characters only; do not output the pinyin unless the pinyin is standalone text with no matching Chinese base text. "
@@ -3408,6 +3408,12 @@ Recent translations to summarize:
         self.vision_ocr_prompt = self.config.get('vision_ocr_prompt', self.default_vision_ocr_prompt)
         if not self.vision_ocr_prompt or not str(self.vision_ocr_prompt).strip():
             self.vision_ocr_prompt = self.default_vision_ocr_prompt
+        elif (
+            "Preserve the original line breaks as faithfully as possible" in str(self.vision_ocr_prompt)
+            or "do not collapse separate visual lines into one paragraph" in str(self.vision_ocr_prompt)
+        ):
+            self.vision_ocr_prompt = self.default_vision_ocr_prompt
+            self.config['vision_ocr_prompt'] = self.default_vision_ocr_prompt
         self.vision_ocr_user_prompt = self.config.get('vision_ocr_user_prompt', self.default_vision_ocr_user_prompt)
         if not self.vision_ocr_user_prompt or not str(self.vision_ocr_user_prompt).strip():
             self.vision_ocr_user_prompt = self.default_vision_ocr_user_prompt

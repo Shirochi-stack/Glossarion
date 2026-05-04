@@ -35,13 +35,18 @@ logger = logging.getLogger(__name__)
 DEFAULT_VISION_OCR_PROMPT = (
     "Extract only the readable text that is physically present in the image, in natural reading order. "
     "If the image itself is a cover page, character art, scene illustration, decorative image, or otherwise not a page of readable story text, reply with exactly: No. "
-    "Return only the base source text exactly as seen. Preserve the original line breaks as faithfully as possible; do not collapse separate visual lines into one paragraph. "
+    "Return only the base source text. Preserve paragraph breaks and intentional textual layout when they affect meaning, but do not reproduce every visual wrap from the image; merge wrapped lines that belong to the same sentence or paragraph. "
     "Preserve visible textual styling and marks when possible, including brackets, parentheses, quote marks, emphasis, strikethrough/deleted text, symbols, and emotes/emoticons. "
     "For Chinese/Japanese/Korean text with small pronunciation guides above or beside the main characters, OCR only the main/base characters and ignore the pronunciation guides. "
     "For pinyin-over-Chinese images, output the Chinese characters only; do not output the pinyin unless the pinyin is standalone text with no matching Chinese base text. "
     "Do not translate, summarize, explain, annotate, transliterate, romanize, or add pronunciation guides. "
     "Do not output duplicate reading lines such as pinyin, romaji, furigana, Jyutping, or Latin readings when they are attached to the same base text. "
     "If no readable story text is present, reply with exactly: No."
+)
+
+STALE_VISION_OCR_PROMPT_MARKERS = (
+    "Preserve the original line breaks as faithfully as possible",
+    "do not collapse separate visual lines into one paragraph",
 )
 
 DEFAULT_VISION_OCR_USER_PROMPT = (
@@ -254,6 +259,8 @@ class ImageTranslator:
         self.image_max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
         self.chunk_height = int(os.getenv("IMAGE_CHUNK_HEIGHT", "2000"))
         self.vision_ocr_prompt = os.getenv("VISION_OCR_PROMPT", DEFAULT_VISION_OCR_PROMPT).strip() or DEFAULT_VISION_OCR_PROMPT
+        if any(marker in self.vision_ocr_prompt for marker in STALE_VISION_OCR_PROMPT_MARKERS):
+            self.vision_ocr_prompt = DEFAULT_VISION_OCR_PROMPT
         self.vision_ocr_user_prompt = os.getenv("VISION_OCR_USER_PROMPT", DEFAULT_VISION_OCR_USER_PROMPT).strip() or DEFAULT_VISION_OCR_USER_PROMPT
         self.last_vision_translation_finish_reason = None
         self.last_vision_translation_error = None
@@ -1382,7 +1389,8 @@ class ImageTranslator:
             if not os.getenv("ENABLE_WATERMARK_REMOVAL", "1") == "1":
                 return image_path  # Return original path
             
-            print(f"   🧹 Preprocessing image for watermark removal...")
+            if not getattr(self, "_suppress_image_detail_logs", False):
+                print(f"   🧹 Preprocessing image for watermark removal...")
             
             # Open image
             img = Image.open(image_path)
@@ -1445,7 +1453,8 @@ class ImageTranslator:
                 _, ext = os.path.splitext(image_path)
                 with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
                     img.save(tmp.name, optimize=False)
-                    print(f"   📝 Created temp cleaned image")
+                    if not getattr(self, "_suppress_image_detail_logs", False):
+                        print(f"   📝 Created temp cleaned image")
                     return tmp.name  # Return temp path
             
         except Exception as e:
@@ -1798,7 +1807,8 @@ class ImageTranslator:
             processed_path = self.preprocess_image_for_watermarks(compressed_path)
             with Image.open(processed_path) as img:
                 width, height = img.size
-                print(f"   📐 OCR image dimensions: {width}x{height}")
+                if not getattr(self, "_suppress_image_detail_logs", False):
+                    print(f"   📐 OCR image dimensions: {width}x{height}")
                 if img.mode not in ('RGB', 'RGBA'):
                     img = img.convert('RGB')
                 if height > self.chunk_height:
@@ -2389,7 +2399,7 @@ class ImageTranslator:
             
             # Log the size for debugging
             size_kb = len(data) / 1024
-            if size_kb > 0:  # Log if file is over 0kb
+            if size_kb > 0 and not getattr(self, "_suppress_image_detail_logs", False):  # Log if file is over 0kb
                 print(f"   💾 Image Chunk Size: {size_kb:.1f}KB ")
             
             return data

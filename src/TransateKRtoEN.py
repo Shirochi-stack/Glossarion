@@ -7927,7 +7927,6 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
                 mapped_path = _resolve_image_path_from_rename_map(original_img_src, image_translator)
                 if mapped_path:
                     img_path = mapped_path
-                    print(f"   Resolved renamed image ref: {os.path.basename(original_img_src)} -> {os.path.basename(mapped_path)}")
                 else:
                     print(f"   ❌ Image not found in any location for: {img_src}")
                     print(f"   Tried: {possible_paths}")
@@ -7938,7 +7937,6 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
         if not os.path.exists(img_path):
             mapped_path = _resolve_image_path_from_rename_map(original_img_src, image_translator)
             if mapped_path:
-                print(f"   Resolved renamed image ref: {os.path.basename(original_img_src)} -> {os.path.basename(mapped_path)}")
                 img_path = mapped_path
 
         if not os.path.exists(img_path):
@@ -8148,6 +8146,7 @@ def _process_chapter_images_vision_ocr_combined(
     processed_srcs = []
     first_img_tag = None
     jobs = []
+    renamed_refs = []
     for idx, img_info in enumerate(images, 1):
         if check_stop_fn and check_stop_fn():
             print("   Image OCR stopped by user before combined translation")
@@ -8160,7 +8159,20 @@ def _process_chapter_images_vision_ocr_combined(
             print(f"   Image not found for combined OCR: {img_src}")
             continue
 
+        if os.path.basename(str(img_src or "")) != os.path.basename(str(img_path or "")):
+            renamed_refs.append((os.path.basename(str(img_src or "")), os.path.basename(str(img_path or ""))))
         jobs.append((idx, img_info, img_src, img_path))
+
+    if renamed_refs:
+        first_old, first_new = renamed_refs[0]
+        if len(renamed_refs) == 1:
+            print(f"   Resolved 1 renamed image ref: {first_old} -> {first_new}")
+        else:
+            last_old, last_new = renamed_refs[-1]
+            print(
+                f"   Resolved {len(renamed_refs)} renamed image refs "
+                f"({first_old} -> {first_new}; ...; {last_old} -> {last_new})"
+            )
 
     def _ocr_page_image(job):
         idx, img_info, img_src, img_path = job
@@ -8172,7 +8184,6 @@ def _process_chapter_images_vision_ocr_combined(
         if img_info.get('alt'):
             context = f", Alt text: {img_info['alt']}"
 
-        print(f"   OCR image {idx}/{len(images)} before chapter translation: {os.path.basename(img_path)}")
         disk_ocr = image_translator._load_saved_ocr_text(
             kind="single",
             image_basename=os.path.basename(img_path),
@@ -8180,7 +8191,6 @@ def _process_chapter_images_vision_ocr_combined(
             chapter_num=actual_num,
         )
         if disk_ocr:
-            print(f"   Skipping OCR image {idx}/{len(images)}; found existing OCR/single file")
             return idx, img_info, img_src, disk_ocr
 
         processed_path = None
@@ -8193,7 +8203,6 @@ def _process_chapter_images_vision_ocr_combined(
             processed_path = image_translator.preprocess_image_for_watermarks(compressed_path)
             with Image.open(processed_path) as img:
                 width, height = img.size
-                print(f"   OCR image dimensions: {width}x{height}")
                 if img.mode not in ('RGB', 'RGBA'):
                     img = img.convert('RGB')
 
@@ -8233,6 +8242,8 @@ def _process_chapter_images_vision_ocr_combined(
     batch_enabled = bool(getattr(image_translator, "_vision_ocr_batch_enabled", lambda: False)())
     batch_size = min(len(jobs), int(getattr(image_translator, "_vision_ocr_batch_size", lambda: 1)())) if batch_enabled and jobs else 1
     previous_batch_env = os.environ.get("BATCH_TRANSLATION")
+    previous_suppress_detail_logs = getattr(image_translator, "_suppress_image_detail_logs", False)
+    image_translator._suppress_image_detail_logs = True
     try:
         if batch_enabled and batch_size > 1 and len(jobs) > 1:
             batching_mode = os.getenv("BATCHING_MODE", "aggressive").strip().lower()
@@ -8241,7 +8252,7 @@ def _process_chapter_images_vision_ocr_combined(
             os.environ["BATCH_TRANSLATION"] = "1"
 
             if batching_mode == "aggressive":
-                print(f"   Vision OCR page no-batching mode: keeping {batch_size} OCR worker slot(s) filled")
+                print(f"   Vision OCR page scheduler: {batch_size} parallel worker slot(s), {len(jobs)} image request(s)")
                 with ThreadPoolExecutor(max_workers=batch_size) as executor:
                     active_futures = {}
                     next_job_idx = 0
@@ -8311,7 +8322,12 @@ def _process_chapter_images_vision_ocr_combined(
             os.environ.pop("BATCH_TRANSLATION", None)
         else:
             os.environ["BATCH_TRANSLATION"] = previous_batch_env
+        image_translator._suppress_image_detail_logs = previous_suppress_detail_logs
 
+    no_count = 0
+    text_count = 0
+    empty_count = 0
+    text_chars = 0
     for idx in sorted(ocr_by_index):
         img_info, img_src, ocr_text = ocr_by_index[idx]
         is_no = getattr(image_translator, "_is_ocr_no_response", lambda text: False)(ocr_text)
@@ -8320,16 +8336,26 @@ def _process_chapter_images_vision_ocr_combined(
             marker = _image_marker_for_combined_ocr(img_info)
             ocr_parts.append(marker)
             processed_srcs.append(img_src)
-            print(f"   OCR image {idx}/{len(images)} returned No; injected image marker into combined OCR")
+            no_count += 1
         elif ocr_text and str(ocr_text).strip():
-            ocr_parts.append(str(ocr_text).strip())
+            cleaned_ocr_text = str(ocr_text).strip()
+            ocr_parts.append(cleaned_ocr_text)
             processed_srcs.append(img_src)
-            print(f"   OCR image {idx}/{len(images)} complete ({len(str(ocr_text).strip())} chars)")
+            text_count += 1
+            text_chars += len(cleaned_ocr_text)
         else:
             marker = _image_marker_for_combined_ocr(img_info)
             ocr_parts.append(marker)
             processed_srcs.append(img_src)
-            print(f"   OCR image {idx}/{len(images)} returned no text; injected image marker into combined OCR")
+            empty_count += 1
+
+    if ocr_by_index:
+        summary_parts = [f"{text_count} text image(s), {text_chars} OCR chars"]
+        if no_count:
+            summary_parts.append(f"{no_count} cover/illustration image(s) preserved")
+        if empty_count:
+            summary_parts.append(f"{empty_count} empty image(s) preserved")
+        print(f"   Vision OCR page complete: {', '.join(summary_parts)}")
 
     combined_ocr = "\n\n".join(part for part in ocr_parts if str(part).strip()).strip()
     if not combined_ocr:
@@ -8491,12 +8517,10 @@ def _resolve_chapter_image_path(img_src, image_translator, actual_num, idx):
         if not os.path.exists(img_path):
             mapped_path = _resolve_image_path_from_rename_map(img_src, image_translator)
             if mapped_path:
-                print(f"   Resolved renamed image ref: {os.path.basename(img_src)} -> {os.path.basename(mapped_path)}")
                 img_path = mapped_path
     else:
         mapped_path = _resolve_image_path_from_rename_map(img_src, image_translator)
         if mapped_path:
-            print(f"   Resolved renamed image ref: {os.path.basename(img_src)} -> {os.path.basename(mapped_path)}")
             img_path = mapped_path
     return img_path if img_path and os.path.exists(img_path) else None
 
