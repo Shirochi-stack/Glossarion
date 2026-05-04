@@ -2548,6 +2548,7 @@ class ImageTranslator:
         signature = self._ocr_cache_signature()
         cache_path = self._ocr_cache_path()
         previous = None
+        cache_file_exists = os.path.exists(cache_path)
         if os.path.exists(cache_path):
             try:
                 with open(cache_path, 'r', encoding='utf-8') as f:
@@ -2556,9 +2557,12 @@ class ImageTranslator:
                 previous = None
 
         if previous is None:
-            if any(os.path.isdir(os.path.join(self.ocr_dir, name)) for name in ("chunks", "combined", "chapters", "full", "single")):
-                print("   🔁 OCR cache metadata missing; invalidating saved OCR text")
-                self._clear_ocr_cache_outputs()
+            has_saved_ocr = any(os.path.isdir(os.path.join(self.ocr_dir, name)) for name in ("chunks", "combined", "chapters", "full", "single"))
+            if has_saved_ocr:
+                if cache_file_exists:
+                    print("   🔁 OCR cache metadata unreadable; preserving saved OCR text and rewriting metadata")
+                else:
+                    print("   🔁 OCR cache metadata missing; recreating metadata and preserving saved OCR text")
             self._write_ocr_cache(signature)
             return
 
@@ -2638,10 +2642,56 @@ class ImageTranslator:
                 chapter_num=chapter_num,
             )
             if not os.path.exists(path):
-                return None
+                path = self._find_legacy_ocr_text_path(
+                    kind=kind,
+                    image_basename=image_basename,
+                    chunk_idx=chunk_idx,
+                    image_idx=image_idx,
+                    chapter_num=chapter_num,
+                )
+                if not path:
+                    return None
             with open(path, 'r', encoding='utf-8') as f:
                 text = f.read()
             return text if text.strip() else None
+        except Exception:
+            return None
+
+    def _find_legacy_ocr_text_path(self, kind="chunks", image_basename=None, chunk_idx=None, image_idx=None, chapter_num=None):
+        """Find OCR files saved by older cache key shapes."""
+        try:
+            candidates = []
+            for legacy_chapter, legacy_image_idx in (
+                (chapter_num, None),
+                (None, image_idx),
+                (None, None),
+            ):
+                candidate = self._ocr_text_path(
+                    kind=kind,
+                    image_basename=image_basename,
+                    chunk_idx=chunk_idx,
+                    image_idx=legacy_image_idx,
+                    chapter_num=legacy_chapter,
+                )
+                if candidate not in candidates:
+                    candidates.append(candidate)
+            for candidate in candidates:
+                if os.path.exists(candidate):
+                    return candidate
+
+            target_dir = os.path.join(getattr(self, 'ocr_dir', os.path.join(self.output_dir, "OCR")), kind)
+            if not os.path.isdir(target_dir):
+                return None
+            stem = self._safe_ocr_stem(image_basename, image_idx=None, chapter_num=None)
+            suffix = f"_chunk_{chunk_idx:03d}.txt" if chunk_idx is not None else ".txt"
+            matches = []
+            for filename in os.listdir(target_dir):
+                if stem in filename and filename.endswith(suffix):
+                    matches.append(os.path.join(target_dir, filename))
+            if not matches:
+                return None
+            matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            return matches[0]
         except Exception:
             return None
 

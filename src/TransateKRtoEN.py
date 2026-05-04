@@ -7961,7 +7961,8 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
         if translated_count > 0:
             delay = float(os.getenv('IMAGE_API_DELAY', '1.0'))
             time.sleep(delay)
-            
+
+        image_translator.current_image_index = idx
         translation_result = image_translator.translate_image(img_path, context, check_stop_fn)
         
         print(f"\n🔍 DEBUG: Image {idx}/{len(images)}")
@@ -16714,10 +16715,20 @@ def main(log_callback=None, stop_callback=None):
             print("TRANSLATION_COMPLETE_SIGNAL")
             return
     else:
-        # Skip EPUB building if graceful stop was triggered
-        graceful_stop_triggered = os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
-        if graceful_stop_triggered:
-            print("⏳ Graceful stop triggered - skipping EPUB building")
+        # Skip EPUB building if any user stop/cancel was triggered.
+        stop_triggered = (
+            os.environ.get('GRACEFUL_STOP') == '1'
+            or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+            or os.environ.get('TRANSLATION_CANCELLED') == '1'
+            or is_stop_requested()
+        )
+        if not stop_triggered and stop_callback:
+            try:
+                stop_triggered = bool(stop_callback())
+            except Exception:
+                stop_triggered = False
+        if stop_triggered:
+            print("⏳ Translation stop/cancel triggered - skipping EPUB building")
             print("TRANSLATION_COMPLETE_SIGNAL")
             return
         
