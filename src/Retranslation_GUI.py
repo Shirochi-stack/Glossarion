@@ -2140,7 +2140,7 @@ class RetranslationMixin:
             if n_merged == 0:
                 lbl_gp_merged.setVisible(False)
             
-            lbl_gp_remaining = QLabel(f"⬜ Not Completed: {n_remaining}")
+            lbl_gp_remaining = QLabel(f"⬜ Not Translated: {n_remaining}")
             lbl_gp_remaining.setFont(gp_stats_font)
             lbl_gp_remaining.setStyleSheet("color: #5a9fd4;")
             lbl_gp_remaining.setCursor(Qt.PointingHandCursor)
@@ -2208,6 +2208,8 @@ class RetranslationMixin:
                         item.setData(Qt.UserRole, status)
                         item.setData(Qt.UserRole + 1, ci)
                         gp_listbox.addItem(item)
+                        if panel_state.get('select_all_visible'):
+                            item.setSelected(not item.isHidden())
                     state['ci'] = end_ci
                     if end_ci < total:
                         QTimer.singleShot(0, _add_chunk)
@@ -2231,7 +2233,7 @@ class RetranslationMixin:
                 lbl_gp_failed.setText(f"❌ Failed: {len(_fail2)} | ")
                 lbl_gp_merged.setText(f"🔗 Merged: {len(_merg2)} | ")
                 lbl_gp_merged.setVisible(len(_merg2) > 0)
-                lbl_gp_remaining.setText(f"⬜ Not Completed: {max(0, _total - len(_comp2 | _fail2 | _merg2 | _prog2))}")
+                lbl_gp_remaining.setText(f"⬜ Not Translated: {max(0, _total - len(_comp2 | _fail2 | _merg2 | _prog2))}")
             
             # Right-click context menu to delete entries from progress
             def _gp_context_menu(pos):
@@ -2338,11 +2340,21 @@ class RetranslationMixin:
             
             # Cycle handler
             def _gp_make_cycle(target_statuses, lb_ref):
+                target_statuses = set(target_statuses)
                 def _handler(_event=None):
                     lb = lb_ref
                     if not lb:
                         return
-                    indices = [i for i in range(lb.count()) if lb.item(i).data(Qt.UserRole) in target_statuses]
+                    indices = []
+                    for i in range(lb.count()):
+                        item = lb.item(i)
+                        if not item or item.isHidden():
+                            continue
+                        status = item.data(Qt.UserRole)
+                        if isinstance(status, str):
+                            status = status.lower().replace(' ', '_')
+                        if status in target_statuses:
+                            indices.append(i)
                     if not indices:
                         return
                     selected_rows = [lb.row(item) for item in lb.selectedItems()]
@@ -2358,7 +2370,7 @@ class RetranslationMixin:
             lbl_gp_in_progress.mousePressEvent = _gp_make_cycle(('in_progress',), gp_listbox)
             lbl_gp_failed.mousePressEvent = _gp_make_cycle(('failed', 'qa_failed'), gp_listbox)
             lbl_gp_merged.mousePressEvent = _gp_make_cycle(('merged',), gp_listbox)
-            lbl_gp_remaining.mousePressEvent = _gp_make_cycle(('not_completed',), gp_listbox)
+            lbl_gp_remaining.mousePressEvent = _gp_make_cycle(('not_completed', 'not_translated', 'not_refined', 'no_tts'), gp_listbox)
             
             p_layout.addWidget(gp_listbox)
             
@@ -2368,6 +2380,37 @@ class RetranslationMixin:
             path_label.setStyleSheet("color: #666; font-size: 8pt;")
             path_label.setWordWrap(True)
             path_row.addWidget(path_label, stretch=1)
+
+            select_all_btn = QPushButton("Select All")
+            select_all_btn.setCursor(Qt.PointingHandCursor)
+            select_all_btn.setStyleSheet(
+                "QPushButton { background-color: #263445; color: #dbeafe; border: 1px solid #64748b; "
+                "border-radius: 3px; padding: 2px 8px; font-size: 8pt; } "
+                "QPushButton:hover { background-color: #334155; }"
+            )
+            select_all_btn.setFixedHeight(22)
+
+            def _select_all_gp_visible(_checked=False):
+                panel_state['select_all_visible'] = True
+                first_selected = None
+                gp_listbox.blockSignals(True)
+                try:
+                    gp_listbox.clearSelection()
+                    for row in range(gp_listbox.count()):
+                        item = gp_listbox.item(row)
+                        if not item or item.isHidden():
+                            continue
+                        item.setSelected(True)
+                        if first_selected is None:
+                            first_selected = row
+                    if first_selected is not None:
+                        gp_listbox.setCurrentRow(first_selected, QItemSelectionModel.Select)
+                finally:
+                    gp_listbox.blockSignals(False)
+                gp_listbox.viewport().update()
+
+            select_all_btn.clicked.connect(_select_all_gp_visible)
+            path_row.addWidget(select_all_btn)
             
             _gp_folder = os.path.dirname(gp_path)
             open_folder_btn = QPushButton("📂 Open Folder")
@@ -2547,7 +2590,7 @@ class RetranslationMixin:
                     lbl_gp_failed.setText(f"❌ Failed: {len(_fail)} | ")
                     lbl_gp_merged.setText(f"🔗 Merged: {len(_merg)} | ")
                     lbl_gp_merged.setVisible(len(_merg) > 0)
-                    lbl_gp_remaining.setText(f"⬜ Not Completed: {_nr}")
+                    lbl_gp_remaining.setText(f"⬜ Not Translated: {_nr}")
                     
                     _bt = _d.get('book_title', '')
                     if _bt and bt_label:

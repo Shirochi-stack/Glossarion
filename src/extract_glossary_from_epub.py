@@ -207,7 +207,7 @@ def _log_assistant_prompt_once():
             print(f"🤖 Assistant Prompt: {assistant_prompt}")
             _log_assistant_prompt_once._logged = True
 
-def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, chapter_idx=None, chunk_idx=None, total_chunks=None, merged_chapters=None):
+def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, chapter_idx=None, chunk_idx=None, total_chunks=None, merged_chapters=None, before_send_callback=None):
     """Send API request with interrupt capability and optional timeout retry
     
     Args:
@@ -307,8 +307,26 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         except Exception as reinit_err:
                             print(f"   ⚠️ Failed to reinitialize client: {reinit_err}")
                 
+                tls_for_callback = None
+                if callable(before_send_callback):
+                    try:
+                        if hasattr(client, '_get_thread_local_client'):
+                            tls_for_callback = client._get_thread_local_client()
+                            tls_for_callback.pre_api_call_callback = before_send_callback
+                        else:
+                            before_send_callback()
+                    except Exception as cb_err:
+                        print(f"⚠️ Failed to register pre-send glossary progress callback: {cb_err}")
+
                 start_time = time.time()
-                result = client.send(messages, temperature=temperature, max_tokens=max_tokens, context='glossary')
+                try:
+                    result = client.send(messages, temperature=temperature, max_tokens=max_tokens, context='glossary')
+                finally:
+                    if tls_for_callback is not None:
+                        try:
+                            tls_for_callback.pre_api_call_callback = None
+                        except Exception:
+                            pass
                 elapsed = time.time() - start_time
                 
                 # Capture raw response object for thought signatures (if available)
@@ -4197,7 +4215,8 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
 def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict], 
                                   client: UnifiedClient, temp: float, mtoks: int,
                                   stop_check_fn, chunk_timeout: int = None,
-                                  chunk_idx: int = None, total_chunks: int = None) -> Dict:
+                                  chunk_idx: int = None, total_chunks: int = None,
+                                  before_send_callback=None) -> Dict:
     """Process a single chapter API call with thread-safe payload handling"""
     
     # Early exit: skip immediately if stop/graceful-stop is already flagged
@@ -4293,7 +4312,8 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             chunk_timeout=chunk_timeout,
             chapter_idx=idx,
             chunk_idx=chunk_idx,
-            total_chunks=total_chunks
+            total_chunks=total_chunks,
+            before_send_callback=before_send_callback,
         )
 
         # Handle the response - it might be a tuple or a string
@@ -4406,7 +4426,8 @@ def process_single_chapter_with_split(idx: int,
                                       temp: float,
                                       mtoks: int,
                                       stop_check_fn,
-                                      chunk_timeout: int = None):
+                                      chunk_timeout: int = None,
+                                      before_send_callback=None):
     """
     Wrapper that performs chapter-level splitting (using output-limit budget) before calling the API.
     Aggregates all chunk results into a single result dict to keep batch accounting identical.
@@ -4438,7 +4459,7 @@ def process_single_chapter_with_split(idx: int,
                     + assistant_prefill_msgs
                     + [{"role": "user", "content": user_prompt}]
                 )
-        return process_single_chapter_api_call(idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout)
+        return process_single_chapter_api_call(idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout, before_send_callback=before_send_callback)
 
     print(f"⚠️ Chapter {idx+1} exceeds chunk budget ({chapter_tokens:,} > {available_tokens:,}); splitting...")
     # Wrap plain text as simple HTML for splitter
@@ -4486,7 +4507,8 @@ def process_single_chapter_with_split(idx: int,
         msgs = _sanitize_messages_for_api(msgs, chunk_text)
         result = process_single_chapter_api_call(
             idx, chunk_text, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout,
-            chunk_idx=chunk_idx, total_chunks=total_chunks
+            chunk_idx=chunk_idx, total_chunks=total_chunks,
+            before_send_callback=before_send_callback,
         )
         if result.get("data"):
             aggregated_data.extend(result["data"])
@@ -4510,7 +4532,8 @@ def process_single_chapter_with_split(idx: int,
 
 def process_merged_group_api_call(merge_group: list, msgs_builder_fn, 
                                    client, temp: float, mtoks: int,
-                                   stop_check_fn, chunk_timeout: int = None) -> Dict:
+                                   stop_check_fn, chunk_timeout: int = None,
+                                   before_send_callback=None) -> Dict:
     """
     Process a merged group of chapters in a single API call.
     
@@ -4537,7 +4560,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
         idx, chap = merge_group[0]
         system_prompt, user_prompt = msgs_builder_fn(chap)
         msgs = [{"role": "system", "content": system_prompt}] + assistant_prefill_msgs + [{"role": "user", "content": user_prompt}]
-        result = process_single_chapter_api_call(idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout)
+        result = process_single_chapter_api_call(idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout, before_send_callback=before_send_callback)
         return {'results': [result], 'merged_indices': []}
     
     # Merge chapter contents WITHOUT separators (glossary extraction doesn't need them)
@@ -4603,6 +4626,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
             chunk_timeout=chunk_timeout,
             chapter_idx=parent_idx,
             merged_chapters=chapter_nums,
+            before_send_callback=before_send_callback,
         )
         
         # Extract response text
@@ -5683,11 +5707,16 @@ def main(log_callback=None, stop_callback=None):
 
                 def _submit_unit(unit):
                     """Submit a single work unit and return its Future."""
-                    _mark_glossary_in_progress([u_idx for u_idx, _ in unit])
+                    unit_indices = [u_idx for u_idx, _ in unit]
+
+                    def _mark_unit_progress_on_send(unit_indices=unit_indices):
+                        _mark_glossary_in_progress(unit_indices)
+
                     if is_merged_mode:
                         future = executor.submit(
                             process_merged_group_api_call,
-                            unit, build_prompt, client, temp, mtoks, check_stop, chunk_timeout
+                            unit, build_prompt, client, temp, mtoks, check_stop, chunk_timeout,
+                            _mark_unit_progress_on_send,
                         )
                     else:
                         idx, chap = unit[0]
@@ -5728,7 +5757,8 @@ def main(log_callback=None, stop_callback=None):
                             temp,
                             mtoks,
                             check_stop,
-                            chunk_timeout
+                            chunk_timeout,
+                            _mark_unit_progress_on_send,
                         )
                     futures[future] = unit
                     # Small yield to keep GUI responsive
@@ -6331,7 +6361,9 @@ def main(log_callback=None, stop_callback=None):
             # Build merged chapter nums for watchdog progress bar
             merged_chapter_nums = [g_idx + 1 for g_idx, _ in merge_groups[idx]] if idx in merge_groups else None
             current_progress_indices = [g_idx for g_idx, _ in merge_groups[idx]] if idx in merge_groups else [idx]
-            _mark_glossary_in_progress(current_progress_indices)
+
+            def _mark_current_glossary_progress_on_send():
+                _mark_glossary_in_progress(current_progress_indices)
 
             # Check if history will reset on this chapter
             if contextual_enabled and len(history) >= ctx_limit and ctx_limit > 0 and not rolling_window:
@@ -6528,7 +6560,8 @@ def main(log_callback=None, stop_callback=None):
                                 chapter_idx=idx,
                                 chunk_idx=chunk_idx,
                                 total_chunks=total_chunks,
-                                merged_chapters=merged_chapter_nums
+                                merged_chapters=merged_chapter_nums,
+                                before_send_callback=_mark_current_glossary_progress_on_send,
                             )
                         except UnifiedClientError as e:
                             if "stopped by user" in str(e).lower():
@@ -6696,7 +6729,8 @@ def main(log_callback=None, stop_callback=None):
                             stop_check_fn=check_stop,
                             chunk_timeout=chunk_timeout,
                             chapter_idx=idx,
-                            merged_chapters=merged_chapter_nums
+                            merged_chapters=merged_chapter_nums,
+                            before_send_callback=_mark_current_glossary_progress_on_send,
                         )
                                 
                     except UnifiedClientError as e:

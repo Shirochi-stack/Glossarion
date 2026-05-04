@@ -13680,6 +13680,19 @@ class UnifiedClient:
 
         # Mark queued watchdog entry as in-flight now that we're about to send
         try:
+            tls = self._get_thread_local_client()
+            cb = getattr(tls, 'pre_api_call_callback', None)
+            if callable(cb):
+                cb()
+            if hasattr(tls, 'pre_api_call_callback'):
+                tls.pre_api_call_callback = None
+        except Exception as cb_err:
+            try:
+                print(f"⚠️ Pre-send progress callback failed: {cb_err}")
+            except Exception:
+                pass
+
+        try:
             rid = request_id
             if not rid:
                 tls = self._get_thread_local_client()

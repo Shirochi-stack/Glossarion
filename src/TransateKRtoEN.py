@@ -4138,7 +4138,7 @@ class TranslationProcessor:
                 print(f"⚠️ Failed to generate rolling summary: {e}")
             return None
     
-    def translate_with_retry(self, msgs, chunk_html, c, chunk_idx, total_chunks, merge_group_len=None, merged_chapters=None):
+    def translate_with_retry(self, msgs, chunk_html, c, chunk_idx, total_chunks, merge_group_len=None, merged_chapters=None, before_send_callback=None):
         """Handle translation with retry logic
         
         Args:
@@ -4378,12 +4378,16 @@ class TranslationProcessor:
                     'total_chunks': total_chunks,
                     'merged_chapters': merged_chapters,
                 }
-                if _single_pass_glossary_mode():
-                    _mark_single_pass_glossary_in_progress(
-                        self.out_dir,
-                        chapter_num=actual_num,
-                        chapter_file=_single_pass_progress_chapter_file(c, fname),
-                    )
+
+                def _mark_progress_on_send():
+                    if callable(before_send_callback):
+                        before_send_callback()
+                    if _single_pass_glossary_mode():
+                        _mark_single_pass_glossary_in_progress(
+                            self.out_dir,
+                            chapter_num=actual_num,
+                            chapter_file=_single_pass_progress_chapter_file(c, fname),
+                        )
                 
                 result, finish_reason, raw_obj = send_with_interrupt(
                     msgs,
@@ -4394,7 +4398,8 @@ class TranslationProcessor:
                     chunk_timeout,
                     context='translation',
                     chapter_context=chapter_ctx,
-                    bypass_graceful_stop=True
+                    bypass_graceful_stop=True,
+                    before_send_callback=_mark_progress_on_send,
                 )
 
                 if _single_pass_glossary_mode() and isinstance(result, str):
@@ -4886,10 +4891,11 @@ class BatchTranslationProcessor:
             
             # Determine output filename early so we can track it in progress
             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-            
-            with self.progress_lock:
-                self.update_progress_fn(idx, actual_num, content_hash, fname, status="in_progress")
-                self.save_progress_fn()
+
+            def _mark_batch_chapter_progress_on_send():
+                with self.progress_lock:
+                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=chapter)
+                    self.save_progress_fn()
             
             from bs4 import BeautifulSoup
             chapter_body = ContentProcessor.image_processing_html(chapter)
@@ -5242,12 +5248,15 @@ class BatchTranslationProcessor:
                 
                 while True:
                     try:
-                        if _single_pass_glossary_mode():
-                            _mark_single_pass_glossary_in_progress(
-                                self.out_dir,
-                                chapter_num=actual_num,
-                                chapter_file=chapter_ref.get("chapter_file"),
-                            )
+                        def _mark_batch_chunk_progress_on_send():
+                            _mark_batch_chapter_progress_on_send()
+                            if _single_pass_glossary_mode():
+                                _mark_single_pass_glossary_in_progress(
+                                    self.out_dir,
+                                    chapter_num=actual_num,
+                                    chapter_file=chapter_ref.get("chapter_file"),
+                                )
+
                         result, finish_reason, raw_obj_from_send = send_with_interrupt(
                             chapter_msgs,
                             self.client,
@@ -5257,7 +5266,8 @@ class BatchTranslationProcessor:
                             chunk_timeout=chunk_timeout,
                             context='translation',
                             chapter_context=chapter_ctx,
-                            bypass_graceful_stop=True
+                            bypass_graceful_stop=True,
+                            before_send_callback=_mark_batch_chunk_progress_on_send,
                         )
                         if _single_pass_glossary_mode() and isinstance(result, str):
                             result, glossary_block = _split_single_pass_glossary_response(result)
@@ -5465,12 +5475,6 @@ class BatchTranslationProcessor:
                                 setattr(tls_retry_client, "_in_truncation_retry", True)
 
                             try:
-                                if _single_pass_glossary_mode():
-                                    _mark_single_pass_glossary_in_progress(
-                                        self.out_dir,
-                                        chapter_num=actual_num,
-                                        chapter_file=chapter_ref.get("chapter_file"),
-                                    )
                                 result_retry, finish_reason_retry, raw_obj_retry = send_with_interrupt(
                                     chapter_msgs,
                                     self.client,
@@ -5480,7 +5484,8 @@ class BatchTranslationProcessor:
                                     chunk_timeout=chunk_timeout,
                                     context='translation',
                                     chapter_context=chapter_ctx,
-                                    bypass_graceful_stop=True
+                                    bypass_graceful_stop=True,
+                                    before_send_callback=_mark_batch_chunk_progress_on_send,
                                 )
                                 if _single_pass_glossary_mode() and isinstance(result_retry, str):
                                     result_retry, glossary_block_retry = _split_single_pass_glossary_response(result_retry)
@@ -6374,12 +6379,11 @@ class BatchTranslationProcessor:
             chapters_data.append((actual_num, chapter_body, idx, chapter, content_hash))
         
         try:
-            # Mark all chapters as in_progress
-            for actual_num, _, idx, chapter, content_hash in chapters_data:
+            def _mark_merged_progress_on_send():
                 with self.progress_lock:
-                    # Determine output filename for tracking (consistent with process_single_chapter)
-                    fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=chapter)
+                    for actual_num, _, idx, chapter, content_hash in chapters_data:
+                        fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                        self.update_progress_fn(idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=chapter)
                     self.save_progress_fn()
             
             # Merge chapter contents
@@ -6553,12 +6557,15 @@ class BatchTranslationProcessor:
                     'total_chunks': 1,
                     'merged_chapters': merged_chapter_nums_for_context,
                 }
-                if _single_pass_glossary_mode():
-                    _mark_single_pass_glossary_in_progress(
-                        self.out_dir,
-                        chapter_num=parent_actual_num,
-                        chapter_file=chapter_ref.get("chapter_file"),
-                    )
+
+                def _mark_merged_request_progress_on_send():
+                    _mark_merged_progress_on_send()
+                    if _single_pass_glossary_mode():
+                        _mark_single_pass_glossary_in_progress(
+                            self.out_dir,
+                            chapter_num=parent_actual_num,
+                            chapter_file=chapter_ref.get("chapter_file"),
+                        )
                 
                 merged_response, finish_reason, raw_obj = send_with_interrupt(
                     msgs,
@@ -6568,6 +6575,7 @@ class BatchTranslationProcessor:
                     self.check_stop_fn,
                     context='translation',
                     chapter_context=chapter_ctx,
+                    before_send_callback=_mark_merged_request_progress_on_send,
                 )
                 if _single_pass_glossary_mode() and isinstance(merged_response, str):
                     merged_response, glossary_block = _split_single_pass_glossary_response(merged_response)
@@ -6689,12 +6697,6 @@ class BatchTranslationProcessor:
                                 setattr(tls_retry_client, "_in_truncation_retry", True)
 
                             try:
-                                if _single_pass_glossary_mode():
-                                    _mark_single_pass_glossary_in_progress(
-                                        self.out_dir,
-                                        chapter_num=parent_actual_num,
-                                        chapter_file=chapter_ref.get("chapter_file"),
-                                    )
                                 merged_response_retry, finish_reason_retry, raw_obj_retry = send_with_interrupt(
                                     msgs,
                                     self.client,
@@ -6703,6 +6705,7 @@ class BatchTranslationProcessor:
                                     self.check_stop_fn,
                                     context='translation',
                                     chapter_context=chapter_ctx,
+                                    before_send_callback=_mark_merged_request_progress_on_send,
                                 )
                                 if _single_pass_glossary_mode() and isinstance(merged_response_retry, str):
                                     merged_response_retry, glossary_block_retry = _split_single_pass_glossary_response(merged_response_retry)
@@ -10275,7 +10278,8 @@ def _skip_thinking_env(context_key):
 # =====================================================
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn,
                        chunk_timeout=None, request_id=None, context=None,
-                       chapter_context=None, bypass_graceful_stop=False):
+                       chapter_context=None, bypass_graceful_stop=False,
+                       before_send_callback=None):
     """Send API request with interrupt capability and optional timeout retry.
     Optional context parameter is passed through to the client to improve payload labeling.
 
@@ -10350,7 +10354,25 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             if 'context' in sig.parameters and context is not None:
                 send_params['context'] = context
             
-            result = client.send(**send_params)
+            tls_for_callback = None
+            if callable(before_send_callback):
+                try:
+                    if hasattr(client, '_get_thread_local_client'):
+                        tls_for_callback = client._get_thread_local_client()
+                        tls_for_callback.pre_api_call_callback = before_send_callback
+                    else:
+                        before_send_callback()
+                except Exception as cb_err:
+                    print(f"⚠️ Failed to register pre-send progress callback: {cb_err}")
+
+            try:
+                result = client.send(**send_params)
+            finally:
+                if tls_for_callback is not None:
+                    try:
+                        tls_for_callback.pre_api_call_callback = None
+                    except Exception:
+                        pass
 
             # If the caller has already timed out/cancelled, do not publish a stale result.
             if cancel_event.is_set():
@@ -15444,8 +15466,6 @@ def main(log_callback=None, stop_callback=None):
                 print(f"📖 Translating text content ({text_size} characters)")
                 # Determine output filename for tracking
                 fname = FileUtilities.create_chapter_filename(c, actual_num)
-                progress_manager.update(idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=c)
-                progress_manager.save()
                 
                 # REQUEST MERGING: If this is a parent chapter, merge content from child chapters
                 merge_info = None  # Will store info for response splitting
@@ -15453,13 +15473,6 @@ def main(log_callback=None, stop_callback=None):
                     group = merge_groups[idx]
                     if len(group) > 1:
                         print(f"\n🔗 MERGING {len(group)} chapters into single request...")
-                        
-                        # Mark all chapters in the group as in_progress
-                        for g_idx, g_chapter, g_actual_num, g_content_hash in group:
-                            if g_idx != idx:  # Parent already marked above
-                                g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                                progress_manager.update(g_idx, g_actual_num, g_content_hash, g_fname, status="in_progress", chapter_obj=g_chapter)
-                        progress_manager.save()
                         
                         # Build merged content with separators
                         chapters_data = []
@@ -15909,8 +15922,20 @@ def main(log_callback=None, stop_callback=None):
                 merge_group_len = len(merge_info['group']) if merge_info else None
                 merged_chapters = merge_info['expected_chapters'] if merge_info else None
 
+                def _mark_sequential_progress_on_send():
+                    if merge_info:
+                        for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                            g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                            progress_manager.update(g_idx, g_actual_num, g_content_hash, g_fname, status="in_progress", chapter_obj=g_chapter)
+                    else:
+                        progress_manager.update(idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=c)
+                    progress_manager.save()
+
                 result, finish_reason, raw_obj = translation_processor.translate_with_retry(
-                    msgs, chunk_html, c, chunk_idx, total_chunks, merge_group_len=merge_group_len, merged_chapters=merged_chapters
+                    msgs, chunk_html, c, chunk_idx, total_chunks,
+                    merge_group_len=merge_group_len,
+                    merged_chapters=merged_chapters,
+                    before_send_callback=_mark_sequential_progress_on_send,
                 )
 
                 # If this chunk was blocked/prohibited, stop remaining chunks and mark QA fail
@@ -16104,7 +16129,10 @@ def main(log_callback=None, stop_callback=None):
                                 config.MAX_OUTPUT_TOKENS = max(original_max, target_tokens)
                                 
                                 result_retry, finish_reason_retry, raw_obj_retry = translation_processor.translate_with_retry(
-                                    msgs, chunk_html, c, chunk_idx, total_chunks
+                                    msgs, chunk_html, c, chunk_idx, total_chunks,
+                                    merge_group_len=merge_group_len,
+                                    merged_chapters=merged_chapters,
+                                    before_send_callback=_mark_sequential_progress_on_send,
                                 )
                                 
                                 # Clear retry flags and restore original token limit
