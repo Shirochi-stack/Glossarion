@@ -1938,15 +1938,23 @@ class RetranslationMixin:
                 if isinstance(previous_entry, dict):
                     restored = dict(previous_entry)
                     restored_status = str(restored.get('status', previous_status) or previous_status).lower()
-                    if restored_status and restored_status not in ('in_progress', 'not_completed', 'not translated'):
+                    if restored_status and restored_status not in ('in_progress', 'not_completed', 'not translated', 'not_translated'):
                         restored.pop('previous_status', None)
                         restored.pop('previous_progress_entry', None)
                         return restored
-                if previous_status in ('qa_failed', 'failed', 'error', 'merged', 'completed'):
+                if previous_status in ('qa_failed', 'failed', 'error', 'pending', 'merged', 'completed'):
                     restored = dict(info)
                     restored['status'] = 'failed' if previous_status == 'error' else previous_status
                     restored.pop('previous_status', None)
                     restored.pop('previous_progress_entry', None)
+                    restored.pop('previous_status_unknown', None)
+                    return restored
+                if info.get('previous_status_unknown'):
+                    restored = dict(info)
+                    restored['status'] = 'failed'
+                    restored.pop('previous_status', None)
+                    restored.pop('previous_progress_entry', None)
+                    restored.pop('previous_status_unknown', None)
                     return restored
                 if previous_status in ('not_completed', 'not translated', 'not_translated'):
                     return None
@@ -1955,6 +1963,7 @@ class RetranslationMixin:
                     restored['status'] = 'failed'
                     restored.pop('previous_status', None)
                     restored.pop('previous_progress_entry', None)
+                    restored.pop('previous_status_unknown', None)
                     return restored
                 return None
             
@@ -3354,6 +3363,108 @@ class RetranslationMixin:
                 if ch.get('output_file') == target_out:
                     return key, ch
             return None
+
+        def _restore_regular_in_progress_entry(info):
+            if not isinstance(info, dict):
+                return None
+            previous_status = str(info.get('previous_status', '') or '').lower()
+            previous_entry = info.get('previous_progress_entry')
+            transient_statuses = {'in_progress', 'not_translated', 'not translated', 'not_completed'}
+            if isinstance(previous_entry, dict):
+                restored = dict(previous_entry)
+                restored_status = str(restored.get('status', previous_status) or previous_status).lower()
+                if restored_status and restored_status not in transient_statuses:
+                    restored.pop('previous_status', None)
+                    restored.pop('previous_progress_entry', None)
+                    return restored
+            if previous_status in ('qa_failed', 'failed', 'error', 'pending', 'merged', 'completed'):
+                restored = dict(info)
+                restored['status'] = 'failed' if previous_status == 'error' else previous_status
+                restored.pop('previous_status', None)
+                restored.pop('previous_progress_entry', None)
+                restored.pop('previous_status_unknown', None)
+                return restored
+            if info.get('previous_status_unknown'):
+                restored = dict(info)
+                restored['status'] = 'failed'
+                restored.pop('previous_status', None)
+                restored.pop('previous_progress_entry', None)
+                restored.pop('previous_status_unknown', None)
+                return restored
+            output_file = info.get('output_file')
+            output_exists = bool(output_file and os.path.exists(os.path.join(data['output_dir'], output_file)))
+            if previous_status in ('not_translated', 'not translated', 'not_completed', ''):
+                if previous_status and not output_exists:
+                    return None
+                if output_exists:
+                    restored = dict(info)
+                    restored['status'] = 'failed'
+                    restored.pop('previous_status', None)
+                    restored.pop('previous_progress_entry', None)
+                    restored.pop('previous_status_unknown', None)
+                    return restored
+            return None
+
+        def restore_in_progress_marks():
+            selected_items = data['listbox'].selectedItems()
+            if not selected_items:
+                self._styled_msgbox(QMessageBox.Warning, data.get('dialog', self), "No Selection", "Please select at least one chapter.")
+                return
+
+            selected_indices = [data['listbox'].row(item) for item in selected_items]
+            selected_chapters = [data['chapter_display_info'][i] for i in selected_indices]
+            in_progress_chapters = [ch for ch in selected_chapters if ch.get('status') == 'in_progress']
+
+            if not in_progress_chapters:
+                self._styled_msgbox(QMessageBox.Warning, data.get('dialog', self), "No In Progress Chapters",
+                                     "None of the selected chapters have 'in_progress' status.")
+                return
+
+            restored_count = 0
+            deleted_count = 0
+            failed_count = 0
+            progress_updated = False
+
+            for info in in_progress_chapters:
+                match = None
+                progress_key = info.get('progress_key')
+                if progress_key and progress_key in data['prog'].get("chapters", {}):
+                    match = (progress_key, data['prog']["chapters"][progress_key])
+                else:
+                    match = _find_progress_entry(info, data['prog'])
+
+                if not match:
+                    print(f"WARNING: Could not find in-progress entry for {info.get('num')} ({info.get('output_file')})")
+                    continue
+
+                key, entry = match
+                restored = _restore_regular_in_progress_entry(entry)
+                if restored:
+                    data['prog']["chapters"][key] = restored
+                    progress_updated = True
+                    if restored.get('status') == 'failed':
+                        failed_count += 1
+                    else:
+                        restored_count += 1
+                else:
+                    del data['prog']["chapters"][key]
+                    progress_updated = True
+                    deleted_count += 1
+
+            if progress_updated:
+                with open(data['progress_file'], 'w', encoding='utf-8') as f:
+                    json.dump(data['prog'], f, ensure_ascii=False, indent=2)
+                self._refresh_retranslation_data(data)
+
+            message_parts = []
+            if restored_count:
+                message_parts.append(f"restored {restored_count}")
+            if deleted_count:
+                message_parts.append(f"removed {deleted_count} not-translated placeholder(s)")
+            if failed_count:
+                message_parts.append(f"marked {failed_count} as failed")
+            message = "Successfully " + ", ".join(message_parts) + "." if message_parts else "No in-progress marks were changed."
+            self._styled_msgbox(QMessageBox.Information, data.get('dialog', self), "In Progress Restored", message)
         
         def remove_qa_failed_mark():
             selected_items = data['listbox'].selectedItems()
@@ -4030,6 +4141,10 @@ class RetranslationMixin:
             item = listbox.itemAt(pos)
             if not item:
                 return
+            if not item.isSelected():
+                listbox.clearSelection()
+                item.setSelected(True)
+                listbox.setCurrentItem(item)
             
             # IMPORTANT: Extract ALL data from the item BEFORE menu.exec() blocks.
             # The auto-refresh timer (2s) can rebuild the listbox and delete C++ objects
@@ -4102,6 +4217,16 @@ class RetranslationMixin:
                 act_insert_img = menu.addAction("🖼️ Insert Missing Image")
                 
             act_remove_qa = menu.addAction("🧹 Remove QA Failed Mark")
+            selected_infos = []
+            try:
+                for selected_item in listbox.selectedItems():
+                    wrapper = selected_item.data(Qt.UserRole) or {}
+                    selected_infos.append(wrapper.get('info', {}))
+            except RuntimeError:
+                selected_infos = [display_info]
+            act_restore_in_progress = None
+            if any((info or {}).get('status') == 'in_progress' for info in selected_infos):
+                act_restore_in_progress = menu.addAction("Restore In Progress Status")
             chosen = menu.exec(listbox.mapToGlobal(pos))
             if chosen == act_open:
                 _open_file_for_item(display_info)
@@ -4208,6 +4333,8 @@ class RetranslationMixin:
                     self._show_message('error', "Error", f"Failed to restore images: {e}")
                     import traceback
                     traceback.print_exc()
+            elif act_restore_in_progress and chosen == act_restore_in_progress:
+                restore_in_progress_marks()
             elif chosen == act_remove_qa:
                 remove_qa_failed_mark()
             elif act_notepad_qa and chosen == act_notepad_qa:

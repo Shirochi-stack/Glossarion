@@ -2067,6 +2067,51 @@ class ProgressManager:
                     os.remove(temp_file)
                 except:
                     pass
+
+    @staticmethod
+    def restore_in_progress_entry(info):
+        """Restore the entry that existed before a temporary in_progress status."""
+        if not isinstance(info, dict):
+            return None
+        previous_status = str(info.get("previous_status", "") or "").lower()
+        previous_entry = info.get("previous_progress_entry")
+        transient_statuses = {"in_progress", "not_translated", "not translated", "not_completed"}
+
+        if isinstance(previous_entry, dict):
+            restored = dict(previous_entry)
+            restored_status = str(restored.get("status", previous_status) or previous_status).lower()
+            if restored_status and restored_status not in transient_statuses:
+                restored.pop("previous_status", None)
+                restored.pop("previous_progress_entry", None)
+                return restored
+
+        if previous_status in ("qa_failed", "failed", "error", "pending", "merged", "completed"):
+            restored = dict(info)
+            restored["status"] = "failed" if previous_status == "error" else previous_status
+            restored.pop("previous_status", None)
+            restored.pop("previous_progress_entry", None)
+            restored.pop("previous_status_unknown", None)
+            return restored
+
+        if info.get("previous_status_unknown"):
+            restored = dict(info)
+            restored["status"] = "failed"
+            restored.pop("previous_status", None)
+            restored.pop("previous_progress_entry", None)
+            restored.pop("previous_status_unknown", None)
+            return restored
+
+        if previous_status in ("not_translated", "not translated", "not_completed", ""):
+            if previous_status:
+                return None
+            if info.get("output_file"):
+                restored = dict(info)
+                restored["status"] = "failed"
+                restored.pop("previous_status", None)
+                restored.pop("previous_progress_entry", None)
+                restored.pop("previous_status_unknown", None)
+                return restored
+        return None
     
     def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None, chapter_obj=None, merged_chapters=None, qa_issues_found=None):
         """Update progress for a chapter"""
@@ -2131,6 +2176,26 @@ class ProgressManager:
             chapter_info["tts_file"] = existing_info.get("tts_file")
         if existing_info.get("tts_at") is not None:
             chapter_info["tts_at"] = existing_info.get("tts_at")
+
+        if status == "in_progress":
+            previous_status = "not_translated"
+            previous_entry = None
+            if isinstance(existing_info, dict) and existing_info:
+                existing_status = str(existing_info.get("status", "not_translated") or "not_translated")
+                if existing_status.lower() == "in_progress":
+                    previous_status = str(existing_info.get("previous_status", "not_translated") or "not_translated")
+                    previous_entry = existing_info.get("previous_progress_entry")
+                    if not isinstance(previous_entry, dict):
+                        chapter_info["previous_status_unknown"] = True
+                else:
+                    previous_status = existing_status
+                    previous_entry = {
+                        k: v for k, v in existing_info.items()
+                        if k not in ("previous_status", "previous_progress_entry", "previous_status_unknown")
+                    }
+            chapter_info["previous_status"] = previous_status
+            if isinstance(previous_entry, dict) and previous_status.lower() not in ("not_translated", "not translated", "not_completed"):
+                chapter_info["previous_progress_entry"] = previous_entry
         
         # CRITICAL: Store original_basename for OPF->output mapping in GUI
         if chapter_obj:
@@ -2173,6 +2238,21 @@ class ProgressManager:
             pass
         
         self.prog["chapters"][chapter_key] = chapter_info
+
+    def restore_in_progress(self, actual_num, output_file=None, chapter_obj=None, content_hash=None):
+        """Clear a hard-stopped in_progress entry by restoring its previous status."""
+        chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
+        chapter_info = self.prog.get("chapters", {}).get(chapter_key)
+        if not isinstance(chapter_info, dict) or str(chapter_info.get("status", "")).lower() != "in_progress":
+            return False
+        restored = self.restore_in_progress_entry(chapter_info)
+        if restored:
+            self.prog["chapters"][chapter_key] = restored
+        else:
+            del self.prog["chapters"][chapter_key]
+            if chapter_key in self.prog.get("chapter_chunks", {}):
+                del self.prog["chapter_chunks"][chapter_key]
+        return True
 
     def update_refinement_status(self, idx, actual_num, content_hash, output_file, refinement_status, chapter_obj=None, error=None):
         chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
@@ -4484,6 +4564,11 @@ class TranslationProcessor:
                 
                 if "stopped by user" in error_msg:
                     print("❌ Translation stopped by user during API call")
+                    _restore_single_pass_glossary_in_progress(
+                        self.out_dir,
+                        chapter_num=actual_num,
+                        chapter_file=_single_pass_progress_chapter_file(c, locals().get("fname", "")),
+                    )
                     return None, None, None
                 
                 # Treat cancelled errors (from client being closed) as timeout
@@ -4491,6 +4576,11 @@ class TranslationProcessor:
                     # Check stop flag before retrying
                     if self.check_stop():
                         print("❌ Translation stopped by user during timeout retry")
+                        _restore_single_pass_glossary_in_progress(
+                            self.out_dir,
+                            chapter_num=actual_num,
+                            chapter_file=_single_pass_progress_chapter_file(c, locals().get("fname", "")),
+                        )
                         return None, None, None
                     
                     # During graceful stop, don't retry - skip this chunk
@@ -4534,6 +4624,11 @@ class TranslationProcessor:
                     # Check stop flag before retrying
                     if self.check_stop():
                         print("❌ Translation stopped by user during timeout retry")
+                        _restore_single_pass_glossary_in_progress(
+                            self.out_dir,
+                            chapter_num=actual_num,
+                            chapter_file=_single_pass_progress_chapter_file(c, locals().get("fname", "")),
+                        )
                         return None, None, None
                     
                     # During graceful stop, don't retry - skip this chunk
@@ -4560,6 +4655,11 @@ class TranslationProcessor:
                     # Check stop flag before retrying
                     if self.check_stop():
                         print("❌ Translation stopped by user during timeout retry")
+                        _restore_single_pass_glossary_in_progress(
+                            self.out_dir,
+                            chapter_num=actual_num,
+                            chapter_file=_single_pass_progress_chapter_file(c, locals().get("fname", "")),
+                        )
                         return None, None, None
                     
                     # During graceful stop, don't retry - skip
@@ -4588,6 +4688,11 @@ class TranslationProcessor:
                     for i in range(60):
                         if self.check_stop():
                             print("❌ Translation stopped during rate limit wait")
+                            _restore_single_pass_glossary_in_progress(
+                                self.out_dir,
+                                chapter_num=actual_num,
+                                chapter_file=_single_pass_progress_chapter_file(c, locals().get("fname", "")),
+                            )
                             return None, None, None
                         time.sleep(1)
                     continue
@@ -5172,6 +5277,11 @@ class BatchTranslationProcessor:
                             # Check stop flag before retrying
                             if local_stop_cb():
                                 print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
+                                _restore_single_pass_glossary_in_progress(
+                                    self.out_dir,
+                                    chapter_num=actual_num,
+                                    chapter_file=chapter_ref.get("chapter_file"),
+                                )
                                 return None, chunk_idx, None, False, "cancelled"
                             
                             # During graceful stop, don't retry - skip this chunk
@@ -5218,6 +5328,11 @@ class BatchTranslationProcessor:
                             # Check stop flag before retrying
                             if local_stop_cb():
                                 print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during timeout retry")
+                                _restore_single_pass_glossary_in_progress(
+                                    self.out_dir,
+                                    chapter_num=actual_num,
+                                    chapter_file=chapter_ref.get("chapter_file"),
+                                )
                                 return None, chunk_idx, None, False, "cancelled"
                             
                             # During graceful stop, don't retry - skip this chunk
@@ -5383,6 +5498,11 @@ class BatchTranslationProcessor:
                                 if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
                                     if local_stop_cb():
                                         print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Translation stopped by user during char-ratio retry")
+                                        _restore_single_pass_glossary_in_progress(
+                                            self.out_dir,
+                                            chapter_num=actual_num,
+                                            chapter_file=chapter_ref.get("chapter_file"),
+                                        )
                                         return None, chunk_idx, None, False, "cancelled"
 
                                     graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
@@ -7302,28 +7422,10 @@ def _single_pass_chapter_refs(output_dir, chapter_num=None, chapter_file=None, p
         {"chapter_file": chapter_file},
         os.getenv("CURRENT_CHAPTER_FILE", ""),
     )
+    idx = None
     actual = None
-    try:
-        if chapter_num is not None:
-            actual = int(chapter_num)
-    except (TypeError, ValueError):
-        actual = None
-    if actual is None and chapter_basename:
-        nums = re.findall(r"\d+", os.path.splitext(chapter_basename)[0])
-        if nums:
-            try:
-                actual = int(nums[-1])
-            except (TypeError, ValueError):
-                actual = None
 
-    idx = (actual - 1) if actual and actual > 0 else None
-    if chapter_basename and (idx is None or actual is None or actual <= 0):
-        spine_idx, spine_pos = _single_pass_spine_ref_for_file(output_dir, chapter_basename)
-        if spine_idx is not None:
-            idx = spine_idx
-            actual = spine_pos
-
-    if chapter_basename and idx is None and isinstance(progress, dict):
+    if chapter_basename and isinstance(progress, dict):
         target = os.path.splitext(os.path.basename(chapter_basename).lower())[0]
         chapters = progress.get("chapters", {})
         if isinstance(chapters, dict):
@@ -7345,7 +7447,78 @@ def _single_pass_chapter_refs(output_dir, chapter_num=None, chapter_file=None, p
                 if idx is not None:
                     break
 
+    if chapter_basename and idx is None:
+        spine_idx, spine_pos = _single_pass_spine_ref_for_file(output_dir, chapter_basename)
+        if spine_idx is not None:
+            idx = spine_idx
+            actual = spine_pos
+
+    if idx is None:
+        try:
+            if chapter_num is not None:
+                actual = int(chapter_num)
+        except (TypeError, ValueError):
+            actual = None
+        if actual is None and chapter_basename:
+            nums = re.findall(r"\d+", os.path.splitext(chapter_basename)[0])
+            if nums:
+                try:
+                    actual = int(nums[-1])
+                except (TypeError, ValueError):
+                    actual = None
+        idx = (actual - 1) if actual and actual > 0 else None
+
+    if idx is not None and actual is None:
+        actual = int(idx) + 1
+
     return idx, actual, chapter_basename
+
+def _single_pass_progress_lists_for_ref(progress, chapter_idx, chapter_basename):
+    completed = list(progress.get("completed", [])) if isinstance(progress, dict) else []
+    failed = list(progress.get("failed", [])) if isinstance(progress, dict) else []
+    merged = list(progress.get("merged_indices", [])) if isinstance(progress, dict) else []
+    if chapter_idx is None or not chapter_basename or not isinstance(progress, dict):
+        return completed, failed, merged
+
+    target_stem = os.path.splitext(os.path.basename(str(chapter_basename).lower()))[0]
+    existing = None
+    chapters = progress.get("chapters", {})
+    if isinstance(chapters, dict):
+        for key, info in chapters.items():
+            if not isinstance(info, dict):
+                continue
+            try:
+                entry_idx = int(info.get("chapter_index", key))
+            except (TypeError, ValueError):
+                continue
+            if entry_idx == int(chapter_idx):
+                existing = info
+                break
+    if not existing:
+        return completed, failed, merged
+
+    existing_name = ""
+    for fname_key in ("output_file", "chapter_file", "original_basename", "filename", "source_filename"):
+        value = existing.get(fname_key)
+        if value:
+            existing_name = str(value)
+            break
+    existing_stem = os.path.splitext(os.path.basename(existing_name.lower()))[0] if existing_name else ""
+    if existing_stem and existing_stem != target_stem:
+        def _without_ref(values):
+            kept = []
+            for idx_value in values:
+                try:
+                    if int(idx_value) == int(chapter_idx):
+                        continue
+                except (TypeError, ValueError):
+                    pass
+                kept.append(idx_value)
+            return kept
+        completed = _without_ref(completed)
+        failed = _without_ref(failed)
+        merged = _without_ref(merged)
+    return completed, failed, merged
 
 def _mark_single_pass_glossary_in_progress(output_dir, chapter_num=None, chapter_file=None):
     """Write a live in-progress row for Single Pass glossary progress."""
@@ -7372,15 +7545,67 @@ def _mark_single_pass_glossary_in_progress(output_dir, chapter_num=None, chapter
         )
         if chapter_basename:
             glossary_extractor._GLOSSARY_CHAPTER_FILENAMES[int(chapter_idx)] = chapter_basename
+        completed, failed, merged_indices = _single_pass_progress_lists_for_ref(progress, chapter_idx, chapter_basename)
         glossary_extractor.save_progress(
-            list(progress.get("completed", [])),
+            completed,
             glossary_extractor._load_glossary_file(json_path),
-            list(progress.get("merged_indices", [])),
-            failed=list(progress.get("failed", [])),
+            merged_indices,
+            failed=failed,
             in_progress=list(set(progress.get("in_progress", []) + [int(chapter_idx)])),
         )
     except Exception as e:
         print(f"⚠️ Single Pass Glossary: failed to mark in-progress: {e}")
+    finally:
+        try:
+            if original_progress_file is not None:
+                glossary_extractor.PROGRESS_FILE = original_progress_file
+            elif "glossary_extractor" in locals() and hasattr(glossary_extractor, "PROGRESS_FILE"):
+                delattr(glossary_extractor, "PROGRESS_FILE")
+            if original_output_file is not None and "glossary_extractor" in locals():
+                glossary_extractor._GLOSSARY_OUTPUT_FILE = original_output_file
+        except Exception:
+            pass
+
+def _restore_single_pass_glossary_in_progress(output_dir, chapter_num=None, chapter_file=None):
+    """Restore/remove a Single Pass glossary in-progress row after a hard stop."""
+    if not _single_pass_glossary_mode():
+        return
+    original_progress_file = None
+    original_output_file = None
+    try:
+        import extract_glossary_from_epub as glossary_extractor
+        _glossary_dir, json_path, _csv_path, progress_path = _single_pass_glossary_paths(output_dir)
+        original_progress_file = getattr(glossary_extractor, "PROGRESS_FILE", None)
+        original_output_file = getattr(glossary_extractor, "_GLOSSARY_OUTPUT_FILE", "")
+        glossary_extractor.PROGRESS_FILE = progress_path
+        glossary_extractor._GLOSSARY_OUTPUT_FILE = json_path
+        progress = glossary_extractor.load_progress()
+        chapter_idx, actual_num, chapter_basename = _single_pass_chapter_refs(output_dir, chapter_num, chapter_file, progress)
+        if chapter_idx is None:
+            return
+        if actual_num is not None:
+            glossary_extractor._GLOSSARY_CHAPTER_POSITIONS[int(chapter_idx)] = int(actual_num)
+            glossary_extractor._GLOSSARY_CHAPTER_NUMBERS[int(chapter_idx)] = int(actual_num)
+        if chapter_basename:
+            glossary_extractor._GLOSSARY_CHAPTER_FILENAMES[int(chapter_idx)] = chapter_basename
+        completed, failed, merged_indices = _single_pass_progress_lists_for_ref(progress, chapter_idx, chapter_basename)
+        in_progress = []
+        for idx_value in progress.get("in_progress", []):
+            try:
+                if int(idx_value) == int(chapter_idx):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            in_progress.append(idx_value)
+        glossary_extractor.save_progress(
+            completed,
+            glossary_extractor._load_glossary_file(json_path),
+            merged_indices,
+            failed=failed,
+            in_progress=in_progress,
+        )
+    except Exception as e:
+        print(f"⚠️ Single Pass Glossary: failed to restore in-progress: {e}")
     finally:
         try:
             if original_progress_file is not None:
@@ -7419,14 +7644,14 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
                 if chapter_basename:
                     glossary_extractor._GLOSSARY_CHAPTER_FILENAMES[int(chapter_idx)] = chapter_basename
 
-            completed = list(progress.get("completed", []))
+            completed, failed, merged_indices = _single_pass_progress_lists_for_ref(progress, chapter_idx, chapter_basename)
             if chapter_idx is not None and chapter_idx not in completed:
                 completed.append(chapter_idx)
                 glossary_extractor.save_progress(
                     completed,
                     glossary_extractor._load_glossary_file(json_path),
-                    list(progress.get("merged_indices", [])),
-                    failed=list(progress.get("failed", [])),
+                    merged_indices,
+                    failed=failed,
                 )
                 progress = glossary_extractor.load_progress()
 
@@ -7459,11 +7684,9 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
             combined = existing + progress_existing + json_existing + valid
             deduped = glossary_extractor.skip_duplicate_entries(combined, output_dir=glossary_dir)
 
-            completed = list(progress.get("completed", []))
+            completed, failed, merged_indices = _single_pass_progress_lists_for_ref(progress, chapter_idx, chapter_basename)
             if chapter_idx is not None and chapter_idx not in completed:
                 completed.append(chapter_idx)
-            merged_indices = list(progress.get("merged_indices", []))
-            failed = list(progress.get("failed", []))
 
             glossary_extractor.save_glossary_json(deduped, json_path)
             glossary_extractor.save_glossary_csv(deduped, json_path)
@@ -15008,7 +15231,9 @@ def main(log_callback=None, stop_callback=None):
                 if force_stop_active or (graceful_stop_active and image_processing_attempted and not image_translations):
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
                     print(f"❌ Image-only chapter {actual_num} stopped before completion; not marking as completed")
-                    progress_manager.update(idx, actual_num, content_hash, fname, status="failed", chapter_obj=c)
+                    if force_stop_active:
+                        progress_manager.restore_in_progress(actual_num, fname, chapter_obj=c, content_hash=content_hash)
+                        _restore_single_pass_glossary_in_progress(out, chapter_num=actual_num, chapter_file=_single_pass_progress_chapter_file(c, fname))
                     progress_manager.save()
                     break
                 
@@ -15086,7 +15311,8 @@ def main(log_callback=None, stop_callback=None):
                 # Step 3: Save with correct filename
                 if os.environ.get('TRANSLATION_CANCELLED') == '1' or (check_stop() and os.environ.get('GRACEFUL_STOP') != '1'):
                     print(f"❌ Image-only chapter {actual_num} stopped before saving; not marking as completed")
-                    progress_manager.update(idx, actual_num, content_hash, fname, status="failed", chapter_obj=c)
+                    progress_manager.restore_in_progress(actual_num, fname, chapter_obj=c, content_hash=content_hash)
+                    _restore_single_pass_glossary_in_progress(out, chapter_num=actual_num, chapter_file=_single_pass_progress_chapter_file(c, fname))
                     progress_manager.save()
                     break
 
@@ -15443,29 +15669,17 @@ def main(log_callback=None, stop_callback=None):
                         # No graceful stop - actually stop immediately
                         log_stop_once()
                         print(f"❌ Translation stopped during chapter {actual_num}, chunk {chunk_idx}")
-                        # Mark any in_progress chapter(s) as failed so the UI reflects the stop
+                        # Hard stop: restore the status that existed before this in-progress run.
                         if merge_info is not None:
                             for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
                                 g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                                progress_manager.update(
-                                    g_idx,
-                                    g_actual_num,
-                                    g_content_hash,
-                                    g_fname,
-                                    status="failed",
-                                    chapter_obj=g_chapter,
-                                )
+                                progress_manager.restore_in_progress(g_actual_num, g_fname, chapter_obj=g_chapter, content_hash=g_content_hash)
+                                _restore_single_pass_glossary_in_progress(out, chapter_num=g_actual_num, chapter_file=_single_pass_progress_chapter_file(g_chapter, g_fname))
                             progress_manager.save()
                         else:
                             fname = FileUtilities.create_chapter_filename(c, actual_num)
-                            progress_manager.update(
-                                idx,
-                                actual_num,
-                                content_hash,
-                                fname,
-                                status="failed",
-                                chapter_obj=c,
-                            )
+                            progress_manager.restore_in_progress(actual_num, fname, chapter_obj=c, content_hash=content_hash)
+                            _restore_single_pass_glossary_in_progress(out, chapter_num=actual_num, chapter_file=_single_pass_progress_chapter_file(c, fname))
                             progress_manager.save()
                         return
                 
@@ -15992,29 +16206,17 @@ def main(log_callback=None, stop_callback=None):
                     for i in range(full_seconds):
                         if os.environ.get('GRACEFUL_STOP') != '1' and check_stop():
                             print("❌ Translation stopped during delay")
-                            # Mark any in_progress chapter(s) as failed so the UI reflects the stop
+                            # Hard stop: restore the status that existed before this in-progress run.
                             if merge_info is not None:
                                 for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
                                     g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                                    progress_manager.update(
-                                        g_idx,
-                                        g_actual_num,
-                                        g_content_hash,
-                                        g_fname,
-                                        status="failed",
-                                        chapter_obj=g_chapter,
-                                    )
+                                    progress_manager.restore_in_progress(g_actual_num, g_fname, chapter_obj=g_chapter, content_hash=g_content_hash)
+                                    _restore_single_pass_glossary_in_progress(out, chapter_num=g_actual_num, chapter_file=_single_pass_progress_chapter_file(g_chapter, g_fname))
                                 progress_manager.save()
                             else:
                                 fname = FileUtilities.create_chapter_filename(c, actual_num)
-                                progress_manager.update(
-                                    idx,
-                                    actual_num,
-                                    content_hash,
-                                    fname,
-                                    status="failed",
-                                    chapter_obj=c,
-                                )
+                                progress_manager.restore_in_progress(actual_num, fname, chapter_obj=c, content_hash=content_hash)
+                                _restore_single_pass_glossary_in_progress(out, chapter_num=actual_num, chapter_file=_single_pass_progress_chapter_file(c, fname))
                                 progress_manager.save()
                             return
                         time.sleep(1)
@@ -16023,29 +16225,17 @@ def main(log_callback=None, stop_callback=None):
                     if fractional_second > 0:
                         if os.environ.get('GRACEFUL_STOP') != '1' and check_stop():
                             print("❌ Translation stopped during delay")
-                            # Mark any in_progress chapter(s) as failed so the UI reflects the stop
+                            # Hard stop: restore the status that existed before this in-progress run.
                             if merge_info is not None:
                                 for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
                                     g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                                    progress_manager.update(
-                                        g_idx,
-                                        g_actual_num,
-                                        g_content_hash,
-                                        g_fname,
-                                        status="failed",
-                                        chapter_obj=g_chapter,
-                                    )
+                                    progress_manager.restore_in_progress(g_actual_num, g_fname, chapter_obj=g_chapter, content_hash=g_content_hash)
+                                    _restore_single_pass_glossary_in_progress(out, chapter_num=g_actual_num, chapter_file=_single_pass_progress_chapter_file(g_chapter, g_fname))
                                 progress_manager.save()
                             else:
                                 fname = FileUtilities.create_chapter_filename(c, actual_num)
-                                progress_manager.update(
-                                    idx,
-                                    actual_num,
-                                    content_hash,
-                                    fname,
-                                    status="failed",
-                                    chapter_obj=c,
-                                )
+                                progress_manager.restore_in_progress(actual_num, fname, chapter_obj=c, content_hash=content_hash)
+                                _restore_single_pass_glossary_in_progress(out, chapter_num=actual_num, chapter_file=_single_pass_progress_chapter_file(c, fname))
                                 progress_manager.save()
                             return
                         time.sleep(fractional_second)
@@ -16053,29 +16243,17 @@ def main(log_callback=None, stop_callback=None):
             # During graceful stop, skip this check to save the completed API response
             if os.environ.get('GRACEFUL_STOP') != '1' and check_stop():
                 print(f"❌ Translation stopped before saving chapter {actual_num}")
-                # Mark any in_progress chapter(s) as failed so the UI reflects the stop
+                # Hard stop: restore the status that existed before this in-progress run.
                 if merge_info is not None:
                     for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
                         g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                        progress_manager.update(
-                            g_idx,
-                            g_actual_num,
-                            g_content_hash,
-                            g_fname,
-                            status="failed",
-                            chapter_obj=g_chapter,
-                        )
+                        progress_manager.restore_in_progress(g_actual_num, g_fname, chapter_obj=g_chapter, content_hash=g_content_hash)
+                        _restore_single_pass_glossary_in_progress(out, chapter_num=g_actual_num, chapter_file=_single_pass_progress_chapter_file(g_chapter, g_fname))
                     progress_manager.save()
                 else:
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
-                    progress_manager.update(
-                        idx,
-                        actual_num,
-                        content_hash,
-                        fname,
-                        status="failed",
-                        chapter_obj=c,
-                    )
+                    progress_manager.restore_in_progress(actual_num, fname, chapter_obj=c, content_hash=content_hash)
+                    _restore_single_pass_glossary_in_progress(out, chapter_num=actual_num, chapter_file=_single_pass_progress_chapter_file(c, fname))
                     progress_manager.save()
                 return
 

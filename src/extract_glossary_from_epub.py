@@ -1019,16 +1019,25 @@ def _glossary_restore_in_progress_entry(info):
     if isinstance(previous_entry, dict):
         restored = dict(previous_entry)
         restored_status = str(restored.get("status", previous_status) or previous_status).lower()
-        if restored_status and restored_status not in ("in_progress", "not_completed", "not translated"):
+        if restored_status and restored_status not in ("in_progress", "not_completed", "not translated", "not_translated"):
             restored.pop("previous_status", None)
             restored.pop("previous_progress_entry", None)
             return restored
 
-    if previous_status in ("qa_failed", "failed", "error", "merged", "completed"):
+    if previous_status in ("qa_failed", "failed", "error", "pending", "merged", "completed"):
         restored = dict(info)
         restored["status"] = "failed" if previous_status == "error" else previous_status
         restored.pop("previous_status", None)
         restored.pop("previous_progress_entry", None)
+        restored.pop("previous_status_unknown", None)
+        return restored
+
+    if info.get("previous_status_unknown"):
+        restored = dict(info)
+        restored["status"] = "failed"
+        restored.pop("previous_status", None)
+        restored.pop("previous_progress_entry", None)
+        restored.pop("previous_status_unknown", None)
         return restored
 
     if previous_status in ("not_completed", "not translated", "not_translated", ""):
@@ -1043,8 +1052,27 @@ def _glossary_restore_in_progress_entry(info):
             restored["status"] = "failed"
             restored.pop("previous_status", None)
             restored.pop("previous_progress_entry", None)
+            restored.pop("previous_status_unknown", None)
             return restored
     return None
+
+def _glossary_is_graceful_stop_active():
+    return os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+
+def _glossary_is_hard_stop_requested(stop_callback=None):
+    if os.environ.get('TRANSLATION_CANCELLED') == '1':
+        return True
+    if _glossary_is_graceful_stop_active():
+        return False
+    try:
+        if stop_callback and stop_callback():
+            return True
+    except Exception:
+        return False
+    try:
+        return bool(is_stop_requested())
+    except Exception:
+        return False
 
 def remove_honorifics(name):
     """Remove common honorifics from names"""
@@ -4772,6 +4800,8 @@ def main(log_callback=None, stop_callback=None):
     
     # Set up stop checking
     def check_stop():
+        if os.environ.get('TRANSLATION_CANCELLED') == '1':
+            return True
         # During graceful stop, ALWAYS return False to let current chapter complete fully
         # The main loop will check GRACEFUL_STOP at the START of each new chapter
         if os.environ.get('GRACEFUL_STOP') == '1':
@@ -5437,6 +5467,9 @@ def main(log_callback=None, stop_callback=None):
         in_progress[:] = [idx for idx in in_progress if idx not in remove]
         if before != len(in_progress):
             save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
+
+    def _restore_glossary_in_progress_for_hard_stop(indices):
+        _clear_glossary_in_progress(indices)
     
     # Request merging configuration (glossary-specific with fallback to global)
     request_merging_enabled = os.getenv('GLOSSARY_REQUEST_MERGING_ENABLED', os.getenv('REQUEST_MERGING_ENABLED', '0')) == '1'
@@ -5729,7 +5762,6 @@ def main(log_callback=None, stop_callback=None):
                                     # Suppress expected "graceful stop" pre-send cancellations.
                                     if isinstance(error, str) and _is_graceful_stop_skip_error(error):
                                         stopped_early = True
-                                        _clear_glossary_in_progress(unit_indices)
                                         return
                                     print(f"[Chapter {idx+1}] Error: {error}")
                                     _mark_glossary_failed(failed, idx, "API_ERROR")
@@ -5812,7 +5844,6 @@ def main(log_callback=None, stop_callback=None):
                                 # Suppress expected "graceful stop" pre-send cancellations.
                                 if (isinstance(error, str) and _is_graceful_stop_skip_error(error)) or result.get('graceful_stop_skip'):
                                     stopped_early = True
-                                    _clear_glossary_in_progress(unit_indices)
                                     return
                                 print(f"[Chapter {idx+1}] Error: {error}")
                                 _mark_glossary_failed(failed, idx, "API_ERROR")
@@ -5878,7 +5909,10 @@ def main(log_callback=None, stop_callback=None):
                         # Suppress expected "graceful stop" pre-send cancellations.
                         if _is_graceful_stop_skip_error(e):
                             stopped_early = True
-                            _clear_glossary_in_progress(unit_indices)
+                            return
+                        if _glossary_is_hard_stop_requested(stop_callback):
+                            stopped_early = True
+                            _restore_glossary_in_progress_for_hard_stop(unit_indices)
                             return
                         if is_merged_mode:
                             # For merged mode, mark all chapters in the unit as failed on error
@@ -5925,6 +5959,8 @@ def main(log_callback=None, stop_callback=None):
                     while active_futures or next_unit_idx < len(current_batch_units):
                         if check_stop():
                             stopped_early = True
+                            for active_unit in list(active_futures.values()):
+                                _restore_glossary_in_progress_for_hard_stop([u_idx for u_idx, _ in active_unit])
                             cancelled = cancel_all_futures(list(active_futures.keys()))
                             if cancelled > 0:
                                 print(f"✅ Cancelled {cancelled} pending API calls")
@@ -5992,6 +6028,8 @@ def main(log_callback=None, stop_callback=None):
                         if check_stop():
                             # print("🛑 Stop detected - cancelling all pending operations...")  # Redundant
                             stopped_early = True
+                            for pending_unit in list(futures.values()):
+                                _restore_glossary_in_progress_for_hard_stop([u_idx for u_idx, _ in pending_unit])
                             cancelled = cancel_all_futures(list(futures.keys()))
                             if cancelled > 0:
                                 print(f"✅ Cancelled {cancelled} pending API calls")
@@ -6398,6 +6436,7 @@ def main(log_callback=None, stop_callback=None):
                     for chunk_html, chunk_idx, total_chunks in chunks:
                         if check_stop():
                             print(f"❌ Glossary extraction stopped during chunk {chunk_idx} of chapter {idx+1}")
+                            _restore_glossary_in_progress_for_hard_stop(current_progress_indices)
                             return
                             
                         print(f"🔄 Processing chunk {chunk_idx}/{total_chunks} of Chapter {idx+1}")
@@ -6494,6 +6533,7 @@ def main(log_callback=None, stop_callback=None):
                         except UnifiedClientError as e:
                             if "stopped by user" in str(e).lower():
                                 print(f"❌ Glossary extraction stopped during chunk {chunk_idx} API call")
+                                _restore_glossary_in_progress_for_hard_stop(current_progress_indices)
                                 return
                             elif "timeout" in str(e).lower():
                                 print(f"⚠️ Chunk {chunk_idx} API call timed out: {e}")
@@ -6600,6 +6640,7 @@ def main(log_callback=None, stop_callback=None):
                             print(f"⏱️  Waiting {api_delay}s before next chunk...")
                             if not interruptible_sleep(api_delay, check_stop, 0.1):
                                 print(f"❌ Glossary extraction stopped during chunk delay")
+                                _restore_glossary_in_progress_for_hard_stop(current_progress_indices)
                                 return
                     
                     # Use the collected data from all chunks
@@ -6614,6 +6655,7 @@ def main(log_callback=None, stop_callback=None):
                     # Check for stop before API call
                     if check_stop():
                         print(f"❌ Glossary extraction stopped before API call for chapter {idx+1}")
+                        _restore_glossary_in_progress_for_hard_stop(current_progress_indices)
                         return
                 
                     # Build messages following the translation pattern for _raw_content_object handling
@@ -6660,6 +6702,7 @@ def main(log_callback=None, stop_callback=None):
                     except UnifiedClientError as e:
                         if "stopped by user" in str(e).lower():
                             print(f"❌ Glossary extraction stopped during API call for chapter {idx+1}")
+                            _restore_glossary_in_progress_for_hard_stop(current_progress_indices)
                             return
                         elif "timeout" in str(e).lower():
                             print(f"⚠️ API call timed out for chapter {idx+1}: {e}")
@@ -6754,6 +6797,7 @@ def main(log_callback=None, stop_callback=None):
                     for eidx, entry in enumerate(data, start=1):
                         if check_stop():
                             print(f"❌ Glossary extraction stopped during entry processing for chapter {idx+1}")
+                            _restore_glossary_in_progress_for_hard_stop(current_progress_indices)
                             return
                             
                         elapsed = time.time() - start
@@ -6879,6 +6923,10 @@ def main(log_callback=None, stop_callback=None):
                     return
 
             except Exception as e:
+                if _glossary_is_hard_stop_requested(stop_callback):
+                    _restore_glossary_in_progress_for_hard_stop(locals().get('current_progress_indices', [idx]))
+                    print(f"❌ Glossary extraction stopped after error in chapter {idx+1}")
+                    return
                 print(f"Error at chapter {idx+1}: {e}")
                 import traceback
                 print(f"Full traceback: {traceback.format_exc()}")
@@ -7046,11 +7094,13 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                     if str(existing_info.get("status", "")).lower() == "in_progress":
                         previous_status = str(existing_info.get("previous_status", "not_completed") or "not_completed")
                         previous_entry = existing_info.get("previous_progress_entry")
+                        if not isinstance(previous_entry, dict):
+                            chapter_info["previous_status_unknown"] = True
                     else:
                         previous_status = str(existing_info.get("status", "not_completed") or "not_completed")
                         previous_entry = {
                             k: v for k, v in existing_info.items()
-                            if k not in ("previous_status", "previous_progress_entry")
+                            if k not in ("previous_status", "previous_progress_entry", "previous_status_unknown")
                         }
                 chapter_info["previous_status"] = previous_status
                 if isinstance(previous_entry, dict) and previous_status.lower() not in ("not_completed", "not translated", "not_translated"):
@@ -7060,11 +7110,15 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         for idx, existing_info in existing_chapters_by_idx.items():
             if idx in done_set or idx in in_progress_set:
                 continue
-            if not isinstance(existing_info, dict) or str(existing_info.get("status", "")).lower() != "in_progress":
+            if not isinstance(existing_info, dict):
                 continue
-            restored = _glossary_restore_in_progress_entry(existing_info)
-            if restored:
-                chapters[_glossary_chapter_key(idx)] = restored
+            existing_status = str(existing_info.get("status", "")).lower()
+            if existing_status == "in_progress":
+                restored = _glossary_restore_in_progress_entry(existing_info)
+                if restored:
+                    chapters[_glossary_chapter_key(idx)] = restored
+            elif existing_status in ("qa_failed", "failed", "error", "pending", "merged", "completed"):
+                chapters[_glossary_chapter_key(idx)] = existing_info
 
         progress_data = {
             "book_title_present": bool(BOOK_TITLE_PRESENT),
