@@ -2070,8 +2070,31 @@ class ImageTranslator:
                 print(f"   ⚠️ Vision Single Pass Glossary persistence skipped: {e}")
         if self.remove_ai_artifacts != "off":
             translated = self._clean_translation_response(translated)
+        translated = self._apply_extraction_output_format(translated)
         translated = self._sanitize_unicode_characters(translated)
         return translated.strip() or None
+
+    def _apply_extraction_output_format(self, translated_text):
+        """Apply the same markdown-to-HTML post-processing used by text translation."""
+        extraction_method = os.getenv("TEXT_EXTRACTION_METHOD", os.getenv("EXTRACTION_MODE", "standard")).strip().lower()
+        if extraction_method not in ("enhanced", "html2text", "markdown"):
+            return translated_text
+        if not translated_text or not str(translated_text).strip():
+            return translated_text
+        try:
+            from TransateKRtoEN import convert_enhanced_text_to_html
+            print("   🔄 Converting Vision OCR translated markdown back to HTML...")
+            return convert_enhanced_text_to_html(
+                translated_text,
+                {
+                    "enhanced_extraction": True,
+                    "preserve_structure": True,
+                    "markdown_provenance": {},
+                },
+            )
+        except Exception as e:
+            print(f"   ⚠️ Vision OCR markdown-to-HTML conversion skipped: {e}")
+            return translated_text
 
     def _extract_context_header_text(self, context):
         if not context:
