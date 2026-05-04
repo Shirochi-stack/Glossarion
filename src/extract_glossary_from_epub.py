@@ -881,6 +881,7 @@ _GLOSSARY_CHAPTER_POSITIONS = {}
 _GLOSSARY_CHAPTER_NUMBERS = {}
 _GLOSSARY_CHAPTER_FILENAMES = {}
 _GLOSSARY_TOTAL_CHAPTERS = 0
+_GLOSSARY_OUTPUT_FILE = ""
 
 def _unique_int_list(values):
     """Return ints in first-seen order, ignoring values that cannot be parsed."""
@@ -923,6 +924,14 @@ def _glossary_chapter_key(idx: int) -> str:
         return f"{actual_num}_{base}"
     return str(actual_num)
 
+def _glossary_chapter_output_file(idx: int) -> str:
+    """Return the stable filename anchor used by the GUI progress manager."""
+    try:
+        idx = int(idx)
+    except (TypeError, ValueError):
+        return ""
+    return os.path.basename(str(_GLOSSARY_CHAPTER_FILENAMES.get(idx, "") or ""))
+
 def _normalize_glossary_qa_issues(value=None, chapters=None):
     """Normalize glossary QA issue storage to {chapter_index: [issue, ...]}."""
     normalized = {}
@@ -957,6 +966,19 @@ def _normalize_glossary_qa_issues(value=None, chapters=None):
             _add(idx, issues)
 
     return normalized
+
+def _glossary_progress_entry_index(info, key=None):
+    """Return the internal zero-based chapter index stored in a progress entry."""
+    if isinstance(info, dict):
+        for idx_key in ("chapter_index", "idx", "index"):
+            try:
+                return int(info.get(idx_key))
+            except (TypeError, ValueError):
+                pass
+    try:
+        return int(key)
+    except (TypeError, ValueError):
+        return None
 
 def _mark_glossary_failed(failed, idx, issues=None):
     """Mark a glossary chapter failed and optionally attach QA-style issue codes."""
@@ -2194,21 +2216,45 @@ def load_progress() -> Dict:
                 if not isinstance(data, dict):
                     print(f"[Warning] Progress file has invalid structure, resetting...")
                     return {"completed": [], "glossary": []}
-                # Ensure all required keys exist
-                if "completed" not in data:
-                    data["completed"] = []
+                chapters = data.get("chapters", {})
+                if not isinstance(chapters, dict):
+                    chapters = {}
+                    data["chapters"] = chapters
                 # Glossary field is deprecated but may exist in old progress files
                 # We ignore it now since glossary is loaded from output file instead
                 if "glossary" in data:
                     # Remove old glossary field to save space (will be ignored anyway)
                     del data["glossary"]
-                if "merged_indices" not in data:
-                    data["merged_indices"] = []  # Track which chapters were merged into others
-                if "failed" not in data:
-                    data["failed"] = []  # Track chapters that had errors (will be retried)
-                data["completed"] = _unique_int_list(data.get("completed", []))
-                data["failed"] = _unique_int_list(data.get("failed", []))
-                data["merged_indices"] = _unique_int_list(data.get("merged_indices", []))
+
+                completed_from_entries = []
+                failed_from_entries = []
+                merged_from_entries = []
+                for chapter_key, info in chapters.items():
+                    if not isinstance(info, dict):
+                        continue
+                    idx = _glossary_progress_entry_index(info, chapter_key)
+                    if idx is None:
+                        continue
+                    status = str(info.get("status", "")).lower()
+                    if status in ("failed", "qa_failed", "error"):
+                        failed_from_entries.append(idx)
+                    elif status == "merged":
+                        merged_from_entries.append(idx)
+                        completed_from_entries.append(idx)
+                    elif status == "completed":
+                        completed_from_entries.append(idx)
+
+                if completed_from_entries or failed_from_entries or merged_from_entries:
+                    data["completed"] = _unique_int_list(completed_from_entries)
+                    data["failed"] = _unique_int_list(failed_from_entries)
+                    data["merged_indices"] = _unique_int_list(merged_from_entries)
+                else:
+                    # Backward compatibility for old progress files that only
+                    # had top-level arrays.
+                    data["completed"] = _unique_int_list(data.get("completed", []))
+                    data["failed"] = _unique_int_list(data.get("failed", []))
+                    data["merged_indices"] = _unique_int_list(data.get("merged_indices", []))
+
                 failed_set = set(data["failed"])
                 if failed_set:
                     data["completed"] = [idx for idx in data["completed"] if idx not in failed_set]
@@ -4763,11 +4809,12 @@ def main(log_callback=None, stop_callback=None):
     os.makedirs(glossary_dir, exist_ok=True)
 
     # override the module‐level PROGRESS_FILE to include epub name
-    global PROGRESS_FILE
+    global PROGRESS_FILE, _GLOSSARY_OUTPUT_FILE
     PROGRESS_FILE = os.path.join(
         glossary_dir,
         f"{file_base}_glossary_progress.json"
     )
+    _GLOSSARY_OUTPUT_FILE = os.path.join(glossary_dir, os.path.basename(args.output))
 
     config = load_config(args.config)
     
@@ -6730,7 +6777,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         for idx in sorted(set(completed_clean) | failed_set | merged_set):
             actual_num = _glossary_chapter_actual_num(idx)
             chapter_key = _glossary_chapter_key(idx)
-            chapter_file = _GLOSSARY_CHAPTER_FILENAMES.get(idx, "")
+            chapter_file = _glossary_chapter_output_file(idx)
             issue_list = qa_issues_clean.get(idx, [])
             if idx in failed_set:
                 status = "qa_failed" if issue_list else "failed"
@@ -6749,6 +6796,9 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             if chapter_file:
                 chapter_info["original_basename"] = chapter_file
                 chapter_info["chapter_file"] = chapter_file
+                # Match TransateKRtoEN.py's progress shape: every chapter gets
+                # a stable filename anchor so OPF offsets do not shift rows.
+                chapter_info["output_file"] = chapter_file
             if issue_list:
                 chapter_info["qa_issues"] = True
                 chapter_info["qa_timestamp"] = time.time()
@@ -6756,8 +6806,6 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             chapters[chapter_key] = chapter_info
 
         progress_data = {
-            "completed": completed_clean,
-            "completed_chapter_nums": [_glossary_chapter_actual_num(idx) for idx in completed_clean],
             "book_title_present": bool(BOOK_TITLE_PRESENT),
             # Use value from entry if present, otherwise fallback to global translated title
             "book_title": BOOK_TITLE_VALUE if BOOK_TITLE_PRESENT else BOOK_TITLE_TRANSLATED,
@@ -6766,21 +6814,13 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             "chapter_numbers": {str(k): v for k, v in sorted((_GLOSSARY_CHAPTER_NUMBERS or {}).items())},
             "chapter_filenames": {str(k): v for k, v in sorted((_GLOSSARY_CHAPTER_FILENAMES or {}).items())},
             "chapter_count": _GLOSSARY_TOTAL_CHAPTERS,
+            "glossary_output_file": _GLOSSARY_OUTPUT_FILE,
             "progress_schema_version": "2.0",
             "indexing": "chapter_index_zero_based",
             "qa_issues_found": {str(idx): issues for idx, issues in sorted(qa_issues_clean.items())},
             # Glossary is saved separately to output files, not in progress
             # This prevents the progress file from overwriting manual edits
         }
-        
-        # Add merged_indices if provided
-        if merged_indices is not None:
-            progress_data["merged_indices"] = merged_clean
-        
-        # Add failed chapters list
-        if failed is not None:
-            progress_data["failed"] = failed_clean
-            progress_data["failed_chapter_nums"] = [_glossary_chapter_actual_num(idx) for idx in failed_clean]
         
         try:
             # Use atomic write with proper temp file handling

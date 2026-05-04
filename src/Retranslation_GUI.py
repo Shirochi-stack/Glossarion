@@ -1725,7 +1725,7 @@ class RetranslationMixin:
                 if not isinstance(info, dict):
                     info = {}
 
-                for fname_key in ('original_basename', 'chapter_file', 'source_filename', 'filename'):
+                for fname_key in ('output_file', 'original_basename', 'chapter_file', 'source_filename', 'filename'):
                     fname = os.path.basename(str(info.get(fname_key, "") or ""))
                     if not fname:
                         continue
