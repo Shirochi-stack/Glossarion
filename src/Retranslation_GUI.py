@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy, QMenu)
-from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl
+from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel
 from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices
 import xml.etree.ElementTree as ET
 import zipfile
@@ -2219,9 +2219,12 @@ class RetranslationMixin:
                     indices = [i for i in range(lb.count()) if lb.item(i).data(Qt.UserRole) in target_statuses]
                     if not indices:
                         return
+                    selected_rows = [lb.row(item) for item in lb.selectedItems()]
                     current = lb.currentRow()
+                    if selected_rows and current not in selected_rows:
+                        current = max(selected_rows)
                     nxt = next((i for i in indices if i > current), indices[0])
-                    lb.setCurrentRow(nxt)
+                    lb.setCurrentRow(nxt, QItemSelectionModel.ClearAndSelect)
                     lb.scrollToItem(lb.item(nxt), QListWidget.PositionAtCenter)
                 return _handler
             
@@ -2983,9 +2986,12 @@ class RetranslationMixin:
                         indices.append(i)
                 if not indices:
                     return
+                selected_rows = [lb.row(item) for item in lb.selectedItems()]
                 current = lb.currentRow()
+                if selected_rows and current not in selected_rows:
+                    current = max(selected_rows)
                 nxt = next((i for i in indices if i > current), indices[0])
-                lb.setCurrentRow(nxt)
+                lb.setCurrentRow(nxt, QItemSelectionModel.ClearAndSelect)
                 lb.scrollToItem(lb.item(nxt), QListWidget.PositionAtCenter)
             return _handler
 
