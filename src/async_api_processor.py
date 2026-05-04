@@ -3351,7 +3351,7 @@ class AsyncProcessingDialog:
         env_vars['IMAGE_CHUNK_HEIGHT'] = _val(self.gui.image_chunk_height_var, 0)
         env_vars['IMAGE_CHUNK_OVERLAP_PERCENT'] = _val(getattr(self.gui, 'image_chunk_overlap_var', None), 3)
         env_vars['IMAGE_CHUNK_MIN_OVERLAP_PIXELS'] = _val(getattr(self.gui, 'image_chunk_min_overlap_pixels_var', None), 80)
-        env_vars['IMAGE_SMART_CHUNKING'] = "1" if _val(getattr(self.gui, 'image_smart_chunking_var', None), False) else "0"
+        env_vars['IMAGE_SMART_CHUNKING'] = "1" if _val(getattr(self.gui, 'image_smart_chunking_var', None), True) else "0"
         env_vars['VISION_OCR_FUZZY_CHUNK_DEDUPE'] = "1" if _val(getattr(self.gui, 'vision_ocr_fuzzy_chunk_dedupe_var', None), False) else "0"
         env_vars['HIDE_IMAGE_TRANSLATION_LABEL'] = "1" if _val(self.gui.hide_image_translation_label_var, False) else "0"
         

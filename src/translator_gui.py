@@ -1777,7 +1777,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             _min_overlap_px = 80
         self.image_chunk_min_overlap_pixels_var = str(_min_overlap_px)
         self.vision_ocr_fuzzy_chunk_dedupe_var = self.config.get('vision_ocr_fuzzy_chunk_dedupe', False)
-        self.image_smart_chunking_var = self.config.get('image_smart_chunking', False)
+        self.image_smart_chunking_var = self.config.get('image_smart_chunking', True)
 
         # Glossary-related variables (existing)
         self.append_glossary_var = self.config.get('append_glossary', False)
@@ -13924,7 +13924,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'IMAGE_CHUNK_HEIGHT': str(self.image_chunk_height_var),
             'IMAGE_CHUNK_OVERLAP_PERCENT': str(getattr(self, 'image_chunk_overlap_var', '3')),
             'IMAGE_CHUNK_MIN_OVERLAP_PIXELS': str(getattr(self, 'image_chunk_min_overlap_pixels_var', '80')),
-            'IMAGE_SMART_CHUNKING': '1' if getattr(self, 'image_smart_chunking_var', False) else '0',
+            'IMAGE_SMART_CHUNKING': '1' if getattr(self, 'image_smart_chunking_var', True) else '0',
             'VISION_OCR_FUZZY_CHUNK_DEDUPE': '1' if getattr(self, 'vision_ocr_fuzzy_chunk_dedupe_var', False) else '0',
             'HIDE_IMAGE_TRANSLATION_LABEL': "1" if self.hide_image_translation_label_var else "0",
             'RETRY_TIMEOUT': "1" if getattr(self, 'retry_timeout_var', self.config.get('retry_timeout', False)) else "0",
@@ -14083,7 +14083,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SAVE_COMPRESSED_IMAGES': "1" if self.config.get('save_compressed_images', False) else "0",
             'IMAGE_CHUNK_OVERLAP_PERCENT': str(getattr(self, 'image_chunk_overlap_var', '3')),
             'IMAGE_CHUNK_MIN_OVERLAP_PIXELS': str(getattr(self, 'image_chunk_min_overlap_pixels_var', '80')),
-            'IMAGE_SMART_CHUNKING': '1' if getattr(self, 'image_smart_chunking_var', False) else '0',
+            'IMAGE_SMART_CHUNKING': '1' if getattr(self, 'image_smart_chunking_var', True) else '0',
             'VISION_OCR_FUZZY_CHUNK_DEDUPE': '1' if getattr(self, 'vision_ocr_fuzzy_chunk_dedupe_var', False) else '0',
 
 
@@ -21762,7 +21762,7 @@ Important rules:
                 ('compression_factor', ['compression_factor_var'], 3.0, float),
                 ('image_chunk_overlap', ['image_chunk_overlap_var'], 3.0, lambda v: safe_float(v, 3.0)),
                 ('image_chunk_min_overlap_pixels', ['image_chunk_min_overlap_pixels_var'], 80, lambda v: max(80, safe_int(v, 80))),
-                ('image_smart_chunking', ['image_smart_chunking_var'], False, bool),
+                ('image_smart_chunking', ['image_smart_chunking_var'], True, bool),
                 ('vision_ocr_fuzzy_chunk_dedupe', ['vision_ocr_fuzzy_chunk_dedupe_var'], False, bool),
 
                 # Batching
@@ -22890,7 +22890,7 @@ Important rules:
                 ('GLOSSARY_API_KEYS', _json.dumps(self.config.get('glossary_keys', []))),
                 ('IMAGE_CHUNK_OVERLAP_PERCENT', str(getattr(self, 'image_chunk_overlap_var', '3'))),
                 ('IMAGE_CHUNK_MIN_OVERLAP_PIXELS', str(getattr(self, 'image_chunk_min_overlap_pixels_var', '80'))),
-                ('IMAGE_SMART_CHUNKING', '1' if getattr(self, 'image_smart_chunking_var', False) else '0'),
+                ('IMAGE_SMART_CHUNKING', '1' if getattr(self, 'image_smart_chunking_var', True) else '0'),
                 ('VISION_OCR_FUZZY_CHUNK_DEDUPE', '1' if getattr(self, 'vision_ocr_fuzzy_chunk_dedupe_var', False) else '0'),
 
                 # Metadata and batch header settings

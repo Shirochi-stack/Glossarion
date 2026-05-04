@@ -2587,7 +2587,7 @@ class ImageTranslator:
             return 100
 
     def _smart_image_chunking_enabled(self) -> bool:
-        return os.getenv("IMAGE_SMART_CHUNKING", "0").strip().lower() in ("1", "true", "yes", "on")
+        return os.getenv("IMAGE_SMART_CHUNKING", "1").strip().lower() in ("1", "true", "yes", "on")
 
     def _smart_row_foreground_counts(self, img) -> List[int]:
         """Count likely foreground/text pixels per row, alpha-aware when possible."""
@@ -2765,7 +2765,7 @@ class ImageTranslator:
             "image_chunk_height": str(os.getenv("IMAGE_CHUNK_HEIGHT", str(self.chunk_height))),
             "image_chunk_overlap_percent": str(os.getenv("IMAGE_CHUNK_OVERLAP_PERCENT", "3")),
             "image_chunk_min_overlap_pixels": str(os.getenv("IMAGE_CHUNK_MIN_OVERLAP_PIXELS", "80")),
-            "image_smart_chunking": str(os.getenv("IMAGE_SMART_CHUNKING", "0")),
+            "image_smart_chunking": str(os.getenv("IMAGE_SMART_CHUNKING", "1")),
             "image_smart_chunk_min_height": str(os.getenv("IMAGE_SMART_CHUNK_MIN_HEIGHT", "600")),
             "image_smart_chunk_max_foreground_ratio": str(os.getenv("IMAGE_SMART_CHUNK_MAX_FOREGROUND_RATIO", "0.01")),
             "image_smart_chunk_min_gap_rows": str(os.getenv("IMAGE_SMART_CHUNK_MIN_GAP_ROWS", "12")),
