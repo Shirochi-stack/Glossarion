@@ -2017,6 +2017,13 @@ class ProgressManager:
     def save(self):
         """Save progress to file with retry logic for Windows file locks"""
         try:
+            if (
+                os.environ.get("TRANSLATION_CANCELLED") == "1"
+                and os.environ.get("GRACEFUL_STOP") != "1"
+                and os.environ.get("GRACEFUL_STOP_COMPLETED") != "1"
+            ):
+                self.restore_all_in_progress_for_hard_stop()
+
             self.prog["completed_list"] = []
             for chapter_key, chapter_info in self.prog.get("chapters", {}).items():
                 if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
@@ -2325,10 +2332,31 @@ class ProgressManager:
         if restored:
             self.prog["chapters"][chapter_key] = restored
         else:
-            del self.prog["chapters"][chapter_key]
-            if chapter_key in self.prog.get("chapter_chunks", {}):
-                del self.prog["chapter_chunks"][chapter_key]
+            failed = self.failed_from_in_progress_entry(chapter_info)
+            if failed:
+                self.prog["chapters"][chapter_key] = failed
         return True
+
+    def restore_all_in_progress_for_hard_stop(self):
+        """Resolve every in-progress row on a hard stop so stale rows cannot survive."""
+        chapters = self.prog.get("chapters", {})
+        if not isinstance(chapters, dict):
+            return 0
+        changed = 0
+        for chapter_key, chapter_info in list(chapters.items()):
+            if not isinstance(chapter_info, dict):
+                continue
+            if str(chapter_info.get("status", "")).lower() != "in_progress":
+                continue
+            restored = self.restore_in_progress_entry(chapter_info)
+            if restored:
+                chapters[chapter_key] = restored
+            else:
+                failed = self.failed_from_in_progress_entry(chapter_info)
+                if failed:
+                    chapters[chapter_key] = failed
+            changed += 1
+        return changed
 
     def update_refinement_status(self, idx, actual_num, content_hash, output_file, refinement_status, chapter_obj=None, error=None):
         chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)

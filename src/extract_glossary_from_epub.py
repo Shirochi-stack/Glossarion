@@ -1129,6 +1129,9 @@ def _glossary_disk_entry_is_still_in_progress(idx):
 def _glossary_is_graceful_stop_active():
     return os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
 
+def _glossary_is_hard_stop_env_active():
+    return os.environ.get('TRANSLATION_CANCELLED') == '1' and not _glossary_is_graceful_stop_active()
+
 def _glossary_is_hard_stop_requested(stop_callback=None):
     if os.environ.get('TRANSLATION_CANCELLED') == '1':
         return True
@@ -5545,32 +5548,13 @@ def main(log_callback=None, stop_callback=None):
             save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
 
     def _restore_glossary_in_progress_for_hard_stop(indices):
-        normal_restore = []
         forced_failed = []
         disk_in_progress = _glossary_disk_in_progress_snapshot()
         if disk_in_progress is None:
             forced_failed = _unique_int_list(list(completed) + list(merged_indices) + list(in_progress) + list(indices))
         else:
-            restore_indices = _unique_int_list(indices)
-
-            def _classify_restore_idx(_idx):
-                try:
-                    _idx = int(_idx)
-                except (TypeError, ValueError):
-                    return None, None
-                return _idx, (_idx in disk_in_progress)
-
-            worker_count = min(32, max(1, len(restore_indices)))
-            with ThreadPoolExecutor(max_workers=worker_count) as restore_pool:
-                classified = list(restore_pool.map(_classify_restore_idx, restore_indices))
-
-            for _idx, is_still_in_progress in classified:
-                if _idx is None:
-                    continue
-                if is_still_in_progress:
-                    normal_restore.append(_idx)
-                else:
-                    forced_failed.append(_idx)
+            restore_indices = set(_unique_int_list(list(in_progress) + list(indices)))
+            in_progress[:] = [idx for idx in in_progress if idx not in restore_indices]
 
         if forced_failed:
             for _idx in forced_failed:
@@ -5582,9 +5566,8 @@ def main(log_callback=None, stop_callback=None):
                     in_progress.remove(_idx)
                 _mark_glossary_failed(failed, _idx)
             save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
-
-        if normal_restore:
-            _clear_glossary_in_progress(normal_restore)
+        else:
+            save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
     
     # Request merging configuration (glossary-specific with fallback to global)
     request_merging_enabled = os.getenv('GLOSSARY_REQUEST_MERGING_ENABLED', os.getenv('REQUEST_MERGING_ENABLED', '0')) == '1'
@@ -7210,6 +7193,39 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         in_progress_clean = [idx for idx in in_progress_clean if idx not in done_set]
         if manual_removed_indices:
             in_progress_clean = [idx for idx in in_progress_clean if idx not in manual_removed_set]
+
+        hard_stop_restored_entries = {}
+        hard_stop_failed_indices = set()
+        if _glossary_is_hard_stop_env_active():
+            hard_stop_indices = set(in_progress_clean)
+            for existing_idx, existing_info in existing_chapters_by_idx.items():
+                if isinstance(existing_info, dict) and str(existing_info.get("status", "")).lower() == "in_progress":
+                    hard_stop_indices.add(existing_idx)
+            hard_stop_indices -= manual_removed_set
+            for stop_idx in sorted(hard_stop_indices):
+                existing_info = existing_chapters_by_idx.get(stop_idx)
+                restored = _glossary_restore_in_progress_entry(existing_info) if isinstance(existing_info, dict) else None
+                if restored:
+                    hard_stop_restored_entries[stop_idx] = restored
+                else:
+                    hard_stop_failed_indices.add(stop_idx)
+            if hard_stop_failed_indices:
+                failed_clean = _unique_int_list(failed_clean + sorted(hard_stop_failed_indices))
+                failed_set = set(failed_clean)
+                if failed is not None:
+                    failed[:] = failed_clean
+            if hard_stop_indices:
+                completed_clean = [idx for idx in completed_clean if idx not in hard_stop_indices]
+                merged_clean = [idx for idx in merged_clean if idx not in hard_stop_indices]
+                in_progress_clean = [idx for idx in in_progress_clean if idx not in hard_stop_indices]
+                if completed is not None:
+                    completed[:] = completed_clean
+                if merged_indices is not None:
+                    merged_indices[:] = merged_clean
+                completed_set = set(completed_clean)
+                merged_set = set(merged_clean)
+                done_set = completed_set | failed_set | merged_set
+
         in_progress_set = set(in_progress_clean)
 
         chapters = {}
@@ -7280,7 +7296,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 continue
             existing_status = str(existing_info.get("status", "")).lower()
             if existing_status == "in_progress":
-                restored = _glossary_restore_in_progress_entry(existing_info)
+                restored = hard_stop_restored_entries.get(idx) or _glossary_restore_in_progress_entry(existing_info)
                 if restored:
                     chapters[_glossary_chapter_key(idx)] = restored
             elif existing_status in ("qa_failed", "failed", "error", "pending", "merged", "completed"):
