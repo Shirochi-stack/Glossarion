@@ -8188,13 +8188,36 @@ def _process_chapter_images_vision_ocr_combined(
     """OCR every image in an image-only HTML page, then translate the combined OCR once."""
     print(f"   Vision OCR page mode: OCRing {len(images)} images first, then translating combined OCR once")
 
+    def _force_stop_requested() -> bool:
+        if os.environ.get('TRANSLATION_CANCELLED') == '1':
+            return True
+        if os.environ.get('GRACEFUL_STOP') == '1':
+            return False
+        return bool(check_stop_fn and check_stop_fn())
+
+    def _stop_new_ocr_work_requested() -> bool:
+        if _force_stop_requested():
+            return True
+        return os.environ.get('GRACEFUL_STOP') == '1' and os.environ.get('WAIT_FOR_CHUNKS') != '1'
+
+    def _cancel_active_vision_requests():
+        try:
+            UnifiedClient.hard_cancel_all()
+        except Exception:
+            pass
+        try:
+            if hasattr(image_translator.client, 'cancel_current_operation'):
+                image_translator.client.cancel_current_operation()
+        except Exception:
+            pass
+
     ocr_parts = []
     processed_srcs = []
     first_img_tag = None
     jobs = []
     renamed_refs = []
     for idx, img_info in enumerate(images, 1):
-        if check_stop_fn and check_stop_fn():
+        if _stop_new_ocr_work_requested():
             print("   Image OCR stopped by user before combined translation")
             break
 
@@ -8222,7 +8245,7 @@ def _process_chapter_images_vision_ocr_combined(
 
     def _ocr_page_image(job):
         idx, img_info, img_src, img_path = job
-        if check_stop_fn and check_stop_fn():
+        if _stop_new_ocr_work_requested():
             return idx, img_info, img_src, None
 
         from PIL import Image
@@ -8299,12 +8322,16 @@ def _process_chapter_images_vision_ocr_combined(
 
             if batching_mode == "aggressive":
                 print(f"   Vision OCR page scheduler: {batch_size} parallel worker slot(s), {len(jobs)} image request(s)")
-                with ThreadPoolExecutor(max_workers=batch_size) as executor:
+                executor = ThreadPoolExecutor(max_workers=batch_size)
+                force_cancelled = False
+                try:
                     active_futures = {}
                     next_job_idx = 0
 
                     def _submit_next_page_ocr():
                         nonlocal next_job_idx
+                        if _stop_new_ocr_work_requested():
+                            return False
                         if next_job_idx >= len(jobs):
                             return False
                         job = jobs[next_job_idx]
@@ -8316,8 +8343,16 @@ def _process_chapter_images_vision_ocr_combined(
                         pass
 
                     while active_futures:
-                        if check_stop_fn and check_stop_fn():
+                        if _force_stop_requested():
                             print("   Image OCR stopped; cancelling queued page OCR work")
+                            force_cancelled = True
+                            image_translator.last_vision_translation_finish_reason = "cancelled"
+                            _cancel_active_vision_requests()
+                            for future in active_futures:
+                                future.cancel()
+                            break
+                        if _stop_new_ocr_work_requested():
+                            print("   Image OCR graceful stop; not starting queued page OCR work")
                             for future in active_futures:
                                 future.cancel()
                             break
@@ -8330,6 +8365,8 @@ def _process_chapter_images_vision_ocr_combined(
                             ocr_by_index[idx] = (img_info, img_src, ocr_text)
                         while len(active_futures) < batch_size and _submit_next_page_ocr():
                             pass
+                finally:
+                    executor.shutdown(wait=not force_cancelled, cancel_futures=True)
             else:
                 if batching_mode == "conservative":
                     group_multiplier = max(1, int(os.getenv("BATCH_GROUP_SIZE", "3") or "3"))
@@ -8340,27 +8377,43 @@ def _process_chapter_images_vision_ocr_combined(
                     print(f"   Vision OCR page direct batching: group size {fixed_group_size}, parallel {batch_size}")
 
                 for batch_start in range(0, len(jobs), fixed_group_size):
-                    if check_stop_fn and check_stop_fn():
+                    if _stop_new_ocr_work_requested():
                         print("   Image OCR stopped before next page OCR batch")
                         break
                     current_group = jobs[batch_start:batch_start + fixed_group_size]
                     print(f"   Page OCR group {batch_start // fixed_group_size + 1}: {len(current_group)} image request(s)")
-                    with ThreadPoolExecutor(max_workers=min(batch_size, len(current_group))) as executor:
-                        future_to_job = {executor.submit(_ocr_page_image, job): job for job in current_group}
-                        for future in as_completed(future_to_job):
-                            if check_stop_fn and check_stop_fn():
+                    executor = ThreadPoolExecutor(max_workers=min(batch_size, len(current_group)))
+                    force_cancelled = False
+                    try:
+                        pending = {executor.submit(_ocr_page_image, job) for job in current_group}
+                        while pending:
+                            done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                            for future in done:
+                                idx, img_info, img_src, ocr_text = future.result()
+                                ocr_by_index[idx] = (img_info, img_src, ocr_text)
+                            if _force_stop_requested():
                                 print("   Image OCR stopped during page OCR group")
+                                force_cancelled = True
+                                image_translator.last_vision_translation_finish_reason = "cancelled"
+                                _cancel_active_vision_requests()
+                                for future in pending:
+                                    future.cancel()
                                 break
-                            idx, img_info, img_src, ocr_text = future.result()
-                            ocr_by_index[idx] = (img_info, img_src, ocr_text)
-                    if check_stop_fn and check_stop_fn():
+                            if _stop_new_ocr_work_requested():
+                                print("   Image OCR graceful stop during page OCR group")
+                                for future in pending:
+                                    future.cancel()
+                                break
+                    finally:
+                        executor.shutdown(wait=not force_cancelled, cancel_futures=True)
+                    if _stop_new_ocr_work_requested():
                         print("   Image OCR stopped after page OCR group")
                         break
         else:
             for job in jobs:
                 idx, img_info, img_src, ocr_text = _ocr_page_image(job)
                 ocr_by_index[idx] = (img_info, img_src, ocr_text)
-                if check_stop_fn and check_stop_fn():
+                if _stop_new_ocr_work_requested():
                     print("   Image OCR stopped after current page image")
                     break
     finally:
@@ -8434,6 +8487,11 @@ def _process_chapter_images_vision_ocr_combined(
         )
     if chapter_header_text:
         combined_prompt += f"\n\n[CHAPTER_HEADER_TEXT]\n{chapter_header_text}\n[/CHAPTER_HEADER_TEXT]"
+
+    if _stop_new_ocr_work_requested():
+        print("   Vision OCR page stopped before combined OCR translation")
+        image_translator.last_vision_translation_finish_reason = "cancelled"
+        return str(soup), {}
 
     image_translator.current_image_index = "combined"
     print(f"   Step 2/2: Translating combined page OCR ({len(combined_ocr)} chars)...")

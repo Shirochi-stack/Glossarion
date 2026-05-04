@@ -114,14 +114,25 @@ def send_image_with_interrupt(client, messages, image_data, temperature, max_tok
     check_interval = 0.5
     elapsed = 0
 
+    def _force_cancel():
+        try:
+            if hasattr(client, 'cancel_current_operation'):
+                client.cancel_current_operation()
+        except Exception:
+            pass
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient.hard_cancel_all()
+        except Exception:
+            pass
+
     def _should_interrupt_wait():
         # Graceful stop lets in-flight API calls finish; immediate stop sets
         # TRANSLATION_CANCELLED and should abort the wait promptly.
-        if os.environ.get("GRACEFUL_STOP") == "1":
-            return os.environ.get("TRANSLATION_CANCELLED") == "1"
-        if os.environ.get("TRANSLATION_CANCELLED") == "1":
+        if _force_stop_requested(stop_check_fn):
+            _force_cancel()
             return True
-        return bool(stop_check_fn and stop_check_fn())
+        return False
     
     while True:
         try:
@@ -163,6 +174,30 @@ def _clear_vision_key_context_for_text_request(client, context):
             pass
     except Exception:
         pass
+
+
+def _force_stop_requested(stop_check_fn=None) -> bool:
+    """Return True only for immediate/force stop requests."""
+    if os.environ.get("TRANSLATION_CANCELLED") == "1":
+        return True
+    if os.environ.get("GRACEFUL_STOP") == "1":
+        return False
+    return bool(stop_check_fn and stop_check_fn())
+
+
+def _graceful_stop_requested() -> bool:
+    return os.environ.get("GRACEFUL_STOP") == "1" and os.environ.get("TRANSLATION_CANCELLED") != "1"
+
+
+def _wait_for_chunks_enabled() -> bool:
+    return os.environ.get("WAIT_FOR_CHUNKS") == "1"
+
+
+def _stop_new_vision_work_requested(stop_check_fn=None) -> bool:
+    """Return True when Vision OCR should avoid starting another API request."""
+    if _force_stop_requested(stop_check_fn):
+        return True
+    return _graceful_stop_requested() and not _wait_for_chunks_enabled()
 
 
 def send_text_with_interrupt(client, messages, temperature, max_tokens, stop_check_fn, chunk_timeout=None, context='translation'):
@@ -207,12 +242,10 @@ def send_text_with_interrupt(client, messages, temperature, max_tokens, stop_che
             pass
 
     def _should_interrupt_wait():
-        if os.environ.get("TRANSLATION_CANCELLED") == "1":
+        if _force_stop_requested(stop_check_fn):
             _force_cancel()
             return True
-        if os.environ.get("GRACEFUL_STOP") == "1":
-            return False
-        return bool(stop_check_fn and stop_check_fn())
+        return False
 
     while True:
         try:
@@ -1746,7 +1779,7 @@ class ImageTranslator:
                 processed_path = dest_path
             
             html_output = self._create_html_output(img_rel_path, translated_text, is_long_text, 
-                                                 hide_label, check_stop_fn and check_stop_fn())
+                                                 hide_label, _stop_new_vision_work_requested(check_stop_fn))
             
             return html_output
             
@@ -1870,7 +1903,7 @@ class ImageTranslator:
         print(f"   👍 Image height OK ({img.height}px), processing as single image...")
         
         # Check for stop before processing
-        if check_stop_fn and check_stop_fn():
+        if _stop_new_vision_work_requested(check_stop_fn):
             print("   ❌ Image translation stopped by user")
             return None
         
@@ -1931,6 +1964,9 @@ class ImageTranslator:
             user_prompt = user_prompt_template
         messages.append({"role": "user", "content": user_prompt})
 
+        if _stop_new_vision_work_requested(check_stop_fn):
+            raise UnifiedClientError("Vision OCR stopped by user", error_type="cancelled")
+
         effective_chapter_num = chapter_num if chapter_num is not None else getattr(self, 'current_chapter_num', None)
         effective_image_idx = image_idx if image_idx is not None else getattr(self, 'current_image_index', 0)
         if effective_chapter_num is not None:
@@ -1986,8 +2022,9 @@ class ImageTranslator:
             print("   OCR marked image as cover/illustration; skipping OCR translation")
             return None
 
-        if check_stop_fn and check_stop_fn():
+        if _stop_new_vision_work_requested(check_stop_fn):
             print("   ❌ Stopped before OCR text translation")
+            self.last_vision_translation_finish_reason = "cancelled"
             return None
 
         ocr_text = self._inject_context_headers_into_ocr(ocr_text, assistant_prompt)
@@ -2815,7 +2852,7 @@ class ImageTranslator:
                     print(f"   Skipping OCR chunk {i+1}/{num_chunks}; found existing OCR/chunks file")
                 continue
 
-            if check_stop_fn and check_stop_fn():
+            if _stop_new_vision_work_requested(check_stop_fn):
                 print(f"   Stopped before OCR chunk {i+1}/{num_chunks}")
                 was_stopped = True
                 break
@@ -2855,7 +2892,7 @@ class ImageTranslator:
 
         def _ocr_job(job):
             i, chunk_bytes, chunk_prompt = job
-            if check_stop_fn and check_stop_fn():
+            if _stop_new_vision_work_requested(check_stop_fn):
                 return i, None
             print(f"   Step 1/2: OCR chunk {i+1}/{num_chunks} with dedicated Vision OCR prompt...")
             ocr_text = self._call_vision_ocr_api(
@@ -2896,6 +2933,8 @@ class ImageTranslator:
 
                         def _submit_next_ocr_chunk():
                             nonlocal next_job_idx
+                            if _stop_new_vision_work_requested(check_stop_fn):
+                                return False
                             if next_job_idx >= len(chunk_jobs):
                                 return False
                             job = chunk_jobs[next_job_idx]
@@ -2919,7 +2958,7 @@ class ImageTranslator:
                                 if ocr_text:
                                     ocr_by_index[i] = ocr_text
 
-                            if os.environ.get("TRANSLATION_CANCELLED") == "1":
+                            if _force_stop_requested(check_stop_fn):
                                 force_cancelled = True
                                 was_stopped = True
                                 try:
@@ -2929,6 +2968,12 @@ class ImageTranslator:
                                 for future in pending:
                                     future.cancel()
                                 raise UnifiedClientError("Vision OCR batch stopped by user", error_type="cancelled")
+
+                            if _stop_new_vision_work_requested(check_stop_fn):
+                                was_stopped = True
+                                for future in pending:
+                                    future.cancel()
+                                break
 
                             while len(pending) < batch_size and _submit_next_ocr_chunk():
                                 pass
@@ -2944,7 +2989,7 @@ class ImageTranslator:
                         print(f"   Vision OCR direct batching: group size {fixed_group_size}, parallel {batch_size}")
 
                     for batch_start in range(0, len(chunk_jobs), fixed_group_size):
-                        if check_stop_fn and check_stop_fn():
+                        if _stop_new_vision_work_requested(check_stop_fn):
                             was_stopped = True
                             break
                         current_batch = chunk_jobs[batch_start:batch_start + fixed_group_size]
@@ -2960,7 +3005,7 @@ class ImageTranslator:
                                     if ocr_text:
                                         ocr_by_index[i] = ocr_text
 
-                                if os.environ.get("TRANSLATION_CANCELLED") == "1":
+                                if _force_stop_requested(check_stop_fn):
                                     force_cancelled = True
                                     was_stopped = True
                                     try:
@@ -2970,10 +3015,15 @@ class ImageTranslator:
                                     for future in pending:
                                         future.cancel()
                                     raise UnifiedClientError("Vision OCR batch stopped by user", error_type="cancelled")
+                                if _stop_new_vision_work_requested(check_stop_fn):
+                                    was_stopped = True
+                                    for future in pending:
+                                        future.cancel()
+                                    break
                         finally:
                             executor.shutdown(wait=not force_cancelled, cancel_futures=True)
 
-                        if check_stop_fn and check_stop_fn():
+                        if _stop_new_vision_work_requested(check_stop_fn):
                             was_stopped = True
                             break
             else:
@@ -2983,7 +3033,7 @@ class ImageTranslator:
                         ocr_by_index[i] = ocr_text
                     if i < num_chunks - 1 and not was_stopped:
                         self._api_delay_with_stop_check(check_stop_fn)
-                    if check_stop_fn and check_stop_fn():
+                    if _stop_new_vision_work_requested(check_stop_fn):
                         was_stopped = True
                         break
         finally:
@@ -3006,6 +3056,11 @@ class ImageTranslator:
         self._save_ocr_text(combined_ocr, kind="combined", image_basename=image_basename)
         if not translate_after:
             return combined_ocr
+
+        if was_stopped and _stop_new_vision_work_requested(check_stop_fn):
+            print("   Vision OCR stopped before combined OCR translation")
+            self.last_vision_translation_finish_reason = "cancelled"
+            return None
 
         print(f"   Step 2/2: Translating combined OCR from {len(ordered_ocr)}/{num_chunks} chunks ({len(combined_ocr)} chars)...")
         combined_prompt = self._format_vision_ocr_combined_context_prompt(len(ordered_ocr), num_chunks, context)
@@ -3328,7 +3383,7 @@ class ImageTranslator:
                     print(f"   ⏱️ Timeout enabled: {chunk_timeout} seconds")
                 
                 # Final stop check before API call
-                if check_stop_fn and check_stop_fn():
+                if _stop_new_vision_work_requested(check_stop_fn):
                     print("   ❌ Stopped before API call")
                     return None
                 
@@ -3562,7 +3617,7 @@ class ImageTranslator:
         """API delay with stop checking"""
         # Check for stop during delay (split into 0.1s intervals)
         for i in range(int(self.api_delay * 10)):
-            if check_stop_fn and check_stop_fn():
+            if _stop_new_vision_work_requested(check_stop_fn):
                 return True
             time.sleep(0.1)
         return False
