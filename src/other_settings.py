@@ -5188,7 +5188,7 @@ def configure_image_chunk_prompt(self):
     from PySide6.QtWidgets import QApplication
     screen = QApplication.primaryScreen().geometry()
     width = int(screen.width() * 0.36)
-    height = int(screen.height() * 0.56)
+    height = int(screen.height() * 0.72)
     dialog.resize(width, height)
 
     # Set icon
@@ -5221,7 +5221,9 @@ def configure_image_chunk_prompt(self):
     placeholders = [
         ("{chunk_idx}", "Current chunk number (1-based)"),
         ("{total_chunks}", "Total number of chunks"),
-        ("{context}", "Additional context (e.g., chapter info)")
+        ("{context}", "Additional context (e.g., chapter info)"),
+        ("{chunk_count}", "Number of OCR chunks with text"),
+        ("{ocr_text}", "Combined OCR text (translation prompt only)")
     ]
     
     for placeholder, description in placeholders:
@@ -5241,6 +5243,30 @@ def configure_image_chunk_prompt(self):
     prompt_v.addWidget(image_chunk_prompt_text)
     
     main_layout.addWidget(prompt_box)
+
+    combined_box = QGroupBox("Vision OCR Combined Context Prompt")
+    combined_v = QVBoxLayout(combined_box)
+
+    vision_ocr_combined_context_prompt_text = QTextEdit()
+    vision_ocr_combined_context_prompt_text.setAcceptRichText(False)
+    vision_ocr_combined_context_prompt_text.setFixedHeight(80)
+    vision_ocr_combined_context_prompt_text.setPlainText(
+        getattr(self, 'vision_ocr_combined_context_prompt', getattr(self, 'default_vision_ocr_combined_context_prompt', ''))
+    )
+    combined_v.addWidget(vision_ocr_combined_context_prompt_text)
+    main_layout.addWidget(combined_box)
+
+    translation_box = QGroupBox("Vision OCR Translation User Prompt")
+    translation_v = QVBoxLayout(translation_box)
+
+    vision_ocr_translation_user_prompt_text = QTextEdit()
+    vision_ocr_translation_user_prompt_text.setAcceptRichText(False)
+    vision_ocr_translation_user_prompt_text.setFixedHeight(130)
+    vision_ocr_translation_user_prompt_text.setPlainText(
+        getattr(self, 'vision_ocr_translation_user_prompt', getattr(self, 'default_vision_ocr_translation_user_prompt', ''))
+    )
+    translation_v.addWidget(vision_ocr_translation_user_prompt_text)
+    main_layout.addWidget(translation_box)
     
     # Example
     example_box = QGroupBox("Example Output")
@@ -5258,11 +5284,28 @@ def configure_image_chunk_prompt(self):
         try:
             template = image_chunk_prompt_text.toPlainText()
             example = template.replace('{chunk_idx}', '3').replace('{total_chunks}', '7').replace('{context}', 'Chapter 5: The Great Battle')
-            example_label.setText(example)
+            combined_template = vision_ocr_combined_context_prompt_text.toPlainText()
+            combined_example = (
+                combined_template
+                .replace('{chunk_count}', '7')
+                .replace('{total_chunks}', '7')
+                .replace('{context}', 'Chapter 5: The Great Battle')
+            )
+            translation_template = vision_ocr_translation_user_prompt_text.toPlainText()
+            translation_example = (
+                translation_template
+                .replace('{context}', combined_example)
+                .replace('{ocr_text}', 'Sample OCR text...')
+            )
+            example_label.setText(
+                f"Chunk context:\n{example}\n\nVision OCR final user prompt:\n{translation_example}"
+            )
         except Exception:
             example_label.setText("[Invalid template]")
     
     image_chunk_prompt_text.textChanged.connect(update_image_example)
+    vision_ocr_combined_context_prompt_text.textChanged.connect(update_image_example)
+    vision_ocr_translation_user_prompt_text.textChanged.connect(update_image_example)
     update_image_example()
     
     main_layout.addWidget(example_box)
@@ -5272,8 +5315,12 @@ def configure_image_chunk_prompt(self):
     
     def save_image_chunk_prompt():
         self.image_chunk_prompt = image_chunk_prompt_text.toPlainText().strip()
+        self.vision_ocr_combined_context_prompt = vision_ocr_combined_context_prompt_text.toPlainText().strip()
+        self.vision_ocr_translation_user_prompt = vision_ocr_translation_user_prompt_text.toPlainText().strip()
         self.config['image_chunk_prompt'] = self.image_chunk_prompt
-        QMessageBox.information(dialog, "Success", "Image chunk prompt saved!")
+        self.config['vision_ocr_combined_context_prompt'] = self.vision_ocr_combined_context_prompt
+        self.config['vision_ocr_translation_user_prompt'] = self.vision_ocr_translation_user_prompt
+        QMessageBox.information(dialog, "Success", "Image chunk prompts saved!")
         dialog.hide()
     
     def reset_image_chunk_prompt():
@@ -5281,6 +5328,8 @@ def configure_image_chunk_prompt(self):
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if result == QMessageBox.Yes:
             image_chunk_prompt_text.setPlainText(self.default_image_chunk_prompt)
+            vision_ocr_combined_context_prompt_text.setPlainText(getattr(self, 'default_vision_ocr_combined_context_prompt', ''))
+            vision_ocr_translation_user_prompt_text.setPlainText(getattr(self, 'default_vision_ocr_translation_user_prompt', ''))
             update_image_example()
     
     save_btn = QPushButton("Save")

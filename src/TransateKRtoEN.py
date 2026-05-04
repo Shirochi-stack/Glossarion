@@ -8371,12 +8371,21 @@ def _process_chapter_images_vision_ocr_combined(
     except Exception:
         pass
 
-    combined_prompt = (
-        f"The OCR text below was assembled from {len(images)} ordered image(s) in one HTML page. "
-        "Translate it as one continuous passage while preserving the OCR paragraph and line-break structure. "
-        "Do not collapse separate source lines into one line. Preserve every <img ... /> tag exactly where it appears; "
-        "those tags mark cover/illustration images that returned No during OCR and must remain in the output."
-    )
+    formatter = getattr(image_translator, "_format_vision_ocr_combined_context_prompt", None)
+    if callable(formatter):
+        combined_prompt = formatter(len(ocr_by_index), len(images), "")
+        if "<img" in combined_ocr:
+            combined_prompt += (
+                "\n\nPreserve every <img ... /> tag exactly where it appears; those tags mark "
+                "cover/illustration images that returned No during OCR and must remain in the output."
+            )
+    else:
+        combined_prompt = (
+            f"The OCR text below was assembled from {len(images)} ordered image(s) in one HTML page. "
+            "Translate it as one continuous passage while preserving the OCR paragraph and line-break structure. "
+            "Do not collapse separate source lines into one line. Preserve every <img ... /> tag exactly where it appears; "
+            "those tags mark cover/illustration images that returned No during OCR and must remain in the output."
+        )
     if chapter_header_text:
         combined_prompt += f"\n\n[CHAPTER_HEADER_TEXT]\n{chapter_header_text}\n[/CHAPTER_HEADER_TEXT]"
 

@@ -56,6 +56,19 @@ DEFAULT_VISION_OCR_USER_PROMPT = (
     "\n\nContext:\n{context}"
 )
 
+DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT = (
+    "The OCR text below was assembled from {chunk_count} tall-image chunk(s). "
+    "Translate it as one continuous passage, preserving narrative flow and removing OCR-only duplication from chunk overlap."
+)
+
+DEFAULT_VISION_OCR_TRANSLATION_USER_PROMPT = (
+    "{context}\n\n"
+    "Translate the following OCR text according to the system prompt. "
+    "Return only the translated text. Preserve the OCR paragraph and line-break structure; "
+    "do not collapse separate source lines into one line.\n\n"
+    "<OCR_TEXT>\n{ocr_text}\n</OCR_TEXT>"
+)
+
 def requires_cv2(func):
     """Decorator to skip methods that require OpenCV"""
     def wrapper(self, *args, **kwargs):
@@ -262,6 +275,8 @@ class ImageTranslator:
         if any(marker in self.vision_ocr_prompt for marker in STALE_VISION_OCR_PROMPT_MARKERS):
             self.vision_ocr_prompt = DEFAULT_VISION_OCR_PROMPT
         self.vision_ocr_user_prompt = os.getenv("VISION_OCR_USER_PROMPT", DEFAULT_VISION_OCR_USER_PROMPT).strip() or DEFAULT_VISION_OCR_USER_PROMPT
+        self.vision_ocr_combined_context_prompt = os.getenv("VISION_OCR_COMBINED_CONTEXT_PROMPT", DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT).strip() or DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT
+        self.vision_ocr_translation_user_prompt = os.getenv("VISION_OCR_TRANSLATION_USER_PROMPT", DEFAULT_VISION_OCR_TRANSLATION_USER_PROMPT).strip() or DEFAULT_VISION_OCR_TRANSLATION_USER_PROMPT
         self.last_vision_translation_finish_reason = None
         self.last_vision_translation_error = None
         self._vision_glossary_processed_hashes = set()
@@ -1981,19 +1996,9 @@ class ImageTranslator:
         ocr_text = self._inject_context_headers_into_ocr(ocr_text, assistant_prompt)
         system_prompt = self._prepare_vision_ocr_translation_prompt(ocr_text, check_stop_fn)
 
-        user_parts = []
-        if assistant_prompt and assistant_prompt.strip():
-            user_parts.append(assistant_prompt.strip())
-        user_parts.append(
-            "Translate the following OCR text according to the system prompt. "
-            "Return only the translated text. Preserve the OCR paragraph and line-break structure; "
-            "do not collapse separate source lines into one line."
-        )
-        user_parts.append("<OCR_TEXT>\n" + ocr_text.strip() + "\n</OCR_TEXT>")
-
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": "\n\n".join(user_parts)}
+            {"role": "user", "content": self._format_vision_ocr_translation_user_prompt(assistant_prompt, ocr_text)}
         ]
 
         single_pass_enabled = False
@@ -2095,6 +2100,31 @@ class ImageTranslator:
         except Exception as e:
             print(f"   ⚠️ Vision OCR markdown-to-HTML conversion skipped: {e}")
             return translated_text
+
+    def _format_vision_ocr_translation_user_prompt(self, context, ocr_text):
+        template = (self.vision_ocr_translation_user_prompt or DEFAULT_VISION_OCR_TRANSLATION_USER_PROMPT).strip()
+        context_text = (context or "").strip()
+        ocr_text = (ocr_text or "").strip()
+        if "{context}" in template:
+            template = template.replace("{context}", context_text)
+        elif context_text:
+            template = f"{context_text}\n\n{template}"
+        if "{ocr_text}" in template:
+            template = template.replace("{ocr_text}", ocr_text)
+        else:
+            template = f"{template}\n\n<OCR_TEXT>\n{ocr_text}\n</OCR_TEXT>"
+        return template.strip()
+
+    def _format_vision_ocr_combined_context_prompt(self, chunk_count, total_chunks, context):
+        template = (self.vision_ocr_combined_context_prompt or DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT).strip()
+        replacements = {
+            "{chunk_count}": str(chunk_count),
+            "{total_chunks}": str(total_chunks),
+            "{context}": (context or "").strip(),
+        }
+        for placeholder, value in replacements.items():
+            template = template.replace(placeholder, value)
+        return template.strip()
 
     def _extract_context_header_text(self, context):
         if not context:
@@ -2881,10 +2911,7 @@ class ImageTranslator:
             return combined_ocr
 
         print(f"   Step 2/2: Translating combined OCR from {len(ordered_ocr)}/{num_chunks} chunks ({len(combined_ocr)} chars)...")
-        combined_prompt = (
-            f"The OCR text below was assembled from {len(ordered_ocr)} tall-image chunk(s). "
-            "Translate it as one continuous passage, preserving narrative flow and removing OCR-only duplication from chunk overlap."
-        )
+        combined_prompt = self._format_vision_ocr_combined_context_prompt(len(ordered_ocr), num_chunks, context)
         translated = self._translate_ocr_text(combined_ocr, combined_prompt, check_stop_fn)
         if translated:
             print(f"   Combined OCR text translated ({len(translated)} chars)")

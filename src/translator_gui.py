@@ -2154,6 +2154,17 @@ Text to analyze:
             "Ignore pinyin/romaji/furigana/Jyutping pronunciation guides attached to base characters. Do not translate."
             "\n\nContext:\n{context}"
         )
+        self.default_vision_ocr_combined_context_prompt = (
+            "The OCR text below was assembled from {chunk_count} tall-image chunk(s). "
+            "Translate it as one continuous passage, preserving narrative flow and removing OCR-only duplication from chunk overlap."
+        )
+        self.default_vision_ocr_translation_user_prompt = (
+            "{context}\n\n"
+            "Translate the following OCR text according to the system prompt. "
+            "Return only the translated text. Preserve the OCR paragraph and line-break structure; "
+            "do not collapse separate source lines into one line.\n\n"
+            "<OCR_TEXT>\n{ocr_text}\n</OCR_TEXT>"
+        )
         self.default_prompts = {
             "Universal": (
                 "You are a professional novel translator. You MUST translate the following text to {target_lang}.\n"
@@ -3417,6 +3428,12 @@ Recent translations to summarize:
         self.vision_ocr_user_prompt = self.config.get('vision_ocr_user_prompt', self.default_vision_ocr_user_prompt)
         if not self.vision_ocr_user_prompt or not str(self.vision_ocr_user_prompt).strip():
             self.vision_ocr_user_prompt = self.default_vision_ocr_user_prompt
+        self.vision_ocr_combined_context_prompt = self.config.get('vision_ocr_combined_context_prompt', self.default_vision_ocr_combined_context_prompt)
+        if not self.vision_ocr_combined_context_prompt or not str(self.vision_ocr_combined_context_prompt).strip():
+            self.vision_ocr_combined_context_prompt = self.default_vision_ocr_combined_context_prompt
+        self.vision_ocr_translation_user_prompt = self.config.get('vision_ocr_translation_user_prompt', self.default_vision_ocr_translation_user_prompt)
+        if not self.vision_ocr_translation_user_prompt or not str(self.vision_ocr_translation_user_prompt).strip():
+            self.vision_ocr_translation_user_prompt = self.default_vision_ocr_translation_user_prompt
         # Optional assistant prefill prompt (disabled by default)
         self.assistant_prompt = self.config.get('assistant_prompt', self.default_assistant_prompt)
         
@@ -13890,6 +13907,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'VISION_OCR_FIRST': '1' if self._get_output_mode() == 'vision' else '0',
             'VISION_OCR_PROMPT': str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', ''))),
             'VISION_OCR_USER_PROMPT': str(getattr(self, 'vision_ocr_user_prompt', self.config.get('vision_ocr_user_prompt', ''))),
+            'VISION_OCR_COMBINED_CONTEXT_PROMPT': str(getattr(self, 'vision_ocr_combined_context_prompt', self.config.get('vision_ocr_combined_context_prompt', ''))),
+            'VISION_OCR_TRANSLATION_USER_PROMPT': str(getattr(self, 'vision_ocr_translation_user_prompt', self.config.get('vision_ocr_translation_user_prompt', ''))),
             'VISION_OCR_BATCH_TRANSLATION': '1' if getattr(self, 'vision_ocr_batch_translation_var', self.config.get('vision_ocr_batch_translation', True)) else '0',
             'VISION_OCR_BATCH_SIZE': str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '10'))),
             'ENABLE_REFINEMENT_OUTPUT_MODE': "1" if self._get_output_mode() == 'refinement' else "0",
@@ -21691,6 +21710,8 @@ Important rules:
                 ('image_chunk_prompt', ['image_chunk_prompt'], '', str),
                 ('vision_ocr_prompt', ['vision_ocr_prompt'], getattr(self, 'default_vision_ocr_prompt', ''), str),
                 ('vision_ocr_user_prompt', ['vision_ocr_user_prompt'], getattr(self, 'default_vision_ocr_user_prompt', ''), str),
+                ('vision_ocr_combined_context_prompt', ['vision_ocr_combined_context_prompt'], getattr(self, 'default_vision_ocr_combined_context_prompt', ''), str),
+                ('vision_ocr_translation_user_prompt', ['vision_ocr_translation_user_prompt'], getattr(self, 'default_vision_ocr_translation_user_prompt', ''), str),
                 ('assistant_prompt', ['assistant_prompt'], '', str),  # Optional assistant prefill
                 ('vertex_ai_location', ['vertex_location_entry', 'vertex_location_var'], 'global', str),
                 ('openai_base_url', ['openai_base_url_var'], '', str),
@@ -22779,6 +22800,8 @@ Important rules:
                 # Prompts
                 ('TRANSLATION_CHUNK_PROMPT', str(getattr(self, 'translation_chunk_prompt', ''))),
                 ('IMAGE_CHUNK_PROMPT', str(getattr(self, 'image_chunk_prompt', ''))),
+                ('VISION_OCR_COMBINED_CONTEXT_PROMPT', str(getattr(self, 'vision_ocr_combined_context_prompt', ''))),
+                ('VISION_OCR_TRANSLATION_USER_PROMPT', str(getattr(self, 'vision_ocr_translation_user_prompt', ''))),
                 ('ASSISTANT_PROMPT', str(getattr(self, 'assistant_prompt', ''))),  # Optional assistant prefill
 
                 # Safety flags
