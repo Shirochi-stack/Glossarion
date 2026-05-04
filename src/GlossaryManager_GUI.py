@@ -43,6 +43,58 @@ class GlossaryManagerMixin:
         """Disable mousewheel scrolling on a combobox"""
         combobox.wheelEvent = lambda event: None
 
+    def _set_glossary_tree_font_size(self, point_size, persist=True):
+        """Apply a bounded font size to the glossary editor tree."""
+        try:
+            point_size = int(point_size)
+        except Exception:
+            return
+
+        point_size = max(8, min(32, point_size))
+        self._glossary_tree_font_size = point_size
+
+        tree = getattr(self, 'glossary_tree', None)
+        if tree is not None:
+            font = tree.font()
+            font.setPointSize(point_size)
+            tree.setFont(font)
+            try:
+                tree.header().setFont(font)
+            except Exception:
+                pass
+
+        entry = getattr(self, '_glossary_active_edit_entry', None)
+        if entry is not None:
+            try:
+                edit_font = entry.font()
+                edit_font.setPointSize(point_size)
+                entry.setFont(edit_font)
+            except RuntimeError:
+                self._glossary_active_edit_entry = None
+
+        if persist:
+            try:
+                self.config['glossary_editor_tree_font_size'] = point_size
+                self.save_config(show_message=False)
+            except Exception:
+                pass
+
+    def _adjust_glossary_tree_font_size(self, delta):
+        """Zoom the glossary editor tree font in or out."""
+        try:
+            current = int(getattr(self, '_glossary_tree_font_size', 0) or 0)
+        except Exception:
+            current = 0
+
+        if current <= 0:
+            tree = getattr(self, 'glossary_tree', None)
+            if tree is not None:
+                current = tree.font().pointSize()
+            if current <= 0:
+                current = 10
+
+        self._set_glossary_tree_font_size(current + int(delta), persist=True)
+
     @staticmethod
     def _sep_for_display(text):
         """Replace raw Unit Separator (\x1F) with visible literal '\x1F' for QTextEdit display."""
@@ -4364,6 +4416,39 @@ CRITICAL EXTRACTION RULES:
         self.glossary_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         content_frame_layout.addWidget(self.glossary_tree)
 
+        configured_tree_font_size = self.config.get('glossary_editor_tree_font_size', None)
+        if configured_tree_font_size is None:
+            configured_tree_font_size = self.glossary_tree.font().pointSize() or 10
+        self._set_glossary_tree_font_size(configured_tree_font_size, persist=False)
+
+        self._glossary_tree_zoom_shortcuts = []
+        for sequence in (QKeySequence.ZoomIn, QKeySequence("Ctrl++"), QKeySequence("Ctrl+=")):
+            shortcut = QShortcut(sequence, self.glossary_tree)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(lambda: self._adjust_glossary_tree_font_size(1))
+            self._glossary_tree_zoom_shortcuts.append(shortcut)
+        for sequence in (QKeySequence.ZoomOut, QKeySequence("Ctrl+-")):
+            shortcut = QShortcut(sequence, self.glossary_tree)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(lambda: self._adjust_glossary_tree_font_size(-1))
+            self._glossary_tree_zoom_shortcuts.append(shortcut)
+
+        original_glossary_tree_wheel_event = self.glossary_tree.wheelEvent
+
+        def glossary_tree_wheel_event(event):
+            try:
+                if event.modifiers() & Qt.ControlModifier:
+                    delta = event.angleDelta().y() or event.pixelDelta().y()
+                    if delta:
+                        self._adjust_glossary_tree_font_size(1 if delta > 0 else -1)
+                        event.accept()
+                        return
+            except Exception:
+                pass
+            original_glossary_tree_wheel_event(event)
+
+        self.glossary_tree.wheelEvent = glossary_tree_wheel_event
+
         self.glossary_tree.itemDoubleClicked.connect(lambda item, col: self._on_tree_double_click(item, col))
         self.glossary_tree.customContextMenuRequested.connect(lambda pos: None)  # will be rebound after helpers are defined
 
@@ -7197,6 +7282,15 @@ CRITICAL EXTRACTION RULES:
        dialog_layout.addWidget(label)
        
        entry = QLineEdit(current_value)
+       try:
+           entry.setFont(self.glossary_tree.font())
+           self._glossary_active_edit_entry = entry
+           edit_dialog.finished.connect(
+               lambda _result: setattr(self, '_glossary_active_edit_entry', None)
+               if getattr(self, '_glossary_active_edit_entry', None) is entry else None
+           )
+       except Exception:
+           pass
        dialog_layout.addWidget(entry)
        dialog_layout.addSpacing(5)
        entry.setFocus()
