@@ -877,6 +877,10 @@ import re
 
 PROGRESS_FILE = "glossary_progress.json"
 _GLOSSARY_QA_ISSUES_FOUND = {}
+_GLOSSARY_CHAPTER_POSITIONS = {}
+_GLOSSARY_CHAPTER_NUMBERS = {}
+_GLOSSARY_CHAPTER_FILENAMES = {}
+_GLOSSARY_TOTAL_CHAPTERS = 0
 
 def _unique_int_list(values):
     """Return ints in first-seen order, ignoring values that cannot be parsed."""
@@ -891,6 +895,33 @@ def _unique_int_list(values):
             seen.add(idx)
             result.append(idx)
     return result
+
+def _glossary_chapter_actual_num(idx: int) -> int:
+    """Return the chapter number used by translation progress for a glossary row."""
+    try:
+        idx_int = int(idx)
+        return int(_GLOSSARY_CHAPTER_NUMBERS.get(
+            idx_int,
+            _GLOSSARY_CHAPTER_POSITIONS.get(idx_int, idx_int + 1)
+        ))
+    except (TypeError, ValueError):
+        return int(idx) + 1
+
+def _glossary_chapter_key(idx: int) -> str:
+    """Build a translation-style key while avoiding collisions for duplicate numbers."""
+    actual_num = _glossary_chapter_actual_num(idx)
+    filename = os.path.basename(str(_GLOSSARY_CHAPTER_FILENAMES.get(idx, "") or ""))
+    base = os.path.splitext(filename)[0]
+    if not base:
+        return str(actual_num)
+    same_num = [
+        int(other_idx)
+        for other_idx, other_num in (_GLOSSARY_CHAPTER_NUMBERS or _GLOSSARY_CHAPTER_POSITIONS or {}).items()
+        if int(other_num) == actual_num
+    ]
+    if len(same_num) > 1:
+        return f"{actual_num}_{base}"
+    return str(actual_num)
 
 def _normalize_glossary_qa_issues(value=None, chapters=None):
     """Normalize glossary QA issue storage to {chapter_index: [issue, ...]}."""
@@ -5116,6 +5147,19 @@ def main(log_callback=None, stop_callback=None):
     if not _chapter_positions:
         _chapter_positions = {i: i + 1 for i in range(len(chapters))}
 
+    global _GLOSSARY_CHAPTER_POSITIONS, _GLOSSARY_CHAPTER_NUMBERS, _GLOSSARY_CHAPTER_FILENAMES, _GLOSSARY_TOTAL_CHAPTERS
+    _GLOSSARY_CHAPTER_POSITIONS = {int(k): int(v) for k, v in (_chapter_positions or {}).items()}
+    _GLOSSARY_CHAPTER_FILENAMES = {int(k): os.path.basename(str(v or "")) for k, v in (_chapter_filenames or {}).items()}
+    _GLOSSARY_CHAPTER_NUMBERS = {}
+    for _idx, _fname in _GLOSSARY_CHAPTER_FILENAMES.items():
+        _stem = os.path.splitext(_fname)[0]
+        _nums = re.findall(r'[0-9]+', _stem) if _stem else []
+        if _nums:
+            _GLOSSARY_CHAPTER_NUMBERS[_idx] = int(_nums[-1])
+    for _idx, _pos in _GLOSSARY_CHAPTER_POSITIONS.items():
+        _GLOSSARY_CHAPTER_NUMBERS.setdefault(_idx, _pos)
+    _GLOSSARY_TOTAL_CHAPTERS = len(chapters)
+
     if not chapters:
         print("No chapters found. Exiting.")
         return
@@ -6677,6 +6721,9 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
 
         chapters = {}
         for idx in sorted(set(completed_clean) | failed_set | merged_set):
+            actual_num = _glossary_chapter_actual_num(idx)
+            chapter_key = _glossary_chapter_key(idx)
+            chapter_file = _GLOSSARY_CHAPTER_FILENAMES.get(idx, "")
             issue_list = qa_issues_clean.get(idx, [])
             if idx in failed_set:
                 status = "qa_failed" if issue_list else "failed"
@@ -6687,22 +6734,33 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
 
             chapter_info = {
                 "chapter_index": idx,
-                "actual_num": idx + 1,
+                "actual_num": actual_num,
+                "chapter_num": actual_num,
                 "status": status,
                 "last_updated": time.time(),
             }
+            if chapter_file:
+                chapter_info["original_basename"] = chapter_file
+                chapter_info["chapter_file"] = chapter_file
             if issue_list:
                 chapter_info["qa_issues"] = True
                 chapter_info["qa_timestamp"] = time.time()
                 chapter_info["qa_issues_found"] = issue_list
-            chapters[str(idx)] = chapter_info
+            chapters[chapter_key] = chapter_info
 
         progress_data = {
             "completed": completed_clean,
+            "completed_chapter_nums": [_glossary_chapter_actual_num(idx) for idx in completed_clean],
             "book_title_present": bool(BOOK_TITLE_PRESENT),
             # Use value from entry if present, otherwise fallback to global translated title
             "book_title": BOOK_TITLE_VALUE if BOOK_TITLE_PRESENT else BOOK_TITLE_TRANSLATED,
             "chapters": chapters,
+            "chapter_positions": {str(k): v for k, v in sorted((_GLOSSARY_CHAPTER_POSITIONS or {}).items())},
+            "chapter_numbers": {str(k): v for k, v in sorted((_GLOSSARY_CHAPTER_NUMBERS or {}).items())},
+            "chapter_filenames": {str(k): v for k, v in sorted((_GLOSSARY_CHAPTER_FILENAMES or {}).items())},
+            "chapter_count": _GLOSSARY_TOTAL_CHAPTERS,
+            "progress_schema_version": "2.0",
+            "indexing": "chapter_index_zero_based",
             "qa_issues_found": {str(idx): issues for idx, issues in sorted(qa_issues_clean.items())},
             # Glossary is saved separately to output files, not in progress
             # This prevents the progress file from overwriting manual edits
@@ -6715,6 +6773,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         # Add failed chapters list
         if failed is not None:
             progress_data["failed"] = failed_clean
+            progress_data["failed_chapter_nums"] = [_glossary_chapter_actual_num(idx) for idx in failed_clean]
         
         try:
             # Use atomic write with proper temp file handling

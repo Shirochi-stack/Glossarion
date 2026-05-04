@@ -1602,15 +1602,59 @@ class RetranslationMixin:
             """Build a glossary progress panel for a single EPUB. Returns (panel_widget, refresh_func)."""
             from PySide6.QtWidgets import QStackedWidget, QComboBox
             
-            with open(gp_path, 'r', encoding='utf-8') as f:
-                gp_data = json.load(f)
-            
-            completed_indices = gp_data.get('completed', [])
-            failed_indices = gp_data.get('failed', [])
-            merged_indices = gp_data.get('merged_indices', [])
+            def _gp_load_progress_dict(path):
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        loaded = json.load(f)
+                except Exception as e:
+                    print(f"⚠️ Could not load glossary progress file {path}: {e}")
+                    return {}
+                if isinstance(loaded, dict):
+                    return loaded
+                print(f"⚠️ Glossary progress file has legacy non-dict shape: {type(loaded).__name__}")
+                return {}
+
+            def _gp_int_list(values):
+                if values is None:
+                    return []
+                if isinstance(values, dict):
+                    values = values.keys()
+                elif isinstance(values, (str, int, float)):
+                    values = [values]
+                result = []
+                seen = set()
+                try:
+                    iterator = iter(values)
+                except TypeError:
+                    iterator = iter([values])
+                for value in iterator:
+                    if isinstance(value, dict):
+                        value = value.get('chapter_index', value.get('actual_num', value.get('chapter_num')))
+                    try:
+                        ivalue = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if ivalue not in seen:
+                        seen.add(ivalue)
+                        result.append(ivalue)
+                return result
+
+            def _gp_safe_int(value, default=0):
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return default
+
+            gp_data = _gp_load_progress_dict(gp_path)
+
+            completed_indices = _gp_int_list(gp_data.get('completed', []))
+            failed_indices = _gp_int_list(gp_data.get('failed', []))
+            merged_indices = _gp_int_list(gp_data.get('merged_indices', []))
             book_title = gp_data.get('book_title', '')
 
             def _gp_qa_issue_map(_d):
+                if not isinstance(_d, dict):
+                    _d = {}
                 issues = {}
 
                 def _add(idx, values):
@@ -1633,39 +1677,117 @@ class RetranslationMixin:
                     for idx, values in raw_map.items():
                         if isinstance(values, dict):
                             values = values.get('qa_issues_found') or values.get('issues') or []
-                        _add(idx, values)
+                        mapped_idx = _gp_index_for_progress_value(idx, _d)
+                        _add(mapped_idx if mapped_idx is not None else idx, values)
 
                 chapters = _d.get('chapters', {})
                 if isinstance(chapters, dict):
                     for key, info in chapters.items():
                         if not isinstance(info, dict):
                             continue
-                        idx = info.get('chapter_index', key)
+                        idx = _gp_index_for_entry(info, key, _d)
                         _add(idx, info.get('qa_issues_found', []))
                 return issues
 
+            def _gp_filename_chapter_num(fname):
+                import re as _re_gp_num
+                nums = _re_gp_num.findall(r'[0-9]+', os.path.splitext(str(fname or ""))[0])
+                if nums:
+                    try:
+                        return int(nums[-1])
+                    except (TypeError, ValueError):
+                        return None
+                return None
+
+            def _gp_index_for_actual_num(actual_num, _d=None):
+                try:
+                    actual_num = int(actual_num)
+                except (TypeError, ValueError):
+                    return None
+                matches = []
+                for ci, fname in (panel_state.get('chapter_map') or {}).items():
+                    if _gp_filename_chapter_num(fname) == actual_num:
+                        matches.append(ci)
+                if not matches:
+                    chapter_numbers = (_d or gp_data).get('chapter_numbers', {})
+                    if isinstance(chapter_numbers, dict):
+                        for ci, num in chapter_numbers.items():
+                            try:
+                                if int(num) == actual_num:
+                                    matches.append(int(ci))
+                            except (TypeError, ValueError):
+                                pass
+                if len(matches) == 1:
+                    return matches[0]
+                return None
+
+            def _gp_index_for_entry(info, key=None, _d=None):
+                if not isinstance(info, dict):
+                    info = {}
+
+                for fname_key in ('original_basename', 'chapter_file', 'source_filename', 'filename'):
+                    fname = os.path.basename(str(info.get(fname_key, "") or ""))
+                    if not fname:
+                        continue
+                    for ci, mapped_name in (panel_state.get('chapter_map') or {}).items():
+                        if os.path.basename(str(mapped_name or "")) == fname:
+                            return ci
+
+                for num_key in ('actual_num', 'chapter_num'):
+                    ci = _gp_index_for_actual_num(info.get(num_key), _d)
+                    if ci is not None:
+                        return ci
+
+                if key is not None and 'chapter_index' not in info:
+                    ci = _gp_index_for_actual_num(key, _d)
+                    if ci is not None:
+                        return ci
+
+                try:
+                    return int(info.get('chapter_index', key))
+                except (TypeError, ValueError):
+                    return None
+
+            def _gp_index_for_progress_value(value, _d):
+                if not isinstance(_d, dict):
+                    _d = {}
+                try:
+                    ivalue = int(value)
+                except (TypeError, ValueError):
+                    return None
+                if str(_d.get('indexing', '')).lower() == 'chapter_index_zero_based':
+                    return ivalue
+                positions = _d.get('chapter_positions', {})
+                if isinstance(positions, dict) and str(ivalue) in positions:
+                    return ivalue
+                ci = _gp_index_for_actual_num(ivalue, _d)
+                return ci if ci is not None else ivalue
+
             def _gp_sets(_d):
-                def _int_set(values):
+                if not isinstance(_d, dict):
+                    _d = {}
+
+                def _index_set(values):
                     result = set()
-                    for value in values or []:
-                        try:
-                            result.add(int(value))
-                        except (TypeError, ValueError):
-                            continue
+                    for value in _gp_int_list(values):
+                        ci = _gp_index_for_progress_value(value, _d)
+                        if ci is not None:
+                            result.add(ci)
                     return result
 
-                comp = _int_set(_d.get('completed', []))
-                fail = _int_set(_d.get('failed', []))
-                merg = _int_set(_d.get('merged_indices', []))
+                comp = set()
+                fail = set()
+                merg = set()
                 chapters = _d.get('chapters', {})
+                used_chapter_entries = False
                 if isinstance(chapters, dict):
                     for key, info in chapters.items():
                         if not isinstance(info, dict):
                             continue
-                        try:
-                            ci = int(info.get('chapter_index', key))
-                        except (TypeError, ValueError):
+                        ci = _gp_index_for_entry(info, key, _d)
+                        if ci is None:
                             continue
+                        used_chapter_entries = True
                         status = str(info.get('status', '')).lower()
                         if status in ('failed', 'qa_failed', 'error'):
                             fail.add(ci)
@@ -1673,39 +1795,57 @@ class RetranslationMixin:
                             merg.add(ci)
                         elif status == 'completed':
                             comp.add(ci)
+                if not used_chapter_entries:
+                    comp = _index_set(_d.get('completed', []))
+                    fail = _index_set(_d.get('failed', []))
+                    merg = _index_set(_d.get('merged_indices', []))
                 # Failed should win over completed in the UI.
                 comp -= fail
                 return comp, fail, merg
 
-            def _gp_status_for(ci, _d):
+            def _gp_status_cache(_d):
                 comp, fail, merg = _gp_sets(_d)
                 issues = _gp_qa_issue_map(_d)
+                qa_failed = set()
+                chapters = _d.get('chapters', {}) if isinstance(_d, dict) else {}
+                if isinstance(chapters, dict):
+                    for key, info in chapters.items():
+                        if not isinstance(info, dict):
+                            continue
+                        if str(info.get('status', '')).lower() != 'qa_failed':
+                            continue
+                        ci = _gp_index_for_entry(info, key, _d)
+                        if ci is not None:
+                            qa_failed.add(ci)
+                return {
+                    'completed': comp,
+                    'failed': fail,
+                    'merged': merg,
+                    'issues': issues,
+                    'qa_failed': qa_failed,
+                }
+
+            def _gp_status_for(ci, _d, cache=None):
+                if not isinstance(_d, dict):
+                    _d = {}
+                cache = cache or _gp_status_cache(_d)
+                comp = cache['completed']
+                fail = cache['failed']
+                merg = cache['merged']
+                issues = cache['issues']
                 if ci in fail:
-                    chapter_status = ''
-                    chapters = _d.get('chapters', {})
-                    if isinstance(chapters, dict):
-                        for key, info in chapters.items():
-                            if not isinstance(info, dict):
-                                continue
-                            try:
-                                chapter_index = int(info.get('chapter_index', key))
-                            except (TypeError, ValueError):
-                                continue
-                            if chapter_index == ci:
-                                chapter_status = str(info.get('status', '')).lower()
-                                break
-                    return ('qa_failed' if issues.get(ci) or chapter_status == 'qa_failed' else 'failed'), issues.get(ci, [])
+                    return ('qa_failed' if issues.get(ci) or ci in cache['qa_failed'] else 'failed'), issues.get(ci, [])
                 if ci in merg:
                     return 'merged', []
                 if ci in comp:
                     return 'completed', []
                 return 'not_completed', []
 
-            def _gp_display_for(ci, fname, _d):
+            def _gp_display_for(ci, fname, _d, cache=None):
                 import re as _re_display
                 _nums = _re_display.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
                 ch_num = int(_nums[-1]) if _nums else ci + 1
-                status, issues = _gp_status_for(ci, _d)
+                status, issues = _gp_status_for(ci, _d, cache)
                 icons = {
                     'completed': '\u2705',
                     'failed': '\u274c',
@@ -1807,18 +1947,35 @@ class RetranslationMixin:
             _cmap_init, _total_init = _read_spine_map(fp, _ts_init)
             
             if _total_init == 0:
-                _total_init = max(
-                    max(completed_indices, default=0),
-                    max(failed_indices, default=0),
-                    max(merged_indices, default=0)
-                ) + 1
+                _total_init = _gp_safe_int(gp_data.get('chapter_count'), 0)
+                if _total_init <= 0:
+                    chapter_filenames = gp_data.get('chapter_filenames', {})
+                    if isinstance(chapter_filenames, dict) and chapter_filenames:
+                        _total_init = max((int(k) for k in chapter_filenames.keys() if str(k).isdigit()), default=-1) + 1
+                if _total_init <= 0:
+                    _idx_values = []
+                    for _values in (completed_indices, failed_indices, merged_indices):
+                        _idx_values.extend(_gp_int_list(_values))
+                    _total_init = (max(_idx_values) + 1) if _idx_values else 1
             
             # Store in mutable dict so closures can update
             panel_state = {
                 'chapter_map': _cmap_init,
                 'total': _total_init,
                 'translate_special': _ts_init,
+                'populate_generation': 0,
             }
+            if not panel_state['chapter_map']:
+                chapter_filenames = gp_data.get('chapter_filenames', {})
+                if isinstance(chapter_filenames, dict):
+                    try:
+                        panel_state['chapter_map'] = {
+                            int(k): os.path.basename(str(v or ""))
+                            for k, v in chapter_filenames.items()
+                            if str(k).lstrip('-').isdigit() and v
+                        }
+                    except Exception:
+                        panel_state['chapter_map'] = {}
             
             panel = QWidget(parent_widget)
             p_layout = QVBoxLayout(panel)
@@ -1889,7 +2046,7 @@ class RetranslationMixin:
             completed_set, failed_set, merged_set = _gp_sets(gp_data)
             
             chapter_map = panel_state['chapter_map']
-            total_epub_chapters = panel_state['total']
+            total_epub_chapters = 0
             
             for ci in range(total_epub_chapters):
                 fname = chapter_map.get(ci, f'chapter {ci + 1}')
@@ -1915,6 +2072,40 @@ class RetranslationMixin:
                 item.setData(Qt.UserRole + 1, ci)  # Store chapter index for deletion
                 gp_listbox.addItem(item)
             
+            def _populate_gp_listbox(_d, chunk_size=150):
+                panel_state['populate_generation'] = panel_state.get('populate_generation', 0) + 1
+                generation = panel_state['populate_generation']
+                cache = _gp_status_cache(_d)
+                gp_listbox.clear()
+                gp_listbox.setUpdatesEnabled(False)
+                total = panel_state['total']
+                chapter_map = panel_state['chapter_map']
+                state = {'ci': 0}
+
+                def _add_chunk():
+                    if generation != panel_state.get('populate_generation'):
+                        return
+                    start_ci = state['ci']
+                    end_ci = min(start_ci + chunk_size, total)
+                    for ci in range(start_ci, end_ci):
+                        fname = chapter_map.get(ci, f'chapter {ci + 1}')
+                        display, status = _gp_display_for(ci, fname, _d, cache)
+                        item = QListWidgetItem(display)
+                        item.setForeground(QColor(_gp_color_for(status)))
+                        item.setData(Qt.UserRole, status)
+                        item.setData(Qt.UserRole + 1, ci)
+                        gp_listbox.addItem(item)
+                    state['ci'] = end_ci
+                    if end_ci < total:
+                        QTimer.singleShot(0, _add_chunk)
+                    else:
+                        gp_listbox.setUpdatesEnabled(True)
+                        gp_listbox.viewport().update()
+
+                QTimer.singleShot(0, _add_chunk)
+
+            _populate_gp_listbox(gp_data)
+
             # Helper to refresh stats labels from a loaded progress dict
             def _refresh_stats_from_dict(_d):
                 _comp2, _fail2, _merg2 = _gp_sets(_d)
@@ -1960,14 +2151,17 @@ class RetranslationMixin:
                     _rp = _find_gp_for_file(fp)
                     if not _rp or not os.path.isfile(_rp):
                         return
-                    with open(_rp, 'r', encoding='utf-8') as _f:
-                        _d = json.load(_f)
+                    _d = _gp_load_progress_dict(_rp)
                     
                     indices_to_remove = set(ci for _, ci in targets)
                     changed = False
                     for key in ('completed', 'failed', 'merged_indices'):
                         lst = _d.get(key, [])
-                        new_lst = [v for v in lst if v not in indices_to_remove]
+                        new_lst = []
+                        for v in lst:
+                            mapped_ci = _gp_index_for_progress_value(v, _d)
+                            if mapped_ci not in indices_to_remove:
+                                new_lst.append(v)
                         if len(new_lst) != len(lst):
                             _d[key] = new_lst
                             changed = True
@@ -1976,10 +2170,8 @@ class RetranslationMixin:
                     if isinstance(qa_map, dict):
                         new_qa_map = {}
                         for k, v in qa_map.items():
-                            try:
-                                keep = int(k) not in indices_to_remove
-                            except (TypeError, ValueError):
-                                keep = True
+                            mapped_ci = _gp_index_for_progress_value(k, _d)
+                            keep = mapped_ci not in indices_to_remove if mapped_ci is not None else True
                             if keep:
                                 new_qa_map[k] = v
                         if len(new_qa_map) != len(qa_map):
@@ -1990,11 +2182,8 @@ class RetranslationMixin:
                     if isinstance(chapters, dict):
                         new_chapters = {}
                         for k, v in chapters.items():
-                            try:
-                                ci = int(v.get('chapter_index', k) if isinstance(v, dict) else k)
-                                keep = ci not in indices_to_remove
-                            except (TypeError, ValueError):
-                                keep = True
+                            ci = _gp_index_for_entry(v, k, _d) if isinstance(v, dict) else None
+                            keep = ci not in indices_to_remove if ci is not None else True
                             if keep:
                                 new_chapters[k] = v
                         if len(new_chapters) != len(chapters):
@@ -2163,10 +2352,8 @@ class RetranslationMixin:
             # Helper to fully rebuild the listbox when chapter_map changes
             def _rebuild_listbox(_d):
                 _cmap = panel_state['chapter_map']
-                _total = panel_state['total']
-                _comp = set(_d.get('completed', []))
-                _fail = set(_d.get('failed', []))
-                _merg = set(_d.get('merged_indices', []))
+                _total = 0
+                _comp, _fail, _merg = _gp_sets(_d)
                 
                 gp_listbox.clear()
                 import re as _re_rb
@@ -2192,14 +2379,15 @@ class RetranslationMixin:
                     item.setData(Qt.UserRole + 1, ci)
                     gp_listbox.addItem(item)
             
+                _populate_gp_listbox(_d)
+
             # Refresh function (called by timer)
             def _refresh():
                 try:
                     _rp = _find_gp_for_file(fp)
                     if not _rp or not os.path.isfile(_rp):
                         return
-                    with open(_rp, 'r', encoding='utf-8') as _f:
-                        _d = json.load(_f)
+                    _d = _gp_load_progress_dict(_rp)
                     
                     # Check if TRANSLATE_SPECIAL_FILES toggle changed — rebuild chapter map if so
                     _cur_ts = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
@@ -2210,7 +2398,8 @@ class RetranslationMixin:
                             panel_state['chapter_map'] = new_cmap
                             panel_state['total'] = new_total
                         elif new_total == 0:
-                            _all_idx = set(_d.get('completed', [])) | set(_d.get('failed', [])) | set(_d.get('merged_indices', []))
+                            _comp0, _fail0, _merg0 = _gp_sets(_d)
+                            _all_idx = _comp0 | _fail0 | _merg0
                             panel_state['total'] = (max(_all_idx, default=0) + 1) if _all_idx else 1
                         _rebuild_listbox(_d)
                         _refresh_stats_from_dict(_d)
@@ -2232,12 +2421,13 @@ class RetranslationMixin:
                     if _bt and bt_label:
                         bt_label.setText(f"📖 {_bt}")
                     
+                    _cache = _gp_status_cache(_d)
                     for ci in range(min(gp_listbox.count(), _total)):
                         item = gp_listbox.item(ci)
                         if not item:
                             continue
                         old_status = item.data(Qt.UserRole)
-                        new_status, _issues = _gp_status_for(ci, _d)
+                        new_status, _issues = _gp_status_for(ci, _d, _cache)
                         new_color = _gp_color_for(new_status)
                         
                         if new_status != old_status or _issues:
@@ -2247,7 +2437,7 @@ class RetranslationMixin:
                             ch_num2 = int(_nums2[-1]) if _nums2 else ci + 1
                             _icons = {'completed': '✅', 'failed': '❌', 'merged': '🔗', 'not_completed': '⬜'}
                             display2 = f"Ch.{ch_num2:03d} | {_icons.get(new_status, '⬜')} {new_status.replace('_', ' ').title():14s} | {fname}"
-                            display2, _ = _gp_display_for(ci, fname, _d)
+                            display2, _ = _gp_display_for(ci, fname, _d, _cache)
                             item.setText(display2)
                             item.setForeground(QColor(new_color))
                             item.setData(Qt.UserRole, new_status)
