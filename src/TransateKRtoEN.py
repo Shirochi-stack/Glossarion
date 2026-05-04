@@ -3231,6 +3231,26 @@ class ContentProcessor:
         return text
 
     @staticmethod
+    def normalize_escaped_image_tags(html_content):
+        """Turn escaped image markup (&lt;img ...&gt;) back into real <img> tags."""
+        if not html_content or '&lt;' not in str(html_content).lower():
+            return html_content
+        try:
+            def _restore_img(match):
+                attrs = html.unescape(match.group(1)).strip()
+                attrs = attrs[:-1].rstrip() if attrs.endswith('/') else attrs
+                return f"<img {attrs}/>"
+
+            return re.sub(
+                r'&lt;\s*img\b(.*?)\s*/?\s*&gt;',
+                _restore_img,
+                str(html_content),
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        except Exception:
+            return html_content
+
+    @staticmethod
     def get_content_hash(html_content):
         """Create a stable hash of content"""
         try:
@@ -3252,6 +3272,7 @@ class ContentProcessor:
     def is_meaningful_text_content(html_content):
         """Check if chapter has meaningful text beyond just structure"""
         try:
+            html_content = ContentProcessor.normalize_escaped_image_tags(html_content)
             # Check if this is plain text from enhanced extraction (html2text output)
             # html2text output characteristics:
             # - Often starts with # for headers
@@ -3322,6 +3343,7 @@ class ContentProcessor:
     def is_only_image_links(html_content):
         """Return True if content contains only image links/paths (no meaningful text)."""
         try:
+            html_content = ContentProcessor.normalize_escaped_image_tags(html_content)
             if not html_content:
                 return False
 
@@ -3381,6 +3403,7 @@ class ContentProcessor:
     def is_mostly_image_html(html_content, min_images=1, max_text_chars=500, image_ratio=0.08):
         """Return True when HTML is primarily image references with little readable text."""
         try:
+            html_content = ContentProcessor.normalize_escaped_image_tags(html_content)
             if not html_content:
                 return False
             soup = BeautifulSoup(html_content, 'html.parser')
@@ -3413,8 +3436,8 @@ class ContentProcessor:
     @staticmethod
     def image_processing_html(chapter):
         """Choose the best HTML source for image translation/OCR."""
-        body = chapter.get("body", "") or ""
-        original = (
+        body = ContentProcessor.normalize_escaped_image_tags(chapter.get("body", "") or "")
+        original = ContentProcessor.normalize_escaped_image_tags(
             chapter.get("original_html")
             or chapter.get("source_html")
             or chapter.get("raw_html")
@@ -4701,8 +4724,19 @@ class BatchTranslationProcessor:
                 self.update_progress_fn(idx, actual_num, content_hash, fname, status="in_progress")
                 self.save_progress_fn()
             
-            chapter_body = chapter["body"]
-            if chapter.get('has_images') and self.image_translator and self.config.ENABLE_IMAGE_TRANSLATION:
+            from bs4 import BeautifulSoup
+            chapter_body = ContentProcessor.image_processing_html(chapter)
+            html_mostly_images = ContentProcessor.is_mostly_image_html(chapter_body)
+            if html_mostly_images and chapter_body != chapter.get("body", ""):
+                chapter["body"] = chapter_body
+                chapter["has_images"] = True
+                chapter["image_count"] = max(
+                    chapter.get("image_count", 0),
+                    len(BeautifulSoup(chapter_body, 'html.parser').find_all('img'))
+                )
+            c = chapter
+            has_images = chapter.get('has_images', False) or html_mostly_images
+            if has_images and self.image_translator and self.config.ENABLE_IMAGE_TRANSLATION:
                 print(f"🖼️ Processing images for Chapter {actual_num}...")
                 self.image_translator.set_current_chapter(actual_num)
                 chapter_body, image_translations = process_chapter_images(
@@ -4712,9 +4746,9 @@ class BatchTranslationProcessor:
                     self.check_stop_fn
                 )
                 if image_translations:
+                    chapter["body"] = chapter_body
                     # Create a copy of the processed body
                     from bs4 import BeautifulSoup 
-                    c = chapter
                     soup_for_text = BeautifulSoup(c["body"], 'html.parser')
                     
                     # Remove all translated content
@@ -4723,7 +4757,7 @@ class BatchTranslationProcessor:
                     
                     # Use this cleaned version for text translation
                     text_to_translate = str(soup_for_text)
-                    final_body_with_images = c["body"]
+                    final_body_with_images = chapter_body
                 else:
                     text_to_translate = c["body"]
                     image_translations = {}
@@ -7796,6 +7830,7 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
                          check_stop_fn=None) -> Tuple[str, Dict[str, str]]:
     """Process and translate images in a chapter"""
     from bs4 import BeautifulSoup
+    chapter_html = ContentProcessor.normalize_escaped_image_tags(chapter_html)
     images = image_translator.extract_images_from_chapter(chapter_html)
 
     if not images:
@@ -7876,12 +7911,23 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
                     break
             
             if not img_path:
-                print(f"   ❌ Image not found in any location for: {img_src}")
-                print(f"   Tried: {possible_paths}")
-                continue
+                mapped_path = _resolve_image_path_from_rename_map(original_img_src, image_translator)
+                if mapped_path:
+                    img_path = mapped_path
+                    print(f"   Resolved renamed image ref: {os.path.basename(original_img_src)} -> {os.path.basename(mapped_path)}")
+                else:
+                    print(f"   ❌ Image not found in any location for: {img_src}")
+                    print(f"   Tried: {possible_paths}")
+                    continue
         
         img_path = os.path.normpath(img_path)
         
+        if not os.path.exists(img_path):
+            mapped_path = _resolve_image_path_from_rename_map(original_img_src, image_translator)
+            if mapped_path:
+                print(f"   Resolved renamed image ref: {os.path.basename(original_img_src)} -> {os.path.basename(mapped_path)}")
+                img_path = mapped_path
+
         if not os.path.exists(img_path):
             print(f"   ⚠️ Image not found: {img_path}")
             print(f"   📁 Images directory: {image_translator.images_dir}")
@@ -8064,6 +8110,60 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
     return chapter_html, {}
 
 
+def _load_image_rename_map_for_output(output_dir):
+    """Load extracted-image rename metadata from the EPUB output folder."""
+    if not output_dir:
+        return {}
+    map_path = os.path.join(output_dir, 'image_rename_map.json')
+    try:
+        if os.path.exists(map_path):
+            with open(map_path, 'r', encoding='utf-8') as f:
+                return json.load(f) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def _resolve_image_path_from_rename_map(img_src, image_translator):
+    """Resolve stale EPUB image refs through image_rename_map.json."""
+    if not img_src or not image_translator:
+        return None
+
+    clean_src = str(img_src).split('?', 1)[0].split('#', 1)[0].replace('\\', '/')
+    basename = os.path.basename(clean_src)
+    if not basename:
+        return None
+
+    rename_map = _load_image_rename_map_for_output(getattr(image_translator, 'output_dir', ''))
+    if not rename_map:
+        return None
+
+    renamed = rename_map.get(basename)
+    if not renamed:
+        lower_lookup = {str(k).lower(): v for k, v in rename_map.items()}
+        renamed = lower_lookup.get(basename.lower())
+    if not renamed:
+        return None
+
+    output_dir = getattr(image_translator, 'output_dir', '') or ''
+    images_dir = getattr(image_translator, 'images_dir', '') or ''
+    src_dir = os.path.dirname(clean_src)
+    candidates = [
+        os.path.join(images_dir, renamed),
+        os.path.join(output_dir, 'images', renamed),
+        os.path.join(output_dir, 'Images', renamed),
+        os.path.join(output_dir, renamed),
+    ]
+    if src_dir:
+        candidates.append(os.path.join(output_dir, src_dir, renamed))
+
+    for candidate in candidates:
+        path = os.path.normpath(candidate)
+        if os.path.exists(path):
+            return path
+    return None
+
+
 def _resolve_chapter_image_path(img_src, image_translator, actual_num, idx):
     """Resolve an HTML image src to a local file path in the extracted output tree."""
     img_path = None
@@ -8105,6 +8205,16 @@ def _resolve_chapter_image_path(img_src, image_translator, actual_num, idx):
 
     if img_path:
         img_path = os.path.normpath(img_path)
+        if not os.path.exists(img_path):
+            mapped_path = _resolve_image_path_from_rename_map(img_src, image_translator)
+            if mapped_path:
+                print(f"   Resolved renamed image ref: {os.path.basename(img_src)} -> {os.path.basename(mapped_path)}")
+                img_path = mapped_path
+    else:
+        mapped_path = _resolve_image_path_from_rename_map(img_src, image_translator)
+        if mapped_path:
+            print(f"   Resolved renamed image ref: {os.path.basename(img_src)} -> {os.path.basename(mapped_path)}")
+            img_path = mapped_path
     return img_path if img_path and os.path.exists(img_path) else None
 
 
@@ -8131,6 +8241,7 @@ def _extract_chapter_header_text(chapter_html):
 
 def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actual_num, check_stop_fn=None):
     """OCR chapter images for Vision-mode glossary prepasses without translating them."""
+    chapter_html = ContentProcessor.normalize_escaped_image_tags(chapter_html)
     images = image_translator.extract_images_from_chapter(chapter_html)
     if not images:
         return ""
@@ -13115,6 +13226,7 @@ def main(log_callback=None, stop_callback=None):
                 continue
             
             # Check for empty or image-only chapters
+            from bs4 import BeautifulSoup
             image_source_html = ContentProcessor.image_processing_html(c)
             html_mostly_images = ContentProcessor.is_mostly_image_html(image_source_html)
             has_images = c.get('has_images', False) or html_mostly_images
@@ -13914,6 +14026,7 @@ def main(log_callback=None, stop_callback=None):
                         needs_translation = True
                 
                 # Skip empty/image-only chapters from merging
+                from bs4 import BeautifulSoup
                 image_source_html = ContentProcessor.image_processing_html(c)
                 html_mostly_images = ContentProcessor.is_mostly_image_html(image_source_html)
                 has_images = c.get('has_images', False) or html_mostly_images
@@ -14084,6 +14197,7 @@ def main(log_callback=None, stop_callback=None):
             # Initialize merge_info for this chapter (will be populated if this is a parent in a merge group)
             merge_info = None
             
+            from bs4 import BeautifulSoup
             image_source_html = ContentProcessor.image_processing_html(c)
             html_mostly_images = ContentProcessor.is_mostly_image_html(image_source_html)
             has_images = c.get('has_images', False) or html_mostly_images
