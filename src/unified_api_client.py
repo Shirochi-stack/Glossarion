@@ -13871,10 +13871,16 @@ class UnifiedClient:
         Get the actual provider name, accounting for Gemini using OpenAI endpoint.
         This is used for proper routing and detection.
         """
-        # Check if this is Gemini using OpenAI endpoint
-        if hasattr(self, '_original_client_type') and self._original_client_type:
+        client_type = getattr(self, 'client_type', 'openai')
+
+        # _original_client_type is only valid while the active client is an
+        # OpenAI-compatible transport. Vision/glossary key overrides can swap
+        # the same UnifiedClient instance from Gemini/OpenAI mode to Vertex AI;
+        # in that case a stale _original_client_type='gemini' must not reroute
+        # vertex/gemini-* requests to the native AI Studio endpoint.
+        if client_type == 'openai' and getattr(self, '_original_client_type', None):
             return self._original_client_type
-        return getattr(self, 'client_type', 'openai')
+        return client_type
 
     def _extract_chapter_label(self, messages) -> str:
         """Extract a concise chapter/chunk label from messages for logging."""

@@ -5305,7 +5305,7 @@ def configure_image_chunk_prompt(self):
         dialog.show()
 
 def configure_vision_ocr_prompt(self):
-    """Configure the OCR-only prompt used by Vision output mode before translation."""
+    """Configure the OCR-only prompts used by Vision output mode before translation."""
     from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextEdit, QMessageBox, QGroupBox
     from PySide6.QtCore import Qt
 
@@ -5326,7 +5326,7 @@ def configure_vision_ocr_prompt(self):
     dialog.setWindowTitle("Vision OCR Prompt")
     dialog.setModal(False)
     dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
-    dialog.resize(640, 460)
+    dialog.resize(760, 620)
     dialog.closeEvent = lambda event: (event.ignore(), dialog.hide())
     self._vision_ocr_prompt_dialog = dialog
 
@@ -5343,27 +5343,54 @@ def configure_vision_ocr_prompt(self):
     main_layout.addWidget(desc)
     main_layout.addSpacing(10)
 
-    prompt_box = QGroupBox("OCR Prompt")
-    prompt_v = QVBoxLayout(prompt_box)
-    prompt_text = QTextEdit()
-    prompt_text.setAcceptRichText(False)
-    prompt_text.setPlainText(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', '')))
-    prompt_v.addWidget(prompt_text)
-    main_layout.addWidget(prompt_box)
+    system_box = QGroupBox("System Prompt")
+    system_v = QVBoxLayout(system_box)
+    system_text = QTextEdit()
+    system_text.setAcceptRichText(False)
+    system_text.setPlainText(getattr(
+        self,
+        'vision_ocr_prompt',
+        self.config.get('vision_ocr_prompt', getattr(self, 'default_vision_ocr_prompt', ''))
+    ))
+    system_v.addWidget(system_text)
+    main_layout.addWidget(system_box, 2)
+
+    user_box = QGroupBox("User Prompt")
+    user_v = QVBoxLayout(user_box)
+    user_hint = QLabel("Use {context} where chapter/image context or alt text should be inserted. The default keeps it at the end.")
+    user_hint.setStyleSheet("color: gray; font-size: 9pt;")
+    user_hint.setWordWrap(True)
+    user_v.addWidget(user_hint)
+    user_text = QTextEdit()
+    user_text.setAcceptRichText(False)
+    user_text.setPlainText(getattr(
+        self,
+        'vision_ocr_user_prompt',
+        self.config.get('vision_ocr_user_prompt', getattr(self, 'default_vision_ocr_user_prompt', ''))
+    ))
+    user_v.addWidget(user_text)
+    main_layout.addWidget(user_box, 1)
 
     button_layout = QHBoxLayout()
 
     def save_prompt():
-        self.vision_ocr_prompt = prompt_text.toPlainText().strip()
+        self.vision_ocr_prompt = system_text.toPlainText().strip()
+        self.vision_ocr_user_prompt = user_text.toPlainText().strip()
         self.config['vision_ocr_prompt'] = self.vision_ocr_prompt
-        QMessageBox.information(dialog, "Success", "Vision OCR prompt saved!")
+        self.config['vision_ocr_user_prompt'] = self.vision_ocr_user_prompt
+        try:
+            self.save_config()
+        except Exception:
+            pass
+        QMessageBox.information(dialog, "Success", "Vision OCR prompts saved!")
         dialog.hide()
 
     def reset_prompt():
-        result = QMessageBox.question(dialog, "Reset Prompt", "Reset to the default Vision OCR prompt?",
+        result = QMessageBox.question(dialog, "Reset Prompts", "Reset both Vision OCR prompts to their defaults?",
                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if result == QMessageBox.Yes:
-            prompt_text.setPlainText(getattr(self, 'default_vision_ocr_prompt', ''))
+            system_text.setPlainText(getattr(self, 'default_vision_ocr_prompt', ''))
+            user_text.setPlainText(getattr(self, 'default_vision_ocr_user_prompt', ''))
 
     save_btn = QPushButton("Save")
     save_btn.clicked.connect(save_prompt)

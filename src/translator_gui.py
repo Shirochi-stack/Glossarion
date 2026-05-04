@@ -2140,12 +2140,19 @@ Text to analyze:
         self.default_vision_ocr_prompt = (
             "Extract only the readable text that is physically present in the image, in natural reading order. "
             "If the image itself is a cover page, character art, scene illustration, decorative image, or otherwise not a page of readable story text, reply with exactly: No. "
-            "Return only the base source text exactly as seen. Preserve line breaks when they help the reading order. "
+            "Return only the base source text exactly as seen. Preserve the original line breaks as faithfully as possible; do not collapse separate visual lines into one paragraph. "
+            "Preserve visible textual styling and marks when possible, including brackets, parentheses, quote marks, emphasis, strikethrough/deleted text, symbols, and emotes/emoticons. "
             "For Chinese/Japanese/Korean text with small pronunciation guides above or beside the main characters, OCR only the main/base characters and ignore the pronunciation guides. "
             "For pinyin-over-Chinese images, output the Chinese characters only; do not output the pinyin unless the pinyin is standalone text with no matching Chinese base text. "
             "Do not translate, summarize, explain, annotate, transliterate, romanize, or add pronunciation guides. "
             "Do not output duplicate reading lines such as pinyin, romaji, furigana, Jyutping, or Latin readings when they are attached to the same base text. "
             "If no readable story text is present, reply with exactly: No."
+        )
+        self.default_vision_ocr_user_prompt = (
+            "OCR this image/chunk. Return only the main/base source text. "
+            "If this image/chunk is cover art, an illustration, decorative art, or has no readable story text, reply with exactly: No. "
+            "Ignore pinyin/romaji/furigana/Jyutping pronunciation guides attached to base characters. Do not translate."
+            "\n\nContext:\n{context}"
         )
         self.default_prompts = {
             "Universal": (
@@ -3399,6 +3406,11 @@ Recent translations to summarize:
         self.translation_chunk_prompt = self.config.get('translation_chunk_prompt', self.default_translation_chunk_prompt)
         self.image_chunk_prompt = self.config.get('image_chunk_prompt', self.default_image_chunk_prompt)
         self.vision_ocr_prompt = self.config.get('vision_ocr_prompt', self.default_vision_ocr_prompt)
+        if not self.vision_ocr_prompt or not str(self.vision_ocr_prompt).strip():
+            self.vision_ocr_prompt = self.default_vision_ocr_prompt
+        self.vision_ocr_user_prompt = self.config.get('vision_ocr_user_prompt', self.default_vision_ocr_user_prompt)
+        if not self.vision_ocr_user_prompt or not str(self.vision_ocr_user_prompt).strip():
+            self.vision_ocr_user_prompt = self.default_vision_ocr_user_prompt
         # Optional assistant prefill prompt (disabled by default)
         self.assistant_prompt = self.config.get('assistant_prompt', self.default_assistant_prompt)
         
@@ -13871,6 +13883,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'OUTPUT_MODE': self._get_output_mode(),
             'VISION_OCR_FIRST': '1' if self._get_output_mode() == 'vision' else '0',
             'VISION_OCR_PROMPT': str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', ''))),
+            'VISION_OCR_USER_PROMPT': str(getattr(self, 'vision_ocr_user_prompt', self.config.get('vision_ocr_user_prompt', ''))),
             'VISION_OCR_BATCH_TRANSLATION': '1' if getattr(self, 'vision_ocr_batch_translation_var', self.config.get('vision_ocr_batch_translation', True)) else '0',
             'VISION_OCR_BATCH_SIZE': str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '10'))),
             'ENABLE_REFINEMENT_OUTPUT_MODE': "1" if self._get_output_mode() == 'refinement' else "0",
@@ -21661,6 +21674,7 @@ Important rules:
                 ('translation_chunk_prompt', ['translation_chunk_prompt'], '', str),
                 ('image_chunk_prompt', ['image_chunk_prompt'], '', str),
                 ('vision_ocr_prompt', ['vision_ocr_prompt'], getattr(self, 'default_vision_ocr_prompt', ''), str),
+                ('vision_ocr_user_prompt', ['vision_ocr_user_prompt'], getattr(self, 'default_vision_ocr_user_prompt', ''), str),
                 ('assistant_prompt', ['assistant_prompt'], '', str),  # Optional assistant prefill
                 ('vertex_ai_location', ['vertex_location_entry', 'vertex_location_var'], 'global', str),
                 ('openai_base_url', ['openai_base_url_var'], '', str),
@@ -22734,6 +22748,7 @@ Important rules:
                 ('OUTPUT_MODE', self._get_output_mode()),
                 ('VISION_OCR_FIRST', '1' if self._get_output_mode() == 'vision' else '0'),
                 ('VISION_OCR_PROMPT', str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', '')))),
+                ('VISION_OCR_USER_PROMPT', str(getattr(self, 'vision_ocr_user_prompt', self.config.get('vision_ocr_user_prompt', '')))),
                 ('VISION_OCR_BATCH_TRANSLATION', '1' if getattr(self, 'vision_ocr_batch_translation_var', True) else '0'),
                 ('VISION_OCR_BATCH_SIZE', str(getattr(self, 'vision_ocr_batch_size_var', '10'))),
                 ('ENABLE_IMAGE_OUTPUT_MODE', self._get_allowed_image_output_mode()),

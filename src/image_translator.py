@@ -35,12 +35,20 @@ logger = logging.getLogger(__name__)
 DEFAULT_VISION_OCR_PROMPT = (
     "Extract only the readable text that is physically present in the image, in natural reading order. "
     "If the image itself is a cover page, character art, scene illustration, decorative image, or otherwise not a page of readable story text, reply with exactly: No. "
-    "Return only the base source text exactly as seen. Preserve line breaks when they help the reading order. "
+    "Return only the base source text exactly as seen. Preserve the original line breaks as faithfully as possible; do not collapse separate visual lines into one paragraph. "
+    "Preserve visible textual styling and marks when possible, including brackets, parentheses, quote marks, emphasis, strikethrough/deleted text, symbols, and emotes/emoticons. "
     "For Chinese/Japanese/Korean text with small pronunciation guides above or beside the main characters, OCR only the main/base characters and ignore the pronunciation guides. "
     "For pinyin-over-Chinese images, output the Chinese characters only; do not output the pinyin unless the pinyin is standalone text with no matching Chinese base text. "
     "Do not translate, summarize, explain, annotate, transliterate, romanize, or add pronunciation guides. "
     "Do not output duplicate reading lines such as pinyin, romaji, furigana, Jyutping, or Latin readings when they are attached to the same base text. "
     "If no readable story text is present, reply with exactly: No."
+)
+
+DEFAULT_VISION_OCR_USER_PROMPT = (
+    "OCR this image/chunk. Return only the main/base source text. "
+    "If this image/chunk is cover art, an illustration, decorative art, or has no readable story text, reply with exactly: No. "
+    "Ignore pinyin/romaji/furigana/Jyutping pronunciation guides attached to base characters. Do not translate."
+    "\n\nContext:\n{context}"
 )
 
 def requires_cv2(func):
@@ -246,6 +254,7 @@ class ImageTranslator:
         self.image_max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
         self.chunk_height = int(os.getenv("IMAGE_CHUNK_HEIGHT", "2000"))
         self.vision_ocr_prompt = os.getenv("VISION_OCR_PROMPT", DEFAULT_VISION_OCR_PROMPT).strip() or DEFAULT_VISION_OCR_PROMPT
+        self.vision_ocr_user_prompt = os.getenv("VISION_OCR_USER_PROMPT", DEFAULT_VISION_OCR_USER_PROMPT).strip() or DEFAULT_VISION_OCR_USER_PROMPT
         self._vision_glossary_processed_hashes = set()
         self._ensure_ocr_cache_valid()
         
@@ -1888,25 +1897,15 @@ class ImageTranslator:
     ):
         """OCR an image/chunk using the dedicated Vision OCR prompt."""
         messages = [{"role": "system", "content": self.vision_ocr_prompt}]
-        if assistant_prompt and assistant_prompt.strip():
-            messages.append({
-                "role": "user",
-                "content": (
-                    f"{assistant_prompt}\n\n"
-                    "OCR this image/chunk. Return only the main/base source text. "
-                    "If this image/chunk is cover art, an illustration, decorative art, or has no readable story text, reply with exactly: No. "
-                    "Ignore pinyin/romaji/furigana/Jyutping pronunciation guides attached to base characters. Do not translate."
-                )
-            })
+        user_prompt_template = (self.vision_ocr_user_prompt or DEFAULT_VISION_OCR_USER_PROMPT).strip()
+        context_text = (assistant_prompt or "").strip()
+        if "{context}" in user_prompt_template:
+            user_prompt = user_prompt_template.replace("{context}", context_text).strip()
+        elif context_text:
+            user_prompt = f"{user_prompt_template}\n\nContext:\n{context_text}".strip()
         else:
-            messages.append({
-                "role": "user",
-                "content": (
-                    "OCR this image. Return only the main/base source text. "
-                    "If this image is cover art, an illustration, decorative art, or has no readable story text, reply with exactly: No. "
-                    "Ignore pinyin/romaji/furigana/Jyutping pronunciation guides attached to base characters. Do not translate."
-                )
-            })
+            user_prompt = user_prompt_template
+        messages.append({"role": "user", "content": user_prompt})
 
         effective_chapter_num = chapter_num if chapter_num is not None else getattr(self, 'current_chapter_num', None)
         effective_image_idx = image_idx if image_idx is not None else getattr(self, 'current_image_index', 0)
