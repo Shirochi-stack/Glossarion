@@ -738,9 +738,10 @@ class ImageTranslator:
     def _process_image_chunks_single_api(self, img, width, height, context, check_stop_fn):
             """Process all image chunks in a single API call with compression support"""
             
-            num_chunks = (height + self.chunk_height - 1) // self.chunk_height
-            overlap_percentage = float(os.getenv('IMAGE_CHUNK_OVERLAP_PERCENT', '1'))
-            overlap = int(self.chunk_height * (overlap_percentage / 100))
+            chunk_ranges = self._image_chunk_ranges(height, img)
+            num_chunks = len(chunk_ranges)
+            overlap_percentage = float(os.getenv('IMAGE_CHUNK_OVERLAP_PERCENT', '3'))
+            overlap = self._image_chunk_overlap_pixels()
             
             print("   🚀 Using SINGLE API CALL mode for " + str(num_chunks) + " chunks")
             print(f"   📐 Chunk overlap: {overlap_percentage}% ({overlap} pixels)")
@@ -819,7 +820,7 @@ class ImageTranslator:
                 if preserve_original_format and original_format:
                     os.environ["ORIGINAL_IMAGE_FORMAT"] = original_format
                 
-                for i in range(num_chunks):
+                for i, (start_y, end_y) in enumerate(chunk_ranges):
                     # Check for stop during preparation
                     if check_stop_fn and check_stop_fn():
                         print("   ❌ Stopped while preparing chunk " + str(i+1) + "/" + str(num_chunks))
@@ -830,10 +831,6 @@ class ImageTranslator:
                             del os.environ["ORIGINAL_IMAGE_FORMAT"]
                         return None
                         
-                    # Calculate chunk boundaries with overlap
-                    start_y = max(0, i * self.chunk_height - (overlap if i > 0 else 0))
-                    end_y = min(height, (i + 1) * self.chunk_height)
-                    
                     # Crop the chunk
                     chunk = img.crop((0, start_y, width, end_y))
                     
@@ -2489,10 +2486,93 @@ class ImageTranslator:
 
     def _image_chunk_overlap_pixels(self) -> int:
         try:
-            overlap_percentage = float(os.getenv('IMAGE_CHUNK_OVERLAP_PERCENT', '1'))
-            return max(0, int(self.chunk_height * (overlap_percentage / 100)))
+            overlap_percentage = float(os.getenv('IMAGE_CHUNK_OVERLAP_PERCENT', '3'))
+            chunk_height = max(1, int(self.chunk_height))
+            overlap = max(0, int(chunk_height * (overlap_percentage / 100)))
+            return min(overlap, chunk_height - 1)
         except Exception:
             return 100
+
+    def _image_chunk_overlap_backup_enabled(self) -> bool:
+        return os.getenv("IMAGE_CHUNK_OVERLAP_BACKUP", "1").strip().lower() in ("1", "true", "yes", "on")
+
+    def _image_chunk_ranges(self, height: int, img=None) -> List[Tuple[int, int]]:
+        """Return tall-image chunk ranges with overlap and a hard max chunk height."""
+        try:
+            chunk_height = max(1, int(self.chunk_height))
+        except Exception:
+            chunk_height = 2000
+        try:
+            height = max(0, int(height))
+        except Exception:
+            height = 0
+        if height <= 0:
+            return []
+
+        overlap = min(self._image_chunk_overlap_pixels(), max(0, chunk_height - 1))
+        use_overlap_backup = self._image_chunk_overlap_backup_enabled()
+        ranges = []
+        start_y = 0
+        while start_y < height:
+            hard_end_y = min(height, start_y + chunk_height)
+            if img is not None:
+                end_y, found_safe_boundary = self._find_safe_chunk_end(img, start_y, hard_end_y, height)
+            else:
+                end_y, found_safe_boundary = hard_end_y, False
+            if end_y <= start_y or end_y > hard_end_y:
+                end_y = hard_end_y
+                found_safe_boundary = False
+
+            ranges.append((start_y, end_y))
+            if end_y >= height:
+                break
+
+            should_overlap = use_overlap_backup and not found_safe_boundary and overlap
+            next_start_y = end_y - overlap if should_overlap else end_y
+            if next_start_y <= start_y:
+                next_start_y = end_y
+            start_y = next_start_y
+
+        return ranges
+
+    def _find_safe_chunk_end(self, img, start_y: int, hard_end_y: int, image_height: int) -> Tuple[int, bool]:
+        """Prefer a low-ink row near the boundary so OCR chunks do not cut text lines."""
+        if os.getenv("IMAGE_CHUNK_SAFE_BOUNDARIES", "1").strip().lower() in ("0", "false", "no", "off"):
+            return hard_end_y, False
+        if hard_end_y >= image_height:
+            return image_height, True
+        try:
+            search_px = int(os.getenv("IMAGE_CHUNK_SAFE_BOUNDARY_SEARCH_PX", "160"))
+        except Exception:
+            search_px = 160
+        search_px = max(0, min(search_px, max(0, hard_end_y - start_y - 1)))
+        if search_px <= 0:
+            return hard_end_y, False
+
+        min_end_y = start_y + max(1, int(max(1, self.chunk_height) * 0.60))
+        search_start_y = max(start_y + 1, min_end_y, hard_end_y - search_px)
+        if search_start_y >= hard_end_y:
+            return hard_end_y, False
+
+        try:
+            band = img.crop((0, search_start_y, img.size[0], hard_end_y)).convert("L")
+            arr = np.asarray(band, dtype=np.uint8)
+            if arr.size == 0:
+                return hard_end_y, False
+
+            ink_density = np.mean(arr < 245, axis=1)
+            quiet_threshold = float(os.getenv("IMAGE_CHUNK_SAFE_BOUNDARY_INK_THRESHOLD", "0.003"))
+            quiet_rows = np.flatnonzero(ink_density <= quiet_threshold)
+            if quiet_rows.size:
+                return search_start_y + int(quiet_rows[-1]), True
+
+            best_row = int(np.argmin(ink_density))
+            if float(ink_density[best_row]) <= 0.01:
+                return search_start_y + best_row, True
+        except Exception:
+            return hard_end_y, False
+
+        return hard_end_y, False
 
     def _ocr_cache_signature(self):
         """Settings that change which images/chunks the saved OCR text represents."""
@@ -2501,7 +2581,10 @@ class ImageTranslator:
             "webnovel_min_height": str(os.getenv("WEBNOVEL_MIN_HEIGHT", str(self.webnovel_min_height))),
             "max_images_per_chapter": str(os.getenv("MAX_IMAGES_PER_CHAPTER", "10")),
             "image_chunk_height": str(os.getenv("IMAGE_CHUNK_HEIGHT", str(self.chunk_height))),
-            "image_chunk_overlap_percent": str(os.getenv("IMAGE_CHUNK_OVERLAP_PERCENT", "1")),
+            "image_chunk_overlap_percent": str(os.getenv("IMAGE_CHUNK_OVERLAP_PERCENT", "3")),
+            "image_chunk_overlap_backup": str(os.getenv("IMAGE_CHUNK_OVERLAP_BACKUP", "1")),
+            "image_chunk_safe_boundaries": str(os.getenv("IMAGE_CHUNK_SAFE_BOUNDARIES", "1")),
+            "image_chunk_safe_boundary_search_px": str(os.getenv("IMAGE_CHUNK_SAFE_BOUNDARY_SEARCH_PX", "160")),
         }
 
     def _ocr_cache_path(self):
@@ -2719,7 +2802,8 @@ class ImageTranslator:
 
     def _process_image_chunks_ocr_first_combined(self, img, width, height, context, check_stop_fn, translate_after=True):
         """OCR all chunks first, then translate the combined OCR text once."""
-        num_chunks = (height + self.chunk_height - 1) // self.chunk_height
+        chunk_ranges = self._image_chunk_ranges(height, img)
+        num_chunks = len(chunk_ranges)
         overlap = self._image_chunk_overlap_pixels()
         batch_enabled = self._vision_ocr_batch_enabled()
         batch_size = min(num_chunks, self._vision_ocr_batch_size()) if batch_enabled else 1
@@ -2750,7 +2834,7 @@ class ImageTranslator:
         ocr_by_index = {}
         was_stopped = False
 
-        for i in range(num_chunks):
+        for i, (start_y, end_y) in enumerate(chunk_ranges):
             disk_ocr = self._load_saved_ocr_text(
                 kind="chunks",
                 image_basename=image_basename,
@@ -2771,8 +2855,6 @@ class ImageTranslator:
                 was_stopped = True
                 break
 
-            start_y = max(0, i * self.chunk_height - (overlap if i > 0 else 0))
-            end_y = min(height, (i + 1) * self.chunk_height)
             current_filename = os.path.basename(self.current_image_path) if hasattr(self, 'current_image_path') else 'unknown'
             print(f"   OCR chunk {i+1}/{num_chunks} (y: {start_y}-{end_y}) for {current_filename}")
             if self.log_callback and hasattr(self.log_callback, '__self__') and hasattr(self.log_callback.__self__, 'append_chunk_progress'):
@@ -2974,8 +3056,8 @@ class ImageTranslator:
         if self._use_ocr_first_pipeline():
             return self._process_image_chunks_ocr_first_combined(img, width, height, context, check_stop_fn)
 
-        num_chunks = (height + self.chunk_height - 1) // self.chunk_height
-        overlap = 100  # Pixels of overlap between chunks
+        chunk_ranges = self._image_chunk_ranges(height, img)
+        num_chunks = len(chunk_ranges)
         
         print(f"   ✂️ Image too tall ({height}px), splitting into {num_chunks} chunks of {self.chunk_height}px...")
         
@@ -3041,7 +3123,7 @@ class ImageTranslator:
         was_stopped = False
         
         # Process chunks
-        for i in range(num_chunks):
+        for i, (start_y, end_y) in enumerate(chunk_ranges):
             # Check if this chunk was already translated
             if i in prog["image_chunks"][image_key]["completed"]:
                 saved_chunk = prog["image_chunks"][image_key]["chunks"].get(str(i))
@@ -3055,10 +3137,6 @@ class ImageTranslator:
                 print(f"   ❌ Stopped at chunk {i+1}/{num_chunks}")
                 was_stopped = True
                 break
-            
-            # Calculate chunk boundaries with overlap
-            start_y = max(0, i * self.chunk_height - (overlap if i > 0 else 0))
-            end_y = min(height, (i + 1) * self.chunk_height)
             
             current_filename = os.path.basename(self.current_image_path) if hasattr(self, 'current_image_path') else 'unknown'
             print(f"   📄 Processing chunk {i+1}/{num_chunks} (y: {start_y}-{end_y}) for {current_filename}")

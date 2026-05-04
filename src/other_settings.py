@@ -9887,9 +9887,33 @@ def _create_image_translation_section(self, parent):
     
     right_v.addWidget(settings_w)
     right_v.addSpacing(15)
+
+    overlap_backup_cb = self._create_styled_checkbox("Use overlap as backup when no clean split line is found")
+    try:
+        overlap_backup_cb.setChecked(bool(getattr(self, 'image_chunk_overlap_backup_var', True)))
+    except Exception:
+        pass
+
+    def _on_overlap_backup_toggle(checked):
+        try:
+            self.image_chunk_overlap_backup_var = bool(checked)
+            self.config['image_chunk_overlap_backup'] = bool(checked)
+            os.environ['IMAGE_CHUNK_OVERLAP_BACKUP'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    overlap_backup_cb.toggled.connect(_on_overlap_backup_toggle)
+    right_v.addWidget(overlap_backup_cb)
+
+    overlap_backup_desc = QLabel("Clean white separator rows are used without overlap. If no clean row is found, this adds the configured overlap to avoid clipping text.")
+    overlap_backup_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    overlap_backup_desc.setWordWrap(True)
+    overlap_backup_desc.setContentsMargins(20, 0, 0, 10)
+    right_v.addWidget(overlap_backup_desc)
+    right_v.addSpacing(5)
     
-    # Send tall image chunks in single API call
-    single_api_cb = self._create_styled_checkbox("Classic image mode: send tall chunks in single API call (NOT RECOMMENDED)")
+    # Legacy direct-image translation path; Vision OCR-first ignores this toggle.
+    single_api_cb = self._create_styled_checkbox("Direct image legacy mode: send tall chunks in one multimodal request (NOT RECOMMENDED)")
     try:
         single_api_cb.setChecked(bool(self.single_api_image_chunks_var))
     except Exception:
@@ -9902,7 +9926,7 @@ def _create_image_translation_section(self, parent):
     single_api_cb.toggled.connect(_on_single_api_toggle)
     right_v.addWidget(single_api_cb)
     
-    single_api_desc = QLabel("Does not affect Vision mode. Vision now OCRs chunks first, then sends combined OCR to one translation request.")
+    single_api_desc = QLabel("Ignored in Vision OCR mode. Vision OCR always OCRs chunks first, then translates the combined OCR text once.")
     single_api_desc.setStyleSheet("color: gray; font-size: 10pt;")
     single_api_desc.setContentsMargins(20, 0, 0, 10)
     right_v.addWidget(single_api_desc)

@@ -1620,6 +1620,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             pass
         self.single_api_image_chunks_var = False
         self.vision_ocr_batch_translation_var = self.config.get('vision_ocr_batch_translation', True)
+        self.image_chunk_overlap_backup_var = self.config.get('image_chunk_overlap_backup', True)
         self.vision_ocr_batch_size_var = str(self.config.get('vision_ocr_batch_size', '10'))
         self.enable_gemini_thinking_var = self.config.get('enable_gemini_thinking', True)
         self.thinking_budget_var = str(self.config.get('thinking_budget', '-1'))
@@ -1770,7 +1771,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.optimize_for_ocr_var = self.config.get('optimize_for_ocr', True)
         self.progressive_encoding_var = self.config.get('progressive_encoding', True)
         self.save_compressed_images_var = self.config.get('save_compressed_images', False)
-        self.image_chunk_overlap_var = str(self.config.get('image_chunk_overlap', '1'))
+        self.image_chunk_overlap_var = str(self.config.get('image_chunk_overlap', '3'))
 
         # Glossary-related variables (existing)
         self.append_glossary_var = self.config.get('append_glossary', False)
@@ -3519,6 +3520,7 @@ Recent translations to summarize:
             ('disable_gemini_safety_var', 'disable_gemini_safety', True),
             ('single_api_image_chunks_var', 'single_api_image_chunks', False),
             ('vision_ocr_batch_translation_var', 'vision_ocr_batch_translation', True),
+            ('image_chunk_overlap_backup_var', 'image_chunk_overlap_backup', True),
             ('enable_image_output_mode_var', 'enable_image_output_mode', False),
             ('enable_video_output_mode_var', 'enable_video_output_mode', False),
             ('enable_audio_output_mode_var', 'enable_audio_output_mode', False),
@@ -13919,6 +13921,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'IMAGE_API_DELAY': '1.0',
             'SAVE_IMAGE_TRANSLATIONS': '1',
             'IMAGE_CHUNK_HEIGHT': str(self.image_chunk_height_var),
+            'IMAGE_CHUNK_OVERLAP_PERCENT': str(getattr(self, 'image_chunk_overlap_var', '3')),
+            'IMAGE_CHUNK_OVERLAP_BACKUP': '1' if getattr(self, 'image_chunk_overlap_backup_var', True) else '0',
             'HIDE_IMAGE_TRANSLATION_LABEL': "1" if self.hide_image_translation_label_var else "0",
             'RETRY_TIMEOUT': "1" if getattr(self, 'retry_timeout_var', self.config.get('retry_timeout', False)) else "0",
             'CHUNK_TIMEOUT': str(self.chunk_timeout_var),
@@ -14074,7 +14078,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'OPTIMIZE_FOR_OCR': "1" if self.config.get('optimize_for_ocr', True) else "0",
             'PROGRESSIVE_ENCODING': "1" if self.config.get('progressive_encoding', True) else "0",
             'SAVE_COMPRESSED_IMAGES': "1" if self.config.get('save_compressed_images', False) else "0",
-            'IMAGE_CHUNK_OVERLAP_PERCENT': str(self.image_chunk_overlap_var),
+            'IMAGE_CHUNK_OVERLAP_PERCENT': str(getattr(self, 'image_chunk_overlap_var', '3')),
+            'IMAGE_CHUNK_OVERLAP_BACKUP': '1' if getattr(self, 'image_chunk_overlap_backup_var', True) else '0',
 
 
             # Metadata and batch header translation settings
@@ -21677,6 +21682,7 @@ Important rules:
                 ('use_sorted_fallback', ['use_sorted_fallback_var'], False, bool),
                 ('single_api_image_chunks', ['single_api_image_chunks_var'], False, bool),
                 ('vision_ocr_batch_translation', ['vision_ocr_batch_translation_var'], True, bool),
+                ('image_chunk_overlap_backup', ['image_chunk_overlap_backup_var'], True, bool),
                 ('use_custom_openai_endpoint', ['use_custom_openai_endpoint_var'], False, bool),
                 ('disable_chapter_merging', ['disable_chapter_merging_var'], False, bool),
                 # Request merging settings
@@ -21750,7 +21756,7 @@ Important rules:
                 ('nanogpt_video_duration', ['nanogpt_video_duration_var'], '60', str),
                 ('nanogpt_video_resolution', ['nanogpt_video_resolution_var'], '720p', str),
                 ('compression_factor', ['compression_factor_var'], 3.0, float),
-                ('image_chunk_overlap', ['image_chunk_overlap_var'], 1.0, lambda v: safe_float(v, 1.0)),
+                ('image_chunk_overlap', ['image_chunk_overlap_var'], 3.0, lambda v: safe_float(v, 3.0)),
 
                 # Batching
                 ('batch_translation', ['batch_checkbox', 'batch_translation_var'], True, bool),
@@ -22358,6 +22364,7 @@ Important rules:
             'PROGRESSIVE_ENCODING': 'Progressive image encoding',
             'SAVE_COMPRESSED_IMAGES': 'Save compressed images',
             'IMAGE_CHUNK_OVERLAP_PERCENT': 'Image chunk overlap percentage',
+            'IMAGE_CHUNK_OVERLAP_BACKUP': 'Use overlap fallback when no clean image split line is found',
             'VISION_OCR_BATCH_TRANSLATION': 'Batch Vision OCR chunk requests',
             'VISION_OCR_BATCH_SIZE': 'Vision OCR batch worker count',
             
@@ -22873,7 +22880,8 @@ Important rules:
                 ('FALLBACK_KEYS', _json.dumps(self.config.get('fallback_keys', []))),
                 ('USE_GLOSSARY_KEYS', '1' if self.config.get('use_glossary_keys', False) else '0'),
                 ('GLOSSARY_API_KEYS', _json.dumps(self.config.get('glossary_keys', []))),
-                ('IMAGE_CHUNK_OVERLAP_PERCENT', str(getattr(self, 'image_chunk_overlap_var', '1'))),
+                ('IMAGE_CHUNK_OVERLAP_PERCENT', str(getattr(self, 'image_chunk_overlap_var', '3'))),
+                ('IMAGE_CHUNK_OVERLAP_BACKUP', '1' if getattr(self, 'image_chunk_overlap_backup_var', True) else '0'),
 
                 # Metadata and batch header settings
                 ('TRANSLATE_METADATA_FIELDS', _json.dumps(getattr(self, 'translate_metadata_fields', {}))),

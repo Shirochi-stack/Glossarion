@@ -3349,6 +3349,8 @@ class AsyncProcessingDialog:
         env_vars['IMAGE_API_DELAY'] = '1.0'
         env_vars['SAVE_IMAGE_TRANSLATIONS'] = '1'
         env_vars['IMAGE_CHUNK_HEIGHT'] = _val(self.gui.image_chunk_height_var, 0)
+        env_vars['IMAGE_CHUNK_OVERLAP_PERCENT'] = _val(getattr(self.gui, 'image_chunk_overlap_var', None), 3)
+        env_vars['IMAGE_CHUNK_OVERLAP_BACKUP'] = "1" if _val(getattr(self.gui, 'image_chunk_overlap_backup_var', None), True) else "0"
         env_vars['HIDE_IMAGE_TRANSLATION_LABEL'] = "1" if _val(self.gui.hide_image_translation_label_var, False) else "0"
         
         # Advanced settings
