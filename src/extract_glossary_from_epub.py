@@ -6831,8 +6831,6 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 "last_updated": time.time(),
             }
             if chapter_file:
-                chapter_info["original_basename"] = chapter_file
-                chapter_info["chapter_file"] = chapter_file
                 # Match TransateKRtoEN.py's progress shape: every chapter gets
                 # a stable filename anchor so OPF offsets do not shift rows.
                 chapter_info["output_file"] = chapter_file
