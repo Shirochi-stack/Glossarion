@@ -2513,9 +2513,6 @@ class ImageTranslator:
         except Exception:
             return 100
 
-    def _image_chunk_overlap_backup_enabled(self) -> bool:
-        return os.getenv("IMAGE_CHUNK_OVERLAP_BACKUP", "1").strip().lower() in ("1", "true", "yes", "on")
-
     def _image_chunk_ranges(self, height: int, img=None) -> List[Tuple[int, int]]:
         """Return tall-image chunk ranges with overlap and a hard max chunk height."""
         try:
@@ -2530,69 +2527,20 @@ class ImageTranslator:
             return []
 
         overlap = min(self._image_chunk_overlap_pixels(), max(0, chunk_height - 1))
-        use_overlap_backup = self._image_chunk_overlap_backup_enabled()
         ranges = []
         start_y = 0
         while start_y < height:
-            hard_end_y = min(height, start_y + chunk_height)
-            if img is not None:
-                end_y, found_safe_boundary = self._find_safe_chunk_end(img, start_y, hard_end_y, height)
-            else:
-                end_y, found_safe_boundary = hard_end_y, False
-            if end_y <= start_y or end_y > hard_end_y:
-                end_y = hard_end_y
-                found_safe_boundary = False
-
+            end_y = min(height, start_y + chunk_height)
             ranges.append((start_y, end_y))
             if end_y >= height:
                 break
 
-            should_overlap = use_overlap_backup and not found_safe_boundary and overlap
-            next_start_y = end_y - overlap if should_overlap else end_y
+            next_start_y = end_y - overlap if overlap else end_y
             if next_start_y <= start_y:
                 next_start_y = end_y
             start_y = next_start_y
 
         return ranges
-
-    def _find_safe_chunk_end(self, img, start_y: int, hard_end_y: int, image_height: int) -> Tuple[int, bool]:
-        """Prefer a low-ink row near the boundary so OCR chunks do not cut text lines."""
-        if os.getenv("IMAGE_CHUNK_SAFE_BOUNDARIES", "1").strip().lower() in ("0", "false", "no", "off"):
-            return hard_end_y, False
-        if hard_end_y >= image_height:
-            return image_height, True
-        try:
-            search_px = int(os.getenv("IMAGE_CHUNK_SAFE_BOUNDARY_SEARCH_PX", "160"))
-        except Exception:
-            search_px = 160
-        search_px = max(0, min(search_px, max(0, hard_end_y - start_y - 1)))
-        if search_px <= 0:
-            return hard_end_y, False
-
-        min_end_y = start_y + max(1, int(max(1, self.chunk_height) * 0.60))
-        search_start_y = max(start_y + 1, min_end_y, hard_end_y - search_px)
-        if search_start_y >= hard_end_y:
-            return hard_end_y, False
-
-        try:
-            band = img.crop((0, search_start_y, img.size[0], hard_end_y)).convert("L")
-            arr = np.asarray(band, dtype=np.uint8)
-            if arr.size == 0:
-                return hard_end_y, False
-
-            ink_density = np.mean(arr < 245, axis=1)
-            quiet_threshold = float(os.getenv("IMAGE_CHUNK_SAFE_BOUNDARY_INK_THRESHOLD", "0.003"))
-            quiet_rows = np.flatnonzero(ink_density <= quiet_threshold)
-            if quiet_rows.size:
-                return search_start_y + int(quiet_rows[-1]), True
-
-            best_row = int(np.argmin(ink_density))
-            if float(ink_density[best_row]) <= 0.01:
-                return search_start_y + best_row, True
-        except Exception:
-            return hard_end_y, False
-
-        return hard_end_y, False
 
     def _ocr_cache_signature(self):
         """Settings that change which images/chunks the saved OCR text represents."""
@@ -2602,9 +2550,6 @@ class ImageTranslator:
             "max_images_per_chapter": str(os.getenv("MAX_IMAGES_PER_CHAPTER", "10")),
             "image_chunk_height": str(os.getenv("IMAGE_CHUNK_HEIGHT", str(self.chunk_height))),
             "image_chunk_overlap_percent": str(os.getenv("IMAGE_CHUNK_OVERLAP_PERCENT", "3")),
-            "image_chunk_overlap_backup": str(os.getenv("IMAGE_CHUNK_OVERLAP_BACKUP", "1")),
-            "image_chunk_safe_boundaries": str(os.getenv("IMAGE_CHUNK_SAFE_BOUNDARIES", "1")),
-            "image_chunk_safe_boundary_search_px": str(os.getenv("IMAGE_CHUNK_SAFE_BOUNDARY_SEARCH_PX", "160")),
         }
 
     def _ocr_cache_path(self):
