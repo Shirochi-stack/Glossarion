@@ -1699,6 +1699,12 @@ class RetranslationMixin:
                         return None
                 return None
 
+            def _gp_display_chapter_num(ci, fname):
+                ch_num = _gp_filename_chapter_num(fname)
+                if ch_num is not None:
+                    return ch_num
+                return 0
+
             def _gp_index_for_actual_num(actual_num, _d=None):
                 try:
                     actual_num = int(actual_num)
@@ -1858,9 +1864,7 @@ class RetranslationMixin:
                 return 'not_completed', []
 
             def _gp_display_for(ci, fname, _d, cache=None):
-                import re as _re_display
-                _nums = _re_display.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
-                ch_num = int(_nums[-1]) if _nums else ci + 1
+                ch_num = _gp_display_chapter_num(ci, fname)
                 status, issues = _gp_status_for(ci, _d, cache)
                 icons = {
                     'completed': '\u2705',
@@ -2066,9 +2070,7 @@ class RetranslationMixin:
             
             for ci in range(total_epub_chapters):
                 fname = chapter_map.get(ci, f'chapter {ci + 1}')
-                import re as _re
-                _nums = _re.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
-                ch_num = int(_nums[-1]) if _nums else ci + 1
+                ch_num = _gp_display_chapter_num(ci, fname)
                 
                 if ci in merged_set:
                     icon, status, color = '🔗', 'merged', '#17a2b8'
@@ -2213,12 +2215,10 @@ class RetranslationMixin:
                         with open(_rp, 'w', encoding='utf-8') as _f:
                             json.dump(_d, _f, ensure_ascii=False, indent=2)
                         # Update all affected items
-                        import re as _re3
                         _cmap = panel_state['chapter_map']
                         for it, ci in targets:
                             fname = _cmap.get(ci, f'chapter {ci + 1}')
-                            _nums3 = _re3.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
-                            ch_num3 = int(_nums3[-1]) if _nums3 else ci + 1
+                            ch_num3 = _gp_display_chapter_num(ci, fname)
                             display3 = f"Ch.{ch_num3:03d} | ⬜ {'Not Completed':14s} | {fname}"
                             it.setText(display3)
                             it.setForeground(QColor('#5a9fd4'))
@@ -2378,11 +2378,9 @@ class RetranslationMixin:
                 _comp, _fail, _merg = _gp_sets(_d)
                 
                 gp_listbox.clear()
-                import re as _re_rb
                 for ci in range(_total):
                     fname = _cmap.get(ci, f'chapter {ci + 1}')
-                    _nums = _re_rb.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
-                    ch_num = int(_nums[-1]) if _nums else ci + 1
+                    ch_num = _gp_display_chapter_num(ci, fname)
                     
                     if ci in _merg:
                         icon, status, color = '🔗', 'merged', '#17a2b8'
@@ -2454,9 +2452,7 @@ class RetranslationMixin:
                         
                         if new_status != old_status or _issues:
                             fname = _cmap.get(ci, f'chapter {ci + 1}')
-                            import re as _re2
-                            _nums2 = _re2.findall(r'[0-9]+', os.path.splitext(fname)[0]) if fname else []
-                            ch_num2 = int(_nums2[-1]) if _nums2 else ci + 1
+                            ch_num2 = _gp_display_chapter_num(ci, fname)
                             _icons = {'completed': '✅', 'failed': '❌', 'merged': '🔗', 'not_completed': '⬜'}
                             display2 = f"Ch.{ch_num2:03d} | {_icons.get(new_status, '⬜')} {new_status.replace('_', ' ').title():14s} | {fname}"
                             display2, _ = _gp_display_for(ci, fname, _d, _cache)
