@@ -1834,8 +1834,30 @@ class RetranslationMixin:
                 comp -= fail
                 return comp, fail, merg
 
+            def _gp_in_progress_set(_d):
+                if not isinstance(_d, dict):
+                    _d = {}
+                result = set()
+                chapters = _d.get('chapters', {})
+                if isinstance(chapters, dict):
+                    for key, info in chapters.items():
+                        if not isinstance(info, dict):
+                            continue
+                        if str(info.get('status', '')).lower() != 'in_progress':
+                            continue
+                        ci = _gp_index_for_entry(info, key, _d)
+                        if ci is not None:
+                            result.add(ci)
+                for value in _gp_int_list(_d.get('in_progress', [])):
+                    ci = _gp_index_for_progress_value(value, _d)
+                    if ci is not None:
+                        result.add(ci)
+                comp, fail, merg = _gp_sets(_d)
+                return result - comp - fail - merg
+
             def _gp_status_cache(_d):
                 comp, fail, merg = _gp_sets(_d)
+                in_prog = _gp_in_progress_set(_d)
                 issues = _gp_qa_issue_map(_d)
                 qa_failed = set()
                 chapters = _d.get('chapters', {}) if isinstance(_d, dict) else {}
@@ -1852,6 +1874,7 @@ class RetranslationMixin:
                     'completed': comp,
                     'failed': fail,
                     'merged': merg,
+                    'in_progress': in_prog,
                     'issues': issues,
                     'qa_failed': qa_failed,
                 }
@@ -1863,6 +1886,7 @@ class RetranslationMixin:
                 comp = cache['completed']
                 fail = cache['failed']
                 merg = cache['merged']
+                in_prog = cache['in_progress']
                 issues = cache['issues']
                 if ci in fail:
                     return ('qa_failed' if issues.get(ci) or ci in cache['qa_failed'] else 'failed'), issues.get(ci, [])
@@ -1870,6 +1894,8 @@ class RetranslationMixin:
                     return 'merged', []
                 if ci in comp:
                     return 'completed', []
+                if ci in in_prog:
+                    return 'in_progress', []
                 return 'not_completed', []
 
             def _gp_display_for(ci, fname, _d, cache=None):
@@ -1881,6 +1907,7 @@ class RetranslationMixin:
                     'failed': '\u274c',
                     'qa_failed': '\u274c',
                     'merged': '\U0001f517',
+                    'in_progress': '\U0001f504',
                     'not_completed': '\u2b1c',
                 }
                 icon = icons.get(status) or '\u2b1c'
@@ -1897,6 +1924,8 @@ class RetranslationMixin:
                     return '#27ae60'
                 if status == 'merged':
                     return '#17a2b8'
+                if status == 'in_progress':
+                    return '#f59e0b'
                 if status in ('failed', 'qa_failed'):
                     return '#e74c3c'
                 return '#5a9fd4'
@@ -2029,11 +2058,13 @@ class RetranslationMixin:
             
             # Stats row (clickable)
             _comp_set_init, _fail_set_init, _merg_set_init = _gp_sets(gp_data)
+            _in_prog_set_init = _gp_in_progress_set(gp_data)
             # Completed count excludes chapters that are also merged
             n_completed = len(_comp_set_init - _merg_set_init - _fail_set_init)
             n_failed = len(_fail_set_init)
             n_merged = len(_merg_set_init)
-            n_remaining = max(0, panel_state['total'] - len(_comp_set_init | _fail_set_init | _merg_set_init))
+            n_in_progress = len(_in_prog_set_init)
+            n_remaining = max(0, panel_state['total'] - len(_comp_set_init | _fail_set_init | _merg_set_init | _in_prog_set_init))
             
             gp_stats_frame = QWidget()
             gp_stats_layout = QHBoxLayout(gp_stats_frame)
@@ -2049,6 +2080,14 @@ class RetranslationMixin:
             lbl_gp_completed.setStyleSheet("color: #27ae60;")
             lbl_gp_completed.setCursor(Qt.PointingHandCursor)
             gp_stats_layout.addWidget(lbl_gp_completed)
+
+            lbl_gp_in_progress = QLabel(f"🔄 In Progress: {n_in_progress} | ")
+            lbl_gp_in_progress.setFont(gp_stats_font)
+            lbl_gp_in_progress.setStyleSheet("color: #f59e0b;")
+            lbl_gp_in_progress.setCursor(Qt.PointingHandCursor)
+            gp_stats_layout.addWidget(lbl_gp_in_progress)
+            if n_in_progress == 0:
+                lbl_gp_in_progress.setVisible(False)
             
             lbl_gp_failed = QLabel(f"❌ Failed: {n_failed} | ")
             lbl_gp_failed.setFont(gp_stats_font)
@@ -2146,19 +2185,22 @@ class RetranslationMixin:
             # Helper to refresh stats labels from a loaded progress dict
             def _refresh_stats_from_dict(_d):
                 _comp2, _fail2, _merg2 = _gp_sets(_d)
+                _prog2 = _gp_in_progress_set(_d)
                 _total = panel_state['total']
                 lbl_total.setText(f"Total: {_total} | ")
                 lbl_gp_completed.setText(f"✅ Completed: {len(_comp2 - _merg2)} | ")
+                lbl_gp_in_progress.setText(f"🔄 In Progress: {len(_prog2)} | ")
+                lbl_gp_in_progress.setVisible(len(_prog2) > 0)
                 lbl_gp_failed.setText(f"❌ Failed: {len(_fail2)} | ")
                 lbl_gp_merged.setText(f"🔗 Merged: {len(_merg2)} | ")
                 lbl_gp_merged.setVisible(len(_merg2) > 0)
-                lbl_gp_remaining.setText(f"⬜ Not Completed: {max(0, _total - len(_comp2 | _fail2 | _merg2))}")
+                lbl_gp_remaining.setText(f"⬜ Not Completed: {max(0, _total - len(_comp2 | _fail2 | _merg2 | _prog2))}")
             
             # Right-click context menu to delete entries from progress
             def _gp_context_menu(pos):
                 # Gather selected items that are deletable
                 selected = gp_listbox.selectedItems()
-                deletable_statuses = ('completed', 'merged', 'failed', 'qa_failed')
+                deletable_statuses = ('completed', 'merged', 'in_progress', 'failed', 'qa_failed')
                 targets = [(it, it.data(Qt.UserRole + 1)) for it in selected
                            if it.data(Qt.UserRole) in deletable_statuses and it.data(Qt.UserRole + 1) is not None]
                 if not targets:
@@ -2195,7 +2237,7 @@ class RetranslationMixin:
                     
                     indices_to_remove = set(ci for _, ci in targets)
                     changed = False
-                    for key in ('completed', 'failed', 'merged_indices'):
+                    for key in ('completed', 'failed', 'merged_indices', 'in_progress'):
                         lst = _d.get(key, [])
                         new_lst = []
                         for v in lst:
@@ -2266,6 +2308,7 @@ class RetranslationMixin:
                 return _handler
             
             lbl_gp_completed.mousePressEvent = _gp_make_cycle(('completed',), gp_listbox)
+            lbl_gp_in_progress.mousePressEvent = _gp_make_cycle(('in_progress',), gp_listbox)
             lbl_gp_failed.mousePressEvent = _gp_make_cycle(('failed', 'qa_failed'), gp_listbox)
             lbl_gp_merged.mousePressEvent = _gp_make_cycle(('merged',), gp_listbox)
             lbl_gp_remaining.mousePressEvent = _gp_make_cycle(('not_completed',), gp_listbox)
@@ -2445,12 +2488,15 @@ class RetranslationMixin:
                         return
                     
                     _comp, _fail, _merg = _gp_sets(_d)
+                    _prog = _gp_in_progress_set(_d)
                     _total = panel_state['total']
                     _cmap = panel_state['chapter_map']
                     
-                    _nr = max(0, _total - len(_comp | _fail | _merg))
+                    _nr = max(0, _total - len(_comp | _fail | _merg | _prog))
                     lbl_total.setText(f"Total: {_total} | ")
                     lbl_gp_completed.setText(f"✅ Completed: {len(_comp - _merg)} | ")
+                    lbl_gp_in_progress.setText(f"🔄 In Progress: {len(_prog)} | ")
+                    lbl_gp_in_progress.setVisible(len(_prog) > 0)
                     lbl_gp_failed.setText(f"❌ Failed: {len(_fail)} | ")
                     lbl_gp_merged.setText(f"🔗 Merged: {len(_merg)} | ")
                     lbl_gp_merged.setVisible(len(_merg) > 0)

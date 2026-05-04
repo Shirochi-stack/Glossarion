@@ -4298,6 +4298,12 @@ class TranslationProcessor:
                     'total_chunks': total_chunks,
                     'merged_chapters': merged_chapters,
                 }
+                if _single_pass_glossary_mode():
+                    _mark_single_pass_glossary_in_progress(
+                        self.out_dir,
+                        chapter_num=actual_num,
+                        chapter_file=_single_pass_progress_chapter_file(c, fname),
+                    )
                 
                 result, finish_reason, raw_obj = send_with_interrupt(
                     msgs,
@@ -5131,6 +5137,12 @@ class BatchTranslationProcessor:
                 
                 while True:
                     try:
+                        if _single_pass_glossary_mode():
+                            _mark_single_pass_glossary_in_progress(
+                                self.out_dir,
+                                chapter_num=actual_num,
+                                chapter_file=chapter_ref.get("chapter_file"),
+                            )
                         result, finish_reason, raw_obj_from_send = send_with_interrupt(
                             chapter_msgs,
                             self.client,
@@ -5338,6 +5350,12 @@ class BatchTranslationProcessor:
                                 setattr(tls_retry_client, "_in_truncation_retry", True)
 
                             try:
+                                if _single_pass_glossary_mode():
+                                    _mark_single_pass_glossary_in_progress(
+                                        self.out_dir,
+                                        chapter_num=actual_num,
+                                        chapter_file=chapter_ref.get("chapter_file"),
+                                    )
                                 result_retry, finish_reason_retry, raw_obj_retry = send_with_interrupt(
                                     chapter_msgs,
                                     self.client,
@@ -6415,6 +6433,12 @@ class BatchTranslationProcessor:
                     'total_chunks': 1,
                     'merged_chapters': merged_chapter_nums_for_context,
                 }
+                if _single_pass_glossary_mode():
+                    _mark_single_pass_glossary_in_progress(
+                        self.out_dir,
+                        chapter_num=parent_actual_num,
+                        chapter_file=chapter_ref.get("chapter_file"),
+                    )
                 
                 merged_response, finish_reason, raw_obj = send_with_interrupt(
                     msgs,
@@ -6545,6 +6569,12 @@ class BatchTranslationProcessor:
                                 setattr(tls_retry_client, "_in_truncation_retry", True)
 
                             try:
+                                if _single_pass_glossary_mode():
+                                    _mark_single_pass_glossary_in_progress(
+                                        self.out_dir,
+                                        chapter_num=parent_actual_num,
+                                        chapter_file=chapter_ref.get("chapter_file"),
+                                    )
                                 merged_response_retry, finish_reason_retry, raw_obj_retry = send_with_interrupt(
                                     msgs,
                                     self.client,
@@ -7267,60 +7297,105 @@ def _single_pass_spine_ref_for_file(output_dir, chapter_basename):
 
     return None, None
 
+def _single_pass_chapter_refs(output_dir, chapter_num=None, chapter_file=None, progress=None):
+    chapter_basename = _single_pass_progress_chapter_file(
+        {"chapter_file": chapter_file},
+        os.getenv("CURRENT_CHAPTER_FILE", ""),
+    )
+    actual = None
+    try:
+        if chapter_num is not None:
+            actual = int(chapter_num)
+    except (TypeError, ValueError):
+        actual = None
+    if actual is None and chapter_basename:
+        nums = re.findall(r"\d+", os.path.splitext(chapter_basename)[0])
+        if nums:
+            try:
+                actual = int(nums[-1])
+            except (TypeError, ValueError):
+                actual = None
+
+    idx = (actual - 1) if actual and actual > 0 else None
+    if chapter_basename and (idx is None or actual is None or actual <= 0):
+        spine_idx, spine_pos = _single_pass_spine_ref_for_file(output_dir, chapter_basename)
+        if spine_idx is not None:
+            idx = spine_idx
+            actual = spine_pos
+
+    if chapter_basename and idx is None and isinstance(progress, dict):
+        target = os.path.splitext(os.path.basename(chapter_basename).lower())[0]
+        chapters = progress.get("chapters", {})
+        if isinstance(chapters, dict):
+            for key, info in chapters.items():
+                if not isinstance(info, dict):
+                    continue
+                for fname_key in ("output_file", "chapter_file", "original_basename", "filename", "source_filename"):
+                    stem = os.path.splitext(os.path.basename(str(info.get(fname_key, "")).lower()))[0]
+                    if stem and stem == target:
+                        try:
+                            idx = int(info.get("chapter_index", key))
+                        except (TypeError, ValueError):
+                            idx = None
+                        try:
+                            actual = int(info.get("actual_num") or info.get("chapter_num") or (idx + 1 if idx is not None else 0))
+                        except (TypeError, ValueError):
+                            actual = idx + 1 if idx is not None else None
+                        break
+                if idx is not None:
+                    break
+
+    return idx, actual, chapter_basename
+
+def _mark_single_pass_glossary_in_progress(output_dir, chapter_num=None, chapter_file=None):
+    """Write a live in-progress row for Single Pass glossary progress."""
+    if not _single_pass_glossary_mode():
+        return
+    original_progress_file = None
+    original_output_file = None
+    try:
+        import extract_glossary_from_epub as glossary_extractor
+        glossary_dir, json_path, _csv_path, progress_path = _single_pass_glossary_paths(output_dir)
+        original_progress_file = getattr(glossary_extractor, "PROGRESS_FILE", None)
+        original_output_file = getattr(glossary_extractor, "_GLOSSARY_OUTPUT_FILE", "")
+        glossary_extractor.PROGRESS_FILE = progress_path
+        glossary_extractor._GLOSSARY_OUTPUT_FILE = json_path
+        progress = glossary_extractor.load_progress()
+        chapter_idx, actual_num, chapter_basename = _single_pass_chapter_refs(output_dir, chapter_num, chapter_file, progress)
+        if chapter_idx is None:
+            return
+        glossary_extractor._GLOSSARY_CHAPTER_POSITIONS[int(chapter_idx)] = int(actual_num)
+        glossary_extractor._GLOSSARY_CHAPTER_NUMBERS[int(chapter_idx)] = int(actual_num)
+        glossary_extractor._GLOSSARY_TOTAL_CHAPTERS = max(
+            int(getattr(glossary_extractor, "_GLOSSARY_TOTAL_CHAPTERS", 0) or 0),
+            int(chapter_idx) + 1,
+        )
+        if chapter_basename:
+            glossary_extractor._GLOSSARY_CHAPTER_FILENAMES[int(chapter_idx)] = chapter_basename
+        glossary_extractor.save_progress(
+            list(progress.get("completed", [])),
+            glossary_extractor._load_glossary_file(json_path),
+            list(progress.get("merged_indices", [])),
+            failed=list(progress.get("failed", [])),
+            in_progress=list(set(progress.get("in_progress", []) + [int(chapter_idx)])),
+        )
+    except Exception as e:
+        print(f"⚠️ Single Pass Glossary: failed to mark in-progress: {e}")
+    finally:
+        try:
+            if original_progress_file is not None:
+                glossary_extractor.PROGRESS_FILE = original_progress_file
+            elif "glossary_extractor" in locals() and hasattr(glossary_extractor, "PROGRESS_FILE"):
+                delattr(glossary_extractor, "PROGRESS_FILE")
+            if original_output_file is not None and "glossary_extractor" in locals():
+                glossary_extractor._GLOSSARY_OUTPUT_FILE = original_output_file
+        except Exception:
+            pass
+
 def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, source_text=None, chapter_file=None):
     """Parse, dedupe, and save inline glossary output using the glossary pipeline."""
     if not _single_pass_glossary_mode():
         return 0
-
-    def _single_pass_chapter_refs(progress=None):
-        chapter_basename = _single_pass_progress_chapter_file(
-            {"chapter_file": chapter_file},
-            os.getenv("CURRENT_CHAPTER_FILE", ""),
-        )
-        actual = None
-        try:
-            if chapter_num is not None:
-                actual = int(chapter_num)
-        except (TypeError, ValueError):
-            actual = None
-        if actual is None and chapter_basename:
-            nums = re.findall(r"\d+", os.path.splitext(chapter_basename)[0])
-            if nums:
-                try:
-                    actual = int(nums[-1])
-                except (TypeError, ValueError):
-                    actual = None
-
-        idx = (actual - 1) if actual and actual > 0 else None
-        if chapter_basename and (idx is None or actual is None or actual <= 0):
-            spine_idx, spine_pos = _single_pass_spine_ref_for_file(output_dir, chapter_basename)
-            if spine_idx is not None:
-                idx = spine_idx
-                actual = spine_pos
-
-        if chapter_basename and idx is None and isinstance(progress, dict):
-            target = os.path.splitext(os.path.basename(chapter_basename).lower())[0]
-            chapters = progress.get("chapters", {})
-            if isinstance(chapters, dict):
-                for key, info in chapters.items():
-                    if not isinstance(info, dict):
-                        continue
-                    for fname_key in ("output_file", "chapter_file", "original_basename", "filename", "source_filename"):
-                        stem = os.path.splitext(os.path.basename(str(info.get(fname_key, "")).lower()))[0]
-                        if stem and stem == target:
-                            try:
-                                idx = int(info.get("chapter_index", key))
-                            except (TypeError, ValueError):
-                                idx = None
-                            try:
-                                actual = int(info.get("actual_num") or info.get("chapter_num") or (idx + 1 if idx is not None else 0))
-                            except (TypeError, ValueError):
-                                actual = idx + 1 if idx is not None else None
-                            break
-                    if idx is not None:
-                        break
-
-        return idx, actual, chapter_basename
 
     with _single_pass_glossary_lock:
         original_progress_file = None
@@ -7333,7 +7408,7 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
             glossary_extractor.PROGRESS_FILE = progress_path
             glossary_extractor._GLOSSARY_OUTPUT_FILE = json_path
             progress = glossary_extractor.load_progress()
-            chapter_idx, actual_num, chapter_basename = _single_pass_chapter_refs(progress)
+            chapter_idx, actual_num, chapter_basename = _single_pass_chapter_refs(output_dir, chapter_num, chapter_file, progress)
             if chapter_idx is not None:
                 glossary_extractor._GLOSSARY_CHAPTER_POSITIONS[int(chapter_idx)] = int(actual_num)
                 glossary_extractor._GLOSSARY_CHAPTER_NUMBERS[int(chapter_idx)] = int(actual_num)

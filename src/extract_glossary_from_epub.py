@@ -2227,7 +2227,7 @@ def load_progress() -> Dict:
                 # Validate the structure
                 if not isinstance(data, dict):
                     print(f"[Warning] Progress file has invalid structure, resetting...")
-                    return {"completed": [], "glossary": []}
+                    return {"completed": [], "glossary": [], "in_progress": []}
                 chapters = data.get("chapters", {})
                 if not isinstance(chapters, dict):
                     chapters = {}
@@ -2241,6 +2241,7 @@ def load_progress() -> Dict:
                 completed_from_entries = []
                 failed_from_entries = []
                 merged_from_entries = []
+                in_progress_from_entries = []
                 for chapter_key, info in chapters.items():
                     if not isinstance(info, dict):
                         continue
@@ -2250,26 +2251,33 @@ def load_progress() -> Dict:
                     status = str(info.get("status", "")).lower()
                     if status in ("failed", "qa_failed", "error"):
                         failed_from_entries.append(idx)
+                    elif status == "in_progress":
+                        in_progress_from_entries.append(idx)
                     elif status == "merged":
                         merged_from_entries.append(idx)
                         completed_from_entries.append(idx)
                     elif status == "completed":
                         completed_from_entries.append(idx)
 
-                if completed_from_entries or failed_from_entries or merged_from_entries:
+                if completed_from_entries or failed_from_entries or merged_from_entries or in_progress_from_entries:
                     data["completed"] = _unique_int_list(completed_from_entries)
                     data["failed"] = _unique_int_list(failed_from_entries)
                     data["merged_indices"] = _unique_int_list(merged_from_entries)
+                    data["in_progress"] = _unique_int_list(in_progress_from_entries)
                 else:
                     # Backward compatibility for old progress files that only
                     # had top-level arrays.
                     data["completed"] = _unique_int_list(data.get("completed", []))
                     data["failed"] = _unique_int_list(data.get("failed", []))
                     data["merged_indices"] = _unique_int_list(data.get("merged_indices", []))
+                    data["in_progress"] = _unique_int_list(data.get("in_progress", []))
 
                 failed_set = set(data["failed"])
                 if failed_set:
                     data["completed"] = [idx for idx in data["completed"] if idx not in failed_set]
+                done_set = set(data["completed"]) | failed_set | set(data["merged_indices"])
+                if done_set:
+                    data["in_progress"] = [idx for idx in data["in_progress"] if idx not in done_set]
                 data["qa_issues_found"] = _normalize_glossary_qa_issues(
                     data.get("qa_issues_found"),
                     data.get("chapters")
@@ -2323,11 +2331,11 @@ def load_progress() -> Dict:
                 print(f"   -> Corrupted file backed up to: {backup_name}")
             except:
                 pass
-            return {"completed": [], "glossary": [], "context_history": []}
+            return {"completed": [], "glossary": [], "context_history": [], "in_progress": []}
         except Exception as e:
             print(f"[Warning] Error loading progress file: {e}")
-            return {"completed": [], "glossary": [], "context_history": []}
-    return {"completed": [], "glossary": [], "context_history": [], "merged_indices": []}
+            return {"completed": [], "glossary": [], "context_history": [], "in_progress": []}
+    return {"completed": [], "glossary": [], "context_history": [], "merged_indices": [], "in_progress": []}
 
 def _normalize_entry_type(entry_type, enabled_types):
     """Normalize an entry type to match an enabled type if possible.
@@ -5336,6 +5344,7 @@ def main(log_callback=None, stop_callback=None):
     )
     completed = prog['completed']
     failed = prog.get('failed', [])
+    in_progress = prog.get('in_progress', [])
     # Remove failed chapters from completed so they get retried
     if failed:
         before = len(completed)
@@ -5363,6 +5372,35 @@ def main(log_callback=None, stop_callback=None):
         else:
             glossary = []
     merged_indices = prog.get('merged_indices', [])
+
+    def _mark_glossary_in_progress(indices):
+        changed = False
+        for _idx in indices:
+            try:
+                _idx = int(_idx)
+            except (TypeError, ValueError):
+                continue
+            if _idx in completed or _idx in failed:
+                continue
+            if _idx not in in_progress:
+                in_progress.append(_idx)
+                changed = True
+        if changed:
+            save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
+
+    def _clear_glossary_in_progress(indices):
+        remove = set()
+        for _idx in indices:
+            try:
+                remove.add(int(_idx))
+            except (TypeError, ValueError):
+                pass
+        if not remove:
+            return
+        before = len(in_progress)
+        in_progress[:] = [idx for idx in in_progress if idx not in remove]
+        if before != len(in_progress):
+            save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
     
     # Request merging configuration (glossary-specific with fallback to global)
     request_merging_enabled = os.getenv('GLOSSARY_REQUEST_MERGING_ENABLED', os.getenv('REQUEST_MERGING_ENABLED', '0')) == '1'
@@ -5576,6 +5614,7 @@ def main(log_callback=None, stop_callback=None):
 
                 def _submit_unit(unit):
                     """Submit a single work unit and return its Future."""
+                    _mark_glossary_in_progress([u_idx for u_idx, _ in unit])
                     if is_merged_mode:
                         future = executor.submit(
                             process_merged_group_api_call,
@@ -5629,6 +5668,7 @@ def main(log_callback=None, stop_callback=None):
 
                 def _handle_future_result(future, unit):
                     nonlocal batch_entry_count, stopped_early
+                    unit_indices = [u_idx for u_idx, _ in unit]
                     try:
                         if is_merged_mode:
                             # Handle merged group result
@@ -5653,9 +5693,12 @@ def main(log_callback=None, stop_callback=None):
                                     # Suppress expected "graceful stop" pre-send cancellations.
                                     if isinstance(error, str) and _is_graceful_stop_skip_error(error):
                                         stopped_early = True
+                                        _clear_glossary_in_progress(unit_indices)
                                         return
                                     print(f"[Chapter {idx+1}] Error: {error}")
                                     _mark_glossary_failed(failed, idx, "API_ERROR")
+                                    _clear_glossary_in_progress(unit_indices)
+                                    save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
                                     return
                                 
                                 # Process entries
@@ -5733,9 +5776,12 @@ def main(log_callback=None, stop_callback=None):
                                 # Suppress expected "graceful stop" pre-send cancellations.
                                 if (isinstance(error, str) and _is_graceful_stop_skip_error(error)) or result.get('graceful_stop_skip'):
                                     stopped_early = True
+                                    _clear_glossary_in_progress(unit_indices)
                                     return
                                 print(f"[Chapter {idx+1}] Error: {error}")
                                 _mark_glossary_failed(failed, idx, "API_ERROR")
+                                _clear_glossary_in_progress(unit_indices)
+                                save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
                                 return
                             
                             # Process entries as each chapter completes
@@ -5786,7 +5832,8 @@ def main(log_callback=None, stop_callback=None):
                                 batch_history_map[idx] = (user_prompt, resp, raw_obj)
                         
                         # Save progress after each chapter completes (crash-safe with atomic writes)
-                        save_progress(completed, glossary, merged_indices, failed=failed)
+                        _clear_glossary_in_progress(unit_indices)
+                        save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
                         # Also save glossary files for incremental updates
                         save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
@@ -5795,6 +5842,7 @@ def main(log_callback=None, stop_callback=None):
                         # Suppress expected "graceful stop" pre-send cancellations.
                         if _is_graceful_stop_skip_error(e):
                             stopped_early = True
+                            _clear_glossary_in_progress(unit_indices)
                             return
                         if is_merged_mode:
                             # For merged mode, mark all chapters in the unit as failed on error
@@ -5813,6 +5861,8 @@ def main(log_callback=None, stop_callback=None):
                                 print(f"Error processing chapter {idx+1}: {e}")
                             if idx not in completed and idx not in failed:
                                 _mark_glossary_failed(failed, idx, "API_ERROR")
+                        _clear_glossary_in_progress(unit_indices)
+                        save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
 
                 if aggressive_mode:
                     # Aggressive mode: keep pool full, auto-refill as futures complete.
@@ -6206,6 +6256,8 @@ def main(log_callback=None, stop_callback=None):
             
             # Build merged chapter nums for watchdog progress bar
             merged_chapter_nums = [g_idx + 1 for g_idx, _ in merge_groups[idx]] if idx in merge_groups else None
+            current_progress_indices = [g_idx for g_idx, _ in merge_groups[idx]] if idx in merge_groups else [idx]
+            _mark_glossary_in_progress(current_progress_indices)
 
             # Check if history will reset on this chapter
             if contextual_enabled and len(history) >= ctx_limit and ctx_limit > 0 and not rolling_window:
@@ -6763,7 +6815,8 @@ def main(log_callback=None, stop_callback=None):
                         except Exception as e:
                             print(f"⚠️ Failed to save history for chapter {idx+1}: {e}")
 
-                save_progress(completed, glossary, merged_indices, failed=failed)
+                _clear_glossary_in_progress(current_progress_indices)
+                save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
                 save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 
@@ -6794,6 +6847,8 @@ def main(log_callback=None, stop_callback=None):
                 import traceback
                 print(f"Full traceback: {traceback.format_exc()}")
                 _mark_glossary_failed(failed, idx, "API_ERROR")
+                _clear_glossary_in_progress(locals().get('current_progress_indices', [idx]))
+                save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
                 # Check for stop even after error
                 if check_stop():
                     print(f"❌ Glossary extraction stopped after error in chapter {idx+1}")
@@ -6828,7 +6883,7 @@ def main(log_callback=None, stop_callback=None):
     except Exception as e:
         print(f"[Warning] Could not save CSV format: {e}")
 
-def save_progress(completed: List[int], glossary: List[Dict], merged_indices: List[int] = None, failed: List[int] = None):
+def save_progress(completed: List[int], glossary: List[Dict], merged_indices: List[int] = None, failed: List[int] = None, in_progress: List[int] = None):
     """Save progress to JSON file (history is now managed separately)
     
     NOTE: We no longer save the glossary itself in the progress file to avoid
@@ -6880,6 +6935,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         }
 
         existing_chapters_by_idx = {}
+        preserved_in_progress = []
         try:
             if os.path.exists(PROGRESS_FILE):
                 with open(PROGRESS_FILE, 'r', encoding='utf-8') as existing_f:
@@ -6892,11 +6948,24 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                         existing_idx = _glossary_progress_entry_index(existing_info, existing_key)
                         if existing_idx is not None:
                             existing_chapters_by_idx[int(existing_idx)] = existing_info
+                            if str(existing_info.get("status", "")).lower() == "in_progress":
+                                preserved_in_progress.append(int(existing_idx))
+                if isinstance(existing_progress, dict):
+                    preserved_in_progress.extend(_unique_int_list(existing_progress.get("in_progress", [])))
         except Exception:
             existing_chapters_by_idx = {}
 
+        if in_progress is None:
+            in_progress_clean = _unique_int_list(preserved_in_progress)
+        else:
+            in_progress_clean = _unique_int_list(in_progress)
+        completed_set = set(completed_clean)
+        done_set = completed_set | failed_set | merged_set
+        in_progress_clean = [idx for idx in in_progress_clean if idx not in done_set]
+        in_progress_set = set(in_progress_clean)
+
         chapters = {}
-        for idx in sorted(set(completed_clean) | failed_set | merged_set):
+        for idx in sorted(completed_set | failed_set | merged_set | in_progress_set):
             existing_info = existing_chapters_by_idx.get(int(idx), {})
             try:
                 actual_num = int(existing_info.get("actual_num") or existing_info.get("chapter_num"))
@@ -6914,6 +6983,8 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 status = "qa_failed" if issue_list else "failed"
             elif idx in merged_set:
                 status = "merged"
+            elif idx in in_progress_set:
+                status = "in_progress"
             else:
                 status = "completed"
 
@@ -6947,6 +7018,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             "progress_schema_version": "2.0",
             "indexing": "chapter_index_zero_based",
             "qa_issues_found": {str(idx): issues for idx, issues in sorted(qa_issues_clean.items())},
+            "in_progress": in_progress_clean,
             # Glossary is saved separately to output files, not in progress
             # This prevents the progress file from overwriting manual edits
         }
