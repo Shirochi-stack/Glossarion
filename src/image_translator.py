@@ -87,7 +87,7 @@ def requires_cv2(func):
         return func(self, *args, **kwargs)
     return wrapper
     
-def send_image_with_interrupt(client, messages, image_data, temperature, max_tokens, stop_check_fn, chunk_timeout=None, context='image_translation'):
+def send_image_with_interrupt(client, messages, image_data, temperature, max_tokens, stop_check_fn, chunk_timeout=None, context='image_translation', chapter_context=None):
     """Send image API request with interrupt capability and timeout retry"""
     import queue
     import threading
@@ -97,6 +97,16 @@ def send_image_with_interrupt(client, messages, image_data, temperature, max_tok
     
     def api_call():
         try:
+            if chapter_context and hasattr(client, 'set_chapter_context'):
+                try:
+                    client.set_chapter_context(
+                        chapter=chapter_context.get('chapter'),
+                        chunk=chapter_context.get('chunk'),
+                        total_chunks=chapter_context.get('total_chunks'),
+                        merged_chapters=chapter_context.get('merged_chapters'),
+                    )
+                except Exception:
+                    pass
             start_time = time.time()
             result = client.send_image(messages, image_data, temperature=temperature, 
                                      max_tokens=max_tokens, context=context)
@@ -200,7 +210,7 @@ def _stop_new_vision_work_requested(stop_check_fn=None) -> bool:
     return _graceful_stop_requested() and not _wait_for_chunks_enabled()
 
 
-def send_text_with_interrupt(client, messages, temperature, max_tokens, stop_check_fn, chunk_timeout=None, context='translation'):
+def send_text_with_interrupt(client, messages, temperature, max_tokens, stop_check_fn, chunk_timeout=None, context='translation', chapter_context=None):
     """Send text API request with graceful/force stop behavior matching image calls."""
     import queue
     import threading
@@ -210,6 +220,16 @@ def send_text_with_interrupt(client, messages, temperature, max_tokens, stop_che
 
     def api_call():
         try:
+            if chapter_context and hasattr(client, 'set_chapter_context'):
+                try:
+                    client.set_chapter_context(
+                        chapter=chapter_context.get('chapter'),
+                        chunk=chapter_context.get('chunk'),
+                        total_chunks=chapter_context.get('total_chunks'),
+                        merged_chapters=chapter_context.get('merged_chapters'),
+                    )
+                except Exception:
+                    pass
             _clear_vision_key_context_for_text_request(client, context)
             start_time = time.time()
             result = client.send(
@@ -1948,6 +1968,7 @@ class ImageTranslator:
         assistant_prompt,
         check_stop_fn,
         chunk_idx=None,
+        total_chunks=None,
         image_basename=None,
         image_idx=None,
         chapter_num=None,
@@ -1981,6 +2002,11 @@ class ImageTranslator:
 
         retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
         chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "1800")) if retry_timeout_enabled else None
+        chapter_context = None
+        if effective_chapter_num is not None:
+            chapter_context = {"chapter": effective_chapter_num}
+            if chunk_idx is not None and total_chunks is not None:
+                chapter_context.update({"chunk": chunk_idx, "total_chunks": total_chunks})
 
         ocr_response, finish_reason = send_image_with_interrupt(
             self.client,
@@ -1990,7 +2016,8 @@ class ImageTranslator:
             self.image_max_tokens,
             check_stop_fn,
             chunk_timeout,
-            'vision_ocr'
+            'vision_ocr',
+            chapter_context=chapter_context,
         )
 
         if finish_reason in ["length", "max_tokens"]:
@@ -2053,6 +2080,10 @@ class ImageTranslator:
         chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "1800")) if retry_timeout_enabled else None
 
         try:
+            chapter_context = None
+            chapter_num_for_context = getattr(self, 'current_chapter_num', None)
+            if chapter_num_for_context is not None:
+                chapter_context = {"chapter": chapter_num_for_context}
             response = send_text_with_interrupt(
                 self.client,
                 messages,
@@ -2061,6 +2092,7 @@ class ImageTranslator:
                 stop_check_fn=check_stop_fn,
                 chunk_timeout=chunk_timeout,
                 context='translation',
+                chapter_context=chapter_context,
             )
         except UnifiedClientError as e:
             err_text = str(e).lower()
@@ -2900,6 +2932,7 @@ class ImageTranslator:
                 chunk_prompt,
                 check_stop_fn,
                 i + 1,
+                num_chunks,
                 image_basename=image_basename,
                 image_idx=getattr(self, 'current_image_index', None),
                 chapter_num=getattr(self, 'current_chapter_num', None),
@@ -3387,6 +3420,11 @@ class ImageTranslator:
                     print("   ❌ Stopped before API call")
                     return None
                 
+                chapter_context = None
+                chapter_num_for_context = getattr(self, 'current_chapter_num', None)
+                if chapter_num_for_context is not None:
+                    chapter_context = {"chapter": chapter_num_for_context}
+
                 # Use the new interrupt function
                 translation_response, trans_finish = send_image_with_interrupt(
                     self.client,
@@ -3396,7 +3434,8 @@ class ImageTranslator:
                     current_max_tokens,
                     check_stop_fn,
                     chunk_timeout,
-                    'image_translation'
+                    'image_translation',
+                    chapter_context=chapter_context,
                 )
                 
                 print(f"   📡 API response received, finish_reason: {trans_finish}")
