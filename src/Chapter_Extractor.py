@@ -657,41 +657,17 @@ def ensure_all_opf_chapters_extracted(zf, chapters, out):
         # Get spine order
         spine = root.find('.//opf:spine', ns)
         if spine:
-            translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
-            if 'SPECIAL_FILE_KEYWORDS' in os.environ:
-                special_keywords = [k.strip().lower() for k in os.environ.get('SPECIAL_FILE_KEYWORDS', '').split(',') if k.strip()]
-            else:
-                special_keywords = [
-                    'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
-                    'message', 'info', 'notice', 'colophon', 'dedication',
-                    'epigraph', 'foreword', 'acknowledgment', 'author',
-                    'appendix', 'bibliography'
-                ]
-            if 'SPECIAL_FILE_EXACT' in os.environ:
-                special_exact = [k.strip().lower() for k in os.environ.get('SPECIAL_FILE_EXACT', '').split(',') if k.strip()]
-            else:
-                special_exact = ['index', 'glossary', 'glossary_extension']
-
-            def _is_configured_special(filename: str) -> bool:
-                name_noext = os.path.splitext(os.path.basename(filename).lower())[0]
-                if name_noext in special_exact:
-                    return True
-                stripped = re.sub(r'\d+$', '', name_noext).rstrip('_- ')
-                has_numbers = bool(re.search(r'\d', name_noext))
-                return any(
-                    kw in name_noext and (not has_numbers or kw == stripped or kw in stripped)
-                    for kw in special_keywords
-                )
-
             for itemref in spine.findall('opf:itemref', ns):
                 idref = itemref.get('idref')
                 if idref and idref in manifest:
                     href = manifest[idref]
                     filename = os.path.basename(href)
                     
-                    # Skip configured special files only.
+                    # Skip nav, toc, cover - BUT only if filename has NO numbers
+                    # Files with numbers like 'nav01', 'toc05' are real chapters
                     import re
-                    if not translate_special and _is_configured_special(filename):
+                    has_numbers = bool(re.search(r'\d', filename))
+                    if not has_numbers and any(skip in filename.lower() for skip in ['nav', 'toc', 'cover']):
                         continue
                     
                     opf_chapters.append(href)

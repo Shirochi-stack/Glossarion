@@ -14,7 +14,6 @@ import unicodedata
 import html as html_module
 from xml.etree import ElementTree as ET
 from typing import Dict, List, Tuple, Optional, Callable
-from urllib.parse import unquote
 
 from ebooklib import epub, ITEM_DOCUMENT
 from bs4 import BeautifulSoup
@@ -1385,7 +1384,6 @@ class EPUBCompiler:
         
         # Track auxiliary (non-chapter) HTML files to include in spine but omit from TOC
         self.auxiliary_html_files: set[str] = set()
-        self._existing_cover_page_filename: Optional[str] = None
         
         # SVG rasterization settings
         self.rasterize_svg = os.getenv('RASTERIZE_SVG_FALLBACK', '1') == '1'
@@ -2246,18 +2244,9 @@ class EPUBCompiler:
             
             # Add cover page if exists
             if cover_file:
-                existing_cover_page = self._find_existing_cover_page_for_image(html_files, cover_file, processed_images)
-                if existing_cover_page:
-                    self._existing_cover_page_filename = existing_cover_page
-                    self.auxiliary_html_files.add(os.path.basename(existing_cover_page))
-                    if self._add_cover_image_to_book(book, cover_file, processed_images):
-                        self.log(f"📔 Existing cover page uses selected cover image; skipping auto-generated cover page: {existing_cover_page}")
-                    else:
-                        self.log(f"📔 Existing cover page found, but cover image metadata could not be added: {existing_cover_page}")
-                else:
-                    cover_page = self._create_cover_page(book, cover_file, processed_images, css_items, metadata)
-                    if cover_page:
-                        spine.insert(0, cover_page)
+                cover_page = self._create_cover_page(book, cover_file, processed_images, css_items, metadata)
+                if cover_page:
+                    spine.insert(0, cover_page)
             
             # Check stop flag
             if self.is_stopped():
@@ -2858,8 +2847,6 @@ class EPUBCompiler:
                 
                 # Process images
                 xhtml_content, _missing_imgs = self._process_chapter_images(xhtml_content, processed_images)
-                if self._is_existing_cover_page(filename):
-                    xhtml_content = self._apply_cover_page_layout(xhtml_content)
                 # Write back: remove broken img tags from source HTML file
                 if _missing_imgs and os.path.exists(path):
                     try:
@@ -3191,10 +3178,12 @@ class EPUBCompiler:
                 
                 if translate_special:
                     # When override is enabled, include ALL files in chapter ordering
+                    skip_list = []
                     self.log("  📝 Special files mode ENABLED - including all files in TOC")
                 else:
-                    # Default behavior: skip configured navigation/metadata files
-                    self.log("  📝 Special files mode DISABLED - excluding configured special files")
+                    # Default behavior: skip navigation/metadata files
+                    skip_list = ['nav', 'toc', 'contents', 'cover']
+                    self.log("  📝 Special files mode DISABLED - excluding navigation files")
                 
                 # Count total items first to decide on logging
                 itemrefs = spine.findall('opf:itemref', ns)
@@ -3222,8 +3211,8 @@ class EPUBCompiler:
                                 else:
                                     self.log(f"  Chapter {chapter_num}: {filename} (numbered)")
                             chapter_num += 1
-                        # Otherwise, check configured special files
-                        elif translate_special or not self._is_configured_special_file(filename):
+                        # Otherwise, check skip list for special files
+                        elif not skip_list or not any(skip in filename.lower() for skip in skip_list):
                             filename_to_order[filename] = chapter_num
                             # Only log periodically for large EPUBs
                             if not use_reduced_logging or idx % log_interval == 0 or idx == 0 or idx == total_items - 1:
@@ -3356,18 +3345,15 @@ class EPUBCompiler:
                 if unmapped_files:
                     self.log(f"⚠️ Adding {len(unmapped_files)} unmapped files at the end")
                     final_order.extend(sorted(unmapped_files))
-                    # Mark only configured special non-response files as auxiliary (omit from TOC)
+                    # Mark non-response unmapped files as auxiliary (omit from TOC)
+                    aux = {f for f in unmapped_files if not f.startswith('response_')}
+                    # If special files override is enabled, do NOT treat special files as auxiliary
                     translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
                     # Backward compatibility
                     translate_special = translate_special or (os.environ.get('TRANSLATE_COVER_HTML', '0') == '1')
                     if translate_special:
                         # Don't exclude any special files when override is enabled
                         aux = set()
-                    else:
-                        aux = {
-                            f for f in unmapped_files
-                            if not f.startswith('response_') and self._is_configured_special_file(f)
-                        }
                     self.auxiliary_html_files = aux
                 else:
                     self.auxiliary_html_files = set()
@@ -3408,9 +3394,10 @@ class EPUBCompiler:
                 
                 main_files.sort(key=extract_number)
             
-            # Append configured special non-response files as auxiliary pages (not in TOC)
+            # Append non-response files as auxiliary pages (not in TOC)
             aux_files = sorted([f for f in html_files if not f.startswith('response_')])
             if aux_files:
+                aux_set = set(aux_files)
                 # If special files override is enabled, don't mark special files as auxiliary
                 translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
                 # Backward compatibility
@@ -3418,8 +3405,6 @@ class EPUBCompiler:
                 if translate_special:
                     # Don't exclude any files when override is enabled
                     aux_set = set()
-                else:
-                    aux_set = {f for f in aux_files if self._is_configured_special_file(f)}
                 self.auxiliary_html_files = aux_set
                 self.log(f"[DEBUG] Appending {len(aux_set)} auxiliary HTML file(s) (not in TOC): {list(aux_set)[:5]}")
             else:
@@ -3623,8 +3608,6 @@ class EPUBCompiler:
                 self.log(f"[DEBUG] Processing chapter images...")
             
             xhtml_content, _missing_imgs = self._process_chapter_images(xhtml_content, processed_images)
-            if self._is_existing_cover_page(filename):
-                xhtml_content = self._apply_cover_page_layout(xhtml_content)
             # Write back: remove broken img tags from source HTML file
             if _missing_imgs and os.path.exists(path):
                 try:
@@ -4813,255 +4796,6 @@ img {
         else:
             self.log(f"✅ Successfully added {added}/{len(images_to_add)} images to EPUB")
     
-    @staticmethod
-    def _csv_env_list(name: str, default: List[str]) -> List[str]:
-        """Read a CSV env setting; an explicitly present empty value means empty."""
-        if name in os.environ:
-            raw = os.environ.get(name, '')
-            return [part.strip().lower() for part in raw.split(',') if part.strip()]
-        return list(default)
-
-    def _configured_special_file_lists(self) -> Tuple[List[str], List[str]]:
-        return (
-            self._csv_env_list('SPECIAL_FILE_KEYWORDS', [
-                'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
-                'message', 'info', 'notice', 'colophon', 'dedication',
-                'epigraph', 'foreword', 'acknowledgment', 'author',
-                'appendix', 'bibliography'
-            ]),
-            self._csv_env_list('SPECIAL_FILE_EXACT', ['index', 'glossary', 'glossary_extension']),
-        )
-
-    def _is_configured_special_file(self, filename: str) -> bool:
-        basename = os.path.basename(filename or '')
-        name_noext = os.path.splitext(basename)[0].lower()
-        if not name_noext:
-            return False
-
-        special_keywords, special_exact = self._configured_special_file_lists()
-        if name_noext in special_exact:
-            return True
-        if not special_keywords:
-            return False
-
-        name_stripped = re.sub(r'\d+$', '', name_noext).rstrip('_- ')
-        has_digits = bool(re.search(r'\d', name_noext))
-        for keyword in special_keywords:
-            if keyword in name_noext:
-                if not has_digits or keyword == name_stripped or keyword in name_stripped:
-                    return True
-        return False
-
-    def _find_original_image_for_safe_name(self, cover_file: str, processed_images: Dict[str, str]) -> Optional[str]:
-        """Return the source image filename that produced a safe EPUB image name."""
-        for original_name, safe_name in processed_images.items():
-            if safe_name == cover_file:
-                return original_name
-        return None
-
-    def _resolve_image_source_path(self, original_name: str, safe_name: str) -> Optional[str]:
-        """Resolve the on-disk image path, including compressed extension fallbacks."""
-        image_path = os.path.join(self.images_dir, original_name)
-        if os.path.isfile(image_path):
-            return image_path
-
-        safe_ext = os.path.splitext(safe_name)[1]
-        if safe_ext:
-            alt_path = os.path.join(self.images_dir, os.path.splitext(original_name)[0] + safe_ext)
-            if os.path.isfile(alt_path):
-                return alt_path
-
-        return None
-
-    def _book_has_item(self, book: epub.EpubBook, file_name: Optional[str] = None, uid: Optional[str] = None) -> bool:
-        """Check whether an EPUB item has already been added."""
-        try:
-            for item in book.get_items():
-                item_file = getattr(item, 'file_name', None)
-                item_uid = getattr(item, 'uid', None) or getattr(item, 'id', None)
-                if uid and item_uid == uid:
-                    return True
-                if file_name and item_file == file_name:
-                    return True
-        except Exception:
-            pass
-        return False
-
-    def _add_cover_image_to_book(self, book: epub.EpubBook, cover_file: str,
-                                 processed_images: Dict[str, str]) -> bool:
-        """Add only the cover image item/metadata when an existing cover page is reused."""
-        original_cover = self._find_original_image_for_safe_name(cover_file, processed_images)
-        if not original_cover:
-            return False
-
-        cover_path = self._resolve_image_source_path(original_cover, cover_file)
-        if not cover_path:
-            return False
-
-        epub_image_path = f"images/{cover_file}"
-        if self._book_has_item(book, file_name=epub_image_path, uid="cover-image"):
-            return True
-
-        try:
-            with open(cover_path, 'rb') as f:
-                cover_data = f.read()
-
-            cover_img = epub.EpubItem(
-                uid="cover-image",
-                file_name=epub_image_path,
-                media_type=mimetypes.guess_type(cover_path)[0] or "image/jpeg",
-                content=cover_data
-            )
-            cover_img.properties = ["cover-image"]
-            book.add_item(cover_img)
-            book.add_metadata('http://purl.org/dc/elements/1.1/', 'cover', 'cover-image')
-            return True
-        except Exception as e:
-            self.log(f"[WARNING] Failed to add existing cover image metadata: {e}")
-            return False
-
-    @staticmethod
-    def _image_src_basename(src: str) -> str:
-        if not src:
-            return ""
-        clean_src = unquote(src.strip()).split('#', 1)[0].split('?', 1)[0]
-        clean_src = clean_src.replace('\\', '/')
-        return os.path.basename(clean_src).lower()
-
-    def _load_image_rename_map(self) -> Dict[str, str]:
-        rename_map_path = os.path.join(self.output_dir, 'image_rename_map.json')
-        if not os.path.exists(rename_map_path):
-            return {}
-        try:
-            with open(rename_map_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            return {}
-
-    def _image_src_matches_safe_name(self, src: str, cover_file: str,
-                                     processed_images: Dict[str, str],
-                                     image_rename_map: Optional[Dict[str, str]] = None) -> bool:
-        """Return True when an HTML image src points to the chosen cover image."""
-        src_base = self._image_src_basename(src)
-        if not src_base:
-            return False
-
-        cover_lower = cover_file.lower()
-        if src_base == cover_lower:
-            return True
-
-        if image_rename_map is None:
-            image_rename_map = self._load_image_rename_map()
-
-        processed_lower = {os.path.basename(orig).lower(): safe.lower() for orig, safe in processed_images.items()}
-        if processed_lower.get(src_base) == cover_lower:
-            return True
-
-        renamed_base = image_rename_map.get(src_base) or image_rename_map.get(os.path.basename(src_base))
-        if renamed_base:
-            renamed_lower = os.path.basename(renamed_base).lower()
-            if renamed_lower == cover_lower or processed_lower.get(renamed_lower) == cover_lower:
-                return True
-
-        src_stem = os.path.splitext(src_base)[0]
-        for original_name, safe_name in processed_images.items():
-            if safe_name.lower() != cover_lower:
-                continue
-            if os.path.splitext(os.path.basename(original_name).lower())[0] == src_stem:
-                return True
-            if os.path.splitext(os.path.basename(safe_name).lower())[0] == src_stem:
-                return True
-
-        return False
-
-    def _find_existing_cover_page_for_image(self, html_files: List[str], cover_file: str,
-                                            processed_images: Dict[str, str]) -> Optional[str]:
-        """Find an existing *cover* HTML file that already points at the selected cover image."""
-        image_rename_map = self._load_image_rename_map()
-        candidates = []
-        for filename in html_files:
-            base_name = os.path.basename(filename)
-            if 'cover' not in base_name.lower():
-                continue
-            if not base_name.lower().endswith(('.html', '.htm', '.xhtml')):
-                continue
-            candidates.append(filename)
-
-        for filename in candidates:
-            path = os.path.join(self.output_dir, filename)
-            if not os.path.isfile(path):
-                continue
-            try:
-                raw_content = self._read_and_decode_html_file(path)
-                soup = BeautifulSoup(raw_content, 'html.parser')
-                for img in soup.find_all('img'):
-                    if self._image_src_matches_safe_name(img.get('src', ''), cover_file, processed_images, image_rename_map):
-                        return filename
-            except Exception as e:
-                self.log(f"[WARNING] Failed checking existing cover page {filename}: {e}")
-
-        return None
-
-    def _is_existing_cover_page(self, filename: str) -> bool:
-        existing = getattr(self, '_existing_cover_page_filename', None)
-        if not existing:
-            return False
-        return os.path.normcase(os.path.normpath(filename)) == os.path.normcase(os.path.normpath(existing))
-
-    @staticmethod
-    def _merge_inline_style(existing_style: str, updates: Dict[str, str]) -> str:
-        styles = {}
-        for part in (existing_style or '').split(';'):
-            if ':' not in part:
-                continue
-            key, value = part.split(':', 1)
-            key = key.strip().lower()
-            if key:
-                styles[key] = value.strip()
-        styles.update(updates)
-        return '; '.join(f"{key}: {value}" for key, value in styles.items()) + ';'
-
-    def _apply_cover_page_layout(self, xhtml_content: str) -> str:
-        """Make an existing cover HTML page preserve the cover image aspect ratio."""
-        try:
-            soup = BeautifulSoup(xhtml_content, 'lxml')
-            img = soup.find('img')
-            if not img:
-                return xhtml_content
-
-            body = soup.find('body')
-            if body:
-                body['style'] = self._merge_inline_style(body.get('style', ''), {
-                    'margin': '0',
-                    'padding': '0',
-                    'text-align': 'center',
-                })
-
-            parent = img.parent
-            if parent and getattr(parent, 'name', None):
-                parent['style'] = self._merge_inline_style(parent.get('style', ''), {
-                    'text-align': 'center',
-                    'margin': '0',
-                    'padding': '0',
-                })
-
-            img['style'] = self._merge_inline_style(img.get('style', ''), {
-                'display': 'block',
-                'margin': '0 auto',
-                'max-width': '100%',
-                'max-height': '100%',
-                'width': 'auto',
-                'height': 'auto',
-                'object-fit': 'contain',
-            })
-            if not img.get('alt'):
-                img['alt'] = 'Cover'
-
-            return str(soup)
-        except Exception as e:
-            self.log(f"[WARNING] Failed to apply cover page layout: {e}")
-            return xhtml_content
-
     def _create_cover_page(self, book: epub.EpubBook, cover_file: str, 
                           processed_images: Dict[str, str], css_items: List[epub.EpubItem],
                           metadata: dict) -> Optional[epub.EpubHtml]:
@@ -5128,9 +4862,9 @@ img {
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
     <title>Cover</title>
     </head>
-    <body style="margin: 0; padding: 0; text-align: center;">
-    <div style="text-align: center; margin: 0; padding: 0;">
-    <img src="{img_href}" alt="Cover" style="display: block; margin: 0 auto; max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain;" />
+    <body>
+    <div style="text-align: center;">
+    <img src="{img_href}" alt="Cover" style="max-width: 100%; height: auto;" />
     </div>
     </body>
     </html>'''

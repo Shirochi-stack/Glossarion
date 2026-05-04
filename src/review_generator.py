@@ -73,15 +73,17 @@ _DEFAULT_SPECIAL_EXACT = ['index', 'glossary', 'glossary_extension']
 
 def _get_special_keywords():
     """Read special file keywords from environment or use defaults."""
-    if 'SPECIAL_FILE_KEYWORDS' in os.environ:
-        return [k.strip().lower() for k in os.environ.get('SPECIAL_FILE_KEYWORDS', '').split(',') if k.strip()]
+    kw_env = os.environ.get('SPECIAL_FILE_KEYWORDS', '')
+    if kw_env:
+        return [k.strip().lower() for k in kw_env.split(',') if k.strip()]
     return _DEFAULT_SPECIAL_PATTERNS
 
 
 def _get_special_exact():
     """Read exact-match special file keywords from environment or use defaults."""
-    if 'SPECIAL_FILE_EXACT' in os.environ:
-        return [k.strip().lower() for k in os.environ.get('SPECIAL_FILE_EXACT', '').split(',') if k.strip()]
+    exact_env = os.environ.get('SPECIAL_FILE_EXACT', '')
+    if exact_env:
+        return [k.strip().lower() for k in exact_env.split(',') if k.strip()]
     return _DEFAULT_SPECIAL_EXACT
 
 
@@ -90,7 +92,7 @@ def _is_special_file(filename: str) -> bool:
     Uses configurable keyword lists from SPECIAL_FILE_KEYWORDS / SPECIAL_FILE_EXACT env vars.
     1) Known keyword patterns (substring match)
     2) Exact basename matches
-    The configured keyword lists are authoritative.
+    3) Filenames with no digits (e.g. 'info.xhtml', 'about.xhtml')
     """
     import re
     base = os.path.splitext(os.path.basename(filename))[0].lower()
@@ -99,6 +101,9 @@ def _is_special_file(filename: str) -> bool:
         return True
     # Exact match only
     if base in _get_special_exact():
+        return True
+    # Heuristic: filenames with no digits are often special/metadata files
+    if not re.search(r'\d', base):
         return True
     return False
 

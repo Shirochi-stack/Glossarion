@@ -2356,18 +2356,12 @@ class ProgressManager:
         if chapter_obj:
             from TransateKRtoEN import FileUtilities
             output_filename = FileUtilities.create_chapter_filename(chapter_obj, actual_num)
-            output_candidates = [output_filename]
-            for _key in ('original_basename', 'original_filename', 'filename'):
-                _value = chapter_obj.get(_key)
-                if _value:
-                    _candidate = os.path.basename(_value)
-                    if _candidate.lower().endswith(('.html', '.htm', '.xhtml')) and _candidate not in output_candidates:
-                        output_candidates.append(_candidate)
+            output_path = os.path.join(output_dir, output_filename)
 
             # If a differently-keyed entry already tracks this file, reuse it instead of auto-discovering
-            expected_norms = {_norm(candidate) for candidate in output_candidates}
+            expected_norm = _norm(output_filename)
             for k, info in self.prog.get("chapters", {}).items():
-                if _norm(info.get("output_file")) in expected_norms:
+                if _norm(info.get("output_file")) == expected_norm:
                     status = info.get("status")
                     if status in ["completed", "completed_empty", "completed_image_only"]:
                         if info.get("output_file"):
@@ -2377,16 +2371,7 @@ class ProgressManager:
                     return True, None, info.get("output_file")
             
             # Check if file exists for auto-discovery
-            existing_output = None
-            output_path = None
-            for candidate in output_candidates:
-                candidate_path = os.path.join(output_dir, candidate)
-                if os.path.exists(candidate_path):
-                    existing_output = candidate
-                    output_path = candidate_path
-                    break
-
-            if existing_output and output_path:
+            if os.path.exists(output_path):
                 # Track auto-discovered files for a single summary instead of per-chapter spam
                 if not hasattr(self, '_auto_discovered_count'):
                     self._auto_discovered_count = 0
@@ -2395,20 +2380,14 @@ class ProgressManager:
                 self.prog["chapters"][chapter_key] = {
                     "actual_num": actual_num,
                     "content_hash": content_hash,
-                    "output_file": existing_output,
+                    "output_file": output_filename,
                     "status": "completed",
                     "last_updated": os.path.getmtime(output_path),
-                    "auto_discovered": True,
-                    "original_basename": os.path.basename(
-                        chapter_obj.get('original_basename')
-                        or chapter_obj.get('original_filename')
-                        or chapter_obj.get('filename')
-                        or existing_output
-                    )
+                    "auto_discovered": True
                 }
                 
                 self.save()
-                return False, f"Chapter {actual_num} already exists: {existing_output}", existing_output
+                return False, f"Chapter {actual_num} already exists: {output_filename}", output_filename
         
         # No entry and no file - needs translation
         return True, None, None
@@ -4757,34 +4736,7 @@ class BatchTranslationProcessor:
                 )
             c = chapter
             has_images = chapter.get('has_images', False) or html_mostly_images
-            has_meaningful_text = ContentProcessor.is_meaningful_text_content(chapter_body)
-            if has_images and not has_meaningful_text and self.config.OUTPUT_MODE != "vision":
-                print(f"📸 Image-only chapter {actual_num} detected in text mode (preserving original content as-is)")
-                source_fname = None
-                for key in ('original_basename', 'original_filename', 'filename'):
-                    value = chapter.get(key)
-                    if value:
-                        candidate = os.path.basename(value)
-                        if candidate.lower().endswith(('.html', '.htm', '.xhtml')):
-                            source_fname = candidate
-                            break
-                if source_fname:
-                    fname = source_fname
-                original_markup = (
-                    chapter.get("original_html")
-                    or chapter.get("source_html")
-                    or chapter.get("raw_html")
-                    or chapter_body
-                    or ""
-                )
-                with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                    f.write(original_markup)
-                with self.progress_lock:
-                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="completed_image_only", chapter_obj=chapter)
-                    self.save_progress_fn()
-                return True, actual_num, fname, None, None
-
-            if has_images and self.image_translator and self.config.ENABLE_IMAGE_TRANSLATION and self.config.OUTPUT_MODE == "vision":
+            if has_images and self.image_translator and self.config.ENABLE_IMAGE_TRANSLATION:
                 print(f"🖼️ Processing images for Chapter {actual_num}...")
                 self.image_translator.set_current_chapter(actual_num)
                 chapter_body, image_translations = process_chapter_images(
@@ -7489,88 +7441,6 @@ def set_output_redirect(log_callback=None):
 # EPUB AND FILE PROCESSING
 # =====================================================
 
-_DEFAULT_SPECIAL_FILE_KEYWORDS = [
-    'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
-    'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
-    'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography'
-]
-_DEFAULT_SPECIAL_FILE_EXACT = ['index', 'glossary', 'glossary_extension']
-
-
-def _csv_env_list(name, default):
-    """Read a CSV env setting; an explicitly present empty value means empty."""
-    if name in os.environ:
-        raw = os.environ.get(name, '')
-        return [part.strip().lower() for part in raw.split(',') if part.strip()]
-    return list(default)
-
-
-def _configured_special_file_lists():
-    return (
-        _csv_env_list('SPECIAL_FILE_KEYWORDS', _DEFAULT_SPECIAL_FILE_KEYWORDS),
-        _csv_env_list('SPECIAL_FILE_EXACT', _DEFAULT_SPECIAL_FILE_EXACT),
-    )
-
-
-def _translation_special_no_digit_enabled():
-    return os.getenv('TRANSLATION_SPECIAL_NO_DIGIT_HEURISTIC', '1') == '1'
-
-
-def _translation_no_digit_skip_exceptions():
-    return _csv_env_list('TRANSLATION_NO_DIGIT_SKIP_EXCEPTIONS', [])
-
-
-def _is_translation_no_digit_exception(filename):
-    basename = os.path.basename(filename or '').lower()
-    name_noext = os.path.splitext(basename)[0]
-    if not name_noext:
-        return False
-    for exception in _translation_no_digit_skip_exceptions():
-        exception_base = os.path.basename(exception)
-        exception_noext = os.path.splitext(exception_base)[0]
-        if exception in (basename, name_noext) or exception_base in (basename, name_noext) or exception_noext == name_noext:
-            return True
-    return False
-
-
-def _is_configured_special_file(filename):
-    """Special-file status controlled only by the configured keyword lists."""
-    basename = os.path.basename(filename or '')
-    name_noext = os.path.splitext(basename)[0].lower()
-    if not name_noext:
-        return False
-
-    special_keywords, special_exact = _configured_special_file_lists()
-    if name_noext in special_exact:
-        return True
-
-    if not special_keywords:
-        return False
-
-    name_stripped = re.sub(r'\d+$', '', name_noext).rstrip('_- ')
-    has_digits = bool(re.search(r'\d', name_noext))
-    for keyword in special_keywords:
-        if keyword in name_noext:
-            if not has_digits or keyword == name_stripped or keyword in name_stripped:
-                return True
-    return False
-
-
-def _is_translation_skip_special_file(filename):
-    """Translation-only special skip, including the optional no-digit rule."""
-    if _is_configured_special_file(filename):
-        return True
-
-    basename = os.path.basename(filename or '')
-    name_noext = os.path.splitext(basename)[0].lower()
-    return bool(
-        name_noext
-        and _translation_special_no_digit_enabled()
-        and not _is_translation_no_digit_exception(filename)
-        and not re.search(r'\d', name_noext)
-    )
-
-
 def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_spine_data=None):
     """Extract chapter number from filename.
 
@@ -7593,8 +7463,16 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
         if last_num == 0:
             return 0, 'filename_zero'
         return last_num, 'filename_digits'
-    # Priority 2: configured special keyword files with no digits -> chapter 0
-    if _is_configured_special_file(base_no_ext_lower):
+    # Priority 2: special keyword files with no digits -> chapter 0
+    # Priority 3: special keyword files with no digits -> chapter 0
+    _kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
+    special_keywords = [k.strip().lower() for k in _kw_env.split(',') if k.strip()] if _kw_env else ['title', 'toc', 'cover', 'copyright', 'preface', 'nav', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
+    if any(name in base_no_ext_lower for name in special_keywords):
+        return 0, 'special_file'
+    # Exact match only: these are special only when the basename matches exactly
+    _exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
+    special_exact = [k.strip().lower() for k in _exact_env.split(',') if k.strip()] if _exact_env else ['index', 'glossary', 'glossary_extension']
+    if base_no_ext_lower in special_exact:
         return 0, 'special_file'
     # Priority 3: legacy fallback patterns
     name_without_ext = base_no_ext
@@ -13199,9 +13077,7 @@ def main(log_callback=None, stop_callback=None):
     
     image_translator = None
 
-    vision_image_translation_enabled = config.ENABLE_IMAGE_TRANSLATION and config.OUTPUT_MODE == "vision"
-
-    if vision_image_translation_enabled:
+    if config.ENABLE_IMAGE_TRANSLATION:
         print(f"🖼️ Image translation enabled for model: {config.MODEL}")
         print("🖼️ Image translation will use your custom system prompt and glossary")
         image_translator = ImageTranslator(
@@ -13229,8 +13105,6 @@ def main(log_callback=None, stop_callback=None):
             run_vision_glossary_prepass(chapters, image_translator, check_stop)
         except Exception as e:
             print(f"⚠️ Vision auto glossary prepass failed: {e}")
-    elif config.ENABLE_IMAGE_TRANSLATION:
-        print("ℹ️ Image translation disabled in text mode (OUTPUT_MODE=text); image-only files will be preserved as-is")
     else:
         print("ℹ️ Image translation disabled by user")
     
@@ -13280,35 +13154,6 @@ def main(log_callback=None, stop_callback=None):
     # Check if special files translation is disabled
     translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
 
-    def _source_html_filename(chapter):
-        for key in ('original_basename', 'original_filename', 'filename'):
-            value = chapter.get(key)
-            if value:
-                candidate = os.path.basename(value)
-                if candidate.lower().endswith(('.html', '.htm', '.xhtml')):
-                    return candidate
-        return None
-
-    def _preserve_translation_skipped_file(idx, chapter, actual_num, content_hash, reason="special"):
-        """Write untranslated HTML to the source filename and mark it completed."""
-        fname = _source_html_filename(chapter) or FileUtilities.create_chapter_filename(chapter, actual_num)
-        original_markup = (
-            chapter.get("original_html")
-            or chapter.get("source_html")
-            or chapter.get("raw_html")
-            or chapter.get("body")
-            or ""
-        )
-        os.makedirs(out, exist_ok=True)
-        with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-            f.write(original_markup)
-        progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=chapter)
-        progress_manager.save()
-        if not hasattr(config, '_preserved_special_files'):
-            config._preserved_special_files = []
-        config._preserved_special_files.append(chapter.get('original_basename') or fname)
-        return fname
-
     # When USE_SPINE_ORDER is active, build a mapping from each extracted
     # chapter's list index → its spine-offset position.  The positions
     # are computed using the FULL OPF spine (same logic as the GUI preview
@@ -13346,8 +13191,25 @@ def main(log_callback=None, stop_callback=None):
                         if _idref and _idref in _manifest:
                             _all_spine_basenames.append(_manifest[_idref])
 
+                # Build offset positions — same logic as preview's
+                # Uses configurable keyword lists from SPECIAL_FILE_KEYWORDS / SPECIAL_FILE_EXACT
+                _sp_kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
+                _sp_keywords = [k.strip().lower() for k in _sp_kw_env.split(',') if k.strip()] if _sp_kw_env else ['title', 'toc', 'cover', 'copyright', 'preface', 'nav', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
+                _sp_exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
+                _sp_exact = [k.strip().lower() for k in _sp_exact_env.split(',') if k.strip()] if _sp_exact_env else ['index', 'glossary', 'glossary_extension']
                 def _is_special_spine(fname):
-                    return _is_configured_special_file(fname)
+                    fl = fname.lower()
+                    fnoext = os.path.splitext(fl)[0]
+                    # Substring keyword match
+                    if any(kw in fnoext for kw in _sp_keywords):
+                        return True
+                    # Exact-match keywords
+                    if fnoext in _sp_exact:
+                        return True
+                    # No digits = likely special/metadata
+                    if not re.search(r'\d', fnoext):
+                        return True
+                    return False
 
                 _offset_by_basename = {}   # basename -> offset pos (1-based)
                 _tpos = 0
@@ -13443,12 +13305,14 @@ def main(log_callback=None, stop_callback=None):
         # Now we can safely use actual_num
         actual_num = c['actual_chapter_num']
         
-        # Skip configured special files if translation is disabled.
+        # Skip special files (chapter 0) if translation is disabled
+        # IMPORTANT: Do NOT treat files with digits (including 0) in their name as special.
         # IMPORTANT: Never skip text-file chapters — "special files" only apply to EPUBs.
-        if not translate_special and not is_text_file:
+        if not translate_special and raw_num == 0 and not is_text_file:
             name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
-            if _is_translation_skip_special_file(name):
-                _preserve_translation_skipped_file(idx, c, actual_num, content_hash)
+            name_noext = os.path.splitext(name)[0] if name else ''
+            has_digits_in_name = bool(re.search(r'\d', name_noext))
+            if not has_digits_in_name:
                 # Track skipped special files
                 if not hasattr(config, '_skipped_special_files'):
                     config._skipped_special_files = []
@@ -13546,10 +13410,10 @@ def main(log_callback=None, stop_callback=None):
         else:
             print(f"   Range: {min(skipped)} to {max(skipped)}")
     
-    # Print special files preservation summary
+    # Print special files skip summary
     if hasattr(config, '_skipped_special_files') and config._skipped_special_files:
         skipped = config._skipped_special_files
-        print(f"📊 Preserved {len(skipped)} special/no-digit file(s) without API translation")
+        print(f"📊 Skipped {len(skipped)} special file(s) (TRANSLATE_SPECIAL_FILES is disabled)")
         if len(skipped) <= 5:
             for file in skipped:
                 print(f"   • {file}")
@@ -13566,11 +13430,10 @@ def main(log_callback=None, stop_callback=None):
                 elif not (start <= _actual <= end):
                     continue
             _raw_num = _chapter.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(_chapter, patterns=None, config=config))
-            if not translate_special and not is_text_file:
+            if not translate_special and _raw_num == 0 and not is_text_file:
                 _name = _chapter.get('original_basename') or os.path.basename(_chapter.get('filename', ''))
-                if _is_translation_skip_special_file(_name):
-                    _content_hash = _chapter.get("content_hash") or ContentProcessor.get_content_hash(_chapter.get("body", ""))
-                    _preserve_translation_skipped_file(_idx, _chapter, _actual, _content_hash)
+                _name_noext = os.path.splitext(_name)[0] if _name else ''
+                if not bool(re.search(r'\d', _name_noext)):
                     continue
             post_mode_chapters.append(_chapter)
         post_out = _resolve_postprocess_output_dir(input_path, file_base, out, post_mode_chapters)
@@ -13708,12 +13571,13 @@ def main(log_callback=None, stop_callback=None):
             else:
                 actual_num = c.get('actual_chapter_num', c['num'])  # Now this will exist!
             
-            # Skip translation-only special files when special-file translation is disabled
+            # Skip special files (chapter 0) if translation is disabled
             raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
-            if not translate_special and not is_text_file:
+            if not translate_special and raw_num == 0 and not is_text_file:
                 name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
-                if _is_translation_skip_special_file(name):
-                    _preserve_translation_skipped_file(idx, c, actual_num, content_hash)
+                name_noext = os.path.splitext(name)[0] if name else ''
+                has_digits_in_name = bool(re.search(r'\d', name_noext))
+                if not has_digits_in_name:
                     continue
             
             # Skip chapters outside the range
@@ -13801,7 +13665,12 @@ def main(log_callback=None, stop_callback=None):
             if is_empty_chapter:
                 print(f"📄 Empty chapter {actual_num} detected (preserving original content as-is)")
 
-                fname = _source_html_filename(c) or FileUtilities.create_chapter_filename(c, c['num'])
+                safe_title = make_safe_filename(c['title'], c['num'])
+
+                if isinstance(c['num'], float):
+                    fname = FileUtilities.create_chapter_filename(c, c['num'])
+                else:
+                    fname = FileUtilities.create_chapter_filename(c, c['num'])
 
                 # IMPORTANT: For completed_empty, preserve the ORIGINAL XHTML/HTML markup.
                 # In enhanced/html2text extraction modes, c['body'] may be empty because it contains only extracted text.
@@ -13816,26 +13685,6 @@ def main(log_callback=None, stop_callback=None):
                     f.write(original_markup)
 
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty", chapter_obj=c)
-                progress_manager.save()
-                chapters_completed += 1
-                continue
-
-            if is_image_only_chapter and config.OUTPUT_MODE != "vision":
-                print(f"📸 Image-only chapter {actual_num} detected in text mode (preserving original content as-is)")
-
-                fname = _source_html_filename(c) or FileUtilities.create_chapter_filename(c, c['num'] if isinstance(c['num'], float) else actual_num)
-
-                original_markup = (
-                    c.get("original_html")
-                    or c.get("source_html")
-                    or c.get("raw_html")
-                    or c.get("body")
-                    or ""
-                )
-                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                    f.write(original_markup)
-
-                progress_manager.update(idx, actual_num, content_hash, fname, status="completed_image_only", chapter_obj=c)
                 progress_manager.save()
                 chapters_completed += 1
                 continue
@@ -14569,12 +14418,13 @@ def main(log_callback=None, stop_callback=None):
                     actual_num = c.get('actual_chapter_num', c['num'])
                 content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
                 
-                # Skip translation-only special files when special-file translation is disabled
+                # Skip special files (chapter 0) if translation is disabled
                 raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
-                if not translate_special and not is_text_file:
+                if not translate_special and raw_num == 0 and not is_text_file:
                     name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
-                    if _is_translation_skip_special_file(name):
-                        _preserve_translation_skipped_file(idx, c, actual_num, content_hash)
+                    name_noext = os.path.splitext(name)[0] if name else ''
+                    has_digits_in_name = bool(re.search(r'\d', name_noext))
+                    if not has_digits_in_name:
                         continue
                 
                 if start is not None:
@@ -14711,12 +14561,13 @@ def main(log_callback=None, stop_callback=None):
                 actual_num = c.get('actual_chapter_num', c['num'])
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
             
-            # Skip translation-only special files when special-file translation is disabled
+            # Skip special files (chapter 0) if translation is disabled
             raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
-            if not translate_special and not is_text_file:
+            if not translate_special and raw_num == 0 and not is_text_file:
                 name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
-                if _is_translation_skip_special_file(name):
-                    _preserve_translation_skipped_file(idx, c, actual_num, content_hash)
+                name_noext = os.path.splitext(name)[0] if name else ''
+                has_digits_in_name = bool(re.search(r'\d', name_noext))
+                if not has_digits_in_name:
                     continue
             
             if start is not None:
@@ -14790,7 +14641,10 @@ def main(log_callback=None, stop_callback=None):
                 print(f"📄 Empty chapter {actual_num} detected (preserving original content as-is)")
 
                 # Create filename for empty chapter
-                fname = _source_html_filename(c) or FileUtilities.create_chapter_filename(c, c['num'] if isinstance(c['num'], float) else actual_num)
+                if isinstance(c['num'], float):
+                    fname = FileUtilities.create_chapter_filename(c, c['num'])
+                else:
+                    fname = FileUtilities.create_chapter_filename(c, actual_num)
 
                 # Save ORIGINAL markup for empty chapters.
                 # In enhanced/html2text extraction modes, c['body'] can be blank (it may only contain extracted text).
@@ -14813,23 +14667,6 @@ def main(log_callback=None, stop_callback=None):
                 continue
 
             elif is_image_only_chapter:
-                if config.OUTPUT_MODE != "vision":
-                    print(f"📸 Image-only chapter {actual_num} detected in text mode (preserving original content as-is)")
-                    translated_html = (
-                        c.get("original_html")
-                        or c.get("source_html")
-                        or c.get("raw_html")
-                        or c.get("body")
-                        or ""
-                    )
-                    fname = _source_html_filename(c) or FileUtilities.create_chapter_filename(c, actual_num)
-                    with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                        f.write(translated_html)
-                    progress_manager.update(idx, actual_num, content_hash, fname, status="completed_image_only", chapter_obj=c)
-                    progress_manager.save()
-                    chapters_completed += 1
-                    continue
-
                 print(f"📸 Image-only chapter: {c.get('image_count', 0)} images")
                 
                 translated_html = c["body"]

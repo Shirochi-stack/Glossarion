@@ -1037,9 +1037,11 @@ class RetranslationMixin:
                 # For other statuses (completed, merged, etc.)
                 spine_ch['status'] = status
                 
-                # Prefer the concrete output recorded in progress. Preserved
-                # source-name files such as cover.html must stay cover.html.
-                spine_ch['output_file'] = matched_info.get('output_file') or expected_response
+                # For special files, always use the original filename (ignore what's in progress JSON)
+                if is_special:
+                    spine_ch['output_file'] = expected_response
+                else:
+                    spine_ch['output_file'] = matched_info.get('output_file', expected_response)
                 
                 spine_ch['progress_entry'] = matched_info
                 
@@ -1770,19 +1772,15 @@ class RetranslationMixin:
                             if idref in id_to_href:
                                 spine_hrefs.append(id_to_href[idref])
                         
-                        if 'SPECIAL_FILE_KEYWORDS' in os.environ:
-                            special_keywords = [k.strip().lower() for k in os.environ.get('SPECIAL_FILE_KEYWORDS', '').split(',') if k.strip()]
-                        else:
-                            special_keywords = [
+                        _kw_env = os.environ.get('SPECIAL_FILE_KEYWORDS', '')
+                        special_keywords = [k.strip().lower() for k in _kw_env.split(',') if k.strip()] if _kw_env else [
                             'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
                             'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
                             'foreword', 'acknowledgment', 'author', 'appendix',
                             'bibliography'
                         ]
-                        if 'SPECIAL_FILE_EXACT' in os.environ:
-                            special_exact = [k.strip().lower() for k in os.environ.get('SPECIAL_FILE_EXACT', '').split(',') if k.strip()]
-                        else:
-                            special_exact = ['index', 'glossary', 'glossary_extension']
+                        _exact_env = os.environ.get('SPECIAL_FILE_EXACT', '')
+                        special_exact = [k.strip().lower() for k in _exact_env.split(',') if k.strip()] if _exact_env else ['index', 'glossary', 'glossary_extension']
                         import re as _re_spine
                         ci = 0
                         for href in spine_hrefs:
