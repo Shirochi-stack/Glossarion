@@ -1873,6 +1873,7 @@ class RetranslationMixin:
                 return 'not_completed', []
 
             def _gp_display_for(ci, fname, _d, cache=None):
+                opf_pos = (panel_state.get('spine_index_map') or {}).get(ci, ci + 1)
                 ch_num = _gp_display_chapter_num(ci, fname)
                 status, issues = _gp_status_for(ci, _d, cache)
                 icons = {
@@ -1883,7 +1884,7 @@ class RetranslationMixin:
                     'not_completed': '\u2b1c',
                 }
                 icon = icons.get(status) or '\u2b1c'
-                display = f"Ch.{ch_num:03d} | {icon} {status.replace('_', ' ').title():14s} | {fname}"
+                display = f"[{opf_pos:03d}] Ch.{ch_num:03d} | {icon} {status.replace('_', ' ').title():14s} | {fname}"
                 if issues:
                     issues_display = ', '.join(issues[:2])
                     if len(issues) > 2:
@@ -1900,12 +1901,13 @@ class RetranslationMixin:
                     return '#e74c3c'
                 return '#5a9fd4'
             
-            # Lightweight spine reader — returns (chapter_map, total_chapters)
+            # Lightweight spine reader - returns (chapter_map, total_chapters, spine_index_map)
             def _read_spine_map(epub_path, translate_special):
-                """Read OPF spine and return (chapter_map, total_chapters) without parsing HTML."""
+                """Read OPF spine and return (chapter_map, total_chapters, spine_index_map)."""
                 cmap = {}
+                spine_index_map = {}
                 if not (epub_path.lower().endswith('.epub') and os.path.exists(epub_path)):
-                    return cmap, 0
+                    return cmap, 0, spine_index_map
                 try:
                     import zipfile
                     from xml.etree import ElementTree as ET
@@ -1921,7 +1923,7 @@ class RetranslationMixin:
                             opf_path = next((n for n in zf.namelist() if n.endswith('.opf')), None)
                         
                         if not opf_path:
-                            return cmap, 0
+                            return cmap, 0, spine_index_map
                         
                         opf_xml = ET.fromstring(zf.read(opf_path))
                         opf_ns = {'opf': 'http://www.idpf.org/2007/opf'}
@@ -1952,7 +1954,7 @@ class RetranslationMixin:
                         special_exact = [k.strip().lower() for k in _exact_env.split(',') if k.strip()] if _exact_env else ['index', 'glossary', 'glossary_extension']
                         import re as _re_spine
                         ci = 0
-                        for href in spine_hrefs:
+                        for opf_pos, href in enumerate(spine_hrefs, start=1):
                             basename = os.path.basename(href)
                             if not translate_special:
                                 name_noext = os.path.splitext(basename)[0]
@@ -1966,14 +1968,15 @@ class RetranslationMixin:
                                     if not has_digits or any(kw == name_stripped or kw in name_stripped for kw in special_keywords):
                                         continue
                             cmap[ci] = basename
+                            spine_index_map[ci] = opf_pos
                             ci += 1
-                        return cmap, ci
+                        return cmap, ci, spine_index_map
                 except Exception:
-                    return cmap, 0
+                    return cmap, 0, spine_index_map
             
             # Mutable state so refresh can update chapter_map when toggle changes
             _ts_init = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
-            _cmap_init, _total_init = _read_spine_map(fp, _ts_init)
+            _cmap_init, _total_init, _spine_idx_init = _read_spine_map(fp, _ts_init)
             
             if _total_init == 0:
                 _total_init = _gp_safe_int(gp_data.get('chapter_count'), 0)
@@ -1990,6 +1993,7 @@ class RetranslationMixin:
             # Store in mutable dict so closures can update
             panel_state = {
                 'chapter_map': _cmap_init,
+                'spine_index_map': _spine_idx_init,
                 'total': _total_init,
                 'translate_special': _ts_init,
                 'populate_generation': 0,
@@ -2003,8 +2007,14 @@ class RetranslationMixin:
                             for k, v in chapter_filenames.items()
                             if str(k).lstrip('-').isdigit() and v
                         }
+                        panel_state['spine_index_map'] = {
+                            int(k): int(k) + 1
+                            for k in chapter_filenames.keys()
+                            if str(k).lstrip('-').isdigit()
+                        }
                     except Exception:
                         panel_state['chapter_map'] = {}
+                        panel_state['spine_index_map'] = {}
             
             panel = QWidget(parent_widget)
             p_layout = QVBoxLayout(panel)
@@ -2227,8 +2237,7 @@ class RetranslationMixin:
                         _cmap = panel_state['chapter_map']
                         for it, ci in targets:
                             fname = _cmap.get(ci, f'chapter {ci + 1}')
-                            ch_num3 = _gp_display_chapter_num(ci, fname)
-                            display3 = f"Ch.{ch_num3:03d} | ⬜ {'Not Completed':14s} | {fname}"
+                            display3, _ = _gp_display_for(ci, fname, _d)
                             it.setText(display3)
                             it.setForeground(QColor('#5a9fd4'))
                             it.setData(Qt.UserRole, 'not_completed')
@@ -2422,9 +2431,10 @@ class RetranslationMixin:
                     _cur_ts = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
                     if _cur_ts != panel_state['translate_special']:
                         panel_state['translate_special'] = _cur_ts
-                        new_cmap, new_total = _read_spine_map(fp, _cur_ts)
+                        new_cmap, new_total, new_spine_idx = _read_spine_map(fp, _cur_ts)
                         if new_total > 0:
                             panel_state['chapter_map'] = new_cmap
+                            panel_state['spine_index_map'] = new_spine_idx
                             panel_state['total'] = new_total
                         elif new_total == 0:
                             _comp0, _fail0, _merg0 = _gp_sets(_d)

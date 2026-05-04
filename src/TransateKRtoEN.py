@@ -4313,14 +4313,13 @@ class TranslationProcessor:
 
                 if _single_pass_glossary_mode() and isinstance(result, str):
                     result, glossary_block = _split_single_pass_glossary_response(result)
-                    if glossary_block:
-                        _persist_single_pass_glossary(
-                            self.out_dir,
-                            glossary_block,
-                            chapter_num=actual_num,
-                            source_text=chunk_html,
-                            chapter_file=_single_pass_progress_chapter_file(c, fname),
-                        )
+                    _persist_single_pass_glossary(
+                        self.out_dir,
+                        glossary_block,
+                        chapter_num=actual_num,
+                        source_text=chunk_html,
+                        chapter_file=_single_pass_progress_chapter_file(c, fname),
+                    )
                 
                 # Enhanced mode workflow:
                 # 1. Original HTML -> html2text -> Markdown/plain text (during extraction)
@@ -5145,14 +5144,13 @@ class BatchTranslationProcessor:
                         )
                         if _single_pass_glossary_mode() and isinstance(result, str):
                             result, glossary_block = _split_single_pass_glossary_response(result)
-                            if glossary_block:
-                                _persist_single_pass_glossary(
-                                    self.out_dir,
-                                    glossary_block,
-                                    chapter_num=actual_num,
-                                    source_text=chunk_html,
-                                    chapter_file=chapter_ref.get("chapter_file"),
-                                )
+                            _persist_single_pass_glossary(
+                                self.out_dir,
+                                glossary_block,
+                                chapter_num=actual_num,
+                                source_text=chunk_html,
+                                chapter_file=chapter_ref.get("chapter_file"),
+                            )
                         break  # Success, exit retry loop
                     except UnifiedClientError as e:
                         error_msg = str(e)
@@ -5353,14 +5351,13 @@ class BatchTranslationProcessor:
                                 )
                                 if _single_pass_glossary_mode() and isinstance(result_retry, str):
                                     result_retry, glossary_block_retry = _split_single_pass_glossary_response(result_retry)
-                                    if glossary_block_retry:
-                                        _persist_single_pass_glossary(
-                                            self.out_dir,
-                                            glossary_block_retry,
-                                            chapter_num=actual_num,
-                                            source_text=chunk_html,
-                                            chapter_file=chapter_ref.get("chapter_file"),
-                                        )
+                                    _persist_single_pass_glossary(
+                                        self.out_dir,
+                                        glossary_block_retry,
+                                        chapter_num=actual_num,
+                                        source_text=chunk_html,
+                                        chapter_file=chapter_ref.get("chapter_file"),
+                                    )
                             except UnifiedClientError as e:
                                 # Treat timeout during char-ratio retry as a timeout for the chunk
                                 error_msg = str(e)
@@ -6430,14 +6427,13 @@ class BatchTranslationProcessor:
                 )
                 if _single_pass_glossary_mode() and isinstance(merged_response, str):
                     merged_response, glossary_block = _split_single_pass_glossary_response(merged_response)
-                    if glossary_block:
-                        _persist_single_pass_glossary(
-                            self.out_dir,
-                            glossary_block,
-                            chapter_num=parent_actual_num,
-                            source_text=merged_content,
-                            chapter_file=chapter_ref.get("chapter_file"),
-                        )
+                    _persist_single_pass_glossary(
+                        self.out_dir,
+                        glossary_block,
+                        chapter_num=parent_actual_num,
+                        source_text=merged_content,
+                        chapter_file=chapter_ref.get("chapter_file"),
+                    )
                 # Preserve the finish reason from the merged API call for later status decisions.
                 merged_finish_reason = finish_reason
                 truncation_exhausted = getattr(self.client, "_truncation_retries_exhausted", False)
@@ -6560,14 +6556,13 @@ class BatchTranslationProcessor:
                                 )
                                 if _single_pass_glossary_mode() and isinstance(merged_response_retry, str):
                                     merged_response_retry, glossary_block_retry = _split_single_pass_glossary_response(merged_response_retry)
-                                    if glossary_block_retry:
-                                        _persist_single_pass_glossary(
-                                            self.out_dir,
-                                            glossary_block_retry,
-                                            chapter_num=parent_actual_num,
-                                            source_text=merged_content,
-                                            chapter_file=chapter_ref.get("chapter_file"),
-                                        )
+                                    _persist_single_pass_glossary(
+                                        self.out_dir,
+                                        glossary_block_retry,
+                                        chapter_num=parent_actual_num,
+                                        source_text=merged_content,
+                                        chapter_file=chapter_ref.get("chapter_file"),
+                                    )
                             finally:
                                 if tls_retry_client is not None:
                                     try:
@@ -7204,12 +7199,80 @@ def _single_pass_progress_chapter_file(chapter=None, fallback=None):
             return name
     return _clean(fallback)
 
+def _single_pass_spine_ref_for_file(output_dir, chapter_basename):
+    """Return (zero_based_index, one_based_position) for a source spine filename."""
+    target = os.path.basename(str(chapter_basename or "")).lower()
+    if not target:
+        return None, None
+    target_stem = os.path.splitext(target)[0]
+
+    def _spine_from_opf_text(opf_text):
+        import xml.etree.ElementTree as _ET
+        root = _ET.fromstring(opf_text)
+        ns = {'opf': 'http://www.idpf.org/2007/opf'}
+        if root.tag.startswith('{'):
+            ns = {'opf': root.tag[1:root.tag.index('}')]}
+
+        manifest = {}
+        for item in root.findall('.//opf:manifest/opf:item', ns):
+            iid = item.get('id')
+            href = item.get('href')
+            mtype = item.get('media-type', '')
+            if iid and href and ('html' in mtype.lower() or href.lower().endswith(('.html', '.xhtml', '.htm'))):
+                manifest[iid] = os.path.basename(href)
+
+        spine = []
+        spine_el = root.find('.//opf:spine', ns)
+        if spine_el is not None:
+            for itemref in spine_el.findall('opf:itemref', ns):
+                idref = itemref.get('idref')
+                if idref and idref in manifest:
+                    spine.append(manifest[idref])
+        return spine
+
+    def _match(spine):
+        for idx, fname in enumerate(spine or []):
+            base = os.path.basename(str(fname or "")).lower()
+            stem = os.path.splitext(base)[0]
+            if base == target or stem == target_stem:
+                return idx, idx + 1
+        return None, None
+
+    opf_candidates = []
+    if output_dir:
+        opf_candidates.append(os.path.join(output_dir, "content.opf"))
+    for opf_path in opf_candidates:
+        try:
+            if opf_path and os.path.exists(opf_path):
+                with open(opf_path, "r", encoding="utf-8") as f:
+                    idx, pos = _match(_spine_from_opf_text(f.read()))
+                    if idx is not None:
+                        return idx, pos
+        except Exception:
+            pass
+
+    epub_path = os.getenv("EPUB_PATH", "")
+    try:
+        if epub_path and os.path.exists(epub_path):
+            import zipfile
+            with zipfile.ZipFile(epub_path, "r") as zf:
+                for name in zf.namelist():
+                    if name.lower().endswith(".opf"):
+                        idx, pos = _match(_spine_from_opf_text(zf.read(name).decode("utf-8", errors="replace")))
+                        if idx is not None:
+                            return idx, pos
+                        break
+    except Exception:
+        pass
+
+    return None, None
+
 def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, source_text=None, chapter_file=None):
     """Parse, dedupe, and save inline glossary output using the glossary pipeline."""
-    if not glossary_block or not _single_pass_glossary_mode():
+    if not _single_pass_glossary_mode():
         return 0
 
-    def _single_pass_chapter_refs():
+    def _single_pass_chapter_refs(progress=None):
         chapter_basename = _single_pass_progress_chapter_file(
             {"chapter_file": chapter_file},
             os.getenv("CURRENT_CHAPTER_FILE", ""),
@@ -7227,7 +7290,36 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
                     actual = int(nums[-1])
                 except (TypeError, ValueError):
                     actual = None
+
         idx = (actual - 1) if actual and actual > 0 else None
+        if chapter_basename and (idx is None or actual is None or actual <= 0):
+            spine_idx, spine_pos = _single_pass_spine_ref_for_file(output_dir, chapter_basename)
+            if spine_idx is not None:
+                idx = spine_idx
+                actual = spine_pos
+
+        if chapter_basename and idx is None and isinstance(progress, dict):
+            target = os.path.splitext(os.path.basename(chapter_basename).lower())[0]
+            chapters = progress.get("chapters", {})
+            if isinstance(chapters, dict):
+                for key, info in chapters.items():
+                    if not isinstance(info, dict):
+                        continue
+                    for fname_key in ("output_file", "chapter_file", "original_basename", "filename", "source_filename"):
+                        stem = os.path.splitext(os.path.basename(str(info.get(fname_key, "")).lower()))[0]
+                        if stem and stem == target:
+                            try:
+                                idx = int(info.get("chapter_index", key))
+                            except (TypeError, ValueError):
+                                idx = None
+                            try:
+                                actual = int(info.get("actual_num") or info.get("chapter_num") or (idx + 1 if idx is not None else 0))
+                            except (TypeError, ValueError):
+                                actual = idx + 1 if idx is not None else None
+                            break
+                    if idx is not None:
+                        break
+
         return idx, actual, chapter_basename
 
     with _single_pass_glossary_lock:
@@ -7241,7 +7333,7 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
             glossary_extractor.PROGRESS_FILE = progress_path
             glossary_extractor._GLOSSARY_OUTPUT_FILE = json_path
             progress = glossary_extractor.load_progress()
-            chapter_idx, actual_num, chapter_basename = _single_pass_chapter_refs()
+            chapter_idx, actual_num, chapter_basename = _single_pass_chapter_refs(progress)
             if chapter_idx is not None:
                 glossary_extractor._GLOSSARY_CHAPTER_POSITIONS[int(chapter_idx)] = int(actual_num)
                 glossary_extractor._GLOSSARY_CHAPTER_NUMBERS[int(chapter_idx)] = int(actual_num)
@@ -7252,7 +7344,18 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
                 if chapter_basename:
                     glossary_extractor._GLOSSARY_CHAPTER_FILENAMES[int(chapter_idx)] = chapter_basename
 
-            parsed = glossary_extractor.parse_api_response(glossary_block)
+            completed = list(progress.get("completed", []))
+            if chapter_idx is not None and chapter_idx not in completed:
+                completed.append(chapter_idx)
+                glossary_extractor.save_progress(
+                    completed,
+                    glossary_extractor._load_glossary_file(json_path),
+                    list(progress.get("merged_indices", [])),
+                    failed=list(progress.get("failed", [])),
+                )
+                progress = glossary_extractor.load_progress()
+
+            parsed = glossary_extractor.parse_api_response(glossary_block or "")
             valid = []
             for entry in parsed:
                 if glossary_extractor.validate_extracted_entry(entry):
