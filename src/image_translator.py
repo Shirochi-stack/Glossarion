@@ -2109,16 +2109,37 @@ class ImageTranslator:
         lines = [line.strip() for line in match.group(1).splitlines() if line.strip()]
         return "\n".join(lines).strip()
 
+    def _uses_markdown_extraction_output(self):
+        extraction_method = os.getenv("TEXT_EXTRACTION_METHOD", os.getenv("EXTRACTION_MODE", "standard")).strip().lower()
+        return extraction_method in ("enhanced", "html2text", "markdown")
+
+    def _format_context_header_for_ocr(self, header_text):
+        if not header_text or not self._uses_markdown_extraction_output():
+            return header_text
+        try:
+            soup = BeautifulSoup(header_text, 'html.parser')
+            lines = [line.strip() for line in soup.get_text("\n").splitlines() if line.strip()]
+        except Exception:
+            lines = [line.strip() for line in str(header_text).splitlines() if line.strip()]
+        if not lines:
+            return header_text
+        first = lines[0]
+        if not first.startswith("#"):
+            first = f"# {first}"
+        return "\n".join([first] + lines[1:])
+
     def _inject_context_headers_into_ocr(self, ocr_text, context):
         header_text = self._extract_context_header_text(context)
         if not header_text:
             return ocr_text
+        header_text = self._format_context_header_for_ocr(header_text)
         source = (ocr_text or "").strip()
         if not source:
             return header_text
         if header_text in source:
             return source
-        print("   📝 Injected chapter header HTML into OCR text")
+        header_kind = "Markdown" if self._uses_markdown_extraction_output() else "HTML"
+        print(f"   📝 Injected chapter header {header_kind} into OCR text")
         return f"{header_text}\n\n{source}"
 
     def _prepare_vision_ocr_translation_prompt(self, ocr_text, check_stop_fn):
@@ -2650,7 +2671,13 @@ class ImageTranslator:
         was_stopped = False
 
         for i in range(num_chunks):
-            disk_ocr = self._load_saved_ocr_text(kind="chunks", image_basename=image_basename, chunk_idx=i + 1)
+            disk_ocr = self._load_saved_ocr_text(
+                kind="chunks",
+                image_basename=image_basename,
+                chunk_idx=i + 1,
+                image_idx=getattr(self, 'current_image_index', None),
+                chapter_num=getattr(self, 'current_chapter_num', None),
+            )
             if disk_ocr:
                 if self._is_ocr_no_response(disk_ocr):
                     print(f"   Skipping OCR chunk {i+1}/{num_chunks}; cached OCR says cover/illustration")
@@ -2704,7 +2731,15 @@ class ImageTranslator:
             if check_stop_fn and check_stop_fn():
                 return i, None
             print(f"   Step 1/2: OCR chunk {i+1}/{num_chunks} with dedicated Vision OCR prompt...")
-            ocr_text = self._call_vision_ocr_api(chunk_bytes, chunk_prompt, check_stop_fn, i + 1)
+            ocr_text = self._call_vision_ocr_api(
+                chunk_bytes,
+                chunk_prompt,
+                check_stop_fn,
+                i + 1,
+                image_basename=image_basename,
+                image_idx=getattr(self, 'current_image_index', None),
+                chapter_num=getattr(self, 'current_chapter_num', None),
+            )
             if self._is_ocr_no_response(ocr_text):
                 print(f"   OCR chunk {i+1}/{num_chunks} marked as cover/illustration; excluding from combined OCR")
                 return i, None
