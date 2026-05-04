@@ -10715,7 +10715,8 @@ class UnifiedClient:
                 
                 # Check stop flag before Gemini call
                 if is_stop_requested():
-                    logger.info("Stop requested, cancelling Vertex AI Gemini request")
+                    # Redundant with the user-facing translation stopped log.
+                    # logger.info("Stop requested, cancelling Vertex AI Gemini request")
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 
                 # Import google-genai SDK
