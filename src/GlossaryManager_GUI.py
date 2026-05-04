@@ -2636,11 +2636,11 @@ Rules:
             self.skip_gender_tracking_checkbox.setChecked(self.config.get('glossary_skip_gender_tracking', False))
         self.skip_gender_tracking_checkbox.setToolTip(
             "Do not create or use the *_gender_tracker.json sidecar file.\n"
-            "Gender entries still save normally in the glossary itself."
+            "Also disables the Male/Female dedupe protection, so same-name entries dedupe normally."
         )
         skip_gender_tracking_layout.addWidget(self.skip_gender_tracking_checkbox)
 
-        skip_gender_tracking_label = QLabel("(Disables the per-chapter gender tracker sidecar file)")
+        skip_gender_tracking_label = QLabel("(Disables gender tracker and gender-variant dedupe protection)")
         skip_gender_tracking_layout.addWidget(skip_gender_tracking_label)
         skip_gender_tracking_layout.addStretch()
 

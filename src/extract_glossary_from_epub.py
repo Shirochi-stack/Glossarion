@@ -1162,6 +1162,9 @@ def _normalize_gender_value(value) -> str:
 def _gender_is_trackable(gender: str) -> bool:
     return bool(gender) and gender not in {"unknown", "n/a", "na", "none", "-"}
 
+def _gender_is_dedupe_protected(gender: str) -> bool:
+    return _normalize_gender_value(gender) in {"male", "female"}
+
 def _entry_type_has_gender(entry: Dict) -> bool:
     try:
         custom_types = get_custom_entry_types()
@@ -1451,6 +1454,8 @@ def _align_gender_variant_translation(existing_entry: Dict, new_entry: Dict):
         new_entry["translated_name"] = canonical
 
 def _is_exact_raw_gender_variant(existing_entry: Dict, new_entry: Dict) -> bool:
+    if _gender_tracking_disabled():
+        return False
     if _raw_exact_key(existing_entry.get("raw_name")) != _raw_exact_key(new_entry.get("raw_name")):
         return False
     if not (_entry_type_has_gender(existing_entry) or _entry_type_has_gender(new_entry)):
@@ -1458,8 +1463,8 @@ def _is_exact_raw_gender_variant(existing_entry: Dict, new_entry: Dict) -> bool:
     existing_gender = _entry_gender(existing_entry)
     new_gender = _entry_gender(new_entry)
     return (
-        _gender_is_trackable(existing_gender)
-        and _gender_is_trackable(new_gender)
+        _gender_is_dedupe_protected(existing_gender)
+        and _gender_is_dedupe_protected(new_gender)
         and existing_gender != new_gender
     )
 
@@ -1545,13 +1550,15 @@ def _harmonize_alias_name_translations(glossary: List[Dict]) -> List[Dict]:
     return glossary
 
 def _harmonize_gender_variant_translations(glossary: List[Dict]) -> List[Dict]:
+    if _gender_tracking_disabled():
+        return glossary
     groups = {}
     for entry in glossary or []:
         if not isinstance(entry, dict) or not _entry_type_has_gender(entry):
             continue
         raw_name = _raw_exact_key(entry.get("raw_name"))
         gender = _entry_gender(entry)
-        if raw_name and _gender_is_trackable(gender):
+        if raw_name and _gender_is_dedupe_protected(gender):
             groups.setdefault(raw_name, []).append(entry)
     for entries in groups.values():
         genders = {_entry_gender(e) for e in entries}
