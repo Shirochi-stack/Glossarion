@@ -4605,6 +4605,50 @@ class RetranslationMixin:
                         pass
             except Exception as e:
                 print(f"[WARN] Could not re-resolve output override on refresh: {e}")
+
+            def _read_progress_json_safely(path):
+                import random
+                import time as _time
+                last_error = None
+                for _attempt in range(12):
+                    try:
+                        with open(path, 'r', encoding='utf-8') as f:
+                            return json.load(f)
+                    except (PermissionError, FileNotFoundError) as e:
+                        last_error = e
+                        _time.sleep(min(1.0, 0.05 * (2 ** min(_attempt, 5))) + random.uniform(0, 0.03))
+                raise last_error
+
+            def _write_progress_json_safely(path, payload):
+                import random
+                import tempfile
+                import time as _time
+                progress_dir = os.path.dirname(path) or '.'
+                if progress_dir:
+                    os.makedirs(progress_dir, exist_ok=True)
+                last_error = None
+                for _attempt in range(12):
+                    temp_path = None
+                    try:
+                        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=progress_dir, delete=False, suffix='.tmp') as tmp:
+                            temp_path = tmp.name
+                            json.dump(payload, tmp, ensure_ascii=False, indent=2)
+                            tmp.flush()
+                            try:
+                                os.fsync(tmp.fileno())
+                            except Exception:
+                                pass
+                        os.replace(temp_path, path)
+                        return True
+                    except PermissionError as e:
+                        last_error = e
+                        if temp_path and os.path.exists(temp_path):
+                            try:
+                                os.remove(temp_path)
+                            except Exception:
+                                pass
+                        _time.sleep(min(1.0, 0.05 * (2 ** min(_attempt, 5))) + random.uniform(0, 0.03))
+                raise last_error
             
             # Save current scroll position (and first visible row/offset) to restore after refresh
             saved_scroll = None
@@ -4692,39 +4736,17 @@ class RetranslationMixin:
                 if _auto_discover_from_output_dir(data['output_dir'], prog):
                     print("💾 Recreated progress file via auto-discovery (refresh)")
                 try:
-                    # Ensure the output directory exists (it may have been deleted)
-                    progress_dir = os.path.dirname(data['progress_file'])
-                    if progress_dir:
-                        os.makedirs(progress_dir, exist_ok=True)
-                    # Retry write in case another thread holds the file lock
-                    for _attempt in range(5):
-                        try:
-                            with open(data['progress_file'], 'w', encoding='utf-8') as f:
-                                json.dump(prog, f, ensure_ascii=False, indent=2)
-                            break
-                        except PermissionError:
-                            if _attempt < 4:
-                                import time as _time; _time.sleep(0.1 * (2 ** _attempt))
-                            else:
-                                raise
+                    _write_progress_json_safely(data['progress_file'], prog)
+                except PermissionError as e:
+                    print(f"⚠️ Progress file locked during refresh recreate; will retry on next refresh tick: {e}")
+                    return
                 except Exception as e:
                     self._styled_msgbox(QMessageBox.Warning, data.get('dialog', self), "Progress File Error",
                                         f"Could not recreate progress file:\n{e}")
                     return
             
-            # Retry reading the progress file — it may be briefly locked or
-            # absent while ProgressManager.save() atomically replaces it.
-            _max_read_retries = 5
-            for _read_attempt in range(_max_read_retries):
-                try:
-                    with open(data['progress_file'], 'r', encoding='utf-8') as f:
-                        data['prog'] = json.load(f)
-                    break  # Read succeeded
-                except (PermissionError, FileNotFoundError):
-                    if _read_attempt < _max_read_retries - 1:
-                        import time as _time; _time.sleep(0.1 * (2 ** _read_attempt))
-                    else:
-                        raise
+            # The translator may briefly lock/replace the JSON; retry and skip this tick if it stays locked.
+            data['prog'] = _read_progress_json_safely(data['progress_file'])
             
             # Clean up missing files and merged children before display unless disabled
             if not data.get('skip_cleanup', False):
@@ -4735,28 +4757,10 @@ class RetranslationMixin:
                 data['prog'] = temp_progress.prog
                 
                 # Save the cleaned progress back to file (with retry for file locks)
-                for _attempt in range(5):
-                    try:
-                        with open(data['progress_file'], 'w', encoding='utf-8') as f:
-                            json.dump(data['prog'], f, ensure_ascii=False, indent=2)
-                        break
-                    except PermissionError:
-                        if _attempt < 4:
-                            import time as _time; _time.sleep(0.1 * (2 ** _attempt))
-                        else:
-                            raise
+                _write_progress_json_safely(data['progress_file'], data['prog'])
 
             if self._reconcile_tts_audio_files(data):
-                for _attempt in range(5):
-                    try:
-                        with open(data['progress_file'], 'w', encoding='utf-8') as f:
-                            json.dump(data['prog'], f, ensure_ascii=False, indent=2)
-                        break
-                    except PermissionError:
-                        if _attempt < 4:
-                            import time as _time; _time.sleep(0.1 * (2 ** _attempt))
-                        else:
-                            raise
+                _write_progress_json_safely(data['progress_file'], data['prog'])
             
             # Check if we're using OPF-based display or fallback
             if data.get('spine_chapters'):
@@ -4862,6 +4866,10 @@ class RetranslationMixin:
                                       f"File not found: {os.path.basename(str(e))}")
             except (RuntimeError, AttributeError):
                 print(f"[WARN] Could not show error dialog - dialog was deleted")
+        except PermissionError as e:
+            # Refresh runs periodically. If the translator is writing/replacing
+            # the progress JSON, skip this tick instead of interrupting the user.
+            print(f"⚠️ Progress file locked during refresh; will retry on next refresh tick: {e}")
         except Exception as e:
             print(f"❌ Failed to refresh data: {e}")
             import traceback
