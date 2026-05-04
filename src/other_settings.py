@@ -9855,7 +9855,8 @@ def _create_image_translation_section(self, parent):
         ("Min Image height (px):", self.webnovel_min_height_var, False),
         ("Max Images per chapter:", self.max_images_per_chapter_var, False),
         ("Chunk height:", self.image_chunk_height_var, False),
-        ("Chunk overlap (%):", self.image_chunk_overlap_var, True)
+        ("Chunk overlap (%):", self.image_chunk_overlap_var, True),
+        ("Chunk overlap floor (px):", getattr(self, 'image_chunk_min_overlap_pixels_var', '80'), True)
     ]
     
     for row, (label, var, has_tip) in enumerate(settings):
@@ -9877,15 +9878,19 @@ def _create_image_translation_section(self, parent):
             return _cb
         # Extract variable name from var reference
         var_name = None
-        for name in ['webnovel_min_height_var', 'max_images_per_chapter_var', 'image_chunk_height_var', 'image_chunk_overlap_var']:
+        for name in ['webnovel_min_height_var', 'max_images_per_chapter_var', 'image_chunk_height_var', 'image_chunk_overlap_var', 'image_chunk_min_overlap_pixels_var']:
             if hasattr(self, name) and getattr(self, name) is var:
                 var_name = name
                 break
         if var_name:
             entry.textChanged.connect(_make_entry_callback(var_name))
         settings_grid.addWidget(entry, row, 1, Qt.AlignLeft)
-    
+
     right_v.addWidget(settings_w)
+    floor_desc = QLabel("Overlap uses the larger of the percentage value or this floor. Minimum saved value is 80px.")
+    floor_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    floor_desc.setContentsMargins(0, 0, 0, 8)
+    right_v.addWidget(floor_desc)
     right_v.addSpacing(15)
 
     # Legacy direct-image translation path; Vision OCR-first ignores this toggle.
@@ -9906,6 +9911,42 @@ def _create_image_translation_section(self, parent):
     single_api_desc.setStyleSheet("color: gray; font-size: 10pt;")
     single_api_desc.setContentsMargins(20, 0, 0, 10)
     right_v.addWidget(single_api_desc)
+
+    smart_chunk_cb = self._create_styled_checkbox("Smart line-boundary chunking")
+    try:
+        smart_chunk_cb.setChecked(bool(self.image_smart_chunking_var))
+    except Exception:
+        pass
+    def _on_smart_chunk_toggle(checked):
+        try:
+            self.image_smart_chunking_var = bool(checked)
+        except Exception:
+            pass
+    smart_chunk_cb.toggled.connect(_on_smart_chunk_toggle)
+    right_v.addWidget(smart_chunk_cb)
+
+    smart_chunk_desc = QLabel("Try to cut tall images on horizontal whitespace gaps; falls back to overlap chunking when no good cuts are found.")
+    smart_chunk_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    smart_chunk_desc.setContentsMargins(20, 0, 0, 10)
+    right_v.addWidget(smart_chunk_desc)
+
+    fuzzy_dedupe_cb = self._create_styled_checkbox("Fuzzy OCR chunk dedupe")
+    try:
+        fuzzy_dedupe_cb.setChecked(bool(self.vision_ocr_fuzzy_chunk_dedupe_var))
+    except Exception:
+        pass
+    def _on_fuzzy_dedupe_toggle(checked):
+        try:
+            self.vision_ocr_fuzzy_chunk_dedupe_var = bool(checked)
+        except Exception:
+            pass
+    fuzzy_dedupe_cb.toggled.connect(_on_fuzzy_dedupe_toggle)
+    right_v.addWidget(fuzzy_dedupe_cb)
+
+    fuzzy_dedupe_desc = QLabel("Test fuzzy removal of near-duplicate OCR lines created by tall-image chunk overlap.")
+    fuzzy_dedupe_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    fuzzy_dedupe_desc.setContentsMargins(20, 0, 0, 10)
+    right_v.addWidget(fuzzy_dedupe_desc)
     
     models_info = QLabel("💡 Supported models:\n• Gemini 1.5 Pro/Flash, 2.0 Flash\n• GPT-4V, GPT-4o, o4-mini")
     models_info.setStyleSheet("color: #666; font-size: 10pt;")

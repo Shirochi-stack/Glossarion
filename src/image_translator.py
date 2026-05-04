@@ -20,6 +20,7 @@ import queue
 import threading
 import sys
 import unicodedata
+from difflib import SequenceMatcher
 # OpenCV availability check
 try:
     import cv2
@@ -2578,9 +2579,86 @@ class ImageTranslator:
             overlap_percentage = float(os.getenv('IMAGE_CHUNK_OVERLAP_PERCENT', '3'))
             chunk_height = max(1, int(self.chunk_height))
             overlap = max(0, int(chunk_height * (overlap_percentage / 100)))
+            min_overlap = max(0, int(os.getenv('IMAGE_CHUNK_MIN_OVERLAP_PIXELS', '80')))
+            if min_overlap:
+                overlap = max(overlap, min_overlap)
             return min(overlap, chunk_height - 1)
         except Exception:
             return 100
+
+    def _smart_image_chunking_enabled(self) -> bool:
+        return os.getenv("IMAGE_SMART_CHUNKING", "0").strip().lower() in ("1", "true", "yes", "on")
+
+    def _smart_image_chunk_ranges(self, img, height: int) -> List[Tuple[int, int]]:
+        """Return chunk ranges whose cuts land near horizontal whitespace gaps."""
+        try:
+            target_height = max(1, int(self.chunk_height))
+        except Exception:
+            target_height = 1200
+        try:
+            min_chunk_height = max(1, int(os.getenv("IMAGE_SMART_CHUNK_MIN_HEIGHT", "600")))
+        except Exception:
+            min_chunk_height = 600
+        min_chunk_height = min(min_chunk_height, target_height)
+        try:
+            line_brightness = float(os.getenv("IMAGE_SMART_CHUNK_LINE_BRIGHTNESS", "220"))
+        except Exception:
+            line_brightness = 220.0
+        try:
+            min_gap_rows = max(1, int(os.getenv("IMAGE_SMART_CHUNK_MIN_GAP_ROWS", "3")))
+        except Exception:
+            min_gap_rows = 3
+
+        gray = img.convert("L")
+        width, actual_height = gray.size
+        height = min(height, actual_height)
+        if height <= target_height:
+            return [(0, height)]
+
+        data = gray.tobytes()
+        candidates = []
+        in_gap = False
+        gap_start = 0
+
+        for y in range(height):
+            row_start = y * width
+            row_mean = sum(data[row_start:row_start + width]) / width
+            if row_mean >= line_brightness:
+                if not in_gap:
+                    in_gap = True
+                    gap_start = y
+            elif in_gap:
+                if y - gap_start >= min_gap_rows:
+                    candidates.append((gap_start + y) // 2)
+                in_gap = False
+
+        if in_gap and height - gap_start >= min_gap_rows:
+            candidates.append((gap_start + height) // 2)
+
+        cuts = []
+        last = 0
+        while last + target_height < height:
+            target = last + target_height
+            min_next = last + min_chunk_height
+            reachable = [c for c in candidates if c > min_next]
+            if not reachable:
+                break
+            best = min(reachable, key=lambda c: abs(c - target))
+            if best >= height:
+                break
+            cuts.append(best)
+            last = best
+
+        if not cuts:
+            return []
+
+        ranges = list(zip([0] + cuts, cuts + [height]))
+        # A single huge whitespace-picked chunk is usually a bad cut; keep the
+        # older overlap splitter as the fallback for dense or dark pages.
+        max_reasonable_height = max(target_height * 2, target_height + min_chunk_height)
+        if any((end_y - start_y) > max_reasonable_height for start_y, end_y in ranges):
+            return []
+        return ranges
 
     def _image_chunk_ranges(self, height: int, img=None) -> List[Tuple[int, int]]:
         """Return tall-image chunk ranges with overlap and a hard max chunk height."""
@@ -2594,6 +2672,14 @@ class ImageTranslator:
             height = 0
         if height <= 0:
             return []
+
+        if img is not None and self._smart_image_chunking_enabled():
+            try:
+                smart_ranges = self._smart_image_chunk_ranges(img, height)
+                if smart_ranges:
+                    return smart_ranges
+            except Exception as e:
+                print(f"   Smart chunking fallback: {e}")
 
         overlap = min(self._image_chunk_overlap_pixels(), max(0, chunk_height - 1))
         ranges = []
@@ -2619,6 +2705,14 @@ class ImageTranslator:
             "max_images_per_chapter": str(os.getenv("MAX_IMAGES_PER_CHAPTER", "10")),
             "image_chunk_height": str(os.getenv("IMAGE_CHUNK_HEIGHT", str(self.chunk_height))),
             "image_chunk_overlap_percent": str(os.getenv("IMAGE_CHUNK_OVERLAP_PERCENT", "3")),
+            "image_chunk_min_overlap_pixels": str(os.getenv("IMAGE_CHUNK_MIN_OVERLAP_PIXELS", "80")),
+            "image_smart_chunking": str(os.getenv("IMAGE_SMART_CHUNKING", "0")),
+            "image_smart_chunk_min_height": str(os.getenv("IMAGE_SMART_CHUNK_MIN_HEIGHT", "600")),
+            "image_smart_chunk_line_brightness": str(os.getenv("IMAGE_SMART_CHUNK_LINE_BRIGHTNESS", "220")),
+            "image_smart_chunk_min_gap_rows": str(os.getenv("IMAGE_SMART_CHUNK_MIN_GAP_ROWS", "3")),
+            "vision_ocr_fuzzy_chunk_dedupe": str(os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE", "0")),
+            "vision_ocr_fuzzy_chunk_dedupe_threshold": str(os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE_THRESHOLD", "0.85")),
+            "vision_ocr_fuzzy_chunk_dedupe_min_length": str(os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE_MIN_LENGTH", "30")),
         }
 
     def _ocr_cache_path(self):
@@ -2814,6 +2908,17 @@ class ImageTranslator:
 
     def _combine_vision_ocr_chunks(self, ocr_chunks):
         """Combine OCR chunks while trimming obvious overlap duplicates."""
+        fuzzy_enabled = os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE", "0").strip().lower() in ("1", "true", "yes", "on")
+        try:
+            fuzzy_threshold = float(os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE_THRESHOLD", "0.85"))
+        except Exception:
+            fuzzy_threshold = 0.85
+        fuzzy_threshold = min(1.0, max(0.0, fuzzy_threshold))
+        try:
+            min_dedupe_length = max(0, int(os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE_MIN_LENGTH", "30")))
+        except Exception:
+            min_dedupe_length = 30
+
         combined_lines = []
         for chunk_text in ocr_chunks:
             lines = [line.rstrip() for line in (chunk_text or "").splitlines()]
@@ -2831,6 +2936,20 @@ class ImageTranslator:
             for line in lines:
                 if combined_lines and combined_lines[-1].strip() == line.strip():
                     continue
+                if fuzzy_enabled and len(line.strip()) >= min_dedupe_length:
+                    normalized_line = line.strip()
+                    is_duplicate = False
+                    for previous in combined_lines[-5:]:
+                        previous_normalized = previous.strip()
+                        if len(previous_normalized) < min_dedupe_length:
+                            continue
+                        if abs(len(normalized_line) - len(previous_normalized)) / max(len(normalized_line), len(previous_normalized), 1) > 0.5:
+                            continue
+                        if SequenceMatcher(None, normalized_line, previous_normalized).ratio() >= fuzzy_threshold:
+                            is_duplicate = True
+                            break
+                    if is_duplicate:
+                        continue
                 combined_lines.append(line)
         return "\n".join(combined_lines).strip()
 

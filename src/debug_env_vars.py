@@ -276,6 +276,11 @@ def print_env_var_status():
         'WEBNOVEL_MIN_HEIGHT': 'Minimum image height',
         'MAX_IMAGES_PER_CHAPTER': 'Max images per chapter',
         'IMAGE_CHUNK_HEIGHT': 'Image chunk height',
+        'IMAGE_CHUNK_MIN_OVERLAP_PIXELS': 'Image chunk minimum overlap pixels',
+        'IMAGE_SMART_CHUNKING': 'Smart line-boundary image chunking',
+        'VISION_OCR_FUZZY_CHUNK_DEDUPE': 'Fuzzy OCR chunk dedupe',
+        'VISION_OCR_FUZZY_CHUNK_DEDUPE_THRESHOLD': 'Fuzzy OCR chunk dedupe threshold',
+        'VISION_OCR_FUZZY_CHUNK_DEDUPE_MIN_LENGTH': 'Fuzzy OCR chunk dedupe minimum length',
         'HIDE_IMAGE_TRANSLATION_LABEL': 'Hide image translation label',
         'DISABLE_EPUB_GALLERY': 'Disable EPUB gallery',
         'DISABLE_AUTOMATIC_COVER_CREATION': 'Disable automatic cover creation',
@@ -424,6 +429,11 @@ def print_env_var_status():
         'USE_FALLBACK_KEYS': 'Use fallback API keys',
         'FALLBACK_KEYS': 'Fallback key list (JSON)',
         'IMAGE_CHUNK_OVERLAP_PERCENT': 'Image chunk overlap percent',
+        'IMAGE_CHUNK_MIN_OVERLAP_PIXELS': 'Image chunk minimum overlap pixels',
+        'IMAGE_SMART_CHUNKING': 'Smart line-boundary image chunking',
+        'VISION_OCR_FUZZY_CHUNK_DEDUPE': 'Fuzzy OCR chunk dedupe',
+        'VISION_OCR_FUZZY_CHUNK_DEDUPE_THRESHOLD': 'Fuzzy OCR chunk dedupe threshold',
+        'VISION_OCR_FUZZY_CHUNK_DEDUPE_MIN_LENGTH': 'Fuzzy OCR chunk dedupe minimum length',
     }
     print(f"\n🗜️ IMAGE COMPRESSION VARIABLES:")
     print("-" * 40)

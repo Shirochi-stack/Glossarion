@@ -1771,6 +1771,13 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.progressive_encoding_var = self.config.get('progressive_encoding', True)
         self.save_compressed_images_var = self.config.get('save_compressed_images', False)
         self.image_chunk_overlap_var = str(self.config.get('image_chunk_overlap', '3'))
+        try:
+            _min_overlap_px = max(80, int(float(self.config.get('image_chunk_min_overlap_pixels', 80))))
+        except Exception:
+            _min_overlap_px = 80
+        self.image_chunk_min_overlap_pixels_var = str(_min_overlap_px)
+        self.vision_ocr_fuzzy_chunk_dedupe_var = self.config.get('vision_ocr_fuzzy_chunk_dedupe', False)
+        self.image_smart_chunking_var = self.config.get('image_smart_chunking', False)
 
         # Glossary-related variables (existing)
         self.append_glossary_var = self.config.get('append_glossary', False)
@@ -13916,6 +13923,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SAVE_IMAGE_TRANSLATIONS': '1',
             'IMAGE_CHUNK_HEIGHT': str(self.image_chunk_height_var),
             'IMAGE_CHUNK_OVERLAP_PERCENT': str(getattr(self, 'image_chunk_overlap_var', '3')),
+            'IMAGE_CHUNK_MIN_OVERLAP_PIXELS': str(getattr(self, 'image_chunk_min_overlap_pixels_var', '80')),
+            'IMAGE_SMART_CHUNKING': '1' if getattr(self, 'image_smart_chunking_var', False) else '0',
+            'VISION_OCR_FUZZY_CHUNK_DEDUPE': '1' if getattr(self, 'vision_ocr_fuzzy_chunk_dedupe_var', False) else '0',
             'HIDE_IMAGE_TRANSLATION_LABEL': "1" if self.hide_image_translation_label_var else "0",
             'RETRY_TIMEOUT': "1" if getattr(self, 'retry_timeout_var', self.config.get('retry_timeout', False)) else "0",
             'CHUNK_TIMEOUT': str(self.chunk_timeout_var),
@@ -14072,6 +14082,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'PROGRESSIVE_ENCODING': "1" if self.config.get('progressive_encoding', True) else "0",
             'SAVE_COMPRESSED_IMAGES': "1" if self.config.get('save_compressed_images', False) else "0",
             'IMAGE_CHUNK_OVERLAP_PERCENT': str(getattr(self, 'image_chunk_overlap_var', '3')),
+            'IMAGE_CHUNK_MIN_OVERLAP_PIXELS': str(getattr(self, 'image_chunk_min_overlap_pixels_var', '80')),
+            'IMAGE_SMART_CHUNKING': '1' if getattr(self, 'image_smart_chunking_var', False) else '0',
+            'VISION_OCR_FUZZY_CHUNK_DEDUPE': '1' if getattr(self, 'vision_ocr_fuzzy_chunk_dedupe_var', False) else '0',
 
 
             # Metadata and batch header translation settings
@@ -21748,6 +21761,9 @@ Important rules:
                 ('nanogpt_video_resolution', ['nanogpt_video_resolution_var'], '720p', str),
                 ('compression_factor', ['compression_factor_var'], 3.0, float),
                 ('image_chunk_overlap', ['image_chunk_overlap_var'], 3.0, lambda v: safe_float(v, 3.0)),
+                ('image_chunk_min_overlap_pixels', ['image_chunk_min_overlap_pixels_var'], 80, lambda v: max(80, safe_int(v, 80))),
+                ('image_smart_chunking', ['image_smart_chunking_var'], False, bool),
+                ('vision_ocr_fuzzy_chunk_dedupe', ['vision_ocr_fuzzy_chunk_dedupe_var'], False, bool),
 
                 # Batching
                 ('batch_translation', ['batch_checkbox', 'batch_translation_var'], True, bool),
@@ -22351,6 +22367,11 @@ Important rules:
             'PROGRESSIVE_ENCODING': 'Progressive image encoding',
             'SAVE_COMPRESSED_IMAGES': 'Save compressed images',
             'IMAGE_CHUNK_OVERLAP_PERCENT': 'Image chunk overlap percentage',
+            'IMAGE_CHUNK_MIN_OVERLAP_PIXELS': 'Image chunk minimum overlap pixels',
+            'IMAGE_SMART_CHUNKING': 'Smart line-boundary image chunking',
+            'VISION_OCR_FUZZY_CHUNK_DEDUPE': 'Fuzzy OCR chunk dedupe',
+            'VISION_OCR_FUZZY_CHUNK_DEDUPE_THRESHOLD': 'Fuzzy OCR chunk dedupe threshold',
+            'VISION_OCR_FUZZY_CHUNK_DEDUPE_MIN_LENGTH': 'Fuzzy OCR chunk dedupe minimum length',
             'VISION_OCR_BATCH_TRANSLATION': 'Batch Vision OCR chunk requests',
             'VISION_OCR_BATCH_SIZE': 'Vision OCR batch worker count',
             
@@ -22865,6 +22886,9 @@ Important rules:
                 ('USE_GLOSSARY_KEYS', '1' if self.config.get('use_glossary_keys', False) else '0'),
                 ('GLOSSARY_API_KEYS', _json.dumps(self.config.get('glossary_keys', []))),
                 ('IMAGE_CHUNK_OVERLAP_PERCENT', str(getattr(self, 'image_chunk_overlap_var', '3'))),
+                ('IMAGE_CHUNK_MIN_OVERLAP_PIXELS', str(getattr(self, 'image_chunk_min_overlap_pixels_var', '80'))),
+                ('IMAGE_SMART_CHUNKING', '1' if getattr(self, 'image_smart_chunking_var', False) else '0'),
+                ('VISION_OCR_FUZZY_CHUNK_DEDUPE', '1' if getattr(self, 'vision_ocr_fuzzy_chunk_dedupe_var', False) else '0'),
 
                 # Metadata and batch header settings
                 ('TRANSLATE_METADATA_FIELDS', _json.dumps(getattr(self, 'translate_metadata_fields', {}))),
