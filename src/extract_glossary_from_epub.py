@@ -5525,8 +5525,12 @@ def main(log_callback=None, stop_callback=None):
                 _idx = int(_idx)
             except (TypeError, ValueError):
                 continue
-            if _idx in completed or _idx in failed:
+            if _idx in completed:
                 continue
+            if _idx in failed:
+                failed.remove(_idx)
+                _GLOSSARY_QA_ISSUES_FOUND.pop(_idx, None)
+                changed = True
             if _idx not in in_progress:
                 in_progress.append(_idx)
                 changed = True
@@ -7104,6 +7108,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
     with _progress_lock:
         completed_clean = _unique_int_list(completed)
         failed_clean = _unique_int_list(failed or [])
+        requested_failed_set = set(failed_clean)
         merged_clean = _unique_int_list(merged_indices or [])
         failed_set = set(failed_clean)
         merged_set = set(merged_clean)
@@ -7183,6 +7188,21 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             for idx, issues in _normalize_glossary_qa_issues(_GLOSSARY_QA_ISSUES_FOUND).items()
             if int(idx) in failed_set
         }
+
+        requested_in_progress_set = set(_unique_int_list(in_progress)) if in_progress is not None else set()
+        current_override_set = set(completed_clean) | set(merged_clean) | requested_in_progress_set
+        if current_override_set:
+            failed_clean = [
+                idx for idx in failed_clean
+                if idx not in current_override_set or idx in requested_failed_set
+            ]
+            failed_set = set(failed_clean)
+            qa_issues_clean = {
+                idx: issues for idx, issues in qa_issues_clean.items()
+                if idx in failed_set
+            }
+            if failed is not None:
+                failed[:] = failed_clean
 
         if in_progress is None:
             in_progress_clean = _unique_int_list(preserved_in_progress)
