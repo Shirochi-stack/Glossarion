@@ -19319,6 +19319,15 @@ Important rules:
                     "bg": "#2c2414", "hover": "#726238", "border": "#ffc830", "accent": "#ffe070",
                     "rec": "⚡ Best for important novels",
                 },
+                {
+                    "value": "single_pass", "emoji": "📑", "title": "SINGLE PASS",
+                    "subtitle": "Inline glossary during translation",
+                    "features": ["✓ Extracts while translating",
+                                 "✓ No separate glossary pass",
+                                 "⚠ Adds prompt/output overhead"],
+                    "bg": "#142a2c", "hover": "#24767a", "border": "#48dbe0", "accent": "#90f4f7",
+                    "rec": "⚡ Fast setup, live glossary",
+                },
             ]
             
             selected_mode = ['balanced']
@@ -19403,33 +19412,6 @@ Important rules:
                 card.mousePressEvent = _click()
             
             p1_lay.addWidget(modes_w, 1)
-            
-            # Halgakos mascot in the empty bottom-right grid cell (row 3, col 1)
-            try:
-                from PySide6.QtGui import QPixmap
-                _mascot_path = os.path.join(self.base_dir, "Halgakos.ico")
-                if os.path.isfile(_mascot_path):
-                    _pm = QPixmap(_mascot_path)
-                    if not _pm.isNull():
-                        _dpr = QApplication.primaryScreen().devicePixelRatio() if QApplication.primaryScreen() else 1.0
-                        _dev_sz = int(140 * _dpr)
-                        _scaled = _pm.scaled(_dev_sz, _dev_sz, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                        _scaled.setDevicePixelRatio(_dpr)
-                        _mascot_lbl = QLabel()
-                        _mascot_lbl.setPixmap(_scaled)
-                        _mascot_lbl.setFixedSize(140, 140)
-                        _mascot_lbl.setAlignment(Qt.AlignCenter)
-                        _mascot_lbl.setStyleSheet("background: transparent; border: none;")
-                        _mascot_container = QWidget()
-                        _mascot_container.setStyleSheet("background: transparent;")
-                        _mc_lay = QVBoxLayout(_mascot_container)
-                        _mc_lay.setContentsMargins(0, 0, 0, 0)
-                        _mc_lay.addStretch()
-                        _mc_lay.addWidget(_mascot_lbl, 0, Qt.AlignCenter)
-                        _mc_lay.addStretch()
-                        modes_lay.addWidget(_mascot_container, 3, 1)
-            except Exception:
-                pass
             
             note1 = QLabel("⚠️ AI models may produce smaller glossaries due to training biases. Full mode captures the most terms but costs more.")
             note1.setWordWrap(True)
