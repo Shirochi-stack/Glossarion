@@ -1705,6 +1705,14 @@ class RetranslationMixin:
                     return ch_num
                 return 0
 
+            def _gp_auto_completed_indices():
+                result = set()
+                for ci, fname in (panel_state.get('chapter_map') or {}).items():
+                    stem = os.path.splitext(os.path.basename(str(fname or "")))[0].lower()
+                    if stem == 'cover':
+                        result.add(ci)
+                return result
+
             def _gp_index_for_actual_num(actual_num, _d=None):
                 try:
                     actual_num = int(actual_num)
@@ -1821,6 +1829,7 @@ class RetranslationMixin:
                     comp = _index_set(_d.get('completed', []))
                     fail = _index_set(_d.get('failed', []))
                     merg = _index_set(_d.get('merged_indices', []))
+                comp |= _gp_auto_completed_indices()
                 # Failed should win over completed in the UI.
                 comp -= fail
                 return comp, fail, merg

@@ -3063,14 +3063,92 @@ def build_single_pass_translation_system_prompt(translation_prompt: str, source_
 
 def split_single_pass_response(response_text: str) -> tuple:
     """Split a single-pass response into (translation_text, glossary_block)."""
-    if not isinstance(response_text, str) or "<glossary" not in response_text.lower():
+    if not isinstance(response_text, str):
         return response_text, ""
-    match = re.search(r"<glossary\b[^>]*>(.*?)</glossary>", response_text, flags=re.IGNORECASE | re.DOTALL)
-    if not match:
-        return response_text, ""
-    glossary_block = (match.group(1) or "").strip()
-    translation = (response_text[:match.start()] + response_text[match.end():]).strip()
-    return translation, glossary_block
+
+    def _extract_csv_glossary_block(text: str, search_start: int = 0):
+        header_re = re.compile(
+            r'(?im)^[ \t]*(?:```(?:csv)?[ \t]*)?type\s*(?:,|\t|\\x1[fF]|\x1f)\s*'
+            r'raw_name\s*(?:,|\t|\\x1[fF]|\x1f)\s*translated_name\b.*$'
+        )
+        match = header_re.search(text, search_start)
+        if not match:
+            return None
+
+        line_start = match.start()
+        pos = line_start
+        rows_seen = 0
+        last_nonempty_end = match.end()
+        enabled_types = set(get_custom_entry_types().keys()) or {'character', 'term', 'book'}
+        enabled_types.update({'character', 'term', 'book'})
+        type_re = re.compile(
+            r'^\s*(?:' + '|'.join(re.escape(t) for t in sorted(enabled_types, key=len, reverse=True)) + r')\s*(?:,|\t|\\x1[fF]|\x1f)',
+            re.IGNORECASE
+        )
+
+        while pos < len(text):
+            next_nl = text.find('\n', pos)
+            line_end = len(text) if next_nl == -1 else next_nl
+            line = text[pos:line_end]
+            stripped = line.strip()
+
+            if pos == line_start:
+                pass
+            elif not stripped:
+                if rows_seen > 0:
+                    break
+            elif stripped.startswith('```') and rows_seen > 0:
+                last_nonempty_end = line_end
+                pos = len(text) if next_nl == -1 else next_nl + 1
+                break
+            elif type_re.match(stripped):
+                rows_seen += 1
+            elif rows_seen > 0:
+                # Description fields sometimes wrap onto following lines. Keep
+                # continuation lines until a blank line or fence closes the block.
+                pass
+            else:
+                break
+
+            if stripped:
+                last_nonempty_end = line_end
+            if next_nl == -1:
+                pos = len(text)
+                break
+            pos = next_nl + 1
+
+        if rows_seen <= 0:
+            return None
+        block_end = last_nonempty_end
+        block = text[line_start:block_end].strip()
+        return line_start, block_end, block
+
+    lower_response = response_text.lower()
+    if "<glossary" in lower_response:
+        match = re.search(r"<glossary\b[^>]*>(.*?)</glossary>", response_text, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            glossary_block = (match.group(1) or "").strip()
+            translation = (response_text[:match.start()] + response_text[match.end():]).strip()
+            return translation, glossary_block
+
+        open_match = re.search(r"<glossary\b[^>]*>", response_text, flags=re.IGNORECASE)
+        if open_match:
+            fallback = _extract_csv_glossary_block(response_text, open_match.end())
+            if fallback:
+                start, end, glossary_block = fallback
+                translation = (response_text[:open_match.start()] + response_text[end:]).strip()
+                return translation, glossary_block
+            glossary_block = response_text[open_match.end():].strip()
+            translation = response_text[:open_match.start()].strip()
+            return translation, glossary_block
+
+    fallback = _extract_csv_glossary_block(response_text)
+    if fallback:
+        start, end, glossary_block = fallback
+        translation = (response_text[:start] + response_text[end:]).strip()
+        return translation, glossary_block
+
+    return response_text, ""
 
 
 def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):

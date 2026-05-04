@@ -7563,8 +7563,7 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
 
     Preference order:
     1) Rightmost digits in the filename (0 if all zeros)
-    2) Special keywords with no digits -> 0
-    3) Legacy fallback patterns
+    2) Any filename with no digits -> 0
     """
     # Normalize: strip directory, extension, and response_ prefix for parsing
     basename = os.path.basename(filename)
@@ -7580,36 +7579,7 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
         if last_num == 0:
             return 0, 'filename_zero'
         return last_num, 'filename_digits'
-    # Priority 2: special keyword files with no digits -> chapter 0
-    # Priority 3: special keyword files with no digits -> chapter 0
-    _kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
-    special_keywords = [k.strip().lower() for k in _kw_env.split(',') if k.strip()] if _kw_env else ['title', 'toc', 'copyright', 'preface', 'nav', 'message', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
-    if any(name in base_no_ext_lower for name in special_keywords):
-        return 0, 'special_file'
-    # Exact match only: these are special only when the basename matches exactly
-    _exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
-    special_exact = [k.strip().lower() for k in _exact_env.split(',') if k.strip()] if _exact_env else ['index', 'glossary', 'glossary_extension']
-    if base_no_ext_lower in special_exact:
-        return 0, 'special_file'
-    # Priority 3: legacy fallback patterns
-    name_without_ext = base_no_ext
-    fallback_patterns = [
-        (r'^response_(\d+)[_\.]', 'response_prefix'),
-        (r'[Cc]hapter[_\s]*(\d+)', 'chapter_word'),
-        (r'[Cc]h[_\s]*(\d+)', 'ch_abbreviation'),
-        (r'No(\d+)', 'no_prefix'),
-        (r'第(\d+)[章话回]', 'chinese_chapter'),
-        (r'-h-(\d+)', 'h_suffix'),              # For your -h-16 pattern
-        (r'_(\d+)', 'underscore_suffix'),
-        (r'-(\d+)', 'dash_suffix'),
-        (r'(\d+)', 'trailing_number'),
-    ]
-    
-    for pattern, method in fallback_patterns:
-        match = re.search(pattern, name_without_ext, re.IGNORECASE)
-        if match:
-            return int(match.group(1)), method
-    return None, None
+    return 0, 'filename_no_digits'
 
 def retroactive_update_image_references(output_dir, source_dir=None):
     """Retroactively update image references in translated HTML files to use new chapter-based format.
