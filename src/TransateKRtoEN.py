@@ -4736,7 +4736,24 @@ class BatchTranslationProcessor:
                 )
             c = chapter
             has_images = chapter.get('has_images', False) or html_mostly_images
-            if has_images and self.image_translator and self.config.ENABLE_IMAGE_TRANSLATION:
+            has_meaningful_text = ContentProcessor.is_meaningful_text_content(chapter_body)
+            if has_images and not has_meaningful_text and self.config.OUTPUT_MODE != "vision":
+                print(f"📸 Image-only chapter {actual_num} detected in text mode (preserving original content as-is)")
+                original_markup = (
+                    chapter.get("original_html")
+                    or chapter.get("source_html")
+                    or chapter.get("raw_html")
+                    or chapter_body
+                    or ""
+                )
+                with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                    f.write(original_markup)
+                with self.progress_lock:
+                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="completed_image_only", chapter_obj=chapter)
+                    self.save_progress_fn()
+                return True, actual_num, fname, None, None
+
+            if has_images and self.image_translator and self.config.ENABLE_IMAGE_TRANSLATION and self.config.OUTPUT_MODE == "vision":
                 print(f"🖼️ Processing images for Chapter {actual_num}...")
                 self.image_translator.set_current_chapter(actual_num)
                 chapter_body, image_translations = process_chapter_images(
@@ -13077,7 +13094,9 @@ def main(log_callback=None, stop_callback=None):
     
     image_translator = None
 
-    if config.ENABLE_IMAGE_TRANSLATION:
+    vision_image_translation_enabled = config.ENABLE_IMAGE_TRANSLATION and config.OUTPUT_MODE == "vision"
+
+    if vision_image_translation_enabled:
         print(f"🖼️ Image translation enabled for model: {config.MODEL}")
         print("🖼️ Image translation will use your custom system prompt and glossary")
         image_translator = ImageTranslator(
@@ -13105,6 +13124,8 @@ def main(log_callback=None, stop_callback=None):
             run_vision_glossary_prepass(chapters, image_translator, check_stop)
         except Exception as e:
             print(f"⚠️ Vision auto glossary prepass failed: {e}")
+    elif config.ENABLE_IMAGE_TRANSLATION:
+        print("ℹ️ Image translation disabled in text mode (OUTPUT_MODE=text); image-only files will be preserved as-is")
     else:
         print("ℹ️ Image translation disabled by user")
     
@@ -13685,6 +13706,29 @@ def main(log_callback=None, stop_callback=None):
                     f.write(original_markup)
 
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty", chapter_obj=c)
+                progress_manager.save()
+                chapters_completed += 1
+                continue
+
+            if is_image_only_chapter and config.OUTPUT_MODE != "vision":
+                print(f"📸 Image-only chapter {actual_num} detected in text mode (preserving original content as-is)")
+
+                if isinstance(c['num'], float):
+                    fname = FileUtilities.create_chapter_filename(c, c['num'])
+                else:
+                    fname = FileUtilities.create_chapter_filename(c, actual_num)
+
+                original_markup = (
+                    c.get("original_html")
+                    or c.get("source_html")
+                    or c.get("raw_html")
+                    or c.get("body")
+                    or ""
+                )
+                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                    f.write(original_markup)
+
+                progress_manager.update(idx, actual_num, content_hash, fname, status="completed_image_only", chapter_obj=c)
                 progress_manager.save()
                 chapters_completed += 1
                 continue
@@ -14667,6 +14711,23 @@ def main(log_callback=None, stop_callback=None):
                 continue
 
             elif is_image_only_chapter:
+                if config.OUTPUT_MODE != "vision":
+                    print(f"📸 Image-only chapter {actual_num} detected in text mode (preserving original content as-is)")
+                    translated_html = (
+                        c.get("original_html")
+                        or c.get("source_html")
+                        or c.get("raw_html")
+                        or c.get("body")
+                        or ""
+                    )
+                    fname = FileUtilities.create_chapter_filename(c, actual_num)
+                    with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                        f.write(translated_html)
+                    progress_manager.update(idx, actual_num, content_hash, fname, status="completed_image_only", chapter_obj=c)
+                    progress_manager.save()
+                    chapters_completed += 1
+                    continue
+
                 print(f"📸 Image-only chapter: {c.get('image_count', 0)} images")
                 
                 translated_html = c["body"]

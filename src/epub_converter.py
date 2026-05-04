@@ -2244,9 +2244,17 @@ class EPUBCompiler:
             
             # Add cover page if exists
             if cover_file:
-                cover_page = self._create_cover_page(book, cover_file, processed_images, css_items, metadata)
-                if cover_page:
-                    spine.insert(0, cover_page)
+                existing_cover_page = self._find_existing_cover_page_for_image(html_files, cover_file, processed_images)
+                if existing_cover_page:
+                    self._existing_cover_page_filename = existing_cover_page
+                    if self._add_cover_image_to_book(book, cover_file, processed_images):
+                        self.log(f"📔 Existing cover page uses selected cover image; skipping auto-generated cover page: {existing_cover_page}")
+                    else:
+                        self.log(f"📔 Existing cover page found, but cover image metadata could not be added: {existing_cover_page}")
+                else:
+                    cover_page = self._create_cover_page(book, cover_file, processed_images, css_items, metadata)
+                    if cover_page:
+                        spine.insert(0, cover_page)
             
             # Check stop flag
             if self.is_stopped():
