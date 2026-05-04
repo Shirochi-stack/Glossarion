@@ -1725,13 +1725,29 @@ class RetranslationMixin:
                 if not isinstance(info, dict):
                     info = {}
 
+                def _gp_filename_keys(name):
+                    base = os.path.basename(str(name or ""))
+                    if not base:
+                        return set()
+                    stem = os.path.splitext(base)[0]
+                    keys = {base.lower(), stem.lower()}
+                    if stem.lower().startswith('response_'):
+                        keys.add(stem[9:].lower())
+                    return {k for k in keys if k}
+
+                had_filename_anchor = False
                 for fname_key in ('output_file', 'original_basename', 'chapter_file', 'source_filename', 'filename'):
                     fname = os.path.basename(str(info.get(fname_key, "") or ""))
                     if not fname:
                         continue
+                    had_filename_anchor = True
+                    fname_keys = _gp_filename_keys(fname)
                     for ci, mapped_name in (panel_state.get('chapter_map') or {}).items():
-                        if os.path.basename(str(mapped_name or "")) == fname:
+                        mapped_keys = _gp_filename_keys(mapped_name)
+                        if fname_keys & mapped_keys:
                             return ci
+                if had_filename_anchor:
+                    return None
 
                 for num_key in ('actual_num', 'chapter_num'):
                     ci = _gp_index_for_actual_num(info.get(num_key), _d)
@@ -2138,7 +2154,10 @@ class RetranslationMixin:
                 if n == 1:
                     ci = targets[0][1]
                     status = targets[0][0].data(Qt.UserRole)
-                    action = menu.addAction(f"🗑️ Remove Ch.{ci+1} from progress ({status})")
+                    display_text = targets[0][0].text() or ""
+                    label_match = re.search(r'\bCh\.\d+(?:\.\d+)?\b', display_text)
+                    chapter_label = label_match.group(0) if label_match else f"Ch.{ci+1}"
+                    action = menu.addAction(f"🗑️ Remove {chapter_label} from progress ({status})")
                 else:
                     action = menu.addAction(f"🗑️ Remove {n} chapters from progress")
                 

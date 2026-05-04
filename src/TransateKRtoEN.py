@@ -4319,7 +4319,7 @@ class TranslationProcessor:
                             glossary_block,
                             chapter_num=actual_num,
                             source_text=chunk_html,
-                            chapter_file=c.get("original_basename") or c.get("filename") or fname,
+                            chapter_file=_single_pass_progress_chapter_file(c, fname),
                         )
                 
                 # Enhanced mode workflow:
@@ -4844,7 +4844,7 @@ class BatchTranslationProcessor:
             glossary_path = find_glossary_file(self.out_dir)
             chapter_ref = {
                 "chapter_num": actual_num,
-                "chapter_file": chapter.get("original_basename") or chapter.get("filename") or fname,
+                "chapter_file": _single_pass_progress_chapter_file(chapter, fname),
             }
             os.environ["CURRENT_CHAPTER_FILE"] = str(chapter_ref["chapter_file"] or "")
             os.environ["CURRENT_CHAPTER_NUM"] = str(actual_num)
@@ -6263,7 +6263,7 @@ class BatchTranslationProcessor:
             parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num) if parent_actual_num is not None else ""
             chapter_ref = {
                 "chapter_num": parent_actual_num,
-                "chapter_file": parent_chapter.get("original_basename") or parent_chapter.get("filename") or parent_fname,
+                "chapter_file": _single_pass_progress_chapter_file(parent_chapter, parent_fname),
             }
             os.environ["CURRENT_CHAPTER_FILE"] = str(chapter_ref["chapter_file"] or "")
             os.environ["CURRENT_CHAPTER_NUM"] = str(parent_actual_num or "")
@@ -7181,13 +7181,39 @@ def _single_pass_glossary_paths(output_dir):
         os.path.join(glossary_dir, f"{base}_glossary_progress.json"),
     )
 
+def _single_pass_progress_chapter_file(chapter=None, fallback=None):
+    """Pick the source spine item for Single Pass progress, never the source book."""
+    chapter = chapter or {}
+    source_book = os.path.basename(str(os.getenv("EPUB_PATH", "") or "")).lower()
+    bad_exts = {".epub", ".pdf", ".zip", ".cbz"}
+
+    def _clean(candidate):
+        name = os.path.basename(str(candidate or "").strip())
+        if not name:
+            return ""
+        if source_book and name.lower() == source_book:
+            return ""
+        ext = os.path.splitext(name)[1].lower()
+        if ext in bad_exts:
+            return ""
+        return name
+
+    for key in ("filename", "original_filename", "original_basename", "source_filename", "chapter_file"):
+        name = _clean(chapter.get(key))
+        if name:
+            return name
+    return _clean(fallback)
+
 def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, source_text=None, chapter_file=None):
     """Parse, dedupe, and save inline glossary output using the glossary pipeline."""
     if not glossary_block or not _single_pass_glossary_mode():
         return 0
 
     def _single_pass_chapter_refs():
-        chapter_basename = os.path.basename(str(chapter_file or os.getenv("CURRENT_CHAPTER_FILE", "") or ""))
+        chapter_basename = _single_pass_progress_chapter_file(
+            {"chapter_file": chapter_file},
+            os.getenv("CURRENT_CHAPTER_FILE", ""),
+        )
         actual = None
         try:
             if chapter_num is not None:
@@ -15467,7 +15493,7 @@ def main(log_callback=None, stop_callback=None):
                 current_glossary_path = find_glossary_file(out) if _single_pass_glossary_mode() else glossary_path
                 current_chapter_ref = {
                     "chapter_num": actual_num,
-                    "chapter_file": c.get("original_basename") or c.get("filename") or FileUtilities.create_chapter_filename(c, actual_num),
+                    "chapter_file": _single_pass_progress_chapter_file(c, FileUtilities.create_chapter_filename(c, actual_num)),
                 }
                 os.environ["CURRENT_CHAPTER_FILE"] = str(current_chapter_ref["chapter_file"] or "")
                 os.environ["CURRENT_CHAPTER_NUM"] = str(actual_num)

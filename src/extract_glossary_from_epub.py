@@ -930,7 +930,19 @@ def _glossary_chapter_output_file(idx: int) -> str:
         idx = int(idx)
     except (TypeError, ValueError):
         return ""
-    return os.path.basename(str(_GLOSSARY_CHAPTER_FILENAMES.get(idx, "") or ""))
+    return _glossary_progress_filename(_GLOSSARY_CHAPTER_FILENAMES.get(idx, ""))
+
+def _glossary_progress_filename(value) -> str:
+    """Return a chapter filename for progress, rejecting source-book paths."""
+    name = os.path.basename(str(value or "").strip())
+    if not name:
+        return ""
+    source_book = os.path.basename(str(os.getenv("EPUB_PATH", "") or "")).lower()
+    if source_book and name.lower() == source_book:
+        return ""
+    if os.path.splitext(name)[1].lower() in (".epub", ".pdf", ".zip", ".cbz"):
+        return ""
+    return name
 
 def _normalize_glossary_qa_issues(value=None, chapters=None):
     """Normalize glossary QA issue storage to {chapter_index: [issue, ...]}."""
@@ -6800,7 +6812,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             chapter_file = _glossary_chapter_output_file(idx)
             if not chapter_file and isinstance(existing_info, dict):
                 for fname_key in ("output_file", "original_basename", "chapter_file", "source_filename", "filename"):
-                    chapter_file = os.path.basename(str(existing_info.get(fname_key, "") or ""))
+                    chapter_file = _glossary_progress_filename(existing_info.get(fname_key, ""))
                     if chapter_file:
                         break
             issue_list = qa_issues_clean.get(idx, [])
