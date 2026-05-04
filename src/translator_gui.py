@@ -16537,11 +16537,21 @@ Important rules:
             except Exception as e:
                 print(f"Error terminating helper child processes: {e}")
         
-        # Set stop flag in epub_converter module
+        # Only poke the EPUB converter stop flag when the converter itself is
+        # running. Translation/image stop should not wake or dirty converter
+        # state just because the module is importable.
         try:
-            import epub_converter
-            if hasattr(epub_converter, 'set_stop_flag'):
-                epub_converter.set_stop_flag(True)
+            epub_running = False
+            epub_future = getattr(self, 'epub_future', None)
+            if epub_future is not None and hasattr(epub_future, 'done'):
+                epub_running = not epub_future.done()
+            epub_thread = getattr(self, 'epub_thread', None)
+            if epub_thread is not None and hasattr(epub_thread, 'is_alive'):
+                epub_running = epub_running or epub_thread.is_alive()
+            if epub_running:
+                import epub_converter
+                if hasattr(epub_converter, 'set_stop_flag'):
+                    epub_converter.set_stop_flag(True)
         except Exception:
             pass
         

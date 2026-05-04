@@ -14549,6 +14549,26 @@ def main(log_callback=None, stop_callback=None):
                         image_translator,
                         check_stop
                     )
+
+                    vision_finish_reason = getattr(image_translator, 'last_vision_translation_finish_reason', None)
+                    if vision_finish_reason in ("content_filter", "prohibited_content", "error"):
+                        fname = FileUtilities.create_chapter_filename(c, actual_num)
+                        save_prohibited_results = os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(config, 'save_prohibited_results', False))
+                        if save_prohibited_results:
+                            try:
+                                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                                    f.write(translated_html if isinstance(translated_html, str) else "")
+                            except Exception:
+                                pass
+                        progress_manager.update(
+                            idx, actual_num, content_hash, fname,
+                            status="qa_failed",
+                            qa_issues_found=["PROHIBITED_CONTENT"],
+                            chapter_obj=c,
+                        )
+                        progress_manager.save()
+                        print(f"❌ Vision image chapter {actual_num} hit content filter/prohibited; marked as qa_failed")
+                        continue
                     
                     if image_translations:
                         print(f"✅ Translated {len(image_translations)} images")

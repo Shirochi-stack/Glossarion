@@ -255,6 +255,8 @@ class ImageTranslator:
         self.chunk_height = int(os.getenv("IMAGE_CHUNK_HEIGHT", "2000"))
         self.vision_ocr_prompt = os.getenv("VISION_OCR_PROMPT", DEFAULT_VISION_OCR_PROMPT).strip() or DEFAULT_VISION_OCR_PROMPT
         self.vision_ocr_user_prompt = os.getenv("VISION_OCR_USER_PROMPT", DEFAULT_VISION_OCR_USER_PROMPT).strip() or DEFAULT_VISION_OCR_USER_PROMPT
+        self.last_vision_translation_finish_reason = None
+        self.last_vision_translation_error = None
         self._vision_glossary_processed_hashes = set()
         self._ensure_ocr_cache_valid()
         
@@ -1952,6 +1954,8 @@ class ImageTranslator:
 
     def _translate_ocr_text(self, ocr_text, assistant_prompt, check_stop_fn):
         """Translate OCR text as a normal text request."""
+        self.last_vision_translation_finish_reason = None
+        self.last_vision_translation_error = None
         if not ocr_text or not ocr_text.strip():
             print("   ℹ️ OCR returned no readable text")
             return None
@@ -1995,18 +1999,36 @@ class ImageTranslator:
         retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
         chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "1800")) if retry_timeout_enabled else None
 
-        response = send_text_with_interrupt(
-            self.client,
-            messages,
-            self.temperature,
-            self.image_max_tokens,
-            stop_check_fn=check_stop_fn,
-            chunk_timeout=chunk_timeout,
-            context='translation',
-        )
+        try:
+            response = send_text_with_interrupt(
+                self.client,
+                messages,
+                self.temperature,
+                self.image_max_tokens,
+                stop_check_fn=check_stop_fn,
+                chunk_timeout=chunk_timeout,
+                context='translation',
+            )
+        except UnifiedClientError as e:
+            err_text = str(e).lower()
+            self.last_vision_translation_error = str(e)
+            if getattr(e, "error_type", None) == "prohibited_content" or "content blocked" in err_text or "recitation" in err_text:
+                self.last_vision_translation_finish_reason = "prohibited_content"
+                print("   🚫 Vision OCR translation hit content filter/prohibited content")
+                return None
+            if getattr(e, "error_type", None) == "cancelled" or "stopped by user" in err_text or "cancelled" in err_text:
+                self.last_vision_translation_finish_reason = "cancelled"
+                return None
+            raise
 
+        finish_reason = None
         if isinstance(response, tuple):
+            finish_reason = response[1] if len(response) > 1 else None
             response = response[0]
+
+        if finish_reason in ("content_filter", "prohibited_content", "error"):
+            self.last_vision_translation_finish_reason = finish_reason
+            return None
 
         if hasattr(response, 'content'):
             translated = response.content
@@ -2016,6 +2038,8 @@ class ImageTranslator:
             translated = str(response)
 
         translated = (translated or "").strip()
+        if finish_reason:
+            self.last_vision_translation_finish_reason = finish_reason
         if single_pass_enabled:
             try:
                 from TransateKRtoEN import _split_single_pass_glossary_response, _persist_single_pass_glossary
