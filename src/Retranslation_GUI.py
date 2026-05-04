@@ -1929,6 +1929,34 @@ class RetranslationMixin:
                 if status in ('failed', 'qa_failed'):
                     return '#e74c3c'
                 return '#5a9fd4'
+
+            def _gp_restore_in_progress_entry(info):
+                if not isinstance(info, dict):
+                    return None
+                previous_status = str(info.get('previous_status', '') or '').lower()
+                previous_entry = info.get('previous_progress_entry')
+                if isinstance(previous_entry, dict):
+                    restored = dict(previous_entry)
+                    restored_status = str(restored.get('status', previous_status) or previous_status).lower()
+                    if restored_status and restored_status not in ('in_progress', 'not_completed', 'not translated'):
+                        restored.pop('previous_status', None)
+                        restored.pop('previous_progress_entry', None)
+                        return restored
+                if previous_status in ('qa_failed', 'failed', 'error', 'merged', 'completed'):
+                    restored = dict(info)
+                    restored['status'] = 'failed' if previous_status == 'error' else previous_status
+                    restored.pop('previous_status', None)
+                    restored.pop('previous_progress_entry', None)
+                    return restored
+                if previous_status in ('not_completed', 'not translated', 'not_translated'):
+                    return None
+                if info.get('output_file'):
+                    restored = dict(info)
+                    restored['status'] = 'failed'
+                    restored.pop('previous_status', None)
+                    restored.pop('previous_progress_entry', None)
+                    return restored
+                return None
             
             # Lightweight spine reader - returns (chapter_map, total_chapters, spine_index_map)
             def _read_spine_map(epub_path, translate_special):
@@ -2220,9 +2248,12 @@ class RetranslationMixin:
                     display_text = targets[0][0].text() or ""
                     label_match = re.search(r'\bCh\.\d+(?:\.\d+)?\b', display_text)
                     chapter_label = label_match.group(0) if label_match else f"Ch.{ci+1}"
-                    action = menu.addAction(f"🗑️ Remove {chapter_label} from progress ({status})")
+                    verb = "Restore" if status == "in_progress" else "Remove"
+                    action = menu.addAction(f"🗑️ {verb} {chapter_label} from progress ({status})")
                 else:
-                    action = menu.addAction(f"🗑️ Remove {n} chapters from progress")
+                    has_in_progress = any((it.data(Qt.UserRole) == "in_progress") for it, _ci in targets)
+                    verb = "Restore/remove" if has_in_progress else "Remove"
+                    action = menu.addAction(f"🗑️ {verb} {n} chapters from progress")
                 
                 chosen = menu.exec(gp_listbox.viewport().mapToGlobal(pos))
                 if chosen != action:
@@ -2268,6 +2299,13 @@ class RetranslationMixin:
                             keep = ci not in indices_to_remove if ci is not None else True
                             if keep:
                                 new_chapters[k] = v
+                            elif isinstance(v, dict) and str(v.get('status', '')).lower() == 'in_progress':
+                                restored = _gp_restore_in_progress_entry(v)
+                                if restored:
+                                    new_chapters[k] = restored
+                                changed = True
+                            else:
+                                changed = True
                         if len(new_chapters) != len(chapters):
                             _d['chapters'] = new_chapters
                             changed = True
@@ -2279,10 +2317,10 @@ class RetranslationMixin:
                         _cmap = panel_state['chapter_map']
                         for it, ci in targets:
                             fname = _cmap.get(ci, f'chapter {ci + 1}')
-                            display3, _ = _gp_display_for(ci, fname, _d)
+                            display3, restored_status = _gp_display_for(ci, fname, _d)
                             it.setText(display3)
-                            it.setForeground(QColor('#5a9fd4'))
-                            it.setData(Qt.UserRole, 'not_completed')
+                            it.setForeground(QColor(_gp_color_for(restored_status)))
+                            it.setData(Qt.UserRole, restored_status)
                         _refresh_stats_from_dict(_d)
                 except Exception as e:
                     print(f"⚠️ Error removing chapters from progress: {e}")

@@ -1010,6 +1010,42 @@ def _mark_glossary_failed(failed, idx, issues=None):
             if issue_text and issue_text not in bucket:
                 bucket.append(issue_text)
 
+def _glossary_restore_in_progress_entry(info):
+    """Restore the pre-in-progress chapter entry, or return None for not completed."""
+    if not isinstance(info, dict):
+        return None
+    previous_status = str(info.get("previous_status", "") or "").lower()
+    previous_entry = info.get("previous_progress_entry")
+    if isinstance(previous_entry, dict):
+        restored = dict(previous_entry)
+        restored_status = str(restored.get("status", previous_status) or previous_status).lower()
+        if restored_status and restored_status not in ("in_progress", "not_completed", "not translated"):
+            restored.pop("previous_status", None)
+            restored.pop("previous_progress_entry", None)
+            return restored
+
+    if previous_status in ("qa_failed", "failed", "error", "merged", "completed"):
+        restored = dict(info)
+        restored["status"] = "failed" if previous_status == "error" else previous_status
+        restored.pop("previous_status", None)
+        restored.pop("previous_progress_entry", None)
+        return restored
+
+    if previous_status in ("not_completed", "not translated", "not_translated", ""):
+        # Explicit not-completed snapshots are temporary markers; removing
+        # in-progress should delete the row rather than invent a real status.
+        if previous_status:
+            return None
+        # Legacy in-progress entries did not record previous state. If there is
+        # an output anchor, fall back to failed so the row is not silently lost.
+        if info.get("output_file"):
+            restored = dict(info)
+            restored["status"] = "failed"
+            restored.pop("previous_status", None)
+            restored.pop("previous_progress_entry", None)
+            return restored
+    return None
+
 def remove_honorifics(name):
     """Remove common honorifics from names"""
     if not name:
@@ -7003,7 +7039,32 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 chapter_info["qa_issues"] = True
                 chapter_info["qa_timestamp"] = time.time()
                 chapter_info["qa_issues_found"] = issue_list
+            if status == "in_progress":
+                previous_status = "not_completed"
+                previous_entry = None
+                if isinstance(existing_info, dict) and existing_info:
+                    if str(existing_info.get("status", "")).lower() == "in_progress":
+                        previous_status = str(existing_info.get("previous_status", "not_completed") or "not_completed")
+                        previous_entry = existing_info.get("previous_progress_entry")
+                    else:
+                        previous_status = str(existing_info.get("status", "not_completed") or "not_completed")
+                        previous_entry = {
+                            k: v for k, v in existing_info.items()
+                            if k not in ("previous_status", "previous_progress_entry")
+                        }
+                chapter_info["previous_status"] = previous_status
+                if isinstance(previous_entry, dict) and previous_status.lower() not in ("not_completed", "not translated", "not_translated"):
+                    chapter_info["previous_progress_entry"] = previous_entry
             chapters[chapter_key] = chapter_info
+
+        for idx, existing_info in existing_chapters_by_idx.items():
+            if idx in done_set or idx in in_progress_set:
+                continue
+            if not isinstance(existing_info, dict) or str(existing_info.get("status", "")).lower() != "in_progress":
+                continue
+            restored = _glossary_restore_in_progress_entry(existing_info)
+            if restored:
+                chapters[_glossary_chapter_key(idx)] = restored
 
         progress_data = {
             "book_title_present": bool(BOOK_TITLE_PRESENT),
