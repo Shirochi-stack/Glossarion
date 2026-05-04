@@ -3689,10 +3689,6 @@ class EPUBCompiler:
     def _get_chapter_title(self, num: int, filename: str, content: str,
                           chapter_titles_info: Dict[int, Tuple[str, float, str]]) -> str:
         """Get chapter title with fallbacks - uses position-based numbering"""
-        filename_stem = os.path.splitext(os.path.basename(filename or ""))[0].lower()
-        if filename_stem == "cover":
-            return "Cover"
-
         title = None
         confidence = 0.0
         

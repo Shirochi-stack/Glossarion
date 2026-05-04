@@ -3446,6 +3446,63 @@ class ContentProcessor:
         if original and ContentProcessor.is_mostly_image_html(original):
             return original
         return body
+
+
+def _read_source_epub_html(chapter, output_dir):
+    """Recover full source XHTML/HTML for older chapter caches."""
+    rel_candidates = []
+    for key in ("filename", "original_filename"):
+        value = chapter.get(key)
+        if value:
+            rel_candidates.append(str(value).replace("\\", "/").lstrip("/"))
+
+    epub_candidates = []
+    env_epub = os.getenv("EPUB_PATH", "").strip()
+    if env_epub:
+        epub_candidates.append(env_epub)
+    pointer_path = os.path.join(output_dir, "source_epub.txt")
+    if os.path.exists(pointer_path):
+        try:
+            with open(pointer_path, "r", encoding="utf-8") as f:
+                pointed = f.read().strip()
+            if pointed:
+                epub_candidates.append(pointed)
+        except Exception:
+            pass
+
+    for epub_path in epub_candidates:
+        if not epub_path or not os.path.isfile(epub_path):
+            continue
+        try:
+            with zipfile.ZipFile(epub_path, "r") as zf:
+                names = zf.namelist()
+                names_by_lower = {name.lower(): name for name in names}
+                for rel in rel_candidates:
+                    match = names_by_lower.get(rel.lower())
+                    if match:
+                        return zf.read(match).decode("utf-8", errors="replace")
+                basenames = {os.path.basename(rel).lower() for rel in rel_candidates if rel}
+                for name in names:
+                    if os.path.basename(name).lower() in basenames:
+                        return zf.read(name).decode("utf-8", errors="replace")
+        except Exception:
+            continue
+    return ""
+
+
+def _original_markup_for_copy(chapter, output_dir):
+    cached = (
+        chapter.get("original_html")
+        or chapter.get("source_html")
+        or chapter.get("raw_html")
+        or ""
+    )
+    recovered = _read_source_epub_html(chapter, output_dir)
+    cached_has_head = bool(re.search(r"<(?:head|title)\b", cached or "", re.IGNORECASE))
+    recovered_has_head = bool(re.search(r"<(?:head|title)\b", recovered or "", re.IGNORECASE))
+    if recovered and recovered_has_head and not cached_has_head:
+        return recovered
+    return cached or recovered or chapter.get("body") or ""
         
 # =====================================================
 # UNIFIED TRANSLATION PROCESSOR
@@ -13692,13 +13749,7 @@ def main(log_callback=None, stop_callback=None):
                 print(f"📸 Image-only chapter {actual_num} detected (preserving original content as-is)")
 
                 fname = FileUtilities.create_chapter_filename(c, actual_num)
-                original_markup = (
-                    c.get("original_html")
-                    or c.get("source_html")
-                    or c.get("raw_html")
-                    or c.get("body")
-                    or ""
-                )
+                original_markup = _original_markup_for_copy(c, out)
                 output_path = os.path.join(out, fname)
                 with open(output_path, 'w', encoding='utf-8') as f:
                     f.write(original_markup)
@@ -14690,13 +14741,7 @@ def main(log_callback=None, stop_callback=None):
                 print(f"📸 Image-only chapter {actual_num} detected (preserving original content as-is)")
 
                 fname = FileUtilities.create_chapter_filename(c, actual_num)
-                original_markup = (
-                    c.get("original_html")
-                    or c.get("source_html")
-                    or c.get("raw_html")
-                    or c.get("body")
-                    or ""
-                )
+                original_markup = _original_markup_for_copy(c, out)
                 output_path = os.path.join(out, fname)
                 with open(output_path, 'w', encoding='utf-8') as f:
                     f.write(original_markup)

@@ -2883,7 +2883,10 @@ def _process_single_html_file(
             chapter_info["enhanced_filtering"] = enhanced_filtering
             chapter_info["preserve_structure"] = preserve_structure
             chapter_info["markdown_provenance"] = getattr(enhanced_extractor, "last_markdown_provenance", {})
-            # Store original HTML for image restoration
+
+        # Store original HTML for image-only chapters so text-mode copy-as-is
+        # preserves document metadata such as <title> and stylesheet links.
+        if enhanced_extraction_used or is_image_only_chapter:
             chapter_info["original_html"] = html_content
         
         # Add merge info if applicable
