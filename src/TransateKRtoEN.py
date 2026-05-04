@@ -2112,6 +2112,57 @@ class ProgressManager:
                 restored.pop("previous_status_unknown", None)
                 return restored
         return None
+
+    @staticmethod
+    def failed_from_in_progress_entry(info):
+        """Convert an in-progress entry to failed without resurrecting its previous snapshot."""
+        if not isinstance(info, dict):
+            return None
+        failed = dict(info)
+        failed["status"] = "failed"
+        failed.pop("previous_status", None)
+        failed.pop("previous_progress_entry", None)
+        failed.pop("previous_status_unknown", None)
+        return failed
+
+    def _disk_entry_is_still_in_progress(self, chapter_key, chapter_info):
+        """Return False when the user deleted/changed the in-progress row on disk."""
+        try:
+            if not os.path.exists(self.PROGRESS_FILE):
+                return False
+            with open(self.PROGRESS_FILE, "r", encoding="utf-8") as f:
+                disk_progress = json.load(f)
+            disk_chapters = disk_progress.get("chapters", {}) if isinstance(disk_progress, dict) else {}
+            disk_info = disk_chapters.get(chapter_key) if isinstance(disk_chapters, dict) else None
+            if not isinstance(disk_info, dict):
+                target_out = chapter_info.get("output_file")
+                target_num = chapter_info.get("actual_num") or chapter_info.get("chapter_num")
+                for candidate in disk_chapters.values() if isinstance(disk_chapters, dict) else []:
+                    if not isinstance(candidate, dict):
+                        continue
+                    same_out = target_out and candidate.get("output_file") == target_out
+                    same_num = str(candidate.get("actual_num", candidate.get("chapter_num"))) == str(target_num)
+                    if same_out and same_num:
+                        disk_info = candidate
+                        break
+            return isinstance(disk_info, dict) and str(disk_info.get("status", "")).lower() == "in_progress"
+        except Exception:
+            # If the file cannot be read, avoid restoring stale completed/merged state.
+            return False
+
+    def _mark_all_known_progress_failed_after_file_delete(self):
+        """If the progress file was deleted mid-run, do not recreate old completed/merged rows."""
+        if getattr(self, "_progress_file_delete_invalidated", False):
+            return
+        for key, entry in list(self.prog.get("chapters", {}).items()):
+            if not isinstance(entry, dict):
+                continue
+            status = str(entry.get("status", "")).lower()
+            if status in ("completed", "merged", "pending", "in_progress"):
+                failed = self.failed_from_in_progress_entry(entry)
+                if failed:
+                    self.prog["chapters"][key] = failed
+        self._progress_file_delete_invalidated = True
     
     def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None, chapter_obj=None, merged_chapters=None, qa_issues_found=None):
         """Update progress for a chapter"""
@@ -2245,6 +2296,14 @@ class ProgressManager:
         chapter_info = self.prog.get("chapters", {}).get(chapter_key)
         if not isinstance(chapter_info, dict) or str(chapter_info.get("status", "")).lower() != "in_progress":
             return False
+        if not os.path.exists(self.PROGRESS_FILE):
+            self._mark_all_known_progress_failed_after_file_delete()
+            return True
+        if not self._disk_entry_is_still_in_progress(chapter_key, chapter_info):
+            failed = self.failed_from_in_progress_entry(chapter_info)
+            if failed:
+                self.prog["chapters"][chapter_key] = failed
+            return True
         restored = self.restore_in_progress_entry(chapter_info)
         if restored:
             self.prog["chapters"][chapter_key] = restored
@@ -7600,6 +7659,27 @@ def _restore_single_pass_glossary_in_progress(output_dir, chapter_num=None, chap
             except (TypeError, ValueError):
                 pass
             in_progress.append(idx_value)
+        if not glossary_extractor._glossary_disk_entry_is_still_in_progress(chapter_idx):
+            def _without_chapter_idx(values):
+                kept = []
+                for idx_value in values:
+                    try:
+                        if int(idx_value) == int(chapter_idx):
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+                    kept.append(idx_value)
+                return kept
+            completed = _without_chapter_idx(completed)
+            merged_indices = _without_chapter_idx(merged_indices)
+            failed_ints = []
+            for idx_value in failed:
+                try:
+                    failed_ints.append(int(idx_value))
+                except (TypeError, ValueError):
+                    pass
+            if int(chapter_idx) not in failed_ints:
+                failed.append(int(chapter_idx))
         glossary_extractor.save_progress(
             completed,
             glossary_extractor._load_glossary_file(json_path),

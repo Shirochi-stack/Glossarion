@@ -1966,6 +1966,14 @@ class RetranslationMixin:
                     restored.pop('previous_status_unknown', None)
                     return restored
                 return None
+
+            def _gp_failed_from_in_progress_entry(info):
+                failed_entry = dict(info) if isinstance(info, dict) else {}
+                failed_entry['status'] = 'failed'
+                failed_entry.pop('previous_status', None)
+                failed_entry.pop('previous_progress_entry', None)
+                failed_entry.pop('previous_status_unknown', None)
+                return failed_entry
             
             # Lightweight spine reader - returns (chapter_map, total_chapters, spine_index_map)
             def _read_spine_map(epub_path, translate_special):
@@ -2259,12 +2267,9 @@ class RetranslationMixin:
                     display_text = targets[0][0].text() or ""
                     label_match = re.search(r'\bCh\.\d+(?:\.\d+)?\b', display_text)
                     chapter_label = label_match.group(0) if label_match else f"Ch.{ci+1}"
-                    verb = "Restore" if status == "in_progress" else "Remove"
-                    action = menu.addAction(f"🗑️ {verb} {chapter_label} from progress ({status})")
+                    action = menu.addAction(f"🗑️ Remove {chapter_label} from progress ({status})")
                 else:
-                    has_in_progress = any((it.data(Qt.UserRole) == "in_progress") for it, _ci in targets)
-                    verb = "Restore/remove" if has_in_progress else "Remove"
-                    action = menu.addAction(f"🗑️ {verb} {n} chapters from progress")
+                    action = menu.addAction(f"🗑️ Remove {n} chapters from progress")
                 
                 chosen = menu.exec(gp_listbox.viewport().mapToGlobal(pos))
                 if chosen != action:
@@ -2305,19 +2310,27 @@ class RetranslationMixin:
                     chapters = _d.get('chapters', {})
                     if isinstance(chapters, dict):
                         new_chapters = {}
+                        chapters_changed = False
                         for k, v in chapters.items():
                             ci = _gp_index_for_entry(v, k, _d) if isinstance(v, dict) else None
                             keep = ci not in indices_to_remove if ci is not None else True
                             if keep:
                                 new_chapters[k] = v
-                            elif isinstance(v, dict) and str(v.get('status', '')).lower() == 'in_progress':
-                                restored = _gp_restore_in_progress_entry(v)
-                                if restored:
-                                    new_chapters[k] = restored
+                            elif isinstance(v, dict) and str(v.get('status', '')).lower() in ('completed', 'merged', 'in_progress', 'pending'):
+                                failed_entry = _gp_failed_from_in_progress_entry(v)
+                                new_chapters[k] = failed_entry
+                                mapped_failed_ci = _gp_index_for_entry(failed_entry, k, _d)
+                                failed_value = mapped_failed_ci if mapped_failed_ci is not None else ci
+                                failed_list = _d.get('failed', [])
+                                if isinstance(failed_list, list) and failed_value not in failed_list:
+                                    failed_list.append(failed_value)
+                                    _d['failed'] = failed_list
+                                chapters_changed = True
                                 changed = True
                             else:
+                                chapters_changed = True
                                 changed = True
-                        if len(new_chapters) != len(chapters):
+                        if chapters_changed or len(new_chapters) != len(chapters):
                             _d['chapters'] = new_chapters
                             changed = True
                     

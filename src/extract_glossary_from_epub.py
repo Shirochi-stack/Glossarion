@@ -1074,6 +1074,42 @@ def _glossary_restore_in_progress_entry(info):
             return restored
     return None
 
+def _glossary_failed_from_in_progress_entry(info):
+    """Convert a glossary in-progress entry to failed without restoring previous state."""
+    if not isinstance(info, dict):
+        info = {}
+    failed = dict(info)
+    failed["status"] = "failed"
+    failed.pop("previous_status", None)
+    failed.pop("previous_progress_entry", None)
+    failed.pop("previous_status_unknown", None)
+    return failed
+
+def _glossary_disk_entry_is_still_in_progress(idx):
+    """False means the user deleted or changed the in-progress row on disk."""
+    try:
+        idx = int(idx)
+    except (TypeError, ValueError):
+        return False
+    try:
+        if not os.path.exists(PROGRESS_FILE):
+            return False
+        with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
+            disk_progress = json.load(f)
+        if not isinstance(disk_progress, dict):
+            return False
+        chapters = disk_progress.get("chapters", {})
+        if isinstance(chapters, dict):
+            for key, info in chapters.items():
+                if not isinstance(info, dict):
+                    continue
+                entry_idx = _glossary_progress_entry_index(info, key)
+                if entry_idx == idx:
+                    return str(info.get("status", "")).lower() == "in_progress"
+        return idx in _unique_int_list(disk_progress.get("in_progress", []))
+    except Exception:
+        return False
+
 def _glossary_is_graceful_stop_active():
     return os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
 
@@ -5493,7 +5529,34 @@ def main(log_callback=None, stop_callback=None):
             save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
 
     def _restore_glossary_in_progress_for_hard_stop(indices):
-        _clear_glossary_in_progress(indices)
+        normal_restore = []
+        forced_failed = []
+        if not os.path.exists(PROGRESS_FILE):
+            forced_failed = _unique_int_list(list(completed) + list(merged_indices) + list(in_progress) + list(indices))
+        else:
+            for _idx in indices:
+                try:
+                    _idx = int(_idx)
+                except (TypeError, ValueError):
+                    continue
+                if _glossary_disk_entry_is_still_in_progress(_idx):
+                    normal_restore.append(_idx)
+                else:
+                    forced_failed.append(_idx)
+
+        if forced_failed:
+            for _idx in forced_failed:
+                if _idx in completed:
+                    completed.remove(_idx)
+                if _idx in merged_indices:
+                    merged_indices.remove(_idx)
+                if _idx in in_progress:
+                    in_progress.remove(_idx)
+                _mark_glossary_failed(failed, _idx)
+            save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
+
+        if normal_restore:
+            _clear_glossary_in_progress(normal_restore)
     
     # Request merging configuration (glossary-specific with fallback to global)
     request_merging_enabled = os.getenv('GLOSSARY_REQUEST_MERGING_ENABLED', os.getenv('REQUEST_MERGING_ENABLED', '0')) == '1'
@@ -7046,14 +7109,9 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         if merged_indices is not None:
             merged_indices[:] = merged_clean
 
-        qa_issues_clean = {
-            int(idx): issues
-            for idx, issues in _normalize_glossary_qa_issues(_GLOSSARY_QA_ISSUES_FOUND).items()
-            if int(idx) in failed_set
-        }
-
         existing_chapters_by_idx = {}
         preserved_in_progress = []
+        externally_failed = []
         try:
             if os.path.exists(PROGRESS_FILE):
                 with open(PROGRESS_FILE, 'r', encoding='utf-8') as existing_f:
@@ -7066,12 +7124,34 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                         existing_idx = _glossary_progress_entry_index(existing_info, existing_key)
                         if existing_idx is not None:
                             existing_chapters_by_idx[int(existing_idx)] = existing_info
-                            if str(existing_info.get("status", "")).lower() == "in_progress":
+                            existing_status = str(existing_info.get("status", "")).lower()
+                            if existing_status == "in_progress":
                                 preserved_in_progress.append(int(existing_idx))
+                            elif existing_status in ("failed", "qa_failed", "error"):
+                                externally_failed.append(int(existing_idx))
                 if isinstance(existing_progress, dict):
                     preserved_in_progress.extend(_unique_int_list(existing_progress.get("in_progress", [])))
         except Exception:
             existing_chapters_by_idx = {}
+
+        if externally_failed:
+            failed_clean = _unique_int_list(failed_clean + externally_failed)
+            failed_set = set(failed_clean)
+            merged_clean = [idx for idx in merged_clean if idx not in failed_set]
+            completed_clean = [idx for idx in completed_clean if idx not in failed_set]
+            merged_set = set(merged_clean)
+            if completed is not None:
+                completed[:] = completed_clean
+            if failed is not None:
+                failed[:] = failed_clean
+            if merged_indices is not None:
+                merged_indices[:] = merged_clean
+
+        qa_issues_clean = {
+            int(idx): issues
+            for idx, issues in _normalize_glossary_qa_issues(_GLOSSARY_QA_ISSUES_FOUND).items()
+            if int(idx) in failed_set
+        }
 
         if in_progress is None:
             in_progress_clean = _unique_int_list(preserved_in_progress)
