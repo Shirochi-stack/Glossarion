@@ -1974,7 +1974,11 @@ class ImageTranslator:
         user_parts = []
         if assistant_prompt and assistant_prompt.strip():
             user_parts.append(assistant_prompt.strip())
-        user_parts.append("Translate the following OCR text according to the system prompt. Return only the translated text.")
+        user_parts.append(
+            "Translate the following OCR text according to the system prompt. "
+            "Return only the translated text. Preserve the OCR paragraph and line-break structure; "
+            "do not collapse separate source lines into one line."
+        )
         user_parts.append("<OCR_TEXT>\n" + ocr_text.strip() + "\n</OCR_TEXT>")
 
         messages = [
@@ -3294,16 +3298,22 @@ class ImageTranslator:
         original = text
         # Replacement character and common geometric fallbacks
         text = text.replace('\ufffd', '')
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        text = text.replace('\u2028', '\n').replace('\u2029', '\n')
         for ch in ['□','◇','◆','■','▢','▣','▤','▥','▦','▧','▨','▩']:
             text = text.replace(ch, '')
-        text = re.sub(r'[\u200b-\u200f\u2028-\u202f\u205f-\u206f\ufeff]', '', text)
+        text = re.sub(r'[\u200b-\u200f\u202a-\u202f\u205f-\u206f\ufeff]', '', text)
         text = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]', '', text)
         try:
             text = text.encode('utf-8', errors='ignore').decode('utf-8')
         except UnicodeError:
             pass
-        # Normalize whitespace
-        text = re.sub(r'\s+', ' ', text).strip()
+        # Normalize only horizontal whitespace. OCR/vision mode relies on
+        # line breaks for reading order, so never collapse \n into spaces.
+        text = re.sub(r'[ \t\f\v]+', ' ', text)
+        text = re.sub(r' *\n *', '\n', text)
+        text = re.sub(r'\n{4,}', '\n\n\n', text)
+        text = text.strip()
         return text
     
     def _create_html_output(self, img_rel_path, translated_text, is_long_text, hide_label, was_stopped):

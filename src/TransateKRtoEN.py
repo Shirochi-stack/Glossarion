@@ -8347,7 +8347,8 @@ def _process_chapter_images_vision_ocr_combined(
 
     combined_prompt = (
         f"The OCR text below was assembled from {len(images)} ordered image(s) in one HTML page. "
-        "Translate it as one continuous passage. Preserve every <img ... /> tag exactly where it appears; "
+        "Translate it as one continuous passage while preserving the OCR paragraph and line-break structure. "
+        "Do not collapse separate source lines into one line. Preserve every <img ... /> tag exactly where it appears; "
         "those tags mark cover/illustration images that returned No during OCR and must remain in the output."
     )
     if chapter_header_text:
@@ -8368,6 +8369,7 @@ def _process_chapter_images_vision_ocr_combined(
 
     container = soup.new_tag('div', **{'class': 'translated-text-only'})
     translation_div = soup.new_tag('div', **{'class': 'image-translation'})
+    translation_div['style'] = 'white-space: pre-wrap;'
     translated_fragment = BeautifulSoup(translated, 'html.parser')
     for child in list(translated_fragment.contents):
         translation_div.append(child)
