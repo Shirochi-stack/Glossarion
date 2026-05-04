@@ -1085,30 +1085,45 @@ def _glossary_failed_from_in_progress_entry(info):
     failed.pop("previous_status_unknown", None)
     return failed
 
-def _glossary_disk_entry_is_still_in_progress(idx):
-    """False means the user deleted or changed the in-progress row on disk."""
-    try:
-        idx = int(idx)
-    except (TypeError, ValueError):
-        return False
+_GLOSSARY_DISK_IN_PROGRESS_CACHE = {}
+
+def _glossary_disk_in_progress_snapshot():
+    """Return a cached set of on-disk in-progress indices, or None if the file is gone/unreadable."""
     try:
         if not os.path.exists(PROGRESS_FILE):
-            return False
+            return None
+        stat = os.stat(PROGRESS_FILE)
+        cache_key = (PROGRESS_FILE, stat.st_mtime_ns, stat.st_size)
+        cached = _GLOSSARY_DISK_IN_PROGRESS_CACHE.get("snapshot")
+        if isinstance(cached, dict) and cached.get("cache_key") == cache_key:
+            return cached.get("indices", set())
         with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
             disk_progress = json.load(f)
         if not isinstance(disk_progress, dict):
-            return False
+            return None
+        indices = set()
         chapters = disk_progress.get("chapters", {})
         if isinstance(chapters, dict):
             for key, info in chapters.items():
                 if not isinstance(info, dict):
                     continue
                 entry_idx = _glossary_progress_entry_index(info, key)
-                if entry_idx == idx:
-                    return str(info.get("status", "")).lower() == "in_progress"
-        return idx in _unique_int_list(disk_progress.get("in_progress", []))
+                if entry_idx is not None and str(info.get("status", "")).lower() == "in_progress":
+                    indices.add(int(entry_idx))
+        indices.update(_unique_int_list(disk_progress.get("in_progress", [])))
+        _GLOSSARY_DISK_IN_PROGRESS_CACHE["snapshot"] = {"cache_key": cache_key, "indices": indices}
+        return indices
     except Exception:
+        return None
+
+def _glossary_disk_entry_is_still_in_progress(idx):
+    """False means the user deleted or changed the in-progress row on disk."""
+    try:
+        idx = int(idx)
+    except (TypeError, ValueError):
         return False
+    snapshot = _glossary_disk_in_progress_snapshot()
+    return bool(snapshot is not None and idx in snapshot)
 
 def _glossary_is_graceful_stop_active():
     return os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
@@ -5531,15 +5546,27 @@ def main(log_callback=None, stop_callback=None):
     def _restore_glossary_in_progress_for_hard_stop(indices):
         normal_restore = []
         forced_failed = []
-        if not os.path.exists(PROGRESS_FILE):
+        disk_in_progress = _glossary_disk_in_progress_snapshot()
+        if disk_in_progress is None:
             forced_failed = _unique_int_list(list(completed) + list(merged_indices) + list(in_progress) + list(indices))
         else:
-            for _idx in indices:
+            restore_indices = _unique_int_list(indices)
+
+            def _classify_restore_idx(_idx):
                 try:
                     _idx = int(_idx)
                 except (TypeError, ValueError):
+                    return None, None
+                return _idx, (_idx in disk_in_progress)
+
+            worker_count = min(32, max(1, len(restore_indices)))
+            with ThreadPoolExecutor(max_workers=worker_count) as restore_pool:
+                classified = list(restore_pool.map(_classify_restore_idx, restore_indices))
+
+            for _idx, is_still_in_progress in classified:
+                if _idx is None:
                     continue
-                if _glossary_disk_entry_is_still_in_progress(_idx):
+                if is_still_in_progress:
                     normal_restore.append(_idx)
                 else:
                     forced_failed.append(_idx)

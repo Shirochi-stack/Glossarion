@@ -2125,30 +2125,47 @@ class ProgressManager:
         failed.pop("previous_status_unknown", None)
         return failed
 
-    def _disk_entry_is_still_in_progress(self, chapter_key, chapter_info):
-        """Return False when the user deleted/changed the in-progress row on disk."""
+    def _disk_in_progress_snapshot(self):
+        """Load the on-disk in-progress rows once per file version."""
         try:
-            if not os.path.exists(self.PROGRESS_FILE):
-                return False
+            stat = os.stat(self.PROGRESS_FILE)
+            cache_key = (stat.st_mtime_ns, stat.st_size)
+            cached = getattr(self, "_disk_in_progress_cache", None)
+            if isinstance(cached, dict) and cached.get("cache_key") == cache_key:
+                return cached.get("keys", set()), cached.get("refs", set())
             with open(self.PROGRESS_FILE, "r", encoding="utf-8") as f:
                 disk_progress = json.load(f)
             disk_chapters = disk_progress.get("chapters", {}) if isinstance(disk_progress, dict) else {}
-            disk_info = disk_chapters.get(chapter_key) if isinstance(disk_chapters, dict) else None
-            if not isinstance(disk_info, dict):
-                target_out = chapter_info.get("output_file")
-                target_num = chapter_info.get("actual_num") or chapter_info.get("chapter_num")
-                for candidate in disk_chapters.values() if isinstance(disk_chapters, dict) else []:
+            keys = set()
+            refs = set()
+            if isinstance(disk_chapters, dict):
+                for key, candidate in disk_chapters.items():
                     if not isinstance(candidate, dict):
                         continue
-                    same_out = target_out and candidate.get("output_file") == target_out
-                    same_num = str(candidate.get("actual_num", candidate.get("chapter_num"))) == str(target_num)
-                    if same_out and same_num:
-                        disk_info = candidate
-                        break
-            return isinstance(disk_info, dict) and str(disk_info.get("status", "")).lower() == "in_progress"
+                    if str(candidate.get("status", "")).lower() != "in_progress":
+                        continue
+                    keys.add(str(key))
+                    out = candidate.get("output_file")
+                    num = candidate.get("actual_num") or candidate.get("chapter_num")
+                    if out and num is not None:
+                        refs.add((str(num), str(out)))
+            self._disk_in_progress_cache = {"cache_key": cache_key, "keys": keys, "refs": refs}
+            return keys, refs
         except Exception:
             # If the file cannot be read, avoid restoring stale completed/merged state.
+            return None
+
+    def _disk_entry_is_still_in_progress(self, chapter_key, chapter_info):
+        """Return False when the user deleted/changed the in-progress row on disk."""
+        snapshot = self._disk_in_progress_snapshot()
+        if not snapshot:
             return False
+        keys, refs = snapshot
+        if str(chapter_key) in keys:
+            return True
+        target_out = chapter_info.get("output_file")
+        target_num = chapter_info.get("actual_num") or chapter_info.get("chapter_num")
+        return bool(target_out and target_num is not None and (str(target_num), str(target_out)) in refs)
 
     def _mark_all_known_progress_failed_after_file_delete(self):
         """If the progress file was deleted mid-run, do not recreate old completed/merged rows."""
