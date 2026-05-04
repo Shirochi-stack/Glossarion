@@ -11681,18 +11681,16 @@ class BookDetailsDialog(QDialog):
             self._meta_grid.addWidget(k_lbl, i, 0, Qt.AlignTop | Qt.AlignLeft)
             self._meta_grid.addWidget(v_lbl, i, 1, Qt.AlignTop | Qt.AlignLeft)
 
-        # Genres / tags — OPF subjects is a good default source; the translator
-        # doesn't always distinguish between the two so we fan them out across
-        # both rows when metadata.json has explicit genres/tags fields.
-        subjects = list(self._details.get("subjects") or [])
-        genres = list(self._metadata_json.get("genres") or []) or subjects[:3]
-        tags = list(self._metadata_json.get("tags") or []) or subjects
-        self._fill_chip_row(self._genres_layout, genres)
-        self._fill_chip_row(self._tags_layout, tags)
-        self._genres_heading.setVisible(bool(genres))
-        self._genres_row.setVisible(bool(genres))
+        tags = self._collect_tag_values(
+            self._details.get("subjects") or [],
+            self._metadata_json.get("genres") or [],
+            self._metadata_json.get("tags") or [],
+        )
+        self._genres_heading.hide()
+        self._genres_row.hide()
         self._tags_heading.setVisible(bool(tags))
         self._tags_row.setVisible(bool(tags))
+        self._fill_chip_row(self._tags_layout, tags)
 
         # Button availability — also dim the emoji + update tooltip so it's
         # obvious why the action isn't usable. (Previously only computed in
@@ -11901,6 +11899,44 @@ class BookDetailsDialog(QDialog):
             layout.addItem(stretch_item)
         else:
             layout.addStretch()
+
+    def _collect_tag_values(self, *sources) -> list[str]:
+        tags: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: str) -> None:
+            tag = str(value or "").strip().strip(",;")
+            if not tag:
+                return
+            key = tag.casefold()
+            if key in seen:
+                return
+            seen.add(key)
+            tags.append(tag)
+
+        for source in sources:
+            if isinstance(source, str):
+                values = [source]
+            else:
+                try:
+                    values = list(source or [])
+                except TypeError:
+                    values = [source]
+            for raw in values:
+                text = str(raw or "").strip()
+                if not text:
+                    continue
+                if "#" in text:
+                    parts = [
+                        m.group(1).strip().strip(",;")
+                        for m in re.finditer(r"#([^#]+)", text)
+                    ]
+                else:
+                    parts = [p.strip() for p in re.split(r"[,;]", text)]
+                for part in parts:
+                    add(part)
+
+        return tags
 
     # Per-tick batch size for :meth:`_populate_chapters` — small enough
     # that one tick fits comfortably inside a Qt event-loop iteration

@@ -2285,7 +2285,7 @@ class EPUBCompiler:
             if disable_gallery:
                 self.log("📷 Image gallery disabled by user preference")
             else:
-                gallery_images = [img for img in processed_images.values() if img != cover_file]
+                gallery_images = [img for img in processed_images.values() if img != cover_file_for_generated_page]
                 if gallery_images:
                     self.log(f"📷 Creating image gallery with {len(gallery_images)} images...")
                     gallery_page = self._create_gallery_page(book, gallery_images, css_items, metadata)
@@ -3179,18 +3179,6 @@ class EPUBCompiler:
             
             spine = root.find('.//opf:spine', ns)
             if spine is not None:
-                # Build dynamic skip list based on TRANSLATE_SPECIAL_FILES toggle
-                translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
-                
-                if translate_special:
-                    # When override is enabled, include ALL files in chapter ordering
-                    skip_list = []
-                    self.log("  📝 Special files mode ENABLED - including all files in TOC")
-                else:
-                    # Default behavior: skip navigation/metadata files
-                    skip_list = ['nav', 'toc', 'contents', 'cover']
-                    self.log("  📝 Special files mode DISABLED - excluding navigation files")
-                
                 # Count total items first to decide on logging
                 itemrefs = spine.findall('opf:itemref', ns)
                 total_items = len(itemrefs)
@@ -3201,36 +3189,15 @@ class EPUBCompiler:
                     idref = itemref.get('idref')
                     if idref and idref in manifest:
                         filename = manifest[idref]
-                        
-                        # CRITICAL: Files with numbers are always regular chapters, regardless of keywords!
-                        name_without_ext = os.path.splitext(filename)[0].lower()
-                        has_numbers = bool(re.search(r'\\d', name_without_ext))
-                        
-                        # If file has numbers, it's a chapter - include it
-                        if has_numbers:
-                            filename_to_order[filename] = chapter_num
-                            # Only log periodically for large EPUBs
-                            if not use_reduced_logging or idx % log_interval == 0 or idx == 0 or idx == total_items - 1:
-                                if use_reduced_logging:
-                                    percent = (idx * 100) // total_items
-                                    self.log(f"  [{idx}/{total_items}] ({percent}%) ✅")
-                                else:
-                                    self.log(f"  Chapter {chapter_num}: {filename} (numbered)")
-                            chapter_num += 1
-                        # Otherwise, check skip list for special files
-                        elif not skip_list or not any(skip in filename.lower() for skip in skip_list):
-                            filename_to_order[filename] = chapter_num
-                            # Only log periodically for large EPUBs
-                            if not use_reduced_logging or idx % log_interval == 0 or idx == 0 or idx == total_items - 1:
-                                if use_reduced_logging:
-                                    percent = (idx * 100) // total_items
-                                    self.log(f"  [{idx}/{total_items}] ({percent}%) ✅")
-                                else:
-                                    self.log(f"  Chapter {chapter_num}: {filename}")
-                            chapter_num += 1
-                        else:
-                            # Always log skipped files (these are rare)
-                            self.log(f"  Skipping special file (no numbers): {filename}")
+                        filename_to_order[filename] = chapter_num
+                        # Only log periodically for large EPUBs
+                        if not use_reduced_logging or idx % log_interval == 0 or idx == 0 or idx == total_items - 1:
+                            if use_reduced_logging:
+                                percent = (idx * 100) // total_items
+                                self.log(f"  [{idx}/{total_items}] ({percent}%) ✅")
+                            else:
+                                self.log(f"  Chapter {chapter_num}: {filename}")
+                        chapter_num += 1
             
             return filename_to_order
             
@@ -3722,6 +3689,10 @@ class EPUBCompiler:
     def _get_chapter_title(self, num: int, filename: str, content: str,
                           chapter_titles_info: Dict[int, Tuple[str, float, str]]) -> str:
         """Get chapter title with fallbacks - uses position-based numbering"""
+        filename_stem = os.path.splitext(os.path.basename(filename or ""))[0].lower()
+        if filename_stem == "cover":
+            return "Cover"
+
         title = None
         confidence = 0.0
         

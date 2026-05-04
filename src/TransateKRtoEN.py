@@ -7466,7 +7466,7 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
     # Priority 2: special keyword files with no digits -> chapter 0
     # Priority 3: special keyword files with no digits -> chapter 0
     _kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
-    special_keywords = [k.strip().lower() for k in _kw_env.split(',') if k.strip()] if _kw_env else ['title', 'toc', 'cover', 'copyright', 'preface', 'nav', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
+    special_keywords = [k.strip().lower() for k in _kw_env.split(',') if k.strip()] if _kw_env else ['title', 'toc', 'copyright', 'preface', 'nav', 'message', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
     if any(name in base_no_ext_lower for name in special_keywords):
         return 0, 'special_file'
     # Exact match only: these are special only when the basename matches exactly
@@ -13194,7 +13194,7 @@ def main(log_callback=None, stop_callback=None):
                 # Build offset positions — same logic as preview's
                 # Uses configurable keyword lists from SPECIAL_FILE_KEYWORDS / SPECIAL_FILE_EXACT
                 _sp_kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
-                _sp_keywords = [k.strip().lower() for k in _sp_kw_env.split(',') if k.strip()] if _sp_kw_env else ['title', 'toc', 'cover', 'copyright', 'preface', 'nav', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
+                _sp_keywords = [k.strip().lower() for k in _sp_kw_env.split(',') if k.strip()] if _sp_kw_env else ['title', 'toc', 'copyright', 'preface', 'nav', 'message', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
                 _sp_exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
                 _sp_exact = [k.strip().lower() for k in _sp_exact_env.split(',') if k.strip()] if _sp_exact_env else ['index', 'glossary', 'glossary_extension']
                 def _is_special_spine(fname):

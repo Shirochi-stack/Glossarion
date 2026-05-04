@@ -63,8 +63,8 @@ def count_tokens(text: str) -> int:
 
 # Default special file patterns — can be overridden via SPECIAL_FILE_KEYWORDS env var
 _DEFAULT_SPECIAL_PATTERNS = [
-    'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
-    'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
+    'title', 'toc', 'copyright', 'preface', 'nav',
+    'message', 'notice', 'colophon', 'dedication', 'epigraph',
     'foreword', 'acknowledgment', 'author', 'appendix',
     'bibliography', 'titlepage', 'halftitle', 'frontmatter', 'backmatter',
 ]

@@ -8498,7 +8498,7 @@ def _create_processing_options_section(self, parent):
     section_v.addWidget(translate_special_desc)
     
     # --- Collapsible keywords panel ---
-    _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, cover, copyright, preface, nav, message, info, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'
+    _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, copyright, preface, nav, message, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'
     _DEFAULT_SPECIAL_EXACT = 'index, glossary, glossary_extension'
     
     # Initialize vars from config
@@ -8518,7 +8518,7 @@ def _create_processing_options_section(self, parent):
     keywords_panel_v.addWidget(kw_substr_label)
     
     kw_substr_edit = QTextEdit()
-    kw_substr_edit.setPlaceholderText("e.g. title, toc, cover, copyright, nav, ...")
+    kw_substr_edit.setPlaceholderText("e.g. title, toc, copyright, nav, ...")
     kw_substr_edit.setText(self.special_file_keywords_var)
     kw_substr_edit.setFixedHeight(60)
     kw_substr_edit.setStyleSheet("""

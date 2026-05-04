@@ -1965,8 +1965,8 @@ def extract_chapters_from_epub(epub_path: str, return_metadata: bool = False) ->
     translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
     _kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
     special_keywords = [k.strip().lower() for k in _kw_env.split(',') if k.strip()] if _kw_env else [
-        'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
-        'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
+        'title', 'toc', 'copyright', 'preface', 'nav',
+        'message', 'notice', 'colophon', 'dedication', 'epigraph',
         'foreword', 'acknowledgment', 'author', 'appendix',
         'bibliography'
     ]

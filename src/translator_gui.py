@@ -3537,7 +3537,7 @@ Recent translations to summarize:
         
         self.translate_special_files_var = self.config.get('translate_special_files', False)
         # Custom special file keywords (comma-separated)
-        _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, cover, copyright, preface, nav, message, info, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'
+        _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, copyright, preface, nav, message, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'
         _DEFAULT_SPECIAL_EXACT = 'index, glossary, glossary_extension'
         self.special_file_keywords_var = self.config.get('special_file_keywords', _DEFAULT_SPECIAL_KEYWORDS)
         self.special_file_exact_var = self.config.get('special_file_exact', _DEFAULT_SPECIAL_EXACT)
