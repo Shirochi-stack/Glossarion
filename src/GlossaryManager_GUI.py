@@ -2052,17 +2052,18 @@ CRITICAL EXTRACTION RULES:
             traceback.print_exc()
     
     def _default_single_pass_header_prompt(self):
-        return """You have 2 roles to complete.
+        return """You have two tasks for this request.
 
-1. Perform glossary extraction using the Balanced/Full glossary logic.
-2. Perform translation using the provided glossary.
+1. Extract a translation glossary from the source text according to the glossary instructions.
+2. Translate the source text using the generated glossary and the translation instructions.
 
 Rules:
-- Wrap the generated glossary in <glossary>...</glossary> tags.
-- The glossary must follow the same structure and formatting as standard Balanced/Full extraction.
+- Output the generated glossary first inside <glossary>...</glossary> tags.
+- Inside <glossary>, follow the glossary prompt's requested schema, fields, and formatting exactly.
 - Any glossary prompt instruction to return only CSV/JSON applies only inside the <glossary> block.
-- The translation must strictly follow the translation prompt and utilize the generated glossary.
-- Output the <glossary> block first, then output only the translated content after </glossary>.
+- After </glossary>, output only the translated content.
+- The translation must use the generated glossary consistently while still following the active translation prompt.
+- Do not explain the process, mention these tasks, or add notes outside the required glossary block and translation.
 
 [Glossary Prompt]
 {glossary_prompt}
@@ -2813,6 +2814,12 @@ Rules:
         )
         if not single_pass_header_from_config or not str(single_pass_header_from_config).strip():
             self.single_pass_glossary_header_prompt = default_single_pass_header
+        elif (
+            "Balanced/Full glossary logic" in str(single_pass_header_from_config)
+            or "standard Balanced/Full extraction" in str(single_pass_header_from_config)
+        ):
+            self.single_pass_glossary_header_prompt = default_single_pass_header
+            self.config['single_pass_glossary_header_prompt'] = default_single_pass_header
         else:
             self.single_pass_glossary_header_prompt = single_pass_header_from_config
         self.single_pass_header_prompt_text.setPlainText(

@@ -2920,23 +2920,29 @@ CRITICAL EXTRACTION RULES:
     
     return (system_prompt, user_prompt)
 
-DEFAULT_SINGLE_PASS_GLOSSARY_HEADER_PROMPT = """You have 2 roles to complete.
+DEFAULT_SINGLE_PASS_GLOSSARY_HEADER_PROMPT = """You have two tasks for this request.
 
-1. Perform glossary extraction using the Balanced/Full glossary logic.
-2. Perform translation using the provided glossary.
+1. Extract a translation glossary from the source text according to the glossary instructions.
+2. Translate the source text using the generated glossary and the translation instructions.
 
 Rules:
-- Wrap the generated glossary in <glossary>...</glossary> tags.
-- The glossary must follow the same structure and formatting as standard Balanced/Full extraction.
+- Output the generated glossary first inside <glossary>...</glossary> tags.
+- Inside <glossary>, follow the glossary prompt's requested schema, fields, and formatting exactly.
 - Any glossary prompt instruction to return only CSV/JSON applies only inside the <glossary> block.
-- The translation must strictly follow the translation prompt and utilize the generated glossary.
-- Output the <glossary> block first, then output only the translated content after </glossary>.
+- After </glossary>, output only the translated content.
+- The translation must use the generated glossary consistently while still following the active translation prompt.
+- Do not explain the process, mention these tasks, or add notes outside the required glossary block and translation.
 
-[Balanced/Full Glossary Prompt]
+[Glossary Prompt]
 {glossary_prompt}
 
 [Translation Prompt]
 {translation_prompt}"""
+
+STALE_SINGLE_PASS_GLOSSARY_HEADER_MARKERS = (
+    "Balanced/Full glossary logic",
+    "standard Balanced/Full extraction",
+)
 
 
 def build_single_pass_translation_system_prompt(translation_prompt: str, source_text: str) -> str:
@@ -2949,7 +2955,7 @@ def build_single_pass_translation_system_prompt(translation_prompt: str, source_
     glossary_system_prompt, _ = build_prompt(source_text or "")
     translation_prompt = translation_prompt or ""
     header = (os.getenv("SINGLE_PASS_GLOSSARY_HEADER_PROMPT", "") or "").strip()
-    if not header:
+    if not header or any(marker in header for marker in STALE_SINGLE_PASS_GLOSSARY_HEADER_MARKERS):
         header = DEFAULT_SINGLE_PASS_GLOSSARY_HEADER_PROMPT
     if "{glossary_prompt}" in header or "{translation_prompt}" in header:
         return (
