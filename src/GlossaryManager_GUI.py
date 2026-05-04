@@ -59,7 +59,18 @@ class GlossaryManagerMixin:
             font.setPointSize(point_size)
             tree.setFont(font)
             try:
-                tree.header().setFont(font)
+                header = tree.header()
+                header.setFont(font)
+                header.setMinimumHeight(header.fontMetrics().height() + 12)
+                header.setStyleSheet(f"""
+                    QHeaderView::section {{
+                        background-color: #252525;
+                        color: white;
+                        border: 1px solid #4a5568;
+                        padding: 4px;
+                        font-size: {point_size}pt;
+                    }}
+                """)
             except Exception:
                 pass
 

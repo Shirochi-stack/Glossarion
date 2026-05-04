@@ -894,6 +894,7 @@ from typing import List, Dict
 import re
 
 PROGRESS_FILE = "glossary_progress.json"
+_GLOSSARY_PROGRESS_SESSION_ID = f"{os.getpid()}-{time.time_ns()}"
 _GLOSSARY_QA_ISSUES_FOUND = {}
 _GLOSSARY_CHAPTER_POSITIONS = {}
 _GLOSSARY_CHAPTER_NUMBERS = {}
@@ -7139,10 +7140,16 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         existing_chapters_by_idx = {}
         preserved_in_progress = []
         externally_failed = []
+        manual_removed_indices = []
         try:
             if os.path.exists(PROGRESS_FILE):
                 with open(PROGRESS_FILE, 'r', encoding='utf-8') as existing_f:
                     existing_progress = json.load(existing_f)
+                if (
+                    isinstance(existing_progress, dict)
+                    and existing_progress.get("manual_removed_session_id") in (None, "", _GLOSSARY_PROGRESS_SESSION_ID)
+                ):
+                    manual_removed_indices = _unique_int_list(existing_progress.get("manual_removed_indices", []))
                 existing_chapters = existing_progress.get("chapters", {}) if isinstance(existing_progress, dict) else {}
                 if isinstance(existing_chapters, dict):
                     for existing_key, existing_info in existing_chapters.items():
@@ -7160,6 +7167,20 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                     preserved_in_progress.extend(_unique_int_list(existing_progress.get("in_progress", [])))
         except Exception:
             existing_chapters_by_idx = {}
+
+        manual_removed_set = set(manual_removed_indices)
+        if manual_removed_indices:
+            completed_clean = [idx for idx in completed_clean if idx not in manual_removed_set]
+            failed_clean = [idx for idx in failed_clean if idx not in manual_removed_set]
+            merged_clean = [idx for idx in merged_clean if idx not in manual_removed_set]
+            failed_set = set(failed_clean)
+            merged_set = set(merged_clean)
+            if completed is not None:
+                completed[:] = completed_clean
+            if failed is not None:
+                failed[:] = failed_clean
+            if merged_indices is not None:
+                merged_indices[:] = merged_clean
 
         if externally_failed:
             failed_clean = _unique_int_list(failed_clean + externally_failed)
@@ -7187,6 +7208,8 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         completed_set = set(completed_clean)
         done_set = completed_set | failed_set | merged_set
         in_progress_clean = [idx for idx in in_progress_clean if idx not in done_set]
+        if manual_removed_indices:
+            in_progress_clean = [idx for idx in in_progress_clean if idx not in manual_removed_set]
         in_progress_set = set(in_progress_clean)
 
         chapters = {}
@@ -7249,6 +7272,8 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             chapters[chapter_key] = chapter_info
 
         for idx, existing_info in existing_chapters_by_idx.items():
+            if idx in manual_removed_set:
+                continue
             if idx in done_set or idx in in_progress_set:
                 continue
             if not isinstance(existing_info, dict):
@@ -7275,9 +7300,13 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             "indexing": "chapter_index_zero_based",
             "qa_issues_found": {str(idx): issues for idx, issues in sorted(qa_issues_clean.items())},
             "in_progress": in_progress_clean,
+            "progress_session_id": _GLOSSARY_PROGRESS_SESSION_ID,
             # Glossary is saved separately to output files, not in progress
             # This prevents the progress file from overwriting manual edits
         }
+        if manual_removed_indices:
+            progress_data["manual_removed_indices"] = manual_removed_indices
+            progress_data["manual_removed_session_id"] = _GLOSSARY_PROGRESS_SESSION_ID
         
         try:
             # Use atomic write with proper temp file handling

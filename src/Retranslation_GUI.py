@@ -1967,14 +1967,6 @@ class RetranslationMixin:
                     return restored
                 return None
 
-            def _gp_failed_from_in_progress_entry(info):
-                failed_entry = dict(info) if isinstance(info, dict) else {}
-                failed_entry['status'] = 'failed'
-                failed_entry.pop('previous_status', None)
-                failed_entry.pop('previous_progress_entry', None)
-                failed_entry.pop('previous_status_unknown', None)
-                return failed_entry
-            
             # Lightweight spine reader - returns (chapter_map, total_chapters, spine_index_map)
             def _read_spine_map(epub_path, translate_special):
                 """Read OPF spine and return (chapter_map, total_chapters, spine_index_map)."""
@@ -2246,6 +2238,10 @@ class RetranslationMixin:
             # Right-click context menu to delete entries from progress
             def _gp_context_menu(pos):
                 # Gather selected items that are deletable
+                clicked_item = gp_listbox.itemAt(pos)
+                if clicked_item is not None and not clicked_item.isSelected():
+                    gp_listbox.clearSelection()
+                    clicked_item.setSelected(True)
                 selected = gp_listbox.selectedItems()
                 deletable_statuses = ('completed', 'merged', 'in_progress', 'failed', 'qa_failed')
                 targets = [(it, it.data(Qt.UserRole + 1)) for it in selected
@@ -2284,6 +2280,19 @@ class RetranslationMixin:
                     
                     indices_to_remove = set(ci for _, ci in targets)
                     changed = False
+                    removed_indices = _d.get('manual_removed_indices', [])
+                    if not isinstance(removed_indices, list):
+                        removed_indices = []
+                    removed_set = set()
+                    for value in removed_indices:
+                        mapped_ci = _gp_index_for_progress_value(value, _d)
+                        if mapped_ci is not None:
+                            removed_set.add(mapped_ci)
+                    removed_set.update(indices_to_remove)
+                    _d['manual_removed_indices'] = sorted(removed_set)
+                    _d['manual_removed_session_id'] = _d.get('progress_session_id')
+                    changed = True
+
                     for key in ('completed', 'failed', 'merged_indices', 'in_progress'):
                         lst = _d.get(key, [])
                         new_lst = []
@@ -2316,17 +2325,6 @@ class RetranslationMixin:
                             keep = ci not in indices_to_remove if ci is not None else True
                             if keep:
                                 new_chapters[k] = v
-                            elif isinstance(v, dict) and str(v.get('status', '')).lower() in ('completed', 'merged', 'in_progress', 'pending'):
-                                failed_entry = _gp_failed_from_in_progress_entry(v)
-                                new_chapters[k] = failed_entry
-                                mapped_failed_ci = _gp_index_for_entry(failed_entry, k, _d)
-                                failed_value = mapped_failed_ci if mapped_failed_ci is not None else ci
-                                failed_list = _d.get('failed', [])
-                                if isinstance(failed_list, list) and failed_value not in failed_list:
-                                    failed_list.append(failed_value)
-                                    _d['failed'] = failed_list
-                                chapters_changed = True
-                                changed = True
                             else:
                                 chapters_changed = True
                                 changed = True
