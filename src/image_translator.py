@@ -2041,6 +2041,26 @@ class ImageTranslator:
         if isinstance(response, tuple):
             finish_reason = response[1] if len(response) > 1 else None
             response = response[0]
+        else:
+            finish_reason = getattr(response, 'finish_reason', None)
+
+        truncation_exhausted = False
+        try:
+            tls_client = self.client._get_thread_local_client() if hasattr(self.client, '_get_thread_local_client') else None
+            if tls_client is not None and getattr(tls_client, "_truncation_retries_exhausted", False):
+                truncation_exhausted = True
+                tls_client._truncation_retries_exhausted = False
+        except Exception:
+            pass
+        try:
+            if getattr(self.client, "_truncation_retries_exhausted", False):
+                truncation_exhausted = True
+                self.client._truncation_retries_exhausted = False
+        except Exception:
+            pass
+
+        if truncation_exhausted and finish_reason not in ("content_filter", "prohibited_content", "error"):
+            finish_reason = "length"
 
         if finish_reason in ("content_filter", "prohibited_content", "error"):
             self.last_vision_translation_finish_reason = finish_reason

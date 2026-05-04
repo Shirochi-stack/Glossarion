@@ -1,4 +1,4 @@
-# TransateKRtoEN.py
+﻿# TransateKRtoEN.py
 # -*- coding: utf-8 -*-
 import json
 import logging
@@ -4745,6 +4745,25 @@ class BatchTranslationProcessor:
                     self.image_translator,
                     self.check_stop_fn
                 )
+                vision_finish_reason = getattr(self.image_translator, 'last_vision_translation_finish_reason', None)
+                vision_qa_issues = _vision_finish_reason_qa_issues(vision_finish_reason)
+                if vision_qa_issues:
+                    if _vision_should_save_partial_for_qa(vision_qa_issues, self.config):
+                        try:
+                            with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                                f.write(chapter_body if isinstance(chapter_body, str) else "")
+                        except Exception:
+                            pass
+                    with self.progress_lock:
+                        self.update_progress_fn(
+                            idx, actual_num, content_hash, fname,
+                            status="qa_failed",
+                            qa_issues_found=vision_qa_issues,
+                            chapter_obj=chapter,
+                        )
+                        self.save_progress_fn()
+                    print(f"⚠️ Vision image chapter {actual_num} marked as qa_failed: {', '.join(vision_qa_issues)}")
+                    return False, actual_num, None, None, None
                 if image_translations:
                     chapter["body"] = chapter_body
                     # Create a copy of the processed body
@@ -7969,6 +7988,13 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
         print(f"   Translation result: {'Success' if translation_result and '[Image Translation Error:' not in translation_result else 'Failed'}")
         if translation_result and "[Image Translation Error:" in translation_result:
             print(f"   Error message: {translation_result}")
+
+        vision_qa_issues = _vision_finish_reason_qa_issues(
+            getattr(image_translator, 'last_vision_translation_finish_reason', None)
+        )
+        if vision_qa_issues:
+            print(f"   ⚠️ Image translation marked chapter QA failed: {', '.join(vision_qa_issues)}")
+            return str(soup), image_translations
         
         if translation_result:
             img_tag = None
@@ -8130,6 +8156,25 @@ def _image_marker_for_combined_ocr(img_info):
     if alt:
         attrs.append(f'alt="{html.escape(alt, quote=True)}"')
     return "<img " + " ".join(attrs) + " />"
+
+
+def _vision_finish_reason_qa_issues(finish_reason):
+    """Map Vision OCR translation finish reasons to chapter QA issue labels."""
+    reason = str(finish_reason or "").strip().lower()
+    if reason in ("length", "max_tokens", "stop_sequence_limit", "truncated", "incomplete"):
+        return ["TRUNCATED"]
+    if reason in ("content_filter", "prohibited_content", "error"):
+        return ["PROHIBITED_CONTENT"]
+    return None
+
+
+def _vision_should_save_partial_for_qa(qa_issues, config=None):
+    issues = set(qa_issues or [])
+    if "PROHIBITED_CONTENT" in issues:
+        return os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(config, 'save_prohibited_results', False))
+    if "TRUNCATED" in issues or "PARTIAL" in issues:
+        return os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(config, 'save_partial_results', False))
+    return False
 
 
 def _process_chapter_images_vision_ocr_combined(
@@ -14587,10 +14632,10 @@ def main(log_callback=None, stop_callback=None):
                     )
 
                     vision_finish_reason = getattr(image_translator, 'last_vision_translation_finish_reason', None)
-                    if vision_finish_reason in ("content_filter", "prohibited_content", "error"):
+                    vision_qa_issues = _vision_finish_reason_qa_issues(vision_finish_reason)
+                    if vision_qa_issues:
                         fname = FileUtilities.create_chapter_filename(c, actual_num)
-                        save_prohibited_results = os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(config, 'save_prohibited_results', False))
-                        if save_prohibited_results:
+                        if _vision_should_save_partial_for_qa(vision_qa_issues, config):
                             try:
                                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                                     f.write(translated_html if isinstance(translated_html, str) else "")
@@ -14599,11 +14644,11 @@ def main(log_callback=None, stop_callback=None):
                         progress_manager.update(
                             idx, actual_num, content_hash, fname,
                             status="qa_failed",
-                            qa_issues_found=["PROHIBITED_CONTENT"],
+                            qa_issues_found=vision_qa_issues,
                             chapter_obj=c,
                         )
                         progress_manager.save()
-                        print(f"❌ Vision image chapter {actual_num} hit content filter/prohibited; marked as qa_failed")
+                        print(f"⚠️ Vision image chapter {actual_num} marked as qa_failed: {', '.join(vision_qa_issues)}")
                         continue
                     
                     if image_translations:
@@ -14738,6 +14783,26 @@ def main(log_callback=None, stop_callback=None):
                         image_translator,
                         check_stop
                     )
+
+                    vision_finish_reason = getattr(image_translator, 'last_vision_translation_finish_reason', None)
+                    vision_qa_issues = _vision_finish_reason_qa_issues(vision_finish_reason)
+                    if vision_qa_issues:
+                        fname = FileUtilities.create_chapter_filename(c, actual_num)
+                        if _vision_should_save_partial_for_qa(vision_qa_issues, config):
+                            try:
+                                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                                    f.write(body_with_images if isinstance(body_with_images, str) else "")
+                            except Exception:
+                                pass
+                        progress_manager.update(
+                            idx, actual_num, content_hash, fname,
+                            status="qa_failed",
+                            qa_issues_found=vision_qa_issues,
+                            chapter_obj=c,
+                        )
+                        progress_manager.save()
+                        print(f"⚠️ Vision image chapter {actual_num} marked as qa_failed: {', '.join(vision_qa_issues)}")
+                        continue
                     
                     if image_translations:
                         print(f"✅ Translated {len(image_translations)} images")
@@ -16811,3 +16876,4 @@ def main(log_callback=None, stop_callback=None):
 if __name__ == "__main__":
     from shutdown_utils import run_cli_main
     run_cli_main(main)
+
