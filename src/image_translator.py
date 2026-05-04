@@ -34,12 +34,13 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_VISION_OCR_PROMPT = (
     "Extract only the readable text that is physically present in the image, in natural reading order. "
+    "If the image itself is a cover page, character art, scene illustration, decorative image, or otherwise not a page of readable story text, reply with exactly: No. "
     "Return only the base source text exactly as seen. Preserve line breaks when they help the reading order. "
     "For Chinese/Japanese/Korean text with small pronunciation guides above or beside the main characters, OCR only the main/base characters and ignore the pronunciation guides. "
     "For pinyin-over-Chinese images, output the Chinese characters only; do not output the pinyin unless the pinyin is standalone text with no matching Chinese base text. "
     "Do not translate, summarize, explain, annotate, transliterate, romanize, or add pronunciation guides. "
     "Do not output duplicate reading lines such as pinyin, romaji, furigana, Jyutping, or Latin readings when they are attached to the same base text. "
-    "If no readable text is present, return an empty response."
+    "If no readable story text is present, reply with exactly: No."
 )
 
 def requires_cv2(func):
@@ -1616,6 +1617,8 @@ class ImageTranslator:
             self.current_image_path = image_path
             print(f"   🔍 translate_image called for: {image_path}")
             
+            self._preserve_current_image = False
+
             # Check for stop at the beginning
             if check_stop_fn and check_stop_fn():
                 print("   ❌ Image translation stopped by user")
@@ -1759,6 +1762,7 @@ class ImageTranslator:
         compressed_path = None
         try:
             self.current_image_path = image_path
+            self._preserve_current_image = False
             print(f"   🔎 ocr_image called for: {image_path}")
             if check_stop_fn and check_stop_fn():
                 print("   ❌ Image OCR stopped by user")
@@ -1782,7 +1786,12 @@ class ImageTranslator:
                         img, width, height, context, check_stop_fn, translate_after=False
                     )
                 image_bytes = self._image_to_bytes_with_compression(img)
-                return self._call_vision_ocr_api(image_bytes, context, check_stop_fn)
+                ocr_text = self._call_vision_ocr_api(image_bytes, context, check_stop_fn)
+                if self._is_ocr_no_response(ocr_text):
+                    self._preserve_current_image = True
+                    print("   OCR marked image as cover/illustration; skipping OCR text use")
+                    return None
+                return ocr_text
         except Exception as e:
             is_cancelled = False
             try:
@@ -1849,7 +1858,25 @@ class ImageTranslator:
             return True
         return output_mode == "vision"
 
-    def _call_vision_ocr_api(self, image_data, assistant_prompt, check_stop_fn, chunk_idx=None):
+    @staticmethod
+    def _is_ocr_no_response(text) -> bool:
+        """Return True when the OCR model used the cover/illustration sentinel."""
+        if text is None:
+            return False
+        normalized = str(text).strip()
+        normalized = re.sub(r'^[\s"`\'*_~]+|[\s"`\'*_~.。!！]+$', '', normalized).strip()
+        return normalized.lower() == "no"
+
+    def _call_vision_ocr_api(
+        self,
+        image_data,
+        assistant_prompt,
+        check_stop_fn,
+        chunk_idx=None,
+        image_basename=None,
+        image_idx=None,
+        chapter_num=None,
+    ):
         """OCR an image/chunk using the dedicated Vision OCR prompt."""
         messages = [{"role": "system", "content": self.vision_ocr_prompt}]
         if assistant_prompt and assistant_prompt.strip():
@@ -1858,6 +1885,7 @@ class ImageTranslator:
                 "content": (
                     f"{assistant_prompt}\n\n"
                     "OCR this image/chunk. Return only the main/base source text. "
+                    "If this image/chunk is cover art, an illustration, decorative art, or has no readable story text, reply with exactly: No. "
                     "Ignore pinyin/romaji/furigana/Jyutping pronunciation guides attached to base characters. Do not translate."
                 )
             })
@@ -1866,15 +1894,22 @@ class ImageTranslator:
                 "role": "user",
                 "content": (
                     "OCR this image. Return only the main/base source text. "
+                    "If this image is cover art, an illustration, decorative art, or has no readable story text, reply with exactly: No. "
                     "Ignore pinyin/romaji/furigana/Jyutping pronunciation guides attached to base characters. Do not translate."
                 )
             })
 
-        if hasattr(self, 'current_chapter_num'):
-            chapter_num = self.current_chapter_num
-            image_idx = getattr(self, 'current_image_index', 0)
+        effective_chapter_num = chapter_num if chapter_num is not None else getattr(self, 'current_chapter_num', None)
+        effective_image_idx = image_idx if image_idx is not None else getattr(self, 'current_image_index', 0)
+        if effective_chapter_num is not None:
             chunk_suffix = f"_chunk_{chunk_idx:03d}" if chunk_idx is not None else ""
-            self.client.set_output_filename(f"ocr_{chapter_num:03d}_Chapter_{chapter_num}_image_{image_idx}{chunk_suffix}.txt")
+            try:
+                chapter_part = f"{int(effective_chapter_num):03d}"
+            except Exception:
+                chapter_part = str(effective_chapter_num)
+            self.client.set_output_filename(
+                f"ocr_{chapter_part}_Chapter_{effective_chapter_num}_image_{effective_image_idx}{chunk_suffix}.txt"
+            )
 
         retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
         chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "1800")) if retry_timeout_enabled else None
@@ -1900,7 +1935,10 @@ class ImageTranslator:
         self._save_ocr_text(
             ocr_text,
             kind="chunks" if chunk_idx is not None else "single",
+            image_basename=image_basename,
             chunk_idx=chunk_idx,
+            image_idx=effective_image_idx,
+            chapter_num=effective_chapter_num,
         )
         return ocr_text.strip()
 
@@ -1908,6 +1946,10 @@ class ImageTranslator:
         """Translate OCR text as a normal text request."""
         if not ocr_text or not ocr_text.strip():
             print("   ℹ️ OCR returned no readable text")
+            return None
+
+        if self._is_ocr_no_response(ocr_text):
+            print("   OCR marked image as cover/illustration; skipping OCR translation")
             return None
 
         if check_stop_fn and check_stop_fn():
@@ -2408,7 +2450,7 @@ class ImageTranslator:
             self._clear_ocr_cache_outputs()
             self._write_ocr_cache(signature)
 
-    def _safe_ocr_stem(self, image_basename=None):
+    def _safe_ocr_stem(self, image_basename=None, image_idx=None, chapter_num=None):
         image_basename = image_basename or os.path.basename(getattr(self, 'current_image_path', 'image'))
         stem, _ = os.path.splitext(image_basename)
         stem = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', stem).strip(' ._') or 'image'
@@ -2426,8 +2468,8 @@ class ImageTranslator:
                     trimmed.append(char)
                     byte_count += len(char_bytes)
                 stem = (''.join(trimmed).rstrip(' ._') or 'image') + f"_{digest}"
-        chapter_num = getattr(self, 'current_chapter_num', None)
-        image_idx = getattr(self, 'current_image_index', None)
+        chapter_num = chapter_num if chapter_num is not None else getattr(self, 'current_chapter_num', None)
+        image_idx = image_idx if image_idx is not None else getattr(self, 'current_image_index', None)
         parts = []
         if chapter_num is not None:
             try:
@@ -2442,7 +2484,7 @@ class ImageTranslator:
         parts.append(stem)
         return "_".join(str(part) for part in parts if str(part))
 
-    def _save_ocr_text(self, text, kind="chunks", image_basename=None, chunk_idx=None):
+    def _save_ocr_text(self, text, kind="chunks", image_basename=None, chunk_idx=None, image_idx=None, chapter_num=None):
         """Save OCR text under output/OCR for inspection and reuse."""
         if not text:
             return None
@@ -2451,7 +2493,7 @@ class ImageTranslator:
             target_dir = os.path.join(ocr_dir, kind)
             os.makedirs(target_dir, exist_ok=True)
             suffix = f"_chunk_{chunk_idx:03d}" if chunk_idx is not None else ""
-            filename = f"{self._safe_ocr_stem(image_basename)}{suffix}.txt"
+            filename = f"{self._safe_ocr_stem(image_basename, image_idx=image_idx, chapter_num=chapter_num)}{suffix}.txt"
             path = os.path.join(target_dir, filename)
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(text)
@@ -2536,8 +2578,11 @@ class ImageTranslator:
         for i in range(num_chunks):
             disk_ocr = self._load_saved_ocr_text(kind="chunks", image_basename=image_basename, chunk_idx=i + 1)
             if disk_ocr:
-                ocr_by_index[i] = disk_ocr
-                print(f"   Skipping OCR chunk {i+1}/{num_chunks}; found existing OCR/chunks file")
+                if self._is_ocr_no_response(disk_ocr):
+                    print(f"   Skipping OCR chunk {i+1}/{num_chunks}; cached OCR says cover/illustration")
+                else:
+                    ocr_by_index[i] = disk_ocr
+                    print(f"   Skipping OCR chunk {i+1}/{num_chunks}; found existing OCR/chunks file")
                 continue
 
             if check_stop_fn and check_stop_fn():
@@ -2586,6 +2631,9 @@ class ImageTranslator:
                 return i, None
             print(f"   Step 1/2: OCR chunk {i+1}/{num_chunks} with dedicated Vision OCR prompt...")
             ocr_text = self._call_vision_ocr_api(chunk_bytes, chunk_prompt, check_stop_fn, i + 1)
+            if self._is_ocr_no_response(ocr_text):
+                print(f"   OCR chunk {i+1}/{num_chunks} marked as cover/illustration; excluding from combined OCR")
+                return i, None
             if ocr_text:
                 print(f"   OCR chunk {i+1}/{num_chunks} complete ({len(ocr_text)} chars)")
             else:
@@ -2649,7 +2697,8 @@ class ImageTranslator:
 
         ordered_ocr = [ocr_by_index[i] for i in range(num_chunks) if ocr_by_index.get(i)]
         if not ordered_ocr:
-            print("   No successful OCR chunks from tall image")
+            self._preserve_current_image = True
+            print("   No translatable OCR chunks from tall image; preserving original image")
             return None
 
         combined_ocr = self._combine_vision_ocr_chunks(ordered_ocr)
@@ -2916,6 +2965,10 @@ class ImageTranslator:
                 print("   🔎 Step 1/2: OCR image with dedicated Vision OCR prompt...")
                 ocr_text = self._call_vision_ocr_api(image_data, assistant_prompt, check_stop_fn)
                 if not ocr_text:
+                    return None
+                if self._is_ocr_no_response(ocr_text):
+                    self._preserve_current_image = True
+                    print("   OCR marked image as cover/illustration; preserving original image and skipping translation")
                     return None
                 ocr_text = self._inject_context_headers_into_ocr(ocr_text, assistant_prompt)
                 self._save_ocr_text(ocr_text, kind="single")

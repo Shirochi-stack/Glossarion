@@ -7859,7 +7859,20 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
     if len(images) > max_images_per_chapter:
         print(f"   ⚠️ Chapter has {len(images)} images - processing first {max_images_per_chapter} only")
         images = images[:max_images_per_chapter]
-    
+
+    if vision_ocr_mode and len(images) > 1 and not ContentProcessor.is_meaningful_text_content(chapter_html):
+        combined_html, combined_translations = _process_chapter_images_vision_ocr_combined(
+            soup,
+            images,
+            actual_num,
+            image_translator,
+            chapter_header_text,
+            check_stop_fn,
+        )
+        if combined_translations:
+            return combined_html, combined_translations
+        return chapter_html, {}
+
     for idx, img_info in enumerate(images, 1):
         if check_stop_fn and check_stop_fn():
             print("❌ Image translation stopped by user")
@@ -8108,6 +8121,216 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
         print(f"   ℹ️ No images were successfully translated")
         
     return chapter_html, {}
+
+
+def _image_marker_for_combined_ocr(img_info):
+    """Build an HTML image marker for non-text images preserved during combined OCR translation."""
+    src = str(img_info.get('src', '') or '')
+    attrs = [f'src="{html.escape(src, quote=True)}"']
+    alt = str(img_info.get('alt', '') or '').strip()
+    if alt:
+        attrs.append(f'alt="{html.escape(alt, quote=True)}"')
+    return "<img " + " ".join(attrs) + " />"
+
+
+def _process_chapter_images_vision_ocr_combined(
+    soup,
+    images,
+    actual_num,
+    image_translator,
+    chapter_header_text,
+    check_stop_fn=None,
+):
+    """OCR every image in an image-only HTML page, then translate the combined OCR once."""
+    print(f"   Vision OCR page mode: OCRing {len(images)} images first, then translating combined OCR once")
+
+    ocr_parts = []
+    processed_srcs = []
+    first_img_tag = None
+    jobs = []
+    for idx, img_info in enumerate(images, 1):
+        if check_stop_fn and check_stop_fn():
+            print("   Image OCR stopped by user before combined translation")
+            break
+
+        img_src = img_info.get('src', '')
+
+        img_path = _resolve_chapter_image_path(img_src, image_translator, actual_num, idx)
+        if not img_path:
+            print(f"   Image not found for combined OCR: {img_src}")
+            continue
+
+        jobs.append((idx, img_info, img_src, img_path))
+
+    def _ocr_page_image(job):
+        idx, img_info, img_src, img_path = job
+        if check_stop_fn and check_stop_fn():
+            return idx, img_info, img_src, None
+
+        from PIL import Image
+        context = ""
+        if img_info.get('alt'):
+            context = f", Alt text: {img_info['alt']}"
+
+        print(f"   OCR image {idx}/{len(images)} before chapter translation: {os.path.basename(img_path)}")
+        processed_path = None
+        compressed_path = None
+        try:
+            compressed_path = img_path
+            if os.getenv("ENABLE_IMAGE_COMPRESSION", "0") == "1":
+                compressed_path = image_translator.compress_image(img_path)
+
+            processed_path = image_translator.preprocess_image_for_watermarks(compressed_path)
+            with Image.open(processed_path) as img:
+                width, height = img.size
+                print(f"   OCR image dimensions: {width}x{height}")
+                if img.mode not in ('RGB', 'RGBA'):
+                    img = img.convert('RGB')
+
+                if height > image_translator.chunk_height:
+                    # Tall single images already have their own internal OCR batching/chunk cache.
+                    image_translator.set_current_chapter(actual_num)
+                    image_translator.current_image_index = idx
+                    ocr_text = image_translator._process_image_chunks_ocr_first_combined(
+                        img, width, height, context, check_stop_fn, translate_after=False
+                    )
+                else:
+                    image_bytes = image_translator._image_to_bytes_with_compression(img)
+                    ocr_text = image_translator._call_vision_ocr_api(
+                        image_bytes,
+                        context,
+                        check_stop_fn,
+                        image_basename=os.path.basename(img_path),
+                        image_idx=idx,
+                        chapter_num=actual_num,
+                    )
+            return idx, img_info, img_src, ocr_text
+        finally:
+            if compressed_path and compressed_path != img_path and os.getenv("SAVE_COMPRESSED_IMAGES", "0") != "1":
+                try:
+                    if os.path.exists(compressed_path):
+                        os.unlink(compressed_path)
+                except Exception:
+                    pass
+            if processed_path and processed_path != img_path and processed_path != compressed_path and os.getenv("SAVE_CLEANED_IMAGES", "0") != "1":
+                try:
+                    if os.path.exists(processed_path):
+                        os.unlink(processed_path)
+                except Exception:
+                    pass
+
+    ocr_by_index = {}
+    batch_enabled = bool(getattr(image_translator, "_vision_ocr_batch_enabled", lambda: False)())
+    batch_size = min(len(jobs), int(getattr(image_translator, "_vision_ocr_batch_size", lambda: 1)())) if batch_enabled and jobs else 1
+    previous_batch_env = os.environ.get("BATCH_TRANSLATION")
+    try:
+        if batch_enabled and batch_size > 1 and len(jobs) > 1:
+            print(f"   Vision OCR page batch mode enabled: {batch_size} parallel OCR workers")
+            os.environ["BATCH_TRANSLATION"] = "1"
+            for batch_start in range(0, len(jobs), batch_size):
+                if check_stop_fn and check_stop_fn():
+                    print("   Image OCR stopped before next page OCR batch")
+                    break
+                current_batch = jobs[batch_start:batch_start + batch_size]
+                print(f"   Page OCR batch {batch_start // batch_size + 1}: {len(current_batch)} image request(s)")
+                with ThreadPoolExecutor(max_workers=len(current_batch)) as executor:
+                    future_to_job = {executor.submit(_ocr_page_image, job): job for job in current_batch}
+                    for future in as_completed(future_to_job):
+                        idx, img_info, img_src, ocr_text = future.result()
+                        ocr_by_index[idx] = (img_info, img_src, ocr_text)
+                if check_stop_fn and check_stop_fn():
+                    print("   Image OCR stopped after page OCR batch")
+                    break
+        else:
+            for job in jobs:
+                idx, img_info, img_src, ocr_text = _ocr_page_image(job)
+                ocr_by_index[idx] = (img_info, img_src, ocr_text)
+                if check_stop_fn and check_stop_fn():
+                    print("   Image OCR stopped after current page image")
+                    break
+    finally:
+        if previous_batch_env is None:
+            os.environ.pop("BATCH_TRANSLATION", None)
+        else:
+            os.environ["BATCH_TRANSLATION"] = previous_batch_env
+
+    for idx in sorted(ocr_by_index):
+        img_info, img_src, ocr_text = ocr_by_index[idx]
+        is_no = getattr(image_translator, "_is_ocr_no_response", lambda text: False)(ocr_text)
+
+        if is_no:
+            marker = _image_marker_for_combined_ocr(img_info)
+            ocr_parts.append(marker)
+            processed_srcs.append(img_src)
+            print(f"   OCR image {idx}/{len(images)} returned No; injected image marker into combined OCR")
+        elif ocr_text and str(ocr_text).strip():
+            ocr_parts.append(str(ocr_text).strip())
+            processed_srcs.append(img_src)
+            print(f"   OCR image {idx}/{len(images)} complete ({len(str(ocr_text).strip())} chars)")
+        else:
+            marker = _image_marker_for_combined_ocr(img_info)
+            ocr_parts.append(marker)
+            processed_srcs.append(img_src)
+            print(f"   OCR image {idx}/{len(images)} returned no text; injected image marker into combined OCR")
+
+    combined_ocr = "\n\n".join(part for part in ocr_parts if str(part).strip()).strip()
+    if not combined_ocr:
+        print("   Combined page OCR was empty; preserving original image HTML")
+        return str(soup), {}
+
+    try:
+        image_translator._save_ocr_text(
+            combined_ocr,
+            kind="chapters",
+            image_basename=f"chapter_{actual_num:03d}_combined_images",
+        )
+    except Exception:
+        pass
+
+    combined_prompt = (
+        f"The OCR text below was assembled from {len(images)} ordered image(s) in one HTML page. "
+        "Translate it as one continuous passage. Preserve every <img ... /> tag exactly where it appears; "
+        "those tags mark cover/illustration images that returned No during OCR and must remain in the output."
+    )
+    if chapter_header_text:
+        combined_prompt += f"\n\n[CHAPTER_HEADER_TEXT]\n{chapter_header_text}\n[/CHAPTER_HEADER_TEXT]"
+
+    image_translator.current_image_index = "combined"
+    print(f"   Step 2/2: Translating combined page OCR ({len(combined_ocr)} chars)...")
+    translated = image_translator._translate_ocr_text(combined_ocr, combined_prompt, check_stop_fn)
+    if not translated:
+        print("   Combined page OCR translation returned empty; preserving original image HTML")
+        return str(soup), {}
+
+    for src in processed_srcs:
+        first_img_tag = soup.find('img', src=src)
+        if first_img_tag:
+            break
+    original_img_tags = [img for img in soup.find_all('img') if img.get('src') in processed_srcs]
+
+    container = soup.new_tag('div', **{'class': 'translated-text-only'})
+    translation_div = soup.new_tag('div', **{'class': 'image-translation'})
+    translated_fragment = BeautifulSoup(translated, 'html.parser')
+    for child in list(translated_fragment.contents):
+        translation_div.append(child)
+    container.append(translation_div)
+
+    if first_img_tag:
+        first_img_tag.replace_with(container)
+    else:
+        target = soup.body if soup.body else soup
+        target.insert(0, container)
+
+    for img in original_img_tags:
+        if img is first_img_tag:
+            continue
+        if getattr(img, 'parent', None):
+            img.decompose()
+
+    image_translations = {"__combined_vision_ocr__": translated}
+    image_translator.save_translation_log(actual_num, image_translations)
+    print(f"   Combined page OCR translated ({len(translated)} chars); original No-image markers preserved in translation")
+    return str(soup), image_translations
 
 
 def _load_image_rename_map_for_output(output_dir):
@@ -14125,6 +14348,9 @@ def main(log_callback=None, stop_callback=None):
             if graceful_stop_active or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
                 print("✅ Graceful stop: Stopping new chapter processing...")
                 break
+            if os.environ.get('TRANSLATION_CANCELLED') == '1' or (check_stop() and os.environ.get('GRACEFUL_STOP') != '1'):
+                print("❌ Translation stopped before starting next chapter")
+                break
             
             # Skip if this chapter was merged into another
             if idx in merged_children:
@@ -14248,9 +14474,14 @@ def main(log_callback=None, stop_callback=None):
                 
                 translated_html = c["body"]
                 image_translations = {}
-                
+                fname = FileUtilities.create_chapter_filename(c, actual_num)
+                progress_manager.update(idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=c)
+                progress_manager.save()
+
                 # Step 1: Process images if image translation is enabled
+                image_processing_attempted = False
                 if image_translator and config.ENABLE_IMAGE_TRANSLATION:
+                    image_processing_attempted = True
                     print(f"🖼️ Translating {c.get('image_count', 0)} images...")
                     image_translator.set_current_chapter(chap_num)
                     
@@ -14263,6 +14494,21 @@ def main(log_callback=None, stop_callback=None):
                     
                     if image_translations:
                         print(f"✅ Translated {len(image_translations)} images")
+
+                force_stop_active = (
+                    os.environ.get('TRANSLATION_CANCELLED') == '1'
+                    or (check_stop() and os.environ.get('GRACEFUL_STOP') != '1')
+                )
+                graceful_stop_active = (
+                    os.environ.get('GRACEFUL_STOP') == '1'
+                    or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+                )
+                if force_stop_active or (graceful_stop_active and image_processing_attempted and not image_translations):
+                    fname = FileUtilities.create_chapter_filename(c, actual_num)
+                    print(f"❌ Image-only chapter {actual_num} stopped before completion; not marking as completed")
+                    progress_manager.update(idx, actual_num, content_hash, fname, status="failed", chapter_obj=c)
+                    progress_manager.save()
+                    break
                 
                 # Step 2: Check for headers/titles that need translation
                 from bs4 import BeautifulSoup
@@ -14334,10 +14580,14 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     print(f"ℹ️ No headers found to translate")
                     status = "completed"
-                
+
                 # Step 3: Save with correct filename
-                fname = FileUtilities.create_chapter_filename(c, actual_num)
-                
+                if os.environ.get('TRANSLATION_CANCELLED') == '1' or (check_stop() and os.environ.get('GRACEFUL_STOP') != '1'):
+                    print(f"❌ Image-only chapter {actual_num} stopped before saving; not marking as completed")
+                    progress_manager.update(idx, actual_num, content_hash, fname, status="failed", chapter_obj=c)
+                    progress_manager.save()
+                    break
+
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(translated_html)
                 
