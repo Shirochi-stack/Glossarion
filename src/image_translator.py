@@ -1771,6 +1771,15 @@ class ImageTranslator:
                 print(f"   ❌ Image file does not exist: {image_path}")
                 return None
 
+            disk_ocr = self._load_saved_ocr_text(kind="single", image_basename=os.path.basename(image_path))
+            if disk_ocr:
+                if self._is_ocr_no_response(disk_ocr):
+                    self._preserve_current_image = True
+                    print("   Skipping OCR image; cached OCR/single says cover/illustration")
+                    return None
+                print(f"   Skipping OCR image; found existing OCR/single file ({len(disk_ocr.strip())} chars)")
+                return disk_ocr.strip()
+
             compressed_path = image_path
             if os.getenv("ENABLE_IMAGE_COMPRESSION", "0") == "1":
                 compressed_path = self.compress_image(image_path)
@@ -2502,15 +2511,21 @@ class ImageTranslator:
             print(f"   Could not save OCR text: {e}")
             return None
 
-    def _ocr_text_path(self, kind="chunks", image_basename=None, chunk_idx=None):
+    def _ocr_text_path(self, kind="chunks", image_basename=None, chunk_idx=None, image_idx=None, chapter_num=None):
         ocr_dir = getattr(self, 'ocr_dir', os.path.join(self.output_dir, "OCR"))
         suffix = f"_chunk_{chunk_idx:03d}" if chunk_idx is not None else ""
-        filename = f"{self._safe_ocr_stem(image_basename)}{suffix}.txt"
+        filename = f"{self._safe_ocr_stem(image_basename, image_idx=image_idx, chapter_num=chapter_num)}{suffix}.txt"
         return os.path.join(ocr_dir, kind, filename)
 
-    def _load_saved_ocr_text(self, kind="chunks", image_basename=None, chunk_idx=None):
+    def _load_saved_ocr_text(self, kind="chunks", image_basename=None, chunk_idx=None, image_idx=None, chapter_num=None):
         try:
-            path = self._ocr_text_path(kind=kind, image_basename=image_basename, chunk_idx=chunk_idx)
+            path = self._ocr_text_path(
+                kind=kind,
+                image_basename=image_basename,
+                chunk_idx=chunk_idx,
+                image_idx=image_idx,
+                chapter_num=chapter_num,
+            )
             if not os.path.exists(path):
                 return None
             with open(path, 'r', encoding='utf-8') as f:

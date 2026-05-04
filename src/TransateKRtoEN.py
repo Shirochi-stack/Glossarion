@@ -8173,6 +8173,16 @@ def _process_chapter_images_vision_ocr_combined(
             context = f", Alt text: {img_info['alt']}"
 
         print(f"   OCR image {idx}/{len(images)} before chapter translation: {os.path.basename(img_path)}")
+        disk_ocr = image_translator._load_saved_ocr_text(
+            kind="single",
+            image_basename=os.path.basename(img_path),
+            image_idx=idx,
+            chapter_num=actual_num,
+        )
+        if disk_ocr:
+            print(f"   Skipping OCR image {idx}/{len(images)}; found existing OCR/single file")
+            return idx, img_info, img_src, disk_ocr
+
         processed_path = None
         compressed_path = None
         try:
