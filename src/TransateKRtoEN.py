@@ -13241,6 +13241,26 @@ def main(log_callback=None, stop_callback=None):
     # Check if special files translation is disabled
     translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
 
+    _special_kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
+    _special_keywords = (
+        [k.strip().lower() for k in _special_kw_env.split(',') if k.strip()]
+        if _special_kw_env
+        else ['title', 'toc', 'copyright', 'preface', 'nav', 'message', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
+    )
+    _special_exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
+    _special_exact = (
+        [k.strip().lower() for k in _special_exact_env.split(',') if k.strip()]
+        if _special_exact_env
+        else ['index', 'glossary', 'glossary_extension']
+    )
+
+    def _is_configured_special_file(fname):
+        name = os.path.basename(str(fname or '')).lower()
+        name_noext = os.path.splitext(name)[0]
+        if not name_noext:
+            return False
+        return name_noext in _special_exact or any(kw in name_noext for kw in _special_keywords)
+
     # When USE_SPINE_ORDER is active, build a mapping from each extracted
     # chapter's list index → its spine-offset position.  The positions
     # are computed using the FULL OPF spine (same logic as the GUI preview
@@ -13278,30 +13298,10 @@ def main(log_callback=None, stop_callback=None):
                         if _idref and _idref in _manifest:
                             _all_spine_basenames.append(_manifest[_idref])
 
-                # Build offset positions — same logic as preview's
-                # Uses configurable keyword lists from SPECIAL_FILE_KEYWORDS / SPECIAL_FILE_EXACT
-                _sp_kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
-                _sp_keywords = [k.strip().lower() for k in _sp_kw_env.split(',') if k.strip()] if _sp_kw_env else ['title', 'toc', 'copyright', 'preface', 'nav', 'message', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
-                _sp_exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
-                _sp_exact = [k.strip().lower() for k in _sp_exact_env.split(',') if k.strip()] if _sp_exact_env else ['index', 'glossary', 'glossary_extension']
-                def _is_special_spine(fname):
-                    fl = fname.lower()
-                    fnoext = os.path.splitext(fl)[0]
-                    # Substring keyword match
-                    if any(kw in fnoext for kw in _sp_keywords):
-                        return True
-                    # Exact-match keywords
-                    if fnoext in _sp_exact:
-                        return True
-                    # No digits = likely special/metadata
-                    if not re.search(r'\d', fnoext):
-                        return True
-                    return False
-
                 _offset_by_basename = {}   # basename -> offset pos (1-based)
                 _tpos = 0
                 for _sb in _all_spine_basenames:
-                    _special = _is_special_spine(_sb)
+                    _special = _is_configured_special_file(_sb)
                     _skip = (not translate_special and _special)
                     if not _skip:
                         _tpos += 1
@@ -13392,14 +13392,12 @@ def main(log_callback=None, stop_callback=None):
         # Now we can safely use actual_num
         actual_num = c['actual_chapter_num']
         
-        # Skip special files (chapter 0) if translation is disabled
-        # IMPORTANT: Do NOT treat files with digits (including 0) in their name as special.
+        # Skip configured special files if translation is disabled.
+        # Display/progress chapter 0 is cosmetic and must not imply special-file skipping.
         # IMPORTANT: Never skip text-file chapters — "special files" only apply to EPUBs.
-        if not translate_special and raw_num == 0 and not is_text_file:
+        if not translate_special and not is_text_file:
             name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
-            name_noext = os.path.splitext(name)[0] if name else ''
-            has_digits_in_name = bool(re.search(r'\d', name_noext))
-            if not has_digits_in_name:
+            if _is_configured_special_file(name):
                 # Track skipped special files
                 if not hasattr(config, '_skipped_special_files'):
                     config._skipped_special_files = []
@@ -13517,10 +13515,9 @@ def main(log_callback=None, stop_callback=None):
                 elif not (start <= _actual <= end):
                     continue
             _raw_num = _chapter.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(_chapter, patterns=None, config=config))
-            if not translate_special and _raw_num == 0 and not is_text_file:
+            if not translate_special and not is_text_file:
                 _name = _chapter.get('original_basename') or os.path.basename(_chapter.get('filename', ''))
-                _name_noext = os.path.splitext(_name)[0] if _name else ''
-                if not bool(re.search(r'\d', _name_noext)):
+                if _is_configured_special_file(_name):
                     continue
             post_mode_chapters.append(_chapter)
         post_out = _resolve_postprocess_output_dir(input_path, file_base, out, post_mode_chapters)
@@ -13560,9 +13557,9 @@ def main(log_callback=None, stop_callback=None):
                 print(f"\n❌ ERROR: No chapters found in EPUB to translate!")
                 raise ValueError("No chapters found in EPUB")
         elif not translate_special and total_chapters > 0:
-            # Only show this warning for EPUBs — "special files" (chapter 0) is an EPUB-specific concept
+            # Only show this warning for EPUBs — "special files" is an EPUB-specific concept
             if not is_text_file and not is_pdf_file:
-                print(f"\n⚠️ WARNING: All chapters are special files (chapter 0) and TRANSLATE_SPECIAL_FILES is disabled.")
+                print(f"\n⚠️ WARNING: All chapters are configured special files and TRANSLATE_SPECIAL_FILES is disabled.")
                 print(f"💡 Enable 'Translate Special Files' in settings if you want to translate these files.")
         elif total_chunks_needed == 0 and total_chapters > 0:
             print(f"\n✅ All chapters already translated - nothing to do!")
@@ -13658,13 +13655,11 @@ def main(log_callback=None, stop_callback=None):
             else:
                 actual_num = c.get('actual_chapter_num', c['num'])  # Now this will exist!
             
-            # Skip special files (chapter 0) if translation is disabled
+            # Skip configured special files if translation is disabled.
             raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
-            if not translate_special and raw_num == 0 and not is_text_file:
+            if not translate_special and not is_text_file:
                 name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
-                name_noext = os.path.splitext(name)[0] if name else ''
-                has_digits_in_name = bool(re.search(r'\d', name_noext))
-                if not has_digits_in_name:
+                if _is_configured_special_file(name):
                     continue
             
             # Skip chapters outside the range
@@ -14519,13 +14514,11 @@ def main(log_callback=None, stop_callback=None):
                     actual_num = c.get('actual_chapter_num', c['num'])
                 content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
                 
-                # Skip special files (chapter 0) if translation is disabled
+                # Skip configured special files if translation is disabled.
                 raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
-                if not translate_special and raw_num == 0 and not is_text_file:
+                if not translate_special and not is_text_file:
                     name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
-                    name_noext = os.path.splitext(name)[0] if name else ''
-                    has_digits_in_name = bool(re.search(r'\d', name_noext))
-                    if not has_digits_in_name:
+                    if _is_configured_special_file(name):
                         continue
                 
                 if start is not None:
@@ -14662,13 +14655,11 @@ def main(log_callback=None, stop_callback=None):
                 actual_num = c.get('actual_chapter_num', c['num'])
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
             
-            # Skip special files (chapter 0) if translation is disabled
+            # Skip configured special files if translation is disabled.
             raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
-            if not translate_special and raw_num == 0 and not is_text_file:
+            if not translate_special and not is_text_file:
                 name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
-                name_noext = os.path.splitext(name)[0] if name else ''
-                has_digits_in_name = bool(re.search(r'\d', name_noext))
-                if not has_digits_in_name:
+                if _is_configured_special_file(name):
                     continue
             
             if start is not None:

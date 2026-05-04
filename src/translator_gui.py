@@ -10841,15 +10841,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
         """Check if a filename is a special file using configurable keyword lists."""
         name_lower = filename.lower()
         name_noext = os.path.splitext(name_lower)[0]
-        # Check known special-file patterns (substring match)
+        # Check configured special-file patterns (substring match).
+        # Non-numbered filenames are allowed to display as Ch.000 elsewhere, but that
+        # must not make them special unless they match these configured lists.
         _kw_str = getattr(self, 'special_file_keywords_var', '')
         if _kw_str:
             _keywords = [k.strip().lower() for k in _kw_str.split(',') if k.strip()]
             if any(kw in name_noext for kw in _keywords):
-                return True
-        else:
-            # Fallback if var not set
-            if any(skip in name_lower for skip in ['nav.', 'toc.', 'cover.']):
                 return True
         # Exact-match keywords
         _exact_str = getattr(self, 'special_file_exact_var', '')
@@ -10857,9 +10855,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
             _exact = [k.strip().lower() for k in _exact_str.split(',') if k.strip()]
             if name_noext in _exact:
                 return True
-        # Check if filename has no digits (special file heuristic)
-        if not re.search(r'\d', name_noext):
-            return True
         return False
 
     def _get_spine_filenames_for_preview(self, epub_path, start, end, spine_mode, translate_special=False):
