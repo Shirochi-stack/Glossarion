@@ -2065,10 +2065,10 @@ def extract_chapters_from_epub(epub_path: str, return_metadata: bool = False) ->
                     # Exact match: these are special only when the basename matches exactly
                     if name_lower in special_exact:
                         is_special = True
-                    # Match if name (with or without trailing digits) contains a special keyword
+                    # Match only configured special keywords, including numbered variants like notice01.
                     elif any(kw in name_lower for kw in special_keywords):
-                        # If no digits at all, it's clearly special (e.g. "cover", "notice")
-                        # If has digits, still special if the base part matches a keyword (e.g. "notice01")
+                        # A no-digit name is special only because it already matched a keyword.
+                        # If it has digits, keep it special when the stripped base still matches.
                         if not has_digits or any(kw == name_stripped or kw in name_stripped for kw in special_keywords):
                             is_special = True
                     if is_special:
@@ -4835,15 +4835,24 @@ def main(log_callback=None, stop_callback=None):
                             if _idref and _idref in _manifest:
                                 _all_spine_basenames.append(_manifest[_idref])
 
-                    # Build offset positions, skip special files (same as TransateKRtoEN)
+                    _sp_kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
+                    _sp_keywords = [k.strip().lower() for k in _sp_kw_env.split(',') if k.strip()] if _sp_kw_env else [
+                        'title', 'toc', 'copyright', 'preface', 'nav',
+                        'message', 'notice', 'colophon', 'dedication', 'epigraph',
+                        'foreword', 'acknowledgment', 'author', 'appendix',
+                        'bibliography'
+                    ]
+                    _sp_exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
+                    _sp_exact = [k.strip().lower() for k in _sp_exact_env.split(',') if k.strip()] if _sp_exact_env else ['index', 'glossary', 'glossary_extension']
+
+                    # Build offset positions, skipping only configured special files.
+                    # Non-numbered files like info.xhtml may display as Ch.000 in the GUI,
+                    # but they must remain normal OPF entries here.
                     def _is_special_spine(fname):
-                        fl = fname.lower()
-                        fnoext = os.path.splitext(fl)[0]
-                        if any(kw in fl for kw in ['nav.', 'toc.', 'cover.']):
-                            return True
-                        if not re.search(r'\d', fnoext):
-                            return True
-                        return False
+                        fnoext = os.path.splitext(os.path.basename(str(fname or '')).lower())[0]
+                        if not fnoext:
+                            return False
+                        return fnoext in _sp_exact or any(kw in fnoext for kw in _sp_keywords)
 
                     _offset_by_basename = {}  # basename → offset pos (1-based)
                     _tpos = 0
@@ -5256,14 +5265,21 @@ def main(log_callback=None, stop_callback=None):
                             _idref = _iref.get('idref')
                             if _idref and _idref in _manifest2:
                                 _all_spine2.append(_manifest2[_idref])
+                    _sp_kw_env2 = os.getenv('SPECIAL_FILE_KEYWORDS', '')
+                    _sp_keywords2 = [k.strip().lower() for k in _sp_kw_env2.split(',') if k.strip()] if _sp_kw_env2 else [
+                        'title', 'toc', 'copyright', 'preface', 'nav',
+                        'message', 'notice', 'colophon', 'dedication', 'epigraph',
+                        'foreword', 'acknowledgment', 'author', 'appendix',
+                        'bibliography'
+                    ]
+                    _sp_exact_env2 = os.getenv('SPECIAL_FILE_EXACT', '')
+                    _sp_exact2 = [k.strip().lower() for k in _sp_exact_env2.split(',') if k.strip()] if _sp_exact_env2 else ['index', 'glossary', 'glossary_extension']
+
                     def _is_special2(fname):
-                        fl = fname.lower()
-                        fnoext = os.path.splitext(fl)[0]
-                        if any(kw in fl for kw in ['nav.', 'toc.', 'cover.']):
-                            return True
-                        if not re.search(r'\d', fnoext):
-                            return True
-                        return False
+                        fnoext = os.path.splitext(os.path.basename(str(fname or '')).lower())[0]
+                        if not fnoext:
+                            return False
+                        return fnoext in _sp_exact2 or any(kw in fnoext for kw in _sp_keywords2)
                     _off2 = {}
                     _tpos2 = 0
                     for _sb in _all_spine2:
