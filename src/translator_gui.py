@@ -3506,6 +3506,7 @@ Recent translations to summarize:
             ('disable_epub_gallery_var', 'disable_epub_gallery', False),
             # NEW: Disable automatic cover creation (affects extraction and EPUB cover page)
             ('disable_automatic_cover_creation_var', 'disable_automatic_cover_creation', False),
+            ('translation_special_no_digit_heuristic_var', 'translation_special_no_digit_heuristic', True),
             ('disable_zero_detection_var', 'disable_zero_detection', True),
             ('use_header_as_output_var', 'use_header_as_output', False),
             ('emergency_restore_var', 'emergency_paragraph_restore', False),
@@ -10837,8 +10838,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
         name_lower = filename.lower()
         name_noext = os.path.splitext(name_lower)[0]
         # Check known special-file patterns (substring match)
-        _kw_str = getattr(self, 'special_file_keywords_var', '')
-        if _kw_str:
+        _kw_str = getattr(self, 'special_file_keywords_var', None)
+        if _kw_str is not None:
             _keywords = [k.strip().lower() for k in _kw_str.split(',') if k.strip()]
             if any(kw in name_noext for kw in _keywords):
                 return True
@@ -10847,14 +10848,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if any(skip in name_lower for skip in ['nav.', 'toc.', 'cover.']):
                 return True
         # Exact-match keywords
-        _exact_str = getattr(self, 'special_file_exact_var', '')
-        if _exact_str:
+        _exact_str = getattr(self, 'special_file_exact_var', None)
+        if _exact_str is not None:
             _exact = [k.strip().lower() for k in _exact_str.split(',') if k.strip()]
             if name_noext in _exact:
                 return True
-        # Check if filename has no digits (special file heuristic)
-        if not re.search(r'\d', name_noext):
-            return True
         return False
 
     def _get_spine_filenames_for_preview(self, epub_path, start, end, spine_mode, translate_special=False):
@@ -13989,6 +13987,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SYNTHETIC_MERGE_HEADERS': "1" if getattr(self, 'synthetic_merge_headers_var', True) else "0",
             'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var else "0",
             'DISABLE_AUTOMATIC_COVER_CREATION': "1" if getattr(self, 'disable_automatic_cover_creation_var', False) else "0",
+            'TRANSLATION_SPECIAL_NO_DIGIT_HEURISTIC': "1" if getattr(self, 'translation_special_no_digit_heuristic_var', True) else "0",
             'TRANSLATE_COVER_HTML': "1" if getattr(self, 'translate_cover_html_var', False) else "0",
             'USE_P_TAG_TOC_FALLBACK': "1" if getattr(self, 'use_p_tag_toc_fallback_var', False) else "0",
             'DEDUPLICATE_TOC': "1" if getattr(self, 'deduplicate_toc_var', False) else "0",
@@ -21662,6 +21661,7 @@ Important rules:
                 ('translation_history_rolling', ['rolling_checkbox', 'translation_history_rolling_var'], False, bool),
                 ('disable_epub_gallery', ['disable_epub_gallery_var'], False, bool),
                 ('disable_automatic_cover_creation', ['disable_automatic_cover_creation_var'], False, bool),
+                ('translation_special_no_digit_heuristic', ['translation_special_no_digit_heuristic_var'], True, bool),
                 ('use_toc_ncx', ['use_toc_ncx_var'], False, bool),
                 ('translate_toc_ncx', ['translate_toc_ncx_var'], False, bool),
                 ('use_p_tag_toc_fallback', ['use_p_tag_toc_fallback_var'], False, bool),
@@ -22776,6 +22776,7 @@ Important rules:
                 # Custom special file keywords
                 ('SPECIAL_FILE_KEYWORDS', getattr(self, 'special_file_keywords_var', '')),
                 ('SPECIAL_FILE_EXACT', getattr(self, 'special_file_exact_var', '')),
+                ('TRANSLATION_SPECIAL_NO_DIGIT_HEURISTIC', '1' if getattr(self, 'translation_special_no_digit_heuristic_var', True) else '0'),
                 ('DISABLE_ZERO_DETECTION', '1' if getattr(self, 'disable_zero_detection_var', True) else '0'),
                 ('DUPLICATE_DETECTION_MODE', getattr(self, 'duplicate_detection_mode_var', 'basic')),
                 ('ENABLE_DECIMAL_CHAPTERS', '1' if getattr(self, 'enable_decimal_chapters_var', False) else '0'),

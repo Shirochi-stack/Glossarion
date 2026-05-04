@@ -3191,12 +3191,10 @@ class EPUBCompiler:
                 
                 if translate_special:
                     # When override is enabled, include ALL files in chapter ordering
-                    skip_list = []
                     self.log("  📝 Special files mode ENABLED - including all files in TOC")
                 else:
-                    # Default behavior: skip navigation/metadata files
-                    skip_list = ['nav', 'toc', 'contents', 'cover']
-                    self.log("  📝 Special files mode DISABLED - excluding navigation files")
+                    # Default behavior: skip configured navigation/metadata files
+                    self.log("  📝 Special files mode DISABLED - excluding configured special files")
                 
                 # Count total items first to decide on logging
                 itemrefs = spine.findall('opf:itemref', ns)
@@ -3224,8 +3222,8 @@ class EPUBCompiler:
                                 else:
                                     self.log(f"  Chapter {chapter_num}: {filename} (numbered)")
                             chapter_num += 1
-                        # Otherwise, check skip list for special files
-                        elif not skip_list or not any(skip in filename.lower() for skip in skip_list):
+                        # Otherwise, check configured special files
+                        elif translate_special or not self._is_configured_special_file(filename):
                             filename_to_order[filename] = chapter_num
                             # Only log periodically for large EPUBs
                             if not use_reduced_logging or idx % log_interval == 0 or idx == 0 or idx == total_items - 1:
@@ -3358,15 +3356,18 @@ class EPUBCompiler:
                 if unmapped_files:
                     self.log(f"⚠️ Adding {len(unmapped_files)} unmapped files at the end")
                     final_order.extend(sorted(unmapped_files))
-                    # Mark non-response unmapped files as auxiliary (omit from TOC)
-                    aux = {f for f in unmapped_files if not f.startswith('response_')}
-                    # If special files override is enabled, do NOT treat special files as auxiliary
+                    # Mark only configured special non-response files as auxiliary (omit from TOC)
                     translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
                     # Backward compatibility
                     translate_special = translate_special or (os.environ.get('TRANSLATE_COVER_HTML', '0') == '1')
                     if translate_special:
                         # Don't exclude any special files when override is enabled
                         aux = set()
+                    else:
+                        aux = {
+                            f for f in unmapped_files
+                            if not f.startswith('response_') and self._is_configured_special_file(f)
+                        }
                     self.auxiliary_html_files = aux
                 else:
                     self.auxiliary_html_files = set()
@@ -3407,10 +3408,9 @@ class EPUBCompiler:
                 
                 main_files.sort(key=extract_number)
             
-            # Append non-response files as auxiliary pages (not in TOC)
+            # Append configured special non-response files as auxiliary pages (not in TOC)
             aux_files = sorted([f for f in html_files if not f.startswith('response_')])
             if aux_files:
-                aux_set = set(aux_files)
                 # If special files override is enabled, don't mark special files as auxiliary
                 translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
                 # Backward compatibility
@@ -3418,6 +3418,8 @@ class EPUBCompiler:
                 if translate_special:
                     # Don't exclude any files when override is enabled
                     aux_set = set()
+                else:
+                    aux_set = {f for f in aux_files if self._is_configured_special_file(f)}
                 self.auxiliary_html_files = aux_set
                 self.log(f"[DEBUG] Appending {len(aux_set)} auxiliary HTML file(s) (not in TOC): {list(aux_set)[:5]}")
             else:
@@ -4811,6 +4813,45 @@ img {
         else:
             self.log(f"✅ Successfully added {added}/{len(images_to_add)} images to EPUB")
     
+    @staticmethod
+    def _csv_env_list(name: str, default: List[str]) -> List[str]:
+        """Read a CSV env setting; an explicitly present empty value means empty."""
+        if name in os.environ:
+            raw = os.environ.get(name, '')
+            return [part.strip().lower() for part in raw.split(',') if part.strip()]
+        return list(default)
+
+    def _configured_special_file_lists(self) -> Tuple[List[str], List[str]]:
+        return (
+            self._csv_env_list('SPECIAL_FILE_KEYWORDS', [
+                'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
+                'message', 'info', 'notice', 'colophon', 'dedication',
+                'epigraph', 'foreword', 'acknowledgment', 'author',
+                'appendix', 'bibliography'
+            ]),
+            self._csv_env_list('SPECIAL_FILE_EXACT', ['index', 'glossary', 'glossary_extension']),
+        )
+
+    def _is_configured_special_file(self, filename: str) -> bool:
+        basename = os.path.basename(filename or '')
+        name_noext = os.path.splitext(basename)[0].lower()
+        if not name_noext:
+            return False
+
+        special_keywords, special_exact = self._configured_special_file_lists()
+        if name_noext in special_exact:
+            return True
+        if not special_keywords:
+            return False
+
+        name_stripped = re.sub(r'\d+$', '', name_noext).rstrip('_- ')
+        has_digits = bool(re.search(r'\d', name_noext))
+        for keyword in special_keywords:
+            if keyword in name_noext:
+                if not has_digits or keyword == name_stripped or keyword in name_stripped:
+                    return True
+        return False
+
     def _find_original_image_for_safe_name(self, cover_file: str, processed_images: Dict[str, str]) -> Optional[str]:
         """Return the source image filename that produced a safe EPUB image name."""
         for original_name, safe_name in processed_images.items():

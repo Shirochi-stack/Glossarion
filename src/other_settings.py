@@ -8496,6 +8496,36 @@ def _create_processing_options_section(self, parent):
     translate_special_desc.setStyleSheet("color: gray; font-size: 10pt;")
     translate_special_desc.setContentsMargins(20, 0, 0, 5)
     section_v.addWidget(translate_special_desc)
+
+    no_digit_cb = self._create_styled_checkbox("Translation-only: Treat no-digit filenames as special")
+    if not hasattr(self, 'translation_special_no_digit_heuristic_var'):
+        self.translation_special_no_digit_heuristic_var = self.config.get('translation_special_no_digit_heuristic', True)
+    try:
+        no_digit_cb.setChecked(bool(self.translation_special_no_digit_heuristic_var))
+    except Exception:
+        pass
+
+    def _on_no_digit_toggle(checked):
+        try:
+            self.translation_special_no_digit_heuristic_var = bool(checked)
+            self.config['translation_special_no_digit_heuristic'] = bool(checked)
+            os.environ['TRANSLATION_SPECIAL_NO_DIGIT_HEURISTIC'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    no_digit_cb.toggled.connect(_on_no_digit_toggle)
+    no_digit_cb.setContentsMargins(20, 2, 0, 0)
+    section_v.addWidget(no_digit_cb)
+
+    no_digit_desc = QLabel(
+        "Only affects translation skipping.\n"
+        "Preview, EPUB compilation, glossary, and retranslation keyword handling still use the lists below."
+    )
+    no_digit_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    no_digit_desc.setContentsMargins(40, 0, 0, 5)
+    no_digit_desc.setMaximumWidth(900)
+    no_digit_desc.setWordWrap(True)
+    section_v.addWidget(no_digit_desc)
     
     # --- Collapsible keywords panel ---
     _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, cover, copyright, preface, nav, message, info, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'

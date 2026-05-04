@@ -1772,15 +1772,19 @@ class RetranslationMixin:
                             if idref in id_to_href:
                                 spine_hrefs.append(id_to_href[idref])
                         
-                        _kw_env = os.environ.get('SPECIAL_FILE_KEYWORDS', '')
-                        special_keywords = [k.strip().lower() for k in _kw_env.split(',') if k.strip()] if _kw_env else [
+                        if 'SPECIAL_FILE_KEYWORDS' in os.environ:
+                            special_keywords = [k.strip().lower() for k in os.environ.get('SPECIAL_FILE_KEYWORDS', '').split(',') if k.strip()]
+                        else:
+                            special_keywords = [
                             'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
                             'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
                             'foreword', 'acknowledgment', 'author', 'appendix',
                             'bibliography'
                         ]
-                        _exact_env = os.environ.get('SPECIAL_FILE_EXACT', '')
-                        special_exact = [k.strip().lower() for k in _exact_env.split(',') if k.strip()] if _exact_env else ['index', 'glossary', 'glossary_extension']
+                        if 'SPECIAL_FILE_EXACT' in os.environ:
+                            special_exact = [k.strip().lower() for k in os.environ.get('SPECIAL_FILE_EXACT', '').split(',') if k.strip()]
+                        else:
+                            special_exact = ['index', 'glossary', 'glossary_extension']
                         import re as _re_spine
                         ci = 0
                         for href in spine_hrefs:

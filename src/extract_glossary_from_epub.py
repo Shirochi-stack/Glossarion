@@ -1963,15 +1963,19 @@ def extract_chapters_from_epub(epub_path: str, return_metadata: bool = False) ->
             
     # Check if special files should be skipped (same logic as TransateKRtoEN)
     translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
-    _kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
-    special_keywords = [k.strip().lower() for k in _kw_env.split(',') if k.strip()] if _kw_env else [
+    if 'SPECIAL_FILE_KEYWORDS' in os.environ:
+        special_keywords = [k.strip().lower() for k in os.getenv('SPECIAL_FILE_KEYWORDS', '').split(',') if k.strip()]
+    else:
+        special_keywords = [
         'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
         'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
         'foreword', 'acknowledgment', 'author', 'appendix',
         'bibliography'
     ]
-    _exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
-    special_exact = [k.strip().lower() for k in _exact_env.split(',') if k.strip()] if _exact_env else ['index', 'glossary', 'glossary_extension']
+    if 'SPECIAL_FILE_EXACT' in os.environ:
+        special_exact = [k.strip().lower() for k in os.getenv('SPECIAL_FILE_EXACT', '').split(',') if k.strip()]
+    else:
+        special_exact = ['index', 'glossary', 'glossary_extension']
     skipped_special = []
 
     for item in items:
@@ -1993,9 +1997,8 @@ def extract_chapters_from_epub(epub_path: str, return_metadata: bool = False) ->
                     # Exact match: these are special only when the basename matches exactly
                     if name_lower in special_exact:
                         is_special = True
-                    # Match if name (with or without trailing digits) contains a special keyword
+                    # Match only configured keyword names (with or without trailing digits)
                     elif any(kw in name_lower for kw in special_keywords):
-                        # If no digits at all, it's clearly special (e.g. "cover", "notice")
                         # If has digits, still special if the base part matches a keyword (e.g. "notice01")
                         if not has_digits or any(kw == name_stripped or kw in name_stripped for kw in special_keywords):
                             is_special = True
@@ -4661,15 +4664,31 @@ def main(log_callback=None, stop_callback=None):
                             if _idref and _idref in _manifest:
                                 _all_spine_basenames.append(_manifest[_idref])
 
-                    # Build offset positions, skip special files (same as TransateKRtoEN)
+                    # Build offset positions, skip configured special files (same as TransateKRtoEN)
+                    if 'SPECIAL_FILE_KEYWORDS' in os.environ:
+                        _sp_keywords = [k.strip().lower() for k in os.environ.get('SPECIAL_FILE_KEYWORDS', '').split(',') if k.strip()]
+                    else:
+                        _sp_keywords = [
+                            'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
+                            'message', 'info', 'notice', 'colophon', 'dedication',
+                            'epigraph', 'foreword', 'acknowledgment', 'author',
+                            'appendix', 'bibliography'
+                        ]
+                    if 'SPECIAL_FILE_EXACT' in os.environ:
+                        _sp_exact = [k.strip().lower() for k in os.environ.get('SPECIAL_FILE_EXACT', '').split(',') if k.strip()]
+                    else:
+                        _sp_exact = ['index', 'glossary', 'glossary_extension']
+
                     def _is_special_spine(fname):
-                        fl = fname.lower()
-                        fnoext = os.path.splitext(fl)[0]
-                        if any(kw in fl for kw in ['nav.', 'toc.', 'cover.']):
+                        fnoext = os.path.splitext(os.path.basename(fname).lower())[0]
+                        if fnoext in _sp_exact:
                             return True
-                        if not re.search(r'\d', fnoext):
-                            return True
-                        return False
+                        stripped = re.sub(r'\d+$', '', fnoext).rstrip('_- ')
+                        has_digits = bool(re.search(r'\d', fnoext))
+                        return any(
+                            kw in fnoext and (not has_digits or kw == stripped or kw in stripped)
+                            for kw in _sp_keywords
+                        )
 
                     _offset_by_basename = {}  # basename → offset pos (1-based)
                     _tpos = 0
@@ -5081,14 +5100,30 @@ def main(log_callback=None, stop_callback=None):
                             _idref = _iref.get('idref')
                             if _idref and _idref in _manifest2:
                                 _all_spine2.append(_manifest2[_idref])
+                    if 'SPECIAL_FILE_KEYWORDS' in os.environ:
+                        _sp_keywords2 = [k.strip().lower() for k in os.environ.get('SPECIAL_FILE_KEYWORDS', '').split(',') if k.strip()]
+                    else:
+                        _sp_keywords2 = [
+                            'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
+                            'message', 'info', 'notice', 'colophon', 'dedication',
+                            'epigraph', 'foreword', 'acknowledgment', 'author',
+                            'appendix', 'bibliography'
+                        ]
+                    if 'SPECIAL_FILE_EXACT' in os.environ:
+                        _sp_exact2 = [k.strip().lower() for k in os.environ.get('SPECIAL_FILE_EXACT', '').split(',') if k.strip()]
+                    else:
+                        _sp_exact2 = ['index', 'glossary', 'glossary_extension']
+
                     def _is_special2(fname):
-                        fl = fname.lower()
-                        fnoext = os.path.splitext(fl)[0]
-                        if any(kw in fl for kw in ['nav.', 'toc.', 'cover.']):
+                        fnoext = os.path.splitext(os.path.basename(fname).lower())[0]
+                        if fnoext in _sp_exact2:
                             return True
-                        if not re.search(r'\d', fnoext):
-                            return True
-                        return False
+                        stripped = re.sub(r'\d+$', '', fnoext).rstrip('_- ')
+                        has_digits = bool(re.search(r'\d', fnoext))
+                        return any(
+                            kw in fnoext and (not has_digits or kw == stripped or kw in stripped)
+                            for kw in _sp_keywords2
+                        )
                     _off2 = {}
                     _tpos2 = 0
                     for _sb in _all_spine2:

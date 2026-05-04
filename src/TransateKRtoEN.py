@@ -7458,6 +7458,59 @@ def set_output_redirect(log_callback=None):
 # EPUB AND FILE PROCESSING
 # =====================================================
 
+_DEFAULT_SPECIAL_FILE_KEYWORDS = [
+    'title', 'toc', 'cover', 'copyright', 'preface', 'nav',
+    'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph',
+    'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography'
+]
+_DEFAULT_SPECIAL_FILE_EXACT = ['index', 'glossary', 'glossary_extension']
+
+
+def _csv_env_list(name, default):
+    """Read a CSV env setting; an explicitly present empty value means empty."""
+    if name in os.environ:
+        raw = os.environ.get(name, '')
+        return [part.strip().lower() for part in raw.split(',') if part.strip()]
+    return list(default)
+
+
+def _configured_special_file_lists():
+    return (
+        _csv_env_list('SPECIAL_FILE_KEYWORDS', _DEFAULT_SPECIAL_FILE_KEYWORDS),
+        _csv_env_list('SPECIAL_FILE_EXACT', _DEFAULT_SPECIAL_FILE_EXACT),
+    )
+
+
+def _translation_special_no_digit_enabled():
+    return os.getenv('TRANSLATION_SPECIAL_NO_DIGIT_HEURISTIC', '1') == '1'
+
+
+def _is_configured_special_file(filename):
+    """Special-file status is controlled only by the configured keyword lists."""
+    basename = os.path.basename(filename or '')
+    name_noext = os.path.splitext(basename)[0].lower()
+    if not name_noext:
+        return False
+
+    special_keywords, special_exact = _configured_special_file_lists()
+    if name_noext in special_exact:
+        return True
+
+    if _translation_special_no_digit_enabled() and not re.search(r'\d', name_noext):
+        return True
+
+    if not special_keywords:
+        return False
+
+    name_stripped = re.sub(r'\d+$', '', name_noext).rstrip('_- ')
+    has_digits = bool(re.search(r'\d', name_noext))
+    for keyword in special_keywords:
+        if keyword in name_noext:
+            if not has_digits or keyword == name_stripped or keyword in name_stripped:
+                return True
+    return False
+
+
 def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_spine_data=None):
     """Extract chapter number from filename.
 
@@ -7480,16 +7533,8 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
         if last_num == 0:
             return 0, 'filename_zero'
         return last_num, 'filename_digits'
-    # Priority 2: special keyword files with no digits -> chapter 0
-    # Priority 3: special keyword files with no digits -> chapter 0
-    _kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
-    special_keywords = [k.strip().lower() for k in _kw_env.split(',') if k.strip()] if _kw_env else ['title', 'toc', 'cover', 'copyright', 'preface', 'nav', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
-    if any(name in base_no_ext_lower for name in special_keywords):
-        return 0, 'special_file'
-    # Exact match only: these are special only when the basename matches exactly
-    _exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
-    special_exact = [k.strip().lower() for k in _exact_env.split(',') if k.strip()] if _exact_env else ['index', 'glossary', 'glossary_extension']
-    if base_no_ext_lower in special_exact:
+    # Priority 2: configured special keyword files with no digits -> chapter 0
+    if _is_configured_special_file(base_no_ext_lower):
         return 0, 'special_file'
     # Priority 3: legacy fallback patterns
     name_without_ext = base_no_ext
@@ -13212,25 +13257,8 @@ def main(log_callback=None, stop_callback=None):
                         if _idref and _idref in _manifest:
                             _all_spine_basenames.append(_manifest[_idref])
 
-                # Build offset positions — same logic as preview's
-                # Uses configurable keyword lists from SPECIAL_FILE_KEYWORDS / SPECIAL_FILE_EXACT
-                _sp_kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
-                _sp_keywords = [k.strip().lower() for k in _sp_kw_env.split(',') if k.strip()] if _sp_kw_env else ['title', 'toc', 'cover', 'copyright', 'preface', 'nav', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
-                _sp_exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
-                _sp_exact = [k.strip().lower() for k in _sp_exact_env.split(',') if k.strip()] if _sp_exact_env else ['index', 'glossary', 'glossary_extension']
                 def _is_special_spine(fname):
-                    fl = fname.lower()
-                    fnoext = os.path.splitext(fl)[0]
-                    # Substring keyword match
-                    if any(kw in fnoext for kw in _sp_keywords):
-                        return True
-                    # Exact-match keywords
-                    if fnoext in _sp_exact:
-                        return True
-                    # No digits = likely special/metadata
-                    if not re.search(r'\d', fnoext):
-                        return True
-                    return False
+                    return _is_configured_special_file(fname)
 
                 _offset_by_basename = {}   # basename -> offset pos (1-based)
                 _tpos = 0
@@ -13326,14 +13354,11 @@ def main(log_callback=None, stop_callback=None):
         # Now we can safely use actual_num
         actual_num = c['actual_chapter_num']
         
-        # Skip special files (chapter 0) if translation is disabled
-        # IMPORTANT: Do NOT treat files with digits (including 0) in their name as special.
+        # Skip configured special files if translation is disabled.
         # IMPORTANT: Never skip text-file chapters — "special files" only apply to EPUBs.
-        if not translate_special and raw_num == 0 and not is_text_file:
+        if not translate_special and not is_text_file:
             name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
-            name_noext = os.path.splitext(name)[0] if name else ''
-            has_digits_in_name = bool(re.search(r'\d', name_noext))
-            if not has_digits_in_name:
+            if _is_configured_special_file(name):
                 # Track skipped special files
                 if not hasattr(config, '_skipped_special_files'):
                     config._skipped_special_files = []
@@ -13451,10 +13476,9 @@ def main(log_callback=None, stop_callback=None):
                 elif not (start <= _actual <= end):
                     continue
             _raw_num = _chapter.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(_chapter, patterns=None, config=config))
-            if not translate_special and _raw_num == 0 and not is_text_file:
+            if not translate_special and not is_text_file:
                 _name = _chapter.get('original_basename') or os.path.basename(_chapter.get('filename', ''))
-                _name_noext = os.path.splitext(_name)[0] if _name else ''
-                if not bool(re.search(r'\d', _name_noext)):
+                if _is_configured_special_file(_name):
                     continue
             post_mode_chapters.append(_chapter)
         post_out = _resolve_postprocess_output_dir(input_path, file_base, out, post_mode_chapters)
