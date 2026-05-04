@@ -13688,6 +13688,26 @@ def main(log_callback=None, stop_callback=None):
                 progress_manager.save()
                 chapters_completed += 1
                 continue
+            elif is_image_only_chapter and config.OUTPUT_MODE == "text":
+                print(f"📸 Image-only chapter {actual_num} detected (preserving original content as-is)")
+
+                fname = FileUtilities.create_chapter_filename(c, actual_num)
+                original_markup = (
+                    c.get("original_html")
+                    or c.get("source_html")
+                    or c.get("raw_html")
+                    or c.get("body")
+                    or ""
+                )
+                output_path = os.path.join(out, fname)
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    f.write(original_markup)
+                retroactive_update_image_references(out)
+
+                progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
+                progress_manager.save()
+                chapters_completed += 1
+                continue
             
             # Add to chapters to translate
             chapters_to_translate.append((idx, c))
@@ -14664,6 +14684,27 @@ def main(log_callback=None, stop_callback=None):
                 chapters_completed += 1
 
                 # CRITICAL: Skip translation!
+                continue
+
+            elif is_image_only_chapter and config.OUTPUT_MODE == "text":
+                print(f"📸 Image-only chapter {actual_num} detected (preserving original content as-is)")
+
+                fname = FileUtilities.create_chapter_filename(c, actual_num)
+                original_markup = (
+                    c.get("original_html")
+                    or c.get("source_html")
+                    or c.get("raw_html")
+                    or c.get("body")
+                    or ""
+                )
+                output_path = os.path.join(out, fname)
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    f.write(original_markup)
+                retroactive_update_image_references(out)
+
+                progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
+                progress_manager.save()
+                chapters_completed += 1
                 continue
 
             elif is_image_only_chapter:

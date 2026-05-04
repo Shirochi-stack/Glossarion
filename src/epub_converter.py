@@ -2234,8 +2234,14 @@ class EPUBCompiler:
                 self.log("🛑 EPUB converter stopped by user")
                 return
             
+            existing_cover_html = any(
+                os.path.splitext(os.path.basename(f))[0].removeprefix('response_').lower() == 'cover'
+                for f in html_files
+            )
+            cover_file_for_generated_page = None if existing_cover_html else cover_file
+
             # Add images to book
-            self._add_images_to_book(book, processed_images, cover_file)
+            self._add_images_to_book(book, processed_images, cover_file_for_generated_page)
             
             # Check stop flag
             if self.is_stopped():
@@ -2243,8 +2249,10 @@ class EPUBCompiler:
                 return
             
             # Add cover page if exists
-            if cover_file:
-                cover_page = self._create_cover_page(book, cover_file, processed_images, css_items, metadata)
+            if existing_cover_html:
+                self.log("📔 Using existing cover.html instead of generating a cover page")
+            elif cover_file_for_generated_page:
+                cover_page = self._create_cover_page(book, cover_file_for_generated_page, processed_images, css_items, metadata)
                 if cover_page:
                     spine.insert(0, cover_page)
             
