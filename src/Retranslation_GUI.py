@@ -1037,11 +1037,9 @@ class RetranslationMixin:
                 # For other statuses (completed, merged, etc.)
                 spine_ch['status'] = status
                 
-                # For special files, always use the original filename (ignore what's in progress JSON)
-                if is_special:
-                    spine_ch['output_file'] = expected_response
-                else:
-                    spine_ch['output_file'] = matched_info.get('output_file', expected_response)
+                # Prefer the concrete output recorded in progress. Preserved
+                # source-name files such as cover.html must stay cover.html.
+                spine_ch['output_file'] = matched_info.get('output_file') or expected_response
                 
                 spine_ch['progress_entry'] = matched_info
                 

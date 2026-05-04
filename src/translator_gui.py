@@ -3544,6 +3544,7 @@ Recent translations to summarize:
         _DEFAULT_SPECIAL_EXACT = 'index, glossary, glossary_extension'
         self.special_file_keywords_var = self.config.get('special_file_keywords', _DEFAULT_SPECIAL_KEYWORDS)
         self.special_file_exact_var = self.config.get('special_file_exact', _DEFAULT_SPECIAL_EXACT)
+        self.translation_no_digit_skip_exceptions_var = self.config.get('translation_no_digit_skip_exceptions', '')
         
         # String variables
         str_vars = [
@@ -13987,8 +13988,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SYNTHETIC_MERGE_HEADERS': "1" if getattr(self, 'synthetic_merge_headers_var', True) else "0",
             'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var else "0",
             'DISABLE_AUTOMATIC_COVER_CREATION': "1" if getattr(self, 'disable_automatic_cover_creation_var', False) else "0",
+            'TRANSLATE_SPECIAL_FILES': "1" if getattr(self, 'translate_special_files_var', False) else "0",
+            'SPECIAL_FILE_KEYWORDS': getattr(self, 'special_file_keywords_var', ''),
+            'SPECIAL_FILE_EXACT': getattr(self, 'special_file_exact_var', ''),
             'TRANSLATION_SPECIAL_NO_DIGIT_HEURISTIC': "1" if getattr(self, 'translation_special_no_digit_heuristic_var', True) else "0",
-            'TRANSLATE_COVER_HTML': "1" if getattr(self, 'translate_cover_html_var', False) else "0",
+            'TRANSLATION_NO_DIGIT_SKIP_EXCEPTIONS': getattr(self, 'translation_no_digit_skip_exceptions_var', ''),
+            'TRANSLATE_COVER_HTML': "1" if getattr(self, 'translate_special_files_var', False) else "0",
             'USE_P_TAG_TOC_FALLBACK': "1" if getattr(self, 'use_p_tag_toc_fallback_var', False) else "0",
             'DEDUPLICATE_TOC': "1" if getattr(self, 'deduplicate_toc_var', False) else "0",
             'DEDUPLICATE_TOC_USE_TRANSLATED': "1" if getattr(self, 'deduplicate_toc_use_translated_var', False) else "0",
@@ -15674,7 +15679,12 @@ Important rules:
             # Set environment variables for EPUB converter
             os.environ['DISABLE_EPUB_GALLERY'] = "1" if self.disable_epub_gallery_var else "0"
             os.environ['DISABLE_AUTOMATIC_COVER_CREATION'] = "1" if getattr(self, 'disable_automatic_cover_creation_var', False) else "0"
-            os.environ['TRANSLATE_COVER_HTML'] = "1" if getattr(self, 'translate_cover_html_var', False) else "0"
+            os.environ['TRANSLATE_SPECIAL_FILES'] = "1" if getattr(self, 'translate_special_files_var', False) else "0"
+            os.environ['TRANSLATE_COVER_HTML'] = "1" if getattr(self, 'translate_special_files_var', False) else "0"
+            os.environ['SPECIAL_FILE_KEYWORDS'] = getattr(self, 'special_file_keywords_var', '')
+            os.environ['SPECIAL_FILE_EXACT'] = getattr(self, 'special_file_exact_var', '')
+            os.environ['TRANSLATION_SPECIAL_NO_DIGIT_HEURISTIC'] = "1" if getattr(self, 'translation_special_no_digit_heuristic_var', True) else "0"
+            os.environ['TRANSLATION_NO_DIGIT_SKIP_EXCEPTIONS'] = getattr(self, 'translation_no_digit_skip_exceptions_var', '')
 
             # If user selected a CSS override file, pass it to EPUB converter
             css_override_path = getattr(self, 'epub_css_override_path_var', self.config.get('epub_css_override_path', ''))
@@ -22047,6 +22057,8 @@ Important rules:
                 self.config['special_file_keywords'] = self.special_file_keywords_var
             if hasattr(self, 'special_file_exact_var'):
                 self.config['special_file_exact'] = self.special_file_exact_var
+            if hasattr(self, 'translation_no_digit_skip_exceptions_var'):
+                self.config['translation_no_digit_skip_exceptions'] = self.translation_no_digit_skip_exceptions_var
 
             # Backward compatibility for extraction_mode
             if hasattr(self, 'text_extraction_method_var') and hasattr(self, 'file_filtering_level_var'):
@@ -22777,6 +22789,7 @@ Important rules:
                 ('SPECIAL_FILE_KEYWORDS', getattr(self, 'special_file_keywords_var', '')),
                 ('SPECIAL_FILE_EXACT', getattr(self, 'special_file_exact_var', '')),
                 ('TRANSLATION_SPECIAL_NO_DIGIT_HEURISTIC', '1' if getattr(self, 'translation_special_no_digit_heuristic_var', True) else '0'),
+                ('TRANSLATION_NO_DIGIT_SKIP_EXCEPTIONS', getattr(self, 'translation_no_digit_skip_exceptions_var', '')),
                 ('DISABLE_ZERO_DETECTION', '1' if getattr(self, 'disable_zero_detection_var', True) else '0'),
                 ('DUPLICATE_DETECTION_MODE', getattr(self, 'duplicate_detection_mode_var', 'basic')),
                 ('ENABLE_DECIMAL_CHAPTERS', '1' if getattr(self, 'enable_decimal_chapters_var', False) else '0'),
