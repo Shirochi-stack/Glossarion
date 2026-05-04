@@ -2298,7 +2298,6 @@ class ImageTranslator:
                 return data
         
         # Default: use existing method without compression
-        print(f"   ⚠️ Compression disabled, using default PNG format")
         return self._image_to_bytes(img)
 
     def _image_to_bytes(self, img, format='PNG', quality=None):
