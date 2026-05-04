@@ -7186,14 +7186,45 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
     if not glossary_block or not _single_pass_glossary_mode():
         return 0
 
+    def _single_pass_chapter_refs():
+        chapter_basename = os.path.basename(str(chapter_file or os.getenv("CURRENT_CHAPTER_FILE", "") or ""))
+        actual = None
+        try:
+            if chapter_num is not None:
+                actual = int(chapter_num)
+        except (TypeError, ValueError):
+            actual = None
+        if actual is None and chapter_basename:
+            nums = re.findall(r"\d+", os.path.splitext(chapter_basename)[0])
+            if nums:
+                try:
+                    actual = int(nums[-1])
+                except (TypeError, ValueError):
+                    actual = None
+        idx = (actual - 1) if actual and actual > 0 else None
+        return idx, actual, chapter_basename
+
     with _single_pass_glossary_lock:
         original_progress_file = None
+        original_output_file = None
         try:
             import extract_glossary_from_epub as glossary_extractor
             glossary_dir, json_path, csv_path, progress_path = _single_pass_glossary_paths(output_dir)
             original_progress_file = getattr(glossary_extractor, "PROGRESS_FILE", None)
+            original_output_file = getattr(glossary_extractor, "_GLOSSARY_OUTPUT_FILE", "")
             glossary_extractor.PROGRESS_FILE = progress_path
+            glossary_extractor._GLOSSARY_OUTPUT_FILE = json_path
             progress = glossary_extractor.load_progress()
+            chapter_idx, actual_num, chapter_basename = _single_pass_chapter_refs()
+            if chapter_idx is not None:
+                glossary_extractor._GLOSSARY_CHAPTER_POSITIONS[int(chapter_idx)] = int(actual_num)
+                glossary_extractor._GLOSSARY_CHAPTER_NUMBERS[int(chapter_idx)] = int(actual_num)
+                glossary_extractor._GLOSSARY_TOTAL_CHAPTERS = max(
+                    int(getattr(glossary_extractor, "_GLOSSARY_TOTAL_CHAPTERS", 0) or 0),
+                    int(chapter_idx) + 1,
+                )
+                if chapter_basename:
+                    glossary_extractor._GLOSSARY_CHAPTER_FILENAMES[int(chapter_idx)] = chapter_basename
 
             parsed = glossary_extractor.parse_api_response(glossary_block)
             valid = []
@@ -7211,8 +7242,9 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
                     valid,
                     json_path,
                     source_path=os.getenv("EPUB_PATH", ""),
-                    chapter_num=chapter_num,
-                    chapter_file=chapter_file or os.getenv("CURRENT_CHAPTER_FILE", ""),
+                    chapter_index=chapter_idx,
+                    chapter_num=actual_num,
+                    chapter_file=chapter_basename,
                 )
             except Exception as e:
                 print(f"⚠️ Single Pass Glossary: failed to update gender tracker: {e}")
@@ -7224,8 +7256,8 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
             deduped = glossary_extractor.skip_duplicate_entries(combined, output_dir=glossary_dir)
 
             completed = list(progress.get("completed", []))
-            if chapter_num is not None and chapter_num not in completed:
-                completed.append(chapter_num)
+            if chapter_idx is not None and chapter_idx not in completed:
+                completed.append(chapter_idx)
             merged_indices = list(progress.get("merged_indices", []))
             failed = list(progress.get("failed", []))
 
@@ -7247,6 +7279,8 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
                     glossary_extractor.PROGRESS_FILE = original_progress_file
                 elif "glossary_extractor" in locals() and hasattr(glossary_extractor, "PROGRESS_FILE"):
                     delattr(glossary_extractor, "PROGRESS_FILE")
+                if original_output_file is not None and "glossary_extractor" in locals():
+                    glossary_extractor._GLOSSARY_OUTPUT_FILE = original_output_file
             except Exception:
                 pass
 

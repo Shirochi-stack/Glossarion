@@ -6773,11 +6773,36 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             if int(idx) in failed_set
         }
 
+        existing_chapters_by_idx = {}
+        try:
+            if os.path.exists(PROGRESS_FILE):
+                with open(PROGRESS_FILE, 'r', encoding='utf-8') as existing_f:
+                    existing_progress = json.load(existing_f)
+                existing_chapters = existing_progress.get("chapters", {}) if isinstance(existing_progress, dict) else {}
+                if isinstance(existing_chapters, dict):
+                    for existing_key, existing_info in existing_chapters.items():
+                        if not isinstance(existing_info, dict):
+                            continue
+                        existing_idx = _glossary_progress_entry_index(existing_info, existing_key)
+                        if existing_idx is not None:
+                            existing_chapters_by_idx[int(existing_idx)] = existing_info
+        except Exception:
+            existing_chapters_by_idx = {}
+
         chapters = {}
         for idx in sorted(set(completed_clean) | failed_set | merged_set):
-            actual_num = _glossary_chapter_actual_num(idx)
+            existing_info = existing_chapters_by_idx.get(int(idx), {})
+            try:
+                actual_num = int(existing_info.get("actual_num") or existing_info.get("chapter_num"))
+            except (TypeError, ValueError):
+                actual_num = _glossary_chapter_actual_num(idx)
             chapter_key = _glossary_chapter_key(idx)
             chapter_file = _glossary_chapter_output_file(idx)
+            if not chapter_file and isinstance(existing_info, dict):
+                for fname_key in ("output_file", "original_basename", "chapter_file", "source_filename", "filename"):
+                    chapter_file = os.path.basename(str(existing_info.get(fname_key, "") or ""))
+                    if chapter_file:
+                        break
             issue_list = qa_issues_clean.get(idx, [])
             if idx in failed_set:
                 status = "qa_failed" if issue_list else "failed"
