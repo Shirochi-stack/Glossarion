@@ -2645,19 +2645,39 @@ class ImageTranslator:
                 os.environ["BATCH_TRANSLATION"] = "1"
                 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
                 from unified_api_client import UnifiedClient, UnifiedClientError
-                for batch_start in range(0, len(chunk_jobs), batch_size):
-                    if check_stop_fn and check_stop_fn():
-                        was_stopped = True
-                        break
-                    current_batch = chunk_jobs[batch_start:batch_start + batch_size]
-                    print(f"   OCR batch {batch_start // batch_size + 1}: {len(current_batch)} chunk request(s)")
-                    executor = ThreadPoolExecutor(max_workers=len(current_batch))
+                batching_mode = os.getenv("BATCHING_MODE", "aggressive").strip().lower()
+                if batching_mode not in ("aggressive", "direct", "conservative"):
+                    batching_mode = "aggressive"
+
+                if batching_mode == "aggressive":
+                    print(f"   Vision OCR no-batching mode: keeping {batch_size} OCR chunk worker slot(s) filled")
+                    executor = ThreadPoolExecutor(max_workers=batch_size)
                     force_cancelled = False
                     try:
-                        pending = {executor.submit(_ocr_job, job) for job in current_batch}
+                        pending = {}
+                        next_job_idx = 0
+
+                        def _submit_next_ocr_chunk():
+                            nonlocal next_job_idx
+                            if next_job_idx >= len(chunk_jobs):
+                                return False
+                            job = chunk_jobs[next_job_idx]
+                            pending[executor.submit(_ocr_job, job)] = job
+                            next_job_idx += 1
+                            return True
+
+                        while len(pending) < batch_size and _submit_next_ocr_chunk():
+                            pass
+
                         while pending:
-                            done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                            done, _ = wait(pending.keys(), timeout=0.5, return_when=FIRST_COMPLETED)
+                            if not done:
+                                if os.environ.get("TRANSLATION_CANCELLED") == "1":
+                                    done = set()
+                                else:
+                                    continue
                             for future in done:
+                                pending.pop(future, None)
                                 i, ocr_text = future.result()
                                 if ocr_text:
                                     ocr_by_index[i] = ocr_text
@@ -2672,12 +2692,53 @@ class ImageTranslator:
                                 for future in pending:
                                     future.cancel()
                                 raise UnifiedClientError("Vision OCR batch stopped by user", error_type="cancelled")
+
+                            while len(pending) < batch_size and _submit_next_ocr_chunk():
+                                pass
                     finally:
                         executor.shutdown(wait=not force_cancelled, cancel_futures=True)
+                else:
+                    if batching_mode == "conservative":
+                        group_multiplier = max(1, int(os.getenv("BATCH_GROUP_SIZE", "3") or "3"))
+                        fixed_group_size = min(len(chunk_jobs), batch_size * group_multiplier)
+                        print(f"   Vision OCR conservative batching: group size {fixed_group_size}, parallel {batch_size}")
+                    else:
+                        fixed_group_size = batch_size
+                        print(f"   Vision OCR direct batching: group size {fixed_group_size}, parallel {batch_size}")
 
-                    if check_stop_fn and check_stop_fn():
-                        was_stopped = True
-                        break
+                    for batch_start in range(0, len(chunk_jobs), fixed_group_size):
+                        if check_stop_fn and check_stop_fn():
+                            was_stopped = True
+                            break
+                        current_batch = chunk_jobs[batch_start:batch_start + fixed_group_size]
+                        print(f"   OCR group {batch_start // fixed_group_size + 1}: {len(current_batch)} chunk request(s)")
+                        executor = ThreadPoolExecutor(max_workers=min(batch_size, len(current_batch)))
+                        force_cancelled = False
+                        try:
+                            pending = {executor.submit(_ocr_job, job) for job in current_batch}
+                            while pending:
+                                done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                                for future in done:
+                                    i, ocr_text = future.result()
+                                    if ocr_text:
+                                        ocr_by_index[i] = ocr_text
+
+                                if os.environ.get("TRANSLATION_CANCELLED") == "1":
+                                    force_cancelled = True
+                                    was_stopped = True
+                                    try:
+                                        UnifiedClient.hard_cancel_all()
+                                    except Exception:
+                                        pass
+                                    for future in pending:
+                                        future.cancel()
+                                    raise UnifiedClientError("Vision OCR batch stopped by user", error_type="cancelled")
+                        finally:
+                            executor.shutdown(wait=not force_cancelled, cancel_futures=True)
+
+                        if check_stop_fn and check_stop_fn():
+                            was_stopped = True
+                            break
             else:
                 for job in chunk_jobs:
                     i, ocr_text = _ocr_job(job)

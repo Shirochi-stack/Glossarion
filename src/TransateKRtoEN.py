@@ -8225,22 +8225,70 @@ def _process_chapter_images_vision_ocr_combined(
     previous_batch_env = os.environ.get("BATCH_TRANSLATION")
     try:
         if batch_enabled and batch_size > 1 and len(jobs) > 1:
-            print(f"   Vision OCR page batch mode enabled: {batch_size} parallel OCR workers")
+            batching_mode = os.getenv("BATCHING_MODE", "aggressive").strip().lower()
+            if batching_mode not in ("aggressive", "direct", "conservative"):
+                batching_mode = "aggressive"
             os.environ["BATCH_TRANSLATION"] = "1"
-            for batch_start in range(0, len(jobs), batch_size):
-                if check_stop_fn and check_stop_fn():
-                    print("   Image OCR stopped before next page OCR batch")
-                    break
-                current_batch = jobs[batch_start:batch_start + batch_size]
-                print(f"   Page OCR batch {batch_start // batch_size + 1}: {len(current_batch)} image request(s)")
-                with ThreadPoolExecutor(max_workers=len(current_batch)) as executor:
-                    future_to_job = {executor.submit(_ocr_page_image, job): job for job in current_batch}
-                    for future in as_completed(future_to_job):
-                        idx, img_info, img_src, ocr_text = future.result()
-                        ocr_by_index[idx] = (img_info, img_src, ocr_text)
-                if check_stop_fn and check_stop_fn():
-                    print("   Image OCR stopped after page OCR batch")
-                    break
+
+            if batching_mode == "aggressive":
+                print(f"   Vision OCR page no-batching mode: keeping {batch_size} OCR worker slot(s) filled")
+                with ThreadPoolExecutor(max_workers=batch_size) as executor:
+                    active_futures = {}
+                    next_job_idx = 0
+
+                    def _submit_next_page_ocr():
+                        nonlocal next_job_idx
+                        if next_job_idx >= len(jobs):
+                            return False
+                        job = jobs[next_job_idx]
+                        active_futures[executor.submit(_ocr_page_image, job)] = job
+                        next_job_idx += 1
+                        return True
+
+                    while len(active_futures) < batch_size and _submit_next_page_ocr():
+                        pass
+
+                    while active_futures:
+                        if check_stop_fn and check_stop_fn():
+                            print("   Image OCR stopped; cancelling queued page OCR work")
+                            for future in active_futures:
+                                future.cancel()
+                            break
+                        done, _ = wait(active_futures.keys(), timeout=0.5, return_when=FIRST_COMPLETED)
+                        if not done:
+                            continue
+                        for future in done:
+                            active_futures.pop(future, None)
+                            idx, img_info, img_src, ocr_text = future.result()
+                            ocr_by_index[idx] = (img_info, img_src, ocr_text)
+                        while len(active_futures) < batch_size and _submit_next_page_ocr():
+                            pass
+            else:
+                if batching_mode == "conservative":
+                    group_multiplier = max(1, int(os.getenv("BATCH_GROUP_SIZE", "3") or "3"))
+                    fixed_group_size = min(len(jobs), batch_size * group_multiplier)
+                    print(f"   Vision OCR page conservative batching: group size {fixed_group_size}, parallel {batch_size}")
+                else:
+                    fixed_group_size = batch_size
+                    print(f"   Vision OCR page direct batching: group size {fixed_group_size}, parallel {batch_size}")
+
+                for batch_start in range(0, len(jobs), fixed_group_size):
+                    if check_stop_fn and check_stop_fn():
+                        print("   Image OCR stopped before next page OCR batch")
+                        break
+                    current_group = jobs[batch_start:batch_start + fixed_group_size]
+                    print(f"   Page OCR group {batch_start // fixed_group_size + 1}: {len(current_group)} image request(s)")
+                    with ThreadPoolExecutor(max_workers=min(batch_size, len(current_group))) as executor:
+                        future_to_job = {executor.submit(_ocr_page_image, job): job for job in current_group}
+                        for future in as_completed(future_to_job):
+                            if check_stop_fn and check_stop_fn():
+                                print("   Image OCR stopped during page OCR group")
+                                break
+                            idx, img_info, img_src, ocr_text = future.result()
+                            ocr_by_index[idx] = (img_info, img_src, ocr_text)
+                    if check_stop_fn and check_stop_fn():
+                        print("   Image OCR stopped after page OCR group")
+                        break
         else:
             for job in jobs:
                 idx, img_info, img_src, ocr_text = _ocr_page_image(job)
