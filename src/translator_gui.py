@@ -8514,14 +8514,18 @@ Recent translations to summarize:
         
         self.frame.addWidget(self.prompt_text, 9, 1, 1, 3)  # row, col, rowspan, colspan
 
+        output_column_width = 270
+
         # Output Token Limit button (row 9, column 0 - below label)
         self.output_btn = QPushButton(f"Output Token Limit: {self.max_output_tokens:,}")
         self.output_btn.clicked.connect(self.prompt_custom_token_limit)
         self.output_btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; padding: 8px 6px;")  # info
-        self.output_btn.setMinimumWidth(180)
+        self.output_btn.setMinimumWidth(0)
+        self.output_btn.setMaximumWidth(output_column_width)
         self.output_btn.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Maximum tokens the model may generate in responses (output side).</p></qt>")
         # Place below the label in a vertical layout
         output_container = QWidget()
+        output_container.setMaximumWidth(output_column_width)
         output_layout = QVBoxLayout(output_container)
         output_layout.setContentsMargins(0, 0, 0, 0)
         
@@ -8550,7 +8554,7 @@ Recent translations to summarize:
         # ── Output mode dropdown (synced with Other Settings radio buttons) ──
         self._output_mode_combo = QComboBox()
         self._output_mode_combo.addItems(["📝Text", "👁️Vision", "🖼️Image", "🎬Video", "🔊Audio", "✨Refine"])
-        self._output_mode_combo.setFixedWidth(78)
+        self._output_mode_combo.setFixedWidth(66)
         self._output_mode_combo.setToolTip(
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
             "<b>Output Mode</b><br>"
@@ -8622,6 +8626,7 @@ Recent translations to summarize:
         # Target Language dropdown (label removed to save vertical space)
         self.target_lang_combo = QComboBox()
         self.target_lang_combo.setEditable(True)
+        self.target_lang_combo.setMaximumWidth(output_column_width)
         self.target_lang_combo.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Replaces {target_lang} in the system prompt with the value in the target language dropdown; synced across all target language dropdowns.</p></qt>")
         # Disable mouse wheel scrolling to prevent accidental changes
         self.target_lang_combo.wheelEvent = lambda event: event.ignore()
@@ -8704,6 +8709,7 @@ Recent translations to summarize:
         # Open Output Folder Button
         self.open_folder_btn = QPushButton("Open Output Folder 📁")
         self.open_folder_btn.clicked.connect(self.open_output_folder)
+        self.open_folder_btn.setMaximumWidth(output_column_width)
         self.open_folder_btn.setStyleSheet("""
             QPushButton {
                 background-color: #3d3d3d;
