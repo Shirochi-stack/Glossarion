@@ -300,7 +300,7 @@ def _get_default_scale_for_resolution():
         elif width >= 1920:     # 1080p (1920×1080)
             return 1.0
         elif width >= 1366:     # 768p / common laptops
-            return 0.62
+            return 0.67
         else:                   # 720p or lower
             return 0.6
     except Exception:

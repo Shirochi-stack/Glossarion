@@ -11048,7 +11048,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 btn.setEnabled(False)
                 btn.setText("Saving…")
                 # Subtle highlight during save
-                btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold;")
+                btn.setStyleSheet("background-color: #17a2b8; color: white; border: none; border-radius: 0px; font-weight: bold;")
                 QApplication.processEvents()
             # Log feedback
             try:
@@ -11059,7 +11059,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.save_config(show_message=True)
             if btn is not None:
                 btn.setText("Saved ✓")
-                btn.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
+                btn.setStyleSheet("background-color: #27ae60; color: white; border: none; border-radius: 0px; font-weight: bold;")
                 # Restore after a short delay
                 def _restore():
                     try:
@@ -11079,7 +11079,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             try:
                 if getattr(self, 'save_config_button', None):
                     self.save_config_button.setText("Save Failed")
-                    self.save_config_button.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
+                    self.save_config_button.setStyleSheet("background-color: #dc3545; color: white; border: none; border-radius: 0px; font-weight: bold;")
                     def _restore_fail():
                         try:
                             self.save_config_button.setText("Save Config")
@@ -17915,45 +17915,12 @@ Important rules:
         except Exception:
             total_h = 0
         if total_h <= 0:
-            return 220
+            return self._prompt_row_floor_height()
 
-        row_floor = self._prompt_row_floor_height()
-
-        # Base target: prompt takes a modest part of vertical space, but may
-        # grow when the prompt content itself needs more room.
-        desired_prompt_max = int(total_h * 0.18)
-        max_auto_prompt = max(row_floor, max(240, min(420, int(total_h * 0.34))))
-        prompt_max = max(row_floor, min(max_auto_prompt, desired_prompt_max))
-
-        # Let the editor fit its plain-text document when there is room.
-        try:
-            if hasattr(self, 'prompt_text') and self.prompt_text:
-                doc = self.prompt_text.document()
-                doc.setTextWidth(max(1, self.prompt_text.viewport().width()))
-                content_h = int(doc.size().height() + 28)
-                prompt_max = max(prompt_max, min(max_auto_prompt, content_h))
-        except Exception:
-            pass
-
-        # Allow the prompt row to match row-9 neighbor content height (within cap)
-        try:
-            neighbor_h = 0
-        except Exception:
-            neighbor_h = 0
-        try:
-            if hasattr(self, 'run_button') and self.run_button:
-                neighbor_h = max(neighbor_h, int(self.run_button.sizeHint().height() or 0))
-        except Exception:
-            pass
-        try:
-            if hasattr(self, '_prompt_side_container') and self._prompt_side_container:
-                neighbor_h = max(neighbor_h, int(self._prompt_side_container.sizeHint().height() or 0))
-        except Exception:
-            pass
-        if neighbor_h > 0:
-            prompt_max = max(prompt_max, min(max_auto_prompt, neighbor_h))
-
-        return int(prompt_max)
+        # Default to the top/minimum split so the log gets the spare vertical
+        # space. The user can still drag the API watchdog handle downward to
+        # give the prompt row more height.
+        return self._prompt_row_floor_height()
 
     def _set_prompt_user_max_height(self, height: int):
         """Set a user override for prompt max-height.
