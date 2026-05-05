@@ -27,26 +27,20 @@ except Exception:
     pass
 
 _configured = False
+_stylesheet_patch_installed = False
+_stylesheet_scale_factor = 1.0
 
 # Default scale factor when config.json has no value
 DEFAULT_SCALE_FACTOR = 1.0
+DEFAULT_FONT_SCALE = 1.0
 
 
 def _ensure_dpi_aware():
     """Make the process DPI-aware on Windows (idempotent, no-op on other platforms)."""
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            try:
-                ctypes.windll.user32.SetProcessDPIAware()
-            except Exception:
-                pass
-    except Exception:
-        pass
+    # Let Qt set the Windows DPI awareness context. Calling the native Windows
+    # APIs here can make Qt's later SetProcessDpiAwarenessContext call fail
+    # with "Access is denied" because awareness can only be set once.
+    return
 
 
 def _mac_get_backing_scale_factor():
@@ -344,6 +338,139 @@ def _read_scale_factor():
     return _get_default_scale_for_resolution()
 
 
+def _read_font_scale():
+    """Read gui_font_scale from config.json (stdlib only; no auto behavior)."""
+    try:
+        if getattr(sys, 'frozen', False) and hasattr(sys, 'executable'):
+            base_dir = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+        cfg_path = os.path.join(base_dir, "config.json")
+        if os.path.isfile(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            factor = float(cfg.get("gui_font_scale", DEFAULT_FONT_SCALE))
+            if factor < 0.5:
+                factor = 0.5
+            elif factor > 1.5:
+                factor = 1.5
+            return factor
+    except Exception:
+        pass
+    return DEFAULT_FONT_SCALE
+
+
+def _format_scaled_font_size(value, unit, factor):
+    scaled = max(1.0, float(value) * factor)
+    if unit.lower() == "px":
+        scaled = round(scaled)
+        return str(int(scaled))
+    text = f"{scaled:.2f}".rstrip("0").rstrip(".")
+    return text or "1"
+
+
+def _scale_stylesheet_font_sizes(style, factor):
+    if not style or factor == 1.0:
+        return style
+    try:
+        import re
+
+        def repl(match):
+            prefix, value, unit = match.groups()
+            return f"{prefix}{_format_scaled_font_size(value, unit, factor)}{unit}"
+
+        return re.sub(r"(font-size\s*:\s*)([0-9]+(?:\.[0-9]+)?)(pt|px)", repl, style, flags=re.IGNORECASE)
+    except Exception:
+        return style
+
+
+def _install_stylesheet_font_scale_patch(factor):
+    """Scale future QWidget stylesheets that hardcode font-size values."""
+    global _stylesheet_patch_installed, _stylesheet_scale_factor
+    _stylesheet_scale_factor = factor
+    if _stylesheet_patch_installed:
+        return
+    try:
+        from PySide6.QtWidgets import QWidget
+
+        original_set_stylesheet = QWidget.setStyleSheet
+
+        def scaled_set_stylesheet(widget, style):
+            try:
+                base_style = style or ""
+                widget.setProperty("_glossarion_base_stylesheet", base_style)
+                style = _scale_stylesheet_font_sizes(base_style, _stylesheet_scale_factor)
+            except Exception:
+                pass
+            return original_set_stylesheet(widget, style)
+
+        QWidget._glossarion_original_setStyleSheet = original_set_stylesheet
+        QWidget.setStyleSheet = scaled_set_stylesheet
+        _stylesheet_patch_installed = True
+    except Exception:
+        pass
+
+
+def _rescale_existing_widget_styles(app, factor):
+    """Reapply stylesheets already set before the font-scale patch was installed."""
+    try:
+        from PySide6.QtWidgets import QWidget
+
+        original_set_stylesheet = getattr(QWidget, "_glossarion_original_setStyleSheet", QWidget.setStyleSheet)
+        for widget in app.allWidgets():
+            try:
+                base_style = widget.property("_glossarion_base_stylesheet")
+                if base_style is None:
+                    base_style = widget.styleSheet()
+                    if base_style:
+                        widget.setProperty("_glossarion_base_stylesheet", base_style)
+                if base_style:
+                    original_set_stylesheet(widget, _scale_stylesheet_font_sizes(base_style, factor))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def apply_font_scale(app=None):
+    """Apply the configured GUI font scale after QApplication exists."""
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        if app is None:
+            app = QApplication.instance()
+        if app is None:
+            return DEFAULT_FONT_SCALE
+
+        factor = _read_font_scale()
+        font = app.font()
+        base_size = getattr(app, "_glossarion_base_font_point_size", None)
+        if not base_size:
+            base_size = font.pointSizeF()
+            if base_size <= 0:
+                base_size = float(font.pointSize() or 9)
+            setattr(app, "_glossarion_base_font_point_size", base_size)
+
+        font.setPointSizeF(max(6.0, base_size * factor))
+        app.setFont(font)
+        _install_stylesheet_font_scale_patch(factor)
+        _rescale_existing_widget_styles(app, factor)
+        return factor
+    except Exception:
+        return DEFAULT_FONT_SCALE
+
+
+def _qgui_application_exists():
+    """Best-effort check without importing PySide unless it is already loaded."""
+    try:
+        if "PySide6.QtGui" not in sys.modules and "PySide6.QtWidgets" not in sys.modules:
+            return False
+        from PySide6.QtGui import QGuiApplication
+        return QGuiApplication.instance() is not None
+    except Exception:
+        return False
+
+
 def configure():
     """Enable Qt6 native high-DPI rendering and apply the user's scale factor.
 
@@ -355,9 +482,12 @@ def configure():
         return
     _configured = True
 
+    if _qgui_application_exists():
+        # Qt's scale-factor policy and scale env vars are pre-QGuiApplication
+        # only. If another entry point already created the app, leave it alone.
+        return
+
     # ── Enable Qt6 native high-DPI scaling (sharp text rendering) ─────────
-    # Use PassThrough to prevent blurry text on fractional scales (e.g. 1.15x)
-    os.environ["QT_SCALE_FACTOR_ROUNDING_POLICY"] = "PassThrough"
     os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
 
     # Do NOT set QT_FONT_DPI — let Qt derive font DPI from the device pixel

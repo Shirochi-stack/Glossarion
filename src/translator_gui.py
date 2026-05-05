@@ -1597,6 +1597,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.auto_update_check_var = self.config.get('auto_update_check', True)
         self.auto_dpi_scale_var = self.config.get('auto_dpi_scale', True)
         self.gui_scale_factor_var = self.config.get('gui_scale_factor', 1.0)
+        self.gui_font_scale_var = self.config.get('gui_font_scale', 1.0)
         self.force_ncx_only_var = self.config.get('force_ncx_only', True)
         self.use_p_tag_toc_fallback_var = self.config.get('use_p_tag_toc_fallback', False)
         self.deduplicate_toc_var = self.config.get('deduplicate_toc', False)
@@ -3140,6 +3141,11 @@ Text to analyze:
         if not app:
             # DPI awareness is handled globally by dpi_setup.configure()
             app = QApplication(sys.argv)
+        try:
+            import dpi_setup
+            dpi_setup.apply_font_scale(app)
+        except Exception:
+            pass
         
         # Create PySide6 dialog with standard window controls
         dialog = QDialog()
@@ -22087,6 +22093,7 @@ Important rules:
                 ('auto_update_check', ['auto_update_check_var'], True, bool),
                 ('auto_dpi_scale', ['auto_dpi_scale_var'], True, bool),
                 ('gui_scale_factor', ['gui_scale_factor_var'], 1.0, lambda v: safe_float(v, 1.0)),
+                ('gui_font_scale', ['gui_font_scale_var'], 1.0, lambda v: safe_float(v, 1.0)),
                 ('ignore_header', ['ignore_header_var'], False, bool),
                 ('use_title', ['use_title_var'], False, bool),
                 ('scan_phase_enabled', ['scan_phase_enabled_var'], True, bool),
@@ -23720,6 +23727,11 @@ if __name__ == "__main__":
             except Exception:
                 pass
             qapp = QApplication(sys.argv)
+        try:
+            import dpi_setup
+            dpi_setup.apply_font_scale(qapp)
+        except Exception:
+            pass
         
         # Initialize the app (modules already available)  
         main_window = TranslatorGUI()

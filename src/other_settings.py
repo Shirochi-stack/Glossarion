@@ -2446,6 +2446,8 @@ def _create_context_management_section(self, parent):
     section_v.addSpacing(6)
     if not hasattr(self, 'auto_dpi_scale_var'):
         self.auto_dpi_scale_var = self.config.get('auto_dpi_scale', True)
+    if not hasattr(self, 'gui_font_scale_var'):
+        self.gui_font_scale_var = self.config.get('gui_font_scale', 1.0)
 
     auto_dpi_cb = self._create_styled_checkbox("Auto DPI Scale")
     auto_dpi_cb.setToolTip(
@@ -2494,6 +2496,47 @@ def _create_context_management_section(self, parent):
     scale_h.addWidget(scale_spin)
     scale_h.addStretch()
 
+    # GUI Font Scale
+    font_scale_row = QWidget()
+    font_scale_h = QHBoxLayout(font_scale_row)
+    font_scale_h.setContentsMargins(0, 0, 0, 0)
+    font_scale_h.setSpacing(6)
+    font_scale_label = QLabel("GUI Font Scale:")
+    font_scale_h.addWidget(font_scale_label)
+
+    font_scale_spin = QDoubleSpinBox()
+    font_scale_spin.setRange(0.50, 1.50)
+    font_scale_spin.setSingleStep(0.05)
+    font_scale_spin.setDecimals(2)
+    font_scale_spin.setFixedWidth(80)
+    font_scale_spin.setFocusPolicy(Qt.StrongFocus)
+    font_scale_spin.wheelEvent = lambda e: e.ignore()
+    try:
+        font_scale_spin.setValue(float(getattr(self, 'gui_font_scale_var', 1.0)))
+    except Exception:
+        font_scale_spin.setValue(1.0)
+
+    def _on_font_scale_changed(val):
+        try:
+            self.gui_font_scale_var = val
+            try:
+                self.config['gui_font_scale'] = val
+                self.save_config(show_message=False)
+                try:
+                    import dpi_setup
+                    from PySide6.QtWidgets import QApplication
+                    dpi_setup.apply_font_scale(QApplication.instance())
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    font_scale_spin.valueChanged.connect(_on_font_scale_changed)
+    font_scale_h.addWidget(font_scale_spin)
+    font_scale_h.addStretch()
+
     # Disabled styling for scale controls
     _scale_label_enabled_style = ""
     _scale_label_disabled_style = "color: #808080;"
@@ -2537,6 +2580,7 @@ def _create_context_management_section(self, parent):
     auto_dpi_cb.toggled.connect(_on_auto_dpi_toggled)
     section_v.addWidget(auto_dpi_cb)
     section_v.addWidget(scale_row)
+    section_v.addWidget(font_scale_row)
 
     # Apply initial enabled state and styling
     initial_auto = auto_dpi_cb.isChecked()
