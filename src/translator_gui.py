@@ -10175,19 +10175,31 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     trial_font.setPointSizeF(point_size)
                     from PySide6.QtGui import QFontMetrics
                     metrics = QFontMetrics(trial_font)
-                    candidate = self._wrap_for_width(metrics, available)
-                    lines = candidate.split("\n")
-                    if len(lines) <= 2 and all(metrics.horizontalAdvance(line) <= available for line in lines):
+                    if metrics.horizontalAdvance(self._full_text) <= available:
                         chosen_font = trial_font
-                        rendered = candidate
+                        rendered = self._full_text
                         break
                     point_size -= 0.5
                 else:
-                    chosen_font = self.font()
-                    chosen_font.setPointSizeF(min_point_size)
-                    from PySide6.QtGui import QFontMetrics
-                    metrics = QFontMetrics(chosen_font)
-                    rendered = self._wrap_for_width(metrics, available)
+                    point_size = self._base_point_size
+                    while point_size >= min_point_size:
+                        trial_font = self.font()
+                        trial_font.setPointSizeF(point_size)
+                        from PySide6.QtGui import QFontMetrics
+                        metrics = QFontMetrics(trial_font)
+                        candidate = self._wrap_for_width(metrics, available)
+                        lines = candidate.split("\n")
+                        if len(lines) <= 2 and all(metrics.horizontalAdvance(line) <= available for line in lines):
+                            chosen_font = trial_font
+                            rendered = candidate
+                            break
+                        point_size -= 0.5
+                    else:
+                        chosen_font = self.font()
+                        chosen_font.setPointSizeF(min_point_size)
+                        from PySide6.QtGui import QFontMetrics
+                        metrics = QFontMetrics(chosen_font)
+                        rendered = self._wrap_for_width(metrics, available)
 
                 self._syncing_fit = True
                 try:
@@ -10197,14 +10209,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self._syncing_fit = False
 
         class FittingLabel(QLabel):
-            """QLabel that shrinks and wraps to two lines while preserving the full text."""
+            """Toolbar label: stay single-line when possible, wrap only when genuinely squeezed."""
             def __init__(self, text="", parent=None):
                 super().__init__("", parent)
                 self._full_text = ""
                 self._base_point_size = self.font().pointSizeF()
                 if self._base_point_size <= 0:
                     self._base_point_size = 10.0
-                self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
                 self.setWordWrap(True)
                 self.setText(text)
 
@@ -10258,19 +10270,35 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     trial_font.setPointSizeF(point_size)
                     from PySide6.QtGui import QFontMetrics
                     metrics = QFontMetrics(trial_font)
-                    candidate = self._wrap_for_width(metrics, available)
-                    lines = candidate.split("\n")
-                    if len(lines) <= 2 and all(metrics.horizontalAdvance(line) <= available for line in lines):
+                    if metrics.horizontalAdvance(self._full_text) <= available:
                         chosen_font = trial_font
-                        rendered = candidate
+                        rendered = self._full_text
                         break
                     point_size -= 0.5
                 else:
-                    chosen_font = self.font()
-                    chosen_font.setPointSizeF(min_point_size)
-                    from PySide6.QtGui import QFontMetrics
-                    metrics = QFontMetrics(chosen_font)
-                    rendered = self._wrap_for_width(metrics, available)
+                    point_size = self._base_point_size
+                    while point_size >= min_point_size:
+                        trial_font = self.font()
+                        trial_font.setPointSizeF(point_size)
+                        from PySide6.QtGui import QFontMetrics
+                        metrics = QFontMetrics(trial_font)
+                        candidate = self._wrap_for_width(metrics, available)
+                        lines = candidate.split("\n")
+                        if (
+                            len(lines) <= 2 and
+                            candidate != self._full_text and
+                            all(metrics.horizontalAdvance(line) <= available for line in lines)
+                        ):
+                            chosen_font = trial_font
+                            rendered = candidate
+                            break
+                        point_size -= 0.5
+                    else:
+                        chosen_font = self.font()
+                        chosen_font.setPointSizeF(min_point_size)
+                        from PySide6.QtGui import QFontMetrics
+                        metrics = QFontMetrics(chosen_font)
+                        rendered = metrics.elidedText(self._full_text, Qt.ElideRight, available)
 
                 self.setFont(chosen_font)
                 super().setText(rendered)
@@ -10290,8 +10318,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
         from PySide6.QtGui import QPixmap, QIcon
         self.qa_button = QPushButton()
         self.qa_button.clicked.connect(self.run_qa_scan)
-        self.qa_button.setMinimumWidth(70)
-        self.qa_button.setMaximumWidth(140)
+        self.qa_button.setMinimumWidth(120)
+        self.qa_button.setMaximumWidth(150)
         self.qa_button.setMinimumHeight(40)  # Increased button height
         self.qa_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         
@@ -10467,7 +10495,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
             # Prevent these icon+label buttons from stretching excessively in fullscreen.
             if lbl in ["Extract Glossary", "EPUB Converter"]:
-                btn.setMinimumWidth(90)
+                btn.setMinimumWidth(150)
                 btn.setMaximumWidth(220)
                 btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
@@ -10572,7 +10600,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 self.glossary_button = btn
                 # Add disabled state styling for Extract Glossary button
-                btn.setMinimumWidth(90)
+                btn.setMinimumWidth(160)
                 btn.setMaximumWidth(220)
                 btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
                 btn.setStyleSheet(f"""
@@ -10669,7 +10697,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 self.epub_button = btn
                 # Add disabled state styling for EPUB Converter button
-                btn.setMinimumWidth(90)
+                btn.setMinimumWidth(150)
                 btn.setMaximumWidth(220)
                 btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
                 btn.setStyleSheet(f"""
