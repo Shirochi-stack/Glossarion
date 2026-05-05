@@ -10346,7 +10346,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
         btn_layout = QHBoxLayout(btn_frame)
         # Buttons should occupy the whole toolbar row instead of floating inside it.
         btn_layout.setContentsMargins(0, 0, 0, 0)
-        btn_layout.setSpacing(1)
+        btn_layout.setSpacing(0)
+
+        toolbar_gap_px = 2
+        toolbar_button_count = 0
+
+        def _add_toolbar_button(widget, stretch=0):
+            """Add a toolbar button with a real physical gap before it."""
+            nonlocal toolbar_button_count
+            if toolbar_button_count > 0:
+                btn_layout.addSpacing(toolbar_gap_px)
+            btn_layout.addWidget(widget, stretch)
+            toolbar_button_count += 1
         
         # QA Scan button with mini icon
         from PySide6.QtGui import QPixmap, QIcon
@@ -10546,13 +10557,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Give Progress Manager extra horizontal stretch so it actually grows.
             try:
                 if lbl == "Progress Manager":
-                    btn_layout.addWidget(btn, 4)
+                    _add_toolbar_button(btn, 4)
                 elif lbl in ("📦 Async Translator", "💾 Save Config", "📄 Load Glossary", "Profiles", "⚙️ Glossary Settings", "🖼️ Manga Translator", "Extract Glossary", "EPUB Converter"):
-                    btn_layout.addWidget(btn, 0)
+                    _add_toolbar_button(btn, 0)
                 else:
-                    btn_layout.addWidget(btn, 0)
+                    _add_toolbar_button(btn, 0)
             except Exception:
-                btn_layout.addWidget(btn)
+                _add_toolbar_button(btn, 0)
             
             if lbl == "Extract Glossary":
                 # Create Extract Glossary button with mini icon
@@ -10849,8 +10860,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.pm_button = btn
         
         # Add QA button at the end
-        btn_layout.addWidget(self.qa_button, 0)
-        
+        _add_toolbar_button(self.qa_button, 0)
+
         # Ensure the toolbar's minimum height matches its content (helps on small/HiDPI displays)
         try:
             btn_frame.setMinimumHeight(max(btn_frame.minimumHeight(), btn_frame.sizeHint().height()))
