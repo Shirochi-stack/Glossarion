@@ -3997,7 +3997,7 @@ Recent translations to summarize:
         
         # Create browse menu button with dropdown
         self.btn_browse_menu = QPushButton("🔍 Browse ▼")
-        self.btn_browse_menu.setMinimumWidth(100)
+        self.btn_browse_menu.setMinimumWidth(70)
         self.btn_browse_menu.setStyleSheet("background-color: #007bff; color: white; font-weight: bold;")  # primary
         
         # Create browse menu
@@ -8061,7 +8061,7 @@ Recent translations to summarize:
             "font-size: 10pt; padding: 6px 14px; border-radius: 4px; border: none; }"
             "QPushButton:hover { background-color: #5a32a3; }"
         )
-        self.library_btn.setMinimumWidth(120)
+        self.library_btn.setMinimumWidth(90)
         self.library_btn.clicked.connect(self._open_epub_library)
         self.frame.addWidget(self.library_btn, 6, 4)
 
@@ -8434,14 +8434,14 @@ Recent translations to summarize:
         # Show/Hide API Key button (row 8)
         self.show_api_btn = QPushButton("Show")
         self.show_api_btn.clicked.connect(self.toggle_api_visibility)
-        self.show_api_btn.setMinimumWidth(100)
+        self.show_api_btn.setMinimumWidth(60)
         self.frame.addWidget(self.show_api_btn, 8, 4)
         
         # Other Settings button (row 7, column 4)
         other_settings_btn = QPushButton("⚙️  Other Setting")
         other_settings_btn.clicked.connect(self.open_other_settings)
         other_settings_btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; font-size: 11pt; padding-top: 8px; padding-bottom: 12px;")  # info-outline
-        other_settings_btn.setMinimumWidth(120)
+        other_settings_btn.setMinimumWidth(90)
         self.frame.addWidget(other_settings_btn, 7, 4)
         
         # Remove AI Artifacts dropdown (row 7) — packed into a compact container
@@ -8514,18 +8514,14 @@ Recent translations to summarize:
         
         self.frame.addWidget(self.prompt_text, 9, 1, 1, 3)  # row, col, rowspan, colspan
 
-        output_column_width = 270
-
         # Output Token Limit button (row 9, column 0 - below label)
         self.output_btn = QPushButton(f"Output Token Limit: {self.max_output_tokens:,}")
         self.output_btn.clicked.connect(self.prompt_custom_token_limit)
         self.output_btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; padding: 8px 6px;")  # info
         self.output_btn.setMinimumWidth(0)
-        self.output_btn.setMaximumWidth(output_column_width)
         self.output_btn.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Maximum tokens the model may generate in responses (output side).</p></qt>")
         # Place below the label in a vertical layout
         output_container = QWidget()
-        output_container.setMaximumWidth(output_column_width)
         output_layout = QVBoxLayout(output_container)
         output_layout.setContentsMargins(0, 0, 0, 0)
         
@@ -8626,7 +8622,7 @@ Recent translations to summarize:
         # Target Language dropdown (label removed to save vertical space)
         self.target_lang_combo = QComboBox()
         self.target_lang_combo.setEditable(True)
-        self.target_lang_combo.setMaximumWidth(output_column_width)
+        self.target_lang_combo.setMinimumWidth(70)
         self.target_lang_combo.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Replaces {target_lang} in the system prompt with the value in the target language dropdown; synced across all target language dropdowns.</p></qt>")
         # Disable mouse wheel scrolling to prevent accidental changes
         self.target_lang_combo.wheelEvent = lambda event: event.ignore()
@@ -8709,7 +8705,7 @@ Recent translations to summarize:
         # Open Output Folder Button
         self.open_folder_btn = QPushButton("Open Output Folder 📁")
         self.open_folder_btn.clicked.connect(self.open_output_folder)
-        self.open_folder_btn.setMaximumWidth(output_column_width)
+        self.open_folder_btn.setMinimumWidth(80)
         self.open_folder_btn.setStyleSheet("""
             QPushButton {
                 background-color: #3d3d3d;
@@ -8886,7 +8882,7 @@ Recent translations to summarize:
                 background-color: #218838;
             }
         """)
-        self.run_button.setMinimumWidth(160)
+        self.run_button.setMinimumWidth(100)
         self.run_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.frame.addWidget(self.run_button, 9, 4)
     
