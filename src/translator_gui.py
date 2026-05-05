@@ -7228,10 +7228,172 @@ Recent translations to summarize:
         # Duplicate Auto Glossary dropdown (synced with main auto_glossary_mode_combo)
         from PySide6.QtWidgets import QComboBox
         from PySide6.QtCore import QSize
-        auto_glossary_label = QLabel("Auto Glossary:")
+        class FittingStatusLabel(QLabel):
+            def __init__(self, text="", parent=None, min_point_size=7.0):
+                super().__init__("", parent)
+                self._full_text = ""
+                self._min_point_size = min_point_size
+                self._base_point_size = self.font().pointSizeF()
+                if self._base_point_size <= 0:
+                    self._base_point_size = 10.0
+                self.setWordWrap(True)
+                self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                self.setText(text)
+
+            def setText(self, text):
+                self._full_text = text or ""
+                self._fit_text()
+
+            def text(self):
+                return self._full_text
+
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                self._fit_text()
+
+            def minimumSizeHint(self):
+                hint = super().minimumSizeHint()
+                hint.setWidth(0)
+                return hint
+
+            def _wrap_for_width(self, metrics, available):
+                words = self._full_text.split()
+                if not words:
+                    return ""
+                if metrics.horizontalAdvance(self._full_text) <= available:
+                    return self._full_text
+                best = None
+                best_score = None
+                for split_at in range(1, len(words)):
+                    candidate = (" ".join(words[:split_at]), " ".join(words[split_at:]))
+                    overflow = max(metrics.horizontalAdvance(candidate[0]), metrics.horizontalAdvance(candidate[1])) - available
+                    balance = abs(metrics.horizontalAdvance(candidate[0]) - metrics.horizontalAdvance(candidate[1]))
+                    score = (max(0, overflow), balance)
+                    if best is None or score < best_score:
+                        best = candidate
+                        best_score = score
+                return "\n".join(best) if best else self._full_text
+
+            def _fit_text(self):
+                from PySide6.QtGui import QFontMetrics
+                available = max(1, self.width() - 2)
+                point_size = self._base_point_size
+                chosen_font = self.font()
+                rendered = self._full_text
+                while point_size >= self._min_point_size:
+                    trial_font = self.font()
+                    trial_font.setPointSizeF(point_size)
+                    metrics = QFontMetrics(trial_font)
+                    candidate = self._wrap_for_width(metrics, available)
+                    lines = candidate.split("\n")
+                    if len(lines) <= 2 and all(metrics.horizontalAdvance(line) <= available for line in lines):
+                        chosen_font = trial_font
+                        rendered = candidate
+                        break
+                    point_size -= 0.5
+                else:
+                    chosen_font = self.font()
+                    chosen_font.setPointSizeF(self._min_point_size)
+                    metrics = QFontMetrics(chosen_font)
+                    rendered = self._wrap_for_width(metrics, available)
+                self.setFont(chosen_font)
+                super().setText(rendered)
+
+        class FittingComboBox(QComboBox):
+            def __init__(self, parent=None):
+                super().__init__(parent)
+                self._base_point_size = self.font().pointSizeF()
+                if self._base_point_size <= 0:
+                    self._base_point_size = 10.0
+                self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+
+            def minimumSizeHint(self):
+                hint = super().minimumSizeHint()
+                hint.setWidth(95)
+                hint.setHeight(max(hint.height(), 38))
+                return hint
+
+            def _wrap_for_width(self, text, metrics, available):
+                words = text.split()
+                if not words:
+                    return ""
+                if metrics.horizontalAdvance(text) <= available:
+                    return text
+                best = None
+                best_score = None
+                for split_at in range(1, len(words)):
+                    candidate = (" ".join(words[:split_at]), " ".join(words[split_at:]))
+                    overflow = max(metrics.horizontalAdvance(candidate[0]), metrics.horizontalAdvance(candidate[1])) - available
+                    balance = abs(metrics.horizontalAdvance(candidate[0]) - metrics.horizontalAdvance(candidate[1]))
+                    score = (max(0, overflow), balance)
+                    if best is None or score < best_score:
+                        best = candidate
+                        best_score = score
+                return "\n".join(best) if best else text
+
+            def _fitted_font_and_text(self, text, available):
+                from PySide6.QtGui import QFontMetrics
+                min_point_size = 7.0
+                point_size = self._base_point_size
+                while point_size >= min_point_size:
+                    trial_font = self.font()
+                    trial_font.setPointSizeF(point_size)
+                    metrics = QFontMetrics(trial_font)
+                    candidate = self._wrap_for_width(text, metrics, available)
+                    lines = candidate.split("\n")
+                    if len(lines) <= 2 and all(metrics.horizontalAdvance(line) <= available for line in lines):
+                        return trial_font, candidate
+                    point_size -= 0.5
+                final_font = self.font()
+                final_font.setPointSizeF(min_point_size)
+                metrics = QFontMetrics(final_font)
+                return final_font, self._wrap_for_width(text, metrics, available)
+
+            def paintEvent(self, event):
+                from PySide6.QtCore import QRect
+                from PySide6.QtGui import QTextOption
+                from PySide6.QtWidgets import QStyle, QStyleOptionComboBox, QStylePainter
+                option = QStyleOptionComboBox()
+                self.initStyleOption(option)
+                option.currentText = ""
+
+                painter = QStylePainter(self)
+                painter.drawComplexControl(QStyle.CC_ComboBox, option)
+
+                text_rect = self.style().subControlRect(
+                    QStyle.CC_ComboBox,
+                    option,
+                    QStyle.SC_ComboBoxEditField,
+                    self
+                )
+                text_rect.adjust(4, 1, -4, -1)
+
+                icon = self.itemIcon(self.currentIndex())
+                if not icon.isNull():
+                    icon_size = self.iconSize()
+                    icon_rect = QRect(
+                        text_rect.left(),
+                        text_rect.center().y() - icon_size.height() // 2,
+                        icon_size.width(),
+                        icon_size.height()
+                    )
+                    icon.paint(painter, icon_rect, Qt.AlignCenter)
+                    text_rect.setLeft(icon_rect.right() + 5)
+
+                font, rendered_text = self._fitted_font_and_text(self.currentText(), max(1, text_rect.width()))
+                painter.setFont(font)
+                painter.setPen(option.palette.text().color())
+                text_option = QTextOption(Qt.AlignCenter)
+                text_option.setWrapMode(QTextOption.WordWrap)
+                painter.drawText(text_rect, rendered_text, text_option)
+
+        auto_glossary_label = FittingStatusLabel("Auto Glossary:")
         auto_glossary_label.setStyleSheet("color: #e8f0ff; font-size: 10pt; font-weight: bold;")
+        auto_glossary_label.setText(auto_glossary_label.text())
+        auto_glossary_label.setMinimumWidth(54)
+        auto_glossary_label.setMaximumWidth(92)
         batch_right_layout.addWidget(auto_glossary_label)
-        self.auto_glossary_shortcut_combo = QComboBox()
+        self.auto_glossary_shortcut_combo = FittingComboBox()
         self.auto_glossary_shortcut_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Manual Glossary Only", "No Glossary", "Minimal", "Balanced", "Full", "Single Pass"])
         # Add Halgakos icon to each item
         try:
@@ -7259,7 +7421,8 @@ Recent translations to summarize:
             "Full: Chapter-by-chapter extraction for maximum context (most expensive)\n"
             "Single Pass: Extract glossary inline during each translation request"
         )
-        self.auto_glossary_shortcut_combo.setFixedWidth(185)
+        self.auto_glossary_shortcut_combo.setMinimumWidth(95)
+        self.auto_glossary_shortcut_combo.setMaximumWidth(185)
         self.auto_glossary_shortcut_combo.setIconSize(QSize(18, 18))
         self.auto_glossary_shortcut_combo.setStyleSheet("""
             QComboBox {
@@ -7293,6 +7456,7 @@ Recent translations to summarize:
                 background-color: #2a4a70;
             }
         """)
+        self.auto_glossary_shortcut_combo.update()
         
         def _on_auto_glossary_shortcut_changed(index):
             """Sync shortcut dropdown → main auto_glossary_mode_combo."""
@@ -7401,16 +7565,21 @@ Recent translations to summarize:
 
         # ── Manual glossary status row (sits ABOVE the auto glossary row) ──
         self._gloss_status_row = QWidget()
+        self._gloss_status_row.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self._gloss_status_row.setMaximumWidth(340)
         _gloss_row_layout = QHBoxLayout(self._gloss_status_row)
         _gloss_row_layout.setContentsMargins(0, 0, 8, 8)
         _gloss_row_layout.setSpacing(6)
 
-        self.manual_glossary_status_label = QLabel("")
+        self.manual_glossary_status_label = FittingStatusLabel("", min_point_size=7.0)
         self.manual_glossary_status_label.setStyleSheet(
             "color: #94a3b8; font-size: 9pt; font-style: italic;"
         )
+        self.manual_glossary_status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.manual_glossary_status_label.setMinimumWidth(130)
+        self.manual_glossary_status_label.setMaximumWidth(310)
         self.manual_glossary_status_label.setToolTip("Currently loaded glossary file (manual or auto-mapped)")
-        _gloss_row_layout.addWidget(self.manual_glossary_status_label)
+        _gloss_row_layout.addWidget(self.manual_glossary_status_label, 1)
 
         self.clear_manual_glossary_btn = QPushButton("✕")
         self.clear_manual_glossary_btn.setFixedSize(20, 20)
@@ -7458,7 +7627,6 @@ Recent translations to summarize:
             self._update_manual_glossary_status()
         self.clear_manual_glossary_btn.clicked.connect(_clear_manual_glossary)
         _gloss_row_layout.addWidget(self.clear_manual_glossary_btn)
-        _gloss_row_layout.addStretch()
 
         self._gloss_status_row.hide()  # hidden when no glossary loaded
 
@@ -10081,6 +10249,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self.qa_button = QPushButton()
         self.qa_button.clicked.connect(self.run_qa_scan)
         self.qa_button.setMinimumWidth(70)
+        self.qa_button.setMaximumWidth(140)
         self.qa_button.setMinimumHeight(40)  # Increased button height
         self.qa_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         
@@ -10262,8 +10431,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
             # Make Progress Manager absorb extra width instead.
             if lbl in ["Progress Manager"]:
-                btn.setMinimumWidth(100)
-                btn.setMaximumWidth(220)
+                btn.setMinimumWidth(160)
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             
             color = style_colors.get(style, "#95a5a6")
@@ -10272,11 +10440,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Give Progress Manager extra horizontal stretch so it actually grows.
             try:
                 if lbl == "Progress Manager":
-                    btn_layout.addWidget(btn, 1)
+                    btn_layout.addWidget(btn, 4)
                 elif lbl in ("📦 Async Translator", "💾 Save Config", "📄 Load Glossary", "Profiles", "⚙️ Glossary Settings", "🖼️ Manga Translator", "Extract Glossary", "EPUB Converter"):
-                    btn_layout.addWidget(btn, 1)
+                    btn_layout.addWidget(btn, 0)
                 else:
-                    btn_layout.addWidget(btn, 1)
+                    btn_layout.addWidget(btn, 0)
             except Exception:
                 btn_layout.addWidget(btn)
             
@@ -10543,8 +10711,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 btn.setLayout(pm_layout)
 
                 # Let Progress Manager take the extra toolbar width (others are constrained)
-                btn.setMinimumWidth(100)
-                btn.setMaximumWidth(220)
+                btn.setMinimumWidth(160)
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
                 # Dark pink color from style_colors
@@ -10570,7 +10737,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.pm_button = btn
         
         # Add QA button at the end
-        btn_layout.addWidget(self.qa_button)
+        btn_layout.addWidget(self.qa_button, 0)
         
         # Ensure the toolbar's minimum height matches its content (helps on small/HiDPI displays)
         try:
