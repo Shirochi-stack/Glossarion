@@ -9895,7 +9895,175 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def _make_bottom_toolbar(self):
         """Create the bottom toolbar with all action buttons"""
         from PySide6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QSizePolicy
-        from PySide6.QtCore import Qt
+        from PySide6.QtCore import Qt, QSize
+
+        class FittingPushButton(QPushButton):
+            """QPushButton that shrinks and wraps its label to fit the available width."""
+            def __init__(self, text="", parent=None):
+                super().__init__("", parent)
+                self._full_text = ""
+                self._base_point_size = self.font().pointSizeF()
+                if self._base_point_size <= 0:
+                    self._base_point_size = 10.0
+                self._syncing_fit = False
+                self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+                self.setText(text)
+
+            def setText(self, text):
+                if self._syncing_fit:
+                    super().setText(text)
+                    return
+                self._full_text = text or ""
+                self._sync_fitted_text()
+
+            def text(self):
+                return self._full_text
+
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                self._sync_fitted_text()
+
+            def minimumSizeHint(self):
+                hint = super().minimumSizeHint()
+                hint.setWidth(70)
+                return hint
+
+            def sizeHint(self):
+                hint = super().sizeHint()
+                if self._full_text:
+                    hint.setWidth(max(hint.width(), self.fontMetrics().horizontalAdvance(self._full_text) + 28))
+                return hint
+
+            def _wrap_for_width(self, metrics, available):
+                words = self._full_text.split()
+                if not words:
+                    return ""
+                if metrics.horizontalAdvance(self._full_text) <= available:
+                    return self._full_text
+
+                best = None
+                best_overflow = None
+                for split_at in range(1, len(words)):
+                    candidate = (" ".join(words[:split_at]), " ".join(words[split_at:]))
+                    overflow = max(metrics.horizontalAdvance(candidate[0]), metrics.horizontalAdvance(candidate[1])) - available
+                    balance = abs(metrics.horizontalAdvance(candidate[0]) - metrics.horizontalAdvance(candidate[1]))
+                    score = (max(0, overflow), balance)
+                    if best is None or score < best_overflow:
+                        best = candidate
+                        best_overflow = score
+                return "\n".join(best) if best else self._full_text
+
+            def _sync_fitted_text(self):
+                available = max(1, self.width() - 16)
+                min_point_size = 7.0
+                chosen_font = self.font()
+                rendered = self._full_text
+
+                point_size = self._base_point_size
+                while point_size >= min_point_size:
+                    trial_font = self.font()
+                    trial_font.setPointSizeF(point_size)
+                    from PySide6.QtGui import QFontMetrics
+                    metrics = QFontMetrics(trial_font)
+                    candidate = self._wrap_for_width(metrics, available)
+                    lines = candidate.split("\n")
+                    if len(lines) <= 2 and all(metrics.horizontalAdvance(line) <= available for line in lines):
+                        chosen_font = trial_font
+                        rendered = candidate
+                        break
+                    point_size -= 0.5
+                else:
+                    chosen_font = self.font()
+                    chosen_font.setPointSizeF(min_point_size)
+                    from PySide6.QtGui import QFontMetrics
+                    metrics = QFontMetrics(chosen_font)
+                    rendered = self._wrap_for_width(metrics, available)
+
+                self._syncing_fit = True
+                try:
+                    self.setFont(chosen_font)
+                    super().setText(rendered)
+                finally:
+                    self._syncing_fit = False
+
+        class FittingLabel(QLabel):
+            """QLabel that shrinks and wraps to two lines while preserving the full text."""
+            def __init__(self, text="", parent=None):
+                super().__init__("", parent)
+                self._full_text = ""
+                self._base_point_size = self.font().pointSizeF()
+                if self._base_point_size <= 0:
+                    self._base_point_size = 10.0
+                self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                self.setWordWrap(True)
+                self.setText(text)
+
+            def setText(self, text):
+                self._full_text = text or ""
+                self._sync_fitted_text()
+
+            def text(self):
+                return self._full_text
+
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                self._sync_fitted_text()
+
+            def minimumSizeHint(self):
+                return QSize(0, super().minimumSizeHint().height())
+
+            def sizeHint(self):
+                hint = super().sizeHint()
+                if self._full_text:
+                    hint.setWidth(max(hint.width(), self.fontMetrics().horizontalAdvance(self._full_text)))
+                return hint
+
+            def _wrap_for_width(self, metrics, available):
+                words = self._full_text.split()
+                if not words:
+                    return ""
+                if metrics.horizontalAdvance(self._full_text) <= available:
+                    return self._full_text
+                best = None
+                best_overflow = None
+                for split_at in range(1, len(words)):
+                    candidate = (" ".join(words[:split_at]), " ".join(words[split_at:]))
+                    overflow = max(metrics.horizontalAdvance(candidate[0]), metrics.horizontalAdvance(candidate[1])) - available
+                    balance = abs(metrics.horizontalAdvance(candidate[0]) - metrics.horizontalAdvance(candidate[1]))
+                    score = (max(0, overflow), balance)
+                    if best is None or score < best_overflow:
+                        best = candidate
+                        best_overflow = score
+                return "\n".join(best) if best else self._full_text
+
+            def _sync_fitted_text(self):
+                available = max(1, self.width())
+                min_point_size = 7.0
+                chosen_font = self.font()
+                rendered = self._full_text
+
+                point_size = self._base_point_size
+                while point_size >= min_point_size:
+                    trial_font = self.font()
+                    trial_font.setPointSizeF(point_size)
+                    from PySide6.QtGui import QFontMetrics
+                    metrics = QFontMetrics(trial_font)
+                    candidate = self._wrap_for_width(metrics, available)
+                    lines = candidate.split("\n")
+                    if len(lines) <= 2 and all(metrics.horizontalAdvance(line) <= available for line in lines):
+                        chosen_font = trial_font
+                        rendered = candidate
+                        break
+                    point_size -= 0.5
+                else:
+                    chosen_font = self.font()
+                    chosen_font.setPointSizeF(min_point_size)
+                    from PySide6.QtGui import QFontMetrics
+                    metrics = QFontMetrics(chosen_font)
+                    rendered = self._wrap_for_width(metrics, available)
+
+                self.setFont(chosen_font)
+                super().setText(rendered)
         
         btn_frame = QWidget()
         # IMPORTANT: do NOT cap the toolbar height. On HiDPI / small displays the buttons' sizeHint can
@@ -9912,9 +10080,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
         from PySide6.QtGui import QPixmap, QIcon
         self.qa_button = QPushButton()
         self.qa_button.clicked.connect(self.run_qa_scan)
-        self.qa_button.setMinimumWidth(120)
+        self.qa_button.setMinimumWidth(70)
         self.qa_button.setMinimumHeight(40)  # Increased button height
-        self.qa_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Expand horizontally to fill space
+        self.qa_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         
         # Create horizontal layout for button content
         qa_btn_widget = QWidget()
@@ -9983,7 +10151,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self.qa_spinner = self._create_spinner(self.qa_button_icon)
         
         # Button text label
-        self.qa_text_label = QLabel("QA Scan")  # Store as instance variable
+        self.qa_text_label = FittingLabel("QA Scan")  # Store as instance variable
         self.qa_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
         self.qa_text_label.setAlignment(Qt.AlignCenter)
         
@@ -10042,7 +10210,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if lbl in ["Extract Glossary", "EPUB Converter"]:
                 btn = QPushButton()
             else:
-                btn = QPushButton(lbl)
+                btn = FittingPushButton(lbl)
             
             # Special-case Save Config for inline feedback
             if lbl == "💾 Save Config":
@@ -10053,47 +10221,49 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 btn.clicked.connect(cmd)
             
             btn.setMinimumHeight(40)
-            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Expand horizontally to fill space
+            btn.setMinimumWidth(72)
+            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             
             # Keep Profiles compact (but slightly wider)
             if lbl in ["Profiles"]:
-                btn.setMinimumWidth(80)
+                btn.setMinimumWidth(60)
                 btn.setMaximumWidth(120)
-                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
             # Keep Async Translator compact (but slightly wider)
             if lbl in ["📦 Async Translator"]:
-                btn.setMinimumWidth(100)
+                btn.setMinimumWidth(85)
                 btn.setMaximumWidth(155)
-                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
             # Keep Save/Load buttons from eating horizontal space (but slightly wider)
             if lbl in ["💾 Save Config", "📄 Load Glossary"]:
-                btn.setMinimumWidth(105)
+                btn.setMinimumWidth(75)
                 btn.setMaximumWidth(140)
-                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
             # Keep Glossary Settings from eating horizontal space
             if lbl in ["⚙️ Glossary Settings"]:
-                btn.setMinimumWidth(150)
+                btn.setMinimumWidth(95)
                 btn.setMaximumWidth(190)
-                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
             # Keep Manga Translator from eating horizontal space (but add emoji)
             if lbl in ["🖼️ Manga Translator"]:
-                btn.setMinimumWidth(140)
+                btn.setMinimumWidth(90)
                 btn.setMaximumWidth(180)
-                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
             # Prevent these icon+label buttons from stretching excessively in fullscreen.
             if lbl in ["Extract Glossary", "EPUB Converter"]:
-                btn.setMinimumWidth(160)
+                btn.setMinimumWidth(90)
                 btn.setMaximumWidth(220)
-                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
             # Make Progress Manager absorb extra width instead.
             if lbl in ["Progress Manager"]:
-                btn.setMinimumWidth(180)
+                btn.setMinimumWidth(100)
+                btn.setMaximumWidth(220)
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             
             color = style_colors.get(style, "#95a5a6")
@@ -10102,9 +10272,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Give Progress Manager extra horizontal stretch so it actually grows.
             try:
                 if lbl == "Progress Manager":
-                    btn_layout.addWidget(btn, 4)
+                    btn_layout.addWidget(btn, 1)
                 elif lbl in ("📦 Async Translator", "💾 Save Config", "📄 Load Glossary", "Profiles", "⚙️ Glossary Settings", "🖼️ Manga Translator", "Extract Glossary", "EPUB Converter"):
-                    btn_layout.addWidget(btn, 0)
+                    btn_layout.addWidget(btn, 1)
                 else:
                     btn_layout.addWidget(btn, 1)
             except Exception:
@@ -10179,7 +10349,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.glossary_spinner = self._create_spinner(self.glossary_button_icon)
                 
                 # Button text label
-                self.glossary_text_label = QLabel("Extract Glossary")  # Store as instance variable
+                self.glossary_text_label = FittingLabel("Extract Glossary")  # Store as instance variable
                 self.glossary_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
                 self.glossary_text_label.setAlignment(Qt.AlignCenter)
                 
@@ -10192,9 +10362,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 self.glossary_button = btn
                 # Add disabled state styling for Extract Glossary button
-                btn.setMinimumWidth(180)
+                btn.setMinimumWidth(90)
                 btn.setMaximumWidth(220)
-                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background-color: {color};
@@ -10276,7 +10446,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.epub_spinner = self._create_spinner(self.epub_button_icon)
                 
                 # Button text label
-                self.epub_text_label = QLabel("EPUB Converter")  # Store as instance variable
+                self.epub_text_label = FittingLabel("EPUB Converter")  # Store as instance variable
                 self.epub_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
                 self.epub_text_label.setAlignment(Qt.AlignCenter)
                 
@@ -10289,9 +10459,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 self.epub_button = btn
                 # Add disabled state styling for EPUB Converter button
-                btn.setMinimumWidth(150)
+                btn.setMinimumWidth(90)
                 btn.setMaximumWidth(220)
-                btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background-color: {color};
@@ -10363,7 +10533,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.pm_spinner = self._create_spinner(self.pm_button_icon, steps=40, interval_ms=16)
                 self._pm_spin_cycle_ms = 900
 
-                self.pm_text_label = QLabel("Progress Manager")
+                self.pm_text_label = FittingLabel("Progress Manager")
                 self.pm_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
                 self.pm_text_label.setAlignment(Qt.AlignCenter)
 
@@ -10373,7 +10543,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 btn.setLayout(pm_layout)
 
                 # Let Progress Manager take the extra toolbar width (others are constrained)
-                btn.setMinimumWidth(180)
+                btn.setMinimumWidth(100)
+                btn.setMaximumWidth(220)
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
                 # Dark pink color from style_colors
