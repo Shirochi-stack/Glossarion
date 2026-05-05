@@ -7146,13 +7146,19 @@ Recent translations to summarize:
         self.frame.addWidget(contextual_container, 3, 2, 1, 2, Qt.AlignLeft)
         
         # Translation History Limit (row 4)
+        history_limit_container = QWidget()
+        history_limit_layout = QHBoxLayout(history_limit_container)
+        history_limit_layout.setContentsMargins(0, 0, 0, 0)
+        history_limit_layout.setSpacing(8)
         self.trans_history_label = QLabel("Translation History Limit:")
-        self.frame.addWidget(self.trans_history_label, 4, 2, Qt.AlignLeft)
+        history_limit_layout.addWidget(self.trans_history_label)
         
         self.trans_history = QLineEdit()
         self.trans_history.setText(str(self.config.get('translation_history_limit', 2)))
         self.trans_history.setMaximumWidth(60)
-        self.frame.addWidget(self.trans_history, 4, 3, Qt.AlignLeft)
+        history_limit_layout.addWidget(self.trans_history)
+        history_limit_layout.addStretch()
+        self.frame.addWidget(history_limit_container, 4, 2, 1, 2, Qt.AlignLeft)
         
         # Rolling History (row 5)
         self.rolling_checkbox = self._create_styled_checkbox("Rolling History Window")
@@ -7169,14 +7175,20 @@ Recent translations to summarize:
         self.frame.addWidget(self.rolling_checkbox, 5, 2, Qt.AlignLeft)
         
         # Temperature (row 6)
+        temp_container = QWidget()
+        temp_layout = QHBoxLayout(temp_container)
+        temp_layout.setContentsMargins(0, 0, 0, 0)
+        temp_layout.setSpacing(8)
         temp_label = QLabel("Temperature:")
         temp_label.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Controls AI creativity. Lower (0.1–0.3) = literal/stable. Higher (0.7+) = creative/random.</p></qt>")
-        self.frame.addWidget(temp_label, 6, 2, Qt.AlignLeft)
+        temp_layout.addWidget(temp_label)
         
         self.trans_temp = QLineEdit()
         self.trans_temp.setText(str(self.config.get('translation_temperature', 0.3)))
         self.trans_temp.setMaximumWidth(60)
-        self.frame.addWidget(self.trans_temp, 6, 3, Qt.AlignLeft)
+        temp_layout.addWidget(self.trans_temp)
+        temp_layout.addStretch()
+        self.frame.addWidget(temp_container, 6, 2, 1, 2, Qt.AlignLeft)
         
         # Batch Translation (row 7) with spinning icon
         batch_container = QWidget()
