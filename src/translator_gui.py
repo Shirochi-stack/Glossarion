@@ -10327,6 +10327,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
         toolbar_button_height = 40
 
         btn_frame = QWidget()
+        btn_frame.setObjectName("bottomToolbarFrame")
+        btn_frame.setStyleSheet("""
+            QWidget#bottomToolbarFrame {
+                background: transparent;
+                border: none;
+                border-radius: 0px;
+                margin: 0px;
+                padding: 0px;
+            }
+        """)
         # IMPORTANT: do NOT cap the toolbar height. On HiDPI / small displays the buttons' sizeHint can
         # exceed a fixed max, and Qt layouts may place child widgets outside this frame (visually overlapping the log).
         btn_frame.setMinimumHeight(toolbar_button_height)
@@ -10426,6 +10436,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             QPushButton {
                 background-color: #e67e22;
                 color: white;
+                border: none;
+                border-radius: 0px;
                 padding: 4px 6px;
                 font-weight: bold;
             }
@@ -10529,7 +10541,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             
             color = style_colors.get(style, "#95a5a6")
-            btn.setStyleSheet(f"background-color: {color}; color: white; padding: 4px 6px; font-weight: bold;")
+            btn.setStyleSheet(f"background-color: {color}; color: white; border: none; border-radius: 0px; padding: 4px 6px; font-weight: bold;")
 
             # Give Progress Manager extra horizontal stretch so it actually grows.
             try:
@@ -10631,6 +10643,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     QPushButton {{
                         background-color: {color};
                         color: white;
+                        border: none;
+                        border-radius: 0px;
                         padding: 4px 6px;
                         font-weight: bold;
                     }}
@@ -10728,6 +10742,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     QPushButton {{
                         background-color: {color};
                         color: white;
+                        border: none;
+                        border-radius: 0px;
                         padding: 4px 6px;
                         font-weight: bold;
                     }}
@@ -10813,6 +10829,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     QPushButton {{
                         background-color: {color};
                         color: white;
+                        border: none;
+                        border-radius: 0px;
                         padding: 4px 8px;
                         font-weight: bold;
                     }}
