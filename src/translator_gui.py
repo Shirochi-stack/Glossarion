@@ -7256,6 +7256,14 @@ Recent translations to summarize:
                 hint.setWidth(0)
                 return hint
 
+            def sizeHint(self):
+                from PySide6.QtGui import QFontMetrics
+                hint = super().sizeHint()
+                if self._full_text:
+                    metrics = QFontMetrics(self.font())
+                    hint.setWidth(max(hint.width(), metrics.horizontalAdvance(self._full_text) + 4))
+                return hint
+
             def _wrap_for_width(self, metrics, available):
                 words = self._full_text.split()
                 if not words:
@@ -7306,12 +7314,30 @@ Recent translations to summarize:
                 if self._base_point_size <= 0:
                     self._base_point_size = 10.0
                 self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+                try:
+                    self.view().setTextElideMode(Qt.ElideNone)
+                except Exception:
+                    pass
 
             def minimumSizeHint(self):
                 hint = super().minimumSizeHint()
                 hint.setWidth(95)
                 hint.setHeight(max(hint.height(), 38))
                 return hint
+
+            def showPopup(self):
+                try:
+                    from PySide6.QtGui import QFontMetrics
+                    metrics = QFontMetrics(self.view().font())
+                    longest = 0
+                    for idx in range(self.count()):
+                        longest = max(longest, metrics.horizontalAdvance(self.itemText(idx)))
+                    popup_width = longest + self.iconSize().width() + 48
+                    self.view().setMinimumWidth(max(self.width(), popup_width))
+                    self.view().setTextElideMode(Qt.ElideNone)
+                except Exception:
+                    pass
+                super().showPopup()
 
             def _wrap_for_width(self, text, metrics, available):
                 words = text.split()
@@ -7351,12 +7377,29 @@ Recent translations to summarize:
 
             def paintEvent(self, event):
                 from PySide6.QtCore import QRect
-                from PySide6.QtGui import QTextOption
+                from PySide6.QtGui import QFontMetrics, QTextOption
                 from PySide6.QtWidgets import QStyle, QStyleOptionComboBox, QStylePainter
                 option = QStyleOptionComboBox()
                 self.initStyleOption(option)
-                option.currentText = ""
 
+                text_rect = self.style().subControlRect(
+                    QStyle.CC_ComboBox,
+                    option,
+                    QStyle.SC_ComboBoxEditField,
+                    self
+                )
+                text_rect.adjust(4, 1, -4, -1)
+
+                icon = self.itemIcon(self.currentIndex())
+                if not icon.isNull():
+                    icon_size = self.iconSize()
+                    text_rect.setLeft(text_rect.left() + icon_size.width() + 5)
+
+                if QFontMetrics(self.font()).horizontalAdvance(self.currentText()) <= max(1, text_rect.width()):
+                    super().paintEvent(event)
+                    return
+
+                option.currentText = ""
                 painter = QStylePainter(self)
                 painter.drawComplexControl(QStyle.CC_ComboBox, option)
 
@@ -7368,7 +7411,6 @@ Recent translations to summarize:
                 )
                 text_rect.adjust(4, 1, -4, -1)
 
-                icon = self.itemIcon(self.currentIndex())
                 if not icon.isNull():
                     icon_size = self.iconSize()
                     icon_rect = QRect(
@@ -7390,8 +7432,8 @@ Recent translations to summarize:
         auto_glossary_label = FittingStatusLabel("Auto Glossary:")
         auto_glossary_label.setStyleSheet("color: #e8f0ff; font-size: 10pt; font-weight: bold;")
         auto_glossary_label.setText(auto_glossary_label.text())
-        auto_glossary_label.setMinimumWidth(54)
-        auto_glossary_label.setMaximumWidth(92)
+        auto_glossary_label.setMinimumWidth(104)
+        auto_glossary_label.setMaximumWidth(128)
         batch_right_layout.addWidget(auto_glossary_label)
         self.auto_glossary_shortcut_combo = FittingComboBox()
         self.auto_glossary_shortcut_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Manual Glossary Only", "No Glossary", "Minimal", "Balanced", "Full", "Single Pass"])
