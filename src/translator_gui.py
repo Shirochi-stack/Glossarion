@@ -10208,31 +10208,27 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 available = max(1, self.width() - 16)
                 min_point_size = 7.0
                 chosen_font = self.font()
+                chosen_font.setPointSizeF(self._base_point_size)
                 rendered = self._full_text
                 current_rendered = super().text()
-                unwrap_margin = 8 if "\n" in current_rendered else 0
 
-                point_size = self._base_point_size
-                while point_size >= min_point_size:
-                    trial_font = self.font()
-                    trial_font.setPointSizeF(point_size)
-                    from PySide6.QtGui import QFontMetrics
-                    metrics = QFontMetrics(trial_font)
-                    if metrics.horizontalAdvance(self._full_text) <= available - unwrap_margin:
-                        chosen_font = trial_font
-                        rendered = self._full_text
-                        break
-                    point_size -= 0.5
+                from PySide6.QtGui import QFontMetrics
+                base_metrics = QFontMetrics(chosen_font)
+                if base_metrics.horizontalAdvance(self._full_text) <= available:
+                    rendered = self._full_text
                 else:
                     point_size = self._base_point_size
                     while point_size >= min_point_size:
                         trial_font = self.font()
                         trial_font.setPointSizeF(point_size)
-                        from PySide6.QtGui import QFontMetrics
                         metrics = QFontMetrics(trial_font)
                         candidate = self._wrap_for_width(metrics, available)
                         lines = candidate.split("\n")
-                        if len(lines) <= 2 and all(metrics.horizontalAdvance(line) <= available for line in lines):
+                        if (
+                            len(lines) <= 2 and
+                            candidate != self._full_text and
+                            all(metrics.horizontalAdvance(line) <= available for line in lines)
+                        ):
                             chosen_font = trial_font
                             rendered = candidate
                             break
@@ -10240,7 +10236,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     else:
                         chosen_font = self.font()
                         chosen_font.setPointSizeF(min_point_size)
-                        from PySide6.QtGui import QFontMetrics
                         metrics = QFontMetrics(chosen_font)
                         rendered = self._wrap_for_width(metrics, available)
 
@@ -10641,7 +10636,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
             # Prevent these icon+label buttons from stretching excessively in fullscreen.
             if lbl in ["Extract Glossary", "EPUB Converter"]:
-                btn.setMinimumWidth(108)
+                btn.setMinimumWidth(145)
                 btn.setMaximumWidth(220)
                 btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
@@ -10748,7 +10743,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 self.glossary_button = btn
                 # Add disabled state styling for Extract Glossary button
-                btn.setMinimumWidth(108)
+                btn.setMinimumWidth(145)
                 btn.setMaximumWidth(220)
                 btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
                 btn.setStyleSheet(f"""
@@ -10849,7 +10844,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 self.epub_button = btn
                 # Add disabled state styling for EPUB Converter button
-                btn.setMinimumWidth(108)
+                btn.setMinimumWidth(145)
                 btn.setMaximumWidth(220)
                 btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
                 btn.setStyleSheet(f"""
