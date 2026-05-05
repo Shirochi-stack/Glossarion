@@ -10209,6 +10209,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 min_point_size = 7.0
                 chosen_font = self.font()
                 rendered = self._full_text
+                current_rendered = super().text()
+                unwrap_margin = 8 if "\n" in current_rendered else 0
 
                 point_size = self._base_point_size
                 while point_size >= min_point_size:
@@ -10216,7 +10218,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     trial_font.setPointSizeF(point_size)
                     from PySide6.QtGui import QFontMetrics
                     metrics = QFontMetrics(trial_font)
-                    if metrics.horizontalAdvance(self._full_text) <= available:
+                    if metrics.horizontalAdvance(self._full_text) <= available - unwrap_margin:
                         chosen_font = trial_font
                         rendered = self._full_text
                         break
@@ -10242,6 +10244,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         metrics = QFontMetrics(chosen_font)
                         rendered = self._wrap_for_width(metrics, available)
 
+                if current_rendered == rendered and abs(self.font().pointSizeF() - chosen_font.pointSizeF()) < 0.01:
+                    return
+
                 self._syncing_fit = True
                 try:
                     self.setFont(chosen_font)
@@ -10251,19 +10256,25 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
         class FittingLabel(QLabel):
             """Toolbar label: stay single-line when possible, wrap only when genuinely squeezed."""
-            def __init__(self, text="", parent=None):
+            def __init__(self, text="", parent=None, base_point_size=None):
                 super().__init__("", parent)
                 self._full_text = ""
-                self._base_point_size = self.font().pointSizeF()
+                self._base_point_size = float(base_point_size) if base_point_size is not None else self.font().pointSizeF()
                 if self._base_point_size <= 0:
                     self._base_point_size = 10.0
+                self._min_point_size = 6.5
+                self._rendered_text = ""
+                self._rendered_point_size = self._base_point_size
                 self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-                self.setWordWrap(True)
+                self.setWordWrap(False)
                 self.setText(text)
 
             def setText(self, text):
                 self._full_text = text or ""
+                self.setMinimumWidth(self._minimum_text_width())
                 self._sync_fitted_text()
+                self.updateGeometry()
+                self.update()
 
             def text(self):
                 return self._full_text
@@ -10273,13 +10284,37 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self._sync_fitted_text()
 
             def minimumSizeHint(self):
-                return QSize(0, super().minimumSizeHint().height())
+                try:
+                    font = self.font()
+                    font.setPointSizeF(self._min_point_size)
+                    from PySide6.QtGui import QFontMetrics
+                    metrics = QFontMetrics(font)
+                    return QSize(self._minimum_text_width(), metrics.lineSpacing() * 2)
+                except Exception:
+                    return QSize(self._minimum_text_width(), super().minimumSizeHint().height())
 
             def sizeHint(self):
-                hint = super().sizeHint()
-                if self._full_text:
-                    hint.setWidth(max(hint.width(), self.fontMetrics().horizontalAdvance(self._full_text)))
-                return hint
+                try:
+                    font = self.font()
+                    font.setPointSizeF(self._base_point_size)
+                    from PySide6.QtGui import QFontMetrics
+                    metrics = QFontMetrics(font)
+                    return QSize(max(self._minimum_text_width(), metrics.horizontalAdvance(self._full_text)), metrics.lineSpacing() * 2)
+                except Exception:
+                    return super().sizeHint()
+
+            def _minimum_text_width(self):
+                try:
+                    font = self.font()
+                    font.setPointSizeF(self._min_point_size)
+                    from PySide6.QtGui import QFontMetrics
+                    metrics = QFontMetrics(font)
+                    words = [w for w in self._full_text.split() if w]
+                    if not words:
+                        return 24
+                    return max(28, min(58, max(metrics.horizontalAdvance(word) for word in words) + 4))
+                except Exception:
+                    return 34
 
             def _wrap_for_width(self, metrics, available):
                 words = self._full_text.split()
@@ -10301,27 +10336,21 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
             def _sync_fitted_text(self):
                 available = max(1, self.width())
-                min_point_size = 7.0
+                min_point_size = self._min_point_size
                 chosen_font = self.font()
+                chosen_font.setPointSizeF(self._base_point_size)
                 rendered = self._full_text
+                current_rendered = self._rendered_text
 
-                point_size = self._base_point_size
-                while point_size >= min_point_size:
-                    trial_font = self.font()
-                    trial_font.setPointSizeF(point_size)
-                    from PySide6.QtGui import QFontMetrics
-                    metrics = QFontMetrics(trial_font)
-                    if metrics.horizontalAdvance(self._full_text) <= available:
-                        chosen_font = trial_font
-                        rendered = self._full_text
-                        break
-                    point_size -= 0.5
+                from PySide6.QtGui import QFontMetrics
+                base_metrics = QFontMetrics(chosen_font)
+                if base_metrics.horizontalAdvance(self._full_text) <= available:
+                    rendered = self._full_text
                 else:
                     point_size = self._base_point_size
                     while point_size >= min_point_size:
                         trial_font = self.font()
                         trial_font.setPointSizeF(point_size)
-                        from PySide6.QtGui import QFontMetrics
                         metrics = QFontMetrics(trial_font)
                         candidate = self._wrap_for_width(metrics, available)
                         lines = candidate.split("\n")
@@ -10337,12 +10366,36 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     else:
                         chosen_font = self.font()
                         chosen_font.setPointSizeF(min_point_size)
-                        from PySide6.QtGui import QFontMetrics
                         metrics = QFontMetrics(chosen_font)
-                        rendered = metrics.elidedText(self._full_text, Qt.ElideRight, available)
+                        candidate = self._wrap_for_width(metrics, available)
+                        lines = candidate.split("\n")
+                        if len(lines) > 1:
+                            rendered = "\n".join(metrics.elidedText(line, Qt.ElideRight, available) for line in lines[:2])
+                        else:
+                            rendered = metrics.elidedText(self._full_text, Qt.ElideRight, available)
+                        if not rendered.strip() and self._full_text:
+                            rendered = self._full_text[0]
 
-                self.setFont(chosen_font)
-                super().setText(rendered)
+                chosen_point_size = chosen_font.pointSizeF()
+                if current_rendered == rendered and abs(self._rendered_point_size - chosen_point_size) < 0.01:
+                    return
+
+                self._rendered_text = rendered
+                self._rendered_point_size = chosen_point_size
+                self.update()
+
+            def paintEvent(self, event):
+                try:
+                    self._sync_fitted_text()
+                    from PySide6.QtGui import QPainter
+                    painter = QPainter(self)
+                    font = self.font()
+                    font.setPointSizeF(self._rendered_point_size)
+                    painter.setFont(font)
+                    painter.setPen(self.palette().color(self.foregroundRole()))
+                    painter.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, self._rendered_text or self._full_text)
+                except Exception:
+                    super().paintEvent(event)
         
         toolbar_button_height = 40
 
@@ -10369,6 +10422,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         btn_layout.setSpacing(0)
 
         toolbar_gap_px = 2
+        toolbar_icon_box = 26
         toolbar_button_count = 0
 
         def _add_toolbar_button(widget, stretch=0):
@@ -10383,8 +10437,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
         from PySide6.QtGui import QPixmap, QIcon
         self.qa_button = QPushButton()
         self.qa_button.clicked.connect(self.run_qa_scan)
-        self.qa_button.setMinimumWidth(120)
-        self.qa_button.setMaximumWidth(150)
+        self.qa_button.setMinimumWidth(92)
+        self.qa_button.setMaximumWidth(140)
         self.qa_button.setMinimumHeight(toolbar_button_height)
         self.qa_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         
@@ -10448,19 +10502,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
             except Exception:
                 pass
             self.qa_button_icon.set_original_pixmap(pm)
-        self.qa_button_icon.setFixedSize(32, 32)
+        self.qa_button_icon.setFixedSize(toolbar_icon_box, toolbar_icon_box)
         self.qa_button_icon.setAlignment(Qt.AlignCenter)
         
         # Smooth spinner (cached frames, no QPainter)
         self.qa_spinner = self._create_spinner(self.qa_button_icon)
         
         # Button text label
-        self.qa_text_label = FittingLabel("QA Scan")  # Store as instance variable
+        self.qa_text_label = FittingLabel("QA Scan", base_point_size=8.0)  # Store as instance variable
         self.qa_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
         self.qa_text_label.setAlignment(Qt.AlignCenter)
         
         qa_btn_layout.addWidget(self.qa_button_icon)
-        qa_btn_layout.addWidget(self.qa_text_label)
+        qa_btn_layout.addWidget(self.qa_text_label, 1)
         self.qa_button.setLayout(qa_btn_layout)
         
         self.qa_button.setStyleSheet("""
@@ -10562,13 +10616,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
             # Prevent these icon+label buttons from stretching excessively in fullscreen.
             if lbl in ["Extract Glossary", "EPUB Converter"]:
-                btn.setMinimumWidth(150)
+                btn.setMinimumWidth(108)
                 btn.setMaximumWidth(220)
                 btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
             # Make Progress Manager absorb extra width instead.
             if lbl in ["Progress Manager"]:
-                btn.setMinimumWidth(160)
+                btn.setMinimumWidth(122)
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             
             color = style_colors.get(style, "#95a5a6")
@@ -10647,19 +10701,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     except Exception:
                         pass
                     self.glossary_button_icon.set_original_pixmap(pm)
-                self.glossary_button_icon.setFixedSize(32, 32)
+                self.glossary_button_icon.setFixedSize(toolbar_icon_box, toolbar_icon_box)
                 self.glossary_button_icon.setAlignment(Qt.AlignCenter)
                 
                 # Smooth spinner (cached frames)
                 self.glossary_spinner = self._create_spinner(self.glossary_button_icon)
                 
                 # Button text label
-                self.glossary_text_label = FittingLabel("Extract Glossary")  # Store as instance variable
+                self.glossary_text_label = FittingLabel("Extract Glossary", base_point_size=8.0)  # Store as instance variable
                 self.glossary_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
                 self.glossary_text_label.setAlignment(Qt.AlignCenter)
                 
                 glossary_btn_layout.addWidget(self.glossary_button_icon)
-                glossary_btn_layout.addWidget(self.glossary_text_label)
+                glossary_btn_layout.addWidget(self.glossary_text_label, 1)
                 btn.setLayout(glossary_btn_layout)
                 
                 # Now connect the command after layout is set
@@ -10667,7 +10721,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 self.glossary_button = btn
                 # Add disabled state styling for Extract Glossary button
-                btn.setMinimumWidth(160)
+                btn.setMinimumWidth(108)
                 btn.setMaximumWidth(220)
                 btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
                 btn.setStyleSheet(f"""
@@ -10746,19 +10800,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     except Exception:
                         pass
                     self.epub_button_icon.set_original_pixmap(pm)
-                self.epub_button_icon.setFixedSize(32, 32)
+                self.epub_button_icon.setFixedSize(toolbar_icon_box, toolbar_icon_box)
                 self.epub_button_icon.setAlignment(Qt.AlignCenter)
                 
                 # Smooth spinner (cached frames)
                 self.epub_spinner = self._create_spinner(self.epub_button_icon)
                 
                 # Button text label
-                self.epub_text_label = FittingLabel("EPUB Converter")  # Store as instance variable
+                self.epub_text_label = FittingLabel("EPUB Converter", base_point_size=8.0)  # Store as instance variable
                 self.epub_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
                 self.epub_text_label.setAlignment(Qt.AlignCenter)
                 
                 epub_btn_layout.addWidget(self.epub_button_icon)
-                epub_btn_layout.addWidget(self.epub_text_label)
+                epub_btn_layout.addWidget(self.epub_text_label, 1)
                 btn.setLayout(epub_btn_layout)
                 
                 # Now connect the command after layout is set
@@ -10766,7 +10820,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 self.epub_button = btn
                 # Add disabled state styling for EPUB Converter button
-                btn.setMinimumWidth(150)
+                btn.setMinimumWidth(108)
                 btn.setMaximumWidth(220)
                 btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
                 btn.setStyleSheet(f"""
@@ -10835,24 +10889,24 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     except Exception:
                         pass
                     self.pm_button_icon.set_original_pixmap(pm)
-                self.pm_button_icon.setFixedSize(32, 32)
+                self.pm_button_icon.setFixedSize(toolbar_icon_box, toolbar_icon_box)
                 self.pm_button_icon.setAlignment(Qt.AlignCenter)
 
                 # Smooth spinner (cached frames)
                 self.pm_spinner = self._create_spinner(self.pm_button_icon, steps=40, interval_ms=16)
                 self._pm_spin_cycle_ms = 900
 
-                self.pm_text_label = FittingLabel("Progress Manager")
+                self.pm_text_label = FittingLabel("Progress Manager", base_point_size=8.0)
                 self.pm_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
                 self.pm_text_label.setAlignment(Qt.AlignCenter)
 
                 pm_layout.addWidget(self.pm_button_icon)
-                pm_layout.addWidget(self.pm_text_label)
+                pm_layout.addWidget(self.pm_text_label, 1)
                 btn.setText("")
                 btn.setLayout(pm_layout)
 
                 # Let Progress Manager take the extra toolbar width (others are constrained)
-                btn.setMinimumWidth(160)
+                btn.setMinimumWidth(122)
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
                 # Dark pink color from style_colors
