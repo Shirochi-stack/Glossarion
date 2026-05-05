@@ -7367,6 +7367,19 @@ Recent translations to summarize:
                 from PySide6.QtGui import QFontMetrics
                 min_point_size = 7.0
                 point_size = self._base_point_size
+
+                # Prefer a single line whenever it can fit, even if that means
+                # shrinking the font a little. Only wrap after single-line fit
+                # has genuinely failed at the minimum readable size.
+                while point_size >= min_point_size:
+                    trial_font = self.font()
+                    trial_font.setPointSizeF(point_size)
+                    metrics = QFontMetrics(trial_font)
+                    if metrics.horizontalAdvance(text) <= available:
+                        return trial_font, text
+                    point_size -= 0.5
+
+                point_size = self._base_point_size
                 while point_size >= min_point_size:
                     trial_font = self.font()
                     trial_font.setPointSizeF(point_size)
@@ -7376,6 +7389,7 @@ Recent translations to summarize:
                     if len(lines) <= 2 and all(metrics.horizontalAdvance(line) <= available for line in lines):
                         return trial_font, candidate
                     point_size -= 0.5
+
                 final_font = self.font()
                 final_font.setPointSizeF(min_point_size)
                 metrics = QFontMetrics(final_font)
@@ -8464,8 +8478,8 @@ Recent translations to summarize:
         self.prompt_text = QTextEdit()
         # Keep prompt flexible; we dynamically adjust its max height on resize to preserve log space.
         self.prompt_text.setMinimumHeight(60)
-        self.prompt_text.setMaximumHeight(220)
-        self.prompt_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.prompt_text.setMaximumHeight(360)
+        self.prompt_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.prompt_text.setAcceptRichText(False)  # Plain text only
         
         # Enable Ctrl+wheel zoom (handled in TranslatorGUI.eventFilter)
@@ -8478,6 +8492,7 @@ Recent translations to summarize:
         # Auto-save system prompt as user types
         self.prompt_text.textChanged.connect(self._auto_save_system_prompt)
         self.prompt_text.textChanged.connect(self._update_target_lang_state)
+        self.prompt_text.textChanged.connect(self._adjust_prompt_and_log_sizes)
         
         self.frame.addWidget(self.prompt_text, 9, 1, 1, 3)  # row, col, rowspan, colspan
 
@@ -17852,9 +17867,21 @@ Important rules:
         if total_h <= 0:
             return 220
 
-        # Base target: prompt takes ~16% of vertical space (clamped)
-        desired_prompt_max = int(total_h * 0.16)
-        prompt_max = max(100, min(240, desired_prompt_max))
+        # Base target: prompt takes a modest part of vertical space, but may
+        # grow when the prompt content itself needs more room.
+        desired_prompt_max = int(total_h * 0.18)
+        max_auto_prompt = max(240, min(420, int(total_h * 0.34)))
+        prompt_max = max(120, min(max_auto_prompt, desired_prompt_max))
+
+        # Let the editor fit its plain-text document when there is room.
+        try:
+            if hasattr(self, 'prompt_text') and self.prompt_text:
+                doc = self.prompt_text.document()
+                doc.setTextWidth(max(1, self.prompt_text.viewport().width()))
+                content_h = int(doc.size().height() + 28)
+                prompt_max = max(prompt_max, min(max_auto_prompt, content_h))
+        except Exception:
+            pass
 
         # Allow the prompt to grow to match row-9 neighbor content height (within cap)
         try:
@@ -17872,7 +17899,7 @@ Important rules:
         except Exception:
             pass
         if neighbor_h > 0:
-            prompt_max = max(prompt_max, min(240, neighbor_h))
+            prompt_max = max(prompt_max, min(max_auto_prompt, neighbor_h))
 
         return int(prompt_max)
 
