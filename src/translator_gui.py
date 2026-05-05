@@ -10334,8 +10334,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         best_overflow = score
                 return "\n".join(best) if best else self._full_text
 
-            def _sync_fitted_text(self):
-                available = max(1, self.width())
+            def _sync_fitted_text(self, repaint=True):
                 min_point_size = self._min_point_size
                 chosen_font = self.font()
                 chosen_font.setPointSizeF(self._base_point_size)
@@ -10344,6 +10343,26 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
                 from PySide6.QtGui import QFontMetrics
                 base_metrics = QFontMetrics(chosen_font)
+                full_text_width = base_metrics.horizontalAdvance(self._full_text)
+                available = max(1, self.width())
+                try:
+                    button = self.parentWidget()
+                    while button and not isinstance(button, QPushButton):
+                        button = button.parentWidget()
+                    layout = self.parentWidget().layout()
+                    sibling_width = 0
+                    spacing = int(layout.spacing() if layout else 0)
+                    if layout:
+                        for i in range(layout.count()):
+                            item = layout.itemAt(i)
+                            widget = item.widget() if item else None
+                            if widget and widget is not self:
+                                sibling_width += int(widget.width() or widget.sizeHint().width() or 0) + spacing
+                    if button and button.width() >= full_text_width + sibling_width + 12:
+                        available = max(available, full_text_width)
+                except Exception:
+                    pass
+
                 if base_metrics.horizontalAdvance(self._full_text) <= available:
                     rendered = self._full_text
                 else:
@@ -10382,18 +10401,22 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
                 self._rendered_text = rendered
                 self._rendered_point_size = chosen_point_size
-                self.update()
+                if repaint:
+                    self.update()
 
             def paintEvent(self, event):
                 try:
-                    self._sync_fitted_text()
+                    self._sync_fitted_text(repaint=False)
                     from PySide6.QtGui import QPainter
                     painter = QPainter(self)
                     font = self.font()
                     font.setPointSizeF(self._rendered_point_size)
                     painter.setFont(font)
                     painter.setPen(self.palette().color(self.foregroundRole()))
-                    painter.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, self._rendered_text or self._full_text)
+                    flags = Qt.AlignCenter
+                    if "\n" in (self._rendered_text or ""):
+                        flags |= Qt.TextWordWrap
+                    painter.drawText(self.rect(), flags, self._rendered_text or self._full_text)
                 except Exception:
                     super().paintEvent(event)
         
@@ -10422,7 +10445,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         btn_layout.setSpacing(0)
 
         toolbar_gap_px = 2
-        toolbar_icon_box = 26
+        toolbar_icon_box = 32
         toolbar_button_count = 0
 
         def _add_toolbar_button(widget, stretch=0):
@@ -10513,8 +10536,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self.qa_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
         self.qa_text_label.setAlignment(Qt.AlignCenter)
         
+        qa_btn_layout.addStretch(1)
         qa_btn_layout.addWidget(self.qa_button_icon)
-        qa_btn_layout.addWidget(self.qa_text_label, 1)
+        qa_btn_layout.addWidget(self.qa_text_label)
+        qa_btn_layout.addStretch(1)
         self.qa_button.setLayout(qa_btn_layout)
         
         self.qa_button.setStyleSheet("""
@@ -10712,8 +10737,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.glossary_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
                 self.glossary_text_label.setAlignment(Qt.AlignCenter)
                 
+                glossary_btn_layout.addStretch(1)
                 glossary_btn_layout.addWidget(self.glossary_button_icon)
-                glossary_btn_layout.addWidget(self.glossary_text_label, 1)
+                glossary_btn_layout.addWidget(self.glossary_text_label)
+                glossary_btn_layout.addStretch(1)
                 btn.setLayout(glossary_btn_layout)
                 
                 # Now connect the command after layout is set
@@ -10811,8 +10838,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.epub_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
                 self.epub_text_label.setAlignment(Qt.AlignCenter)
                 
+                epub_btn_layout.addStretch(1)
                 epub_btn_layout.addWidget(self.epub_button_icon)
-                epub_btn_layout.addWidget(self.epub_text_label, 1)
+                epub_btn_layout.addWidget(self.epub_text_label)
+                epub_btn_layout.addStretch(1)
                 btn.setLayout(epub_btn_layout)
                 
                 # Now connect the command after layout is set
@@ -10900,8 +10929,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.pm_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
                 self.pm_text_label.setAlignment(Qt.AlignCenter)
 
+                pm_layout.addStretch(1)
                 pm_layout.addWidget(self.pm_button_icon)
-                pm_layout.addWidget(self.pm_text_label, 1)
+                pm_layout.addWidget(self.pm_text_label)
+                pm_layout.addStretch(1)
                 btn.setText("")
                 btn.setLayout(pm_layout)
 
