@@ -7156,12 +7156,17 @@ Recent translations to summarize:
         
         # Rolling History (row 5)
         self.rolling_checkbox = self._create_styled_checkbox("Rolling History Window")
+        rolling_history_tooltip = (
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "Recommended: keeps translation history rolling forward instead of resetting to 0 "
+            "every time the history limit is reached.<br><br>"
+            "Example: with a limit of 2, the app keeps the latest 2 history entries and drops older ones, "
+            "so contextual translation can continue using recent context."
+            "</p></qt>"
+        )
+        self.rolling_checkbox.setToolTip(rolling_history_tooltip)
         self.rolling_checkbox.setChecked(self.translation_history_rolling_var)
         self.frame.addWidget(self.rolling_checkbox, 5, 2, Qt.AlignLeft)
-        
-        self.rolling_history_desc = QLabel("(Keep recent history instead of purging)")
-        self.rolling_history_desc.setStyleSheet("color: gray; font-size: 9pt;")
-        self.frame.addWidget(self.rolling_history_desc, 5, 3, Qt.AlignLeft)
         
         # Temperature (row 6)
         temp_label = QLabel("Temperature:")
@@ -7223,7 +7228,7 @@ Recent translations to summarize:
         batch_right_container = QWidget()
         batch_right_layout = QHBoxLayout(batch_right_container)
         batch_right_layout.setContentsMargins(0, 0, 0, 0)
-        batch_right_layout.setSpacing(12)
+        batch_right_layout.setSpacing(6)
         
         self.batch_size_entry = QLineEdit()
         self.batch_size_entry.setText(str(self.batch_size_var))
@@ -7451,9 +7456,10 @@ Recent translations to summarize:
 
         auto_glossary_label = FittingStatusLabel("Auto Glossary:")
         auto_glossary_label.setStyleSheet("color: #e8f0ff; font-size: 10pt; font-weight: bold;")
+        auto_glossary_label.setContentsMargins(8, 0, 0, 0)
         auto_glossary_label.setText(auto_glossary_label.text())
-        auto_glossary_label.setMinimumWidth(104)
-        auto_glossary_label.setMaximumWidth(128)
+        auto_glossary_label.setMinimumWidth(92)
+        auto_glossary_label.setMaximumWidth(108)
         batch_right_layout.addWidget(auto_glossary_label)
         self.auto_glossary_shortcut_combo = FittingComboBox()
         self.auto_glossary_shortcut_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Manual Glossary Only", "No Glossary", "Minimal", "Balanced", "Full", "Single Pass"])
