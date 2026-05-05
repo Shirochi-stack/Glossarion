@@ -10324,15 +10324,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.setFont(chosen_font)
                 super().setText(rendered)
         
+        toolbar_button_height = 40
+
         btn_frame = QWidget()
         # IMPORTANT: do NOT cap the toolbar height. On HiDPI / small displays the buttons' sizeHint can
         # exceed a fixed max, and Qt layouts may place child widgets outside this frame (visually overlapping the log).
-        btn_frame.setMinimumHeight(50)
+        btn_frame.setMinimumHeight(toolbar_button_height)
+        btn_frame.setMaximumHeight(toolbar_button_height)
         btn_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         btn_layout = QHBoxLayout(btn_frame)
-        # Compact spacing so the toolbar fits better on smaller displays
-        btn_layout.setContentsMargins(0, 3, 0, 3)
+        # Buttons should occupy the whole toolbar row instead of floating inside it.
+        btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.setSpacing(1)
         
         # QA Scan button with mini icon
@@ -10341,8 +10344,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self.qa_button.clicked.connect(self.run_qa_scan)
         self.qa_button.setMinimumWidth(120)
         self.qa_button.setMaximumWidth(150)
-        self.qa_button.setMinimumHeight(40)  # Increased button height
-        self.qa_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.qa_button.setMinimumHeight(toolbar_button_height)
+        self.qa_button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         
         # Create horizontal layout for button content
         qa_btn_widget = QWidget()
@@ -10404,7 +10407,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             except Exception:
                 pass
             self.qa_button_icon.set_original_pixmap(pm)
-        self.qa_button_icon.setFixedSize(36, 36)  # Larger container to prevent clipping during rotation
+        self.qa_button_icon.setFixedSize(32, 32)
         self.qa_button_icon.setAlignment(Qt.AlignCenter)
         
         # Smooth spinner (cached frames, no QPainter)
@@ -10480,50 +10483,50 @@ If you see multiple p-b cookies, use the one with the longest value."""
             elif lbl not in ["Extract Glossary", "EPUB Converter"]:  # Don't connect yet for these buttons
                 btn.clicked.connect(cmd)
             
-            btn.setMinimumHeight(40)
+            btn.setMinimumHeight(toolbar_button_height)
             btn.setMinimumWidth(72)
-            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
             
             # Keep Profiles compact (but slightly wider)
             if lbl in ["Profiles"]:
                 btn.setMinimumWidth(60)
                 btn.setMaximumWidth(120)
-                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
             # Keep Async Translator compact (but slightly wider)
             if lbl in ["📦 Async Translator"]:
                 btn.setMinimumWidth(85)
                 btn.setMaximumWidth(155)
-                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
             # Keep Save/Load buttons from eating horizontal space (but slightly wider)
             if lbl in ["💾 Save Config", "📄 Load Glossary"]:
                 btn.setMinimumWidth(75)
                 btn.setMaximumWidth(140)
-                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
             # Keep Glossary Settings from eating horizontal space
             if lbl in ["⚙️ Glossary Settings"]:
                 btn.setMinimumWidth(95)
                 btn.setMaximumWidth(190)
-                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
             # Keep Manga Translator from eating horizontal space (but add emoji)
             if lbl in ["🖼️ Manga Translator"]:
                 btn.setMinimumWidth(90)
                 btn.setMaximumWidth(180)
-                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
             # Prevent these icon+label buttons from stretching excessively in fullscreen.
             if lbl in ["Extract Glossary", "EPUB Converter"]:
                 btn.setMinimumWidth(150)
                 btn.setMaximumWidth(220)
-                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
             # Make Progress Manager absorb extra width instead.
             if lbl in ["Progress Manager"]:
                 btn.setMinimumWidth(160)
-                btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             
             color = style_colors.get(style, "#95a5a6")
             btn.setStyleSheet(f"background-color: {color}; color: white; padding: 4px 6px; font-weight: bold;")
@@ -10601,7 +10604,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     except Exception:
                         pass
                     self.glossary_button_icon.set_original_pixmap(pm)
-                self.glossary_button_icon.setFixedSize(36, 36)  # Larger container to prevent clipping during rotation
+                self.glossary_button_icon.setFixedSize(32, 32)
                 self.glossary_button_icon.setAlignment(Qt.AlignCenter)
                 
                 # Smooth spinner (cached frames)
@@ -10623,7 +10626,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Add disabled state styling for Extract Glossary button
                 btn.setMinimumWidth(160)
                 btn.setMaximumWidth(220)
-                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background-color: {color};
@@ -10698,7 +10701,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     except Exception:
                         pass
                     self.epub_button_icon.set_original_pixmap(pm)
-                self.epub_button_icon.setFixedSize(36, 36)  # Larger container to prevent clipping during rotation
+                self.epub_button_icon.setFixedSize(32, 32)
                 self.epub_button_icon.setAlignment(Qt.AlignCenter)
                 
                 # Smooth spinner (cached frames)
@@ -10720,7 +10723,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Add disabled state styling for EPUB Converter button
                 btn.setMinimumWidth(150)
                 btn.setMaximumWidth(220)
-                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
                 btn.setStyleSheet(f"""
                     QPushButton {{
                         background-color: {color};
@@ -10785,7 +10788,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     except Exception:
                         pass
                     self.pm_button_icon.set_original_pixmap(pm)
-                self.pm_button_icon.setFixedSize(36, 36)
+                self.pm_button_icon.setFixedSize(32, 32)
                 self.pm_button_icon.setAlignment(Qt.AlignCenter)
 
                 # Smooth spinner (cached frames)
@@ -10803,7 +10806,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
                 # Let Progress Manager take the extra toolbar width (others are constrained)
                 btn.setMinimumWidth(160)
-                btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
                 # Dark pink color from style_colors
                 btn.setStyleSheet(f"""
@@ -17748,19 +17751,13 @@ Important rules:
                     elif et == QEvent.MouseButtonPress:
                         try:
                             if event.button() == Qt.LeftButton and _local_y(event) <= hit_px:
-                                # Start drag: baseline is current auto; we never allow shrinking below it
-                                cw = self.centralWidget()
-                                total_h = int(cw.height() if cw else self.height())
-                                baseline = self._compute_auto_prompt_max_height(total_h)
-
+                                # Start from the visible height, not maximumHeight().
+                                # maximumHeight() can be larger than the actual allocated row,
+                                # which caused the first drag movement to jump.
                                 self._prompt_resize_drag_active = True
                                 self._prompt_resize_start_y = _global_y(event)
 
-                                cur_max = int(self.prompt_text.maximumHeight() or 0)
-                                if cur_max <= 0:
-                                    cur_max = int(self.prompt_text.sizeHint().height() or baseline)
-
-                                start_h = max(int(baseline), int(cur_max))
+                                start_h = self._visible_prompt_row_height()
                                 self._prompt_resize_start_h = start_h
                                 self._prompt_user_max_height = start_h
 
@@ -17858,6 +17855,41 @@ Important rules:
         except Exception:
             pass
 
+    def _prompt_row_floor_height(self) -> int:
+        """Minimum practical height for the whole prompt/run row."""
+        floor = 120
+        try:
+            if hasattr(self, 'prompt_text') and self.prompt_text:
+                floor = max(floor, int(self.prompt_text.minimumHeight() or 0))
+        except Exception:
+            pass
+        for attr in ('run_button', '_prompt_side_container', 'open_folder_btn'):
+            try:
+                widget = getattr(self, attr, None)
+                if not widget:
+                    continue
+                floor = max(
+                    floor,
+                    int(widget.minimumHeight() or 0),
+                    int(widget.minimumSizeHint().height() or 0),
+                    int(widget.sizeHint().height() or 0),
+                )
+            except Exception:
+                pass
+        return int(floor)
+
+    def _visible_prompt_row_height(self) -> int:
+        """Current allocated height of row 9, measured from its real widgets."""
+        h = 0
+        for attr in ('prompt_text', 'run_button', '_prompt_side_container'):
+            try:
+                widget = getattr(self, attr, None)
+                if widget:
+                    h = max(h, int(widget.height() or 0))
+            except Exception:
+                pass
+        return max(h, self._prompt_row_floor_height())
+
     def _compute_auto_prompt_max_height(self, total_h: int) -> int:
         """Compute the automatic (non-user-overridden) prompt max height."""
         try:
@@ -17867,11 +17899,13 @@ Important rules:
         if total_h <= 0:
             return 220
 
+        row_floor = self._prompt_row_floor_height()
+
         # Base target: prompt takes a modest part of vertical space, but may
         # grow when the prompt content itself needs more room.
         desired_prompt_max = int(total_h * 0.18)
-        max_auto_prompt = max(240, min(420, int(total_h * 0.34)))
-        prompt_max = max(120, min(max_auto_prompt, desired_prompt_max))
+        max_auto_prompt = max(row_floor, max(240, min(420, int(total_h * 0.34))))
+        prompt_max = max(row_floor, min(max_auto_prompt, desired_prompt_max))
 
         # Let the editor fit its plain-text document when there is room.
         try:
@@ -17883,7 +17917,7 @@ Important rules:
         except Exception:
             pass
 
-        # Allow the prompt to grow to match row-9 neighbor content height (within cap)
+        # Allow the prompt row to match row-9 neighbor content height (within cap)
         try:
             neighbor_h = 0
         except Exception:
@@ -17906,7 +17940,8 @@ Important rules:
     def _set_prompt_user_max_height(self, height: int):
         """Set a user override for prompt max-height.
 
-        IMPORTANT: never allow lowering below the automatic baseline (user can only increase).
+        Clamp only to the editor's practical minimum so dragging starts smoothly
+        from the visible height and can move both directions.
         """
         try:
             h = int(height)
@@ -17920,16 +17955,14 @@ Important rules:
         except Exception:
             total_h = 0
 
-        baseline = self._compute_auto_prompt_max_height(total_h)
-
         # Keep some space for watchdog/log/toolbar; still allow large increases
         try:
             max_allow = int(total_h * 0.92) if total_h > 0 else 1600
         except Exception:
             max_allow = 1600
 
-        # Never decrease below baseline
-        h = max(int(baseline), min(int(max_allow), h))
+        min_allow = self._prompt_row_floor_height()
+        h = max(int(min_allow), min(int(max_allow), h))
 
         # Store override
         self._prompt_user_max_height = h
@@ -17944,7 +17977,7 @@ Important rules:
         # This is what actually steals space from the log row.
         try:
             if hasattr(self, 'frame') and self.frame:
-                self.frame.setRowMinimumHeight(9, max(120, int(h)))
+                self.frame.setRowMinimumHeight(9, max(int(min_allow), int(h)))
         except Exception:
             pass
 
@@ -17955,10 +17988,10 @@ Important rules:
                 self._prompt_user_max_height = None
         except Exception:
             pass
-        # Restore default row-9 minimum height so we don't keep forcing the prompt tall.
+        # Restore row-9 to the natural height required by the row's neighboring controls.
         try:
             if hasattr(self, 'frame') and self.frame:
-                self.frame.setRowMinimumHeight(9, 120)
+                self.frame.setRowMinimumHeight(9, self._prompt_row_floor_height())
         except Exception:
             pass
         try:
@@ -17985,6 +18018,7 @@ Important rules:
                 return
 
             baseline = self._compute_auto_prompt_max_height(total_h)
+            row_floor = self._prompt_row_floor_height()
 
             # If the user dragged the handle, respect their setting (but never below baseline)
             user_h = getattr(self, '_prompt_user_max_height', None)
@@ -17999,9 +18033,9 @@ Important rules:
                     max_allow = int(total_h * 0.92)
                 except Exception:
                     max_allow = 1600
-                prompt_max = max(int(baseline), min(int(max_allow), int(user_h)))
+                prompt_max = max(int(row_floor), min(int(max_allow), int(user_h)))
             else:
-                prompt_max = int(baseline)
+                prompt_max = max(int(row_floor), int(baseline))
 
             # Ensure the toolbar is allowed to claim its required height
             try:
@@ -18014,13 +18048,11 @@ Important rules:
             # Apply cap
             self.prompt_text.setMaximumHeight(int(prompt_max))
 
-            # When user override is active, enforce the grid row height so the prompt can actually grow.
+            # Enforce row 9 as a whole so the prompt, output column, and run button
+            # resize together instead of the prompt being treated as a separate box.
             try:
                 if hasattr(self, 'frame') and self.frame:
-                    if user_h is not None:
-                        self.frame.setRowMinimumHeight(9, max(120, int(prompt_max)))
-                    else:
-                        self.frame.setRowMinimumHeight(9, 120)
+                    self.frame.setRowMinimumHeight(9, max(int(row_floor), int(prompt_max)))
             except Exception:
                 pass
         except Exception:
