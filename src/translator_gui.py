@@ -10728,7 +10728,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.glossary_spinner = self._create_spinner(self.glossary_button_icon)
                 
                 # Button text label
-                self.glossary_text_label = FittingLabel("Extract Glossary", base_point_size=8.0)  # Store as instance variable
+                self.glossary_text_label = QLabel("Extract Glossary")  # Store as instance variable
                 self.glossary_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
                 self.glossary_text_label.setAlignment(Qt.AlignCenter)
                 
@@ -10829,7 +10829,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.epub_spinner = self._create_spinner(self.epub_button_icon)
                 
                 # Button text label
-                self.epub_text_label = FittingLabel("EPUB Converter", base_point_size=8.0)  # Store as instance variable
+                self.epub_text_label = QLabel("EPUB Converter")  # Store as instance variable
                 self.epub_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
                 self.epub_text_label.setAlignment(Qt.AlignCenter)
                 
@@ -10961,6 +10961,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         
         # Add QA button at the end
         _add_toolbar_button(self.qa_button, 0)
+        self._update_min_width_toolbar_labels()
 
         # Ensure the toolbar's minimum height matches its content (helps on small/HiDPI displays)
         try:
@@ -16712,6 +16713,11 @@ Important rules:
                # Stop spinner
                if getattr(self, 'epub_spinner', None):
                    self.epub_spinner.stop()
+
+       try:
+           self._update_min_width_toolbar_labels()
+       except Exception:
+           pass
        
        # QA button
        if hasattr(self, 'qa_button'):
@@ -17980,9 +17986,47 @@ Important rules:
         except Exception:
             pass
         try:
+            self._update_min_width_toolbar_labels()
+        except Exception:
+            pass
+        try:
             self._adjust_prompt_and_log_sizes()
         except Exception:
             pass
+
+    def _update_min_width_toolbar_labels(self):
+        """Force two-line toolbar labels only when the main window is at minimum width."""
+        try:
+            at_min_width = self.width() <= self.minimumWidth() + 24
+        except Exception:
+            at_min_width = False
+
+        label_texts = (
+            ('epub_text_label', {"EPUB Converter", "EPUB\nConverter"}, "EPUB\nConverter" if at_min_width else "EPUB Converter"),
+            ('glossary_text_label', {"Extract Glossary", "Extract\nGlossary"}, "Extract\nGlossary" if at_min_width else "Extract Glossary"),
+        )
+        for attr, base_states, text in label_texts:
+            label = getattr(self, attr, None)
+            try:
+                if label and label.text() in base_states and label.text() != text:
+                    label.setText(text)
+            except Exception:
+                pass
+
+        button_widths = (
+            ('epub_button', 112 if at_min_width else 145, 128 if at_min_width else 220),
+            ('glossary_button', 112 if at_min_width else 145, 128 if at_min_width else 220),
+        )
+        for attr, min_width, max_width in button_widths:
+            button = getattr(self, attr, None)
+            try:
+                if button:
+                    if button.minimumWidth() != min_width:
+                        button.setMinimumWidth(min_width)
+                    if button.maximumWidth() != max_width:
+                        button.setMaximumWidth(max_width)
+            except Exception:
+                pass
 
     def _prompt_row_floor_height(self) -> int:
         """Minimum practical height for the whole prompt/run row."""
