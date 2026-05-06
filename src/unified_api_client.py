@@ -10937,7 +10937,7 @@ class UnifiedClient:
                     # Emit thought parts in the response when the user has
                     # enabled thinking streaming (mirrors _send_gemini).
                     _include_thoughts_v = (
-                        os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+                        self._stream_thinking_logging_enabled()
                         or str(os.getenv("ENABLE_THOUGHTS", "")).strip().lower() in ("1", "true", "yes", "on")
                     )
 
@@ -11049,11 +11049,9 @@ class UnifiedClient:
                 # Emit the "API call in progress" line AFTER the config summary,
                 # so the per-request log block ends with it (matches authgem path).
                 # ------------------------------------------------------------------
-                _enable_streaming = os.getenv("ENABLE_STREAMING", "1").lower() not in ("0", "false")
-                _log_stream = _enable_streaming and os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
-                if os.getenv("BATCH_TRANSLATION", "0") == "1":
-                    _log_stream = os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
-                _stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+                _enable_streaming = self._streaming_enabled()
+                _log_stream = self._stream_logging_enabled(_enable_streaming)
+                _stream_thinking = self._stream_thinking_logging_enabled()
                 _thread_name = threading.current_thread().name
                 _think_suffix = self._get_thinking_status_label()
                 try:
@@ -16611,7 +16609,7 @@ class UnifiedClient:
                         cb = evt.get("content_block", {})
                         current_block_type = cb.get("type", "")
                         if current_block_type == "thinking" and not self._is_stop_requested():
-                            stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+                            stream_thinking = self._stream_thinking_logging_enabled()
                             if not thinking_started:
                                 thinking_started = True
                                 # Don't print header yet — defer until threshold
@@ -16628,7 +16626,7 @@ class UnifiedClient:
                                 # when native thinking is not supported
                                 _anth_think_buf += frag
                                 _cleaned_frag = ""
-                                stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+                                stream_thinking = self._stream_thinking_logging_enabled()
                                 while _anth_think_buf:
                                     if _anth_in_think_tag:
                                         # Inside <think> — look for </think>
@@ -16750,7 +16748,7 @@ class UnifiedClient:
                     # content_block_stop → flush thinking buffer & reset block type
                     elif evt_type == "content_block_stop":
                         if current_block_type == "thinking" and not self._is_stop_requested():
-                            stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+                            stream_thinking = self._stream_thinking_logging_enabled()
                             if stream_thinking and thinking_started:
                                 # Flush any remaining buffered thinking text
                                 remainder = "".join(thinking_log_buf).rstrip("\n")
@@ -17715,7 +17713,7 @@ class UnifiedClient:
                                 if level not in ('low', 'medium', 'high', 'none'):
                                     level = 'high'
                                 
-                                stream_thoughts = os.getenv('STREAM_THINKING_LOGS', '1') == '1'
+                                stream_thoughts = self._stream_thinking_logging_enabled()
                                 
                                 if level != 'none':
                                     thinking_cfg = {"thinking_level": level.upper()}
@@ -20637,11 +20635,11 @@ class UnifiedClient:
                 if _antigravity_reset_cancel is not None:
                     _antigravity_reset_cancel()
 
-                # Determine stream log visibility: always log by default,
-                # but suppress during batch mode unless the user toggled it on.
-                log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
+                # Determine stream log visibility from the GUI toggles.
                 if os.getenv("BATCH_TRANSLATION", "0") == "1":
-                    log_stream = os.getenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
+                    log_stream = os.getenv("ALLOW_AUTHGPT_BATCH_STREAM_LOGS", "0").strip().lower() not in ("", "0", "false", "no", "off")
+                else:
+                    log_stream = self._streaming_enabled() and os.getenv("LOG_STREAM_CHUNKS", "1").strip().lower() not in ("0", "false", "no", "off")
 
                 result = _antigravity_send_stream(
                     messages=messages,

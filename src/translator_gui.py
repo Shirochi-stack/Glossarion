@@ -12341,19 +12341,24 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 return False
             # Sync streaming toggle to env for all backends
             try:
-                stream_on = bool(self.config.get('enable_streaming', False))
+                stream_on = bool(getattr(self, 'enable_streaming_var', self.config.get('enable_streaming', False)))
                 os.environ['ENABLE_STREAMING'] = '1' if stream_on else '0'
                 self.append_log(f"🛰️ Streaming {'enabled' if stream_on else 'disabled'} (exported ENABLE_STREAMING)")
             except Exception:
                 pass
             try:
-                allow_batch_logs = bool(self.config.get('allow_batch_stream_logs', False))
+                allow_batch_logs = bool(getattr(self, 'allow_batch_stream_logs_var', self.config.get('allow_batch_stream_logs', False)))
                 os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1' if allow_batch_logs else '0'
             except Exception:
                 pass
             try:
-                allow_authgpt_logs = bool(self.config.get('allow_authgpt_batch_stream_logs', False))
+                allow_authgpt_logs = bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False)))
                 os.environ['ALLOW_AUTHGPT_BATCH_STREAM_LOGS'] = '1' if allow_authgpt_logs else '0'
+            except Exception:
+                pass
+            try:
+                stream_thinking = bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False)))
+                os.environ['STREAM_THINKING_LOGS'] = '1' if stream_thinking else '0'
             except Exception:
                 pass
 
@@ -14499,6 +14504,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_CUSTOM_FIELDS': json.dumps(getattr(self, 'custom_glossary_fields', self.config.get('custom_glossary_fields', []))),
             'OUTPUT_MODE': output_mode,
             'VISION_OCR_FIRST': '1' if output_mode == 'vision' else '0',
+            'ENABLE_STREAMING': '1' if bool(getattr(self, 'enable_streaming_var', self.config.get('enable_streaming', False))) else '0',
+            'ALLOW_BATCH_STREAM_LOGS': '1' if bool(getattr(self, 'allow_batch_stream_logs_var', self.config.get('allow_batch_stream_logs', False))) else '0',
+            'ALLOW_AUTHGPT_BATCH_STREAM_LOGS': '1' if bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False))) else '0',
+            'STREAM_THINKING_LOGS': '1' if bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False))) else '0',
             'VISION_OCR_PROMPT': str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', ''))),
             'VISION_OCR_USER_PROMPT': str(getattr(self, 'vision_ocr_user_prompt', self.config.get('vision_ocr_user_prompt', ''))),
             'VISION_OCR_COMBINED_CONTEXT_PROMPT': str(getattr(self, 'vision_ocr_combined_context_prompt', self.config.get('vision_ocr_combined_context_prompt', ''))),
@@ -14862,23 +14871,23 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
             # Ensure streaming flags are applied to glossary runtime (mirrors translation flow)
             try:
-                stream_on = bool(self.config.get('enable_streaming', False))
+                stream_on = bool(getattr(self, 'enable_streaming_var', self.config.get('enable_streaming', False)))
                 os.environ['ENABLE_STREAMING'] = '1' if stream_on else '0'
                 self.append_log(f"🛰️ Streaming {'enabled' if stream_on else 'disabled'} (exported ENABLE_STREAMING)")
             except Exception:
                 pass
             try:
-                allow_batch_logs = bool(self.config.get('allow_batch_stream_logs', False))
+                allow_batch_logs = bool(getattr(self, 'allow_batch_stream_logs_var', self.config.get('allow_batch_stream_logs', False)))
                 os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1' if allow_batch_logs else '0'
             except Exception:
                 pass
             try:
-                allow_authgpt_logs = bool(self.config.get('allow_authgpt_batch_stream_logs', False))
+                allow_authgpt_logs = bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False)))
                 os.environ['ALLOW_AUTHGPT_BATCH_STREAM_LOGS'] = '1' if allow_authgpt_logs else '0'
             except Exception:
                 pass
             try:
-                stream_thinking = bool(self.config.get('stream_thinking_logs', False))
+                stream_thinking = bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False)))
                 os.environ['STREAM_THINKING_LOGS'] = '1' if stream_thinking else '0'
             except Exception:
                 pass
@@ -23203,11 +23212,11 @@ Important rules:
 
                 # Thinking toggles
                 ('ENABLE_DEEPSEEK_THINKING', '1' if self.config.get('enable_deepseek_thinking', True) else '0'),
-                ('ENABLE_STREAMING', '1' if self.config.get('enable_streaming', False) else '0'),
-                ('ALLOW_BATCH_STREAM_LOGS', '1' if self.config.get('allow_batch_stream_logs', False) else '0'),
-                ('ALLOW_AUTHGPT_BATCH_STREAM_LOGS', '1' if self.config.get('allow_authgpt_batch_stream_logs', False) else '0'),
+                ('ENABLE_STREAMING', '1' if bool(getattr(self, 'enable_streaming_var', self.config.get('enable_streaming', False))) else '0'),
+                ('ALLOW_BATCH_STREAM_LOGS', '1' if bool(getattr(self, 'allow_batch_stream_logs_var', self.config.get('allow_batch_stream_logs', False))) else '0'),
+                ('ALLOW_AUTHGPT_BATCH_STREAM_LOGS', '1' if bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False))) else '0'),
                 ('ENABLE_THOUGHTS', '1' if self.config.get('enable_thoughts', True) else '0'),
-                ('STREAM_THINKING_LOGS', '1' if self.config.get('stream_thinking_logs', False) else '0'),
+                ('STREAM_THINKING_LOGS', '1' if bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False))) else '0'),
                 ('HTML2TEXT_ESCAPE_SNOB', '1' if self.config.get('html2text_escape_snob', False) else '0'),
                 
                 # General settings

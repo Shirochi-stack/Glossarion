@@ -3193,6 +3193,10 @@ class AsyncProcessingDialog:
         env_vars['TRANSLATION_TEMPERATURE'] = _text(getattr(self.gui, 'trans_temp', None), '0.3')
         env_vars['TRANSLATION_HISTORY_LIMIT'] = _text(getattr(self.gui, 'trans_history', None), '8')
         # Explicitly disable thought streaming for async jobs
+        env_vars['ENABLE_STREAMING'] = "1" if _val(getattr(self.gui, 'enable_streaming_var', None), self.gui.config.get('enable_streaming', False)) else "0"
+        env_vars['ALLOW_BATCH_STREAM_LOGS'] = "1" if _val(getattr(self.gui, 'allow_batch_stream_logs_var', None), self.gui.config.get('allow_batch_stream_logs', False)) else "0"
+        env_vars['ALLOW_AUTHGPT_BATCH_STREAM_LOGS'] = "1" if _val(getattr(self.gui, 'allow_authgpt_batch_stream_logs_var', None), self.gui.config.get('allow_authgpt_batch_stream_logs', False)) else "0"
+        env_vars['STREAM_THINKING_LOGS'] = "1" if _val(getattr(self.gui, 'stream_thinking_logs_var', None), self.gui.config.get('stream_thinking_logs', False)) else "0"
         env_vars['ENABLE_THOUGHTS'] = '0'
         
         # API settings - handle both PySide6 and tkinter
