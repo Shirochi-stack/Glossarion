@@ -166,6 +166,77 @@ def _mac_get_screen_resolution():
     return (0, 0)
 
 
+def _win_get_current_display_mode_resolution():
+    """Return the primary Windows display mode in physical pixels."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        CCHDEVICENAME = 32
+        CCHFORMNAME = 32
+        ENUM_CURRENT_SETTINGS = -1
+
+        class DEVMODEW(ctypes.Structure):
+            _fields_ = [
+                ("dmDeviceName", wintypes.WCHAR * CCHDEVICENAME),
+                ("dmSpecVersion", wintypes.WORD),
+                ("dmDriverVersion", wintypes.WORD),
+                ("dmSize", wintypes.WORD),
+                ("dmDriverExtra", wintypes.WORD),
+                ("dmFields", wintypes.DWORD),
+                ("dmOrientation", wintypes.SHORT),
+                ("dmPaperSize", wintypes.SHORT),
+                ("dmPaperLength", wintypes.SHORT),
+                ("dmPaperWidth", wintypes.SHORT),
+                ("dmScale", wintypes.SHORT),
+                ("dmCopies", wintypes.SHORT),
+                ("dmDefaultSource", wintypes.SHORT),
+                ("dmPrintQuality", wintypes.SHORT),
+                ("dmColor", wintypes.SHORT),
+                ("dmDuplex", wintypes.SHORT),
+                ("dmYResolution", wintypes.SHORT),
+                ("dmTTOption", wintypes.SHORT),
+                ("dmCollate", wintypes.SHORT),
+                ("dmFormName", wintypes.WCHAR * CCHFORMNAME),
+                ("dmLogPixels", wintypes.WORD),
+                ("dmBitsPerPel", wintypes.DWORD),
+                ("dmPelsWidth", wintypes.DWORD),
+                ("dmPelsHeight", wintypes.DWORD),
+                ("dmDisplayFlags", wintypes.DWORD),
+                ("dmDisplayFrequency", wintypes.DWORD),
+                ("dmICMMethod", wintypes.DWORD),
+                ("dmICMIntent", wintypes.DWORD),
+                ("dmMediaType", wintypes.DWORD),
+                ("dmDitherType", wintypes.DWORD),
+                ("dmReserved1", wintypes.DWORD),
+                ("dmReserved2", wintypes.DWORD),
+                ("dmPanningWidth", wintypes.DWORD),
+                ("dmPanningHeight", wintypes.DWORD),
+            ]
+
+        user32 = ctypes.windll.user32
+        devmode = DEVMODEW()
+        devmode.dmSize = ctypes.sizeof(DEVMODEW)
+        try:
+            user32.EnumDisplaySettingsW.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                ctypes.POINTER(DEVMODEW),
+            ]
+            user32.EnumDisplaySettingsW.restype = wintypes.BOOL
+        except Exception:
+            pass
+
+        if user32.EnumDisplaySettingsW(None, ENUM_CURRENT_SETTINGS, ctypes.byref(devmode)):
+            width = int(devmode.dmPelsWidth)
+            height = int(devmode.dmPelsHeight)
+            if width > 0 and height > 0:
+                return (width, height)
+    except Exception:
+        pass
+    return (0, 0)
+
+
 def _get_system_dpi_scale():
     """Return the OS-level DPI scale factor (e.g. 1.0, 1.25, 1.5, 2.0).
 
@@ -179,6 +250,26 @@ def _get_system_dpi_scale():
         _ensure_dpi_aware()
         try:
             import ctypes
+
+            # Before Qt creates the application, this process may still be DPI
+            # unaware. In that state GetDpiForSystem can report 96 DPI even when
+            # Windows is scaling the desktop. Compare the real display mode with
+            # the DPI-virtualized screen size first so QT_SCALE_FACTOR is divided
+            # by the scale Qt will later apply natively.
+            try:
+                user32 = ctypes.windll.user32
+                physical_w, physical_h = _win_get_current_display_mode_resolution()
+                logical_w = int(user32.GetSystemMetrics(0))
+                logical_h = int(user32.GetSystemMetrics(1))
+                if physical_w > 0 and physical_h > 0 and logical_w > 0 and logical_h > 0:
+                    scale_w = physical_w / logical_w
+                    scale_h = physical_h / logical_h
+                    scale = max(scale_w, scale_h)
+                    if 1.01 <= scale <= 4.0 and abs(scale_w - scale_h) < 0.05:
+                        return scale
+            except Exception:
+                pass
+
             # GetDpiForSystem (Windows 10 1607+)
             try:
                 dpi = ctypes.windll.user32.GetDpiForSystem()
@@ -246,8 +337,11 @@ def _get_screen_resolution():
         try:
             import ctypes
             user32 = ctypes.windll.user32
-            width = user32.GetSystemMetrics(0)
-            height = user32.GetSystemMetrics(1)
+            width, height = _win_get_current_display_mode_resolution()
+
+            if width <= 0 or height <= 0:
+                width = user32.GetSystemMetrics(0)
+                height = user32.GetSystemMetrics(1)
         except Exception:
             pass
 
@@ -291,6 +385,11 @@ def _get_default_scale_for_resolution():
         width, height = _get_screen_resolution()
         if width <= 0 or height <= 0:
             return DEFAULT_SCALE_FACTOR
+
+        if 1600 <= width < 1920:
+            return 0.85
+        if 1366 <= width < 1600:
+            return 0.7
 
         # Choose scale factor based on horizontal resolution
         if width >= 3840:       # 4K (3840×2160)
