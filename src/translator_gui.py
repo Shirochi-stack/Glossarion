@@ -7464,6 +7464,7 @@ Recent translations to summarize:
                 painter.setPen(option.palette.text().color())
                 text_option = QTextOption(Qt.AlignCenter)
                 text_option.setWrapMode(QTextOption.WordWrap)
+                painter.setClipRect(text_rect)
                 painter.drawText(text_rect, rendered_text, text_option)
 
         auto_glossary_label = FittingStatusLabel("Auto Glossary:")
@@ -7473,6 +7474,13 @@ Recent translations to summarize:
         auto_glossary_label.setText(auto_glossary_label.text())
         auto_glossary_label.setFixedWidth(78)
         batch_right_layout.addWidget(auto_glossary_label)
+        auto_glossary_control = QWidget()
+        auto_glossary_control.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        auto_glossary_control.setStyleSheet("background-color: transparent;")
+        auto_glossary_control_layout = QHBoxLayout(auto_glossary_control)
+        auto_glossary_control_layout.setContentsMargins(0, 0, 0, 0)
+        auto_glossary_control_layout.setSpacing(0)
+        self._auto_glossary_control_layout = auto_glossary_control_layout
         self.auto_glossary_shortcut_combo = FittingComboBox()
         self.auto_glossary_shortcut_combo.addItems(["Off", "Off (Fuzzy Mapping)", "Manual Glossary Only", "No Glossary", "Minimal", "Balanced", "Full", "Single Pass"])
         # Add Halgakos icon to each item
@@ -7501,8 +7509,9 @@ Recent translations to summarize:
             "Full: Chapter-by-chapter extraction for maximum context (most expensive)\n"
             "Single Pass: Extract glossary inline during each translation request"
         )
-        self.auto_glossary_shortcut_combo.setMinimumWidth(95)
-        self.auto_glossary_shortcut_combo.setMaximumWidth(185)
+        self.auto_glossary_shortcut_combo.setMinimumWidth(82)
+        self.auto_glossary_shortcut_combo.setMaximumWidth(150)
+        self.auto_glossary_shortcut_combo.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.auto_glossary_shortcut_combo.setIconSize(QSize(18, 18))
         self.auto_glossary_shortcut_combo.setStyleSheet("""
             QComboBox {
@@ -7511,7 +7520,10 @@ Recent translations to summarize:
                 padding: 5px 10px;
                 padding-right: 0px;
                 border: 2px solid #4a8fd4;
-                border-radius: 4px;
+                border-top-left-radius: 4px;
+                border-bottom-left-radius: 4px;
+                border-top-right-radius: 0px;
+                border-bottom-right-radius: 0px;
                 font-size: 10pt;
                 font-weight: bold;
             }
@@ -7641,7 +7653,8 @@ Recent translations to summarize:
         
         self.auto_glossary_shortcut_combo.currentIndexChanged.connect(_on_auto_glossary_shortcut_changed)
         self.auto_glossary_shortcut_combo.wheelEvent = lambda event: event.ignore()
-        batch_right_layout.addWidget(self.auto_glossary_shortcut_combo)
+        auto_glossary_control_layout.addWidget(self.auto_glossary_shortcut_combo)
+        batch_right_layout.addWidget(auto_glossary_control)
 
         # ── Manual glossary status row (sits ABOVE the auto glossary row) ──
         self._gloss_status_row = QWidget()
@@ -7994,28 +8007,48 @@ Recent translations to summarize:
 
         self.delete_glossary_btn = QPushButton("🗑️")
         self.delete_glossary_btn.setToolTip("Delete glossary files for selected input files")
-        self.delete_glossary_btn.setFixedWidth(32)
-        self.delete_glossary_btn.setFixedHeight(32)
+        self.delete_glossary_btn.setFixedWidth(38)
+        self.delete_glossary_btn.setFixedHeight(40)
         self.delete_glossary_btn.setStyleSheet(
-            "QPushButton { background-color: #dc3545; color: white; border-radius: 4px; font-size: 12pt; padding: 0; } "
-            "QPushButton:hover { background-color: #c82333; } "
-            "QPushButton:disabled { background-color: #555; color: #888; }"
+            "QPushButton { background-color: #dc3545; color: white; border: 2px solid #4a8fd4; border-left: none; border-right: none; border-radius: 0px; font-size: 12pt; padding: 0; } "
+            "QPushButton:hover { background-color: #c82333; border-color: #70b8ff; } "
+            "QPushButton:disabled { background-color: #555; color: #888; border-color: #4a8fd4; }"
         )
         self.delete_glossary_btn.clicked.connect(_delete_current_glossary)
-        batch_right_layout.addWidget(self.delete_glossary_btn)
+        try:
+            separator = QFrame()
+            separator.setFrameShape(QFrame.VLine)
+            separator.setFrameShadow(QFrame.Plain)
+            separator.setFixedWidth(1)
+            separator.setFixedHeight(40)
+            separator.setStyleSheet("background-color: #4a8fd4; margin-top: 2px; margin-bottom: 2px;")
+            self._auto_glossary_control_layout.addWidget(separator)
+            self._auto_glossary_control_layout.addWidget(self.delete_glossary_btn)
+        except Exception:
+            batch_right_layout.addWidget(self.delete_glossary_btn)
 
         self.restore_glossary_btn = QPushButton("↩️")
         self.restore_glossary_btn.setToolTip("Restore the most recent glossary backup")
-        self.restore_glossary_btn.setFixedWidth(32)
-        self.restore_glossary_btn.setFixedHeight(32)
+        self.restore_glossary_btn.setFixedWidth(38)
+        self.restore_glossary_btn.setFixedHeight(40)
         self.restore_glossary_btn.setStyleSheet(
-            "QPushButton { background-color: #6f43c1; color: white; border-radius: 4px; font-size: 12pt; padding: 0; } "
-            "QPushButton:hover { background-color: #5a32a3; } "
-            "QPushButton:disabled { background-color: #555; color: #888; }"
+            "QPushButton { background-color: #6f43c1; color: white; border: 2px solid #4a8fd4; border-left: none; border-top-left-radius: 0px; border-bottom-left-radius: 0px; border-top-right-radius: 4px; border-bottom-right-radius: 4px; font-size: 12pt; padding: 0; } "
+            "QPushButton:hover { background-color: #5a32a3; border-color: #70b8ff; } "
+            "QPushButton:disabled { background-color: #555; color: #888; border-color: #4a8fd4; }"
         )
         self.restore_glossary_btn.clicked.connect(_restore_glossary_backup)
         self.restore_glossary_btn.setVisible(False)
-        batch_right_layout.addWidget(self.restore_glossary_btn)
+        try:
+            separator = QFrame()
+            separator.setFrameShape(QFrame.VLine)
+            separator.setFrameShadow(QFrame.Plain)
+            separator.setFixedWidth(1)
+            separator.setFixedHeight(40)
+            separator.setStyleSheet("background-color: #4a8fd4; margin-top: 2px; margin-bottom: 2px;")
+            self._auto_glossary_control_layout.addWidget(separator)
+            self._auto_glossary_control_layout.addWidget(self.restore_glossary_btn)
+        except Exception:
+            batch_right_layout.addWidget(self.restore_glossary_btn)
 
         # Check restore visibility on startup (deferred so selected_files is populated)
         from PySide6.QtCore import QTimer
