@@ -8481,15 +8481,6 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
         os.getenv("OUTPUT_MODE", "").strip().lower() == "vision"
         and os.getenv("VISION_OCR_FIRST", "auto").strip().lower() not in ("0", "false", "no", "off")
     )
-    chapter_header_text = _extract_chapter_header_text(chapter_html) if vision_ocr_mode else ""
-    if chapter_header_text:
-        removed_headers = 0
-        for header_tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title']):
-            header_tag.decompose()
-            removed_headers += 1
-        if removed_headers:
-            print(f"   📝 Vision mode: removed {removed_headers} source header tag(s) before merging image translation")
-    
     try:
         max_images_per_chapter = int(os.getenv('MAX_IMAGES_PER_CHAPTER', '-1'))
     except (TypeError, ValueError):
@@ -8504,7 +8495,6 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
             images,
             actual_num,
             image_translator,
-            chapter_header_text,
             check_stop_fn,
         )
         if combined_translations:
@@ -8593,8 +8583,6 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
         context = ""
         if img_info.get('alt'):
             context += f", Alt text: {img_info['alt']}"
-        if chapter_header_text:
-            context += f"\n\n[CHAPTER_HEADER_TEXT]\n{chapter_header_text}\n[/CHAPTER_HEADER_TEXT]"
             
         if translated_count > 0:
             delay = float(os.getenv('IMAGE_API_DELAY', '1.0'))
@@ -8801,7 +8789,6 @@ def _process_chapter_images_vision_ocr_combined(
     images,
     actual_num,
     image_translator,
-    chapter_header_text,
     check_stop_fn=None,
 ):
     """OCR every image in an image-only HTML page, then translate the combined OCR once."""
@@ -9104,8 +9091,6 @@ def _process_chapter_images_vision_ocr_combined(
             "Do not collapse separate source lines into one line. Preserve every <img ... /> tag exactly where it appears; "
             "those tags mark cover/illustration images that returned No during OCR and must remain in the output."
         )
-    if chapter_header_text:
-        combined_prompt += f"\n\n[CHAPTER_HEADER_TEXT]\n{chapter_header_text}\n[/CHAPTER_HEADER_TEXT]"
 
     if _stop_new_ocr_work_requested():
         print("   Vision OCR page stopped before combined OCR translation")
@@ -9257,27 +9242,6 @@ def _resolve_chapter_image_path(img_src, image_translator, actual_num, idx):
     return img_path if img_path and os.path.exists(img_path) else None
 
 
-def _extract_chapter_header_text(chapter_html):
-    """Return visible chapter header/title text for Vision OCR injection."""
-    try:
-        soup = BeautifulSoup(chapter_html or "", 'html.parser')
-        parts = []
-        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title']):
-            text = tag.get_text(" ", strip=True)
-            if text and text not in parts:
-                parts.append(text)
-        if not parts:
-            return ""
-        title = parts[0]
-        extra = parts[1:]
-        header = f"<h1>{html.escape(title)}</h1>"
-        if extra:
-            header += "\n" + "\n".join(extra)
-        return header.strip()
-    except Exception:
-        return ""
-
-
 def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actual_num, check_stop_fn=None):
     """OCR chapter images for Vision-mode glossary prepasses without translating them."""
     chapter_html = ContentProcessor.normalize_escaped_image_tags(chapter_html)
@@ -9286,7 +9250,6 @@ def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actua
         return ""
 
     chapter_ocr_parts = []
-    chapter_header_text = _extract_chapter_header_text(chapter_html)
     print(f"🔎 Vision glossary prepass: OCRing {len(images)} image(s) in {_chapter_term()} {actual_num}")
 
     for idx, img_info in enumerate(images, 1):
@@ -9303,8 +9266,6 @@ def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actua
         context = ""
         if img_info.get('alt'):
             context += f", Alt text: {img_info['alt']}"
-        if chapter_header_text:
-            context += f"\n\n[CHAPTER_HEADER_TEXT]\n{chapter_header_text}\n[/CHAPTER_HEADER_TEXT]"
         image_translator.current_chapter_num = actual_num
         image_translator.current_image_index = idx
         ocr_text = image_translator.ocr_image(img_path, context, check_stop_fn)
@@ -9328,6 +9289,16 @@ def _chapter_image_html_for_vision_glossary(chapter):
             return html_source
 
     return ContentProcessor.image_processing_html(chapter)
+
+
+def _vision_glossary_progress_ref(chapter, chapter_idx, actual_num):
+    """Build a glossary progress reference for a Vision OCR chapter/group."""
+    chapter_file = _single_pass_progress_chapter_file(chapter)
+    return {
+        "chapter_idx": int(chapter_idx),
+        "chapter_num": actual_num,
+        "chapter_file": chapter_file,
+    }
 
 
 def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
@@ -9365,6 +9336,7 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             print("❌ Vision glossary prepass stopped by user")
             break
         actual_num = chapter.get('actual_chapter_num', chapter.get('num', idx + 1))
+        progress_ref = _vision_glossary_progress_ref(chapter, idx, actual_num)
         body = _chapter_image_html_for_vision_glossary(chapter)
         if not body or '<img' not in body.lower():
             continue
@@ -9375,29 +9347,32 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             continue
 
         if mode == "minimal":
-            all_ocr.append((actual_num, chapter_ocr))
+            all_ocr.append((actual_num, chapter_ocr, progress_ref))
             continue
 
         if merge_enabled:
-            merge_buffer.append((actual_num, chapter_ocr))
+            merge_buffer.append((actual_num, chapter_ocr, progress_ref))
             if len(merge_buffer) < merge_count:
                 continue
-            merged_text = "\n\n".join(f"[Chapter {num}]\n{text}" for num, text in merge_buffer)
-            if image_translator._ensure_vision_ocr_glossary(merged_text, mode, check_stop_fn):
+            merged_text = "\n\n".join(f"[Chapter {num}]\n{text}" for num, text, _ref in merge_buffer)
+            refs = [ref for _num, _text, ref in merge_buffer if ref]
+            if image_translator._ensure_vision_ocr_glossary(merged_text, mode, check_stop_fn, progress_refs=refs):
                 generated += 1
             merge_buffer = []
         else:
-            if image_translator._ensure_vision_ocr_glossary(chapter_ocr, mode, check_stop_fn):
+            if image_translator._ensure_vision_ocr_glossary(chapter_ocr, mode, check_stop_fn, progress_refs=[progress_ref]):
                 generated += 1
 
     if mode == "minimal" and all_ocr:
-        full_ocr = "\n\n".join(f"[Chapter {num}]\n{text}" for num, text in all_ocr)
+        full_ocr = "\n\n".join(f"[Chapter {num}]\n{text}" for num, text, _ref in all_ocr)
+        refs = [ref for _num, _text, ref in all_ocr if ref]
         image_translator._save_ocr_text(full_ocr, kind="full", image_basename="novel_vision_ocr")
-        if image_translator._ensure_vision_ocr_glossary(full_ocr, mode, check_stop_fn):
+        if image_translator._ensure_vision_ocr_glossary(full_ocr, mode, check_stop_fn, progress_refs=refs):
             generated += 1
     elif merge_enabled and merge_buffer:
-        merged_text = "\n\n".join(f"[Chapter {num}]\n{text}" for num, text in merge_buffer)
-        if image_translator._ensure_vision_ocr_glossary(merged_text, mode, check_stop_fn):
+        merged_text = "\n\n".join(f"[Chapter {num}]\n{text}" for num, text, _ref in merge_buffer)
+        refs = [ref for _num, _text, ref in merge_buffer if ref]
+        if image_translator._ensure_vision_ocr_glossary(merged_text, mode, check_stop_fn, progress_refs=refs):
             generated += 1
 
     if generated:
@@ -15426,16 +15401,8 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Look for headers
                 headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title'])
-                vision_ocr_mode = (
-                    os.getenv("OUTPUT_MODE", "").strip().lower() == "vision"
-                    and os.getenv("VISION_OCR_FIRST", "auto").strip().lower() not in ("0", "false", "no", "off")
-                )
-                
                 # If we have headers, we should translate them even in "image-only" chapters
-                if vision_ocr_mode and headers and any(h.get_text(strip=True) for h in headers):
-                    print("📝 Vision mode: injected headers into OCR text; skipping separate header translation")
-                    status = "completed"
-                elif headers and any(h.get_text(strip=True) for h in headers):
+                if headers and any(h.get_text(strip=True) for h in headers):
                     print(f"📝 Found headers to translate in image-only chapter")
                     
                     # Create a minimal HTML with just the headers for translation
@@ -15581,7 +15548,7 @@ def main(log_callback=None, stop_callback=None):
                                 header_tag.decompose()
                             remaining_non_header_text = soup_without_headers.get_text("", strip=True)
                             if len(remaining_non_header_text) < 20:
-                                print("📝 Vision mode: headers were injected into OCR text; skipping separate header/text translation.")
+                                print("📝 Vision mode: source headers are not OCR text; skipping separate header/text translation.")
                                 fname = FileUtilities.create_chapter_filename(c, actual_num)
                                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                                     f.write(body_with_images)

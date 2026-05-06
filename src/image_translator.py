@@ -2062,7 +2062,6 @@ class ImageTranslator:
             self.last_vision_translation_finish_reason = "cancelled"
             return None
 
-        ocr_text = self._inject_context_headers_into_ocr(ocr_text, assistant_prompt)
         system_prompt = self._prepare_vision_ocr_translation_prompt(ocr_text, check_stop_fn)
 
         messages = [
@@ -2220,52 +2219,6 @@ class ImageTranslator:
             template = template.replace(placeholder, value)
         return template.strip()
 
-    def _extract_context_header_text(self, context):
-        if not context:
-            return ""
-        match = re.search(
-            r"\[CHAPTER_HEADER_TEXT\]\s*(.*?)\s*\[/CHAPTER_HEADER_TEXT\]",
-            str(context),
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        if not match:
-            return ""
-        lines = [line.strip() for line in match.group(1).splitlines() if line.strip()]
-        return "\n".join(lines).strip()
-
-    def _uses_markdown_extraction_output(self):
-        extraction_method = os.getenv("TEXT_EXTRACTION_METHOD", os.getenv("EXTRACTION_MODE", "standard")).strip().lower()
-        return extraction_method in ("enhanced", "html2text", "markdown")
-
-    def _format_context_header_for_ocr(self, header_text):
-        if not header_text or not self._uses_markdown_extraction_output():
-            return header_text
-        try:
-            soup = BeautifulSoup(header_text, 'html.parser')
-            lines = [line.strip() for line in soup.get_text("\n").splitlines() if line.strip()]
-        except Exception:
-            lines = [line.strip() for line in str(header_text).splitlines() if line.strip()]
-        if not lines:
-            return header_text
-        first = lines[0]
-        if not first.startswith("#"):
-            first = f"# {first}"
-        return "\n".join([first] + lines[1:])
-
-    def _inject_context_headers_into_ocr(self, ocr_text, context):
-        header_text = self._extract_context_header_text(context)
-        if not header_text:
-            return ocr_text
-        header_text = self._format_context_header_for_ocr(header_text)
-        source = (ocr_text or "").strip()
-        if not source:
-            return header_text
-        if header_text in source:
-            return source
-        header_kind = "Markdown" if self._uses_markdown_extraction_output() else "HTML"
-        print(f"   📝 Injected chapter header {header_kind} into OCR text")
-        return f"{header_text}\n\n{source}"
-
     def _prepare_vision_ocr_translation_prompt(self, ocr_text, check_stop_fn):
         """Apply automatic glossary modes to OCR text before the final translation call."""
         mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower()
@@ -2299,8 +2252,10 @@ class ImageTranslator:
 
     def _find_vision_glossary_file(self):
         try:
-            glossary_dir = os.path.join(self.output_dir, "Glossary")
+            glossary_dir, json_path, csv_path, _progress_path = self._vision_ocr_glossary_paths()
             candidates = [
+                csv_path,
+                json_path,
                 os.path.join(self.output_dir, "glossary.csv"),
                 os.path.join(self.output_dir, "glossary.json"),
                 os.path.join(glossary_dir, "vision_ocr_glossary.csv"),
@@ -2317,7 +2272,91 @@ class ImageTranslator:
             pass
         return None
 
-    def _ensure_vision_ocr_glossary(self, ocr_text, mode, check_stop_fn):
+    def _vision_ocr_glossary_paths(self):
+        epub_path = os.getenv("EPUB_PATH", "").strip()
+        if epub_path:
+            base = os.path.splitext(os.path.basename(epub_path))[0]
+        else:
+            base = os.path.basename(os.path.abspath(self.output_dir or "")) or "book"
+        glossary_dir = os.getenv("GLOSSARY_SHARED_DIR", "").strip()
+        if not glossary_dir:
+            glossary_dir = os.path.join(self.output_dir, "Glossary")
+        return (
+            glossary_dir,
+            os.path.join(glossary_dir, f"{base}_glossary.json"),
+            os.path.join(glossary_dir, f"{base}_glossary.csv"),
+            os.path.join(glossary_dir, f"{base}_glossary_progress.json"),
+        )
+
+    def _normalize_vision_glossary_progress_refs(self, progress_refs):
+        refs = []
+        for ref in progress_refs or []:
+            if not isinstance(ref, dict):
+                continue
+            try:
+                idx = int(ref.get("chapter_idx"))
+            except (TypeError, ValueError):
+                try:
+                    num = int(ref.get("chapter_num"))
+                    idx = max(0, num - 1)
+                except (TypeError, ValueError):
+                    continue
+            try:
+                actual = int(ref.get("chapter_num"))
+            except (TypeError, ValueError):
+                actual = idx + 1
+            refs.append({
+                "chapter_idx": idx,
+                "chapter_num": actual,
+                "chapter_file": os.path.basename(str(ref.get("chapter_file") or "")),
+            })
+        deduped = {}
+        for ref in refs:
+            deduped[ref["chapter_idx"]] = ref
+        return [deduped[idx] for idx in sorted(deduped)]
+
+    def _update_vision_ocr_glossary_progress(self, glossary_extractor, json_path, progress_refs, status):
+        refs = self._normalize_vision_glossary_progress_refs(progress_refs)
+        if not refs:
+            return
+        progress = glossary_extractor.load_progress()
+        completed = list(progress.get("completed", []))
+        failed = list(progress.get("failed", []))
+        merged = list(progress.get("merged_indices", []))
+        in_progress = list(progress.get("in_progress", []))
+        indices = []
+        for ref in refs:
+            idx = int(ref["chapter_idx"])
+            indices.append(idx)
+            glossary_extractor._GLOSSARY_CHAPTER_POSITIONS[idx] = int(ref["chapter_num"])
+            glossary_extractor._GLOSSARY_CHAPTER_NUMBERS[idx] = int(ref["chapter_num"])
+            glossary_extractor._GLOSSARY_TOTAL_CHAPTERS = max(
+                int(getattr(glossary_extractor, "_GLOSSARY_TOTAL_CHAPTERS", 0) or 0),
+                idx + 1,
+            )
+            if ref.get("chapter_file"):
+                glossary_extractor._GLOSSARY_CHAPTER_FILENAMES[idx] = ref["chapter_file"]
+
+        index_set = set(indices)
+        completed = [idx for idx in completed if idx not in index_set]
+        failed = [idx for idx in failed if idx not in index_set]
+        in_progress = [idx for idx in in_progress if idx not in index_set]
+        if status == "in_progress":
+            in_progress.extend(indices)
+        elif status == "completed":
+            completed.extend(indices)
+        elif status == "failed":
+            failed.extend(indices)
+
+        glossary_extractor.save_progress(
+            completed,
+            glossary_extractor._load_glossary_file(json_path),
+            merged,
+            failed=failed,
+            in_progress=in_progress,
+        )
+
+    def _ensure_vision_ocr_glossary(self, ocr_text, mode, check_stop_fn, progress_refs=None):
         """Generate/update glossary entries from OCR text for Vision mode."""
         if not ocr_text or not ocr_text.strip():
             return None
@@ -2331,10 +2370,12 @@ class ImageTranslator:
                 return None
 
             import extract_glossary_from_epub as glossary_extractor
-            glossary_dir = os.path.join(self.output_dir, "Glossary")
+            glossary_dir, json_path, csv_path, progress_path = self._vision_ocr_glossary_paths()
             os.makedirs(glossary_dir, exist_ok=True)
-            json_path = os.path.join(glossary_dir, "vision_ocr_glossary.json")
-            csv_path = os.path.join(glossary_dir, "vision_ocr_glossary.csv")
+            original_progress_file = getattr(glossary_extractor, "PROGRESS_FILE", None)
+            original_output_file = getattr(glossary_extractor, "_GLOSSARY_OUTPUT_FILE", "")
+            glossary_extractor.PROGRESS_FILE = progress_path
+            glossary_extractor._GLOSSARY_OUTPUT_FILE = json_path
 
             system_prompt, user_prompt = glossary_extractor.build_prompt(ocr_text)
             messages = [
@@ -2349,6 +2390,7 @@ class ImageTranslator:
             temperature = float(os.getenv("GLOSSARY_TEMPERATURE", str(self.temperature)) or self.temperature)
 
             print(f"   📑 Vision OCR auto glossary ({mode}): generating entries from OCR text...")
+            self._update_vision_ocr_glossary_progress(glossary_extractor, json_path, progress_refs, "in_progress")
             response = send_text_with_interrupt(
                 self.client,
                 messages,
@@ -2375,6 +2417,7 @@ class ImageTranslator:
                         entry["raw_name"] = entry["raw_name"].strip()
                     valid.append(entry)
             if not valid:
+                self._update_vision_ocr_glossary_progress(glossary_extractor, json_path, progress_refs, "completed")
                 print("   📑 Vision OCR auto glossary: no valid entries found")
                 return self._find_vision_glossary_file()
 
@@ -2388,12 +2431,29 @@ class ImageTranslator:
             deduped = glossary_extractor.skip_duplicate_entries(existing + valid, output_dir=glossary_dir)
             glossary_extractor.save_glossary_json(deduped, json_path)
             glossary_extractor.save_glossary_csv(deduped, json_path)
+            self._update_vision_ocr_glossary_progress(glossary_extractor, json_path, progress_refs, "completed")
             self._vision_glossary_processed_hashes.add(text_hash)
             print(f"   📑 Vision OCR auto glossary: saved {len(valid)} new entries ({len(deduped)} total)")
             return csv_path if os.path.exists(csv_path) else json_path
         except Exception as e:
+            try:
+                if "glossary_extractor" in locals():
+                    self._update_vision_ocr_glossary_progress(glossary_extractor, json_path, progress_refs, "failed")
+            except Exception:
+                pass
             print(f"   ⚠️ Vision OCR auto glossary failed: {e}")
             return self._find_vision_glossary_file()
+        finally:
+            try:
+                if "glossary_extractor" in locals():
+                    if original_progress_file is not None:
+                        glossary_extractor.PROGRESS_FILE = original_progress_file
+                    elif hasattr(glossary_extractor, "PROGRESS_FILE"):
+                        delattr(glossary_extractor, "PROGRESS_FILE")
+                    if original_output_file is not None:
+                        glossary_extractor._GLOSSARY_OUTPUT_FILE = original_output_file
+            except Exception:
+                pass
 
 
     def _image_to_bytes_with_compression(self, img):
@@ -3277,7 +3337,6 @@ class ImageTranslator:
         if not combined_ocr:
             print("   Combined OCR was empty")
             return None
-        combined_ocr = self._inject_context_headers_into_ocr(combined_ocr, context)
         self._save_ocr_text(combined_ocr, kind="combined", image_basename=image_basename)
         if not translate_after:
             return combined_ocr
@@ -3540,7 +3599,6 @@ class ImageTranslator:
                     self._preserve_current_image = True
                     print("   OCR marked image as cover/illustration; preserving original image and skipping translation")
                     return None
-                ocr_text = self._inject_context_headers_into_ocr(ocr_text, assistant_prompt)
                 self._save_ocr_text(ocr_text, kind="single")
                 print(f"   ✅ OCR complete ({len(ocr_text)} chars)")
                 print("   🌐 Step 2/2: Translating OCR text...")
