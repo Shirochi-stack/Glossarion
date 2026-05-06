@@ -12783,9 +12783,6 @@ def delete_profile(self):
             "Korean_html2text",
             "Japanese_html2text",
             "Chinese_html2text",
-            "korean_OCR",
-            "japanese_OCR",
-            "chinese_OCR",
         }
 
     if name in protected:

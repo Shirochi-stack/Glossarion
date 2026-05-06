@@ -3354,6 +3354,9 @@ class AsyncProcessingDialog:
         env_vars['IMAGE_SMART_CHUNKING'] = "1" if _val(getattr(self.gui, 'image_smart_chunking_var', None), True) else "0"
         env_vars['VISION_OCR_FUZZY_CHUNK_DEDUPE'] = "1" if _val(getattr(self.gui, 'vision_ocr_fuzzy_chunk_dedupe_var', None), False) else "0"
         env_vars['HIDE_IMAGE_TRANSLATION_LABEL'] = "1" if _val(self.gui.hide_image_translation_label_var, False) else "0"
+        output_mode = self.gui._get_output_mode() if hasattr(self.gui, '_get_output_mode') else _val(getattr(self.gui, 'output_mode_var', 'text'), 'text')
+        env_vars['OUTPUT_MODE'] = output_mode
+        env_vars['VISION_OCR_FIRST'] = "1" if output_mode == "vision" else "0"
         
         # Advanced settings
 
@@ -3363,8 +3366,17 @@ class AsyncProcessingDialog:
         env_vars['CHAPTER_NUMBER_OFFSET'] = str(_val(self.gui.chapter_number_offset_var, 0))
         env_vars['COMPRESSION_FACTOR'] = _val(self.gui.compression_factor_var, 0)
         extraction_mode = _val(self.gui.extraction_mode_var, 'smart') if hasattr(self.gui, 'extraction_mode_var') else 'smart'
+        text_extraction_method = _val(getattr(self.gui, 'text_extraction_method_var', None), 'standard') if hasattr(self.gui, 'text_extraction_method_var') else ('enhanced' if extraction_mode == 'enhanced' else 'standard')
+        enhanced_filtering = _val(getattr(self.gui, 'enhanced_filtering_var', None), 'smart')
+        if output_mode == "vision":
+            extraction_mode = "enhanced"
+            text_extraction_method = "enhanced"
+            enhanced_filtering = _val(getattr(self.gui, 'file_filtering_level_var', None), enhanced_filtering)
         env_vars['COMPREHENSIVE_EXTRACTION'] = "1" if extraction_mode in ['comprehensive', 'full'] else "0"
         env_vars['EXTRACTION_MODE'] = extraction_mode
+        env_vars['TEXT_EXTRACTION_METHOD'] = text_extraction_method
+        env_vars['ENHANCED_FILTERING'] = enhanced_filtering
+        env_vars['USE_HTML2TEXT'] = "1" if output_mode == "vision" or text_extraction_method in ('enhanced', 'html2text', 'markdown') or extraction_mode == 'enhanced' else "0"
         env_vars['DISABLE_ZERO_DETECTION'] = "1" if _val(self.gui.disable_zero_detection_var, False) else "0"
         env_vars['USE_HEADER_AS_OUTPUT'] = "1" if _val(self.gui.use_header_as_output_var, False) else "0"
         env_vars['ENABLE_DECIMAL_CHAPTERS'] = "1" if _val(self.gui.enable_decimal_chapters_var, False) else "0"

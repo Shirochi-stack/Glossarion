@@ -36,7 +36,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_VISION_OCR_PROMPT = (
     "Extract only the readable text that is physically present in the image, in natural reading order. "
     "If the image itself is a cover page, character art, scene illustration, decorative image, or otherwise not a page of readable story text, reply with exactly: No. "
-    "Return only the base source text. Preserve paragraph breaks and intentional textual layout when they affect meaning, but do not reproduce every visual wrap from the image; merge wrapped lines that belong to the same sentence or paragraph. "
+    "Return Markdown only, not HTML. Preserve paragraph breaks and meaningful visual structure using Markdown: blank lines for paragraph breaks, headings with #, lists with - or 1., blockquotes with >, tables when table structure is visible, and emphasis/strikethrough/code markers when visible in the source. "
+    "Do not reproduce every visual wrap from the image; merge wrapped lines that belong to the same sentence or paragraph unless the line break is semantically intentional. "
     "Preserve visible textual styling and marks when possible, including brackets, parentheses, quote marks, emphasis, strikethrough/deleted text, symbols, and emotes/emoticons. "
     "For Chinese/Japanese/Korean text with small pronunciation guides above or beside the main characters, OCR only the main/base characters and ignore the pronunciation guides. "
     "For pinyin-over-Chinese images, output the Chinese characters only; do not output the pinyin unless the pinyin is standalone text with no matching Chinese base text. "
@@ -48,25 +49,25 @@ DEFAULT_VISION_OCR_PROMPT = (
 STALE_VISION_OCR_PROMPT_MARKERS = (
     "Preserve the original line breaks as faithfully as possible",
     "do not collapse separate visual lines into one paragraph",
+    "Return only the base source text. Preserve paragraph breaks and intentional textual layout",
 )
 
 DEFAULT_VISION_OCR_USER_PROMPT = (
-    "OCR this image/chunk. Return only the main/base source text. "
+    "OCR this image/chunk. Return Markdown only with the main/base source text. "
     "If this image/chunk is cover art, an illustration, decorative art, or has no readable story text, reply with exactly: No. "
     "Ignore pinyin/romaji/furigana/Jyutping pronunciation guides attached to base characters. Do not translate."
     "\n\nContext:\n{context}"
 )
 
 DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT = (
-    "The OCR text below was assembled from {chunk_count} tall-image chunk(s). "
-    "Translate it as one continuous passage, preserving narrative flow and removing OCR-only duplication from chunk overlap."
+    "The Markdown OCR text below was assembled from {chunk_count} tall-image chunk(s). "
+    "Translate it as one continuous passage, preserving narrative flow, Markdown structure, and removing OCR-only duplication from chunk overlap."
 )
 
 DEFAULT_VISION_OCR_TRANSLATION_USER_PROMPT = (
     "{context}\n\n"
-    "Translate the following OCR text according to the system prompt. "
-    "Return only the translated text. Preserve the OCR paragraph and line-break structure; "
-    "do not collapse separate source lines into one line.\n\n"
+    "Translate the following Markdown OCR text according to the system prompt. "
+    "Return only the translated text. Preserve the Markdown paragraph, heading, list, table, blockquote, emphasis, and line-break structure.\n\n"
     "<OCR_TEXT>\n{ocr_text}\n</OCR_TEXT>"
 )
 
@@ -329,8 +330,14 @@ class ImageTranslator:
         if any(marker in self.vision_ocr_prompt for marker in STALE_VISION_OCR_PROMPT_MARKERS):
             self.vision_ocr_prompt = DEFAULT_VISION_OCR_PROMPT
         self.vision_ocr_user_prompt = os.getenv("VISION_OCR_USER_PROMPT", DEFAULT_VISION_OCR_USER_PROMPT).strip() or DEFAULT_VISION_OCR_USER_PROMPT
+        if "OCR this image/chunk. Return only the main/base source text." in self.vision_ocr_user_prompt:
+            self.vision_ocr_user_prompt = DEFAULT_VISION_OCR_USER_PROMPT
         self.vision_ocr_combined_context_prompt = os.getenv("VISION_OCR_COMBINED_CONTEXT_PROMPT", DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT).strip() or DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT
+        if "The OCR text below was assembled from" in self.vision_ocr_combined_context_prompt:
+            self.vision_ocr_combined_context_prompt = DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT
         self.vision_ocr_translation_user_prompt = os.getenv("VISION_OCR_TRANSLATION_USER_PROMPT", DEFAULT_VISION_OCR_TRANSLATION_USER_PROMPT).strip() or DEFAULT_VISION_OCR_TRANSLATION_USER_PROMPT
+        if "Translate the following OCR text according to the system prompt." in self.vision_ocr_translation_user_prompt:
+            self.vision_ocr_translation_user_prompt = DEFAULT_VISION_OCR_TRANSLATION_USER_PROMPT
         self.last_vision_translation_finish_reason = None
         self.last_vision_translation_error = None
         self._vision_glossary_processed_hashes = set()

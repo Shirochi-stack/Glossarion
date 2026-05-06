@@ -1213,9 +1213,6 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             "Korean_html2text",
             "Japanese_html2text",
             "Chinese_html2text",
-            "korean_OCR",
-            "japanese_OCR",
-            "chinese_OCR",
             "RPGMaker_GTool",
             "RPGMaker_GTool_Image",
         }
@@ -2148,7 +2145,8 @@ Text to analyze:
         self.default_vision_ocr_prompt = (
             "Extract only the readable text that is physically present in the image, in natural reading order. "
             "If the image itself is a cover page, character art, scene illustration, decorative image, or otherwise not a page of readable story text, reply with exactly: No. "
-            "Return only the base source text. Preserve paragraph breaks and intentional textual layout when they affect meaning, but do not reproduce every visual wrap from the image; merge wrapped lines that belong to the same sentence or paragraph. "
+            "Return Markdown only, not HTML. Preserve paragraph breaks and meaningful visual structure using Markdown: blank lines for paragraph breaks, headings with #, lists with - or 1., blockquotes with >, tables when table structure is visible, and emphasis/strikethrough/code markers when visible in the source. "
+            "Do not reproduce every visual wrap from the image; merge wrapped lines that belong to the same sentence or paragraph unless the line break is semantically intentional. "
             "Preserve visible textual styling and marks when possible, including brackets, parentheses, quote marks, emphasis, strikethrough/deleted text, symbols, and emotes/emoticons. "
             "For Chinese/Japanese/Korean text with small pronunciation guides above or beside the main characters, OCR only the main/base characters and ignore the pronunciation guides. "
             "For pinyin-over-Chinese images, output the Chinese characters only; do not output the pinyin unless the pinyin is standalone text with no matching Chinese base text. "
@@ -2157,20 +2155,19 @@ Text to analyze:
             "If no readable story text is present, reply with exactly: No."
         )
         self.default_vision_ocr_user_prompt = (
-            "OCR this image/chunk. Return only the main/base source text. "
+            "OCR this image/chunk. Return Markdown only with the main/base source text. "
             "If this image/chunk is cover art, an illustration, decorative art, or has no readable story text, reply with exactly: No. "
             "Ignore pinyin/romaji/furigana/Jyutping pronunciation guides attached to base characters. Do not translate."
             "\n\nContext:\n{context}"
         )
         self.default_vision_ocr_combined_context_prompt = (
-            "The OCR text below was assembled from {chunk_count} tall-image chunk(s). "
-            "Translate it as one continuous passage, preserving narrative flow and removing OCR-only duplication from chunk overlap."
+            "The Markdown OCR text below was assembled from {chunk_count} tall-image chunk(s). "
+            "Translate it as one continuous passage, preserving narrative flow, Markdown structure, and removing OCR-only duplication from chunk overlap."
         )
         self.default_vision_ocr_translation_user_prompt = (
             "{context}\n\n"
-            "Translate the following OCR text according to the system prompt. "
-            "Return only the translated text. Preserve the OCR paragraph and line-break structure; "
-            "do not collapse separate source lines into one line.\n\n"
+            "Translate the following Markdown OCR text according to the system prompt. "
+            "Return only the translated text. Preserve the Markdown paragraph, heading, list, table, blockquote, emphasis, and line-break structure.\n\n"
             "<OCR_TEXT>\n{ocr_text}\n</OCR_TEXT>"
         )
         self.default_prompts = {
@@ -2355,53 +2352,6 @@ Text to analyze:
 
                 "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
             ), 
-            "korean_OCR": (
-                "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
-                "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
-                "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
-                "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
-                "- Retain Korean familial address terms in romanized form rather than translating them (examples: oppa, eonni, hyung, noona, omma, appa, halabeoji, halmeoni), preserving their nuance and relationship context instead of converting them to English equivalents like brother, sister, mom, or dad.\n"
-                "- Always localize Korean terminology to proper English equivalents instead of literal translations (examples: 마왕 = Demon King; 마술 = magic).\n"
-                "- When translating Korean's pronoun-dropping style, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration while reflecting the Korean pronoun's nuance (나/내/저/우리/etc.) through speech patterns and formality level rather than the pronoun itself, and maintain natural English flow without overusing pronouns just because they're omitted in Korean.\n"
-                "- All Korean profanity must be translated to English profanity.\n"
-                "- Preserve original intent, and speech tone.\n"
-                "- Retain onomatopoeia in Romaji.\n"
-                "- Keep original Korean quotation marks (\" \", ' ', 「」, 『』) as-is without converting to English quotes.\\n"
-                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory.\n"
-                "- Add HTML tags for proper formatting as expected of a novel.\n"
-                "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces.\n"
-            ),
-            "japanese_OCR": (
-                "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
-                "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
-                "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
-                "- Retain Japanese honorifics and respectful speech markers in romanized form, including but not limited to: -san, -sama, -chan, -kun, -dono, -sensei, -senpai, -kouhai. For archaic/classical Japanese honorific forms, preserve them as-is rather than converting to modern equivalents.\n"
-                "- Retain Japanese familial address terms in romanized form rather than translating them (examples: onii-san, onii-sama, onii-chan, onii-tan, onee-san, onee-sama, okaasan, otousan, imouto, ani, ane), preserving their nuance and level of affection instead of converting them to English equivalents like brother or sister.\n"                
-                "- Always localize Japanese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 魔術 = magic).\n"
-                "- When translating Japanese's pronoun-dropping style, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration while reflecting the Japanese pronoun's nuance (私/僕/俺/etc.) through speech patterns rather than the pronoun itself, and maintain natural English flow without overusing pronouns just because they're omitted in Japanese.\n"
-                "- All Japanese profanity must be translated to English profanity.\n"
-                "- Preserve original intent, and speech tone.\n"
-                "- Retain onomatopoeia in Romaji.\n"
-                "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
-                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
-                "- Add HTML tags for proper formatting as expected of a novel.\n"
-                "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces.\n"
-            ),
-            "chinese_OCR": (
-                "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
-                "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
-                "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
-                "- Retain Chinese titles and respectful forms of address in romanized form, including but not limited to: laoban, laoshi, shifu, xiaojie, xiansheng, taitai, daren, qianbei. For archaic/classical Chinese respectful forms, preserve them as-is rather than converting to modern equivalents.\n"
-                "- Always localize Chinese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 法术 = magic).\n"
-                "- When translating Chinese's flexible pronoun usage, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration while reflecting the pronoun's nuance (我/吾/咱/人家/etc.) through speech patterns and formality level rather than the pronoun itself, and since Chinese pronouns don't indicate gender in speech (他/她/它 all sound like 'tā'), rely on context or glossary rather than assuming gender.\n"
-                "- All Chinese profanity must be translated to English profanity.\n"
-                "- Preserve original intent, and speech tone.\n"
-                "- Retain onomatopoeia in Romaji.\n"
-                "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
-                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
-                "- Add HTML tags for proper formatting as expected of a novel.\n"
-                "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces.\n"
-            ),            
             "Glossary_Editor": (
                 "I have a messy character glossary from a Korean web novel that needs to be cleaned up and restructured. Please Output only JSON entries while creating a clean JSON glossary with the following requirements:\n"
                 "1. Merge duplicate character entries - Some characters appear multiple times (e.g., Noah, Ichinose family members).\n"
@@ -3435,18 +3385,28 @@ Recent translations to summarize:
         elif (
             "Preserve the original line breaks as faithfully as possible" in str(self.vision_ocr_prompt)
             or "do not collapse separate visual lines into one paragraph" in str(self.vision_ocr_prompt)
+            or "Return only the base source text. Preserve paragraph breaks and intentional textual layout" in str(self.vision_ocr_prompt)
         ):
             self.vision_ocr_prompt = self.default_vision_ocr_prompt
             self.config['vision_ocr_prompt'] = self.default_vision_ocr_prompt
         self.vision_ocr_user_prompt = self.config.get('vision_ocr_user_prompt', self.default_vision_ocr_user_prompt)
         if not self.vision_ocr_user_prompt or not str(self.vision_ocr_user_prompt).strip():
             self.vision_ocr_user_prompt = self.default_vision_ocr_user_prompt
+        elif "OCR this image/chunk. Return only the main/base source text." in str(self.vision_ocr_user_prompt):
+            self.vision_ocr_user_prompt = self.default_vision_ocr_user_prompt
+            self.config['vision_ocr_user_prompt'] = self.default_vision_ocr_user_prompt
         self.vision_ocr_combined_context_prompt = self.config.get('vision_ocr_combined_context_prompt', self.default_vision_ocr_combined_context_prompt)
         if not self.vision_ocr_combined_context_prompt or not str(self.vision_ocr_combined_context_prompt).strip():
             self.vision_ocr_combined_context_prompt = self.default_vision_ocr_combined_context_prompt
+        elif "The OCR text below was assembled from" in str(self.vision_ocr_combined_context_prompt):
+            self.vision_ocr_combined_context_prompt = self.default_vision_ocr_combined_context_prompt
+            self.config['vision_ocr_combined_context_prompt'] = self.default_vision_ocr_combined_context_prompt
         self.vision_ocr_translation_user_prompt = self.config.get('vision_ocr_translation_user_prompt', self.default_vision_ocr_translation_user_prompt)
         if not self.vision_ocr_translation_user_prompt or not str(self.vision_ocr_translation_user_prompt).strip():
             self.vision_ocr_translation_user_prompt = self.default_vision_ocr_translation_user_prompt
+        elif "Translate the following OCR text according to the system prompt." in str(self.vision_ocr_translation_user_prompt):
+            self.vision_ocr_translation_user_prompt = self.default_vision_ocr_translation_user_prompt
+            self.config['vision_ocr_translation_user_prompt'] = self.default_vision_ocr_translation_user_prompt
         # Optional assistant prefill prompt (disabled by default)
         self.assistant_prompt = self.config.get('assistant_prompt', self.default_assistant_prompt)
         
@@ -3633,6 +3593,11 @@ Recent translations to summarize:
         
         # Profiles
         self.prompt_profiles = self.config.get('prompt_profiles', self.default_prompts.copy())
+        removed_ocr_profiles = {"korean_OCR", "japanese_OCR", "chinese_OCR"}
+        for profile_name in removed_ocr_profiles:
+            self.prompt_profiles.pop(profile_name, None)
+        if self.config.get('active_profile') in removed_ocr_profiles:
+            self.config['active_profile'] = 'Universal'
         
         # Ensure Universal profile and all extraction mode profiles exist and are up to date
         # Define profiles that should always be included (in order of priority)
@@ -3645,10 +3610,6 @@ Recent translations to summarize:
             "Korean_html2text",
             "Japanese_html2text",
             "Chinese_html2text",
-            # OCR profiles (keys match self.default_prompts)
-            "korean_OCR",
-            "japanese_OCR",
-            "chinese_OCR",
             # RPG Maker GTool profiles
             "RPGMaker_GTool",
             "RPGMaker_GTool_Image",
@@ -3680,6 +3641,9 @@ Recent translations to summarize:
             self.prompt_profiles = new_profiles
         
         active = self.config.get('active_profile', next(iter(self.prompt_profiles)))
+        if active not in self.prompt_profiles:
+            active = next(iter(self.prompt_profiles))
+            self.config['active_profile'] = active
         self.profile_var = active
         # Initialize lang_var to the actual target language from config, not the profile name
         # This will be properly synced when update_target_language is called during GUI setup
@@ -6369,8 +6333,7 @@ Recent translations to summarize:
         info = QLabel(
             "<span style='font-weight:600;'>Profile name tags</span> <span style='color:#94a3b8;'>(case-insensitive)</span>:<br>"
             "• <span style='font-family: Consolas, \"Courier New\", monospace; font-weight:700; color:#e2e8f0;'>_beautifulsoup</span>: BeautifulSoup extraction<br>"
-            "• <span style='font-family: Consolas, \"Courier New\", monospace; font-weight:700; color:#e2e8f0;'>_html2text</span>: html2text extraction<br>"
-            "• <span style='font-family: Consolas, \"Courier New\", monospace; font-weight:700; color:#e2e8f0;'>_ocr</span>: OCR-focused prompt profile <span style='color:#94a3b8;'>(does not change output mode)</span><br><br>"
+            "• <span style='font-family: Consolas, \"Courier New\", monospace; font-weight:700; color:#e2e8f0;'>_html2text</span>: html2text extraction<br><br>"
             "Built-in profiles are protected <span style='color:#94a3b8;'>(can’t be deleted)</span> and will restore themselves on restart."
         )
         info.setWordWrap(True)
@@ -6509,9 +6472,6 @@ Recent translations to summarize:
                     "Korean_html2text",
                     "Japanese_html2text",
                     "Chinese_html2text",
-                    "korean_OCR",
-                    "japanese_OCR",
-                    "chinese_OCR",
                 }
 
             profile_names = [item.text() for item in selected_items]
@@ -14334,6 +14294,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 except:
                     pass
                     
+        output_mode = self._get_output_mode()
+
         # Handle extraction mode - check which variables exist
         if hasattr(self, 'text_extraction_method_var'):
             # New cleaner UI variables
@@ -14349,10 +14311,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
         else:
             # Old UI variables
             extraction_mode = self.extraction_mode_var
+            extraction_method = 'enhanced' if extraction_mode == 'enhanced' else 'standard'
             if extraction_mode == 'enhanced':
                 enhanced_filtering = getattr(self, 'enhanced_filtering_var', 'smart')
             else:
                 enhanced_filtering = 'smart'
+
+        if output_mode == 'vision':
+            extraction_method = 'enhanced'
+            extraction_mode = 'enhanced'
+            enhanced_filtering = filtering_level if hasattr(self, 'file_filtering_level_var') else getattr(self, 'enhanced_filtering_var', 'smart')
                     
         # Ensure multi-key env toggles are set early for the main translation path as well
         try:
@@ -14502,15 +14470,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_ALIAS_AWARE_GENDER_ONLY': '1' if getattr(self, 'glossary_alias_aware_gender_only_var', True) else '0',
             'GLOSSARY_CUSTOM_ENTRY_TYPES': json.dumps(getattr(self, 'custom_entry_types', self.config.get('custom_entry_types', {}))),
             'GLOSSARY_CUSTOM_FIELDS': json.dumps(getattr(self, 'custom_glossary_fields', self.config.get('custom_glossary_fields', []))),
-            'OUTPUT_MODE': self._get_output_mode(),
-            'VISION_OCR_FIRST': '1' if self._get_output_mode() == 'vision' else '0',
+            'OUTPUT_MODE': output_mode,
+            'VISION_OCR_FIRST': '1' if output_mode == 'vision' else '0',
             'VISION_OCR_PROMPT': str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', ''))),
             'VISION_OCR_USER_PROMPT': str(getattr(self, 'vision_ocr_user_prompt', self.config.get('vision_ocr_user_prompt', ''))),
             'VISION_OCR_COMBINED_CONTEXT_PROMPT': str(getattr(self, 'vision_ocr_combined_context_prompt', self.config.get('vision_ocr_combined_context_prompt', ''))),
             'VISION_OCR_TRANSLATION_USER_PROMPT': str(getattr(self, 'vision_ocr_translation_user_prompt', self.config.get('vision_ocr_translation_user_prompt', ''))),
             'VISION_OCR_BATCH_TRANSLATION': '1' if getattr(self, 'vision_ocr_batch_translation_var', self.config.get('vision_ocr_batch_translation', True)) else '0',
             'VISION_OCR_BATCH_SIZE': str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '10'))),
-            'ENABLE_REFINEMENT_OUTPUT_MODE': "1" if self._get_output_mode() == 'refinement' else "0",
+            'ENABLE_REFINEMENT_OUTPUT_MODE': "1" if output_mode == 'refinement' else "0",
             'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var else "0",
             'WEBNOVEL_MIN_HEIGHT': str(self.webnovel_min_height_var),
@@ -14580,8 +14548,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'FORCE_BS_FOR_TRADITIONAL': '1' if getattr(self, 'force_bs_for_traditional_var', False) else '0',
             
             # For new UI
-            "TEXT_EXTRACTION_METHOD": extraction_method if hasattr(self, 'text_extraction_method_var') else ('enhanced' if extraction_mode == 'enhanced' else 'standard'),
+            "TEXT_EXTRACTION_METHOD": extraction_method if hasattr(self, 'text_extraction_method_var') or output_mode == 'vision' else ('enhanced' if extraction_mode == 'enhanced' else 'standard'),
             "FILE_FILTERING_LEVEL": filtering_level if hasattr(self, 'file_filtering_level_var') else extraction_mode,
+            "USE_HTML2TEXT": "1" if output_mode == 'vision' or extraction_method in ('enhanced', 'html2text', 'markdown') or extraction_mode == 'enhanced' else "0",
             'DISABLE_CHAPTER_MERGING': '1' if self.disable_chapter_merging_var else '0',
             # Request merging (combine multiple chapters into single API request)
             'REQUEST_MERGING_ENABLED': "1" if getattr(self, 'request_merging_enabled_var', False) else "0",
@@ -20213,7 +20182,6 @@ Important rules:
             for sfx, sdesc, scolor in [
                 ("_beautifulsoup", "BeautifulSoup extraction", "#5eedc0"),
                 ("_html2text", "html2text extraction", "#80b8ff"),
-                ("_ocr", "OCR-focused prompt profile (does not change output mode)", "#ffd050"),
             ]:
                 sl = QLabel(f"<code style='color:{scolor}; font-weight:bold;'>{sfx}</code> — {sdesc}")
                 sl.setTextFormat(Qt.RichText)
@@ -20222,7 +20190,7 @@ Important rules:
                 sl.setWordWrap(True)
                 sl.setStyleSheet("color: #e0e0e0;")
                 suffix_lay.addWidget(sl)
-            suffix_note = QLabel("Example: Korean_BeautifulSoup, Japanese_html2text, Custom_ocr")
+            suffix_note = QLabel("Example: Korean_BeautifulSoup, Japanese_html2text")
             suffix_note.setFont(QFont("Arial", 8))
             suffix_note.setStyleSheet("color: #8090a8; font-style: italic;")
             suffix_lay.addWidget(suffix_note)
@@ -23329,6 +23297,14 @@ Important rules:
             # Calculate resolved_max_retry_tokens
             current_max_tokens = getattr(self, 'max_output_tokens', 128000)
             resolved_max_retry_tokens = self._resolve_max_retry_tokens(current_max_tokens) if hasattr(self, '_resolve_max_retry_tokens') else current_max_tokens
+            output_mode = self._get_output_mode()
+            env_text_extraction_method = getattr(self, 'text_extraction_method_var', 'standard') if hasattr(self, 'text_extraction_method_var') else 'standard'
+            env_extraction_mode = getattr(self, 'extraction_mode_var', 'smart')
+            env_enhanced_filtering = getattr(self, 'enhanced_filtering_var', 'smart')
+            if output_mode == 'vision':
+                env_text_extraction_method = 'enhanced'
+                env_extraction_mode = 'enhanced'
+                env_enhanced_filtering = getattr(self, 'file_filtering_level_var', env_enhanced_filtering)
             
             extra_env_mappings = [
                 # Rolling summary
@@ -23427,16 +23403,16 @@ Important rules:
                 # Watermark/image toggles
                 ('ENABLE_WATERMARK_REMOVAL', '1' if getattr(self, 'enable_watermark_removal_var', True) else '0'),
                 ('SAVE_CLEANED_IMAGES', '1' if getattr(self, 'save_cleaned_images_var', False) else '0'),
-                ('OUTPUT_MODE', self._get_output_mode()),
-                ('VISION_OCR_FIRST', '1' if self._get_output_mode() == 'vision' else '0'),
+                ('OUTPUT_MODE', output_mode),
+                ('VISION_OCR_FIRST', '1' if output_mode == 'vision' else '0'),
                 ('VISION_OCR_PROMPT', str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', '')))),
                 ('VISION_OCR_USER_PROMPT', str(getattr(self, 'vision_ocr_user_prompt', self.config.get('vision_ocr_user_prompt', '')))),
                 ('VISION_OCR_BATCH_TRANSLATION', '1' if getattr(self, 'vision_ocr_batch_translation_var', True) else '0'),
                 ('VISION_OCR_BATCH_SIZE', str(getattr(self, 'vision_ocr_batch_size_var', '10'))),
                 ('ENABLE_IMAGE_OUTPUT_MODE', self._get_allowed_image_output_mode()),
                 ('ENABLE_VIDEO_OUTPUT_MODE', self._get_allowed_video_output_mode()),
-                ('ENABLE_AUDIO_OUTPUT_MODE', '1' if self._get_output_mode() == 'audio' else '0'),
-                ('ENABLE_REFINEMENT_OUTPUT_MODE', '1' if self._get_output_mode() == 'refinement' else '0'),
+                ('ENABLE_AUDIO_OUTPUT_MODE', '1' if output_mode == 'audio' else '0'),
+                ('ENABLE_REFINEMENT_OUTPUT_MODE', '1' if output_mode == 'refinement' else '0'),
                 # Normalize to uppercase so validation in unified_api_client accepts 1K/2K/4K
                 ('IMAGE_OUTPUT_RESOLUTION', str(getattr(self, 'image_output_resolution_var', '1K')).upper()),
                 ('NANOGPT_VIDEO_DURATION', str(getattr(self, 'nanogpt_video_duration_var', '60')) + 's'),
@@ -23534,10 +23510,11 @@ Important rules:
                 ('USE_TITLE', '1' if getattr(self, 'use_title_var', False) else '0'),
 
                 # Extraction mode
-                ('TEXT_EXTRACTION_METHOD', getattr(self, 'text_extraction_method_var', 'standard') if hasattr(self, 'text_extraction_method_var') else 'standard'),
+                ('TEXT_EXTRACTION_METHOD', env_text_extraction_method),
                 ('FILE_FILTERING_LEVEL', getattr(self, 'file_filtering_level_var', 'smart') if hasattr(self, 'file_filtering_level_var') else 'smart'),
-                ('EXTRACTION_MODE', getattr(self, 'extraction_mode_var', 'smart')),
-                ('ENHANCED_FILTERING', getattr(self, 'enhanced_filtering_var', 'smart')),
+                ('EXTRACTION_MODE', env_extraction_mode),
+                ('ENHANCED_FILTERING', env_enhanced_filtering),
+                ('USE_HTML2TEXT', '1' if output_mode == 'vision' or env_text_extraction_method in ('enhanced', 'html2text', 'markdown') or env_extraction_mode == 'enhanced' else '0'),
 
                 # Anti-duplicate
                 ('ENABLE_ANTI_DUPLICATE', '1' if getattr(self, 'enable_anti_duplicate_var', False) else '0'),
