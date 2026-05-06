@@ -11635,7 +11635,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     # ESCAPE PASS: Convert non-allowed angle-bracket sequences to HTML entities.
     # Runs FIRST so prose like <Alice's Nightmare> and AI-injected HTML are
     # safely escaped before anything else touches the text.
-    # Allowed tags (a, img, svg, picture, figure) are kept as real HTML.
+    # Real HTML tags are kept as markup; story/prose angle brackets are escaped.
     # Logs a warning when the AI returned non-allowed angle-bracket content.
     # -------------------------------------------------------------------------
     _ALLOWED_TAGS = ("a", "img", "svg", "picture", "figure", "ruby", "rt", "rp", "rb", "rtc")
@@ -11675,6 +11675,13 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             # tag name -> escape it so the browser renders the literal text.
             return "&lt;" + inner + "&gt;"
         if tag in _HTML_TAG_NAMES:
+            stripped = inner.strip()
+            is_closing = stripped.startswith('/')
+            is_self_closing = stripped.endswith('/')
+            is_bare = stripped.lower().lstrip('/') == tag
+            has_attr = '=' in inner
+            if is_closing or is_bare or has_attr or is_self_closing:
+                return "<" + inner + ">"
             _escape_fired[0] = True
         return "&lt;" + inner + "&gt;"
 
@@ -11697,7 +11704,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     # an <img> or <a> in the text does NOT trigger this pass and collapse the
     # markdown line structure.
     # -------------------------------------------------------------------------
-    _allowed_alt = '|'.join(_ALLOWED_TAGS)
+    _allowed_alt = '|'.join(sorted(set(_ALLOWED_TAGS).union(_HTML_TAG_NAMES), key=len, reverse=True))
     _html_tag_re = re.compile(
         rf'</?(?!(?:{_allowed_alt})(?:[\s/>]))[a-zA-Z][^>]*>',
         re.DOTALL | re.IGNORECASE
@@ -11995,6 +12002,14 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
         
         # Code inline
         line = re.sub(r'`([^`]+)`', r'<code>\1</code>', line)
+
+        if re.match(
+            r'^</?(?:' + '|'.join(sorted(_HTML_TAG_NAMES, key=len, reverse=True)) + r')(?:\s|>|/)',
+            line,
+            flags=re.IGNORECASE,
+        ):
+            html_parts.append(line)
+            continue
         
         # Regular paragraph
         html_parts.append(f'<p>{line}</p>')
