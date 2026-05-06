@@ -3357,6 +3357,14 @@ class AsyncProcessingDialog:
         output_mode = self.gui._get_output_mode() if hasattr(self.gui, '_get_output_mode') else _val(getattr(self.gui, 'output_mode_var', 'text'), 'text')
         env_vars['OUTPUT_MODE'] = output_mode
         env_vars['VISION_OCR_FIRST'] = "1" if output_mode == "vision" else "0"
+        glossary_request_merge_count = str(self.gui.config.get('glossary_request_merge_count', 10) or 10)
+        if output_mode == "vision" and auto_glossary_mode == "balanced":
+            env_vars['GLOSSARY_REQUEST_MERGING_ENABLED'] = "1"
+            env_vars['GLOSSARY_ENABLE_CHAPTER_SPLIT'] = "1"
+        else:
+            env_vars['GLOSSARY_REQUEST_MERGING_ENABLED'] = "1" if self.gui.config.get('glossary_request_merging_enabled', False) else "0"
+            env_vars['GLOSSARY_ENABLE_CHAPTER_SPLIT'] = "1" if self.gui.config.get('glossary_enable_chapter_split', False) else "0"
+        env_vars['GLOSSARY_REQUEST_MERGE_COUNT'] = glossary_request_merge_count
         
         # Advanced settings
 

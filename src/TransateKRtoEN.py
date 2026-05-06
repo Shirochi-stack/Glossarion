@@ -9317,6 +9317,19 @@ def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actua
     return chapter_ocr
 
 
+def _chapter_image_html_for_vision_glossary(chapter):
+    """Return the chapter HTML that still contains image tags for the Vision OCR prepass."""
+    if not isinstance(chapter, dict):
+        return ""
+
+    for key in ("original_html", "source_html", "raw_html", "html", "body", "content"):
+        html_source = ContentProcessor.normalize_escaped_image_tags(chapter.get(key, "") or "")
+        if html_source and "<img" in html_source.lower():
+            return html_source
+
+    return ContentProcessor.image_processing_html(chapter)
+
+
 def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
     """OCR image chapters and generate auto glossary before Vision translation starts."""
     mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower()
@@ -9329,9 +9342,11 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
     print(f"📑 Vision Auto Glossary Prepass: {mode.capitalize()}")
     print("="*50)
 
-    merge_enabled = (
-        mode in ("balanced", "full")
-        and os.getenv('GLOSSARY_REQUEST_MERGING_ENABLED', os.getenv('REQUEST_MERGING_ENABLED', '0')) == '1'
+    merge_env = os.getenv('GLOSSARY_REQUEST_MERGING_ENABLED')
+    if merge_env is None and mode == "balanced":
+        merge_env = "1"
+    merge_enabled = mode in ("balanced", "full") and (
+        (merge_env if merge_env is not None else os.getenv('REQUEST_MERGING_ENABLED', '0')) == '1'
     )
     try:
         merge_count = int(os.getenv('GLOSSARY_REQUEST_MERGE_COUNT', os.getenv('REQUEST_MERGE_COUNT', '10')))
@@ -9350,7 +9365,7 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             print("❌ Vision glossary prepass stopped by user")
             break
         actual_num = chapter.get('actual_chapter_num', chapter.get('num', idx + 1))
-        body = chapter.get('body') or chapter.get('content') or ""
+        body = _chapter_image_html_for_vision_glossary(chapter)
         if not body or '<img' not in body.lower():
             continue
 
@@ -9385,7 +9400,10 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
         if image_translator._ensure_vision_ocr_glossary(merged_text, mode, check_stop_fn):
             generated += 1
 
-    os.environ["VISION_GLOSSARY_PREPASS_DONE"] = "1"
+    if generated:
+        os.environ["VISION_GLOSSARY_PREPASS_DONE"] = "1"
+    else:
+        os.environ.pop("VISION_GLOSSARY_PREPASS_DONE", None)
     print(f"📑 Vision glossary prepass complete ({generated} glossary request group(s))")
     print("="*50 + "\n")
 

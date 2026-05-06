@@ -11985,7 +11985,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     auto_glossary_mode = 'off'
                 
                 if current_output_mode == 'vision' and auto_glossary_mode in ('balanced', 'full'):
-                    self.append_log("📑 Vision mode: glossary extraction will run after OCR prepass inside translation")
+                    glossary_merge_count = str(self.config.get(
+                        'glossary_request_merge_count',
+                        getattr(self, 'request_merge_count_var', '10')
+                    ) or '10')
+                    if auto_glossary_mode == 'balanced':
+                        os.environ['GLOSSARY_REQUEST_MERGING_ENABLED'] = '1'
+                        os.environ['GLOSSARY_ENABLE_CHAPTER_SPLIT'] = '1'
+                    else:
+                        os.environ['GLOSSARY_REQUEST_MERGING_ENABLED'] = '1' if self.config.get('glossary_request_merging_enabled', False) else '0'
+                        os.environ['GLOSSARY_ENABLE_CHAPTER_SPLIT'] = '1' if self.config.get('glossary_enable_chapter_split', False) else '0'
+                    os.environ['GLOSSARY_REQUEST_MERGE_COUNT'] = glossary_merge_count
+                    self.append_log(f"📑 Vision mode: OCR prepass will run before glossary extraction (merge count: {glossary_merge_count})")
                 elif auto_glossary_mode in ('balanced', 'full'):
                     # Check if a glossary was MANUALLY loaded by the user for this file
                     # Auto-loaded glossaries (from autofill) could be incomplete from a stopped extraction
@@ -14388,6 +14399,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
         resolved_max_retry_tokens = self._resolve_max_retry_tokens(current_max_tokens)
         
         auto_inject_book_title = bool(getattr(self, 'auto_inject_book_title_var', self.config.get('auto_inject_book_title', False)))
+        auto_glossary_mode = self.config.get('auto_glossary_mode', None)
+        if auto_glossary_mode is None:
+            auto_glossary_mode = 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
+        glossary_request_merge_count = str(self.config.get(
+            'glossary_request_merge_count',
+            getattr(self, 'request_merge_count_var', '10')
+        ) or '10')
+        if output_mode == 'vision' and auto_glossary_mode == 'balanced':
+            glossary_request_merging_enabled = '1'
+            glossary_enable_chapter_split = '1'
+        else:
+            glossary_request_merging_enabled = '1' if self.config.get('glossary_request_merging_enabled', False) else '0'
+            glossary_enable_chapter_split = '1' if self.config.get('glossary_enable_chapter_split', False) else '0'
 
         return {
             'EPUB_PATH': epub_path,
@@ -14452,6 +14476,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_SKIP_FREQUENCY_CHECK': "1" if self.config.get('glossary_skip_frequency_check', False) else "0",
             'GLOSSARY_INCLUDE_BOOK_TITLE': "1" if getattr(self, 'include_book_title_glossary_var', False) else "0",
             'GLOSSARY_AUTO_INJECT_BOOK_TITLE': "1" if auto_inject_book_title else "0",
+            'GLOSSARY_REQUEST_MERGING_ENABLED': glossary_request_merging_enabled,
+            'GLOSSARY_REQUEST_MERGE_COUNT': glossary_request_merge_count,
+            'GLOSSARY_ENABLE_CHAPTER_SPLIT': glossary_enable_chapter_split,
             'ENABLE_AUTO_GLOSSARY': "1" if (self.config.get('auto_glossary_mode', 'off') == 'minimal' or (self.config.get('auto_glossary_mode') is None and self.enable_auto_glossary_var)) else "0",
             'AUTO_GLOSSARY_MODE': self.config.get('auto_glossary_mode', 'off'),
             'SINGLE_PASS_GLOSSARY_MODE': '1' if self.config.get('auto_glossary_mode', 'off') == 'single_pass' else '',
@@ -23305,6 +23332,14 @@ Important rules:
                 env_text_extraction_method = 'enhanced'
                 env_extraction_mode = 'enhanced'
                 env_enhanced_filtering = getattr(self, 'file_filtering_level_var', env_enhanced_filtering)
+            env_auto_glossary_mode = self.config.get('auto_glossary_mode', 'off')
+            env_glossary_merge_count = str(self.config.get('glossary_request_merge_count', '10') or '10')
+            if output_mode == 'vision' and env_auto_glossary_mode == 'balanced':
+                env_glossary_merging_enabled = '1'
+                env_glossary_chapter_split = '1'
+            else:
+                env_glossary_merging_enabled = '1' if self.config.get('glossary_request_merging_enabled', False) else '0'
+                env_glossary_chapter_split = '1' if self.config.get('glossary_enable_chapter_split', False) else '0'
             
             extra_env_mappings = [
                 # Rolling summary
@@ -23361,6 +23396,9 @@ Important rules:
                 ('BOOK_TITLE_PROMPT', getattr(self, 'book_title_prompt', '')),
                 ('GLOSSARY_INCLUDE_BOOK_TITLE', '1' if getattr(self, 'include_book_title_glossary_var', True) else '0'),
                 ('GLOSSARY_AUTO_INJECT_BOOK_TITLE', '1' if getattr(self, 'auto_inject_book_title_var', self.config.get('auto_inject_book_title', False)) else '0'),
+                ('GLOSSARY_REQUEST_MERGING_ENABLED', env_glossary_merging_enabled),
+                ('GLOSSARY_REQUEST_MERGE_COUNT', env_glossary_merge_count),
+                ('GLOSSARY_ENABLE_CHAPTER_SPLIT', env_glossary_chapter_split),
 
                 # Safety/merge toggles
                 ('EMERGENCY_PARAGRAPH_RESTORE', '1' if getattr(self, 'emergency_restore_var', False) else '0'),
