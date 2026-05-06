@@ -3471,6 +3471,12 @@ Recent translations to summarize:
         if 'batch_group_size' not in self.config:
             # legacy hardcoded multiplier was 3
             self.config['batch_group_size'] = str(self.config.get('conservative_batch_multiplier', 3) or 3)
+
+        # Legacy image cap was stored under max_images_per_chapter with a default of 1.
+        # The v2 key defaults to -1, which means no per-chapter image limit.
+        if 'max_images_per_chapter_v2' not in self.config:
+            self.config['max_images_per_chapter_v2'] = '-1'
+        self.config.pop('max_images_per_chapter', None)
         
         # Create all config variables with helper
         def create_var(var_type, key, default):
@@ -3580,7 +3586,7 @@ Recent translations to summarize:
             ('glossary_max_titles_var', 'glossary_max_titles', '30'),
             ('context_window_size_var', 'context_window_size', '5'),
             ('webnovel_min_height_var', 'webnovel_min_height', '1000'),
-            ('max_images_per_chapter_var', 'max_images_per_chapter', '1'),
+            ('max_images_per_chapter_var', 'max_images_per_chapter_v2', '-1'),
             ('image_chunk_height_var', 'image_chunk_height', '1500'),
             ('image_output_resolution_var', 'image_output_resolution', '1K'),
             ('nanogpt_video_duration_var', 'nanogpt_video_duration', '60'),
@@ -22370,7 +22376,7 @@ Important rules:
                 ('enable_image_translation', ['enable_image_translation_var'], False, bool),
                 ('process_webnovel_images', ['process_webnovel_images_var'], False, bool),
                 ('webnovel_min_height', ['webnovel_min_height_var'], 1000, lambda v: safe_int(v, 1000)),
-                ('max_images_per_chapter', ['max_images_per_chapter_var'], 1, lambda v: safe_int(v, 1)),
+                ('max_images_per_chapter_v2', ['max_images_per_chapter_var'], -1, lambda v: safe_int(v, -1)),
                 ('enable_watermark_removal', ['enable_watermark_removal_var'], False, bool),
                 ('save_cleaned_images', ['save_cleaned_images_var'], False, bool),
                 ('advanced_watermark_removal', ['advanced_watermark_removal_var'], False, bool),
@@ -23395,7 +23401,7 @@ Important rules:
                 ('ENABLE_IMAGE_TRANSLATION', '1' if getattr(self, 'enable_image_translation_var', False) else '0'),
                 ('PROCESS_WEBNOVEL_IMAGES', '1' if getattr(self, 'process_webnovel_images_var', True) else '0'),
                 ('WEBNOVEL_MIN_HEIGHT', str(getattr(self, 'webnovel_min_height_var', '1000'))),
-                ('MAX_IMAGES_PER_CHAPTER', str(getattr(self, 'max_images_per_chapter_var', '1'))),
+                ('MAX_IMAGES_PER_CHAPTER', str(getattr(self, 'max_images_per_chapter_var', '-1'))),
                 ('IMAGE_CHUNK_HEIGHT', str(getattr(self, 'image_chunk_height_var', '1500'))),
                 ('MAX_OUTPUT_TOKENS', str(getattr(self, 'max_output_tokens', 128000))),
                 ('HIDE_IMAGE_TRANSLATION_LABEL', '1' if getattr(self, 'hide_image_translation_label_var', True) else '0'),

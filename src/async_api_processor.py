@@ -3345,7 +3345,7 @@ class AsyncProcessingDialog:
         env_vars['ENABLE_IMAGE_TRANSLATION'] = "1" if _val(self.gui.enable_image_translation_var, False) else "0"
         env_vars['PROCESS_WEBNOVEL_IMAGES'] = "1" if _val(self.gui.process_webnovel_images_var, False) else "0"
         env_vars['WEBNOVEL_MIN_HEIGHT'] = _val(self.gui.webnovel_min_height_var, 0)
-        env_vars['MAX_IMAGES_PER_CHAPTER'] = _val(self.gui.max_images_per_chapter_var, 0)
+        env_vars['MAX_IMAGES_PER_CHAPTER'] = _val(self.gui.max_images_per_chapter_var, -1)
         env_vars['IMAGE_API_DELAY'] = '1.0'
         env_vars['SAVE_IMAGE_TRANSLATIONS'] = '1'
         env_vars['IMAGE_CHUNK_HEIGHT'] = _val(self.gui.image_chunk_height_var, 0)

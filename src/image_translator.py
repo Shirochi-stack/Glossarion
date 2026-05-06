@@ -2761,7 +2761,7 @@ class ImageTranslator:
         return {
             "cache_version": 1,
             "webnovel_min_height": str(os.getenv("WEBNOVEL_MIN_HEIGHT", str(self.webnovel_min_height))),
-            "max_images_per_chapter": str(os.getenv("MAX_IMAGES_PER_CHAPTER", "10")),
+            "max_images_per_chapter": str(os.getenv("MAX_IMAGES_PER_CHAPTER", "-1")),
             "image_chunk_height": str(os.getenv("IMAGE_CHUNK_HEIGHT", str(self.chunk_height))),
             "image_chunk_overlap_percent": str(os.getenv("IMAGE_CHUNK_OVERLAP_PERCENT", "3")),
             "image_chunk_min_overlap_pixels": str(os.getenv("IMAGE_CHUNK_MIN_OVERLAP_PIXELS", "80")),

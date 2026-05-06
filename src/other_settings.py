@@ -9897,7 +9897,7 @@ def _create_image_translation_section(self, parent):
     
     settings = [
         ("Min Image height (px):", self.webnovel_min_height_var, False),
-        ("Max Images per chapter:", self.max_images_per_chapter_var, False),
+        ("Max Images per chapter (-1 = all):", self.max_images_per_chapter_var, False),
         ("Chunk height:", self.image_chunk_height_var, False),
         ("Chunk overlap (%):", self.image_chunk_overlap_var, True),
         ("Chunk overlap floor (px):", getattr(self, 'image_chunk_min_overlap_pixels_var', '80'), True)

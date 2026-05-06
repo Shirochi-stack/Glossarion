@@ -8490,8 +8490,11 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
         if removed_headers:
             print(f"   📝 Vision mode: removed {removed_headers} source header tag(s) before merging image translation")
     
-    max_images_per_chapter = int(os.getenv('MAX_IMAGES_PER_CHAPTER', '10'))
-    if len(images) > max_images_per_chapter:
+    try:
+        max_images_per_chapter = int(os.getenv('MAX_IMAGES_PER_CHAPTER', '-1'))
+    except (TypeError, ValueError):
+        max_images_per_chapter = -1
+    if max_images_per_chapter >= 0 and len(images) > max_images_per_chapter:
         print(f"   ⚠️ Chapter has {len(images)} images - processing first {max_images_per_chapter} only")
         images = images[:max_images_per_chapter]
 
