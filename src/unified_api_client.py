@@ -14005,6 +14005,33 @@ class UnifiedClient:
         except Exception:
             pass
 
+    def _streaming_enabled(self) -> bool:
+        """Return the effective streaming toggle, giving explicit env values priority."""
+        env_stream = os.getenv("ENABLE_STREAMING")
+        if env_stream is not None:
+            return str(env_stream).strip().lower() not in ("", "0", "false", "no", "off")
+        try:
+            if bool(getattr(self, 'config', {}).get('enable_streaming', False)):
+                return True
+        except Exception:
+            pass
+        return bool(getattr(self, 'enable_streaming_var', False))
+
+    def _stream_logging_enabled(self, use_streaming: bool) -> bool:
+        if not use_streaming:
+            return False
+        if os.getenv("LOG_STREAM_CHUNKS", "1").strip().lower() in ("0", "false", "no", "off"):
+            return False
+        if (
+            os.getenv("BATCH_TRANSLATION", "0") == "1"
+            and os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").strip().lower() in ("", "0", "false", "no", "off")
+        ):
+            return False
+        return True
+
+    def _stream_thinking_logging_enabled(self) -> bool:
+        return os.getenv("STREAM_THINKING_LOGS", "0").strip().lower() not in ("", "0", "false", "no", "off")
+
     def _is_gemini_request(self) -> bool:
         """
         Check if this is a Gemini request (native or via OpenAI endpoint)
@@ -15226,7 +15253,7 @@ class UnifiedClient:
         self._save_gemini_safety_config(config_data, response_name)
         # Global streaming toggle
         env_stream = os.getenv("ENABLE_STREAMING", "0")
-        use_streaming = env_stream not in ("0", "false", "False", "FALSE")
+        use_streaming = self._streaming_enabled()
         # Note: suppress duplicate provider logs; native path logs once here
         if use_streaming and not self._is_stop_requested():
             print(f"🛰️ [gemini-native] Streaming ON (env={env_stream})")
@@ -15425,7 +15452,7 @@ class UnifiedClient:
                                 supports_thinking=supports_thinking,
                                 anti_dupe_params=anti_dupe_params,
                                 stop_check_fn=self._is_stop_requested,
-                                log_stream=True,
+                                log_stream=self._stream_logging_enabled(use_streaming),
                             )
                         else:
                             grpc_response = self.grpc_gemini_client.generate_content(
@@ -15746,14 +15773,11 @@ class UnifiedClient:
                             stream_image_data = None  # Capture image bytes from stream
                             finish_reason = 'stop'
                             response = None
-                            log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
-                            allow_batch_logs = os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
-                            if os.getenv("BATCH_TRANSLATION", "0") == "1" and not allow_batch_logs:
-                                log_stream = False
+                            log_stream = self._stream_logging_enabled(use_streaming)
                             log_buf = []
                             log_flush_len = 240
                             # Thinking streaming state
-                            stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+                            stream_thinking = self._stream_thinking_logging_enabled()
                             gemini_thinking_started = False
                             gemini_thinking_chunks = 0
                             gemini_thinking_start_ts = None
@@ -16370,22 +16394,10 @@ class UnifiedClient:
             api_url = "https://api.anthropic.com/v1/messages"
         
         # Check streaming toggle (same pattern as OpenAI-compatible path)
-        env_stream = os.getenv("ENABLE_STREAMING", "0")
-        cfg_stream = False
-        try:
-            cfg_stream = bool(getattr(self, 'config', {}).get('enable_streaming', False))
-        except Exception:
-            pass
-        var_stream = bool(getattr(self, 'enable_streaming_var', False))
-        use_streaming = (env_stream not in ("0", "false", "False", "FALSE")) or cfg_stream or var_stream
+        use_streaming = self._streaming_enabled()
 
         # Streaming log toggle
-        log_stream = False
-        if use_streaming:
-            log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
-            allow_batch_logs = os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
-            if os.getenv("BATCH_TRANSLATION", "0") == "1" and not allow_batch_logs:
-                log_stream = False
+        log_stream = self._stream_logging_enabled(use_streaming)
 
         if use_streaming:
             # ── Anthropic SSE streaming path ──
@@ -17839,19 +17851,9 @@ class UnifiedClient:
                         call_kwargs["extra_body"] = extra_body
 
                     # Optional streaming toggle (text-only aggregation) - honor env, config, or runtime var
-                    env_stream = os.getenv("ENABLE_STREAMING", "0")
-                    cfg_stream = False
-                    try:
-                        cfg_stream = bool(getattr(self, 'config', {}).get('enable_streaming', False))
-                    except Exception:
-                        pass
-                    var_stream = bool(getattr(self, 'enable_streaming_var', False))
-                    use_streaming = (env_stream not in ("0", "false", "False", "FALSE")) or cfg_stream or var_stream
+                    use_streaming = self._streaming_enabled()
                     # Streaming log toggle (must be defined before streaming extraction)
-                    allow_batch_logs = os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
-                    log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false") if use_streaming else False
-                    if os.getenv("BATCH_TRANSLATION", "0") == "1" and not allow_batch_logs:
-                        log_stream = False
+                    log_stream = self._stream_logging_enabled(use_streaming)
                     # Responses API streaming is not currently handled by this SDK path; disable to avoid breakage.
                     if use_responses_api and use_streaming:
                         use_streaming = False
@@ -18135,6 +18137,7 @@ class UnifiedClient:
                                 "max_completion_tokens" in err_str and 
                                 "streaming mode allows" in err_str and 
                                 not use_responses_api and
+                                self._streaming_enabled() and
                                 not call_kwargs.get("stream", False)):
                                 
                                 print(f"⚠️ {provider} token limit error: Auto-enabling streaming to bypass non-streaming limit")
@@ -18284,7 +18287,7 @@ class UnifiedClient:
                         log_buf = []  # Always define to avoid UnboundLocalError
                         finish_reason = 'stop'
                         # Thinking/reasoning streaming state
-                        oai_stream_thinking = os.getenv("STREAM_THINKING_LOGS", "1") not in ("0", "false")
+                        oai_stream_thinking = self._stream_thinking_logging_enabled()
                         oai_thinking_started = False
                         oai_thinking_chunks = 0
                         oai_thinking_start_ts = None
