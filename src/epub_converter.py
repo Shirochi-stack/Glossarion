@@ -4637,9 +4637,7 @@ img {
                            cover_file: Optional[str]):
         """Add images to book using parallel processing for reading files"""
         
-        # Filter out cover image
-        images_to_add = [(orig, safe) for orig, safe in processed_images.items() 
-                         if safe != cover_file]
+        images_to_add = self._filter_embedded_images_for_ocr(processed_images, cover_file)
         
         if not images_to_add:
             self.log("No images to add (besides cover)")
@@ -5112,6 +5110,86 @@ img {
                     values.extend(ocr_values)
                     break
         return values
+
+    def _compiled_html_image_reference_keys(self, rename_map: Dict[str, str]) -> set:
+        """Return normalized image filename keys still referenced by compiled HTML."""
+        reference_keys = set()
+        html_exts = (".html", ".htm", ".xhtml")
+        try:
+            filenames = [
+                f for f in os.listdir(self.output_dir)
+                if f.lower().endswith(html_exts) and os.path.isfile(os.path.join(self.output_dir, f))
+            ]
+        except Exception:
+            return reference_keys
+
+        for filename in filenames:
+            path = os.path.join(self.output_dir, filename)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception:
+                continue
+            try:
+                soup = BeautifulSoup(content, "html.parser")
+                srcs = [img.get("src", "") for img in soup.find_all("img")]
+            except Exception:
+                srcs = re.findall(r'<img\b[^>]*\bsrc=["\']([^"\']+)["\']', content, flags=re.IGNORECASE)
+
+            for src in srcs:
+                basename = os.path.basename(str(src or "").split("?", 1)[0].split("#", 1)[0])
+                key = self._gallery_ocr_key(basename)
+                if key:
+                    reference_keys.add(key)
+                renamed = rename_map.get(basename)
+                renamed_key = self._gallery_ocr_key(renamed) if renamed else ""
+                if renamed_key:
+                    reference_keys.add(renamed_key)
+
+        return reference_keys
+
+    def _filter_embedded_images_for_ocr(self, processed_images: Dict[str, str], cover_file: Optional[str]) -> List[Tuple[str, str]]:
+        """Exclude OCR text-page images from the EPUB payload when no HTML uses them."""
+        image_items = [(original, safe) for original, safe in processed_images.items() if safe != cover_file]
+        classifications = self._load_gallery_ocr_classifications()
+        if not classifications:
+            return image_items
+
+        rename_map = self._load_gallery_image_rename_map()
+        referenced_keys = self._compiled_html_image_reference_keys(rename_map)
+        images_to_add: List[Tuple[str, str]] = []
+        excluded_text = 0
+        kept_referenced_text = 0
+        kept_no = 0
+
+        for original, safe in image_items:
+            image_keys = self._gallery_ocr_candidates_for_image(original, safe, rename_map)
+            ocr_values = self._gallery_ocr_match_values(image_keys, classifications)
+            if not ocr_values:
+                images_to_add.append((original, safe))
+                continue
+
+            is_ocr_text_image = any(value is False for value in ocr_values)
+            if is_ocr_text_image:
+                if any(key in referenced_keys for key in image_keys):
+                    kept_referenced_text += 1
+                    images_to_add.append((original, safe))
+                else:
+                    excluded_text += 1
+                continue
+
+            kept_no += 1
+            images_to_add.append((original, safe))
+
+        if excluded_text or kept_referenced_text or kept_no:
+            summary = [f"excluded {excluded_text} OCR text image(s) from EPUB"]
+            if kept_referenced_text:
+                summary.append(f"kept {kept_referenced_text} still-referenced OCR text image(s)")
+            if kept_no:
+                summary.append(f"kept {kept_no} OCR illustration image(s)")
+            self.log("Image EPUB OCR filter: " + ", ".join(summary))
+
+        return images_to_add
 
     def _filter_gallery_images_for_ocr(self, processed_images: Dict[str, str], cover_file: Optional[str]) -> List[str]:
         """Exclude OCR text-page images from the optional EPUB image gallery."""
