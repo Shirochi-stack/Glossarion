@@ -9066,7 +9066,7 @@ def _vision_finish_reason_qa_issues(finish_reason):
     reason = str(finish_reason or "").strip().lower()
     if reason in ("length", "max_tokens", "stop_sequence_limit", "truncated", "incomplete"):
         return ["TRUNCATED"]
-    if reason in ("content_filter", "prohibited_content", "error"):
+    if reason in ("content_filter", "prohibited_content"):
         return ["PROHIBITED_CONTENT"]
     return None
 

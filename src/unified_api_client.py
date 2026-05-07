@@ -1467,7 +1467,18 @@ class UnifiedClient:
         if os.getenv('DISABLE_EMPTY_SAFETY_HEURISTIC', '0') != '1':
             if provider in ['openai', 'azure', 'electronhub', 'openrouter', 'poe', 'gemini']:
                 # Exclude known model errors that are NOT safety filters
-                _non_safety_reasons = {'error', 'malformed_function_call', 'other_error', 'unexpected_tool_call'}
+                _non_safety_reasons = {
+                    'error',
+                    'length',
+                    'max_tokens',
+                    'max_length',
+                    'truncated',
+                    'incomplete',
+                    'stop_sequence_limit',
+                    'malformed_function_call',
+                    'other_error',
+                    'unexpected_tool_call',
+                }
                 if not extracted_content and finish_reason not in _non_safety_reasons:
                     return True
         return False
@@ -1670,6 +1681,9 @@ class UnifiedClient:
         else:
             fb_reason = "empty_image" if request_type == 'image' else "empty"
         fallback = self._handle_empty_result(messages, context, getattr(response, 'error_details', fb_reason) if response else fb_reason)
+        normalized_finish = str(finish_reason or "").strip().lower()
+        if normalized_finish in {'length', 'max_tokens', 'max_length', 'truncated', 'incomplete', 'stop_sequence_limit'}:
+            return "", 'length'
         return fallback, ('content_filter' if is_safety else 'error')
 
     def _is_rate_limit_error(self, exc: Exception) -> bool:
