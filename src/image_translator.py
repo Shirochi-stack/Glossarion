@@ -3609,6 +3609,7 @@ class ImageTranslator:
             self.finish_vision_ocr_progress_cancelled()
             return None
 
+        self.finish_vision_ocr_progress_success()
         print(f"   Step 2/2: Translating combined OCR from {len(ordered_ocr)}/{num_chunks} chunks ({len(combined_ocr)} chars)...")
         combined_prompt = self._format_vision_ocr_combined_context_prompt(len(ordered_ocr), num_chunks, context)
         translated = self._translate_ocr_text(combined_ocr, combined_prompt, check_stop_fn)
@@ -3982,6 +3983,26 @@ class ImageTranslator:
                 if ref:
                     self.update_vision_ocr_glossary_progress([ref], "failed")
                     self.update_vision_ocr_glossary_ocr_progress([ref], done, total)
+        self.clear_vision_ocr_progress()
+
+    def finish_vision_ocr_progress_success(self):
+        """Close the current OCR progress scope after OCR completes successfully."""
+        with self._vision_ocr_progress_lock:
+            if not self._vision_ocr_progress_scope:
+                return
+            scope = self._vision_ocr_progress_scope
+            if scope.get("cancelled"):
+                return
+            total = int(scope.get("total", 0) or 0)
+            done = int(scope.get("done", 0) or 0)
+            if total > 0 and done < total:
+                scope["done"] = total
+                scope["reserved_pending"] = 0
+                should_write = True
+            else:
+                should_write = False
+        if should_write:
+            self._write_vision_ocr_progress()
         self.clear_vision_ocr_progress()
 
     def clear_vision_ocr_progress(self):

@@ -9231,6 +9231,7 @@ def _process_chapter_images_vision_ocr_combined(
         return str(soup), {}
 
     image_translator.current_image_index = "combined"
+    image_translator.finish_vision_ocr_progress_success()
     print(f"   Step 2/2: Translating combined page OCR ({len(combined_ocr)} chars)...")
     translated = image_translator._translate_ocr_text(combined_ocr, combined_prompt, check_stop_fn)
     if not translated:
@@ -12129,16 +12130,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     # Logs a warning when the AI returned non-allowed angle-bracket content.
     # -------------------------------------------------------------------------
     _ALLOWED_TAGS = ("a", "img", "svg", "picture", "figure", "ruby", "rt", "rp", "rb", "rtc")
-    _HTML_TAG_NAMES = frozenset({
-        'b','i','u','s','em','strong','span','div','p','br','hr','pre','code',
-        'h1','h2','h3','h4','h5','h6','ul','ol','li','dl','dt','dd',
-        'table','tr','td','th','thead','tbody','tfoot','caption',
-        'blockquote','q','cite','del','ins','mark','small','sub','sup',
-        'header','footer','nav','main','section','article','aside',
-        'form','input','button','select','option','textarea','label',
-        'script','style','link','meta','head','body','html',
-        'center','font','strike','ruby','rt','rp','rb','rtc','wbr','details','summary',
-    })
+    _HTML_TAG_NAMES = _KNOWN_HTML_TAGS
     _escape_fired = [False]
 
     def _escape_tag_like(m):
