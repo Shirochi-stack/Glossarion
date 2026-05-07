@@ -14533,6 +14533,7 @@ class EpubReaderDialog(QDialog):
     def _close_search(self):
         self._search_bar.hide()
         self._search_bar.clear()
+        self._clear_paginated_search_hits()
         if _HAS_WEBENGINE:
             for w in [self._reader, self._reader_left, self._reader_right]:
                 if hasattr(w, 'findText'):
@@ -14546,6 +14547,7 @@ class EpubReaderDialog(QDialog):
         self._search_last_row = self._current_row
         self._search_match_index = 0
         if not text:
+            self._clear_paginated_search_hits()
             for w in [self._reader, self._reader_left, self._reader_right]:
                 if hasattr(w, 'findText'):
                     w.findText("")
@@ -14658,6 +14660,7 @@ class EpubReaderDialog(QDialog):
                 return
             if count:
                 self._search_match_count = count
+                self._search_match_index = min(wanted, max(0, count - 1))
             if self._layout_mode == LAYOUT_DOUBLE:
                 page_num = max(0, page_num - (page_num % 2))
             if page_num != self._current_page:
@@ -14669,7 +14672,38 @@ class EpubReaderDialog(QDialog):
                     self._js_scroll_to(self._reader_right, self._current_page + 1, animate=False)
             self._update_nav_buttons()
 
+        if self._layout_mode == LAYOUT_DOUBLE:
+            for other in (self._reader_left, self._reader_right):
+                if other is not browser and hasattr(other, "page"):
+                    other.page().runJavaScript(js)
         browser.page().runJavaScript(js, _on_page_result)
+
+    def _clear_paginated_search_hits(self):
+        """Remove custom search spans used by paginated layouts."""
+        if not _HAS_WEBENGINE:
+            return
+        if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            return
+        js = r"""(function() {
+  var roots = [document.getElementById('content'), document.body];
+  var root = roots.filter(Boolean)[0];
+  if (!root) return;
+  var oldHits = root.querySelectorAll('.glossarion-search-hit');
+  oldHits.forEach(function(hit) {
+    var parent = hit.parentNode;
+    if (!parent) return;
+    parent.replaceChild(document.createTextNode(hit.textContent || ''), hit);
+    parent.normalize();
+  });
+})();"""
+        for w in (getattr(self, "_reader", None),
+                  getattr(self, "_reader_left", None),
+                  getattr(self, "_reader_right", None)):
+            try:
+                if w is not None and hasattr(w, "page"):
+                    w.page().runJavaScript(js)
+            except Exception:
+                pass
 
     def _find_and_scroll(self, browser, text):
         """Run page-level findText with callback to scroll to the match."""
@@ -14755,6 +14789,13 @@ class EpubReaderDialog(QDialog):
             # the browser's own in-document search.
             self._reader.findText(text)
             return
+        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            if self._advance_paginated_search(text):
+                return
+            self._search_bar.setStyleSheet(
+                self._search_bar.styleSheet() + " QLineEdit { border-color: #c04040; }")
+            QTimer.singleShot(800, lambda: self._apply_reader_style())
+            return
         n = len(self._chapters)
         browser = self._reader_left if self._layout_mode == LAYOUT_DOUBLE else self._reader
 
@@ -14787,6 +14828,47 @@ class EpubReaderDialog(QDialog):
             self._search_bar.styleSheet() + " QLineEdit { border-color: #c04040; }")
         QTimer.singleShot(800, lambda: self._apply_reader_style())
         return
+
+    def _advance_paginated_search(self, text: str) -> bool:
+        """Advance to the next match in single/double-page layouts."""
+        if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            return False
+        n = len(self._chapters)
+        if not text or n <= 0:
+            return False
+
+        browser = self._reader_left if self._layout_mode == LAYOUT_DOUBLE else self._reader
+        current_count = self._count_chapter_matches(self._current_row, text)
+        current_match = int(getattr(self, '_search_match_index', -1) or 0)
+        if current_count > 0 and current_match + 1 < current_count:
+            occurrence = current_match + 1
+            self._search_chapter_idx = self._current_row
+            self._search_last_row = self._current_row
+            self._search_match_index = occurrence
+            self._search_match_count = current_count
+            self._find_paginated_match(browser, text, occurrence)
+            return True
+
+        for step in range(1, n + 1):
+            idx = (self._current_row + step) % n
+            count = self._count_chapter_matches(idx, text)
+            if count <= 0:
+                continue
+            self._search_chapter_idx = idx
+            self._search_last_row = idx
+            self._search_match_index = 0
+            self._search_match_count = count
+            if idx != self._current_row:
+                self._pending_search_text = text
+                self._pending_search_index = 0
+                self._toc_list.blockSignals(True)
+                self._toc_list.setCurrentRow(idx)
+                self._toc_list.blockSignals(False)
+                self._on_chapter_selected(idx)
+            else:
+                self._find_paginated_match(browser, text, 0)
+            return True
+        return False
 
     def _toggle_toc(self):
         """Show or hide the TOC sidebar using splitter sizes."""
@@ -15265,7 +15347,7 @@ class EpubReaderDialog(QDialog):
             js = (
                 "var c = document.getElementById('columns');"
                 "var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:window.innerWidth;"
-                "c ? Math.max(1, Math.round(c.scrollWidth / w)) : 1;"
+                "c ? Math.max(1, Math.ceil(c.scrollWidth / Math.max(1, w))) : 1;"
             )
             browser.page().runJavaScript(js, callback)
         else:
@@ -16094,7 +16176,7 @@ class EpubReaderDialog(QDialog):
                 f"transform: translate3d(0, 0, 0); "
                 f"font-family: {_font_stack}; "
                 f"font-size: {_font_px}px; line-height: {self._line_spacing}; }}"
-                f"#content {{ padding: 0 40px; }}"
+                f"#content {{ padding: 0 40px; overflow-wrap: anywhere; word-break: normal; }}"
                 f"h1, h2, h3, h4, h5, h6 {{ color: {t['heading']}; margin: 0; padding: 0; }}"
                 f"img {{ display: block; max-width: 100%; max-height: calc(100vh - 60px); "
                 f"height: auto; object-fit: contain; "
