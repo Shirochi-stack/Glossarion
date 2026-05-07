@@ -522,9 +522,9 @@ def extract_images_from_pdf(pdf_path: str, output_dir: str) -> Dict[int, List[Di
             page = doc[page_num]
             image_list = page.get_images(full=True)
             
-            # Progress logging every 10%
+            # Progress logging every 1% so very large PDFs do not look stalled.
             _img_pct = int((page_num + 1) / _total_img_pages * 100) if _total_img_pages else 100
-            if _img_pct // 10 > _last_img_pct // 10 or page_num == _total_img_pages - 1:
+            if _img_pct > _last_img_pct or page_num == _total_img_pages - 1:
                 _last_img_pct = _img_pct
                 print(f"    📷 Scanning images: {_img_pct}% ({page_num + 1}/{_total_img_pages} pages)")
             

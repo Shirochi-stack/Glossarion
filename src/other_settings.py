@@ -9757,7 +9757,7 @@ def _create_image_translation_section(self, parent):
 
     skip_translation_cb.toggled.connect(_on_skip_translation_toggle)
     vision_sub_v.addWidget(skip_translation_cb)
-    skip_translation_desc = QLabel("Only generate the sibling _OCR EPUB. Glossary extraction and translation are skipped.")
+    skip_translation_desc = QLabel("Only generate the sibling _OCR file (EPUB/PDF). Glossary extraction and translation are skipped.")
     skip_translation_desc.setStyleSheet("color: gray; font-size: 10pt;")
     skip_translation_desc.setWordWrap(True)
     vision_sub_v.addWidget(skip_translation_desc)

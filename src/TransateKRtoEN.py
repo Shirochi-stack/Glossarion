@@ -10087,7 +10087,7 @@ def _vision_ocr_source_pdf_path(input_path):
 
 
 def prepare_pdf_images_for_vision_ocr(input_path, output_dir, check_stop_fn=None):
-    """Prepare output/images for OCR-only PDF processing without XHTML rendering."""
+    """Prepare output/images for Vision OCR PDF processing without XHTML rendering."""
     images_dir = os.path.join(output_dir, "images")
     os.makedirs(images_dir, exist_ok=True)
     image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
@@ -10104,7 +10104,7 @@ def prepare_pdf_images_for_vision_ocr(input_path, output_dir, check_stop_fn=None
 
     existing = _existing_images()
     if existing:
-        print(f"📄 Vision OCR-only PDF: reusing {len(existing)} existing extracted image(s)")
+        print(f"📄 Vision OCR PDF: reusing {len(existing)} existing extracted image(s)")
         return len(existing)
 
     if check_stop_fn and check_stop_fn():
@@ -10112,7 +10112,7 @@ def prepare_pdf_images_for_vision_ocr(input_path, output_dir, check_stop_fn=None
 
     try:
         from pdf_extractor import extract_images_from_pdf
-        print("📄 Vision OCR-only PDF: extracting embedded images; skipping MuPDF XHTML rendering")
+        print("📄 Vision OCR PDF: extracting embedded images; skipping MuPDF XHTML rendering")
         images_by_page = extract_images_from_pdf(input_path, output_dir)
         extracted_count = sum(len(v) for v in (images_by_page or {}).values())
         if extracted_count:
@@ -10134,12 +10134,12 @@ def prepare_pdf_images_for_vision_ocr(input_path, output_dir, check_stop_fn=None
                 zoom = 2.0
             zoom = max(0.5, min(4.0, zoom))
             matrix = fitz.Matrix(zoom, zoom)
-            print(f"📄 Vision OCR-only PDF: rendering {total_pages} page image(s) only (scale {zoom}x)")
+            print(f"📄 Vision OCR PDF: rendering {total_pages} page image(s) only (scale {zoom}x)")
             last_pct = -1
             rendered = 0
             for idx, page in enumerate(doc, 1):
                 if check_stop_fn and check_stop_fn():
-                    print("⏹️ Vision OCR-only PDF page rendering stopped")
+                    print("⏹️ Vision OCR PDF page rendering stopped")
                     break
                 pix = page.get_pixmap(matrix=matrix, alpha=False)
                 pix.save(os.path.join(images_dir, f"page_{idx}.png"))
@@ -10150,7 +10150,7 @@ def prepare_pdf_images_for_vision_ocr(input_path, output_dir, check_stop_fn=None
                     print(f"    📄 Rendered page images: {pct}% ({idx}/{total_pages})")
             return rendered
     except Exception as e:
-        print(f"⚠️ Vision OCR-only PDF page rendering failed: {e}")
+        print(f"⚠️ Vision OCR PDF page rendering failed: {e}")
         return 0
 
 
@@ -10162,6 +10162,15 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
         return None
     if image_translator is None:
         return None
+
+    output_path = _vision_ocr_source_pdf_path(input_path)
+    existing_source = os.getenv("VISION_OCR_SOURCE_PDF", "").strip()
+    if (
+        existing_source
+        and os.path.abspath(existing_source) == os.path.abspath(output_path)
+        and os.path.exists(existing_source)
+    ):
+        return existing_source
 
     images_dir = os.path.join(output_dir or getattr(image_translator, "output_dir", ""), "images")
     if not os.path.isdir(images_dir):
@@ -10180,7 +10189,6 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
         print(f"⚠️ Vision OCR source PDF prepass found no images in: {images_dir}")
         return None
 
-    output_path = _vision_ocr_source_pdf_path(input_path)
     print("\n" + "="*50)
     print("📖 Vision OCR Source PDF Prepass")
     print("="*50)
@@ -10231,6 +10239,13 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
     if workers > 1:
         print(f"📖 Vision OCR source PDF batch enabled: {workers} parallel image request worker(s)")
 
+    last_ocr_pct = [-1]
+    def _log_pdf_ocr_progress():
+        pct = int(checked / len(image_paths) * 100) if image_paths else 100
+        if pct > last_ocr_pct[0] or checked == len(image_paths):
+            last_ocr_pct[0] = pct
+            print(f"    📷 PDF OCR: {pct}% ({checked}/{len(image_paths)} images)")
+
     jobs = list(enumerate(image_paths, 1))
     try:
         if workers > 1 and len(jobs) > 1:
@@ -10246,6 +10261,7 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
                         ocr_by_index[idx] = (image_path, text.strip())
                     else:
                         no_text += 1
+                    _log_pdf_ocr_progress()
                     if check_stop_fn and check_stop_fn():
                         print("⏹️ Vision OCR source PDF prepass stopped")
                         return None
@@ -10260,6 +10276,7 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
                     ocr_by_index[idx] = (image_path, text.strip())
                 else:
                     no_text += 1
+                _log_pdf_ocr_progress()
     finally:
         image_translator._suppress_ocr_save_logs = previous_suppress_save
         image_translator._suppress_image_detail_logs = previous_suppress_detail
@@ -13622,7 +13639,6 @@ def main(log_callback=None, stop_callback=None):
     preserve_pdf_ocr_images = (
         is_pdf_file
         and config.OUTPUT_MODE == "vision"
-        and getattr(config, "VISION_OCR_SKIP_TRANSLATION", False)
     )
     cleanup_previous_extraction(out, preserve_images=preserve_pdf_ocr_images)
 
@@ -13730,40 +13746,41 @@ def main(log_callback=None, stop_callback=None):
     if hasattr(client, 'reset_cleanup_state'):
         client.reset_cleanup_state()    
 
-    if is_pdf_file and config.OUTPUT_MODE == "vision" and getattr(config, "VISION_OCR_SKIP_TRANSLATION", False):
+    if is_pdf_file and config.OUTPUT_MODE == "vision":
         print("📄 Processing PDF file...")
         print("\n" + "="*50)
-        print("📖 VISION OCR ONLY PDF PHASE")
+        print("📖 VISION OCR PDF SOURCE PHASE")
         print("="*50)
+        ocr_source_file = None
         try:
             prepared_images = prepare_pdf_images_for_vision_ocr(input_path, out, check_stop)
-            if prepared_images <= 0:
-                print("⚠️ Vision OCR skip translation enabled: no PDF images were prepared")
-                print("TRANSLATION_COMPLETE_SIGNAL")
-                return
-            ocr_system = config.get_system_prompt(actual_merge_count=1)
-            ocr_image_translator = ImageTranslator(
-                client,
-                out,
-                config.PROFILE_NAME,
-                ocr_system,
-                config.TEMP,
-                log_callback,
-                progress_manager,
-                history_manager,
-                chunk_context_manager,
-            )
-            ocr_source_file = run_vision_ocr_source_pdf_prepass(ocr_image_translator, input_path, out, check_stop)
+            if prepared_images > 0:
+                ocr_system = config.get_system_prompt(actual_merge_count=1)
+                ocr_image_translator = ImageTranslator(
+                    client,
+                    out,
+                    config.PROFILE_NAME,
+                    ocr_system,
+                    config.TEMP,
+                    log_callback,
+                    progress_manager,
+                    history_manager,
+                    chunk_context_manager,
+                )
+                ocr_source_file = run_vision_ocr_source_pdf_prepass(ocr_image_translator, input_path, out, check_stop)
+            else:
+                print("⚠️ Vision OCR PDF source prepass: no PDF images were prepared")
         except Exception as e:
             print(f"⚠️ Vision OCR source PDF prepass failed: {e}")
-            ocr_source_file = None
         if ocr_source_file:
-            print(f"📖 Vision OCR skip translation enabled: generated {ocr_source_file}")
+            print(f"📖 Vision OCR PDF source generated: {ocr_source_file}")
         else:
-            print("📖 Vision OCR skip translation enabled: OCR source PDF was not generated")
-        print("⏭️ Skipping PDF XHTML rendering, title translation, metadata translation, glossary extraction, and chapter translation by user setting")
-        print("TRANSLATION_COMPLETE_SIGNAL")
-        return
+            print("📖 Vision OCR PDF source was not generated")
+        if getattr(config, "VISION_OCR_SKIP_TRANSLATION", False):
+            print("⏭️ Skipping PDF XHTML rendering, title translation, metadata translation, glossary extraction, and chapter translation by user setting")
+            print("TRANSLATION_COMPLETE_SIGNAL")
+            return
+        print("📄 Continuing normal PDF extraction/translation after OCR source generation")
         
     if is_pdf_file:
         print("📄 Processing PDF file...")
