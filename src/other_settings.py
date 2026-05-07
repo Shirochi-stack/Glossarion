@@ -9741,6 +9741,27 @@ def _create_image_translation_section(self, parent):
     vision_ocr_desc.setWordWrap(True)
     vision_sub_v.addWidget(vision_ocr_desc)
 
+    skip_translation_cb = self._create_styled_checkbox("Skip translation")
+    try:
+        skip_translation_cb.setChecked(bool(getattr(self, 'vision_ocr_skip_translation_var', self.config.get('vision_ocr_skip_translation', False))))
+    except Exception:
+        pass
+
+    def _on_skip_translation_toggle(checked):
+        try:
+            self.vision_ocr_skip_translation_var = bool(checked)
+            self.config['vision_ocr_skip_translation'] = bool(checked)
+            os.environ['VISION_OCR_SKIP_TRANSLATION'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    skip_translation_cb.toggled.connect(_on_skip_translation_toggle)
+    vision_sub_v.addWidget(skip_translation_cb)
+    skip_translation_desc = QLabel("Only generate the sibling _OCR EPUB. Glossary extraction and translation are skipped.")
+    skip_translation_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    skip_translation_desc.setWordWrap(True)
+    vision_sub_v.addWidget(skip_translation_desc)
+
     vision_batch_row = QWidget()
     vision_batch_h = QHBoxLayout(vision_batch_row)
     vision_batch_h.setContentsMargins(0, 0, 0, 0)

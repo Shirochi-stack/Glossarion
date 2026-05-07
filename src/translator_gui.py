@@ -1619,6 +1619,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.single_api_image_chunks_var = False
         self.vision_ocr_batch_translation_var = self.config.get('vision_ocr_batch_translation', True)
         self.vision_ocr_batch_size_var = str(self.config.get('vision_ocr_batch_size', '10'))
+        self.vision_ocr_skip_translation_var = self.config.get('vision_ocr_skip_translation', False)
+        os.environ['VISION_OCR_SKIP_TRANSLATION'] = '1' if self.vision_ocr_skip_translation_var else '0'
         self.enable_gemini_thinking_var = self.config.get('enable_gemini_thinking', True)
         self.thinking_budget_var = str(self.config.get('thinking_budget', '-1'))
         self.thinking_level_var = self.config.get('thinking_level', 'high')
@@ -3517,6 +3519,7 @@ Recent translations to summarize:
             ('disable_gemini_safety_var', 'disable_gemini_safety', True),
             ('single_api_image_chunks_var', 'single_api_image_chunks', False),
             ('vision_ocr_batch_translation_var', 'vision_ocr_batch_translation', True),
+            ('vision_ocr_skip_translation_var', 'vision_ocr_skip_translation', False),
             ('enable_image_output_mode_var', 'enable_image_output_mode', False),
             ('enable_video_output_mode_var', 'enable_video_output_mode', False),
             ('enable_audio_output_mode_var', 'enable_audio_output_mode', False),
@@ -14554,6 +14557,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'VISION_OCR_TRANSLATION_USER_PROMPT': str(getattr(self, 'vision_ocr_translation_user_prompt', self.config.get('vision_ocr_translation_user_prompt', ''))),
             'VISION_OCR_BATCH_TRANSLATION': '1' if _bool_setting(getattr(self, 'vision_ocr_batch_translation_var', None), self.config.get('vision_ocr_batch_translation', True)) else '0',
             'VISION_OCR_BATCH_SIZE': str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '10'))),
+            'VISION_OCR_SKIP_TRANSLATION': '1' if _bool_setting(getattr(self, 'vision_ocr_skip_translation_var', None), self.config.get('vision_ocr_skip_translation', False)) else '0',
             'ENABLE_REFINEMENT_OUTPUT_MODE': "1" if output_mode == 'refinement' else "0",
             'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var else "0",
@@ -22365,6 +22369,7 @@ Important rules:
                 ('use_sorted_fallback', ['use_sorted_fallback_var'], False, bool),
                 ('single_api_image_chunks', ['single_api_image_chunks_var'], False, bool),
                 ('vision_ocr_batch_translation', ['vision_ocr_batch_translation_var'], True, bool),
+                ('vision_ocr_skip_translation', ['vision_ocr_skip_translation_var'], False, bool),
                 ('use_custom_openai_endpoint', ['use_custom_openai_endpoint_var'], False, bool),
                 ('disable_chapter_merging', ['disable_chapter_merging_var'], False, bool),
                 # Request merging settings
@@ -23515,6 +23520,7 @@ Important rules:
                 ('VISION_OCR_USER_PROMPT', str(getattr(self, 'vision_ocr_user_prompt', self.config.get('vision_ocr_user_prompt', '')))),
                 ('VISION_OCR_BATCH_TRANSLATION', '1' if _bool_value(getattr(self, 'vision_ocr_batch_translation_var', True)) else '0'),
                 ('VISION_OCR_BATCH_SIZE', str(getattr(self, 'vision_ocr_batch_size_var', '10'))),
+                ('VISION_OCR_SKIP_TRANSLATION', '1' if _bool_value(getattr(self, 'vision_ocr_skip_translation_var', False)) else '0'),
                 ('ENABLE_IMAGE_OUTPUT_MODE', self._get_allowed_image_output_mode()),
                 ('ENABLE_VIDEO_OUTPUT_MODE', self._get_allowed_video_output_mode()),
                 ('ENABLE_AUDIO_OUTPUT_MODE', '1' if output_mode == 'audio' else '0'),

@@ -528,6 +528,7 @@ class TranslationConfig:
         self.BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
         self.BATCHING_MODE = os.getenv("BATCHING_MODE", "aggressive")
         self.BATCH_GROUP_SIZE = int(os.getenv("BATCH_GROUP_SIZE", os.getenv("CONSERVATIVE_BATCH_GROUP_SIZE", "3")))
+        self.VISION_OCR_SKIP_TRANSLATION = os.getenv("VISION_OCR_SKIP_TRANSLATION", "0") == "1"
         # Note: REQUEST_MERGING_ENABLED and REQUEST_MERGE_COUNT are set earlier (before split_marker_instruction handling)
         # Synthetic header injection for merged requests (Split-the-Merge helper)
         self.SYNTHETIC_MERGE_HEADERS = os.getenv("SYNTHETIC_MERGE_HEADERS", "1") == "1"
@@ -9937,11 +9938,19 @@ def run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, c
     previous_suppress_summary = getattr(image_translator, "_suppress_vision_ocr_summary_log", False)
     image_translator._suppress_ocr_save_logs = True
     image_translator._suppress_vision_ocr_summary_log = True
-    try:
-        for idx, chapter in enumerate(chapters or []):
+    def _ocr_source_chapter_job(idx_chapter):
+        idx, chapter = idx_chapter
+        result = {
+            "entries": {},
+            "chapter_content_count": 0,
+            "total_images": 0,
+            "total_text_only": 0,
+            "stopped": False,
+        }
+        try:
             if check_stop_fn and check_stop_fn():
-                print("⏹️ Vision OCR source EPUB prepass stopped")
-                return None
+                result["stopped"] = True
+                return result
 
             actual_num = chapter.get('actual_chapter_num', chapter.get('num', idx + 1))
             filename = (
@@ -9958,10 +9967,10 @@ def run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, c
 
             body = _chapter_image_html_for_vision_glossary(chapter)
             image_count = len(image_translator.extract_images_from_chapter(body)) if body and "<img" in body.lower() else 0
-            total_images += image_count
+            result["total_images"] = image_count
             skip_special_image_chapter = image_count > 0 and _vision_ocr_glossary_should_skip_special_chapter(chapter)
             if skip_special_image_chapter:
-                continue
+                return result
 
             if image_count > 0:
                 progress_ref = _vision_glossary_progress_ref(chapter, idx, actual_num)
@@ -9990,16 +9999,60 @@ def run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, c
                 if chapter_ocr:
                     text_parts.append(chapter_ocr)
             elif image_count <= 0 and text_for_glossary:
-                total_text_only += 1
+                result["total_text_only"] = 1
 
             combined_text = _join_vision_ocr_parts(part for part in text_parts if str(part).strip())
             if combined_text:
-                chapter_content_count += 1
+                result["chapter_content_count"] = 1
                 base = os.path.basename(str(filename))
                 stem = os.path.splitext(base)[0].lower()
-                chapter_text_by_filename[str(filename).replace("\\", "/")] = combined_text
-                chapter_text_by_filename[base] = combined_text
-                chapter_text_by_filename[stem] = combined_text
+                result["entries"][str(filename).replace("\\", "/")] = combined_text
+                result["entries"][base] = combined_text
+                result["entries"][stem] = combined_text
+        except Exception as e:
+            result["error"] = str(e)
+        return result
+
+    chapter_jobs = list(enumerate(chapters or []))
+    chapter_batch_enabled = os.getenv("BATCH_TRANSLATION", "0").strip().lower() in ("1", "true", "yes", "on")
+    try:
+        requested_chapter_workers = int(os.getenv("BATCH_SIZE", "1") or "1")
+    except Exception:
+        requested_chapter_workers = 1
+    chapter_workers = min(len(chapter_jobs), max(1, requested_chapter_workers)) if chapter_batch_enabled else 1
+    if chapter_workers > 1:
+        print(f"📖 Vision OCR source EPUB chapter batch enabled: {chapter_workers} parallel chapter worker(s)")
+
+    try:
+        if chapter_workers > 1 and len(chapter_jobs) > 1:
+            with ThreadPoolExecutor(max_workers=chapter_workers) as executor:
+                future_to_idx = {executor.submit(_ocr_source_chapter_job, job): job[0] for job in chapter_jobs}
+                for future in as_completed(future_to_idx):
+                    result = future.result()
+                    if result.get("stopped"):
+                        print("⏹️ Vision OCR source EPUB prepass stopped")
+                        return None
+                    if result.get("error"):
+                        print(f"⚠️ Vision OCR source EPUB chapter failed: {result['error']}")
+                    chapter_text_by_filename.update(result.get("entries") or {})
+                    chapter_content_count += int(result.get("chapter_content_count") or 0)
+                    total_images += int(result.get("total_images") or 0)
+                    total_text_only += int(result.get("total_text_only") or 0)
+                    if check_stop_fn and check_stop_fn():
+                        print("⏹️ Vision OCR source EPUB prepass stopped")
+                        return None
+        else:
+            for job in chapter_jobs:
+                result = _ocr_source_chapter_job(job)
+                if result.get("stopped"):
+                    print("⏹️ Vision OCR source EPUB prepass stopped")
+                    return None
+                if result.get("error"):
+                    print(f"⚠️ Vision OCR source EPUB chapter failed: {result['error']}")
+                chapter_text_by_filename.update(result.get("entries") or {})
+                chapter_content_count += int(result.get("chapter_content_count") or 0)
+                total_images += int(result.get("total_images") or 0)
+                total_text_only += int(result.get("total_text_only") or 0)
     finally:
         image_translator._suppress_ocr_save_logs = previous_suppress_save
         image_translator._suppress_vision_ocr_summary_log = previous_suppress_summary
@@ -13892,6 +13945,35 @@ def main(log_callback=None, stop_callback=None):
     # Reset cleanup state when starting new translation
     if hasattr(client, 'reset_cleanup_state'):
         client.reset_cleanup_state()
+
+    if config.OUTPUT_MODE == "vision" and getattr(config, "VISION_OCR_SKIP_TRANSLATION", False):
+        print("\n" + "="*50)
+        print("📖 VISION OCR ONLY PHASE")
+        print("="*50)
+        ocr_source_epub = None
+        try:
+            ocr_system = config.get_system_prompt(actual_merge_count=1)
+            ocr_image_translator = ImageTranslator(
+                client,
+                out,
+                config.PROFILE_NAME,
+                ocr_system,
+                config.TEMP,
+                log_callback,
+                progress_manager,
+                history_manager,
+                chunk_context_manager,
+            )
+            ocr_source_epub = run_vision_ocr_source_epub_prepass(chapters, ocr_image_translator, input_path, check_stop)
+        except Exception as e:
+            print(f"⚠️ Vision OCR source EPUB prepass failed: {e}")
+        if ocr_source_epub:
+            print(f"📖 Vision OCR skip translation enabled: generated {ocr_source_epub}")
+        else:
+            print("📖 Vision OCR skip translation enabled: OCR source EPUB was not generated")
+        print("⏭️ Skipping title translation, metadata translation, glossary extraction, and chapter translation by user setting")
+        print("TRANSLATION_COMPLETE_SIGNAL")
+        return
         
     if "title" in metadata and config.TRANSLATE_BOOK_TITLE and not metadata.get("title_translated", False):
         # Skip title translation for non-book file types
