@@ -634,6 +634,26 @@ class EnhancedTextExtractor:
             return str(soup.body)
         else:
             return str(soup)
+
+    def _remove_document_declarations(self, soup: BeautifulSoup) -> None:
+        """Remove XML declarations and doctypes before html2text conversion.
+
+        html2text treats full-document XHTML declarations like ``<?xml ...?>``
+        and ``<!DOCTYPE ...>`` as visible text when a whole soup is converted.
+        These nodes are metadata, not story text, so strip them at the parser
+        boundary.
+        """
+        try:
+            from bs4 import Declaration, Doctype, ProcessingInstruction
+        except Exception:
+            return
+
+        for node in list(soup.find_all(string=True)):
+            if isinstance(node, (Declaration, Doctype, ProcessingInstruction)):
+                try:
+                    node.extract()
+                except Exception:
+                    pass
     
     def extract_chapter_content(self, html_content: str, extraction_mode: str = None) -> Tuple[str, str, Optional[str]]:
         """Extract chapter content with proper Unicode and CJK handling"""
@@ -675,6 +695,7 @@ class EnhancedTextExtractor:
                     pass
             
             soup = BeautifulSoup(html_content, parser)
+            self._remove_document_declarations(soup)
             
             # Protect quotes before any processing
             self._protect_quotes_in_soup(soup)
