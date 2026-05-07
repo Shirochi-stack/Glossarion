@@ -1,6 +1,8 @@
 import html
 import os
+import posixpath
 import re
+from urllib.parse import unquote
 import zipfile
 from typing import Dict, Optional
 
@@ -8,6 +10,7 @@ from bs4 import BeautifulSoup
 
 
 HTML_EXTS = (".html", ".xhtml", ".htm")
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".avif")
 
 
 def ocr_epub_path_for(source_epub_path: str) -> str:
@@ -117,6 +120,59 @@ def _lookup_replacement(filename: str, replacements: Dict[str, str]) -> Optional
     return None
 
 
+def _zip_norm(path: str) -> str:
+    return posixpath.normpath(unquote(str(path or "").replace("\\", "/"))).lstrip("./")
+
+
+def _resolve_zip_ref(chapter_zip_path: str, src: str) -> str:
+    clean_src = str(src or "").split("?", 1)[0].split("#", 1)[0].replace("\\", "/")
+    if not clean_src:
+        return ""
+    if clean_src.startswith("/"):
+        return _zip_norm(clean_src.lstrip("/"))
+    base_dir = posixpath.dirname(str(chapter_zip_path or "").replace("\\", "/"))
+    return _zip_norm(posixpath.join(base_dir, clean_src) if base_dir else clean_src)
+
+
+def _is_preserved_original_html(filename: str) -> bool:
+    stem = os.path.splitext(os.path.basename(str(filename or "")))[0].lower()
+    return stem == "cover" or stem.startswith("cover_") or stem.startswith("cover-")
+
+
+def _html_image_refs(chapter_zip_path: str, html_data: bytes) -> set:
+    refs = set()
+    try:
+        source = html_data.decode("utf-8", errors="replace")
+    except Exception:
+        source = str(html_data)
+    try:
+        soup = BeautifulSoup(source, "html.parser")
+        for img in soup.find_all("img"):
+            resolved = _resolve_zip_ref(chapter_zip_path, img.get("src", ""))
+            if resolved:
+                refs.add(resolved)
+                refs.add(_zip_norm(img.get("src", "")))
+    except Exception:
+        pass
+    return refs
+
+
+def _replacement_image_refs(chapter_zip_path: str, replacement: str) -> set:
+    refs = set()
+    for marker in IMG_TAG_RE.findall(replacement or ""):
+        try:
+            soup = BeautifulSoup(marker, "html.parser")
+            img = soup.find("img")
+            src = img.get("src") if img else ""
+            resolved = _resolve_zip_ref(chapter_zip_path, src)
+            if resolved:
+                refs.add(resolved)
+                refs.add(_zip_norm(src))
+        except Exception:
+            continue
+    return refs
+
+
 def write_ocr_epub(source_epub_path: str, chapter_text_by_filename: Dict[str, str], output_path: Optional[str] = None) -> str:
     """Copy an EPUB and replace chapter HTML bodies with raw OCR/text content."""
     if not source_epub_path or not os.path.exists(source_epub_path):
@@ -140,6 +196,21 @@ def write_ocr_epub(source_epub_path: str, chapter_text_by_filename: Dict[str, st
     tmp_path = f"{output_path}.tmp"
     with zipfile.ZipFile(source_epub_path, "r") as zin, zipfile.ZipFile(tmp_path, "w") as zout:
         infos = zin.infolist()
+        replacement_by_html = {
+            info.filename: _lookup_replacement(info.filename, replacements)
+            for info in infos
+            if info.filename.lower().endswith(HTML_EXTS)
+        }
+        preserved_image_refs = set()
+        for html_name, replacement in replacement_by_html.items():
+            if replacement is not None:
+                preserved_image_refs.update(_replacement_image_refs(html_name, replacement))
+            elif _is_preserved_original_html(html_name):
+                try:
+                    preserved_image_refs.update(_html_image_refs(html_name, zin.read(html_name)))
+                except Exception:
+                    pass
+
         mimetype_info = next((info for info in infos if info.filename == "mimetype"), None)
         if mimetype_info is not None:
             mt_info = _copy_zip_info(mimetype_info)
@@ -150,16 +221,22 @@ def write_ocr_epub(source_epub_path: str, chapter_text_by_filename: Dict[str, st
             if info.filename == "mimetype":
                 continue
             out_info = _copy_zip_info(info)
-            replacement = _lookup_replacement(info.filename, replacements)
-            if replacement is not None and info.filename.lower().endswith(HTML_EXTS):
+            lower_name = info.filename.lower()
+            if lower_name.endswith(HTML_EXTS):
+                replacement = replacement_by_html.get(info.filename)
                 original_data = zin.read(info.filename)
-                data = _html_with_ocr_body(
-                    original_data,
-                    replacement,
-                    os.path.splitext(os.path.basename(info.filename))[0],
-                )
-                out_info.compress_type = zipfile.ZIP_DEFLATED
-                zout.writestr(out_info, data)
+                if replacement is None and _is_preserved_original_html(info.filename):
+                    zout.writestr(out_info, original_data)
+                else:
+                    data = _html_with_ocr_body(
+                        original_data,
+                        replacement or "",
+                        os.path.splitext(os.path.basename(info.filename))[0],
+                    )
+                    out_info.compress_type = zipfile.ZIP_DEFLATED
+                    zout.writestr(out_info, data)
+            elif lower_name.endswith(IMAGE_EXTS) and _zip_norm(info.filename) not in preserved_image_refs:
+                continue
             else:
                 zout.writestr(out_info, zin.read(info.filename))
 
