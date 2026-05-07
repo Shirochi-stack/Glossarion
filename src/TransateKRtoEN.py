@@ -5317,6 +5317,22 @@ class BatchTranslationProcessor:
                         self.save_progress_fn()
                     print(f"⚠️ Vision image chapter {actual_num} marked as qa_failed: {', '.join(vision_qa_issues)}")
                     return False, actual_num, None, None, None
+                vision_combined_failure = (
+                    image_translations.get("__vision_ocr_combined_failed__")
+                    if isinstance(image_translations, dict) else None
+                )
+                if vision_combined_failure:
+                    qa_issue = [str(vision_combined_failure or "EMPTY_OUTPUT").upper()]
+                    with self.progress_lock:
+                        self.update_progress_fn(
+                            idx, actual_num, content_hash, fname,
+                            status="qa_failed",
+                            qa_issues_found=qa_issue,
+                            chapter_obj=chapter,
+                        )
+                        self.save_progress_fn()
+                    print(f"⚠️ Vision OCR combined chapter {actual_num} failed; marked as qa_failed: {', '.join(qa_issue)}")
+                    return False, actual_num, None, None, None
                 if image_translations:
                     if (
                         os.getenv("OUTPUT_MODE", "").strip().lower() == "vision"
@@ -9145,6 +9161,11 @@ def _process_chapter_images_vision_ocr_combined(
 ):
     """OCR every image in an image-only HTML page, then translate the combined OCR once."""
     print(f"   Vision OCR page mode: OCRing {len(images)} images first, then translating combined OCR once")
+    try:
+        image_translator.last_vision_ocr_combined_failed = False
+        image_translator.last_vision_ocr_combined_failure_reason = None
+    except Exception:
+        pass
 
     def _force_stop_requested() -> bool:
         if os.environ.get('TRANSLATION_CANCELLED') == '1':
@@ -9469,8 +9490,16 @@ def _process_chapter_images_vision_ocr_combined(
     print(f"   Step 2/2: Translating combined page OCR ({len(combined_ocr)} chars)...")
     translated = image_translator._translate_ocr_text(combined_ocr, combined_prompt, check_stop_fn)
     if not translated:
-        print("   Combined page OCR translation returned empty; preserving original image HTML")
-        return str(soup), {}
+        failure_reason = getattr(image_translator, "last_vision_translation_finish_reason", None) or "EMPTY_OUTPUT"
+        if str(failure_reason).strip().lower() in ("", "none", "stop", "error"):
+            failure_reason = "EMPTY_OUTPUT"
+        print("   Combined page OCR translation returned empty; marking chapter for retry instead of falling back to image tags")
+        try:
+            image_translator.last_vision_ocr_combined_failed = True
+            image_translator.last_vision_ocr_combined_failure_reason = failure_reason
+        except Exception:
+            pass
+        return str(soup), {"__vision_ocr_combined_failed__": failure_reason}
 
     for src in processed_srcs:
         first_img_tag = soup.find('img', src=src)
@@ -10413,13 +10442,13 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
         else:
             jobs.append((idx, image_path))
 
-    chapter_batch_enabled = os.getenv("BATCH_TRANSLATION", "0").strip().lower() in ("1", "true", "yes", "on")
+    vision_batch_enabled = os.getenv("VISION_OCR_BATCH_TRANSLATION", "1").strip().lower() in ("1", "true", "yes", "on")
     try:
-        requested_workers = int(os.getenv("BATCH_SIZE", "1") or "1")
+        requested_workers = int(os.getenv("VISION_OCR_BATCH_SIZE", "10") or "10")
     except Exception:
         requested_workers = 1
     remaining_jobs = len(jobs)
-    workers = min(remaining_jobs, max(1, requested_workers)) if chapter_batch_enabled and remaining_jobs else 1
+    workers = min(remaining_jobs, max(1, requested_workers)) if vision_batch_enabled and remaining_jobs else 1
     if remaining_jobs and workers > 1:
         print(f"📖 Vision OCR source PDF batch enabled: {workers} parallel image request worker(s)")
 
@@ -17147,6 +17176,21 @@ def main(log_callback=None, stop_callback=None):
                         progress_manager.save()
                         print(f"⚠️ Vision image chapter {actual_num} marked as qa_failed: {', '.join(vision_qa_issues)}")
                         continue
+                    vision_combined_failure = (
+                        image_translations.get("__vision_ocr_combined_failed__")
+                        if isinstance(image_translations, dict) else None
+                    )
+                    if vision_combined_failure:
+                        qa_issue = [str(vision_combined_failure or "EMPTY_OUTPUT").upper()]
+                        progress_manager.update(
+                            idx, actual_num, content_hash, fname,
+                            status="qa_failed",
+                            qa_issues_found=qa_issue,
+                            chapter_obj=c,
+                        )
+                        progress_manager.save()
+                        print(f"⚠️ Vision OCR combined chapter {actual_num} failed; marked as qa_failed: {', '.join(qa_issue)}")
+                        continue
                     
                     if image_translations:
                         print(f"✅ Translated {len(image_translations)} images")
@@ -17301,6 +17345,21 @@ def main(log_callback=None, stop_callback=None):
                         )
                         progress_manager.save()
                         print(f"⚠️ Vision image chapter {actual_num} marked as qa_failed: {', '.join(vision_qa_issues)}")
+                        continue
+                    vision_combined_failure = (
+                        image_translations.get("__vision_ocr_combined_failed__")
+                        if isinstance(image_translations, dict) else None
+                    )
+                    if vision_combined_failure:
+                        qa_issue = [str(vision_combined_failure or "EMPTY_OUTPUT").upper()]
+                        progress_manager.update(
+                            idx, actual_num, content_hash, fname,
+                            status="qa_failed",
+                            qa_issues_found=qa_issue,
+                            chapter_obj=c,
+                        )
+                        progress_manager.save()
+                        print(f"⚠️ Vision OCR combined chapter {actual_num} failed; marked as qa_failed: {', '.join(qa_issue)}")
                         continue
                     
                     if image_translations:
