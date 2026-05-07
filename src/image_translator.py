@@ -3465,6 +3465,49 @@ class ImageTranslator:
 
     def _combine_vision_ocr_chunks(self, ocr_chunks):
         """Combine OCR chunks while trimming obvious overlap duplicates."""
+        def _trim_chunk_edge_blanks(lines):
+            start = 0
+            end = len(lines)
+            while start < end and not lines[start].strip():
+                start += 1
+            while end > start and not lines[end - 1].strip():
+                end -= 1
+            return lines[start:end]
+
+        def _is_structural_markdown_line(line):
+            stripped = (line or "").strip()
+            if not stripped:
+                return True
+            if stripped.startswith((">", "|", "```")):
+                return True
+            if re.match(r"^(#{1,6}\s+|[-*+]\s+|\d+[\.)]\s+)", stripped):
+                return True
+            if re.match(r"^\|?[\s:=-]{3,}\|", stripped):
+                return True
+            return False
+
+        def _should_merge_chunk_boundary(previous, current):
+            prev = (previous or "").rstrip()
+            cur = (current or "").lstrip()
+            if not prev or not cur:
+                return False
+            if _is_structural_markdown_line(prev) or _is_structural_markdown_line(cur):
+                return False
+            # Terminal punctuation usually means the chunk ended at a real
+            # sentence/paragraph boundary. Otherwise the boundary was probably
+            # introduced by image slicing, so join the prose back together.
+            terminal = ".!?。！？…;；:：)]}”’\"'"
+            return not prev.endswith(tuple(terminal))
+
+        def _join_boundary(previous, current):
+            prev = (previous or "").rstrip()
+            cur = (current or "").lstrip()
+            if not prev:
+                return cur
+            if prev.endswith("-"):
+                return prev[:-1] + cur
+            return f"{prev} {cur}"
+
         fuzzy_enabled = os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE", "0").strip().lower() in ("1", "true", "yes", "on")
         try:
             fuzzy_threshold = float(os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE_THRESHOLD", "0.85"))
@@ -3478,8 +3521,9 @@ class ImageTranslator:
 
         combined_lines = []
         for chunk_text in ocr_chunks:
-            lines = [line.rstrip() for line in (chunk_text or "").splitlines()]
-            lines = [line for line in lines if line.strip()]
+            lines = _trim_chunk_edge_blanks(
+                [line.rstrip() for line in (chunk_text or "").splitlines()]
+            )
             if not lines:
                 continue
             max_overlap = min(20, len(combined_lines), len(lines))
@@ -3490,7 +3534,19 @@ class ImageTranslator:
                     break
             if overlap:
                 lines = lines[overlap:]
+            merged_boundary = False
             for line in lines:
+                if not line.strip():
+                    if combined_lines and combined_lines[-1].strip():
+                        combined_lines.append("")
+                    continue
+                if (not merged_boundary and combined_lines
+                        and combined_lines[-1].strip()
+                        and _should_merge_chunk_boundary(combined_lines[-1], line)):
+                    combined_lines[-1] = _join_boundary(combined_lines[-1], line)
+                    merged_boundary = True
+                    continue
+                merged_boundary = True
                 if combined_lines and combined_lines[-1].strip() == line.strip():
                     continue
                 if fuzzy_enabled and len(line.strip()) >= min_dedupe_length:

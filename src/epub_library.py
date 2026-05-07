@@ -14520,19 +14520,20 @@ class EpubReaderDialog(QDialog):
         """)
 
     def _toggle_search(self):
-        if self._search_bar.isVisible():
+        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
             self._close_search()
-        else:
-            self._search_bar.show()
-            self._search_bar.setFocus()
-            self._search_bar.selectAll()
-            self._search_chapter_idx = self._current_row
-            self._search_last_row = self._current_row
-            self._search_match_index = 0
+            return
+        self._show_search_dialog()
 
     def _close_search(self):
         self._search_bar.hide()
         self._search_bar.clear()
+        dlg = getattr(self, "_search_dialog", None)
+        if dlg is not None:
+            try:
+                dlg.hide()
+            except Exception:
+                pass
         if _HAS_WEBENGINE:
             for w in [self._reader, self._reader_left, self._reader_right]:
                 if hasattr(w, 'findText'):
@@ -14542,6 +14543,8 @@ class EpubReaderDialog(QDialog):
         """Live highlight in current chapter as user types."""
         if not _HAS_WEBENGINE:
             return
+        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            return
         self._search_chapter_idx = self._current_row
         self._search_last_row = self._current_row
         self._search_match_index = 0
@@ -14550,100 +14553,183 @@ class EpubReaderDialog(QDialog):
                 if hasattr(w, 'findText'):
                     w.findText("")
             return
-        # Use callback to scroll to the match in paginated modes
-        browser = self._reader
-        if self._layout_mode == LAYOUT_DOUBLE:
-            browser = self._reader_left
+        self._reader.findText(text)
+
+    def _show_search_dialog(self):
+        """Open the scroll-mode search dialog with all EPUB matches."""
         if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            self._find_in_paginated_panes(text)
-        else:
-            browser.findText(text)
-
-    def _find_result_has_match(self, result) -> bool:
-        """Return whether a QWebEngine findText callback found anything."""
-        try:
-            if hasattr(result, "numberOfMatches"):
-                return int(result.numberOfMatches()) > 0
-            if hasattr(result, "activeMatch"):
-                return int(result.activeMatch()) > 0
-        except Exception:
-            pass
-        return bool(result)
-
-    def _find_and_scroll(self, browser, text, flags=None, on_finished=None):
-        """Run native findText and scroll paginated columns to the match."""
-        try:
-            from PySide6.QtWebEngineCore import QWebEnginePage
-            if flags is None:
-                flags = QWebEnginePage.FindFlag(0)
-
-            def _after_find(result):
-                has_match = self._find_result_has_match(result)
-                if has_match:
-                    self._scroll_to_find_match(browser)
-                if callable(on_finished):
-                    on_finished(has_match)
-
-            browser.page().findText(
-                text, flags, _after_find)
-        except Exception:
-            if callable(on_finished):
-                on_finished(False)
-
-    def _find_in_paginated_panes(self, text: str, on_finished=None):
-        """Use Chromium search in paginated modes, then page-align columns."""
-        if not _HAS_WEBENGINE or self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            if callable(on_finished):
-                on_finished(False)
+            self._close_search()
             return
-        if self._layout_mode == LAYOUT_DOUBLE:
-            try:
-                self._reader_right.page().findText(text)
-            except Exception:
-                pass
-            self._find_and_scroll(self._reader_left, text, on_finished=on_finished)
+
+        dlg = getattr(self, "_search_dialog", None)
+        if dlg is None:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Search EPUB")
+            dlg.resize(620, 460)
+            layout = QVBoxLayout(dlg)
+            layout.setContentsMargins(10, 10, 10, 10)
+            layout.setSpacing(8)
+
+            query = QLineEdit()
+            query.setPlaceholderText("Search text...")
+            layout.addWidget(query)
+
+            count_label = QLabel("Type to search")
+            layout.addWidget(count_label)
+
+            results = QListWidget()
+            results.setWordWrap(True)
+            results.itemActivated.connect(self._activate_search_result)
+            results.itemClicked.connect(self._activate_search_result)
+            layout.addWidget(results, 1)
+
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dlg.hide)
+            layout.addWidget(close_btn)
+
+            query.textChanged.connect(self._populate_search_results)
+            query.returnPressed.connect(self._find_next_from_search_dialog)
+
+            self._search_dialog = dlg
+            self._search_dialog_query = query
+            self._search_dialog_count = count_label
+            self._search_dialog_results = results
+
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        query = getattr(self, "_search_dialog_query", None)
+        if query is not None:
+            query.setFocus()
+            query.selectAll()
+            self._populate_search_results(query.text())
+
+    def _search_excerpt(self, plain: str, start: int, end: int, radius: int = 60) -> str:
+        left = max(0, start - radius)
+        right = min(len(plain), end + radius)
+        excerpt = plain[left:right]
+        excerpt = re.sub(r"\s+", " ", excerpt).strip()
+        if left > 0:
+            excerpt = "..." + excerpt
+        if right < len(plain):
+            excerpt += "..."
+        return excerpt
+
+    def _populate_search_results(self, text):
+        results = getattr(self, "_search_dialog_results", None)
+        count_label = getattr(self, "_search_dialog_count", None)
+        if results is None or count_label is None:
+            return
+        results.clear()
+        query = (text or "").strip()
+        if not query:
+            count_label.setText("Type to search")
+            return
+        pattern = re.compile(re.escape(query), re.IGNORECASE)
+        total = 0
+        for chapter_idx, (title, html) in enumerate(self._chapters):
+            plain = self._plain_chapter_text(html)
+            local_occurrence = 0
+            for match in pattern.finditer(plain):
+                excerpt = self._search_excerpt(plain, match.start(), match.end())
+                item = QListWidgetItem(
+                    f"{title or f'Chapter {chapter_idx + 1}'}\n{excerpt}"
+                )
+                item.setData(Qt.UserRole, {
+                    "chapter_idx": chapter_idx,
+                    "local_occurrence": local_occurrence,
+                    "global_occurrence": total,
+                    "text": query,
+                })
+                results.addItem(item)
+                total += 1
+                local_occurrence += 1
+        count_label.setText(f"{total} match{'es' if total != 1 else ''}")
+
+    def _find_next_from_search_dialog(self):
+        query = getattr(self, "_search_dialog_query", None)
+        if query is None:
+            return
+        text = query.text().strip()
+        if not text or self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            return
+        self._reader.findText(text)
+
+    def _activate_search_result(self, item):
+        data = item.data(Qt.UserRole) if item is not None else None
+        if not isinstance(data, dict):
+            return
+        text = data.get("text", "")
+        chapter_idx = int(data.get("chapter_idx", 0) or 0)
+        local_occurrence = int(data.get("local_occurrence", 0) or 0)
+        global_occurrence = int(data.get("global_occurrence", 0) or 0)
+        if self._layout_mode == LAYOUT_ALL:
+            self._select_text_occurrence(self._reader, text, global_occurrence)
+            return
+        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            return
+        if chapter_idx != self._current_row:
+            self._pending_search_text = text
+            self._pending_search_index = local_occurrence
+            self._toc_list.blockSignals(True)
+            self._toc_list.setCurrentRow(chapter_idx)
+            self._toc_list.blockSignals(False)
+            self._on_chapter_selected(chapter_idx)
         else:
-            self._find_and_scroll(self._reader, text, on_finished=on_finished)
+            self._select_text_occurrence(self._reader, text, local_occurrence)
 
-    def _scroll_to_find_match(self, browser):
-        """After findText highlights a match, scroll the paginated view to it.
-
-        In column-based pagination the match may be in a column that's
-        translated off-screen. We ask JS for the selection's bounding
-        rect, compute which page it's on, and navigate there.
-        """
-        if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            return  # scroll modes don't need help
-        js = r"""(function() {
-  var sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0) return -1;
-  var range = sel.getRangeAt(0);
-  var rect = range.getBoundingClientRect();
-  var c = document.getElementById('columns');
-  if (!c) return -1;
-  var w = (typeof _PAGE_W !== 'undefined' && _PAGE_W) ? _PAGE_W : Math.floor(window.innerWidth);
-  var tx = 0;
-  var m = c.style.transform.match(/translate3d\(([^,]+)/);
-  if (m) tx = parseFloat(m[1]) || 0;
-  var absX = rect.left - tx;
-  return Math.max(0, Math.floor(absX / w));
-})();"""
-        def _on_page_result(page_num):
-            try:
-                page_num = int(page_num)
-            except (TypeError, ValueError):
-                return
-            if page_num < 0:
-                return
-            if self._layout_mode == LAYOUT_DOUBLE:
-                page_num = max(0, page_num - (page_num % 2))
-            if page_num != self._current_page:
-                self._current_page = page_num
-                if self._layout_mode == LAYOUT_SINGLE:
-                    self._scroll_to_page_single()
-                elif self._layout_mode == LAYOUT_DOUBLE:
-                    self._scroll_to_page_double()
-        browser.page().runJavaScript(js, _on_page_result)
+    def _select_text_occurrence(self, browser, text: str, occurrence: int = 0):
+        """Select and scroll to a concrete text occurrence in scroll layouts."""
+        if not _HAS_WEBENGINE or not text:
+            return
+        try:
+            import json
+            needle = json.dumps(text)
+            wanted = max(0, int(occurrence or 0))
+        except Exception:
+            return
+        js = f"""(function() {{
+  var query = {needle};
+  var wanted = {wanted};
+  var root = document.getElementById('content') || document.body;
+  if (!query || !root) return false;
+  var lowerQuery = query.toLocaleLowerCase();
+  var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {{
+    acceptNode: function(node) {{
+      var parent = node.parentElement;
+      if (!parent) return NodeFilter.FILTER_REJECT;
+      var tag = parent.tagName ? parent.tagName.toLowerCase() : '';
+      if (tag === 'script' || tag === 'style' || tag === 'noscript') {{
+        return NodeFilter.FILTER_REJECT;
+      }}
+      return node.nodeValue ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    }}
+  }});
+  var seen = 0;
+  var node;
+  while ((node = walker.nextNode())) {{
+    var hay = node.nodeValue || '';
+    var lowerHay = hay.toLocaleLowerCase();
+    var pos = 0;
+    while ((pos = lowerHay.indexOf(lowerQuery, pos)) !== -1) {{
+      if (seen === wanted) {{
+        var range = document.createRange();
+        range.setStart(node, pos);
+        range.setEnd(node, pos + query.length);
+        var sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        var rect = range.getBoundingClientRect();
+        window.scrollBy({{ top: rect.top - Math.floor(window.innerHeight * 0.25), left: 0, behavior: 'smooth' }});
+        return true;
+      }}
+      seen += 1;
+      pos += Math.max(1, query.length);
+    }}
+  }}
+  return false;
+}})();"""
+        browser.page().runJavaScript(js)
 
     def _plain_chapter_text(self, html: str) -> str:
         """Return searchable visible text, matching the reader DOM search."""
@@ -14682,7 +14768,6 @@ class EpubReaderDialog(QDialog):
             self._reader.findText(text)
             return
         if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            self._find_in_paginated_panes(text)
             return
         n = len(self._chapters)
         browser = self._reader_left if self._layout_mode == LAYOUT_DOUBLE else self._reader
@@ -14898,6 +14983,8 @@ class EpubReaderDialog(QDialog):
     def _on_layout_changed(self, index):
         modes = [LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_SCROLL, LAYOUT_ALL]
         self._layout_mode = modes[index] if index < len(modes) else LAYOUT_SINGLE
+        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            self._close_search()
         self._current_page = 0
         self._loaded_chapter = -1  # force re-render on layout change
         self._chapter_page_cache.clear()
@@ -15234,8 +15321,7 @@ class EpubReaderDialog(QDialog):
 
     def _consume_pending_search(self, browser):
         """If a cross-chapter search stored ``_pending_search_text``,
-        highlight the match and scroll the paginated view to the correct
-        page.  Called by the paginated finalizers after layout is ready.
+        select the requested occurrence after the fresh chapter has loaded.
         """
         text = getattr(self, '_pending_search_text', None)
         if not text:
@@ -15245,9 +15331,8 @@ class EpubReaderDialog(QDialog):
         self._pending_search_index = 0
         self._search_match_index = occurrence
         if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            self._find_in_paginated_panes(text)
-        else:
-            browser.findText(text)
+            return
+        self._select_text_occurrence(browser, text, occurrence)
 
     def _finalize_single_page(self):
         """After HTML load: get page count and scroll to current page."""
