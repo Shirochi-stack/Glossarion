@@ -56,6 +56,81 @@ _SCALED_PIXMAP_CACHE: dict[tuple[str, int, int], QPixmap] = {}
 _BASE_PIXMAP_CACHE_LIMIT = 256
 _BASE_PIXMAP_CACHE: dict[str, QPixmap] = {}
 
+_DEFAULT_SPECIAL_FILE_KEYWORDS = (
+    "title, toc, copyright, preface, nav, message, notice, colophon, "
+    "dedication, epigraph, foreword, acknowledgment, author, appendix, "
+    "bibliography"
+)
+_DEFAULT_SPECIAL_FILE_EXACT = "index, glossary, glossary_extension"
+
+
+def _parse_special_file_list(value: object) -> list[str]:
+    """Parse a comma-separated special-file setting into lowercase tokens."""
+    if value is None:
+        return []
+    return [p.strip().lower() for p in str(value).split(",") if p.strip()]
+
+
+def _resolve_special_file_lists(config: dict | None = None) -> tuple[list[str], list[str]]:
+    """Return configured (substring_keywords, exact_keywords).
+
+    The Other Settings dialog exposes the same values as
+    ``special_file_keywords`` / ``special_file_exact`` in config and mirrors
+    edits into ``SPECIAL_FILE_KEYWORDS`` / ``SPECIAL_FILE_EXACT``. Environment
+    variables win because translator worker processes use them as runtime
+    overrides; otherwise config wins; otherwise use the UI defaults.
+    """
+    cfg = config or {}
+
+    if "SPECIAL_FILE_KEYWORDS" in os.environ:
+        kw_value = os.environ.get("SPECIAL_FILE_KEYWORDS", "")
+    elif "special_file_keywords" in cfg:
+        kw_value = cfg.get("special_file_keywords", "")
+    else:
+        kw_value = _DEFAULT_SPECIAL_FILE_KEYWORDS
+
+    if "SPECIAL_FILE_EXACT" in os.environ:
+        exact_value = os.environ.get("SPECIAL_FILE_EXACT", "")
+    elif "special_file_exact" in cfg:
+        exact_value = cfg.get("special_file_exact", "")
+    else:
+        exact_value = _DEFAULT_SPECIAL_FILE_EXACT
+
+    return _parse_special_file_list(kw_value), _parse_special_file_list(exact_value)
+
+
+def _special_file_settings_signature(config: dict | None = None) -> str:
+    """Stable signature used by caches that filter configured special files."""
+    keywords, exact = _resolve_special_file_lists(config)
+    return hashlib.md5(
+        ("kw=" + ",".join(keywords) + "|exact=" + ",".join(exact)).encode("utf-8")
+    ).hexdigest()[:10]
+
+
+def _special_file_stem(name: str) -> str:
+    """Normalize a source/response filename to a comparable lowercase stem."""
+    if not name:
+        return ""
+    base = os.path.basename(str(name)).lower()
+    if base.startswith("response_"):
+        base = base[len("response_"):]
+    html_like_exts = {".html", ".xhtml", ".htm", ".txt", ".xml"}
+    while True:
+        stem, ext = os.path.splitext(base)
+        if ext.lower() not in html_like_exts:
+            break
+        base = stem
+    return base
+
+
+def _is_configured_special_file(name: str, config: dict | None = None) -> bool:
+    """Return True when *name* matches the configured special-file lists."""
+    stem = _special_file_stem(name)
+    if not stem:
+        return False
+    keywords, exact = _resolve_special_file_lists(config)
+    return stem in exact or any(kw in stem for kw in keywords)
+
 
 def _epub_plain_chapter_text(html: str) -> str:
     """Return searchable visible text, matching the reader DOM search."""
@@ -617,10 +692,11 @@ def _epub_cache_dir() -> str:
 #          by the text-length filter.
 #   v4  — reader respects the Show-special-files toggle (cache key now
 #          embeds its state so on/off entries don't collide).
-_EPUB_CACHE_SCHEMA = "v4"
+_EPUB_CACHE_SCHEMA = "v5"
 
 
-def _epub_cache_key(epub_path: str, show_special_files: bool = True) -> str:
+def _epub_cache_key(epub_path: str, show_special_files: bool = True,
+                    config: dict | None = None) -> str:
     """Generate a cache key from path + file modification time + schema.
 
     *show_special_files* is baked into the key so switching the
@@ -631,12 +707,20 @@ def _epub_cache_key(epub_path: str, show_special_files: bool = True) -> str:
         mtime = os.path.getmtime(epub_path)
     except OSError:
         mtime = 0
-    salt = f"{_EPUB_CACHE_SCHEMA}|special={int(bool(show_special_files))}"
+    special_sig = (
+        _special_file_settings_signature(config)
+        if not show_special_files else ""
+    )
+    salt = (
+        f"{_EPUB_CACHE_SCHEMA}|special={int(bool(show_special_files))}"
+        f"|special_sig={special_sig}"
+    )
     raw = f"{epub_path}|{mtime}|{salt}".encode("utf-8")
     return hashlib.md5(raw).hexdigest()[:16]
 
 
-def _load_epub_cache(epub_path: str, show_special_files: bool = True):
+def _load_epub_cache(epub_path: str, show_special_files: bool = True,
+                     config: dict | None = None):
     """Try to load cached EPUB data.
 
     Returns ``(chapters, images, filenames)`` where ``filenames`` is a parallel
@@ -655,7 +739,7 @@ def _load_epub_cache(epub_path: str, show_special_files: bool = True):
     """
     import pickle
     try:
-        key = _epub_cache_key(epub_path, show_special_files)
+        key = _epub_cache_key(epub_path, show_special_files, config)
         cache_file = os.path.join(_epub_cache_dir(), f"{key}.pkl")
         if os.path.isfile(cache_file):
             with open(cache_file, "rb") as f:
@@ -676,7 +760,8 @@ def _load_epub_cache(epub_path: str, show_special_files: bool = True):
 
 
 def _save_epub_cache(epub_path: str, chapters, images, filenames=None,
-                     show_special_files: bool = True):
+                     show_special_files: bool = True,
+                     config: dict | None = None):
     """Save parsed EPUB data to disk cache.
 
     *show_special_files* is forwarded to :func:`_epub_cache_key` so the
@@ -684,7 +769,7 @@ def _save_epub_cache(epub_path: str, chapters, images, filenames=None,
     """
     import pickle
     try:
-        key = _epub_cache_key(epub_path, show_special_files)
+        key = _epub_cache_key(epub_path, show_special_files, config)
         cache_file = os.path.join(_epub_cache_dir(), f"{key}.pkl")
         with open(cache_file, "wb") as f:
             pickle.dump({
@@ -1220,20 +1305,18 @@ def _is_gallery_filename(name: str) -> bool:
     return stem == "gallery"
 
 
-def _read_progress_summary(progress_file: str, exclude_special: bool = False) -> dict | None:
+def _read_progress_summary(progress_file: str, exclude_special: bool = False,
+                           config: dict | None = None) -> dict | None:
     """Return a lightweight summary of translation_progress.json or None on failure.
 
     The summary counts chapter statuses so the library card can render a
     fraction/percentage without paying for the full OPF-aware match.
 
-    When *exclude_special* is True, entries whose ``original_basename``
-    (or ``output_file``) has no digit in its stem — ``cover.xhtml``,
-    ``nav.xhtml``, … — are dropped from both the total and the status
-    tallies. This matches the heuristic used by :func:`_count_epub_spine_items`
-    and :func:`_count_translated_response_files` so the toggle actually
-    shifts both numerator and denominator together (otherwise the
-    filesystem / spine counts shrink but the progress-file count stays
-    fixed and the dreaded 98 %↛1 00 % pair never changes).
+    When *exclude_special* is True, entries matching the configured
+    special-file substring/exact lists are dropped from both the total and
+    the status tallies. This matches :func:`_count_epub_spine_items` and
+    :func:`_count_translated_response_files` so the toggle shifts numerator
+    and denominator together.
 
     **File-existence verification**: entries whose ``status`` is
     ``"completed"`` are only counted as completed when the
@@ -1248,7 +1331,6 @@ def _read_progress_summary(progress_file: str, exclude_special: bool = False) ->
     ``in_progress`` instead so the fraction reflects reality.
     """
     import json as _json
-    import re as _re
     try:
         with open(progress_file, "r", encoding="utf-8") as f:
             prog = _json.load(f)
@@ -1277,14 +1359,11 @@ def _read_progress_summary(progress_file: str, exclude_special: bool = False) ->
             # (response_*.html) so a run started with translate_special=ON
             # and flipped OFF still filters correctly. Fall back to the
             # progress-file key as a last resort.
-            low = name.lower()
-            if low.startswith("response_"):
-                low = low[len("response_"):]
-            stem = os.path.splitext(os.path.basename(low))[0]
+            stem = _special_file_stem(name)
             # Only skip when we HAVE a filename to judge by — entries
             # with no recognizable name stay in the count rather than
             # silently disappearing.
-            if stem and not _re.search(r"\d", stem):
+            if stem and _is_configured_special_file(name, config):
                 continue
         total += 1
         status = ch.get("status", "")
@@ -1321,7 +1400,8 @@ def _read_progress_summary(progress_file: str, exclude_special: bool = False) ->
 _SPINE_COUNT_CACHE: dict[str, int] = {}
 
 
-def _count_epub_spine_items(epub_path: str, exclude_special: bool = False) -> int:
+def _count_epub_spine_items(epub_path: str, exclude_special: bool = False,
+                            config: dict | None = None) -> int:
     """Return the number of itemrefs in the EPUB's spine (0 on failure).
 
     Cheap: reads only ``META-INF/container.xml`` + the OPF, never the
@@ -1332,10 +1412,10 @@ def _count_epub_spine_items(epub_path: str, exclude_special: bool = False) -> in
     under-reports the real length for freshly imported / early-progress
     novels.
 
-    When *exclude_special* is True, spine items whose manifest href has no
-    digit in its basename (cover, nav, toc, info, message, …) are skipped,
-    matching the translator's default behavior of not translating special
-    files unless ``translate_special_files`` is explicitly enabled.
+    When *exclude_special* is True, spine items matching the configured
+    special-file substring/exact lists are skipped, matching the translator's
+    default behavior of not translating special files unless
+    ``translate_special_files`` is explicitly enabled.
     """
     if not epub_path or not os.path.isfile(epub_path):
         return 0
@@ -1343,13 +1423,16 @@ def _count_epub_spine_items(epub_path: str, exclude_special: bool = False) -> in
         base_key = _epub_cache_key(epub_path)
     except Exception:
         base_key = ""
-    cache_key = f"{base_key}|excl={int(bool(exclude_special))}" if base_key else ""
+    special_sig = _special_file_settings_signature(config) if exclude_special else ""
+    cache_key = (
+        f"{base_key}|excl={int(bool(exclude_special))}|special={special_sig}"
+        if base_key else ""
+    )
     if cache_key and cache_key in _SPINE_COUNT_CACHE:
         return _SPINE_COUNT_CACHE[cache_key]
     count = 0
     try:
         import zipfile
-        import re as _re
         from xml.etree import ElementTree as ET
         with zipfile.ZipFile(epub_path, "r") as zf:
             names = zf.namelist()
@@ -1394,7 +1477,7 @@ def _count_epub_spine_items(epub_path: str, exclude_special: bool = False) -> in
                             if _is_gallery_filename(basename):
                                 continue
                             if exclude_special:
-                                if not _re.search(r"\d", basename):
+                                if _is_configured_special_file(basename, config):
                                     continue
                             count += 1
                 except Exception:
@@ -1441,46 +1524,31 @@ def _resolve_show_special_files(config: dict | None) -> bool:
     return bool(stored) or translate_special
 
 
-def _is_special_spine_item(name: str) -> bool:
-    """Return True if *name* is a "special" (non-numbered) spine item.
+def _is_special_spine_item(name: str, config: dict | None = None) -> bool:
+    """Return True if *name* matches configured special-file keywords.
 
-    Matches the digit-stem heuristic used by :func:`_count_epub_spine_items`
-    and :func:`_count_translated_response_files`: any spine entry whose
-    basename (minus a ``response_`` prefix, minus the extension) contains
-    no digit is treated as a named special page — cover, nav, toc, info,
-    message, afterword, etc. — rather than a numbered chapter. The
-    reader hides these when the Show-special-files toggle is off so the
-    TOC mirrors what the translator will actually process.
+    This intentionally does not use the old "no digits means special"
+    heuristic: files like ``cover.html`` or ``info.html`` are ordinary spine
+    entries unless the user puts matching tokens in Other Settings.
     """
-    import re as _re
-    if not name:
-        return False
-    base = os.path.basename(str(name)).lower()
-    if base.startswith("response_"):
-        base = base[len("response_"):]
-    stem = os.path.splitext(base)[0]
-    if not stem:
-        return False
-    return not _re.search(r"\d", stem)
+    return _is_configured_special_file(name, config)
 
 
-def _count_translated_response_files(folder: str, exclude_special: bool = False) -> int:
+def _count_translated_response_files(folder: str, exclude_special: bool = False,
+                                     config: dict | None = None) -> int:
     """Count ``response_*.{html,xhtml,htm,txt}`` files inside *folder*.
 
     Acts as a filesystem-based "done" count fallback for cards whose
     ``translation_progress.json`` is missing / empty (e.g. a crashed run
     that never flushed ``status=completed`` to the sidecar).
 
-    When *exclude_special* is True, response files whose stem has no
-    digit — ``response_cover.html``, ``response_nav.xhtml``, … — are
-    skipped, matching the same heuristic used by
-    :func:`_count_epub_spine_items`. This keeps the denominator and the
-    numerator consistent when the "translate special files" toggle is
+    When *exclude_special* is True, response files matching the configured
+    special-file substring/exact lists are skipped. This keeps denominator
+    and numerator consistent when the "translate special files" toggle is
     off.
     """
     if not folder or not os.path.isdir(folder):
         return 0
-    import re as _re
     count = 0
     try:
         for entry in os.scandir(folder):
@@ -1495,8 +1563,7 @@ def _count_translated_response_files(folder: str, exclude_special: bool = False)
             if _is_gallery_filename(entry.name):
                 continue
             if exclude_special:
-                stem = os.path.splitext(lower[len("response_"):])[0]
-                if not _re.search(r"\d", stem):
+                if _is_configured_special_file(lower, config):
                     continue
             count += 1
     except (PermissionError, OSError):
@@ -2114,7 +2181,7 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
     if not roots:
         return []
     # Honor the "translate special files" toggle: when OFF (default), special
-    # files (cover/nav/toc/info/…) are never translated, so they shouldn't
+    # configured special files are never translated, so they shouldn't
     # count toward the card's total. Otherwise a fully-translated EPUB sits
     # at 98/100 forever because two special files were skipped by design.
     exclude_special = not _resolve_translate_special_files(config)
@@ -2168,7 +2235,8 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 # budging the numerator and the card reads as 100 % no
                 # matter what the user does.
                 summary = _read_progress_summary(
-                    progress_file, exclude_special=exclude_special
+                    progress_file, exclude_special=exclude_special,
+                    config=config,
                 ) if has_progress else None
                 # Track the distinction between "parse worked, book has
                 # zero chapters" and "parse failed entirely" — the latter
@@ -2208,11 +2276,12 @@ def scan_output_folders(config: dict | None = None) -> list[dict]:
                 #             exclude_special so partial stub files for
                 #             skipped specials can't inflate the fraction.
                 fs_done = _count_translated_response_files(
-                    folder, exclude_special=exclude_special)
+                    folder, exclude_special=exclude_special, config=config)
                 spine_total = 0
                 if raw_source_path and raw_source_path.lower().endswith(".epub"):
                     spine_total = _count_epub_spine_items(
-                        raw_source_path, exclude_special=exclude_special)
+                        raw_source_path, exclude_special=exclude_special,
+                        config=config)
                 total = max(progress_total, spine_total)
                 if progress_total > 0:
                     # Progress file is authoritative — in-progress specials
@@ -2453,9 +2522,11 @@ def _find_in_progress_novels(config: dict | None = None) -> list[dict]:
     Returns a list of dicts compatible with the rest of the scanner (with
     extra in-progress metadata).
     """
+    config = config or {}
     roots = _resolve_output_roots(config)
     if not roots:
         return []
+    exclude_special = not _resolve_translate_special_files(config)
 
     library_dir_norm = os.path.normcase(os.path.normpath(os.path.abspath(get_library_dir())))
 
@@ -2505,7 +2576,9 @@ def _find_in_progress_novels(config: dict | None = None) -> list[dict]:
                 if _folder_has_output_epub(folder):
                     # Already done — normal scan will pick up the .epub.
                     continue
-                summary = _read_progress_summary(progress_file)
+                summary = _read_progress_summary(
+                    progress_file, exclude_special=exclude_special,
+                    config=config)
                 if summary is None:
                     continue
                 folder_name = entry.name
@@ -10766,9 +10839,10 @@ class _BookDetailsLoader(QThread):
     done = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, book: dict, parent=None):
+    def __init__(self, book: dict, config: dict | None = None, parent=None):
         super().__init__(parent)
         self._book = book
+        self._config = config or {}
 
     def run(self):
         try:
@@ -10985,13 +11059,11 @@ class _BookDetailsLoader(QThread):
             # time of a couple of sequential disk hits.
             chapters = details.get("chapters", []) or []
             output_dir_ok = bool(output_folder and os.path.isdir(output_folder))
-            has_digit_re = re.compile(r"\d")
-
             def _resolve_chapter(item):
                 idx, ch = item
                 filename = ch["filename"]
                 raw_title = ch["title"]
-                is_special = not bool(has_digit_re.search(filename))
+                is_special = _is_configured_special_file(filename, self._config)
                 is_gallery = _is_gallery_filename(filename)
                 norm_key = _norm(filename)
                 match = prog_by_basename.get(norm_key) or prog_by_output.get(norm_key)
@@ -11109,8 +11181,8 @@ class BookDetailsDialog(QDialog):
         self._selected_chapter_idx: int | None = None
         # Whether the "show special files" toggle is on. Its initial state is
         # coupled to the global "Translate Special Files" setting (Other
-        # Settings): if the translator is configured to handle cover / nav /
-        # toc files, the dialog defaults to showing them too and counting
+        # Settings): if the translator is configured to handle special-file
+        # keywords, the dialog defaults to showing them too and counting
         # them in the progress percentage. The user can still override the
         # toggle per-dialog — the override is persisted in config.
         _translate_special = _resolve_translate_special_files(self._config)
@@ -11413,16 +11485,16 @@ class BookDetailsDialog(QDialog):
         chap_header.addWidget(self._toc_toggle)
         chap_header.addStretch()
         # "Show special files" toggle mirrors the Progress Manager's behavior.
-        # Hidden by default for EPUBs so files like cover/nav/toc/info don't
-        # clutter the list; user state is persisted via config. Built via
+        # Hidden by default for EPUBs so configured files like nav/toc/title
+        # don't clutter the list; user state is persisted via config. Built via
         # :func:`_create_styled_checkbox` so the Book Details header reads
         # as the same visual vocabulary as Other Settings (identical
         # indicator border / fill / hover colours + “✓” overlay).
         self._special_cb = _create_styled_checkbox(
-            "Show special files (cover, nav, toc)")
+            "Show special files (nav, toc, title)")
         self._special_cb.setToolTip(
-            "When enabled, shows special files (files without chapter numbers "
-            "like cover, nav, toc, info, message, etc.)"
+            "When enabled, shows files matching the special-file keywords "
+            "configured in Other Settings."
         )
         self._special_cb.setChecked(self._show_special_files)
         self._special_cb.toggled.connect(self._on_special_files_toggled)
@@ -11496,7 +11568,7 @@ class BookDetailsDialog(QDialog):
         # background. Replaced in :meth:`_on_details_ready` with real rows.
         self._show_chapter_placeholder()
         self._is_auto_refreshing = False
-        self._loader = _BookDetailsLoader(self._book, self)
+        self._loader = _BookDetailsLoader(self._book, self._config, self)
         # ``preview_ready`` fires first with cover + metadata so the hero
         # paints immediately; ``done`` follows with the full chapter list.
         self._loader.preview_ready.connect(self._on_preview_ready)
@@ -11526,7 +11598,7 @@ class BookDetailsDialog(QDialog):
             except Exception:
                 pass
         self._is_auto_refreshing = True
-        self._loader = _BookDetailsLoader(self._book, self)
+        self._loader = _BookDetailsLoader(self._book, self._config, self)
         # Only subscribe to ``done`` — ``preview_ready`` is only useful
         # for the initial paint and would re-flash the cover + synopsis
         # with every tick otherwise.
@@ -11863,8 +11935,8 @@ class BookDetailsDialog(QDialog):
         user-visible "Show special files" checkbox drives the percentage
         (in addition to the chapter list filter). Rules:
 
-        - Checkbox ON  → count every spine chapter, including cover /
-          nav / toc, toward the denominator.
+        - Checkbox ON  → count every spine chapter, including configured
+          special files, toward the denominator.
         - Checkbox OFF → exclude special files so a book doesn't sit at
           98/100 forever when the only untranslated entries are files
           the translator skips by design.
@@ -12291,6 +12363,29 @@ class BookDetailsDialog(QDialog):
                     extra_dirs.append(candidate)
         return overlay, extra_dirs
 
+    def _translated_css_dirs(self) -> list[str]:
+        """Return CSS directories that belong to the translated output folder."""
+        output_folder = self._book.get("output_folder")
+        if not output_folder:
+            for ci in self._chapters_info:
+                path = ci.get("translated_path") or ""
+                if path and os.path.isfile(path):
+                    output_folder = os.path.dirname(path)
+                    break
+        if not output_folder or not os.path.isdir(output_folder):
+            return []
+        dirs: list[str] = []
+        css_dir = os.path.join(output_folder, "css")
+        dirs.append(css_dir)
+        # Some HTML outputs keep styles directly beside the responses.
+        try:
+            if any(name.lower().endswith(".css")
+                   for name in os.listdir(output_folder)):
+                dirs.append(output_folder)
+        except OSError:
+            pass
+        return dirs
+
     def _open_reader(self, initial_chapter: int | None = None, raw_only: bool = False):
         """Dispatch to the appropriate viewer based on the resolved source type.
 
@@ -12329,11 +12424,13 @@ class BookDetailsDialog(QDialog):
                 QApplication.processEvents()
                 overlay: dict[str, dict] = {}
                 extra_dirs: list[str] = []
+                translated_css_dirs: list[str] = []
                 window_title = None
                 # Only offer the translated overlay when the book is actually an
                 # in-progress novel with at least one translated chapter on disk.
                 if not raw_only and self._book.get("is_in_progress"):
                     overlay, extra_dirs = self._build_translated_overlay()
+                    translated_css_dirs = self._translated_css_dirs()
                     if overlay:
                         # Derive the displayed title from the metadata.json /
                         # OPF title, falling back to the book's name.
@@ -12402,10 +12499,11 @@ class BookDetailsDialog(QDialog):
                     initial_chapter_filename=initial_filename,
                     translated_overlay=overlay or None,
                     extra_image_dirs=extra_dirs or None,
+                    translated_css_dirs=translated_css_dirs or None,
                     window_title=window_title,
                     # Propagate the dialog's current toggle so the reader's
                     # TOC matches what the Book Details chapter list
-                    # shows (cover / nav / toc hidden when this is off).
+                    # shows (configured special files hidden when this is off).
                     show_special_files=self._show_special_files,
                     alt_epub_path=alt_for_reader or None,
                     overlay_provider=overlay_provider,
@@ -12776,16 +12874,18 @@ class _EpubCacheLoaderThread(QThread):
     miss = Signal()
 
     def __init__(self, epub_path: str, show_special_files: bool = True,
-                 parent=None):
+                 config: dict | None = None, parent=None):
         super().__init__(parent)
         self._epub_path = epub_path
         self._show_special_files = bool(show_special_files)
+        self._config = config or {}
 
     def run(self):
         try:
             cached = _load_epub_cache(
                 self._epub_path,
                 show_special_files=self._show_special_files,
+                config=self._config,
             )
         except Exception:
             logger.debug("Cache load failed in worker: %s",
@@ -12985,15 +13085,17 @@ class _EpubLoaderThread(QThread):
     error = Signal(str)
 
     def __init__(self, epub_path: str, parent=None,
-                 show_special_files: bool = True):
+                 show_special_files: bool = True,
+                 config: dict | None = None):
         super().__init__(parent)
         self._epub_path = epub_path
-        # When False, spine items flagged as "special" (no-digit stem —
-        # cover / nav / toc / info / message / …) are excluded from the
+        # When False, spine items flagged by the configured special-file
+        # keywords are excluded from the
         # chapter list so the TOC mirrors what the translator would act
         # on with ``translate_special_files`` off. Baked into the cache
         # key so on / off variants don't collide.
         self._show_special_files = bool(show_special_files)
+        self._config = config or {}
 
     def run(self):
         try:
@@ -13095,14 +13197,13 @@ class _EpubLoaderThread(QThread):
             filenames: list[str] = []
             for item, authoritative in chapter_items:
                 try:
-                    # "Show special files" toggle: when OFF, drop named
-                    # non-chapter pages (cover.xhtml, nav.xhtml, toc.xhtml,
-                    # info.html, …) so the TOC matches what the
+                    # "Show special files" toggle: when OFF, drop configured
+                    # non-chapter pages so the TOC matches what the
                     # translator considers real chapters. This still
                     # respects spine ordering for the chapters that DO
                     # survive — we just prune the specials.
                     if not self._show_special_files and _is_special_spine_item(
-                            item.get_name() or ""):
+                            item.get_name() or "", self._config):
                         continue
 
                     content = item.get_content().decode("utf-8", errors="replace")
@@ -13157,6 +13258,7 @@ class _EpubLoaderThread(QThread):
             _save_epub_cache(
                 self._epub_path, chapters, images, filenames,
                 show_special_files=self._show_special_files,
+                config=self._config,
             )
             self.done.emit()
         except Exception as exc:
@@ -13282,6 +13384,7 @@ class EpubReaderDialog(QDialog):
                  initial_chapter_filename: str | None = None,
                  translated_overlay: dict | None = None,
                  extra_image_dirs: list[str] | None = None,
+                 translated_css_dirs: list[str] | None = None,
                  window_title: str | None = None,
                  show_special_files: bool | None = None,
                  alt_epub_path: str | None = None,
@@ -13317,8 +13420,8 @@ class EpubReaderDialog(QDialog):
         self._chapters_overlaid: list[tuple[str, str]] = []
         self._chapter_filenames: list[str] = []
         self._images: dict[str, bytes] = {}
-        # Whether to surface non-chapter spine items (cover / nav / toc /
-        # info / …) in the TOC. Caller can force the flag; otherwise we
+        # Whether to surface configured non-chapter spine items in the TOC.
+        # Caller can force the flag; otherwise we
         # resolve it the same way BookDetailsDialog does, so opening a
         # reader directly from a library card picks up the user's last
         # toggle state instead of silently diverging.
@@ -13384,6 +13487,12 @@ class EpubReaderDialog(QDialog):
         # <output_folder>/translated_images) used to augment the EPUB's own
         # image table so translated chapters can resolve their assets.
         self._extra_image_dirs: list[str] = list(extra_image_dirs or [])
+        # CSS directories from the translated output folder. In overlay mode
+        # the active EPUB path still points at the raw source, so translated
+        # Embedded CSS must be supplied explicitly.
+        self._translated_css_dirs: list[str] = [
+            str(p) for p in (translated_css_dirs or []) if p
+        ]
         # Auto-refresh: when a ``overlay_provider`` callable is supplied
         # (typically :meth:`BookDetailsDialog._build_translated_overlay`)
         # the reader ticks a :class:`QTimer` on a short interval, re-runs
@@ -13966,6 +14075,7 @@ class EpubReaderDialog(QDialog):
         self._cache_loader_thread = _EpubCacheLoaderThread(
             self._epub_path,
             show_special_files=self._show_special_files,
+            config=self._config,
             parent=self,
         )
         self._cache_loader_thread.hit.connect(self._on_cache_hit)
@@ -13990,6 +14100,7 @@ class EpubReaderDialog(QDialog):
         self._loader_thread = _EpubLoaderThread(
             self._epub_path, self,
             show_special_files=self._show_special_files,
+            config=self._config,
         )
         self._loader_thread.done.connect(lambda: self._on_loader_done())
         self._loader_thread.error.connect(lambda msg: self._on_epub_error(msg))
@@ -14015,6 +14126,7 @@ class EpubReaderDialog(QDialog):
         reader_thread = _EpubCacheLoaderThread(
             self._epub_path,
             show_special_files=self._show_special_files,
+            config=self._config,
             parent=self,
         )
         # Post-reparse cache-miss shouldn't re-trigger the parser (that
@@ -16024,6 +16136,7 @@ class EpubReaderDialog(QDialog):
         self._cache_loader_thread = _EpubCacheLoaderThread(
             self._epub_path,
             show_special_files=self._show_special_files,
+            config=self._config,
             parent=self,
         )
         self._cache_loader_thread.hit.connect(self._on_cache_hit)
@@ -16216,13 +16329,66 @@ class EpubReaderDialog(QDialog):
         URIs so the result is self-contained.
         """
         cache_attr = '_embedded_css_cache'
+        translated_css_mode = bool(
+            self._translated_overlay
+            and not getattr(self, "_show_raw", False)
+            and self._translated_css_dirs
+        )
+        cache_key = (
+            "translated" if translated_css_mode else "active_epub",
+            os.path.abspath(str(self._epub_path or "")),
+            tuple(os.path.abspath(p) for p in self._translated_css_dirs),
+        )
         if hasattr(self, cache_attr):
-            return getattr(self, cache_attr)
+            cached = getattr(self, cache_attr)
+            if isinstance(cached, tuple) and len(cached) == 2:
+                old_key, old_css = cached
+                if old_key == cache_key:
+                    return old_css
+            elif isinstance(cached, str) and not translated_css_mode:
+                return cached
 
         import zipfile, re, base64
         css_text = ''
         font_data: dict[str, bytes] = {}
         _FONT_EXTS = ('.ttf', '.otf', '.woff', '.woff2')
+
+        def _collect_fonts(folder: str) -> None:
+            if not folder or not os.path.isdir(folder):
+                return
+            try:
+                for root, _dirs, files in os.walk(folder):
+                    for fname in files:
+                        ext = os.path.splitext(fname)[1].lower()
+                        if ext not in _FONT_EXTS:
+                            continue
+                        bname = fname.lower()
+                        if bname in font_data:
+                            continue
+                        try:
+                            with open(os.path.join(root, fname), 'rb') as ff:
+                                font_data[bname] = ff.read()
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+
+        def _append_css_dir(css_dir: str) -> None:
+            nonlocal css_text
+            if not css_dir or not os.path.isdir(css_dir):
+                return
+            try:
+                for fname in sorted(os.listdir(css_dir)):
+                    if not fname.lower().endswith('.css'):
+                        continue
+                    try:
+                        with open(os.path.join(css_dir, fname), 'r',
+                                  encoding='utf-8', errors='replace') as cf:
+                            css_text += cf.read() + '\n'
+                    except OSError:
+                        pass
+            except OSError:
+                pass
 
         # --- Source 0: Explicit CSS override from the GUI -------------------
         override_path = os.environ.get('EPUB_CSS_OVERRIDE_PATH', '').strip()
@@ -16235,6 +16401,23 @@ class EpubReaderDialog(QDialog):
             except OSError:
                 has_override = False  # fall through to normal sources
 
+        # In in-progress translated reader mode, ``_epub_path`` still points
+        # at the raw EPUB because translated HTML is overlaid in memory. Pull
+        # Embedded CSS from the output folder instead, so translated view uses
+        # dist/<book>/css/style.css while Raw keeps the source EPUB styling.
+        if translated_css_mode:
+            for css_dir in self._translated_css_dirs:
+                css_abs = os.path.abspath(css_dir)
+                output_root = (
+                    os.path.dirname(css_abs)
+                    if os.path.basename(css_abs).lower() == "css"
+                    else css_abs
+                )
+                _collect_fonts(os.path.join(output_root, 'fonts'))
+                _collect_fonts(css_abs)
+                if not has_override:
+                    _append_css_dir(css_abs)
+
         # --- Source 1: EPUB zip contents ------------------------------------
         # Always read fonts from the zip; only read CSS if no override.
         try:
@@ -16243,8 +16426,9 @@ class EpubReaderDialog(QDialog):
                     ext = os.path.splitext(entry)[1].lower()
                     if ext in _FONT_EXTS:
                         bname = os.path.basename(entry).lower()
-                        font_data[bname] = zf.read(entry)
-                if not has_override:
+                        if bname not in font_data:
+                            font_data[bname] = zf.read(entry)
+                if not has_override and not translated_css_mode:
                     for entry in zf.namelist():
                         if entry.lower().endswith('.css'):
                             try:
@@ -16260,30 +16444,11 @@ class EpubReaderDialog(QDialog):
         if epub_dir:
             # Fonts from <epub_dir>/fonts/ (supplement zip fonts)
             fonts_dir = os.path.join(epub_dir, 'fonts')
-            if os.path.isdir(fonts_dir):
-                for root, _dirs, files in os.walk(fonts_dir):
-                    for fname in files:
-                        ext = os.path.splitext(fname)[1].lower()
-                        if ext in _FONT_EXTS:
-                            bname = fname.lower()
-                            if bname not in font_data:
-                                try:
-                                    with open(os.path.join(root, fname), 'rb') as ff:
-                                        font_data[bname] = ff.read()
-                                except OSError:
-                                    pass
+            _collect_fonts(fonts_dir)
             # CSS from <epub_dir>/css/ (only if no override)
-            if not has_override:
+            if not has_override and not translated_css_mode:
                 css_dir = os.path.join(epub_dir, 'css')
-                if os.path.isdir(css_dir):
-                    for fname in sorted(os.listdir(css_dir)):
-                        if fname.lower().endswith('.css'):
-                            try:
-                                with open(os.path.join(css_dir, fname), 'r',
-                                          encoding='utf-8', errors='replace') as cf:
-                                    css_text += cf.read() + '\n'
-                            except OSError:
-                                pass
+                _append_css_dir(css_dir)
 
         # --- Rewrite font URLs to data URIs ---------------------------------
         def _replace_font_url(m):
@@ -16302,7 +16467,7 @@ class EpubReaderDialog(QDialog):
             r'url\s*\(\s*["\']?([^"\')\s]+\.(?:ttf|otf|woff2?))["\'\s]*\)',
             _replace_font_url, css_text)
 
-        setattr(self, cache_attr, css_text)
+        setattr(self, cache_attr, (cache_key, css_text))
         return css_text
 
     def _wrap_html(self, body_html: str, paginated: bool = False) -> str:
