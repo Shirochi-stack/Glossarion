@@ -2804,6 +2804,9 @@ class ImageTranslator:
             for ref in refs:
                 ref_idx = int(ref["chapter_idx"])
                 ref_num = int(ref["chapter_num"])
+                target_file = os.path.splitext(
+                    os.path.basename(str(ref.get("chapter_file") or "").lower())
+                )[0]
                 target_key = None
                 for key, info in chapters.items():
                     if not isinstance(info, dict):
@@ -2816,11 +2819,22 @@ class ImageTranslator:
                         entry_num = int(info.get("actual_num") or info.get("chapter_num"))
                     except (TypeError, ValueError):
                         entry_num = None
-                    if entry_idx == ref_idx or entry_num == ref_num:
+                    entry_file = ""
+                    for file_key in ("output_file", "chapter_file", "original_basename", "filename", "source_filename"):
+                        if info.get(file_key):
+                            entry_file = os.path.splitext(os.path.basename(str(info.get(file_key)).lower()))[0]
+                            break
+                    if entry_idx == ref_idx:
+                        target_key = key
+                        break
+                    if entry_idx is None and target_file and entry_file and target_file == entry_file:
+                        target_key = key
+                        break
+                    if entry_idx is None and not target_file and entry_num == ref_num:
                         target_key = key
                         break
                 if target_key is None:
-                    target_key = str(ref_num)
+                    target_key = str(ref_idx)
                     chapters[target_key] = {
                         "chapter_index": ref_idx,
                         "actual_num": ref_num,
@@ -2828,16 +2842,31 @@ class ImageTranslator:
                         "status": "in_progress",
                         "last_updated": time.time(),
                     }
+                    if ref.get("chapter_file"):
+                        chapters[target_key]["output_file"] = os.path.basename(str(ref.get("chapter_file") or ""))
                 chapters[target_key]["ocr_progress"] = dict(ocr_progress)
                 chapters[target_key]["last_updated"] = time.time()
 
+            tmp_path = None
             try:
                 tmp_path = f"{progress_path}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
                 with open(tmp_path, "w", encoding="utf-8") as f:
                     json.dump(progress, f, ensure_ascii=False, indent=2)
-                os.replace(tmp_path, progress_path)
+                for attempt in range(8):
+                    try:
+                        os.replace(tmp_path, progress_path)
+                        break
+                    except OSError as e:
+                        if getattr(e, "winerror", None) not in (5, 32) or attempt >= 7:
+                            raise
+                        time.sleep(0.05 * (2 ** attempt))
             except Exception as e:
                 print(f"   ⚠️ Vision OCR glossary OCR progress write failed: {e}")
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
 
     def _ensure_vision_ocr_glossary(self, ocr_text, mode, check_stop_fn, progress_refs=None, merged_refs=None):
         """Generate/update glossary entries from OCR text for Vision mode."""
