@@ -103,7 +103,7 @@ def requires_cv2(func):
         return func(self, *args, **kwargs)
     return wrapper
     
-def send_image_with_interrupt(client, messages, image_data, temperature, max_tokens, stop_check_fn, chunk_timeout=None, context='image_translation', chapter_context=None):
+def send_image_with_interrupt(client, messages, image_data, temperature, max_tokens, stop_check_fn, chunk_timeout=None, context='image_translation', chapter_context=None, before_send_callback=None):
     """Send image API request with interrupt capability and timeout retry"""
     import queue
     import threading
@@ -123,6 +123,12 @@ def send_image_with_interrupt(client, messages, image_data, temperature, max_tok
                     )
                 except Exception:
                     pass
+            if callable(before_send_callback) and hasattr(client, "_get_thread_local_client"):
+                try:
+                    tls = client._get_thread_local_client()
+                    tls.pre_api_call_callback = before_send_callback
+                except Exception:
+                    before_send_callback()
             start_time = time.time()
             result = client.send_image(messages, image_data, temperature=temperature, 
                                      max_tokens=max_tokens, context=context)
@@ -2137,8 +2143,13 @@ class ImageTranslator:
             if chunk_idx is not None and total_chunks is not None:
                 chapter_context.update({"chunk": chunk_idx, "total_chunks": total_chunks})
 
-        self.mark_vision_ocr_progress_started()
         self.record_vision_ocr_summary(api_requests=1)
+        ocr_request_started = {"value": False}
+
+        def _mark_ocr_progress_on_send():
+            ocr_request_started["value"] = True
+            self.mark_vision_ocr_progress_started()
+
         try:
             ocr_response, finish_reason = send_image_with_interrupt(
                 self.client,
@@ -2150,9 +2161,11 @@ class ImageTranslator:
                 chunk_timeout,
                 'vision_ocr',
                 chapter_context=chapter_context,
+                before_send_callback=_mark_ocr_progress_on_send,
             )
         finally:
-            self.mark_vision_ocr_progress_done()
+            if ocr_request_started["value"]:
+                self.mark_vision_ocr_progress_done()
 
         if finish_reason in ["length", "max_tokens"]:
             print("   ⚠️ OCR response was truncated. Consider increasing Max tokens.")
@@ -2782,6 +2795,8 @@ class ImageTranslator:
             total = max(0, int(total))
         except (TypeError, ValueError):
             return
+        if done <= 0 and total <= 0:
+            return
 
         with self.__class__._vision_ocr_glossary_file_lock:
             _glossary_dir, _json_path, _csv_path, progress_path = self._vision_ocr_glossary_paths()
@@ -2801,6 +2816,26 @@ class ImageTranslator:
                     return
 
             chapters = progress.setdefault("chapters", {})
+            completed = {
+                int(value)
+                for value in progress.get("completed", [])
+                if str(value).lstrip("-").isdigit()
+            }
+            merged = {
+                int(value)
+                for value in progress.get("merged_indices", [])
+                if str(value).lstrip("-").isdigit()
+            }
+            failed = [
+                int(value)
+                for value in progress.get("failed", [])
+                if str(value).lstrip("-").isdigit()
+            ]
+            in_progress = [
+                int(value)
+                for value in progress.get("in_progress", [])
+                if str(value).lstrip("-").isdigit()
+            ]
             ocr_progress = {
                 "done": min(done, total) if total else done,
                 "total": total,
@@ -2850,8 +2885,16 @@ class ImageTranslator:
                     }
                     if ref.get("chapter_file"):
                         chapters[target_key]["output_file"] = os.path.basename(str(ref.get("chapter_file") or ""))
+                current_status = str(chapters[target_key].get("status") or "").lower().strip()
+                if ref_idx not in completed and ref_idx not in merged and current_status not in ("completed", "merged"):
+                    chapters[target_key]["status"] = "in_progress"
+                    failed = [idx for idx in failed if idx != ref_idx]
+                    if ref_idx not in in_progress:
+                        in_progress.append(ref_idx)
                 chapters[target_key]["ocr_progress"] = dict(ocr_progress)
                 chapters[target_key]["last_updated"] = time.time()
+            progress["failed"] = failed
+            progress["in_progress"] = in_progress
 
             tmp_path = None
             try:
@@ -4321,6 +4364,7 @@ class ImageTranslator:
                 "done": 0,
                 "total": total,
                 "reserved_pending": total,
+                "api_started": False,
                 "glossary_ref": glossary_ref,
                 "chapter_file": os.path.basename(str((glossary_ref or {}).get("chapter_file") or getattr(self, "current_chapter_file", "") or "")),
                 "chapter_obj": getattr(self, "current_chapter_obj", None),
@@ -4415,6 +4459,7 @@ class ImageTranslator:
             scope = self._vision_ocr_progress_scope
             if scope.get("cancelled"):
                 return
+            scope["api_started"] = True
             reserved_pending = max(0, int(scope.get("reserved_pending", 0) or 0))
             consume_reserved = min(reserved_pending, units)
             scope["reserved_pending"] = reserved_pending - consume_reserved
@@ -4549,7 +4594,7 @@ class ImageTranslator:
                     print(f"   ⚠️ Vision OCR translation progress update failed: {e}")
             if scope.get("write_glossary"):
                 ref = scope.get("glossary_ref")
-                if ref:
+                if ref and scope.get("api_started"):
                     self.update_vision_ocr_glossary_ocr_progress([ref], done, total)
 
     def _call_vision_api(self, image_data, assistant_prompt, check_stop_fn):
