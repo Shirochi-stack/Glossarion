@@ -9952,6 +9952,19 @@ def run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, c
         return None
 
     output_path = ocr_epub_path_for(input_path)
+    existing_source = (os.getenv("VISION_OCR_SOURCE_EPUB") or "").strip()
+    try:
+        if existing_source and os.path.exists(existing_source) and os.path.abspath(existing_source) == os.path.abspath(output_path):
+            os.environ["GLOSSARY_COMPRESSION_SOURCE_EPUB"] = existing_source
+            os.environ["QA_VISION_OCR_SOURCE_EPUB"] = existing_source
+            print("\n" + "="*50)
+            print("📖 Vision OCR Source EPUB Prepass")
+            print("="*50)
+            print(f"✅ Vision OCR source EPUB already ready: {existing_source}")
+            return existing_source
+    except Exception:
+        pass
+
     chapter_text_by_filename = {}
     chapter_content_count = 0
     total_images = 0
@@ -10566,6 +10579,71 @@ def run_vision_ocr_source_prepass(chapters, image_translator, input_path, output
     if str(input_path or "").lower().endswith(".pdf"):
         return run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, check_stop_fn, progress_manager=progress_manager)
     return run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, check_stop_fn)
+
+
+def _vision_minimal_ocr_glossary_enabled(config=None):
+    """Use the normal GlossaryManager minimal pipeline, but feed it the OCR source file."""
+    mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower()
+    if mode != "minimal":
+        return False
+    output_mode = (getattr(config, "OUTPUT_MODE", None) or os.getenv("OUTPUT_MODE", "")).strip().lower()
+    if output_mode != "vision":
+        return False
+    return os.getenv("VISION_MINIMAL_GLOSSARY_USE_OCR_SOURCE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _coerce_glossary_source_chapters(raw_chapters, source_path):
+    chapters_out = []
+    for idx, item in enumerate(raw_chapters or []):
+        filename = ""
+        body = ""
+        if isinstance(item, dict):
+            body = item.get("body") or item.get("text") or item.get("content") or ""
+            filename = item.get("filename") or item.get("original_filename") or item.get("original_basename") or ""
+        elif isinstance(item, (tuple, list)) and item:
+            body = item[0] if len(item) > 0 else ""
+            filename = item[1] if len(item) > 1 else ""
+        else:
+            body = item
+
+        body = str(body or "").strip()
+        if not body:
+            continue
+        if not filename:
+            ext = ".xhtml" if not str(source_path).lower().endswith(".pdf") else ".txt"
+            filename = f"ocr_chapter_{idx + 1:04d}{ext}"
+        base = os.path.basename(str(filename))
+        chapters_out.append({
+            "num": idx + 1,
+            "actual_chapter_num": idx + 1,
+            "filename": filename,
+            "original_filename": filename,
+            "original_basename": base,
+            "body": body,
+            "file_size": len(body),
+            "source": "vision_ocr_source",
+        })
+    return chapters_out
+
+
+def _load_glossary_chapters_from_ocr_source(source_path, check_stop_fn=None):
+    """Extract text chapters from the generated *_OCR source file for GlossaryManager."""
+    if not source_path or not os.path.exists(source_path):
+        return []
+    source_lower = str(source_path).lower()
+    try:
+        import extract_glossary_from_epub as glossary_extractor
+        if source_lower.endswith(".pdf"):
+            raw_chapters = glossary_extractor._extract_pdf_chapters_for_glossary(source_path, check_stop_fn)
+        elif source_lower.endswith(".epub"):
+            raw_chapters = glossary_extractor.extract_chapters_from_epub(source_path, return_metadata=True)
+        else:
+            with open(source_path, "r", encoding="utf-8", errors="ignore") as f:
+                raw_chapters = [(f.read(), os.path.basename(source_path))]
+        return _coerce_glossary_source_chapters(raw_chapters, source_path)
+    except Exception as e:
+        print(f"⚠️ Failed to load OCR source for glossary generation: {e}")
+        return []
 
 
 def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
