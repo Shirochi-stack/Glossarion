@@ -57,6 +57,37 @@ _BASE_PIXMAP_CACHE_LIMIT = 256
 _BASE_PIXMAP_CACHE: dict[str, QPixmap] = {}
 
 
+def _epub_plain_chapter_text(html: str) -> str:
+    """Return searchable visible text, matching the reader DOM search."""
+    html = html or ''
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        for node in soup(["script", "style", "noscript"]):
+            node.decompose()
+        return soup.get_text(" ", strip=False)
+    except Exception:
+        import html as html_lib
+        cleaned = re.sub(
+            r'<(script|style|noscript)\b[^>]*>.*?</\1>',
+            ' ', html, flags=re.IGNORECASE | re.DOTALL)
+        cleaned = re.sub(r'<[^>]+>', ' ', cleaned)
+        return html_lib.unescape(cleaned)
+
+
+def _epub_search_excerpt(plain: str, start: int, end: int,
+                         radius: int = 60) -> str:
+    left = max(0, start - radius)
+    right = min(len(plain), end + radius)
+    excerpt = plain[left:right]
+    excerpt = re.sub(r"\s+", " ", excerpt).strip()
+    if left > 0:
+        excerpt = "..." + excerpt
+    if right < len(plain):
+        excerpt += "..."
+    return excerpt
+
+
 def _cache_put_bounded(cache: dict, key, value, limit: int) -> None:
     """Insert *key*/*value* into *cache*, evicting the oldest entry if full."""
     try:
@@ -12892,6 +12923,57 @@ class _OverlayMergeThread(QThread):
         self.done.emit(overlaid, images, overlay_applied)
 
 
+class _EpubSearchThread(QThread):
+    """Build the Search EPUB match list away from the Qt UI thread."""
+    results_ready = Signal(int, str, object)
+
+    def __init__(self, search_id: int, query: str, chapters, parent=None):
+        super().__init__(parent)
+        self._search_id = int(search_id)
+        self._query = query or ""
+        self._chapters = list(chapters or [])
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self):
+        query = self._query.strip()
+        if not query:
+            self.results_ready.emit(self._search_id, query, [])
+            return
+        try:
+            pattern = re.compile(re.escape(query), re.IGNORECASE)
+        except re.error:
+            self.results_ready.emit(self._search_id, query, [])
+            return
+
+        matches = []
+        total = 0
+        for chapter_idx, (title, html) in enumerate(self._chapters):
+            if self._cancelled:
+                return
+            plain = _epub_plain_chapter_text(html)
+            local_occurrence = 0
+            display_title = title or f"Chapter {chapter_idx + 1}"
+            for match in pattern.finditer(plain):
+                if self._cancelled:
+                    return
+                matches.append({
+                    "chapter_idx": chapter_idx,
+                    "local_occurrence": local_occurrence,
+                    "global_occurrence": total,
+                    "text": query,
+                    "title": display_title,
+                    "excerpt": _epub_search_excerpt(
+                        plain, match.start(), match.end()),
+                })
+                total += 1
+                local_occurrence += 1
+        if not self._cancelled:
+            self.results_ready.emit(self._search_id, query, matches)
+
+
 class _EpubLoaderThread(QThread):
     """Load the EPUB in a background thread and write result to cache.
 
@@ -13778,6 +13860,18 @@ class EpubReaderDialog(QDialog):
         self._search_bar.textChanged.connect(self._on_search_text_changed)
         self._search_bar.returnPressed.connect(self._on_search_next)
         self._search_chapter_idx = 0  # track which chapter we last searched
+        self._search_dialog_generation = 0
+        self._search_workers = []
+        self._search_pending_render_rows = []
+        self._search_pending_render_query = ""
+        self._search_debounce_timer = QTimer(self)
+        self._search_debounce_timer.setSingleShot(True)
+        self._search_debounce_timer.timeout.connect(
+            self._start_search_dialog_worker)
+        self._search_render_timer = QTimer(self)
+        self._search_render_timer.setInterval(0)
+        self._search_render_timer.timeout.connect(
+            self._render_search_result_batch)
         root.addWidget(self._search_bar)
 
         self._apply_reader_style()
@@ -14520,14 +14614,14 @@ class EpubReaderDialog(QDialog):
         """)
 
     def _toggle_search(self):
-        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            self._close_search()
-            return
         self._show_search_dialog()
 
     def _close_search(self):
         self._search_bar.hide()
         self._search_bar.clear()
+        self._search_dialog_generation = (
+            int(getattr(self, "_search_dialog_generation", 0) or 0) + 1)
+        self._cancel_search_dialog_workers()
         dlg = getattr(self, "_search_dialog", None)
         if dlg is not None:
             try:
@@ -14556,11 +14650,7 @@ class EpubReaderDialog(QDialog):
         self._reader.findText(text)
 
     def _show_search_dialog(self):
-        """Open the scroll-mode search dialog with all EPUB matches."""
-        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            self._close_search()
-            return
-
+        """Open the search dialog with all EPUB matches."""
         dlg = getattr(self, "_search_dialog", None)
         if dlg is None:
             dlg = QDialog(self)
@@ -14584,7 +14674,7 @@ class EpubReaderDialog(QDialog):
             layout.addWidget(results, 1)
 
             close_btn = QPushButton("Close")
-            close_btn.clicked.connect(dlg.hide)
+            close_btn.clicked.connect(self._close_search)
             layout.addWidget(close_btn)
 
             query.textChanged.connect(self._populate_search_results)
@@ -14605,53 +14695,180 @@ class EpubReaderDialog(QDialog):
             self._populate_search_results(query.text())
 
     def _search_excerpt(self, plain: str, start: int, end: int, radius: int = 60) -> str:
-        left = max(0, start - radius)
-        right = min(len(plain), end + radius)
-        excerpt = plain[left:right]
-        excerpt = re.sub(r"\s+", " ", excerpt).strip()
-        if left > 0:
-            excerpt = "..." + excerpt
-        if right < len(plain):
-            excerpt += "..."
-        return excerpt
+        return _epub_search_excerpt(plain, start, end, radius=radius)
+
+    def _highlight_search_excerpt(self, excerpt: str, query: str) -> str:
+        import html as html_lib
+        safe = html_lib.escape(excerpt or "")
+        needle = html_lib.escape(query or "")
+        if not needle:
+            return safe
+        pattern = re.compile(re.escape(needle), re.IGNORECASE)
+        return pattern.sub(
+            lambda m: (
+                "<span style='background:#ffd966; color:#101010; "
+                "border-radius:2px; padding:0 2px;'>"
+                f"{m.group(0)}</span>"
+            ),
+            safe,
+        )
+
+    def _set_search_result_widget(self, item, title: str, excerpt: str, query: str) -> None:
+        results = getattr(self, "_search_dialog_results", None)
+        if results is None:
+            return
+        label = QLabel()
+        label.setTextFormat(Qt.RichText)
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.NoTextInteraction)
+        try:
+            label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        except Exception:
+            pass
+        import html as html_lib
+        safe_title = html_lib.escape(title or "")
+        highlighted = self._highlight_search_excerpt(excerpt, query)
+        label.setText(
+            f"<div style='color:#ffffff; font-size:10pt;'>{safe_title}</div>"
+            f"<div style='color:#f0f0f0; font-size:10pt;'>{highlighted}</div>"
+        )
+        label.setContentsMargins(4, 4, 4, 4)
+        label.adjustSize()
+        item.setSizeHint(label.sizeHint())
+        results.setItemWidget(item, label)
+
+    def _cancel_search_dialog_workers(self) -> None:
+        timer = getattr(self, "_search_debounce_timer", None)
+        if timer is not None:
+            timer.stop()
+        render_timer = getattr(self, "_search_render_timer", None)
+        if render_timer is not None:
+            render_timer.stop()
+        self._search_pending_render_rows = []
+        self._search_pending_render_query = ""
+        self._search_pending_render_index = 0
+        for worker in list(getattr(self, "_search_workers", []) or []):
+            try:
+                worker.cancel()
+            except Exception:
+                pass
 
     def _populate_search_results(self, text):
         results = getattr(self, "_search_dialog_results", None)
         count_label = getattr(self, "_search_dialog_count", None)
         if results is None or count_label is None:
             return
+        self._search_dialog_generation = (
+            int(getattr(self, "_search_dialog_generation", 0) or 0) + 1)
+        self._cancel_search_dialog_workers()
         results.clear()
         query = (text or "").strip()
         if not query:
             count_label.setText("Type to search")
             return
-        pattern = re.compile(re.escape(query), re.IGNORECASE)
-        total = 0
-        for chapter_idx, (title, html) in enumerate(self._chapters):
-            plain = self._plain_chapter_text(html)
-            local_occurrence = 0
-            for match in pattern.finditer(plain):
-                excerpt = self._search_excerpt(plain, match.start(), match.end())
-                item = QListWidgetItem(
-                    f"{title or f'Chapter {chapter_idx + 1}'}\n{excerpt}"
-                )
-                item.setData(Qt.UserRole, {
-                    "chapter_idx": chapter_idx,
-                    "local_occurrence": local_occurrence,
-                    "global_occurrence": total,
-                    "text": query,
-                })
-                results.addItem(item)
-                total += 1
-                local_occurrence += 1
-        count_label.setText(f"{total} match{'es' if total != 1 else ''}")
+        count_label.setText("Searching...")
+        timer = getattr(self, "_search_debounce_timer", None)
+        if timer is not None:
+            timer.start(180)
+        else:
+            self._start_search_dialog_worker()
+
+    def _start_search_dialog_worker(self):
+        query_widget = getattr(self, "_search_dialog_query", None)
+        count_label = getattr(self, "_search_dialog_count", None)
+        if query_widget is None or count_label is None:
+            return
+        query = query_widget.text().strip()
+        search_id = int(getattr(self, "_search_dialog_generation", 0) or 0)
+        if not query:
+            count_label.setText("Type to search")
+            return
+        worker = _EpubSearchThread(
+            search_id, query, list(getattr(self, "_chapters", []) or []), self)
+        self._search_workers.append(worker)
+        worker.results_ready.connect(self._on_search_dialog_results_ready)
+        worker.finished.connect(lambda w=worker: self._on_search_worker_finished(w))
+        worker.start()
+
+    def _on_search_worker_finished(self, worker):
+        try:
+            self._search_workers.remove(worker)
+        except (AttributeError, ValueError):
+            pass
+        try:
+            worker.deleteLater()
+        except Exception:
+            pass
+
+    @Slot(int, str, object)
+    def _on_search_dialog_results_ready(self, search_id: int, query: str, rows):
+        current_id = int(getattr(self, "_search_dialog_generation", 0) or 0)
+        query_widget = getattr(self, "_search_dialog_query", None)
+        results = getattr(self, "_search_dialog_results", None)
+        count_label = getattr(self, "_search_dialog_count", None)
+        if query_widget is None or results is None or count_label is None:
+            return
+        if search_id != current_id or query != query_widget.text().strip():
+            return
+        rows = list(rows or [])
+        self._search_pending_render_rows = rows
+        self._search_pending_render_query = query
+        self._search_pending_render_index = 0
+        self._search_dialog_total_matches = len(rows)
+        results.clear()
+        total = len(rows)
+        count_label.setText(
+            f"{total} match{'es' if total != 1 else ''}"
+            + (" - rendering..." if total else ""))
+        if total:
+            self._search_render_timer.start()
+
+    def _render_search_result_batch(self):
+        results = getattr(self, "_search_dialog_results", None)
+        count_label = getattr(self, "_search_dialog_count", None)
+        if results is None or count_label is None:
+            return
+        rows = getattr(self, "_search_pending_render_rows", []) or []
+        query = getattr(self, "_search_pending_render_query", "") or ""
+        idx = int(getattr(self, "_search_pending_render_index", 0) or 0)
+        end = min(len(rows), idx + 75)
+        for row in rows[idx:end]:
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, {
+                "chapter_idx": int(row.get("chapter_idx", 0) or 0),
+                "local_occurrence": int(row.get("local_occurrence", 0) or 0),
+                "global_occurrence": int(row.get("global_occurrence", 0) or 0),
+                "text": row.get("text", query),
+            })
+            results.addItem(item)
+            self._set_search_result_widget(
+                item,
+                str(row.get("title", "") or ""),
+                str(row.get("excerpt", "") or ""),
+                query,
+            )
+        self._search_pending_render_index = end
+        total = int(getattr(self, "_search_dialog_total_matches", len(rows)) or 0)
+        if end >= len(rows):
+            self._search_render_timer.stop()
+            count_label.setText(f"{total} match{'es' if total != 1 else ''}")
+        else:
+            count_label.setText(
+                f"{total} match{'es' if total != 1 else ''} - "
+                f"showing {end}")
 
     def _find_next_from_search_dialog(self):
         query = getattr(self, "_search_dialog_query", None)
         if query is None:
             return
         text = query.text().strip()
-        if not text or self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+        if not text:
+            return
+        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            results = getattr(self, "_search_dialog_results", None)
+            item = results.currentItem() if results is not None else None
+            if item is not None:
+                self._activate_search_result(item)
             return
         self._reader.findText(text)
 
@@ -14666,8 +14883,6 @@ class EpubReaderDialog(QDialog):
         if self._layout_mode == LAYOUT_ALL:
             self._select_text_occurrence(self._reader, text, global_occurrence)
             return
-        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            return
         if chapter_idx != self._current_row:
             self._pending_search_text = text
             self._pending_search_index = local_occurrence
@@ -14679,7 +14894,7 @@ class EpubReaderDialog(QDialog):
             self._select_text_occurrence(self._reader, text, local_occurrence)
 
     def _select_text_occurrence(self, browser, text: str, occurrence: int = 0):
-        """Select and scroll to a concrete text occurrence in scroll layouts."""
+        """Select a concrete text occurrence and align the active layout."""
         if not _HAS_WEBENGINE or not text:
             return
         try:
@@ -14692,7 +14907,7 @@ class EpubReaderDialog(QDialog):
   var query = {needle};
   var wanted = {wanted};
   var root = document.getElementById('content') || document.body;
-  if (!query || !root) return false;
+  if (!query || !root) return {{found: false}};
   var lowerQuery = query.toLocaleLowerCase();
   var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {{
     acceptNode: function(node) {{
@@ -14720,34 +14935,61 @@ class EpubReaderDialog(QDialog):
         sel.removeAllRanges();
         sel.addRange(range);
         var rect = range.getBoundingClientRect();
+        var columns = document.getElementById('columns');
+        if (columns) {{
+          var w = (typeof _PAGE_W !== 'undefined' && _PAGE_W) ? _PAGE_W : Math.floor(window.innerWidth);
+          var oldTransform = columns.style.transform;
+          var oldTransition = columns.style.transition;
+          columns.style.transition = 'none';
+          columns.style.transform = 'translate3d(0, 0, 0)';
+          void columns.offsetHeight;
+          rect = range.getBoundingClientRect();
+          var colRect = columns.getBoundingClientRect();
+          columns.style.transform = oldTransform;
+          columns.style.transition = oldTransition || 'none';
+          return {{
+            found: true,
+            page: Math.max(0, Math.floor((rect.left - colRect.left) / Math.max(1, w)))
+          }};
+        }}
         window.scrollBy({{ top: rect.top - Math.floor(window.innerHeight * 0.25), left: 0, behavior: 'smooth' }});
-        return true;
+        return {{found: true}};
       }}
       seen += 1;
       pos += Math.max(1, query.length);
     }}
   }}
-  return false;
+  return {{found: false}};
 }})();"""
-        browser.page().runJavaScript(js)
+        def _after_select(result):
+            if not isinstance(result, dict) or not result.get("found"):
+                return
+            page = result.get("page", None)
+            if page is None or self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+                return
+            try:
+                page_num = int(page)
+            except (TypeError, ValueError):
+                return
+            if self._layout_mode == LAYOUT_DOUBLE:
+                page_num = max(0, page_num - (page_num % 2))
+            self._current_page = max(0, page_num)
+            if self._layout_mode == LAYOUT_SINGLE:
+                self._js_scroll_to(self._reader, self._current_page, animate=False)
+            else:
+                self._js_scroll_to(self._reader_left, self._current_page, animate=False)
+                self._js_scroll_to(self._reader_right, self._current_page + 1, animate=False)
+                try:
+                    if browser is self._reader_left:
+                        self._reader_right.page().runJavaScript(js)
+                except Exception:
+                    pass
+            self._update_nav_buttons()
+
+        browser.page().runJavaScript(js, _after_select)
 
     def _plain_chapter_text(self, html: str) -> str:
-        """Return searchable visible text, matching the reader DOM search."""
-        html = html or ''
-        try:
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html, "html.parser")
-            for node in soup(["script", "style", "noscript"]):
-                node.decompose()
-            return soup.get_text(" ", strip=False)
-        except Exception:
-            import html as html_lib
-            import re
-            cleaned = re.sub(
-                r'<(script|style|noscript)\b[^>]*>.*?</\1>',
-                ' ', html, flags=re.IGNORECASE | re.DOTALL)
-            cleaned = re.sub(r'<[^>]+>', ' ', cleaned)
-            return html_lib.unescape(cleaned)
+        return _epub_plain_chapter_text(html)
 
     def _count_chapter_matches(self, chapter_idx: int, text: str) -> int:
         if not text or chapter_idx < 0 or chapter_idx >= len(self._chapters):
@@ -14983,8 +15225,6 @@ class EpubReaderDialog(QDialog):
     def _on_layout_changed(self, index):
         modes = [LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_SCROLL, LAYOUT_ALL]
         self._layout_mode = modes[index] if index < len(modes) else LAYOUT_SINGLE
-        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            self._close_search()
         self._current_page = 0
         self._loaded_chapter = -1  # force re-render on layout change
         self._chapter_page_cache.clear()
@@ -15330,8 +15570,6 @@ class EpubReaderDialog(QDialog):
         occurrence = int(getattr(self, '_pending_search_index', 0) or 0)
         self._pending_search_index = 0
         self._search_match_index = occurrence
-        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            return
         self._select_text_occurrence(browser, text, occurrence)
 
     def _finalize_single_page(self):
@@ -15568,6 +15806,14 @@ class EpubReaderDialog(QDialog):
                 pass
             try:
                 overlay_thread.quit()
+            except Exception:
+                pass
+        self._search_dialog_generation = (
+            int(getattr(self, "_search_dialog_generation", 0) or 0) + 1)
+        self._cancel_search_dialog_workers()
+        for worker in list(getattr(self, "_search_workers", []) or []):
+            try:
+                worker.wait(500)
             except Exception:
                 pass
         _persist_config_via_parent(self)
