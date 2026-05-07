@@ -3232,7 +3232,7 @@ class RetranslationMixin:
             status_label = status_labels.get(status, status)
             chapter_info = info.get('info') or info.get('progress_entry') or {}
             ocr_progress = chapter_info.get('ocr_progress') if isinstance(chapter_info, dict) else None
-            if isinstance(ocr_progress, dict):
+            if status == 'in_progress' and isinstance(ocr_progress, dict):
                 try:
                     ocr_done = int(ocr_progress.get('done', 0))
                     ocr_total = int(ocr_progress.get('total', 0))
@@ -5524,8 +5524,12 @@ class RetranslationMixin:
                 
                 if not is_merged_chapter:
                     info['status'] = 'completed'
+                    info.pop('info', None)
+                    info.pop('progress_entry', None)
             else:
                 info['status'] = 'not_translated'
+                info.pop('info', None)
+                info.pop('progress_entry', None)
     
     def _update_listbox_display(self, data):
         """Update the listbox display with current chapter information"""
@@ -5594,7 +5598,7 @@ class RetranslationMixin:
             status_label = status_labels.get(status, status)
             chapter_info = info.get('info') or info.get('progress_entry') or {}
             ocr_progress = chapter_info.get('ocr_progress') if isinstance(chapter_info, dict) else None
-            if isinstance(ocr_progress, dict):
+            if status == 'in_progress' and isinstance(ocr_progress, dict):
                 try:
                     ocr_done = int(ocr_progress.get('done', 0))
                     ocr_total = int(ocr_progress.get('total', 0))

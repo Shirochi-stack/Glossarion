@@ -3130,9 +3130,17 @@ class AsyncProcessingDialog:
         """Prepare environment variables from GUI settings"""
         def _val(obj, default=None):
             try:
+                if hasattr(obj, "isChecked"):
+                    return obj.isChecked()
                 return obj.get()
             except Exception:
                 return obj if obj is not None else default
+
+        def _bool_val(obj, default=False):
+            value = _val(obj, default)
+            if isinstance(value, str):
+                return value.strip().lower() in ("1", "true", "yes", "on")
+            return bool(value)
 
         def _text(widget, default=""):
             if widget is None:
@@ -3356,6 +3364,8 @@ class AsyncProcessingDialog:
         env_vars['IMAGE_CHUNK_OVERLAP_PERCENT'] = _val(getattr(self.gui, 'image_chunk_overlap_var', None), 3)
         env_vars['IMAGE_CHUNK_MIN_OVERLAP_PIXELS'] = _val(getattr(self.gui, 'image_chunk_min_overlap_pixels_var', None), 80)
         env_vars['IMAGE_SMART_CHUNKING'] = "1" if _val(getattr(self.gui, 'image_smart_chunking_var', None), True) else "0"
+        env_vars['VISION_OCR_BATCH_TRANSLATION'] = "1" if _bool_val(getattr(self.gui, 'vision_ocr_batch_translation_var', None), self.gui.config.get('vision_ocr_batch_translation', True)) else "0"
+        env_vars['VISION_OCR_BATCH_SIZE'] = str(_val(getattr(self.gui, 'vision_ocr_batch_size_var', None), self.gui.config.get('vision_ocr_batch_size', '10')))
         env_vars['VISION_OCR_FUZZY_CHUNK_DEDUPE'] = "1" if _val(getattr(self.gui, 'vision_ocr_fuzzy_chunk_dedupe_var', None), False) else "0"
         env_vars['HIDE_IMAGE_TRANSLATION_LABEL'] = "1" if _val(self.gui.hide_image_translation_label_var, False) else "0"
         output_mode = self.gui._get_output_mode() if hasattr(self.gui, '_get_output_mode') else _val(getattr(self.gui, 'output_mode_var', 'text'), 'text')

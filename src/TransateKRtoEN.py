@@ -2337,7 +2337,21 @@ class ProgressManager:
 
         chapter_info.setdefault("actual_num", actual_num)
         chapter_info.setdefault("chapter_num", actual_num)
-        chapter_info.setdefault("status", "in_progress")
+        existing_status = str(chapter_info.get("status", "") or "")
+        if existing_status.lower() == "in_progress":
+            previous_status = chapter_info.get("previous_status")
+            previous_entry = chapter_info.get("previous_progress_entry")
+        else:
+            previous_status = existing_status or "not_translated"
+            previous_entry = {
+                k: v for k, v in chapter_info.items()
+                if k not in ("previous_status", "previous_progress_entry", "previous_status_unknown")
+            } if chapter_info and previous_status.lower() not in ("not_translated", "not translated", "not_completed") else None
+        chapter_info["status"] = "in_progress"
+        if previous_status and previous_status.lower() not in ("in_progress", "not_translated", "not translated", "not_completed"):
+            chapter_info["previous_status"] = previous_status
+            if isinstance(previous_entry, dict):
+                chapter_info["previous_progress_entry"] = previous_entry
         chapter_info["ocr_progress"] = {
             "done": min(done, total) if total else done,
             "total": total,
@@ -5050,6 +5064,12 @@ class BatchTranslationProcessor:
             if has_images and self.image_translator and self.config.ENABLE_IMAGE_TRANSLATION:
                 print(f"🖼️ Processing images for Chapter {actual_num}...")
                 self.image_translator.set_current_chapter(actual_num)
+                _set_image_translator_chapter_progress_context(
+                    self.image_translator,
+                    chapter,
+                    idx,
+                    actual_num,
+                )
                 chapter_body, image_translations = process_chapter_images(
                     chapter_body, 
                     actual_num, 
@@ -8526,8 +8546,8 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
     if vision_ocr_mode:
         image_translator.begin_vision_ocr_progress(
             actual_num,
-            len(images),
-            glossary_ref=_vision_ocr_progress_ref_for_actual(actual_num),
+            0,
+            glossary_ref=getattr(image_translator, "current_chapter_progress_ref", None) or _vision_ocr_progress_ref_for_actual(actual_num),
             write_translation=True,
             write_glossary=_vision_ocr_translation_glossary_progress_enabled(),
         )
@@ -8601,8 +8621,6 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
                 else:
                     print(f"   ❌ Image not found in any location for: {img_src}")
                     print(f"   Tried: {possible_paths}")
-                    if vision_ocr_mode:
-                        image_translator.mark_vision_ocr_progress_done()
                     continue
         
         img_path = os.path.normpath(img_path)
@@ -8621,8 +8639,6 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
             if os.path.exists(image_translator.images_dir):
                 files = os.listdir(image_translator.images_dir)
                 print(f"   📁 Files in images dir: {files[:5]}...")
-            if vision_ocr_mode:
-                image_translator.mark_vision_ocr_progress_done()
             continue
         
         print(f"   🔍 Processing image {idx}/{len(images)}: {os.path.basename(img_path)}")
@@ -8879,7 +8895,6 @@ def _process_chapter_images_vision_ocr_combined(
         img_path = _resolve_chapter_image_path(img_src, image_translator, actual_num, idx)
         if not img_path:
             print(f"   Image not found for combined OCR: {img_src}")
-            image_translator.mark_vision_ocr_progress_done()
             continue
 
         if os.path.basename(str(img_src or "")) != os.path.basename(str(img_path or "")):
@@ -8914,7 +8929,6 @@ def _process_chapter_images_vision_ocr_combined(
             chapter_num=actual_num,
         )
         if disk_ocr:
-            image_translator.mark_vision_ocr_progress_done()
             return idx, img_info, img_src, disk_ocr
 
         processed_path = None
@@ -9299,12 +9313,12 @@ def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actua
         return ""
 
     chapter_ocr_parts = []
-    print(f"🔎 Vision glossary prepass: OCRing {len(images)} image(s) in {_chapter_term()} {actual_num}")
+    print(f"🔎 Vision glossary prepass: OCRing {len(images)} image(s) in chapter {actual_num}")
     image_translator.begin_vision_ocr_progress(
         actual_num,
-        len(images),
+        0,
         glossary_ref=progress_ref or _vision_ocr_progress_ref_for_actual(actual_num),
-        write_translation=False,
+        write_translation=True,
         write_glossary=True,
     )
 
@@ -9317,7 +9331,6 @@ def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actua
         img_path = _resolve_chapter_image_path(img_src, image_translator, actual_num, idx)
         if not img_path:
             print(f"   ⚠️ Vision glossary OCR image not found: {img_src}")
-            image_translator.mark_vision_ocr_progress_done()
             continue
 
         context = ""
@@ -9356,6 +9369,19 @@ def _vision_glossary_progress_ref(chapter, chapter_idx, actual_num):
         "chapter_num": actual_num,
         "chapter_file": chapter_file,
     }
+
+
+def _set_image_translator_chapter_progress_context(image_translator, chapter, chapter_idx, actual_num):
+    if not image_translator:
+        return None
+    progress_ref = _vision_glossary_progress_ref(chapter or {}, chapter_idx, actual_num)
+    chapter_file = progress_ref.get("chapter_file", "")
+    image_translator.current_chapter_progress_ref = progress_ref
+    image_translator.current_chapter_file = chapter_file
+    image_translator.current_chapter_obj = chapter or {}
+    os.environ["CURRENT_CHAPTER_FILE"] = str(chapter_file or "")
+    os.environ["CURRENT_CHAPTER_NUM"] = str(actual_num)
+    return progress_ref
 
 
 def _vision_ocr_progress_ref_for_actual(actual_num, chapter_file=""):
@@ -9416,6 +9442,12 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             continue
 
         image_translator.current_chapter_num = actual_num
+        progress_ref = _set_image_translator_chapter_progress_context(
+            image_translator,
+            chapter,
+            idx,
+            actual_num,
+        ) or progress_ref
         image_translator.update_vision_ocr_glossary_progress([progress_ref], "in_progress")
         chapter_ocr = ocr_chapter_images_for_vision_glossary(
             body,
@@ -15448,6 +15480,12 @@ def main(log_callback=None, stop_callback=None):
                     image_processing_attempted = True
                     print(f"🖼️ Translating {c.get('image_count', 0)} images...")
                     image_translator.set_current_chapter(actual_num)
+                    _set_image_translator_chapter_progress_context(
+                        image_translator,
+                        c,
+                        idx,
+                        actual_num,
+                    )
                     
                     translated_html, image_translations = process_chapter_images(
                         c["body"], 
@@ -15589,6 +15627,12 @@ def main(log_callback=None, stop_callback=None):
                     print(f"[DEBUG] Has h2 tags: {'<h2>' in c['body']}")
                     
                     image_translator.set_current_chapter(actual_num)
+                    _set_image_translator_chapter_progress_context(
+                        image_translator,
+                        c,
+                        idx,
+                        actual_num,
+                    )
                     
                     # Store the original body before processing
                     original_body = c["body"]

@@ -14418,6 +14418,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
             glossary_request_merging_enabled = '1' if self.config.get('glossary_request_merging_enabled', False) else '0'
             glossary_enable_chapter_split = '1' if self.config.get('glossary_enable_chapter_split', False) else '0'
 
+        def _bool_setting(value, default=False):
+            if value is None:
+                return bool(default)
+            if hasattr(value, 'isChecked'):
+                return bool(value.isChecked())
+            if hasattr(value, 'get'):
+                try:
+                    return _bool_setting(value.get(), default)
+                except Exception:
+                    return bool(default)
+            if isinstance(value, str):
+                return value.strip().lower() in ('1', 'true', 'yes', 'on')
+            return bool(value)
+
         return {
             'EPUB_PATH': epub_path,
             'MODEL': self.model_var,
@@ -14512,7 +14526,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'VISION_OCR_USER_PROMPT': str(getattr(self, 'vision_ocr_user_prompt', self.config.get('vision_ocr_user_prompt', ''))),
             'VISION_OCR_COMBINED_CONTEXT_PROMPT': str(getattr(self, 'vision_ocr_combined_context_prompt', self.config.get('vision_ocr_combined_context_prompt', ''))),
             'VISION_OCR_TRANSLATION_USER_PROMPT': str(getattr(self, 'vision_ocr_translation_user_prompt', self.config.get('vision_ocr_translation_user_prompt', ''))),
-            'VISION_OCR_BATCH_TRANSLATION': '1' if getattr(self, 'vision_ocr_batch_translation_var', self.config.get('vision_ocr_batch_translation', True)) else '0',
+            'VISION_OCR_BATCH_TRANSLATION': '1' if _bool_setting(getattr(self, 'vision_ocr_batch_translation_var', None), self.config.get('vision_ocr_batch_translation', True)) else '0',
             'VISION_OCR_BATCH_SIZE': str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '10'))),
             'ENABLE_REFINEMENT_OUTPUT_MODE': "1" if output_mode == 'refinement' else "0",
             'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var else "0",
@@ -23349,6 +23363,20 @@ Important rules:
             else:
                 env_glossary_merging_enabled = '1' if self.config.get('glossary_request_merging_enabled', False) else '0'
                 env_glossary_chapter_split = '1' if self.config.get('glossary_enable_chapter_split', False) else '0'
+
+            def _bool_value(value, default=False):
+                if value is None:
+                    return bool(default)
+                if hasattr(value, 'isChecked'):
+                    return bool(value.isChecked())
+                if hasattr(value, 'get'):
+                    try:
+                        return _bool_value(value.get(), default)
+                    except Exception:
+                        return bool(default)
+                if isinstance(value, str):
+                    return value.strip().lower() in ('1', 'true', 'yes', 'on')
+                return bool(value)
             
             extra_env_mappings = [
                 # Rolling summary
@@ -23454,7 +23482,7 @@ Important rules:
                 ('VISION_OCR_FIRST', '1' if output_mode == 'vision' else '0'),
                 ('VISION_OCR_PROMPT', str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', '')))),
                 ('VISION_OCR_USER_PROMPT', str(getattr(self, 'vision_ocr_user_prompt', self.config.get('vision_ocr_user_prompt', '')))),
-                ('VISION_OCR_BATCH_TRANSLATION', '1' if getattr(self, 'vision_ocr_batch_translation_var', True) else '0'),
+                ('VISION_OCR_BATCH_TRANSLATION', '1' if _bool_value(getattr(self, 'vision_ocr_batch_translation_var', True)) else '0'),
                 ('VISION_OCR_BATCH_SIZE', str(getattr(self, 'vision_ocr_batch_size_var', '10'))),
                 ('ENABLE_IMAGE_OUTPUT_MODE', self._get_allowed_image_output_mode()),
                 ('ENABLE_VIDEO_OUTPUT_MODE', self._get_allowed_video_output_mode()),
