@@ -2285,7 +2285,10 @@ class EPUBCompiler:
             if disable_gallery:
                 self.log("📷 Image gallery disabled by user preference")
             else:
-                gallery_images = [img for img in processed_images.values() if img != cover_file_for_generated_page]
+                gallery_images = self._filter_gallery_images_for_ocr(
+                    processed_images,
+                    cover_file_for_generated_page,
+                )
                 if gallery_images:
                     self.log(f"📷 Creating image gallery with {len(gallery_images)} images...")
                     gallery_page = self._create_gallery_page(book, gallery_images, css_items, metadata)
@@ -5019,6 +5022,130 @@ img {
         except Exception as e:
             self.log(f"[WARNING] Failed to process images in chapter: {e}")
             return xhtml_content, []
+
+    @staticmethod
+    def _gallery_ocr_key(name: str) -> str:
+        """Normalize an image/OCR filename stem for gallery OCR matching."""
+        stem = os.path.splitext(os.path.basename(str(name or "")))[0].lower()
+        return re.sub(r'[^a-z0-9]+', '_', stem).strip('_')
+
+    @staticmethod
+    def _gallery_ocr_is_no_response(text) -> bool:
+        """Return True when Vision OCR marked an image as a real illustration."""
+        if text is None:
+            return False
+        normalized = str(text).strip()
+        normalized = re.sub(r'^[\s"`\'*_~]+|[\s"`\'*_~.。!！]+$', '', normalized).strip()
+        return normalized.lower() == "no"
+
+    def _gallery_ocr_candidates_for_image(self, original_name: str, safe_name: str, rename_map: Dict[str, str]) -> List[str]:
+        candidates = set()
+        for name in (original_name, safe_name):
+            key = self._gallery_ocr_key(name)
+            if key:
+                candidates.add(key)
+
+            base = os.path.basename(str(name or ""))
+            for src, dst in rename_map.items():
+                src_base = os.path.basename(str(src or ""))
+                dst_base = os.path.basename(str(dst or ""))
+                if base and base in (src_base, dst_base):
+                    for mapped in (src_base, dst_base):
+                        mapped_key = self._gallery_ocr_key(mapped)
+                        if mapped_key:
+                            candidates.add(mapped_key)
+
+        return sorted(candidates, key=len, reverse=True)
+
+    def _load_gallery_ocr_classifications(self) -> Dict[str, List[bool]]:
+        """Load cached per-image OCR results from OCR/single and OCR/chunks."""
+        classifications: Dict[str, List[bool]] = {}
+        ocr_dir = os.path.join(self.output_dir, "OCR")
+        if not os.path.isdir(ocr_dir):
+            return classifications
+
+        for kind in ("single", "chunks"):
+            target_dir = os.path.join(ocr_dir, kind)
+            if not os.path.isdir(target_dir):
+                continue
+            try:
+                filenames = os.listdir(target_dir)
+            except Exception:
+                continue
+            for filename in filenames:
+                if not filename.lower().endswith(".txt"):
+                    continue
+                path = os.path.join(target_dir, filename)
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        text = f.read()
+                except Exception:
+                    continue
+                if not text.strip():
+                    continue
+
+                key = self._gallery_ocr_key(filename)
+                key = re.sub(r'_chunk_\d+$', '', key)
+                if key:
+                    classifications.setdefault(key, []).append(self._gallery_ocr_is_no_response(text))
+
+        return classifications
+
+    def _load_gallery_image_rename_map(self) -> Dict[str, str]:
+        rename_map_path = os.path.join(self.output_dir, "image_rename_map.json")
+        if not os.path.exists(rename_map_path):
+            return {}
+        try:
+            with open(rename_map_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _gallery_ocr_match_values(self, image_keys: List[str], classifications: Dict[str, List[bool]]) -> List[bool]:
+        values: List[bool] = []
+        for ocr_key, ocr_values in classifications.items():
+            for image_key in image_keys:
+                if not image_key or len(image_key) < 4:
+                    continue
+                if ocr_key == image_key or ocr_key.endswith(f"_{image_key}"):
+                    values.extend(ocr_values)
+                    break
+        return values
+
+    def _filter_gallery_images_for_ocr(self, processed_images: Dict[str, str], cover_file: Optional[str]) -> List[str]:
+        """Exclude OCR text-page images from the optional EPUB image gallery."""
+        gallery_items = [(original, safe) for original, safe in processed_images.items() if safe != cover_file]
+        classifications = self._load_gallery_ocr_classifications()
+        if not classifications:
+            return [safe for _original, safe in gallery_items]
+
+        rename_map = self._load_gallery_image_rename_map()
+        gallery_images: List[str] = []
+        excluded_text = 0
+        kept_no = 0
+
+        for original, safe in gallery_items:
+            image_keys = self._gallery_ocr_candidates_for_image(original, safe, rename_map)
+            ocr_values = self._gallery_ocr_match_values(image_keys, classifications)
+            if not ocr_values:
+                gallery_images.append(safe)
+                continue
+
+            if any(value is False for value in ocr_values):
+                excluded_text += 1
+                continue
+
+            kept_no += 1
+            gallery_images.append(safe)
+
+        if excluded_text or kept_no:
+            self.log(
+                f"Gallery OCR filter: excluded {excluded_text} OCR text image(s), "
+                f"kept {kept_no} OCR illustration image(s)"
+            )
+
+        return gallery_images
     
     def _create_gallery_page(self, book: epub.EpubBook, images: List[str],
                             css_items: List[epub.EpubItem], metadata: dict) -> epub.EpubHtml:
