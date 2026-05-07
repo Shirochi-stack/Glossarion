@@ -2586,6 +2586,48 @@ class ProgressManager:
                 if not ext:
                     break
             return base.lower()
+
+        def _existing_output_match(output_file=None, entry=None):
+            """Find an existing translated output while tolerating response_/extension toggles."""
+            candidates = []
+            if output_file:
+                candidates.append(output_file)
+            if isinstance(entry, dict):
+                for key in ("output_file",):
+                    if entry.get(key):
+                        candidates.append(entry[key])
+                previous = entry.get("previous_progress_entry")
+                if isinstance(previous, dict) and previous.get("output_file"):
+                    candidates.append(previous["output_file"])
+            if chapter_obj:
+                try:
+                    from TransateKRtoEN import FileUtilities
+                    candidates.append(FileUtilities.create_chapter_filename(chapter_obj, actual_num))
+                except Exception:
+                    pass
+
+            seen = []
+            for cand in candidates:
+                if cand and cand not in seen:
+                    seen.append(cand)
+
+            for cand in seen:
+                path = cand if os.path.isabs(str(cand)) else os.path.join(output_dir, str(cand))
+                if os.path.isfile(path):
+                    return os.path.basename(path)
+
+            expected_norms = {_norm(cand) for cand in seen if cand}
+            expected_norms.discard("")
+            if not expected_norms:
+                return None
+            try:
+                for fname in os.listdir(output_dir):
+                    path = os.path.join(output_dir, fname)
+                    if os.path.isfile(path) and _norm(fname) in expected_norms:
+                        return fname
+            except Exception:
+                return None
+            return None
         
         # If caller passed 0/None, recompute from filename/spine to avoid collapsing to chapter 0
         if (actual_num is None or actual_num <= 0) and chapter_obj:
@@ -2612,6 +2654,33 @@ class ProgressManager:
             if status == "merged":
                 parent_chapter = chapter_info.get("merged_parent_chapter")
                 return False, f"Chapter {actual_num} merged into chapter {parent_chapter}", None
+
+            existing_output = _existing_output_match(chapter_info.get("output_file"), chapter_info)
+            if existing_output and status_l in {
+                "in_progress",
+                "not_translated",
+                "not translated",
+                "not_completed",
+                "not completed",
+                "completed",
+                "completed_empty",
+                "completed_image_only",
+            }:
+                if chapter_info.get("status") != "completed" or chapter_info.get("output_file") != existing_output:
+                    restored_info = {
+                        k: v for k, v in chapter_info.items()
+                        if k not in ("previous_status", "previous_progress_entry", "previous_status_unknown", "ocr_progress")
+                    }
+                    restored_info["actual_num"] = actual_num
+                    restored_info["chapter_num"] = actual_num
+                    restored_info["content_hash"] = content_hash
+                    restored_info["output_file"] = existing_output
+                    restored_info["status"] = "completed"
+                    restored_info["last_updated"] = os.path.getmtime(os.path.join(output_dir, existing_output))
+                    restored_info["auto_restored_from_output"] = True
+                    self.prog["chapters"][chapter_key] = restored_info
+                    self.save()
+                return False, f"Chapter {actual_num} already translated: {existing_output}", existing_output
             
             # Completed - check file exists
             if status in ["completed", "completed_empty", "completed_image_only"]:
@@ -2661,6 +2730,18 @@ class ProgressManager:
                         if info.get("output_file"):
                             if os.path.exists(os.path.join(output_dir, info["output_file"])):
                                 return False, f"Chapter {info.get('actual_num', actual_num)} already translated: {info['output_file']}", info["output_file"]
+                    existing_output = _existing_output_match(info.get("output_file"), info)
+                    if existing_output and str(status or "").lower() in ("in_progress", "not_translated", "not translated", "not_completed", "not completed"):
+                        info["output_file"] = existing_output
+                        info["status"] = "completed"
+                        info["last_updated"] = os.path.getmtime(os.path.join(output_dir, existing_output))
+                        info.pop("previous_status", None)
+                        info.pop("previous_progress_entry", None)
+                        info.pop("previous_status_unknown", None)
+                        info.pop("ocr_progress", None)
+                        self.prog["chapters"][k] = info
+                        self.save()
+                        return False, f"Chapter {info.get('actual_num', actual_num)} already translated: {existing_output}", existing_output
                     # If tracked with other status, treat as tracked (will retranslate if non-completed)
                     return True, None, info.get("output_file")
             
@@ -5125,8 +5206,7 @@ class BatchTranslationProcessor:
             has_images = chapter.get('has_images', False) or html_mostly_images
             if has_images and self.image_translator and self.config.ENABLE_IMAGE_TRANSLATION:
                 print(f"🖼️ Processing images for Chapter {actual_num}...")
-                self.image_translator.set_current_chapter(actual_num)
-                _set_image_translator_chapter_progress_context(
+                chapter_image_translator = _chapter_image_translator_for_processing(
                     self.image_translator,
                     chapter,
                     idx,
@@ -5135,10 +5215,12 @@ class BatchTranslationProcessor:
                 chapter_body, image_translations = process_chapter_images(
                     chapter_body, 
                     actual_num, 
-                    self.image_translator,
-                    self.check_stop_fn
+                    chapter_image_translator,
+                    self.check_stop_fn,
+                    chapter_obj=chapter,
+                    chapter_idx=idx,
                 )
-                vision_finish_reason = getattr(self.image_translator, 'last_vision_translation_finish_reason', None)
+                vision_finish_reason = getattr(chapter_image_translator, 'last_vision_translation_finish_reason', None)
                 vision_qa_issues = _vision_finish_reason_qa_issues(vision_finish_reason)
                 if vision_qa_issues:
                     if _vision_should_save_partial_for_qa(vision_qa_issues, self.config):
@@ -8578,7 +8660,7 @@ def retroactive_update_image_references(output_dir, source_dir=None):
 
 
 def process_chapter_images(chapter_html: str, actual_num: int, image_translator: ImageTranslator, 
-                         check_stop_fn=None) -> Tuple[str, Dict[str, str]]:
+                         check_stop_fn=None, chapter_obj=None, chapter_idx=None) -> Tuple[str, Dict[str, str]]:
     """Process and translate images in a chapter"""
     from bs4 import BeautifulSoup
     chapter_html = ContentProcessor.normalize_escaped_image_tags(chapter_html)
@@ -8606,10 +8688,22 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
         images = images[:max_images_per_chapter]
 
     if vision_ocr_mode:
+        progress_ref = None
+        if chapter_obj is not None:
+            progress_ref = _set_image_translator_chapter_progress_context(
+                image_translator,
+                chapter_obj,
+                chapter_idx if chapter_idx is not None else max(0, int(actual_num or 1) - 1),
+                actual_num,
+                update_env=False,
+            )
+        else:
+            image_translator.set_current_chapter(actual_num)
+            progress_ref = getattr(image_translator, "current_chapter_progress_ref", None) or _vision_ocr_progress_ref_for_actual(actual_num)
         image_translator.begin_vision_ocr_progress(
             actual_num,
             0,
-            glossary_ref=getattr(image_translator, "current_chapter_progress_ref", None) or _vision_ocr_progress_ref_for_actual(actual_num),
+            glossary_ref=progress_ref,
             write_translation=True,
             write_glossary=_vision_ocr_translation_glossary_progress_enabled(),
         )
@@ -8978,6 +9072,7 @@ def _process_chapter_images_vision_ocr_combined(
         idx, img_info, img_src, img_path = job
         if _stop_new_ocr_work_requested():
             return idx, img_info, img_src, None
+        image_translator.record_vision_ocr_summary(seen=1)
 
         from PIL import Image
         context = ""
@@ -8992,6 +9087,10 @@ def _process_chapter_images_vision_ocr_combined(
         )
         if disk_ocr:
             image_translator.mark_vision_ocr_progress_cached_done()
+            if getattr(image_translator, "_is_ocr_no_response", lambda text: False)(disk_ocr):
+                image_translator.record_vision_ocr_summary(cache_no_text=1)
+            else:
+                image_translator.record_vision_ocr_summary(cache_hits=1)
             return idx, img_info, img_src, disk_ocr
 
         processed_path = None
@@ -9205,6 +9304,8 @@ def _process_chapter_images_vision_ocr_combined(
             combined_ocr,
             kind="chapters",
             image_basename=f"chapter_{actual_num:03d}_combined_images",
+            image_idx="combined",
+            chapter_num=actual_num,
         )
     except Exception:
         pass
@@ -9230,6 +9331,7 @@ def _process_chapter_images_vision_ocr_combined(
         image_translator.finish_vision_ocr_progress_cancelled()
         return str(soup), {}
 
+    image_translator.current_chapter_num = actual_num
     image_translator.current_image_index = "combined"
     image_translator.finish_vision_ocr_progress_success()
     print(f"   Step 2/2: Translating combined page OCR ({len(combined_ocr)} chars)...")
@@ -9385,6 +9487,7 @@ def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actua
 
     chapter_ocr_parts = []
     print(f"🔎 Vision glossary prepass: OCRing {len(images)} image(s) in chapter {actual_num}")
+    image_translator.set_current_chapter(actual_num)
     image_translator.begin_vision_ocr_progress(
         actual_num,
         0,
@@ -9478,7 +9581,14 @@ def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actua
 
     chapter_ocr = "\n\n".join(part for part in chapter_ocr_parts if part and part.strip()).strip()
     if chapter_ocr:
-        image_translator._save_ocr_text(chapter_ocr, kind="chapters", image_basename=f"chapter_{actual_num:03d}")
+        image_translator._save_ocr_text(
+            chapter_ocr,
+            kind="chapters",
+            image_basename=f"chapter_{actual_num:03d}",
+            chapter_num=actual_num,
+        )
+    if not (check_stop_fn and check_stop_fn()):
+        image_translator.finish_vision_ocr_progress_success()
     return chapter_ocr
 
 
@@ -9510,6 +9620,7 @@ def _set_image_translator_chapter_progress_context(image_translator, chapter, ch
         return None
     progress_ref = _vision_glossary_progress_ref(chapter or {}, chapter_idx, actual_num)
     chapter_file = progress_ref.get("chapter_file", "")
+    image_translator.set_current_chapter(actual_num)
     image_translator.current_chapter_progress_ref = progress_ref
     image_translator.current_chapter_file = chapter_file
     image_translator.current_chapter_obj = chapter or {}
@@ -9527,10 +9638,33 @@ def _clone_image_translator_for_vision_ocr(parent):
     worker._vision_ocr_progress_lock = threading.Lock()
     worker._vision_ocr_progress_write_lock = threading.Lock()
     worker._vision_ocr_progress_scope = None
+    worker._vision_ocr_summary_lock = threading.Lock()
+    worker._vision_ocr_summary = None
     worker._preserve_current_image = False
     worker.last_vision_translation_finish_reason = None
     worker.last_vision_translation_error = None
     return worker
+
+
+def _vision_ocr_mode_enabled():
+    return (
+        os.getenv("OUTPUT_MODE", "").strip().lower() == "vision"
+        and os.getenv("VISION_OCR_FIRST", "auto").strip().lower() not in ("0", "false", "no", "off")
+    )
+
+
+def _chapter_image_translator_for_processing(parent, chapter, chapter_idx, actual_num):
+    if not parent:
+        return None
+    image_translator = _clone_image_translator_for_vision_ocr(parent) if _vision_ocr_mode_enabled() else parent
+    _set_image_translator_chapter_progress_context(
+        image_translator,
+        chapter,
+        chapter_idx,
+        actual_num,
+        update_env=not _vision_ocr_mode_enabled(),
+    )
+    return image_translator
 
 
 def _vision_ocr_progress_ref_for_actual(actual_num, chapter_file=""):
@@ -15851,8 +15985,7 @@ def main(log_callback=None, stop_callback=None):
                 if image_translator and config.ENABLE_IMAGE_TRANSLATION:
                     image_processing_attempted = True
                     print(f"🖼️ Translating {c.get('image_count', 0)} images...")
-                    image_translator.set_current_chapter(actual_num)
-                    _set_image_translator_chapter_progress_context(
+                    chapter_image_translator = _chapter_image_translator_for_processing(
                         image_translator,
                         c,
                         idx,
@@ -15862,11 +15995,13 @@ def main(log_callback=None, stop_callback=None):
                     translated_html, image_translations = process_chapter_images(
                         c["body"], 
                         actual_num,
-                        image_translator,
-                        check_stop
+                        chapter_image_translator,
+                        check_stop,
+                        chapter_obj=c,
+                        chapter_idx=idx,
                     )
 
-                    vision_finish_reason = getattr(image_translator, 'last_vision_translation_finish_reason', None)
+                    vision_finish_reason = getattr(chapter_image_translator, 'last_vision_translation_finish_reason', None)
                     vision_qa_issues = _vision_finish_reason_qa_issues(vision_finish_reason)
                     if vision_qa_issues:
                         fname = FileUtilities.create_chapter_filename(c, actual_num)
@@ -15998,8 +16133,7 @@ def main(log_callback=None, stop_callback=None):
                     print(f"[DEBUG] Has h1 tags: {'<h1>' in c['body']}")
                     print(f"[DEBUG] Has h2 tags: {'<h2>' in c['body']}")
                     
-                    image_translator.set_current_chapter(actual_num)
-                    _set_image_translator_chapter_progress_context(
+                    chapter_image_translator = _chapter_image_translator_for_processing(
                         image_translator,
                         c,
                         idx,
@@ -16016,11 +16150,13 @@ def main(log_callback=None, stop_callback=None):
                     body_with_images, image_translations = process_chapter_images(
                         c["body"], 
                         actual_num,
-                        image_translator,
-                        check_stop
+                        chapter_image_translator,
+                        check_stop,
+                        chapter_obj=c,
+                        chapter_idx=idx,
                     )
 
-                    vision_finish_reason = getattr(image_translator, 'last_vision_translation_finish_reason', None)
+                    vision_finish_reason = getattr(chapter_image_translator, 'last_vision_translation_finish_reason', None)
                     vision_qa_issues = _vision_finish_reason_qa_issues(vision_finish_reason)
                     if vision_qa_issues:
                         fname = FileUtilities.create_chapter_filename(c, actual_num)

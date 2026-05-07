@@ -347,6 +347,8 @@ class ImageTranslator:
         self._vision_ocr_progress_lock = threading.Lock()
         self._vision_ocr_progress_write_lock = threading.Lock()
         self._vision_ocr_progress_scope = None
+        self._vision_ocr_summary_lock = threading.Lock()
+        self._vision_ocr_summary = None
         self._ensure_ocr_cache_valid()
         
         # DEBUG: Log the actual max tokens being used for image translation
@@ -1870,7 +1872,7 @@ class ImageTranslator:
             effective_image_basename = image_basename or os.path.basename(image_path)
             self.current_image_path = image_path
             self._preserve_current_image = False
-            print(f"   🔎 ocr_image called for: {image_path}")
+            self.record_vision_ocr_summary(seen=1)
             if check_stop_fn and check_stop_fn():
                 self.finish_vision_ocr_progress_cancelled()
                 return None
@@ -1888,9 +1890,9 @@ class ImageTranslator:
                 self.mark_vision_ocr_progress_cached_done()
                 if self._is_ocr_no_response(disk_ocr):
                     self._preserve_current_image = True
-                    print("   Skipping OCR image; cached OCR/single says cover/illustration")
+                    self.record_vision_ocr_summary(cache_no_text=1)
                     return None
-                print(f"   Skipping OCR image; found existing OCR/single file ({len(disk_ocr.strip())} chars)")
+                self.record_vision_ocr_summary(cache_hits=1)
                 return disk_ocr.strip()
 
             compressed_path = image_path
@@ -1928,7 +1930,7 @@ class ImageTranslator:
                 )
                 if self._is_ocr_no_response(ocr_text):
                     self._preserve_current_image = True
-                    print("   OCR marked image as cover/illustration; skipping OCR text use")
+                    self.record_vision_ocr_summary(no_text=1)
                     return None
                 return ocr_text
         except Exception as e:
@@ -2053,6 +2055,7 @@ class ImageTranslator:
                 chapter_context.update({"chunk": chunk_idx, "total_chunks": total_chunks})
 
         self.mark_vision_ocr_progress_started()
+        self.record_vision_ocr_summary(api_requests=1)
         try:
             ocr_response, finish_reason = send_image_with_interrupt(
                 self.client,
@@ -3869,7 +3872,57 @@ class ImageTranslator:
                 "write_translation": bool(write_translation),
                 "write_glossary": bool(write_glossary),
             }
+        self.begin_vision_ocr_summary(chapter_num)
         self._write_vision_ocr_progress()
+
+    def begin_vision_ocr_summary(self, chapter_num=None):
+        with self._vision_ocr_summary_lock:
+            self._vision_ocr_summary = {
+                "chapter_num": chapter_num,
+                "seen": 0,
+                "cache_hits": 0,
+                "cache_no_text": 0,
+                "no_text": 0,
+                "api_requests": 0,
+            }
+
+    def record_vision_ocr_summary(self, **increments):
+        with self._vision_ocr_summary_lock:
+            if self._vision_ocr_summary is None:
+                return
+            for key, value in increments.items():
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    value = 0
+                if value:
+                    self._vision_ocr_summary[key] = int(self._vision_ocr_summary.get(key, 0) or 0) + value
+
+    def _print_vision_ocr_summary(self, status="complete"):
+        with self._vision_ocr_summary_lock:
+            summary = dict(self._vision_ocr_summary or {})
+        if not summary:
+            return
+        seen = int(summary.get("seen", 0) or 0)
+        cache_hits = int(summary.get("cache_hits", 0) or 0)
+        cache_no_text = int(summary.get("cache_no_text", 0) or 0)
+        no_text = int(summary.get("no_text", 0) or 0)
+        api_requests = int(summary.get("api_requests", 0) or 0)
+        if not any((seen, cache_hits, cache_no_text, no_text, api_requests)):
+            return
+        chapter_num = summary.get("chapter_num")
+        label = f"Chapter {chapter_num}" if chapter_num is not None else "chapter"
+        status_label = "cancelled" if status == "cancelled" else "complete"
+        parts = [f"{seen} image(s) checked"]
+        if cache_hits:
+            parts.append(f"{cache_hits} cached OCR hit(s)")
+        if cache_no_text:
+            parts.append(f"{cache_no_text} cached cover/illustration skip(s)")
+        if no_text:
+            parts.append(f"{no_text} cover/illustration skip(s)")
+        if api_requests:
+            parts.append(f"{api_requests} new OCR request(s)")
+        print(f"   Vision OCR summary for {label} ({status_label}): {', '.join(parts)}")
 
     def reserve_vision_ocr_progress_units(self, units=1):
         """Reserve known OCR work before cached/fresh requests are split."""
@@ -3983,6 +4036,7 @@ class ImageTranslator:
                 if ref:
                     self.update_vision_ocr_glossary_progress([ref], "failed")
                     self.update_vision_ocr_glossary_ocr_progress([ref], done, total)
+        self._print_vision_ocr_summary(status="cancelled")
         self.clear_vision_ocr_progress()
 
     def finish_vision_ocr_progress_success(self):
@@ -4003,11 +4057,14 @@ class ImageTranslator:
                 should_write = False
         if should_write:
             self._write_vision_ocr_progress()
+        self._print_vision_ocr_summary(status="complete")
         self.clear_vision_ocr_progress()
 
     def clear_vision_ocr_progress(self):
         with self._vision_ocr_progress_lock:
             self._vision_ocr_progress_scope = None
+        with self._vision_ocr_summary_lock:
+            self._vision_ocr_summary = None
 
     def _write_vision_ocr_progress(self):
         with self._vision_ocr_progress_lock:

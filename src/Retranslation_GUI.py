@@ -4101,10 +4101,18 @@ class RetranslationMixin:
             if not output_file:
                 self._show_message('error', "File Missing", "No output file recorded for this entry.", parent=data.get('dialog', self))
                 return
-            path = os.path.join(data['output_dir'], output_file)
-            if not os.path.exists(path):
-                self._show_message('error', "File Missing", f"File not found:\n{path}", parent=data.get('dialog', self))
+            resolved_file, path = self._resolve_existing_output_path(
+                data['output_dir'],
+                output_file,
+                display_info,
+                data.get('prog'),
+            )
+            if not path or not os.path.exists(path):
+                missing_path = os.path.join(data['output_dir'], output_file)
+                self._show_message('error', "File Missing", f"File not found:\n{missing_path}", parent=data.get('dialog', self))
                 return
+            if resolved_file and resolved_file != output_file:
+                display_info['output_file'] = resolved_file
             try:
                 QDesktopServices.openUrl(QUrl.fromLocalFile(path))
             except Exception as e:
@@ -5384,6 +5392,92 @@ class RetranslationMixin:
             variants.append(f"response_{stem}")
         return list(dict.fromkeys(variants))
 
+    def _normalize_progress_output_name(self, name: str) -> str:
+        """Normalize translated/source output names for response_/extension-tolerant matching."""
+        if not name:
+            return ""
+        base = os.path.basename(str(name).replace("\\", "/"))
+        if base.lower().startswith("response_"):
+            base = base[len("response_"):]
+        while True:
+            stem, ext = os.path.splitext(base)
+            if not ext:
+                break
+            base = stem
+        return base.lower()
+
+    def _resolve_existing_output_path(self, output_dir, output_file=None, display_info=None, prog=None):
+        """Resolve an output file while tolerating stale OCR rows and filename mode changes."""
+        display_info = display_info or {}
+        progress_entry = display_info.get("info") or display_info.get("progress_entry") or {}
+        prog = prog or {}
+        chapters = prog.get("chapters", {}) if isinstance(prog, dict) else {}
+        candidates = []
+
+        def add_candidate(value):
+            if value:
+                text = str(value).replace("\\", "/")
+                if text not in candidates:
+                    candidates.append(text)
+
+        add_candidate(output_file)
+        add_candidate(display_info.get("output_file"))
+        add_candidate(progress_entry.get("output_file") if isinstance(progress_entry, dict) else None)
+        if isinstance(progress_entry, dict):
+            previous = progress_entry.get("previous_progress_entry")
+            if isinstance(previous, dict):
+                add_candidate(previous.get("output_file"))
+
+        progress_key = display_info.get("progress_key")
+        if progress_key and isinstance(chapters.get(progress_key), dict):
+            tracked = chapters[progress_key]
+            add_candidate(tracked.get("output_file"))
+            previous = tracked.get("previous_progress_entry")
+            if isinstance(previous, dict):
+                add_candidate(previous.get("output_file"))
+
+        target_num = display_info.get("num")
+        original_names = {
+            self._normalize_progress_output_name(display_info.get("original_filename")),
+            self._normalize_progress_output_name(display_info.get("original_basename")),
+        }
+        original_names.discard("")
+
+        for tracked in chapters.values():
+            if not isinstance(tracked, dict):
+                continue
+            tracked_num = tracked.get("actual_num", tracked.get("chapter_num"))
+            tracked_names = {
+                self._normalize_progress_output_name(tracked.get("output_file")),
+                self._normalize_progress_output_name(tracked.get("original_basename")),
+                self._normalize_progress_output_name(tracked.get("original_filename")),
+            }
+            if str(tracked_num) == str(target_num) or (original_names and tracked_names & original_names):
+                add_candidate(tracked.get("output_file"))
+                previous = tracked.get("previous_progress_entry")
+                if isinstance(previous, dict):
+                    add_candidate(previous.get("output_file"))
+
+        for candidate in candidates:
+            path = candidate if os.path.isabs(candidate) else os.path.join(output_dir, candidate)
+            if os.path.isfile(path):
+                rel = os.path.relpath(path, output_dir).replace("\\", "/") if os.path.isabs(candidate) else candidate
+                return rel, path
+
+        target_norms = {self._normalize_progress_output_name(value) for value in candidates if value}
+        target_norms |= original_names
+        target_norms.discard("")
+        if not target_norms:
+            return None, None
+        try:
+            for fname in os.listdir(output_dir):
+                path = os.path.join(output_dir, fname)
+                if os.path.isfile(path) and self._normalize_progress_output_name(fname) in target_norms:
+                    return fname, path
+        except Exception:
+            pass
+        return None, None
+
     def _audio_candidates_for_entry(self, output_dir, entry):
         """Return possible audio files for a progress entry as (relative, absolute) pairs."""
         candidates = []
@@ -5495,7 +5589,13 @@ class RetranslationMixin:
         # Re-check file existence and update status for each chapter
         for info in data['chapter_display_info']:
             output_file = info['output_file']
-            output_path = os.path.join(data['output_dir'], output_file)
+            resolved_output_file, resolved_output_path = self._resolve_existing_output_path(
+                data['output_dir'],
+                output_file,
+                info,
+                data.get('prog'),
+            )
+            output_path = resolved_output_path or os.path.join(data['output_dir'], output_file)
             
             # Find matching progress entry
             matched_info = None
@@ -5539,6 +5639,8 @@ class RetranslationMixin:
                 # don't have their own output files, they point to parent's file)
                 if new_status == 'completed' and not os.path.exists(output_path):
                     new_status = 'not_translated'
+                elif new_status == 'completed' and resolved_output_file:
+                    info['output_file'] = resolved_output_file
                 info['status'] = new_status
                 info['info'] = matched_info
             elif os.path.exists(output_path):
