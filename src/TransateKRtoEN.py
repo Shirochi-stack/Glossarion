@@ -5317,6 +5317,18 @@ class BatchTranslationProcessor:
                     print(f"⚠️ Vision image chapter {actual_num} marked as qa_failed: {', '.join(vision_qa_issues)}")
                     return False, actual_num, None, None, None
                 if image_translations:
+                    if (
+                        os.getenv("OUTPUT_MODE", "").strip().lower() == "vision"
+                        and os.getenv("VISION_OCR_FIRST", "auto").strip().lower() not in ("0", "false", "no", "off")
+                        and "__combined_vision_ocr__" in image_translations
+                    ):
+                        print("📝 Vision OCR combined output is final; skipping duplicate chapter text translation.")
+                        with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                            f.write(chapter_body if isinstance(chapter_body, str) else "")
+                        with self.progress_lock:
+                            self.update_progress_fn(idx, actual_num, content_hash, fname, status="completed", chapter_obj=chapter)
+                            self.save_progress_fn()
+                        return True, actual_num, fname, None, None
                     chapter["body"] = chapter_body
                     # Create a copy of the processed body
                     from bs4 import BeautifulSoup 
@@ -16486,6 +16498,21 @@ def main(log_callback=None, stop_callback=None):
                         
                         # Store the body with images for later merging
                         c["body_with_images"] = body_with_images
+
+                        vision_ocr_combined_done = (
+                            os.getenv("OUTPUT_MODE", "").strip().lower() == "vision"
+                            and os.getenv("VISION_OCR_FIRST", "auto").strip().lower() not in ("0", "false", "no", "off")
+                            and "__combined_vision_ocr__" in image_translations
+                        )
+                        if vision_ocr_combined_done:
+                            print("📝 Vision OCR combined output is final; skipping duplicate chapter text translation.")
+                            fname = FileUtilities.create_chapter_filename(c, actual_num)
+                            with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                                f.write(body_with_images)
+                            progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
+                            progress_manager.save()
+                            chapters_completed += 1
+                            continue
                         
                         # For chapters with only images and title, we still need to translate the title
                         # Extract clean text for translation from ORIGINAL body
