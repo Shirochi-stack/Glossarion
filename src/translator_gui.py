@@ -12702,10 +12702,17 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             return
                         try:
                             import time as _time
+                            import threading as _threading
+                            import uuid as _uuid
                             # Ensure directory exists
                             os.makedirs(os.path.dirname(self.PROGRESS_FILE), exist_ok=True)
                             
-                            temp_file = self.PROGRESS_FILE + '.tmp'
+                            temp_file = (
+                                f"{self.PROGRESS_FILE}."
+                                f"{os.getpid()}."
+                                f"{_threading.get_ident()}."
+                                f"{_uuid.uuid4().hex}.tmp"
+                            )
                             max_retries = 5
                             for attempt in range(max_retries):
                                 try:
@@ -15697,14 +15704,19 @@ Important rules:
             def save(self):
                 """Save progress to file atomically"""
                 try:
+                    import threading as _threading
+                    import uuid as _uuid
                     os.makedirs(os.path.dirname(self.PROGRESS_FILE), exist_ok=True)
-                    temp_file = self.PROGRESS_FILE + '.tmp'
+                    temp_file = (
+                        f"{self.PROGRESS_FILE}."
+                        f"{os.getpid()}."
+                        f"{_threading.get_ident()}."
+                        f"{_uuid.uuid4().hex}.tmp"
+                    )
                     with open(temp_file, "w", encoding="utf-8") as pf:
                         json.dump(self.prog, pf, ensure_ascii=False, indent=2)
                     
-                    if os.path.exists(self.PROGRESS_FILE):
-                        os.remove(self.PROGRESS_FILE)
-                    os.rename(temp_file, self.PROGRESS_FILE)
+                    os.replace(temp_file, self.PROGRESS_FILE)
                 except Exception as e:
                     pass
             

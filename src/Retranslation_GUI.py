@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import re
+import copy
 from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget, 
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
@@ -4569,6 +4570,8 @@ class RetranslationMixin:
     
     def _refresh_retranslation_data(self, data):
         """Refresh the retranslation dialog data by reloading progress and updating display"""
+        updates_were_enabled = True
+        signals_were_blocked = False
         try:
             # First check if widgets are still valid
             if not self._is_data_valid(data):
@@ -4619,13 +4622,19 @@ class RetranslationMixin:
                 import random
                 import time as _time
                 last_error = None
-                for _attempt in range(12):
+                for _attempt in range(20):
                     try:
                         with open(path, 'r', encoding='utf-8') as f:
-                            return json.load(f)
-                    except (PermissionError, FileNotFoundError) as e:
+                            loaded = json.load(f)
+                        data['_last_good_prog'] = copy.deepcopy(loaded)
+                        return loaded
+                    except (PermissionError, FileNotFoundError, json.JSONDecodeError, OSError) as e:
                         last_error = e
-                        _time.sleep(min(1.0, 0.05 * (2 ** min(_attempt, 5))) + random.uniform(0, 0.03))
+                        _time.sleep(min(0.5, 0.03 * (2 ** min(_attempt, 5))) + random.uniform(0, 0.03))
+                snapshot = data.get('_last_good_prog') or data.get('prog')
+                if isinstance(snapshot, dict):
+                    print(f"⚠️ Progress file locked during refresh; using last good snapshot this tick: {last_error}")
+                    return copy.deepcopy(snapshot)
                 raise last_error
 
             def _write_progress_json_safely(path, payload):
@@ -4636,7 +4645,7 @@ class RetranslationMixin:
                 if progress_dir:
                     os.makedirs(progress_dir, exist_ok=True)
                 last_error = None
-                for _attempt in range(12):
+                for _attempt in range(20):
                     temp_path = None
                     try:
                         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=progress_dir, delete=False, suffix='.tmp') as tmp:
@@ -4649,14 +4658,14 @@ class RetranslationMixin:
                                 pass
                         os.replace(temp_path, path)
                         return True
-                    except PermissionError as e:
+                    except (PermissionError, OSError) as e:
                         last_error = e
                         if temp_path and os.path.exists(temp_path):
                             try:
                                 os.remove(temp_path)
                             except Exception:
                                 pass
-                        _time.sleep(min(1.0, 0.05 * (2 ** min(_attempt, 5))) + random.uniform(0, 0.03))
+                        _time.sleep(min(0.5, 0.03 * (2 ** min(_attempt, 5))) + random.uniform(0, 0.03))
                 raise last_error
             
             # Save current scroll position (and first visible row/offset) to restore after refresh
@@ -4756,17 +4765,31 @@ class RetranslationMixin:
             
             # The translator may briefly lock/replace the JSON; retry and skip this tick if it stays locked.
             data['prog'] = _read_progress_json_safely(data['progress_file'])
+            data['_last_good_prog'] = copy.deepcopy(data['prog'])
+
+            def _progress_has_active_entries(prog):
+                try:
+                    return any(
+                        isinstance(info, dict)
+                        and str(info.get('status', '')).lower() == 'in_progress'
+                        for info in (prog or {}).get('chapters', {}).values()
+                    )
+                except Exception:
+                    return False
             
             # Clean up missing files and merged children before display unless disabled
-            if not data.get('skip_cleanup', False):
+            if not data.get('skip_cleanup', False) and not _progress_has_active_entries(data['prog']):
                 from TransateKRtoEN import ProgressManager
+                before_cleanup = copy.deepcopy(data['prog'])
                 temp_progress = ProgressManager(os.path.dirname(data['progress_file']))
                 temp_progress.prog = data['prog']
                 temp_progress.cleanup_missing_files(data['output_dir'])
                 data['prog'] = temp_progress.prog
                 
-                # Save the cleaned progress back to file (with retry for file locks)
-                _write_progress_json_safely(data['progress_file'], data['prog'])
+                # Save only if cleanup really changed the file. During active translation
+                # refresh should be a reader, not another progress writer.
+                if data['prog'] != before_cleanup:
+                    _write_progress_json_safely(data['progress_file'], data['prog'])
 
             if self._reconcile_tts_audio_files(data):
                 _write_progress_json_safely(data['progress_file'], data['prog'])
@@ -4896,6 +4919,16 @@ class RetranslationMixin:
             except (RuntimeError, AttributeError):
                 # Dialog was also deleted, just print to console
                 print(f"[WARN] Could not show error dialog - dialog was deleted")
+        finally:
+            self._suspend_yield = False
+            try:
+                listbox = data.get('listbox') if isinstance(data, dict) else None
+                if listbox:
+                    listbox.setUpdatesEnabled(updates_were_enabled)
+                    listbox.blockSignals(signals_were_blocked)
+                    listbox.viewport().update()
+            except Exception:
+                pass
     
     def _rematch_spine_chapters(self, data):
         """Re-run the full spine chapter matching logic against updated progress JSON"""

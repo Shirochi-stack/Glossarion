@@ -6,6 +6,7 @@ import shutil
 import threading
 import queue
 import uuid
+import copy
 import inspect
 import html
 import os, sys, io, zipfile, time, re, mimetypes, subprocess, tiktoken
@@ -8950,6 +8951,7 @@ def _process_chapter_images_vision_ocr_combined(
             chapter_num=actual_num,
         )
         if disk_ocr:
+            image_translator.mark_vision_ocr_progress_cached_done()
             return idx, img_info, img_src, disk_ocr
 
         processed_path = None
@@ -9462,7 +9464,7 @@ def _vision_glossary_progress_ref(chapter, chapter_idx, actual_num):
     }
 
 
-def _set_image_translator_chapter_progress_context(image_translator, chapter, chapter_idx, actual_num):
+def _set_image_translator_chapter_progress_context(image_translator, chapter, chapter_idx, actual_num, update_env=True):
     if not image_translator:
         return None
     progress_ref = _vision_glossary_progress_ref(chapter or {}, chapter_idx, actual_num)
@@ -9470,9 +9472,24 @@ def _set_image_translator_chapter_progress_context(image_translator, chapter, ch
     image_translator.current_chapter_progress_ref = progress_ref
     image_translator.current_chapter_file = chapter_file
     image_translator.current_chapter_obj = chapter or {}
-    os.environ["CURRENT_CHAPTER_FILE"] = str(chapter_file or "")
-    os.environ["CURRENT_CHAPTER_NUM"] = str(actual_num)
+    if update_env:
+        os.environ["CURRENT_CHAPTER_FILE"] = str(chapter_file or "")
+        os.environ["CURRENT_CHAPTER_NUM"] = str(actual_num)
     return progress_ref
+
+
+def _clone_image_translator_for_vision_ocr(parent):
+    """Create an OCR worker with independent mutable/progress state."""
+    worker = copy.copy(parent)
+    worker.processed_images = {}
+    worker.image_translations = {}
+    worker._vision_ocr_progress_lock = threading.Lock()
+    worker._vision_ocr_progress_write_lock = threading.Lock()
+    worker._vision_ocr_progress_scope = None
+    worker._preserve_current_image = False
+    worker.last_vision_translation_finish_reason = None
+    worker.last_vision_translation_error = None
+    return worker
 
 
 def _vision_ocr_progress_ref_for_actual(actual_num, chapter_file=""):
@@ -9588,6 +9605,139 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             ref for ref in pending_progress_refs
             if _ref_key(ref) not in keys
         ]
+
+    if merge_enabled:
+        chapter_jobs = []
+        for idx, chapter in enumerate(chapters):
+            if check_stop_fn and check_stop_fn():
+                print("❌ Vision glossary prepass stopped by user")
+                stopped = True
+                break
+            actual_num = chapter.get('actual_chapter_num', chapter.get('num', idx + 1))
+            if _vision_ocr_glossary_should_skip_special_chapter(chapter):
+                skipped_name = (
+                    chapter.get("original_basename")
+                    or chapter.get("original_filename")
+                    or chapter.get("filename")
+                    or f"chapter {actual_num}"
+                )
+                print(f"⏭️ Vision glossary prepass: skipping special/cover file {os.path.basename(str(skipped_name))}")
+                continue
+            body = _chapter_image_html_for_vision_glossary(chapter)
+            if not body or '<img' not in body.lower():
+                continue
+            progress_ref = _vision_glossary_progress_ref(chapter, idx, actual_num)
+            chapter_jobs.append((len(chapter_jobs), idx, chapter, actual_num, body, progress_ref))
+
+        batch_enabled = bool(getattr(image_translator, "_vision_ocr_batch_enabled", lambda: False)())
+        try:
+            requested_workers = int(getattr(image_translator, "_vision_ocr_batch_size", lambda: 1)())
+        except Exception:
+            requested_workers = 1
+        chapter_batch_size = min(max(1, requested_workers), merge_count) if batch_enabled else 1
+        if batch_enabled and chapter_batch_size > 1 and chapter_jobs:
+            print(
+                f"📑 Vision glossary OCR chapter batch enabled: "
+                f"{chapter_batch_size} parallel chapter worker(s) per merge group"
+            )
+
+        def _ocr_merge_chapter_job(job):
+            order, chapter_idx, chapter, actual_num, body, progress_ref = job
+            worker = _clone_image_translator_for_vision_ocr(image_translator)
+            progress_ref = _set_image_translator_chapter_progress_context(
+                worker,
+                chapter,
+                chapter_idx,
+                actual_num,
+                update_env=False,
+            ) or progress_ref
+            worker.current_chapter_num = actual_num
+            worker.update_vision_ocr_glossary_progress([progress_ref], "in_progress")
+            chapter_ocr = ocr_chapter_images_for_vision_glossary(
+                body,
+                worker,
+                actual_num,
+                check_stop_fn,
+                progress_ref=progress_ref,
+            )
+            return order, actual_num, chapter_ocr, progress_ref
+
+        for group_start in range(0, len(chapter_jobs), merge_count):
+            if stopped or (check_stop_fn and check_stop_fn()):
+                stopped = True
+                break
+            group = chapter_jobs[group_start:group_start + merge_count]
+            group_results = []
+            if batch_enabled and chapter_batch_size > 1 and len(group) > 1:
+                executor = ThreadPoolExecutor(max_workers=min(chapter_batch_size, len(group)))
+                try:
+                    future_to_job = {executor.submit(_ocr_merge_chapter_job, job): job for job in group}
+                    while future_to_job:
+                        done, _ = wait(future_to_job.keys(), timeout=0.5, return_when=FIRST_COMPLETED)
+                        if not done:
+                            continue
+                        for future in done:
+                            job = future_to_job.pop(future, None)
+                            try:
+                                group_results.append(future.result())
+                            except Exception as e:
+                                if job:
+                                    _order, _idx, _chapter, _actual, _body, ref = job
+                                    image_translator.update_vision_ocr_glossary_progress([ref], "failed")
+                                print(f"⚠️ Vision glossary OCR chapter worker failed: {e}")
+                        if check_stop_fn and check_stop_fn():
+                            stopped = True
+                            for future in future_to_job:
+                                future.cancel()
+                            break
+                finally:
+                    executor.shutdown(wait=not stopped, cancel_futures=True)
+            else:
+                for job in group:
+                    if check_stop_fn and check_stop_fn():
+                        stopped = True
+                        break
+                    group_results.append(_ocr_merge_chapter_job(job))
+
+            group_results.sort(key=lambda item: item[0])
+            refs_to_merge = []
+            ocr_to_merge = []
+            for _order, actual_num, chapter_ocr, progress_ref in group_results:
+                if chapter_ocr:
+                    refs_to_merge.append(progress_ref)
+                    ocr_to_merge.append((actual_num, chapter_ocr, progress_ref))
+                elif check_stop_fn and check_stop_fn():
+                    image_translator.update_vision_ocr_glossary_progress([progress_ref], "failed")
+                else:
+                    image_translator.update_vision_ocr_glossary_progress([progress_ref], "completed")
+
+            if stopped:
+                if refs_to_merge:
+                    image_translator.update_vision_ocr_glossary_progress(refs_to_merge, "failed")
+                break
+
+            if ocr_to_merge:
+                merged_text = "\n\n".join(f"[Chapter {num}]\n{text}" for num, text, _ref in ocr_to_merge)
+                refs = [ref for _num, _text, ref in ocr_to_merge if ref]
+                if image_translator._ensure_vision_ocr_glossary(
+                    merged_text,
+                    mode,
+                    check_stop_fn,
+                    progress_refs=refs,
+                    merged_refs=refs[1:],
+                ):
+                    generated += 1
+                if check_stop_fn and check_stop_fn():
+                    stopped = True
+                    break
+
+        if generated:
+            os.environ["VISION_GLOSSARY_PREPASS_DONE"] = "1"
+        else:
+            os.environ.pop("VISION_GLOSSARY_PREPASS_DONE", None)
+        print(f"📑 Vision glossary prepass complete ({generated} glossary request group(s))")
+        print("="*50 + "\n")
+        return
 
     for idx, chapter in enumerate(chapters):
         if check_stop_fn and check_stop_fn():

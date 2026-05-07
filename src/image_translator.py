@@ -18,6 +18,7 @@ import logging
 import time
 import queue
 import threading
+import uuid
 import sys
 import unicodedata
 from difflib import SequenceMatcher
@@ -288,6 +289,8 @@ def send_text_with_interrupt(client, messages, temperature, max_tokens, stop_che
                 raise UnifiedClientError(f"Text API call timed out after {chunk_timeout} seconds")
 
 class ImageTranslator:
+    _vision_ocr_glossary_file_lock = threading.RLock()
+
     def __init__(self, client, output_dir: str, profile_name: str = "", system_prompt: str = "", 
                  temperature: float = 0.3, log_callback=None, progress_manager=None,
                  history_manager=None, chunk_context_manager=None):
@@ -1417,7 +1420,12 @@ class ImageTranslator:
             progress_file = os.path.join(self.output_dir, "translation_progress.json")
             try:
                 # Write to a temporary file first, with retry for file locks
-                temp_file = progress_file + '.tmp'
+                temp_file = (
+                    f"{progress_file}."
+                    f"{os.getpid()}."
+                    f"{threading.get_ident()}."
+                    f"{uuid.uuid4().hex}.tmp"
+                )
                 max_retries = 5
                 for attempt in range(max_retries):
                     try:
@@ -1877,6 +1885,7 @@ class ImageTranslator:
                 chapter_num=effective_chapter_num,
             )
             if disk_ocr:
+                self.mark_vision_ocr_progress_cached_done()
                 if self._is_ocr_no_response(disk_ocr):
                     self._preserve_current_image = True
                     print("   Skipping OCR image; cached OCR/single says cover/illustration")
@@ -2468,34 +2477,35 @@ class ImageTranslator:
         """Write Vision OCR glossary progress even while OCR is still running."""
         original_progress_file = None
         original_output_file = None
-        try:
-            import extract_glossary_from_epub as glossary_extractor
-            glossary_dir, json_path, _csv_path, progress_path = self._vision_ocr_glossary_paths()
-            os.makedirs(glossary_dir, exist_ok=True)
-            original_progress_file = getattr(glossary_extractor, "PROGRESS_FILE", None)
-            original_output_file = getattr(glossary_extractor, "_GLOSSARY_OUTPUT_FILE", "")
-            glossary_extractor.PROGRESS_FILE = progress_path
-            glossary_extractor._GLOSSARY_OUTPUT_FILE = json_path
-            self._update_vision_ocr_glossary_progress(
-                glossary_extractor,
-                json_path,
-                progress_refs,
-                status,
-                merged_refs=merged_refs,
-            )
-        except Exception as e:
-            print(f"   ⚠️ Vision OCR glossary progress update failed: {e}")
-        finally:
+        with self.__class__._vision_ocr_glossary_file_lock:
             try:
-                if "glossary_extractor" in locals():
-                    if original_progress_file is not None:
-                        glossary_extractor.PROGRESS_FILE = original_progress_file
-                    elif hasattr(glossary_extractor, "PROGRESS_FILE"):
-                        delattr(glossary_extractor, "PROGRESS_FILE")
-                    if original_output_file is not None:
-                        glossary_extractor._GLOSSARY_OUTPUT_FILE = original_output_file
-            except Exception:
-                pass
+                import extract_glossary_from_epub as glossary_extractor
+                glossary_dir, json_path, _csv_path, progress_path = self._vision_ocr_glossary_paths()
+                os.makedirs(glossary_dir, exist_ok=True)
+                original_progress_file = getattr(glossary_extractor, "PROGRESS_FILE", None)
+                original_output_file = getattr(glossary_extractor, "_GLOSSARY_OUTPUT_FILE", "")
+                glossary_extractor.PROGRESS_FILE = progress_path
+                glossary_extractor._GLOSSARY_OUTPUT_FILE = json_path
+                self._update_vision_ocr_glossary_progress(
+                    glossary_extractor,
+                    json_path,
+                    progress_refs,
+                    status,
+                    merged_refs=merged_refs,
+                )
+            except Exception as e:
+                print(f"   ⚠️ Vision OCR glossary progress update failed: {e}")
+            finally:
+                try:
+                    if "glossary_extractor" in locals():
+                        if original_progress_file is not None:
+                            glossary_extractor.PROGRESS_FILE = original_progress_file
+                        elif hasattr(glossary_extractor, "PROGRESS_FILE"):
+                            delattr(glossary_extractor, "PROGRESS_FILE")
+                        if original_output_file is not None:
+                            glossary_extractor._GLOSSARY_OUTPUT_FILE = original_output_file
+                except Exception:
+                    pass
 
     def update_vision_ocr_glossary_ocr_progress(self, progress_refs, done, total):
         """Patch OCR request progress into the Vision/Single Pass glossary progress file."""
@@ -2508,66 +2518,67 @@ class ImageTranslator:
         except (TypeError, ValueError):
             return
 
-        _glossary_dir, _json_path, _csv_path, progress_path = self._vision_ocr_glossary_paths()
-        if not os.path.exists(progress_path):
-            self.update_vision_ocr_glossary_progress(refs, "in_progress")
+        with self.__class__._vision_ocr_glossary_file_lock:
+            _glossary_dir, _json_path, _csv_path, progress_path = self._vision_ocr_glossary_paths()
+            if not os.path.exists(progress_path):
+                self.update_vision_ocr_glossary_progress(refs, "in_progress")
 
-        try:
-            with open(progress_path, "r", encoding="utf-8") as f:
-                progress = json.load(f)
-        except Exception:
-            self.update_vision_ocr_glossary_progress(refs, "in_progress")
             try:
                 with open(progress_path, "r", encoding="utf-8") as f:
                     progress = json.load(f)
             except Exception as e:
-                print(f"   ⚠️ Vision OCR glossary OCR progress read failed: {e}")
-                return
-
-        chapters = progress.setdefault("chapters", {})
-        ocr_progress = {
-            "done": min(done, total) if total else done,
-            "total": total,
-            "label": f"{min(done, total) if total else done}/{total}",
-            "last_updated": time.time(),
-        }
-        for ref in refs:
-            ref_idx = int(ref["chapter_idx"])
-            ref_num = int(ref["chapter_num"])
-            target_key = None
-            for key, info in chapters.items():
-                if not isinstance(info, dict):
-                    continue
                 try:
-                    entry_idx = int(info.get("chapter_index", key))
-                except (TypeError, ValueError):
-                    entry_idx = None
-                try:
-                    entry_num = int(info.get("actual_num") or info.get("chapter_num"))
-                except (TypeError, ValueError):
-                    entry_num = None
-                if entry_idx == ref_idx or entry_num == ref_num:
-                    target_key = key
-                    break
-            if target_key is None:
-                target_key = str(ref_num)
-                chapters[target_key] = {
-                    "chapter_index": ref_idx,
-                    "actual_num": ref_num,
-                    "chapter_num": ref_num,
-                    "status": "in_progress",
-                    "last_updated": time.time(),
-                }
-            chapters[target_key]["ocr_progress"] = dict(ocr_progress)
-            chapters[target_key]["last_updated"] = time.time()
+                    self.update_vision_ocr_glossary_progress(refs, "in_progress")
+                    with open(progress_path, "r", encoding="utf-8") as f:
+                        progress = json.load(f)
+                except Exception as e:
+                    print(f"   ⚠️ Vision OCR glossary OCR progress read failed: {e}")
+                    return
 
-        try:
-            tmp_path = progress_path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(progress, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, progress_path)
-        except Exception as e:
-            print(f"   ⚠️ Vision OCR glossary OCR progress write failed: {e}")
+            chapters = progress.setdefault("chapters", {})
+            ocr_progress = {
+                "done": min(done, total) if total else done,
+                "total": total,
+                "label": f"{min(done, total) if total else done}/{total}",
+                "last_updated": time.time(),
+            }
+            for ref in refs:
+                ref_idx = int(ref["chapter_idx"])
+                ref_num = int(ref["chapter_num"])
+                target_key = None
+                for key, info in chapters.items():
+                    if not isinstance(info, dict):
+                        continue
+                    try:
+                        entry_idx = int(info.get("chapter_index", key))
+                    except (TypeError, ValueError):
+                        entry_idx = None
+                    try:
+                        entry_num = int(info.get("actual_num") or info.get("chapter_num"))
+                    except (TypeError, ValueError):
+                        entry_num = None
+                    if entry_idx == ref_idx or entry_num == ref_num:
+                        target_key = key
+                        break
+                if target_key is None:
+                    target_key = str(ref_num)
+                    chapters[target_key] = {
+                        "chapter_index": ref_idx,
+                        "actual_num": ref_num,
+                        "chapter_num": ref_num,
+                        "status": "in_progress",
+                        "last_updated": time.time(),
+                    }
+                chapters[target_key]["ocr_progress"] = dict(ocr_progress)
+                chapters[target_key]["last_updated"] = time.time()
+
+            try:
+                tmp_path = f"{progress_path}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(progress, f, ensure_ascii=False, indent=2)
+                os.replace(tmp_path, progress_path)
+            except Exception as e:
+                print(f"   ⚠️ Vision OCR glossary OCR progress write failed: {e}")
 
     def _ensure_vision_ocr_glossary(self, ocr_text, mode, check_stop_fn, progress_refs=None, merged_refs=None):
         """Generate/update glossary entries from OCR text for Vision mode."""
@@ -3357,6 +3368,7 @@ class ImageTranslator:
         chunk_jobs = []
         ocr_by_index = {}
         was_stopped = False
+        self.reserve_vision_ocr_progress_units(num_chunks)
 
         for i, (start_y, end_y) in enumerate(chunk_ranges):
             disk_ocr = self._load_saved_ocr_text(
@@ -3367,6 +3379,7 @@ class ImageTranslator:
                 chapter_num=effective_chapter_num,
             )
             if disk_ocr:
+                self.mark_vision_ocr_progress_cached_done()
                 if self._is_ocr_no_response(disk_ocr):
                     print(f"   Skipping OCR chunk {i+1}/{num_chunks}; cached OCR says cover/illustration")
                 else:
@@ -3842,12 +3855,29 @@ class ImageTranslator:
                 "chapter_num": chapter_num,
                 "done": 0,
                 "total": total,
+                "reserved_pending": total,
                 "glossary_ref": glossary_ref,
                 "chapter_file": os.path.basename(str((glossary_ref or {}).get("chapter_file") or getattr(self, "current_chapter_file", "") or "")),
                 "chapter_obj": getattr(self, "current_chapter_obj", None),
                 "write_translation": bool(write_translation),
                 "write_glossary": bool(write_glossary),
             }
+        self._write_vision_ocr_progress()
+
+    def reserve_vision_ocr_progress_units(self, units=1):
+        """Reserve known OCR work before cached/fresh requests are split."""
+        try:
+            units = int(units)
+        except (TypeError, ValueError):
+            units = 1
+        if units <= 0:
+            return
+        with self._vision_ocr_progress_lock:
+            if not self._vision_ocr_progress_scope:
+                return
+            scope = self._vision_ocr_progress_scope
+            scope["total"] = max(0, int(scope.get("total", 0) or 0) + units)
+            scope["reserved_pending"] = max(0, int(scope.get("reserved_pending", 0) or 0) + units)
         self._write_vision_ocr_progress()
 
     def mark_vision_ocr_progress_started(self, units=1):
@@ -3862,7 +3892,35 @@ class ImageTranslator:
             if not self._vision_ocr_progress_scope:
                 return
             scope = self._vision_ocr_progress_scope
-            scope["total"] = max(0, int(scope.get("total", 0) or 0) + units)
+            reserved_pending = max(0, int(scope.get("reserved_pending", 0) or 0))
+            consume_reserved = min(reserved_pending, units)
+            scope["reserved_pending"] = reserved_pending - consume_reserved
+            unreserved_units = units - consume_reserved
+            if unreserved_units:
+                scope["total"] = max(0, int(scope.get("total", 0) or 0) + unreserved_units)
+        self._write_vision_ocr_progress()
+
+    def mark_vision_ocr_progress_cached_done(self, units=1):
+        """Count OCR work satisfied by an existing OCR cache file."""
+        try:
+            units = int(units)
+        except (TypeError, ValueError):
+            units = 1
+        if units <= 0:
+            return
+        with self._vision_ocr_progress_lock:
+            if not self._vision_ocr_progress_scope:
+                return
+            scope = self._vision_ocr_progress_scope
+            reserved_pending = max(0, int(scope.get("reserved_pending", 0) or 0))
+            consume_reserved = min(reserved_pending, units)
+            scope["reserved_pending"] = reserved_pending - consume_reserved
+            unreserved_units = units - consume_reserved
+            if unreserved_units:
+                scope["total"] = max(0, int(scope.get("total", 0) or 0) + unreserved_units)
+            current_done = int(scope.get("done", 0) or 0)
+            total = int(scope.get("total", 0) or 0)
+            scope["done"] = min(total, current_done + units) if total else current_done + units
         self._write_vision_ocr_progress()
 
     def mark_vision_ocr_progress_done(self, units=1):
