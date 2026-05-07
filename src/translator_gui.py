@@ -2143,20 +2143,20 @@ Text to analyze:
         self.default_translation_chunk_prompt = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned.\n{chunk_html}"
         self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned. {context}"
         self.default_vision_ocr_prompt = (
-            "Extract only the readable text that is physically present in the image, in natural reading order. "
-            "If the image itself is a cover page, character art, scene illustration, decorative image, or otherwise not a page of readable story text, reply with exactly: No. "
-            "Return Markdown only, not HTML. Preserve paragraph breaks and meaningful visual structure using Markdown: blank lines for paragraph breaks, headings with #, lists with - or 1., blockquotes with >, tables when table structure is visible, and emphasis/strikethrough/code markers when visible in the source. "
+            "Extract all readable text that is physically present in the image, in natural reading order. Return Markdown only, not HTML. "
+            "Output plain text by default. Use Markdown only to preserve visible source structure or styling when it is actually present in the image: paragraph breaks, meaningful line breaks, bullet lists, numbered lists, blockquotes, tables, bold, italic, strikethrough/deleted text, inline code/code blocks, or visibly printed Markdown characters. "
+            "Do not invent Markdown formatting. Do not convert titles, centered text, chapter names, large text, or standalone numbers into Markdown headings. Do not add # unless a # character is visibly present in the image. "
+            "If the image contains any readable text, output it, even if it is a title page, chapter title page, cover page, splash page, or mostly blank page. Reply exactly No only when there is no readable text at all, or when the image is purely illustration/decorative art with no readable text. "
             "Do not reproduce every visual wrap from the image; merge wrapped lines that belong to the same sentence or paragraph unless the line break is semantically intentional. "
-            "Preserve visible textual styling and marks when possible, including brackets, parentheses, quote marks, emphasis, strikethrough/deleted text, symbols, and emotes/emoticons. "
+            "Preserve visible textual marks when possible, including brackets, parentheses, quote marks, symbols, and emotes/emoticons. "
             "For Chinese/Japanese/Korean text with small pronunciation guides above or beside the main characters, OCR only the main/base characters and ignore the pronunciation guides. "
             "For pinyin-over-Chinese images, output the Chinese characters only; do not output the pinyin unless the pinyin is standalone text with no matching Chinese base text. "
             "Do not translate, summarize, explain, annotate, transliterate, romanize, or add pronunciation guides. "
-            "Do not output duplicate reading lines such as pinyin, romaji, furigana, Jyutping, or Latin readings when they are attached to the same base text. "
-            "If no readable story text is present, reply with exactly: No."
+            "Do not output duplicate reading lines such as pinyin, romaji, furigana, Jyutping, or Latin readings when they are attached to the same base text."
         )
         self.default_vision_ocr_user_prompt = (
-            "OCR this image/chunk. Return Markdown only with the main/base source text. "
-            "If this image/chunk is cover art, an illustration, decorative art, or has no readable story text, reply with exactly: No. "
+            "OCR this image/chunk. Return Markdown only with the literal main/base source text. "
+            "If any readable text is present, output it. Reply exactly No only when there is no readable text at all. "
             "Ignore pinyin/romaji/furigana/Jyutping pronunciation guides attached to base characters. Do not translate."
             "\n\nContext:\n{context}"
         )
@@ -3386,13 +3386,18 @@ Recent translations to summarize:
             "Preserve the original line breaks as faithfully as possible" in str(self.vision_ocr_prompt)
             or "do not collapse separate visual lines into one paragraph" in str(self.vision_ocr_prompt)
             or "Return only the base source text. Preserve paragraph breaks and intentional textual layout" in str(self.vision_ocr_prompt)
+            or "otherwise not a page of readable story text" in str(self.vision_ocr_prompt)
+            or "headings with #" in str(self.vision_ocr_prompt)
         ):
             self.vision_ocr_prompt = self.default_vision_ocr_prompt
             self.config['vision_ocr_prompt'] = self.default_vision_ocr_prompt
         self.vision_ocr_user_prompt = self.config.get('vision_ocr_user_prompt', self.default_vision_ocr_user_prompt)
         if not self.vision_ocr_user_prompt or not str(self.vision_ocr_user_prompt).strip():
             self.vision_ocr_user_prompt = self.default_vision_ocr_user_prompt
-        elif "OCR this image/chunk. Return only the main/base source text." in str(self.vision_ocr_user_prompt):
+        elif (
+            "OCR this image/chunk. Return only the main/base source text." in str(self.vision_ocr_user_prompt)
+            or "has no readable story text" in str(self.vision_ocr_user_prompt)
+        ):
             self.vision_ocr_user_prompt = self.default_vision_ocr_user_prompt
             self.config['vision_ocr_user_prompt'] = self.default_vision_ocr_user_prompt
         self.vision_ocr_combined_context_prompt = self.config.get('vision_ocr_combined_context_prompt', self.default_vision_ocr_combined_context_prompt)
