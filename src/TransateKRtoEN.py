@@ -10216,7 +10216,7 @@ def prepare_pdf_images_for_vision_ocr(input_path, output_dir, check_stop_fn=None
         return 0
 
 
-def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, check_stop_fn=None):
+def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, check_stop_fn=None, progress_manager=None):
     """OCR extracted PDF images into a sibling *_OCR.pdf before translation/glossary work."""
     if not _vision_ocr_mode_enabled():
         return None
@@ -10256,6 +10256,98 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
     print("="*50)
     print(f"📖 OCR source PDF target: {output_path}")
     print(f"📖 OCRing {len(image_paths)} extracted PDF image(s)")
+
+    progress_lock = threading.RLock()
+    progress_last_save = [0.0]
+    progress_last_pct = [-1]
+
+    def _pdf_ocr_progress_save(force=False):
+        if progress_manager is None:
+            return
+        now = time.time()
+        pct = int(checked / len(image_paths) * 100) if image_paths else 100
+        if not force and pct == progress_last_pct[0] and now - progress_last_save[0] < 2.0:
+            return
+        progress_last_pct[0] = pct
+        progress_last_save[0] = now
+        try:
+            progress_manager.save()
+        except Exception:
+            pass
+
+    def _pdf_ocr_progress_init():
+        if progress_manager is None:
+            return
+        with progress_lock:
+            progress_manager.prog.setdefault("pdf_ocr", {})
+            progress_manager.prog["pdf_ocr"] = {
+                **progress_manager.prog.get("pdf_ocr", {}),
+                "source_file": os.path.abspath(input_path),
+                "ocr_source_file": output_path,
+                "status": "in_progress",
+                "total": len(image_paths),
+                "done": 0,
+                "cached": 0,
+                "no_text": 0,
+                "failed": 0,
+                "last_updated": time.time(),
+                "pages": progress_manager.prog.get("pdf_ocr", {}).get("pages", {}),
+            }
+            pages = progress_manager.prog["pdf_ocr"].setdefault("pages", {})
+            for idx, image_path in enumerate(image_paths, 1):
+                key = str(idx)
+                page_entry = pages.get(key) if isinstance(pages.get(key), dict) else {}
+                page_entry.update({
+                    "page": idx,
+                    "image_file": os.path.basename(image_path),
+                    "status": page_entry.get("status", "pending"),
+                    "last_updated": page_entry.get("last_updated", time.time()),
+                })
+                pages[key] = page_entry
+            _pdf_ocr_progress_save(force=True)
+
+    def _pdf_ocr_progress_page(idx, image_path, status, cached=False, no_text=False, error=None):
+        if progress_manager is None:
+            return
+        with progress_lock:
+            root = progress_manager.prog.setdefault("pdf_ocr", {})
+            root.setdefault("source_file", os.path.abspath(input_path))
+            root.setdefault("ocr_source_file", output_path)
+            root["status"] = "in_progress"
+            root["total"] = len(image_paths)
+            root["done"] = checked
+            root["cached"] = cached_hits
+            root["no_text"] = no_text
+            root["failed"] = failed
+            root["last_updated"] = time.time()
+            pages = root.setdefault("pages", {})
+            entry = {
+                "page": idx,
+                "image_file": os.path.basename(image_path),
+                "status": status,
+                "cached": bool(cached),
+                "no_text": bool(no_text),
+                "last_updated": time.time(),
+            }
+            if error:
+                entry["error"] = str(error)
+            pages[str(idx)] = entry
+            _pdf_ocr_progress_save()
+
+    def _pdf_ocr_progress_finish(status):
+        if progress_manager is None:
+            return
+        with progress_lock:
+            root = progress_manager.prog.setdefault("pdf_ocr", {})
+            root["status"] = status
+            root["total"] = len(image_paths)
+            root["done"] = checked
+            root["cached"] = cached_hits
+            root["no_text"] = no_text
+            root["failed"] = failed
+            root["ocr_source_file"] = output_path if status == "completed" else root.get("ocr_source_file", output_path)
+            root["last_updated"] = time.time()
+            _pdf_ocr_progress_save(force=True)
 
     previous_suppress_save = getattr(image_translator, "_suppress_ocr_save_logs", False)
     previous_suppress_detail = getattr(image_translator, "_suppress_image_detail_logs", False)
@@ -10304,16 +10396,20 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
     checked = 0
     no_text = 0
     cached_hits = 0
+    failed = 0
     jobs = []
+    _pdf_ocr_progress_init()
     for idx, image_path in enumerate(image_paths, 1):
         cached = _load_pdf_image_cached_ocr(idx, image_path)
         if cached:
             checked += 1
             if image_translator._is_ocr_no_response(cached):
                 no_text += 1
+                _pdf_ocr_progress_page(idx, image_path, "completed", cached=True, no_text=True)
             else:
                 cached_hits += 1
                 ocr_by_index[idx] = (image_path, cached)
+                _pdf_ocr_progress_page(idx, image_path, "completed", cached=True)
         else:
             jobs.append((idx, image_path))
 
@@ -10343,32 +10439,47 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
     try:
         if workers > 1 and len(jobs) > 1:
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                future_to_idx = {executor.submit(_ocr_pdf_image, job): job[0] for job in jobs}
-                for future in as_completed(future_to_idx):
-                    idx, image_path, text, stopped = future.result()
+                future_to_job = {executor.submit(_ocr_pdf_image, job): job for job in jobs}
+                for future in as_completed(future_to_job):
+                    job_idx, job_image_path = future_to_job[future]
+                    try:
+                        idx, image_path, text, stopped = future.result()
+                    except Exception as e:
+                        failed += 1
+                        checked += 1
+                        _pdf_ocr_progress_page(job_idx, job_image_path, "failed", error=e)
+                        _log_pdf_ocr_progress()
+                        continue
                     if stopped:
                         print("⏹️ Vision OCR source PDF prepass stopped")
+                        _pdf_ocr_progress_finish("cancelled")
                         return None
                     checked += 1
                     if text and not image_translator._is_ocr_no_response(text):
                         ocr_by_index[idx] = (image_path, text.strip())
+                        _pdf_ocr_progress_page(idx, image_path, "completed")
                     else:
                         no_text += 1
+                        _pdf_ocr_progress_page(idx, image_path, "completed", no_text=True)
                     _log_pdf_ocr_progress()
                     if check_stop_fn and check_stop_fn():
                         print("⏹️ Vision OCR source PDF prepass stopped")
+                        _pdf_ocr_progress_finish("cancelled")
                         return None
         else:
             for job in jobs:
                 idx, image_path, text, stopped = _ocr_pdf_image(job)
                 if stopped:
                     print("⏹️ Vision OCR source PDF prepass stopped")
+                    _pdf_ocr_progress_finish("cancelled")
                     return None
                 checked += 1
                 if text and not image_translator._is_ocr_no_response(text):
                     ocr_by_index[idx] = (image_path, text.strip())
+                    _pdf_ocr_progress_page(idx, image_path, "completed")
                 else:
                     no_text += 1
+                    _pdf_ocr_progress_page(idx, image_path, "completed", no_text=True)
                 _log_pdf_ocr_progress()
     finally:
         image_translator._suppress_ocr_save_logs = previous_suppress_save
@@ -10376,6 +10487,7 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
 
     if not ocr_by_index:
         print("⚠️ Vision OCR source PDF prepass found no OCR text")
+        _pdf_ocr_progress_finish("failed")
         return None
 
     try:
@@ -10404,6 +10516,7 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
 """ + "\n".join(page_html) + "\n</body>\n</html>"
         if not create_pdf_from_html(full_html, output_path):
             print("⚠️ Failed to create Vision OCR source PDF")
+            _pdf_ocr_progress_finish("failed")
             return None
         os.environ["VISION_OCR_SOURCE_PDF"] = output_path
         os.environ["GLOSSARY_COMPRESSION_SOURCE_PDF"] = output_path
@@ -10412,15 +10525,17 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
             f"✅ Vision OCR source PDF ready: {output_path} "
             f"({len(ocr_by_index)} OCR page(s), {checked} image(s) checked, {no_text} no-text image(s))"
         )
+        _pdf_ocr_progress_finish("completed")
         return output_path
     except Exception as e:
         print(f"⚠️ Failed to write Vision OCR source PDF: {e}")
+        _pdf_ocr_progress_finish("failed")
         return None
 
 
-def run_vision_ocr_source_prepass(chapters, image_translator, input_path, output_dir, check_stop_fn=None):
+def run_vision_ocr_source_prepass(chapters, image_translator, input_path, output_dir, check_stop_fn=None, progress_manager=None):
     if str(input_path or "").lower().endswith(".pdf"):
-        return run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, check_stop_fn)
+        return run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, check_stop_fn, progress_manager=progress_manager)
     return run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, check_stop_fn)
 
 
@@ -13860,7 +13975,7 @@ def main(log_callback=None, stop_callback=None):
                     history_manager,
                     chunk_context_manager,
                 )
-                ocr_source_file = run_vision_ocr_source_pdf_prepass(ocr_image_translator, input_path, out, check_stop)
+                ocr_source_file = run_vision_ocr_source_pdf_prepass(ocr_image_translator, input_path, out, check_stop, progress_manager=progress_manager)
             else:
                 print("⚠️ Vision OCR PDF source prepass: no PDF images were prepared")
         except Exception as e:
@@ -14378,7 +14493,7 @@ def main(log_callback=None, stop_callback=None):
                 history_manager,
                 chunk_context_manager,
             )
-            ocr_source_file = run_vision_ocr_source_prepass(chapters, ocr_image_translator, input_path, out, check_stop)
+            ocr_source_file = run_vision_ocr_source_prepass(chapters, ocr_image_translator, input_path, out, check_stop, progress_manager=progress_manager)
         except Exception as e:
             print(f"⚠️ Vision OCR source prepass failed: {e}")
         if ocr_source_file:
@@ -15717,7 +15832,7 @@ def main(log_callback=None, stop_callback=None):
 
     if image_translator is not None:
         try:
-            run_vision_ocr_source_prepass(chapters, image_translator, input_path, out, check_stop)
+            run_vision_ocr_source_prepass(chapters, image_translator, input_path, out, check_stop, progress_manager=progress_manager)
         except Exception as e:
             print(f"⚠️ Vision OCR source prepass failed: {e}")
         try:

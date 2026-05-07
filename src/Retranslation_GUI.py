@@ -1303,6 +1303,8 @@ class RetranslationMixin:
             
             # Sort by chapter number
             chapter_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
+
+        self._append_pdf_ocr_display_info({'prog': prog, 'file_path': file_path, 'output_dir': output_dir}, chapter_display_info)
         
         # =====================================================
         # CREATE UI
@@ -5326,8 +5328,99 @@ class RetranslationMixin:
         # Sort by chapter number
         chapter_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
         
+        self._append_pdf_ocr_display_info(data, chapter_display_info)
+
         # Update data with rebuilt list
         data['chapter_display_info'] = chapter_display_info
+
+    def _append_pdf_ocr_display_info(self, data, chapter_display_info):
+        """Add a lightweight summary row for PDF Vision OCR progress."""
+        try:
+            prog = data.get('prog') or {}
+            pdf_ocr = prog.get('pdf_ocr')
+            if not isinstance(pdf_ocr, dict):
+                output_dir = data.get('output_dir') or ''
+                image_exts = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tif', '.tiff')
+                image_dir = os.path.join(output_dir, 'images')
+                single_dir = os.path.join(output_dir, 'OCR', 'single')
+                image_count = 0
+                cached_count = 0
+                try:
+                    if os.path.isdir(image_dir):
+                        image_count = sum(
+                            1 for name in os.listdir(image_dir)
+                            if os.path.isfile(os.path.join(image_dir, name)) and name.lower().endswith(image_exts)
+                        )
+                except Exception:
+                    image_count = 0
+                try:
+                    if os.path.isdir(single_dir):
+                        cached_count = sum(
+                            1 for name in os.listdir(single_dir)
+                            if os.path.isfile(os.path.join(single_dir, name)) and name.lower().endswith('.txt')
+                        )
+                except Exception:
+                    cached_count = 0
+                total_guess = max(image_count, cached_count)
+                if total_guess <= 0:
+                    return
+                pdf_ocr = {
+                    'source_file': data.get('file_path'),
+                    'ocr_source_file': '',
+                    'status': 'completed' if cached_count >= total_guess else 'in_progress',
+                    'total': total_guess,
+                    'done': cached_count,
+                    'cached': cached_count,
+                    'no_text': 0,
+                    'failed': 0,
+                    'cache_inferred': True,
+                }
+            total = int(pdf_ocr.get('total') or 0)
+            pages = pdf_ocr.get('pages') if isinstance(pdf_ocr.get('pages'), dict) else {}
+            if total <= 0 and pages:
+                total = len(pages)
+            if total <= 0:
+                return
+            done = int(pdf_ocr.get('done') or 0)
+            cached = int(pdf_ocr.get('cached') or 0)
+            failed = int(pdf_ocr.get('failed') or 0)
+            no_text = int(pdf_ocr.get('no_text') or 0)
+            status = str(pdf_ocr.get('status') or 'in_progress').lower().strip()
+            if status not in ('completed', 'failed', 'cancelled'):
+                status = 'in_progress'
+            elif status == 'cancelled':
+                status = 'failed'
+            source_file = os.path.basename(str(pdf_ocr.get('source_file') or data.get('file_path') or 'PDF'))
+            ocr_source_file = os.path.basename(str(pdf_ocr.get('ocr_source_file') or ''))
+            label_bits = [f"{min(done, total)}/{total} pages"]
+            if cached:
+                label_bits.append(f"{cached} cached")
+            if no_text:
+                label_bits.append(f"{no_text} no-text")
+            if failed:
+                label_bits.append(f"{failed} failed")
+            output_label = f"{source_file} -> {ocr_source_file or '_OCR.pdf'} ({', '.join(label_bits)})"
+            info = dict(pdf_ocr)
+            info['status'] = status
+            info['ocr_progress'] = {
+                'done': min(done, total),
+                'total': total,
+                'label': f"{min(done, total)}/{total}",
+            }
+            chapter_display_info.insert(0, {
+                'key': '__pdf_ocr__',
+                'num': 0,
+                'info': info,
+                'output_file': output_label,
+                'status': status,
+                'duplicate_count': 1,
+                'entries': [],
+                'is_special': False,
+                'progress_key': '__pdf_ocr__',
+                'pdf_ocr': True,
+            })
+        except Exception as e:
+            print(f"Warning: could not read PDF OCR progress: {e}")
     
     def _current_progress_output_mode(self, data=None, entry=None):
         """Prefer the live GUI output mode over stale mode values saved in progress JSON."""
@@ -5758,6 +5851,8 @@ class RetranslationMixin:
                     ocr_total = 0
                 if ocr_total > 0:
                     status_label = f"{status_label} ({min(ocr_done, ocr_total)}/{ocr_total})"
+            if info.get('pdf_ocr'):
+                return f"PDF OCR | {icon} {status_label:18s} | {output_file}"
             if 'opf_position' in info:
                 original_file = info.get('original_filename', '')
                 opf_pos = info['opf_position'] + 1
@@ -5885,14 +5980,31 @@ class RetranslationMixin:
         if stats_labels:
             # Recalculate statistics from chapter_display_info (works for both OPF and non-OPF)
             chapter_display_info = data.get('chapter_display_info', [])
-            total_chapters = len(chapter_display_info)
-            display_statuses = [self._progress_display_status(info, data) for info in chapter_display_info]
-            completed = sum(1 for status in display_statuses if status == 'completed')
-            merged = sum(1 for status in display_statuses if status == 'merged')
-            in_progress = sum(1 for status in display_statuses if status == 'in_progress')
-            pending = sum(1 for status in display_statuses if status == 'pending')
-            missing = sum(1 for status in display_statuses if status in ['not_translated', 'not_refined', 'no_tts'])
-            failed = sum(1 for status in display_statuses if status in ['failed', 'qa_failed'])
+            pdf_rows = [info for info in chapter_display_info if info.get('pdf_ocr')]
+            if pdf_rows and len(pdf_rows) == len(chapter_display_info):
+                pdf_info = pdf_rows[0].get('info') or {}
+                try:
+                    total_chapters = int(pdf_info.get('total') or 0)
+                    completed = min(int(pdf_info.get('done') or 0), total_chapters)
+                    failed = int(pdf_info.get('failed') or 0)
+                except (TypeError, ValueError):
+                    total_chapters = len(chapter_display_info)
+                    completed = 0
+                    failed = 0
+                merged = 0
+                pending = 0
+                status = self._progress_display_status(pdf_rows[0], data)
+                in_progress = 1 if status == 'in_progress' else 0
+                missing = max(0, total_chapters - completed - failed)
+            else:
+                total_chapters = len(chapter_display_info)
+                display_statuses = [self._progress_display_status(info, data) for info in chapter_display_info]
+                completed = sum(1 for status in display_statuses if status == 'completed')
+                merged = sum(1 for status in display_statuses if status == 'merged')
+                in_progress = sum(1 for status in display_statuses if status == 'in_progress')
+                pending = sum(1 for status in display_statuses if status == 'pending')
+                missing = sum(1 for status in display_statuses if status in ['not_translated', 'not_refined', 'no_tts'])
+                failed = sum(1 for status in display_statuses if status in ['failed', 'qa_failed'])
             
             # Update labels
             if 'total' in stats_labels:

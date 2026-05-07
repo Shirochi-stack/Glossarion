@@ -511,6 +511,7 @@ def extract_images_from_pdf(pdf_path: str, output_dir: str) -> Dict[int, List[Di
         _total_img_pages = len(doc)
         print(f"📷 Extracting images from PDF ({_total_img_pages} pages)...")
         _last_img_pct = -1
+        _scan_start_time = time.time()
         
         for page_num in range(_total_img_pages):
             # Check for stop flag (cross-process via stop file)
@@ -526,7 +527,9 @@ def extract_images_from_pdf(pdf_path: str, output_dir: str) -> Dict[int, List[Di
             _img_pct = int((page_num + 1) / _total_img_pages * 100) if _total_img_pages else 100
             if _img_pct > _last_img_pct or page_num == _total_img_pages - 1:
                 _last_img_pct = _img_pct
-                print(f"    📷 Scanning images: {_img_pct}% ({page_num + 1}/{_total_img_pages} pages)")
+                _elapsed = int(time.time() - _scan_start_time)
+                _elapsed_text = f"{_elapsed // 60}m {_elapsed % 60}s" if _elapsed >= 60 else f"{_elapsed}s"
+                print(f"    📷 Scanning images: {_img_pct}% ({page_num + 1}/{_total_img_pages} pages, elapsed {_elapsed_text})")
             
             if not image_list:
                 continue
