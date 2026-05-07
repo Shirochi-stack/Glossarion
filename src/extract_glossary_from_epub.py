@@ -7305,6 +7305,8 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 chapter_info["previous_status"] = previous_status
                 if isinstance(previous_entry, dict) and previous_status.lower() not in ("not_completed", "not translated", "not_translated"):
                     chapter_info["previous_progress_entry"] = previous_entry
+            if isinstance(existing_info, dict) and isinstance(existing_info.get("ocr_progress"), dict):
+                chapter_info["ocr_progress"] = existing_info["ocr_progress"]
             chapters[chapter_key] = chapter_info
 
         for idx, existing_info in existing_chapters_by_idx.items():

@@ -3230,6 +3230,17 @@ class RetranslationMixin:
             output_file = info['output_file']
             icon = status_icons.get(status, '❓')
             status_label = status_labels.get(status, status)
+            chapter_info = info.get('info') or info.get('progress_entry') or {}
+            ocr_progress = chapter_info.get('ocr_progress') if isinstance(chapter_info, dict) else None
+            if isinstance(ocr_progress, dict):
+                try:
+                    ocr_done = int(ocr_progress.get('done', 0))
+                    ocr_total = int(ocr_progress.get('total', 0))
+                except (TypeError, ValueError):
+                    ocr_done = 0
+                    ocr_total = 0
+                if ocr_total > 0:
+                    status_label = f"{status_label} ({min(ocr_done, ocr_total)}/{ocr_total})"
             
             # Format display with OPF info if available
             if 'opf_position' in info:
@@ -5581,6 +5592,17 @@ class RetranslationMixin:
             output_file = info['output_file']
             icon = status_icons.get(status, '❓')
             status_label = status_labels.get(status, status)
+            chapter_info = info.get('info') or info.get('progress_entry') or {}
+            ocr_progress = chapter_info.get('ocr_progress') if isinstance(chapter_info, dict) else None
+            if isinstance(ocr_progress, dict):
+                try:
+                    ocr_done = int(ocr_progress.get('done', 0))
+                    ocr_total = int(ocr_progress.get('total', 0))
+                except (TypeError, ValueError):
+                    ocr_done = 0
+                    ocr_total = 0
+                if ocr_total > 0:
+                    status_label = f"{status_label} ({min(ocr_done, ocr_total)}/{ocr_total})"
             if 'opf_position' in info:
                 original_file = info.get('original_filename', '')
                 opf_pos = info['opf_position'] + 1

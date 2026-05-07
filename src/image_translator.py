@@ -341,6 +341,8 @@ class ImageTranslator:
         self.last_vision_translation_finish_reason = None
         self.last_vision_translation_error = None
         self._vision_glossary_processed_hashes = set()
+        self._vision_ocr_progress_lock = threading.Lock()
+        self._vision_ocr_progress_scope = None
         self._ensure_ocr_cache_valid()
         
         # DEBUG: Log the actual max tokens being used for image translation
@@ -1866,6 +1868,7 @@ class ImageTranslator:
 
             disk_ocr = self._load_saved_ocr_text(kind="single", image_basename=os.path.basename(image_path))
             if disk_ocr:
+                self.mark_vision_ocr_progress_done()
                 if self._is_ocr_no_response(disk_ocr):
                     self._preserve_current_image = True
                     print("   Skipping OCR image; cached OCR/single says cover/illustration")
@@ -2043,6 +2046,7 @@ class ImageTranslator:
             image_idx=effective_image_idx,
             chapter_num=effective_chapter_num,
         )
+        self.mark_vision_ocr_progress_done()
         return ocr_text.strip()
 
     def _translate_ocr_text(self, ocr_text, assistant_prompt, check_stop_fn):
@@ -2394,6 +2398,78 @@ class ImageTranslator:
                         glossary_extractor._GLOSSARY_OUTPUT_FILE = original_output_file
             except Exception:
                 pass
+
+    def update_vision_ocr_glossary_ocr_progress(self, progress_refs, done, total):
+        """Patch OCR request progress into the Vision/Single Pass glossary progress file."""
+        refs = self._normalize_vision_glossary_progress_refs(progress_refs)
+        if not refs:
+            return
+        try:
+            done = max(0, int(done))
+            total = max(0, int(total))
+        except (TypeError, ValueError):
+            return
+
+        _glossary_dir, _json_path, _csv_path, progress_path = self._vision_ocr_glossary_paths()
+        if not os.path.exists(progress_path):
+            self.update_vision_ocr_glossary_progress(refs, "in_progress")
+
+        try:
+            with open(progress_path, "r", encoding="utf-8") as f:
+                progress = json.load(f)
+        except Exception:
+            self.update_vision_ocr_glossary_progress(refs, "in_progress")
+            try:
+                with open(progress_path, "r", encoding="utf-8") as f:
+                    progress = json.load(f)
+            except Exception as e:
+                print(f"   ⚠️ Vision OCR glossary OCR progress read failed: {e}")
+                return
+
+        chapters = progress.setdefault("chapters", {})
+        ocr_progress = {
+            "done": min(done, total) if total else done,
+            "total": total,
+            "label": f"{min(done, total) if total else done}/{total}",
+            "last_updated": time.time(),
+        }
+        for ref in refs:
+            ref_idx = int(ref["chapter_idx"])
+            ref_num = int(ref["chapter_num"])
+            target_key = None
+            for key, info in chapters.items():
+                if not isinstance(info, dict):
+                    continue
+                try:
+                    entry_idx = int(info.get("chapter_index", key))
+                except (TypeError, ValueError):
+                    entry_idx = None
+                try:
+                    entry_num = int(info.get("actual_num") or info.get("chapter_num"))
+                except (TypeError, ValueError):
+                    entry_num = None
+                if entry_idx == ref_idx or entry_num == ref_num:
+                    target_key = key
+                    break
+            if target_key is None:
+                target_key = str(ref_num)
+                chapters[target_key] = {
+                    "chapter_index": ref_idx,
+                    "actual_num": ref_num,
+                    "chapter_num": ref_num,
+                    "status": "in_progress",
+                    "last_updated": time.time(),
+                }
+            chapters[target_key]["ocr_progress"] = dict(ocr_progress)
+            chapters[target_key]["last_updated"] = time.time()
+
+        try:
+            tmp_path = progress_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(progress, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, progress_path)
+        except Exception as e:
+            print(f"   ⚠️ Vision OCR glossary OCR progress write failed: {e}")
 
     def _ensure_vision_ocr_glossary(self, ocr_text, mode, check_stop_fn, progress_refs=None, merged_refs=None):
         """Generate/update glossary entries from OCR text for Vision mode."""
@@ -3145,6 +3221,7 @@ class ImageTranslator:
         batch_size = min(num_chunks, self._vision_ocr_batch_size()) if batch_enabled else 1
 
         print(f"   Vision OCR-first: splitting tall image into {num_chunks} OCR chunks, then translating combined OCR once")
+        self.extend_vision_ocr_progress_total(max(0, num_chunks - 1))
         if batch_enabled and batch_size > 1:
             print(f"   Vision OCR batch mode enabled: {batch_size} parallel OCR workers")
             print("   Stop will take effect after the current OCR batch completes")
@@ -3185,6 +3262,7 @@ class ImageTranslator:
                 chapter_num=getattr(self, 'current_chapter_num', None),
             )
             if disk_ocr:
+                self.mark_vision_ocr_progress_done()
                 if self._is_ocr_no_response(disk_ocr):
                     print(f"   Skipping OCR chunk {i+1}/{num_chunks}; cached OCR says cover/illustration")
                 else:
@@ -3642,6 +3720,80 @@ class ImageTranslator:
     def set_current_chapter(self, chapter_num):
         """Set the current chapter number for progress tracking"""
         self.current_chapter_num = chapter_num
+
+    def begin_vision_ocr_progress(self, chapter_num, total, glossary_ref=None, write_translation=True, write_glossary=False):
+        """Start tracking chapter-level Vision OCR request progress."""
+        try:
+            total = max(0, int(total))
+        except (TypeError, ValueError):
+            total = 0
+        with self._vision_ocr_progress_lock:
+            self._vision_ocr_progress_scope = {
+                "chapter_num": chapter_num,
+                "done": 0,
+                "total": total,
+                "glossary_ref": glossary_ref,
+                "write_translation": bool(write_translation),
+                "write_glossary": bool(write_glossary),
+            }
+        self._write_vision_ocr_progress()
+
+    def extend_vision_ocr_progress_total(self, extra):
+        """Increase OCR total when one image expands into multiple chunk requests."""
+        try:
+            extra = int(extra)
+        except (TypeError, ValueError):
+            return
+        if extra <= 0:
+            return
+        with self._vision_ocr_progress_lock:
+            if not self._vision_ocr_progress_scope:
+                return
+            self._vision_ocr_progress_scope["total"] = max(
+                0,
+                int(self._vision_ocr_progress_scope.get("total", 0)) + extra,
+            )
+        self._write_vision_ocr_progress()
+
+    def mark_vision_ocr_progress_done(self, units=1):
+        """Mark one or more OCR requests/images as finished."""
+        try:
+            units = int(units)
+        except (TypeError, ValueError):
+            units = 1
+        if units <= 0:
+            return
+        with self._vision_ocr_progress_lock:
+            if not self._vision_ocr_progress_scope:
+                return
+            scope = self._vision_ocr_progress_scope
+            scope["done"] = min(
+                int(scope.get("total", 0)) if int(scope.get("total", 0)) > 0 else int(scope.get("done", 0)) + units,
+                int(scope.get("done", 0)) + units,
+            )
+        self._write_vision_ocr_progress()
+
+    def clear_vision_ocr_progress(self):
+        with self._vision_ocr_progress_lock:
+            self._vision_ocr_progress_scope = None
+
+    def _write_vision_ocr_progress(self):
+        with self._vision_ocr_progress_lock:
+            scope = dict(self._vision_ocr_progress_scope or {})
+        if not scope:
+            return
+        chapter_num = scope.get("chapter_num")
+        done = int(scope.get("done", 0) or 0)
+        total = int(scope.get("total", 0) or 0)
+        if scope.get("write_translation") and self.progress_manager and hasattr(self.progress_manager, "update_ocr_progress"):
+            try:
+                self.progress_manager.update_ocr_progress(chapter_num, done, total)
+            except Exception as e:
+                print(f"   ⚠️ Vision OCR translation progress update failed: {e}")
+        if scope.get("write_glossary"):
+            ref = scope.get("glossary_ref")
+            if ref:
+                self.update_vision_ocr_glossary_ocr_progress([ref], done, total)
 
     def _call_vision_api(self, image_data, assistant_prompt, check_stop_fn):
         """Make the actual API call for vision translation with retry support"""
