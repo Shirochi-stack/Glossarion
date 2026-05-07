@@ -3207,7 +3207,9 @@ class ImageTranslator:
             path = os.path.join(target_dir, filename)
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(text)
-            print(f"   Saved OCR text: {path}")
+            self._last_saved_ocr_text_path = path
+            if not getattr(self, "_suppress_ocr_save_logs", False):
+                print(f"   Saved OCR text: {path}")
             return path
         except Exception as e:
             print(f"   Could not save OCR text: {e}")
@@ -3911,6 +3913,8 @@ class ImageTranslator:
         if not any((seen, cache_hits, cache_no_text, no_text, api_requests)):
             return
         chapter_num = summary.get("chapter_num")
+        summary["status"] = "cancelled" if status == "cancelled" else "complete"
+        self._last_vision_ocr_summary = summary
         label = f"Chapter {chapter_num}" if chapter_num is not None else "chapter"
         status_label = "cancelled" if status == "cancelled" else "complete"
         parts = [f"{seen} image(s) checked"]
@@ -3922,6 +3926,8 @@ class ImageTranslator:
             parts.append(f"{no_text} cover/illustration skip(s)")
         if api_requests:
             parts.append(f"{api_requests} new OCR request(s)")
+        if getattr(self, "_suppress_vision_ocr_summary_log", False):
+            return
         print(f"   OCR Combined for {label} ({status_label}): {', '.join(parts)}")
 
     def reserve_vision_ocr_progress_units(self, units=1):

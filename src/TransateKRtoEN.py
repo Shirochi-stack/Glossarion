@@ -9898,6 +9898,50 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             f"({preview}); chapter workers: {chapter_workers}, OCR workers/chapter: up to {max_ocr_workers}"
         )
 
+    def _log_glossary_ocr_group_complete(group_number, group_results):
+        summaries = []
+        saved_count = 0
+        total_seen = 0
+        total_cache_hits = 0
+        total_cache_no_text = 0
+        total_no_text = 0
+        total_api_requests = 0
+        for _order, actual_num, _chapter_ocr, _progress_ref, summary, saved_path in group_results:
+            if isinstance(summary, dict):
+                seen = int(summary.get("seen", 0) or 0)
+                cache_hits = int(summary.get("cache_hits", 0) or 0)
+                cache_no_text = int(summary.get("cache_no_text", 0) or 0)
+                no_text = int(summary.get("no_text", 0) or 0)
+                api_requests = int(summary.get("api_requests", 0) or 0)
+                total_seen += seen
+                total_cache_hits += cache_hits
+                total_cache_no_text += cache_no_text
+                total_no_text += no_text
+                total_api_requests += api_requests
+                summaries.append(f"Ch.{_chapter_label(actual_num)}: {seen}")
+            if saved_path:
+                saved_count += 1
+        if not summaries and not saved_count:
+            return
+        preview = ", ".join(summaries[:8])
+        if len(summaries) > 8:
+            preview += f", +{len(summaries) - 8} more"
+        parts = [f"{total_seen} image(s) checked"]
+        if total_cache_hits:
+            parts.append(f"{total_cache_hits} cached OCR hit(s)")
+        if total_cache_no_text:
+            parts.append(f"{total_cache_no_text} cached cover/illustration skip(s)")
+        if total_no_text:
+            parts.append(f"{total_no_text} cover/illustration skip(s)")
+        if total_api_requests:
+            parts.append(f"{total_api_requests} new OCR request(s)")
+        if saved_count:
+            parts.append(f"{saved_count} chapter OCR file(s) saved")
+        print(
+            f"📑 Vision glossary OCR Combined group {group_number} complete: "
+            f"{', '.join(parts)} ({preview})"
+        )
+
     if merge_enabled:
         chapter_jobs = []
         for idx, chapter in enumerate(chapters):
@@ -9946,6 +9990,8 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
                 update_env=False,
             ) or progress_ref
             worker.current_chapter_num = actual_num
+            worker._suppress_ocr_save_logs = True
+            worker._suppress_vision_ocr_summary_log = True
             worker.update_vision_ocr_glossary_progress([progress_ref], "in_progress")
             chapter_ocr = ocr_chapter_images_for_vision_glossary(
                 body,
@@ -9956,7 +10002,14 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
                 log_start=False,
                 log_batch=False,
             )
-            return order, actual_num, chapter_ocr, progress_ref
+            return (
+                order,
+                actual_num,
+                chapter_ocr,
+                progress_ref,
+                getattr(worker, "_last_vision_ocr_summary", None),
+                getattr(worker, "_last_saved_ocr_text_path", None),
+            )
 
         for group_start in range(0, len(chapter_jobs), merge_count):
             if stopped or (check_stop_fn and check_stop_fn()):
@@ -10002,9 +10055,10 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
                     group_results.append(_ocr_merge_chapter_job(job))
 
             group_results.sort(key=lambda item: item[0])
+            _log_glossary_ocr_group_complete(group_start // merge_count + 1, group_results)
             refs_to_merge = []
             ocr_to_merge = []
-            for _order, actual_num, chapter_ocr, progress_ref in group_results:
+            for _order, actual_num, chapter_ocr, progress_ref, _summary, _saved_path in group_results:
                 if chapter_ocr:
                     refs_to_merge.append(progress_ref)
                     ocr_to_merge.append((actual_num, chapter_ocr, progress_ref))
