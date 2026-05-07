@@ -38,7 +38,10 @@ DEFAULT_VISION_OCR_PROMPT = (
     "Extract all readable text that is physically present in the image, in natural reading order. Return Markdown only, not HTML. "
     "Output plain text by default. Use Markdown only to preserve visible source structure or styling when it is actually present in the image: paragraph breaks, meaningful line breaks, bullet lists, numbered lists, blockquotes, tables, bold, italic, strikethrough/deleted text, inline code/code blocks, or visibly printed Markdown characters. "
     "Do not invent Markdown formatting. Do not convert titles, centered text, chapter names, large text, or standalone numbers into Markdown headings. Do not add # unless a # character is visibly present in the image. "
-    "If the image contains any readable text, output it, even if it is a title page, chapter title page, cover page, splash page, or mostly blank page. Reply exactly No only when there is no readable text at all, or when the image is purely illustration/decorative art with no readable text. "
+    "If the image is primarily cover art, character art, scene illustration, splash art, decorative art, a poster, or a promotional image, reply exactly No when the only readable text is a logo, watermark, title/author/credit text, short decorative words, background writing, or other incidental non-story text. "
+    "Do not OCR incidental text from illustrated covers or splash images. "
+    "If the image is primarily a text page, title page, chapter title page, document/table/list page, speech-bubble comic page, or mostly blank page with readable non-decorative text, output the readable text. "
+    "Reply exactly No only when there is no readable text, or when the image is illustration/decorative/cover art whose readable text is only incidental. "
     "Do not reproduce every visual wrap from the image; merge wrapped lines that belong to the same sentence or paragraph unless the line break is semantically intentional. "
     "Preserve visible textual marks when possible, including brackets, parentheses, quote marks, symbols, and emotes/emoticons. "
     "For Chinese/Japanese/Korean text with small pronunciation guides above or beside the main characters, OCR only the main/base characters and ignore the pronunciation guides. "
@@ -53,11 +56,13 @@ STALE_VISION_OCR_PROMPT_MARKERS = (
     "Return only the base source text. Preserve paragraph breaks and intentional textual layout",
     "otherwise not a page of readable story text",
     "headings with #",
+    "If any readable text is present, output it",
 )
 
 DEFAULT_VISION_OCR_USER_PROMPT = (
     "OCR this image/chunk. Return Markdown only with the literal main/base source text. "
-    "If any readable text is present, output it. Reply exactly No only when there is no readable text at all. "
+    "If this is primarily cover/illustration/splash/decorative art and the readable text is only logo, watermark, title/author/credit text, short decorative words, or background writing, reply exactly No. "
+    "If this is primarily a text/title/chapter/document/comic page with readable non-decorative text, output it. Reply exactly No only when there is no readable text or only incidental cover/illustration text. "
     "Ignore pinyin/romaji/furigana/Jyutping pronunciation guides attached to base characters. Do not translate."
     "\n\nContext:\n{context}"
 )
@@ -391,6 +396,7 @@ class ImageTranslator:
         if (
             "OCR this image/chunk. Return only the main/base source text." in self.vision_ocr_user_prompt
             or "has no readable story text" in self.vision_ocr_user_prompt
+            or "If any readable text is present, output it" in self.vision_ocr_user_prompt
         ):
             self.vision_ocr_user_prompt = DEFAULT_VISION_OCR_USER_PROMPT
         self.vision_ocr_combined_context_prompt = os.getenv("VISION_OCR_COMBINED_CONTEXT_PROMPT", DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT).strip() or DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT
