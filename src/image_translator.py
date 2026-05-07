@@ -2423,11 +2423,47 @@ class ImageTranslator:
 
     def _prepare_vision_ocr_translation_prompt(self, ocr_text, check_stop_fn):
         """Apply automatic glossary modes to OCR text before the final translation call."""
+        chapter_ref = {
+            "chapter_num": getattr(self, "current_chapter_num", None),
+            "chapter_file": (
+                getattr(self, "current_chapter_file", None)
+                or os.getenv("CURRENT_CHAPTER_FILE", "").strip()
+            ),
+        }
+        compression_source_text = ocr_text
+        ocr_epub = (
+            os.getenv("GLOSSARY_COMPRESSION_SOURCE_EPUB", "").strip()
+            or os.getenv("VISION_OCR_SOURCE_EPUB", "").strip()
+        )
+        if ocr_epub and os.path.exists(ocr_epub):
+            try:
+                from vision_ocr_source_epub import load_ocr_epub_text
+                epub_text = load_ocr_epub_text(ocr_epub, chapter_ref)
+                if epub_text:
+                    compression_source_text = epub_text
+            except Exception as e:
+                print(f"   ⚠️ OCR EPUB glossary compression source unavailable: {e}")
+
+        system_prompt = self.system_prompt
+        manual_glossary_path = getattr(self, "manual_glossary_path", None) or os.getenv("MANUAL_GLOSSARY", "").strip()
+        base_system_prompt = getattr(self, "base_system_prompt", None)
+        if manual_glossary_path and base_system_prompt and os.path.exists(manual_glossary_path):
+            try:
+                from TransateKRtoEN import build_system_prompt
+                system_prompt = build_system_prompt(
+                    base_system_prompt,
+                    manual_glossary_path,
+                    source_text=compression_source_text,
+                    chapter_ref=chapter_ref,
+                )
+            except Exception as e:
+                print(f"   ⚠️ Vision OCR manual glossary prompt rebuild failed: {e}")
+
         mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower()
         if mode in ("single_pass", "single-pass", "off", "no_glossary", "off_fuzzy_automap", "off_no_automap", ""):
-            return self.system_prompt
+            return system_prompt
         if mode not in ("minimal", "balanced", "full"):
-            return self.system_prompt
+            return system_prompt
 
         glossary_path = None
         if os.getenv("VISION_GLOSSARY_PREPASS_DONE", "0") != "1":
@@ -2441,22 +2477,59 @@ class ImageTranslator:
         if not glossary_path:
             glossary_path = self._find_vision_glossary_file()
         if not glossary_path:
-            return self.system_prompt
+            return system_prompt
 
         try:
             with open(glossary_path, 'r', encoding='utf-8') as f:
                 glossary_text = f.read()
             if not glossary_text.strip():
-                return self.system_prompt
+                return system_prompt
+            if os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1":
+                try:
+                    from glossary_compressor import compress_glossary
+                    compression_source_text = ocr_text
+                    ocr_epub = (
+                        os.getenv("GLOSSARY_COMPRESSION_SOURCE_EPUB", "").strip()
+                        or os.getenv("VISION_OCR_SOURCE_EPUB", "").strip()
+                    )
+                    chapter_ref = {
+                        "chapter_num": getattr(self, "current_chapter_num", None),
+                        "chapter_file": (
+                            getattr(self, "current_chapter_file", None)
+                            or os.getenv("CURRENT_CHAPTER_FILE", "").strip()
+                        ),
+                    }
+                    if ocr_epub and os.path.exists(ocr_epub):
+                        try:
+                            from vision_ocr_source_epub import load_ocr_epub_text
+                            epub_text = load_ocr_epub_text(ocr_epub, chapter_ref)
+                            if epub_text:
+                                compression_source_text = epub_text
+                        except Exception as e:
+                            print(f"   ⚠️ OCR EPUB glossary compression source unavailable: {e}")
+                    original_length = len(glossary_text)
+                    glossary_text = compress_glossary(
+                        glossary_text,
+                        compression_source_text,
+                        glossary_format='auto',
+                        glossary_path=glossary_path,
+                        chapter_ref=chapter_ref,
+                    )
+                    compressed_length = len(glossary_text)
+                    if original_length:
+                        reduction_pct = (original_length - compressed_length) / original_length * 100
+                        print(f"   🗜️ Vision OCR glossary compressed: {original_length:,} → {compressed_length:,} chars ({reduction_pct:.1f}%)")
+                except Exception as e:
+                    print(f"   ⚠️ Vision OCR glossary compression failed: {e}")
             append_prompt = os.getenv(
                 "GLOSSARY_APPEND_PROMPT",
                 "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
             )
             print(f"   📑 Vision OCR glossary applied: {os.path.basename(glossary_path)}")
-            return f"{self.system_prompt}\n\n{append_prompt}\n{glossary_text}"
+            return f"{system_prompt}\n\n{append_prompt}\n{glossary_text}"
         except Exception as e:
             print(f"   ⚠️ Failed to append Vision OCR glossary: {e}")
-            return self.system_prompt
+            return system_prompt
 
     def _find_vision_glossary_file(self):
         try:

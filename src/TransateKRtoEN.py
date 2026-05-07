@@ -9618,6 +9618,8 @@ def ocr_chapter_images_for_vision_glossary(
     progress_ref=None,
     log_start=True,
     log_batch=True,
+    write_translation=True,
+    write_glossary=True,
 ):
     """OCR chapter images for Vision-mode glossary prepasses without translating them."""
     chapter_html = ContentProcessor.normalize_escaped_image_tags(chapter_html)
@@ -9633,8 +9635,8 @@ def ocr_chapter_images_for_vision_glossary(
         actual_num,
         0,
         glossary_ref=progress_ref or _vision_ocr_progress_ref_for_actual(actual_num),
-        write_translation=True,
-        write_glossary=True,
+        write_translation=write_translation,
+        write_glossary=write_glossary,
     )
 
     jobs = []
@@ -9890,6 +9892,120 @@ def _vision_ocr_glossary_should_skip_special_chapter(chapter):
         else ["cover", "index", "glossary", "glossary_extension"]
     )
     return any(stem in special_exact or any(kw in stem for kw in special_keywords) for stem in stems)
+
+
+def run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, check_stop_fn=None):
+    """OCR the EPUB into a sibling *_OCR.epub before translation/glossary compression."""
+    if not _vision_ocr_mode_enabled():
+        return None
+    if not input_path or not str(input_path).lower().endswith(".epub") or not os.path.exists(input_path):
+        return None
+    if image_translator is None:
+        return None
+
+    try:
+        from vision_ocr_source_epub import ocr_epub_path_for, write_ocr_epub
+    except Exception as e:
+        print(f"⚠️ Vision OCR source EPUB support unavailable: {e}")
+        return None
+
+    output_path = ocr_epub_path_for(input_path)
+    chapter_text_by_filename = {}
+    chapter_content_count = 0
+    total_images = 0
+    total_text_only = 0
+
+    print("\n" + "="*50)
+    print("📖 Vision OCR Source EPUB Prepass")
+    print("="*50)
+    print(f"📖 OCR source EPUB target: {output_path}")
+
+    previous_suppress_save = getattr(image_translator, "_suppress_ocr_save_logs", False)
+    previous_suppress_summary = getattr(image_translator, "_suppress_vision_ocr_summary_log", False)
+    image_translator._suppress_ocr_save_logs = True
+    image_translator._suppress_vision_ocr_summary_log = True
+    try:
+        for idx, chapter in enumerate(chapters or []):
+            if check_stop_fn and check_stop_fn():
+                print("⏹️ Vision OCR source EPUB prepass stopped")
+                return None
+
+            actual_num = chapter.get('actual_chapter_num', chapter.get('num', idx + 1))
+            filename = (
+                chapter.get("filename")
+                or chapter.get("original_filename")
+                or chapter.get("original_basename")
+                or f"chapter_{actual_num}.xhtml"
+            )
+
+            text_parts = []
+            text_for_glossary = _chapter_text_for_vision_glossary(chapter)
+            if text_for_glossary:
+                text_parts.append(text_for_glossary)
+
+            body = _chapter_image_html_for_vision_glossary(chapter)
+            image_count = len(image_translator.extract_images_from_chapter(body)) if body and "<img" in body.lower() else 0
+            total_images += image_count
+            skip_special_image_chapter = image_count > 0 and _vision_ocr_glossary_should_skip_special_chapter(chapter)
+            if skip_special_image_chapter:
+                continue
+
+            if image_count > 0:
+                progress_ref = _vision_glossary_progress_ref(chapter, idx, actual_num)
+                worker = _clone_image_translator_for_vision_ocr(image_translator)
+                _set_image_translator_chapter_progress_context(
+                    worker,
+                    chapter,
+                    idx,
+                    actual_num,
+                    update_env=False,
+                )
+                worker._suppress_ocr_save_logs = True
+                worker._suppress_vision_ocr_summary_log = True
+                chapter_ocr = ocr_chapter_images_for_vision_glossary(
+                    body,
+                    worker,
+                    actual_num,
+                    check_stop_fn,
+                    progress_ref=progress_ref,
+                    log_start=False,
+                    log_batch=False,
+                    write_translation=True,
+                    write_glossary=False,
+                )
+                if chapter_ocr:
+                    text_parts.append(chapter_ocr)
+            elif image_count <= 0 and text_for_glossary:
+                total_text_only += 1
+
+            combined_text = _join_vision_ocr_parts(part for part in text_parts if str(part).strip())
+            if combined_text:
+                chapter_content_count += 1
+                base = os.path.basename(str(filename))
+                stem = os.path.splitext(base)[0].lower()
+                chapter_text_by_filename[str(filename).replace("\\", "/")] = combined_text
+                chapter_text_by_filename[base] = combined_text
+                chapter_text_by_filename[stem] = combined_text
+    finally:
+        image_translator._suppress_ocr_save_logs = previous_suppress_save
+        image_translator._suppress_vision_ocr_summary_log = previous_suppress_summary
+
+    if not chapter_text_by_filename:
+        print("⚠️ Vision OCR source EPUB prepass found no OCR/text content")
+        return None
+
+    try:
+        ocr_epub = write_ocr_epub(input_path, chapter_text_by_filename, output_path)
+        os.environ["VISION_OCR_SOURCE_EPUB"] = ocr_epub
+        os.environ["GLOSSARY_COMPRESSION_SOURCE_EPUB"] = ocr_epub
+        print(
+            f"✅ Vision OCR source EPUB ready: {ocr_epub} "
+            f"({chapter_content_count} chapter(s), {total_images} image(s), {total_text_only} text-only chapter(s))"
+        )
+        return ocr_epub
+    except Exception as e:
+        print(f"⚠️ Failed to write Vision OCR source EPUB: {e}")
+        return None
 
 
 def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
@@ -11733,6 +11849,23 @@ def parse_token_limit(env_value):
     
     return 1000000, "1000000 (default)"
 
+def _glossary_compression_source_text(source_text=None, chapter_ref=None):
+    """Prefer Vision OCR source EPUB text when compressing glossary prompts."""
+    ocr_epub = (
+        os.getenv("GLOSSARY_COMPRESSION_SOURCE_EPUB", "").strip()
+        or os.getenv("VISION_OCR_SOURCE_EPUB", "").strip()
+    )
+    if ocr_epub and os.path.exists(ocr_epub):
+        try:
+            from vision_ocr_source_epub import load_ocr_epub_text
+            ocr_text = load_ocr_epub_text(ocr_epub, chapter_ref)
+            if ocr_text:
+                return ocr_text
+        except Exception as e:
+            print(f"⚠️ OCR EPUB glossary compression source unavailable: {e}")
+    return source_text
+
+
 def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapter_ref=None):
     """Build the system prompt with glossary - TRUE BRUTE FORCE VERSION"""
     append_glossary = os.getenv("APPEND_GLOSSARY", "1") == "1"
@@ -11768,14 +11901,15 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapt
             
             # Apply glossary compression if enabled and source text is provided
             compress_glossary_enabled = os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1"
-            if compress_glossary_enabled and source_text:
+            compression_source_text = _glossary_compression_source_text(source_text, chapter_ref)
+            if compress_glossary_enabled and compression_source_text:
                 try:
                     from glossary_compressor import compress_glossary
                     original_glossary_text = glossary_text  # Store original for token counting
                     original_length = len(glossary_text)
                     glossary_text = compress_glossary(
                         glossary_text,
-                        source_text,
+                        compression_source_text,
                         glossary_format='auto',
                         glossary_path=actual_glossary_path,
                         chapter_ref=chapter_ref,
@@ -11839,13 +11973,13 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapt
                             additional_glossary_text = af.read()
                         
                         # Apply same compression logic if enabled
-                        if compress_glossary_enabled and source_text:
+                        if compress_glossary_enabled and compression_source_text:
                             try:
                                 from glossary_compressor import compress_glossary
                                 original_add_length = len(additional_glossary_text)
                                 additional_glossary_text = compress_glossary(
                                     additional_glossary_text,
-                                    source_text,
+                                    compression_source_text,
                                     glossary_format='auto',
                                     glossary_path=additional_glossary_path,
                                     chapter_ref=chapter_ref,
@@ -14745,6 +14879,8 @@ def main(log_callback=None, stop_callback=None):
             history_manager,
             chunk_context_manager
         )
+        image_translator.base_system_prompt = config.get_system_prompt(actual_merge_count=1)
+        image_translator.manual_glossary_path = glossary_path
     else:
         print("ℹ️ Image translation disabled by user")
     
@@ -15068,6 +15204,10 @@ def main(log_callback=None, stop_callback=None):
                 print(f"   • {file}")
 
     if image_translator is not None:
+        try:
+            run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, check_stop)
+        except Exception as e:
+            print(f"⚠️ Vision OCR source EPUB prepass failed: {e}")
         try:
             os.environ.pop("VISION_GLOSSARY_PREPASS_DONE", None)
             run_vision_glossary_prepass(chapters, image_translator, check_stop)
