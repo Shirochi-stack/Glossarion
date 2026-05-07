@@ -11140,13 +11140,15 @@ def check_epub_readiness(output_dir):
             print(f"   • {issue}")
         return False
 
-def cleanup_previous_extraction(output_dir):
+def cleanup_previous_extraction(output_dir, preserve_images=False):
     """Clean up any files from previous extraction runs (preserves CSS files)"""
     # Remove 'css' from cleanup_items to preserve CSS files
     cleanup_items = [
-         'images',  # Removed 'css' from this list
+        # Removed 'css' from this list
         '.resources_extracted'
     ]
+    if not preserve_images:
+        cleanup_items.insert(0, 'images')
     
     epub_structure_files = [
         'container.xml', 'content.opf', 'toc.ncx'
@@ -11201,6 +11203,16 @@ def cleanup_previous_extraction(output_dir):
         print(f"⚠️ Could not remove extraction marker: {e}")
     
     # Check if CSS files exist and inform user they're being preserved
+    if preserve_images:
+        images_path = os.path.join(output_dir, 'images')
+        if os.path.exists(images_path):
+            try:
+                image_files = [f for f in os.listdir(images_path) if os.path.isfile(os.path.join(images_path, f))]
+                if image_files:
+                    print(f"📄 Preserving {len(image_files)} existing PDF image file(s)")
+            except Exception:
+                pass
+
     css_path = os.path.join(output_dir, 'css')
     if os.path.exists(css_path):
         try:
@@ -13607,7 +13619,12 @@ def main(log_callback=None, stop_callback=None):
     os.makedirs(out, exist_ok=True)
     print(f"[DEBUG] Created output folder → {out}")
     
-    cleanup_previous_extraction(out)
+    preserve_pdf_ocr_images = (
+        is_pdf_file
+        and config.OUTPUT_MODE == "vision"
+        and getattr(config, "VISION_OCR_SKIP_TRANSLATION", False)
+    )
+    cleanup_previous_extraction(out, preserve_images=preserve_pdf_ocr_images)
 
     os.environ["EPUB_OUTPUT_DIR"] = out
     payloads_dir = out

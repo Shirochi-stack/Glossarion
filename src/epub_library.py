@@ -16329,20 +16329,29 @@ class EpubReaderDialog(QDialog):
         URIs so the result is self-contained.
         """
         cache_attr = '_embedded_css_cache'
+        attach_css_enabled = self._resolve_attach_css_to_chapters()
+        translated_view = bool(
+            not getattr(self, "_show_raw", False)
+            and (
+                self._translated_overlay
+                or self._raw_epub_alt_path
+                or self._translated_css_dirs
+            )
+        )
         translated_css_mode = bool(
+            attach_css_enabled
+            and
             self._translated_overlay
             and not getattr(self, "_show_raw", False)
             and self._translated_css_dirs
         )
-        suppress_wrapper_centering = (
-            translated_css_mode
-            and not self._resolve_attach_css_to_chapters()
-        )
+        suppress_translated_css = translated_view and not attach_css_enabled
         cache_key = (
             "translated" if translated_css_mode else "active_epub",
             os.path.abspath(str(self._epub_path or "")),
             tuple(os.path.abspath(p) for p in self._translated_css_dirs),
-            int(bool(suppress_wrapper_centering)),
+            int(bool(attach_css_enabled)),
+            int(bool(suppress_translated_css)),
         )
         if hasattr(self, cache_attr):
             cached = getattr(self, cache_attr)
@@ -16352,6 +16361,10 @@ class EpubReaderDialog(QDialog):
                     return old_css
             elif isinstance(cached, str) and not translated_css_mode:
                 return cached
+
+        if suppress_translated_css:
+            setattr(self, cache_attr, (cache_key, ""))
+            return ""
 
         import zipfile, re, base64
         css_text = ''
@@ -16389,10 +16402,7 @@ class EpubReaderDialog(QDialog):
                     try:
                         with open(os.path.join(css_dir, fname), 'r',
                                   encoding='utf-8', errors='replace') as cf:
-                            raw_css = cf.read()
-                            if suppress_wrapper_centering:
-                                raw_css = self._strip_broad_wrapper_centering(raw_css)
-                            css_text += raw_css + '\n'
+                            css_text += cf.read() + '\n'
                     except OSError:
                         pass
             except OSError:
@@ -16405,10 +16415,7 @@ class EpubReaderDialog(QDialog):
             try:
                 with open(override_path, 'r', encoding='utf-8',
                           errors='replace') as f:
-                    raw_css = f.read()
-                    if suppress_wrapper_centering:
-                        raw_css = self._strip_broad_wrapper_centering(raw_css)
-                    css_text = raw_css + '\n'
+                    css_text = f.read() + '\n'
             except OSError:
                 has_override = False  # fall through to normal sources
 
@@ -16489,56 +16496,6 @@ class EpubReaderDialog(QDialog):
         if env in ("0", "false", "no", "off"):
             return False
         return bool(self._config.get("attach_css_to_chapters", False))
-
-    def _strip_broad_wrapper_centering(self, css_text: str) -> str:
-        """Remove broad wrapper centering while Attach CSS is off.
-
-        Rules like ``.kakao-image-chapter { text-align: center; }`` are useful
-        for image pages, but translated text-only chapters also live inside
-        that wrapper in the reader. Strip only those broad wrapper
-        declarations; leave headings and image-specific centering alone.
-        """
-        import re
-        if not css_text:
-            return css_text
-
-        broad_wrappers = {
-            '.kakao-image-chapter',
-            'div.kakao-image-chapter',
-            '.image-translation',
-            'div.image-translation',
-            '.translated-text-only',
-            'div.translated-text-only',
-            '.image-with-translation',
-            'div.image-with-translation',
-        }
-
-        def _clean_rule(match):
-            selector = match.group(1)
-            body = match.group(2)
-            selector_parts = [s.strip().lower() for s in selector.split(',')]
-            if not any(part in broad_wrappers for part in selector_parts):
-                return match.group(0)
-            cleaned = re.sub(
-                r'(^|;)\s*text-align\s*:\s*center\s*!important\s*(?=;|$)',
-                r'\1',
-                body,
-                flags=re.IGNORECASE,
-            )
-            cleaned = re.sub(
-                r'(^|;)\s*text-align\s*:\s*center\s*(?=;|$)',
-                r'\1',
-                cleaned,
-                flags=re.IGNORECASE,
-            )
-            cleaned = re.sub(r';{2,}', ';', cleaned).strip()
-            cleaned = cleaned.strip(';').strip()
-            if not cleaned:
-                return ''
-            return f"{selector} {{ {cleaned} }}"
-
-        return re.sub(r'([^{}]+)\{([^{}]*)\}', _clean_rule, css_text,
-                      flags=re.DOTALL)
 
     def _wrap_html(self, body_html: str, paginated: bool = False) -> str:
         """Wrap processed HTML in a full styled document.
