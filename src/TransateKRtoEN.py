@@ -10092,6 +10092,37 @@ def prepare_pdf_images_for_vision_ocr(input_path, output_dir, check_stop_fn=None
     os.makedirs(images_dir, exist_ok=True)
     image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 
+    def _pdf_page_count():
+        try:
+            import fitz
+            with fitz.open(input_path) as doc:
+                return len(doc)
+        except Exception:
+            return 0
+
+    def _pdf_has_meaningful_text_sample(max_pages=12):
+        try:
+            import fitz
+            with fitz.open(input_path) as doc:
+                sample_pages = min(len(doc), max_pages)
+                total_text = 0
+                for idx in range(sample_pages):
+                    total_text += len((doc[idx].get_text("text") or "").strip())
+                return total_text >= 100
+        except Exception:
+            return True
+
+    def _image_page_numbers(paths):
+        pages = set()
+        for path in paths:
+            match = re.search(r"(?:^|[_-])page[_-]?(\d+)(?:[_\.-]|$)", os.path.basename(path), re.IGNORECASE)
+            if match:
+                try:
+                    pages.add(int(match.group(1)))
+                except Exception:
+                    pass
+        return pages
+
     def _existing_images():
         if not os.path.isdir(images_dir):
             return []
@@ -10104,19 +10135,44 @@ def prepare_pdf_images_for_vision_ocr(input_path, output_dir, check_stop_fn=None
 
     existing = _existing_images()
     if existing:
-        print(f"📄 Vision OCR PDF: reusing {len(existing)} existing extracted image(s)")
-        return len(existing)
+        total_pages = _pdf_page_count()
+        existing_pages = _image_page_numbers(existing)
+        if total_pages and existing_pages and len(existing_pages) < total_pages:
+            print(
+                f"📄 Vision OCR PDF: found partial image cache "
+                f"({len(existing_pages)}/{total_pages} pages, {len(existing)} image file(s)); extracting missing/full image set"
+            )
+        elif total_pages and len(existing) < total_pages:
+            print(
+                f"📄 Vision OCR PDF: found suspiciously small image cache "
+                f"({len(existing)} image file(s), {total_pages} PDF page(s)); extracting missing/full image set"
+            )
+        else:
+            print(f"📄 Vision OCR PDF: reusing {len(existing)} existing extracted image(s)")
+            return len(existing)
+
+    total_pdf_pages = _pdf_page_count()
+    pdf_has_text = _pdf_has_meaningful_text_sample()
 
     if check_stop_fn and check_stop_fn():
         return 0
 
+    force_render_all_pages = False
     try:
         from pdf_extractor import extract_images_from_pdf
         print("📄 Vision OCR PDF: extracting embedded images; skipping MuPDF XHTML rendering")
         images_by_page = extract_images_from_pdf(input_path, output_dir)
         extracted_count = sum(len(v) for v in (images_by_page or {}).values())
         if extracted_count:
-            return extracted_count
+            extracted_pages = len(images_by_page or {})
+            if total_pdf_pages and not pdf_has_text and extracted_pages < total_pdf_pages:
+                print(
+                    f"📄 Vision OCR PDF: embedded extraction covered only "
+                    f"{extracted_pages}/{total_pdf_pages} image-only page(s); rendering every page for OCR"
+                )
+                force_render_all_pages = True
+            else:
+                return extracted_count
     except Exception as e:
         print(f"⚠️ Embedded PDF image extraction failed: {e}")
 
@@ -10128,6 +10184,12 @@ def prepare_pdf_images_for_vision_ocr(input_path, output_dir, check_stop_fn=None
 
         with fitz.open(input_path) as doc:
             total_pages = len(doc)
+            if force_render_all_pages:
+                for old_image in _existing_images():
+                    try:
+                        os.remove(old_image)
+                    except Exception:
+                        pass
             try:
                 zoom = float(os.getenv("PDF_IMAGE_RENDER_SCALE", "2.0") or 2.0)
             except Exception:
@@ -10200,6 +10262,17 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
     image_translator._suppress_ocr_save_logs = True
     image_translator._suppress_image_detail_logs = True
 
+    def _load_pdf_image_cached_ocr(idx, image_path):
+        cached = image_translator._load_saved_ocr_text(
+            kind="single",
+            image_basename=os.path.basename(image_path),
+            image_idx=1,
+            chapter_num=idx,
+        )
+        if cached:
+            return cached.strip()
+        return None
+
     def _ocr_pdf_image(job):
         idx, image_path = job
         if check_stop_fn and check_stop_fn():
@@ -10230,13 +10303,28 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
     ocr_by_index = {}
     checked = 0
     no_text = 0
+    cached_hits = 0
+    jobs = []
+    for idx, image_path in enumerate(image_paths, 1):
+        cached = _load_pdf_image_cached_ocr(idx, image_path)
+        if cached:
+            checked += 1
+            if image_translator._is_ocr_no_response(cached):
+                no_text += 1
+            else:
+                cached_hits += 1
+                ocr_by_index[idx] = (image_path, cached)
+        else:
+            jobs.append((idx, image_path))
+
     chapter_batch_enabled = os.getenv("BATCH_TRANSLATION", "0").strip().lower() in ("1", "true", "yes", "on")
     try:
         requested_workers = int(os.getenv("BATCH_SIZE", "1") or "1")
     except Exception:
         requested_workers = 1
-    workers = min(len(image_paths), max(1, requested_workers)) if chapter_batch_enabled else 1
-    if workers > 1:
+    remaining_jobs = len(jobs)
+    workers = min(remaining_jobs, max(1, requested_workers)) if chapter_batch_enabled and remaining_jobs else 1
+    if remaining_jobs and workers > 1:
         print(f"📖 Vision OCR source PDF batch enabled: {workers} parallel image request worker(s)")
 
     last_ocr_pct = [-1]
@@ -10244,9 +10332,14 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
         pct = int(checked / len(image_paths) * 100) if image_paths else 100
         if pct > last_ocr_pct[0] or checked == len(image_paths):
             last_ocr_pct[0] = pct
-            print(f"    📷 PDF OCR: {pct}% ({checked}/{len(image_paths)} images)")
+            cache_note = f", {cached_hits} cached" if cached_hits else ""
+            print(f"    📷 PDF OCR: {pct}% ({checked}/{len(image_paths)} images{cache_note})")
 
-    jobs = list(enumerate(image_paths, 1))
+    if checked:
+        _log_pdf_ocr_progress()
+    if not jobs:
+        print("📖 Vision OCR source PDF: all extracted images were already cached")
+
     try:
         if workers > 1 and len(jobs) > 1:
             with ThreadPoolExecutor(max_workers=workers) as executor:
