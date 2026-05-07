@@ -15024,6 +15024,56 @@ def main(log_callback=None, stop_callback=None):
                     for var in important_vars:
                         if var in os.environ:
                             env_vars[var] = os.environ[var]
+
+                    worker_chapters = chapters
+                    if _vision_minimal_ocr_glossary_enabled(config):
+                        print("📑 Vision minimal auto glossary: using GlossaryManager with the OCR source file")
+                        ocr_source_file = (
+                            os.getenv("VISION_OCR_SOURCE_PDF")
+                            if str(input_path or "").lower().endswith(".pdf")
+                            else os.getenv("VISION_OCR_SOURCE_EPUB")
+                        )
+                        if not ocr_source_file or not os.path.exists(ocr_source_file):
+                            try:
+                                ocr_system = config.get_system_prompt(actual_merge_count=1)
+                                ocr_image_translator = ImageTranslator(
+                                    client,
+                                    out,
+                                    config.PROFILE_NAME,
+                                    ocr_system,
+                                    config.TEMP,
+                                    log_callback,
+                                    progress_manager,
+                                    history_manager,
+                                    chunk_context_manager,
+                                )
+                                ocr_source_file = run_vision_ocr_source_prepass(
+                                    chapters,
+                                    ocr_image_translator,
+                                    input_path,
+                                    out,
+                                    check_stop,
+                                    progress_manager=progress_manager,
+                                )
+                            except Exception as e:
+                                print(f"⚠️ Vision minimal auto glossary could not create OCR source file: {e}")
+                                ocr_source_file = None
+
+                        if ocr_source_file and os.path.exists(ocr_source_file):
+                            ocr_glossary_chapters = _load_glossary_chapters_from_ocr_source(ocr_source_file, check_stop)
+                            if ocr_glossary_chapters:
+                                worker_chapters = ocr_glossary_chapters
+                                env_vars["EPUB_PATH"] = ocr_source_file
+                                os.environ["VISION_GLOSSARY_PREPASS_DONE"] = "1"
+                                os.environ["VISION_GLOSSARY_SOURCE_FILE"] = ocr_source_file
+                                print(
+                                    f"📑 Vision minimal auto glossary source: {ocr_source_file} "
+                                    f"({len(worker_chapters)} OCR chapter/page item(s))"
+                                )
+                            else:
+                                print("⚠️ Vision minimal auto glossary: OCR source contained no extractable text; using extracted chapter text")
+                        else:
+                            print("⚠️ Vision minimal auto glossary: OCR source file unavailable; using extracted chapter text")
                     
                     # NOTE: Avoid multiprocessing.Manager() here.
                     # Instead, have the subprocess append logs to a file and tail it from the parent.
@@ -15056,7 +15106,7 @@ def main(log_callback=None, stop_callback=None):
                         future = executor.submit(
                             generate_glossary_in_process,
                             out,
-                            chapters,
+                            worker_chapters,
                             instructions,
                             env_vars,
                             log_queue,  # Queue disabled (None)
@@ -15943,8 +15993,15 @@ def main(log_callback=None, stop_callback=None):
         except Exception as e:
             print(f"⚠️ Vision OCR source prepass failed: {e}")
         try:
-            os.environ.pop("VISION_GLOSSARY_PREPASS_DONE", None)
-            run_vision_glossary_prepass(chapters, image_translator, check_stop)
+            if _vision_minimal_ocr_glossary_enabled(config):
+                source_file = os.environ.get("VISION_GLOSSARY_SOURCE_FILE") or os.environ.get("VISION_OCR_SOURCE_EPUB") or os.environ.get("VISION_OCR_SOURCE_PDF")
+                if os.environ.get("VISION_GLOSSARY_PREPASS_DONE") == "1":
+                    print(f"📑 Vision auto glossary prepass already completed via OCR source file; skipping direct OCR-text glossary prepass ({source_file})")
+                else:
+                    print(f"📑 Vision minimal auto glossary uses GlossaryManager/_OCR source path; skipping direct OCR-text glossary prepass ({source_file or 'no OCR source'})")
+            else:
+                os.environ.pop("VISION_GLOSSARY_PREPASS_DONE", None)
+                run_vision_glossary_prepass(chapters, image_translator, check_stop)
         except Exception as e:
             print(f"⚠️ Vision auto glossary prepass failed: {e}")
     
