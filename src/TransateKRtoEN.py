@@ -10925,7 +10925,6 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             worker.current_chapter_num = actual_num
             worker._suppress_ocr_save_logs = True
             worker._suppress_vision_ocr_summary_log = True
-            worker.update_vision_ocr_glossary_progress([progress_ref], "in_progress")
             chapter_ocr = ""
             if image_count > 0:
                 chapter_ocr = ocr_chapter_images_for_vision_glossary(
@@ -11118,7 +11117,6 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
                     update_env=False,
                 ) or progress_ref
                 worker.current_chapter_num = actual_num
-                worker.update_vision_ocr_glossary_progress([progress_ref], "in_progress")
                 chapter_ocr = ""
                 if has_images:
                     chapter_ocr = ocr_chapter_images_for_vision_glossary(
@@ -11218,7 +11216,6 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             idx,
             actual_num,
         ) or progress_ref
-        image_translator.update_vision_ocr_glossary_progress([progress_ref], "in_progress")
         _track_pending_ref(progress_ref)
         chapter_ocr = ""
         if has_images:

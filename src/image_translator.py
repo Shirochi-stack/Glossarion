@@ -226,7 +226,7 @@ def _stop_new_vision_work_requested(stop_check_fn=None) -> bool:
     return _graceful_stop_requested() and not _wait_for_chunks_enabled()
 
 
-def send_text_with_interrupt(client, messages, temperature, max_tokens, stop_check_fn, chunk_timeout=None, context='translation', chapter_context=None):
+def send_text_with_interrupt(client, messages, temperature, max_tokens, stop_check_fn, chunk_timeout=None, context='translation', chapter_context=None, before_send_callback=None):
     """Send text API request with graceful/force stop behavior matching image calls."""
     import queue
     import threading
@@ -247,6 +247,12 @@ def send_text_with_interrupt(client, messages, temperature, max_tokens, stop_che
                 except Exception:
                     pass
             _clear_vision_key_context_for_text_request(client, context)
+            if callable(before_send_callback) and hasattr(client, "_get_thread_local_client"):
+                try:
+                    tls = client._get_thread_local_client()
+                    tls.pre_api_call_callback = before_send_callback
+                except Exception:
+                    before_send_callback()
             start_time = time.time()
             result = client.send(
                 messages=messages,
@@ -2912,7 +2918,13 @@ class ImageTranslator:
             temperature = float(os.getenv("GLOSSARY_TEMPERATURE", str(self.temperature)) or self.temperature)
 
             print(f"   📑 Vision OCR auto glossary ({mode}): generating entries from OCR text...")
-            self._update_vision_ocr_glossary_progress(glossary_extractor, json_path, progress_refs, "in_progress")
+            def _mark_glossary_progress_on_send():
+                self._update_vision_ocr_glossary_progress(
+                    glossary_extractor,
+                    json_path,
+                    progress_refs,
+                    "in_progress",
+                )
             response = send_text_with_interrupt(
                 self.client,
                 messages,
@@ -2921,6 +2933,7 @@ class ImageTranslator:
                 stop_check_fn=check_stop_fn,
                 chunk_timeout=chunk_timeout,
                 context='glossary',
+                before_send_callback=_mark_glossary_progress_on_send,
             )
             raw, finish_reason = _extract_text_response_and_finish_reason(response)
             bad_finish_reason = _bad_vision_glossary_finish_reason(finish_reason)
