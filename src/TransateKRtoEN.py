@@ -2384,6 +2384,46 @@ class ProgressManager:
         self.prog.setdefault("chapters", {})[chapter_key] = chapter_info
         self.save()
 
+    def fail_ocr_progress(self, actual_num, done=None, total=None, output_file=None, chapter_obj=None, content_hash=None):
+        """Resolve an OCR in-progress row after cancellation so it cannot stay stale."""
+        chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
+        chapter_info = dict(self.prog.get("chapters", {}).get(chapter_key, {}))
+        if not chapter_info:
+            for existing_key, existing_info in self.prog.get("chapters", {}).items():
+                if not isinstance(existing_info, dict):
+                    continue
+                if str(existing_info.get("actual_num", existing_info.get("chapter_num"))) == str(actual_num):
+                    chapter_key = existing_key
+                    chapter_info = dict(existing_info)
+                    break
+        if not chapter_info:
+            return False
+
+        failed = self.failed_from_in_progress_entry(chapter_info) if str(chapter_info.get("status", "")).lower() == "in_progress" else dict(chapter_info)
+        if not failed:
+            failed = dict(chapter_info)
+        failed["status"] = "failed"
+        failed["failure_reason"] = "cancelled"
+        failed["error_message"] = "Translation stopped by user"
+        if done is not None or total is not None:
+            try:
+                current = failed.get("ocr_progress") if isinstance(failed.get("ocr_progress"), dict) else {}
+                final_done = max(0, int(done if done is not None else current.get("done", 0) or 0))
+                final_total = max(0, int(total if total is not None else current.get("total", 0) or 0))
+                failed["ocr_progress"] = {
+                    "done": min(final_done, final_total) if final_total else final_done,
+                    "total": final_total,
+                    "label": f"{min(final_done, final_total) if final_total else final_done}/{final_total}",
+                    "last_updated": time.time(),
+                    "cancelled": True,
+                }
+            except (TypeError, ValueError):
+                pass
+        failed["last_updated"] = time.time()
+        self.prog.setdefault("chapters", {})[chapter_key] = failed
+        self.save()
+        return True
+
     def restore_in_progress(self, actual_num, output_file=None, chapter_obj=None, content_hash=None):
         """Clear a hard-stopped in_progress entry by restoring its previous status."""
         chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
@@ -8909,7 +8949,7 @@ def _process_chapter_images_vision_ocr_combined(
     renamed_refs = []
     for idx, img_info in enumerate(images, 1):
         if _stop_new_ocr_work_requested():
-            print("   Image OCR stopped by user before combined translation")
+            image_translator.finish_vision_ocr_progress_cancelled()
             break
 
         img_src = img_info.get('src', '')
@@ -9043,15 +9083,15 @@ def _process_chapter_images_vision_ocr_combined(
 
                     while active_futures:
                         if _force_stop_requested():
-                            print("   Image OCR stopped; cancelling queued page OCR work")
                             force_cancelled = True
                             image_translator.last_vision_translation_finish_reason = "cancelled"
+                            image_translator.finish_vision_ocr_progress_cancelled()
                             _cancel_active_vision_requests()
                             for future in active_futures:
                                 future.cancel()
                             break
                         if _stop_new_ocr_work_requested():
-                            print("   Image OCR graceful stop; not starting queued page OCR work")
+                            image_translator.finish_vision_ocr_progress_cancelled()
                             for future in active_futures:
                                 future.cancel()
                             break
@@ -9077,7 +9117,7 @@ def _process_chapter_images_vision_ocr_combined(
 
                 for batch_start in range(0, len(jobs), fixed_group_size):
                     if _stop_new_ocr_work_requested():
-                        print("   Image OCR stopped before next page OCR batch")
+                        image_translator.finish_vision_ocr_progress_cancelled()
                         break
                     current_group = jobs[batch_start:batch_start + fixed_group_size]
                     print(f"   Page OCR group {batch_start // fixed_group_size + 1}: {len(current_group)} image request(s)")
@@ -9090,30 +9130,30 @@ def _process_chapter_images_vision_ocr_combined(
                             for future in done:
                                 idx, img_info, img_src, ocr_text = future.result()
                                 ocr_by_index[idx] = (img_info, img_src, ocr_text)
-                            if _force_stop_requested():
-                                print("   Image OCR stopped during page OCR group")
-                                force_cancelled = True
-                                image_translator.last_vision_translation_finish_reason = "cancelled"
-                                _cancel_active_vision_requests()
-                                for future in pending:
-                                    future.cancel()
-                                break
-                            if _stop_new_ocr_work_requested():
-                                print("   Image OCR graceful stop during page OCR group")
-                                for future in pending:
-                                    future.cancel()
-                                break
+                                if _force_stop_requested():
+                                    force_cancelled = True
+                                    image_translator.last_vision_translation_finish_reason = "cancelled"
+                                    image_translator.finish_vision_ocr_progress_cancelled()
+                                    _cancel_active_vision_requests()
+                                    for future in pending:
+                                        future.cancel()
+                                    break
+                                if _stop_new_ocr_work_requested():
+                                    image_translator.finish_vision_ocr_progress_cancelled()
+                                    for future in pending:
+                                        future.cancel()
+                                    break
                     finally:
                         executor.shutdown(wait=not force_cancelled, cancel_futures=True)
                     if _stop_new_ocr_work_requested():
-                        print("   Image OCR stopped after page OCR group")
+                        image_translator.finish_vision_ocr_progress_cancelled()
                         break
         else:
             for job in jobs:
                 idx, img_info, img_src, ocr_text = _ocr_page_image(job)
                 ocr_by_index[idx] = (img_info, img_src, ocr_text)
                 if _stop_new_ocr_work_requested():
-                    print("   Image OCR stopped after current page image")
+                    image_translator.finish_vision_ocr_progress_cancelled()
                     break
     finally:
         if previous_batch_env is None:
@@ -9186,8 +9226,8 @@ def _process_chapter_images_vision_ocr_combined(
         )
 
     if _stop_new_ocr_work_requested():
-        print("   Vision OCR page stopped before combined OCR translation")
         image_translator.last_vision_translation_finish_reason = "cancelled"
+        image_translator.finish_vision_ocr_progress_cancelled()
         return str(soup), {}
 
     image_translator.current_image_index = "combined"
@@ -9415,7 +9455,7 @@ def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actua
                 while len(pending) < batch_size and _submit_next_glossary_ocr():
                     pass
                 if check_stop_fn and check_stop_fn():
-                    print("❌ Vision glossary OCR stopped by user")
+                    image_translator.finish_vision_ocr_progress_cancelled()
                     for future in pending:
                         future.cancel()
                     break
@@ -9424,7 +9464,7 @@ def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actua
     else:
         for job in jobs:
             if check_stop_fn and check_stop_fn():
-                print("❌ Vision glossary OCR stopped by user")
+                image_translator.finish_vision_ocr_progress_cancelled()
                 break
             idx, ocr_text = _glossary_ocr_job(job)
             if ocr_text:
@@ -9610,7 +9650,6 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
         chapter_jobs = []
         for idx, chapter in enumerate(chapters):
             if check_stop_fn and check_stop_fn():
-                print("❌ Vision glossary prepass stopped by user")
                 stopped = True
                 break
             actual_num = chapter.get('actual_chapter_num', chapter.get('num', idx + 1))
@@ -9741,7 +9780,6 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
 
     for idx, chapter in enumerate(chapters):
         if check_stop_fn and check_stop_fn():
-            print("❌ Vision glossary prepass stopped by user")
             stopped = True
             break
         actual_num = chapter.get('actual_chapter_num', chapter.get('num', idx + 1))

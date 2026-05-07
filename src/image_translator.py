@@ -1872,7 +1872,7 @@ class ImageTranslator:
             self._preserve_current_image = False
             print(f"   🔎 ocr_image called for: {image_path}")
             if check_stop_fn and check_stop_fn():
-                print("   ❌ Image OCR stopped by user")
+                self.finish_vision_ocr_progress_cancelled()
                 return None
             if not os.path.exists(image_path):
                 print(f"   ❌ Image file does not exist: {image_path}")
@@ -1938,7 +1938,7 @@ class ImageTranslator:
             except Exception:
                 is_cancelled = False
             if is_cancelled or "stopped by user" in str(e).lower() or "cancelled" in str(e).lower():
-                print(f"   ⏹️ Image OCR cancelled: {e}")
+                self.finish_vision_ocr_progress_cancelled()
                 return None
             print(f"   ❌ Exception in ocr_image: {e}")
             logger.error(f"Error OCRing image {image_path}: {e}")
@@ -3388,7 +3388,7 @@ class ImageTranslator:
                 continue
 
             if _stop_new_vision_work_requested(check_stop_fn):
-                print(f"   Stopped before OCR chunk {i+1}/{num_chunks}")
+                self.finish_vision_ocr_progress_cancelled()
                 was_stopped = True
                 break
 
@@ -3581,6 +3581,9 @@ class ImageTranslator:
         ordered_ocr = [ocr_by_index[i] for i in range(num_chunks) if ocr_by_index.get(i)]
         if not ordered_ocr:
             self._preserve_current_image = True
+            if was_stopped and _stop_new_vision_work_requested(check_stop_fn):
+                self.finish_vision_ocr_progress_cancelled()
+                return None
             print("   No translatable OCR chunks from tall image; preserving original image")
             return None
 
@@ -3595,12 +3598,15 @@ class ImageTranslator:
             image_idx=effective_image_idx,
             chapter_num=effective_chapter_num,
         )
+        if was_stopped and _stop_new_vision_work_requested(check_stop_fn):
+            self.finish_vision_ocr_progress_cancelled()
+            return None
         if not translate_after:
             return combined_ocr
 
         if was_stopped and _stop_new_vision_work_requested(check_stop_fn):
-            print("   Vision OCR stopped before combined OCR translation")
             self.last_vision_translation_finish_reason = "cancelled"
+            self.finish_vision_ocr_progress_cancelled()
             return None
 
         print(f"   Step 2/2: Translating combined OCR from {len(ordered_ocr)}/{num_chunks} chunks ({len(combined_ocr)} chars)...")
@@ -3876,6 +3882,8 @@ class ImageTranslator:
             if not self._vision_ocr_progress_scope:
                 return
             scope = self._vision_ocr_progress_scope
+            if scope.get("cancelled"):
+                return
             scope["total"] = max(0, int(scope.get("total", 0) or 0) + units)
             scope["reserved_pending"] = max(0, int(scope.get("reserved_pending", 0) or 0) + units)
         self._write_vision_ocr_progress()
@@ -3892,6 +3900,8 @@ class ImageTranslator:
             if not self._vision_ocr_progress_scope:
                 return
             scope = self._vision_ocr_progress_scope
+            if scope.get("cancelled"):
+                return
             reserved_pending = max(0, int(scope.get("reserved_pending", 0) or 0))
             consume_reserved = min(reserved_pending, units)
             scope["reserved_pending"] = reserved_pending - consume_reserved
@@ -3912,6 +3922,8 @@ class ImageTranslator:
             if not self._vision_ocr_progress_scope:
                 return
             scope = self._vision_ocr_progress_scope
+            if scope.get("cancelled"):
+                return
             reserved_pending = max(0, int(scope.get("reserved_pending", 0) or 0))
             consume_reserved = min(reserved_pending, units)
             scope["reserved_pending"] = reserved_pending - consume_reserved
@@ -3935,11 +3947,42 @@ class ImageTranslator:
             if not self._vision_ocr_progress_scope:
                 return
             scope = self._vision_ocr_progress_scope
+            if scope.get("cancelled"):
+                return
             scope["done"] = min(
                 int(scope.get("total", 0)) if int(scope.get("total", 0)) > 0 else int(scope.get("done", 0)) + units,
                 int(scope.get("done", 0)) + units,
             )
         self._write_vision_ocr_progress()
+
+    def finish_vision_ocr_progress_cancelled(self):
+        """Mark the current OCR progress row as failed/cancelled and stop later updates."""
+        with self._vision_ocr_progress_lock:
+            scope = dict(self._vision_ocr_progress_scope or {})
+            if not scope or scope.get("cancelled"):
+                return
+            self._vision_ocr_progress_scope["cancelled"] = True
+        chapter_num = scope.get("chapter_num")
+        done = int(scope.get("done", 0) or 0)
+        total = int(scope.get("total", 0) or 0)
+        with self._vision_ocr_progress_write_lock:
+            if scope.get("write_translation") and self.progress_manager and hasattr(self.progress_manager, "fail_ocr_progress"):
+                try:
+                    self.progress_manager.fail_ocr_progress(
+                        chapter_num,
+                        done=done,
+                        total=total,
+                        output_file=scope.get("chapter_file") or None,
+                        chapter_obj=scope.get("chapter_obj") if isinstance(scope.get("chapter_obj"), dict) else None,
+                    )
+                except Exception as e:
+                    print(f"   ⚠️ Vision OCR cancellation progress update failed: {e}")
+            if scope.get("write_glossary"):
+                ref = scope.get("glossary_ref")
+                if ref:
+                    self.update_vision_ocr_glossary_progress([ref], "failed")
+                    self.update_vision_ocr_glossary_ocr_progress([ref], done, total)
+        self.clear_vision_ocr_progress()
 
     def clear_vision_ocr_progress(self):
         with self._vision_ocr_progress_lock:
@@ -3949,6 +3992,8 @@ class ImageTranslator:
         with self._vision_ocr_progress_lock:
             scope = dict(self._vision_ocr_progress_scope or {})
         if not scope:
+            return
+        if scope.get("cancelled"):
             return
         chapter_num = scope.get("chapter_num")
         done = int(scope.get("done", 0) or 0)
