@@ -50,8 +50,40 @@ def _text_to_xhtml(text: str, title: str = "") -> bytes:
     return doc.encode("utf-8")
 
 
-def _append_ocr_fragment(soup: BeautifulSoup, parent, text: str) -> None:
+def _reverse_rename_map(image_rename_map) -> Dict[str, str]:
+    reverse = {}
+    for old_name, new_name in (image_rename_map or {}).items():
+        old_base = os.path.basename(str(old_name or ""))
+        new_base = os.path.basename(str(new_name or ""))
+        if old_base and new_base:
+            reverse[new_base] = old_base
+            reverse[new_base.lower()] = old_base
+    return reverse
+
+
+def _source_src_for_marker(src: str, reverse_rename_map: Dict[str, str]) -> str:
+    src_text = str(src or "")
+    if not src_text or not reverse_rename_map:
+        return src_text
+    clean_src, suffix = src_text, ""
+    for sep in ("?", "#"):
+        if sep in clean_src:
+            clean_src, tail = clean_src.split(sep, 1)
+            suffix = sep + tail
+            break
+    normalized = clean_src.replace("\\", "/")
+    dirname = posixpath.dirname(normalized)
+    basename = posixpath.basename(normalized)
+    source_base = reverse_rename_map.get(basename) or reverse_rename_map.get(basename.lower())
+    if not source_base:
+        return src_text
+    rewritten = posixpath.join(dirname, source_base) if dirname else source_base
+    return rewritten + suffix
+
+
+def _append_ocr_fragment(soup: BeautifulSoup, parent, text: str, reverse_rename_map=None) -> None:
     """Append OCR text while allowing preserved No-image <img> markers through."""
+    reverse_rename_map = reverse_rename_map or {}
     for part in IMG_TAG_RE.split(text or ""):
         if not part:
             continue
@@ -59,6 +91,10 @@ def _append_ocr_fragment(soup: BeautifulSoup, parent, text: str) -> None:
             img_fragment = BeautifulSoup(part, "html.parser")
             img = img_fragment.find("img")
             if img:
+                src = img.get("src", "")
+                rewritten_src = _source_src_for_marker(src, reverse_rename_map)
+                if rewritten_src and rewritten_src != src:
+                    img["src"] = rewritten_src
                 parent.append(img)
             continue
 
@@ -69,7 +105,7 @@ def _append_ocr_fragment(soup: BeautifulSoup, parent, text: str) -> None:
             parent.append(pre)
 
 
-def _html_with_ocr_body(original_data: bytes, replacement: str, title: str = "") -> bytes:
+def _html_with_ocr_body(original_data: bytes, replacement: str, title: str = "", reverse_rename_map=None) -> bytes:
     """Preserve original HTML head/CSS and replace only the visible body content."""
     try:
         original_html = original_data.decode("utf-8", errors="replace")
@@ -98,7 +134,7 @@ def _html_with_ocr_body(original_data: bytes, replacement: str, title: str = "")
         body = soup.new_tag("body")
         html_tag.append(body)
     body.clear()
-    _append_ocr_fragment(soup, body, replacement or "")
+    _append_ocr_fragment(soup, body, replacement or "", reverse_rename_map)
 
     return str(soup).encode("utf-8")
 
@@ -157,13 +193,15 @@ def _html_image_refs(chapter_zip_path: str, html_data: bytes) -> set:
     return refs
 
 
-def _replacement_image_refs(chapter_zip_path: str, replacement: str) -> set:
+def _replacement_image_refs(chapter_zip_path: str, replacement: str, reverse_rename_map=None) -> set:
     refs = set()
+    reverse_rename_map = reverse_rename_map or {}
     for marker in IMG_TAG_RE.findall(replacement or ""):
         try:
             soup = BeautifulSoup(marker, "html.parser")
             img = soup.find("img")
             src = img.get("src") if img else ""
+            src = _source_src_for_marker(src, reverse_rename_map)
             resolved = _resolve_zip_ref(chapter_zip_path, src)
             if resolved:
                 refs.add(resolved)
@@ -173,7 +211,12 @@ def _replacement_image_refs(chapter_zip_path: str, replacement: str) -> set:
     return refs
 
 
-def write_ocr_epub(source_epub_path: str, chapter_text_by_filename: Dict[str, str], output_path: Optional[str] = None) -> str:
+def write_ocr_epub(
+    source_epub_path: str,
+    chapter_text_by_filename: Dict[str, str],
+    output_path: Optional[str] = None,
+    image_rename_map: Optional[Dict[str, str]] = None,
+) -> str:
     """Copy an EPUB and replace chapter HTML bodies with raw OCR/text content."""
     if not source_epub_path or not os.path.exists(source_epub_path):
         raise FileNotFoundError(source_epub_path)
@@ -181,6 +224,7 @@ def write_ocr_epub(source_epub_path: str, chapter_text_by_filename: Dict[str, st
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
     replacements = {}
+    reverse_rename_map = _reverse_rename_map(image_rename_map)
     for key, value in (chapter_text_by_filename or {}).items():
         if not key or not str(value).strip():
             continue
@@ -204,7 +248,7 @@ def write_ocr_epub(source_epub_path: str, chapter_text_by_filename: Dict[str, st
         preserved_image_refs = set()
         for html_name, replacement in replacement_by_html.items():
             if replacement is not None:
-                preserved_image_refs.update(_replacement_image_refs(html_name, replacement))
+                preserved_image_refs.update(_replacement_image_refs(html_name, replacement, reverse_rename_map))
             elif _is_preserved_original_html(html_name):
                 try:
                     preserved_image_refs.update(_html_image_refs(html_name, zin.read(html_name)))
@@ -232,6 +276,7 @@ def write_ocr_epub(source_epub_path: str, chapter_text_by_filename: Dict[str, st
                         original_data,
                         replacement or "",
                         os.path.splitext(os.path.basename(info.filename))[0],
+                        reverse_rename_map,
                     )
                     out_info.compress_type = zipfile.ZIP_DEFLATED
                     zout.writestr(out_info, data)

@@ -10000,7 +10000,8 @@ def run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, c
         return None
 
     try:
-        ocr_epub = write_ocr_epub(input_path, chapter_text_by_filename, output_path)
+        image_rename_map = _load_image_rename_map_for_output(getattr(image_translator, 'output_dir', ''))
+        ocr_epub = write_ocr_epub(input_path, chapter_text_by_filename, output_path, image_rename_map=image_rename_map)
         os.environ["VISION_OCR_SOURCE_EPUB"] = ocr_epub
         os.environ["GLOSSARY_COMPRESSION_SOURCE_EPUB"] = ocr_epub
         os.environ["QA_VISION_OCR_SOURCE_EPUB"] = ocr_epub
