@@ -9073,6 +9073,49 @@ def _image_marker_for_combined_ocr(img_info):
     return "<img " + " ".join(attrs) + " />"
 
 
+def _vision_ocr_part_edge_lines(part):
+    lines = [line.strip() for line in str(part or "").splitlines() if line.strip()]
+    if not lines:
+        return "", ""
+    return lines[0], lines[-1]
+
+
+def _vision_ocr_compact_continuation_line(line):
+    stripped = str(line or "").strip()
+    if not stripped:
+        return False
+    if stripped.startswith("<img"):
+        return False
+    if re.match(r"^[\u2460-\u2473\u3251-\u325f\u2776-\u277f]\s*", stripped):
+        return True
+    if re.match(r"^[-*+]\s+\S", stripped):
+        return True
+    if re.match(r"^(?:\d+|[A-Za-z])[.)]\s+\S", stripped):
+        return True
+    if re.match(r"^[\[\(（【<《].+[\]\)）】>》]\s*$", stripped):
+        return True
+    return False
+
+
+def _join_vision_ocr_parts(parts):
+    """Join OCR image blocks without blank lines inside compact UI/list runs."""
+    cleaned_parts = [str(part).strip() for part in parts if str(part).strip()]
+    if not cleaned_parts:
+        return ""
+
+    combined = cleaned_parts[0]
+    for part in cleaned_parts[1:]:
+        _next_first, _next_last = _vision_ocr_part_edge_lines(part)
+        _prev_first, prev_last = _vision_ocr_part_edge_lines(combined)
+        if (_vision_ocr_compact_continuation_line(prev_last)
+                and _vision_ocr_compact_continuation_line(_next_first)):
+            separator = "\n"
+        else:
+            separator = "\n\n"
+        combined = f"{combined.rstrip()}{separator}{part.lstrip()}"
+    return combined.strip()
+
+
 def _vision_finish_reason_qa_issues(finish_reason):
     """Map Vision OCR translation finish reasons to chapter QA issue labels."""
     reason = str(finish_reason or "").strip().lower()
@@ -9383,7 +9426,7 @@ def _process_chapter_images_vision_ocr_combined(
             summary_parts.append(f"{empty_count} empty image(s) preserved")
         print(f"   Vision OCR page complete: {', '.join(summary_parts)}")
 
-    combined_ocr = "\n\n".join(part for part in ocr_parts if str(part).strip()).strip()
+    combined_ocr = _join_vision_ocr_parts(ocr_parts)
     if not combined_ocr:
         print("   Combined page OCR was empty; preserving original image HTML")
         return str(soup), {}
@@ -9678,7 +9721,7 @@ def ocr_chapter_images_for_vision_glossary(
         if ocr_text:
             chapter_ocr_parts.append(ocr_text)
 
-    chapter_ocr = "\n\n".join(part for part in chapter_ocr_parts if part and part.strip()).strip()
+    chapter_ocr = _join_vision_ocr_parts(chapter_ocr_parts)
     if chapter_ocr:
         image_translator._save_ocr_text(
             chapter_ocr,
