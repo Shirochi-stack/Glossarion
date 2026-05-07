@@ -11361,6 +11361,13 @@ class UnifiedClient:
                             for idx, candidate in enumerate(response.candidates):
                                 if hasattr(candidate, 'finish_reason'):
                                     print(f"   ⚠️ Candidate {idx} finish_reason: {candidate.finish_reason}")
+                        if finish_reason == 'length':
+                            print("   Empty Vertex response is MAX_TOKENS truncation, not a safety filter")
+                            return UnifiedResponse(
+                                content="",
+                                finish_reason='length',
+                                raw_response=response
+                            )
                         raise UnifiedClientError(
                             "Empty response from Vertex AI Gemini - likely safety filter",
                             error_type="prohibited_content"
@@ -11392,6 +11399,12 @@ class UnifiedClient:
                             print(f"   ⚠️ Failed to save generated image: {e}")
                     
                     if not result_text and not image_data:
+                        if finish_reason == 'length':
+                            return UnifiedResponse(
+                                content="",
+                                finish_reason='length',
+                                raw_response=response
+                            )
                         raise UnifiedClientError("Empty response from Vertex AI Gemini")
                     
                     # CHECK STOP FLAG AFTER RESPONSE
