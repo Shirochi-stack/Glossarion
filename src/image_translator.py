@@ -288,6 +288,59 @@ def send_text_with_interrupt(client, messages, temperature, max_tokens, stop_che
             if chunk_timeout is not None and elapsed >= chunk_timeout:
                 raise UnifiedClientError(f"Text API call timed out after {chunk_timeout} seconds")
 
+
+def _extract_text_response_and_finish_reason(response):
+    """Return (text, finish_reason) for the response shapes used by UnifiedClient."""
+    finish_reason = None
+    raw_response = response
+    if isinstance(response, tuple):
+        raw_response = response[0] if len(response) > 0 else None
+        finish_reason = response[1] if len(response) > 1 else None
+
+    if finish_reason is None and hasattr(raw_response, 'finish_reason'):
+        finish_reason = getattr(raw_response, 'finish_reason', None)
+
+    if hasattr(raw_response, 'content'):
+        raw = raw_response.content
+    elif hasattr(raw_response, 'text'):
+        raw = raw_response.text
+    elif raw_response is None:
+        raw = ""
+    else:
+        raw = str(raw_response)
+
+    return raw or "", finish_reason
+
+
+def _bad_vision_glossary_finish_reason(finish_reason):
+    """Normalize API finish reasons that should fail Vision glossary progress rows."""
+    reason = str(finish_reason or "").strip().lower()
+    if not reason:
+        return None
+    reason = reason.rsplit(".", 1)[-1]
+    bad_reasons = {
+        "length",
+        "max_tokens",
+        "max_length",
+        "stop_sequence_limit",
+        "truncated",
+        "incomplete",
+        "content_filter",
+        "prohibited_content",
+        "blocked",
+        "safety",
+        "recitation",
+        "error",
+        "other_error",
+        "malformed_function_call",
+        "timeout",
+        "cancelled",
+        "canceled",
+        "graceful_stop",
+    }
+    return reason if reason in bad_reasons else None
+
+
 class ImageTranslator:
     _vision_ocr_glossary_file_lock = threading.RLock()
 
@@ -2637,14 +2690,25 @@ class ImageTranslator:
                 chunk_timeout=chunk_timeout,
                 context='glossary',
             )
-            if isinstance(response, tuple):
-                response = response[0]
-            if hasattr(response, 'content'):
-                raw = response.content
-            elif hasattr(response, 'text'):
-                raw = response.text
-            else:
-                raw = str(response)
+            raw, finish_reason = _extract_text_response_and_finish_reason(response)
+            bad_finish_reason = _bad_vision_glossary_finish_reason(finish_reason)
+            if bad_finish_reason:
+                self._update_vision_ocr_glossary_progress(
+                    glossary_extractor,
+                    json_path,
+                    progress_refs,
+                    "failed",
+                )
+                print(f"   ⚠️ Vision OCR auto glossary failed: finish_reason={finish_reason}")
+                return self._find_vision_glossary_file()
+            if check_stop_fn and check_stop_fn():
+                self._update_vision_ocr_glossary_progress(
+                    glossary_extractor,
+                    json_path,
+                    progress_refs,
+                    "failed",
+                )
+                return self._find_vision_glossary_file()
 
             parsed = glossary_extractor.parse_api_response(raw or "")
             valid = []
