@@ -9436,8 +9436,7 @@ def _process_chapter_images_vision_ocr_combined(
         image_translator._save_ocr_text(
             combined_ocr,
             kind="chapters",
-            image_basename=f"chapter_{actual_num:03d}_combined_images",
-            image_idx="combined",
+            image_basename=f"chapter_{actual_num:03d}",
             chapter_num=actual_num,
         )
     except Exception:
