@@ -342,6 +342,7 @@ class ImageTranslator:
         self.last_vision_translation_error = None
         self._vision_glossary_processed_hashes = set()
         self._vision_ocr_progress_lock = threading.Lock()
+        self._vision_ocr_progress_write_lock = threading.Lock()
         self._vision_ocr_progress_scope = None
         self._ensure_ocr_cache_valid()
         
@@ -1851,11 +1852,14 @@ class ImageTranslator:
                     except Exception as e:
                         logger.warning(f"Could not delete temp processed file: {e}")
 
-    def ocr_image(self, image_path: str, context: str = "", check_stop_fn=None) -> Optional[str]:
+    def ocr_image(self, image_path: str, context: str = "", check_stop_fn=None, image_idx=None, chapter_num=None, image_basename=None) -> Optional[str]:
         """OCR an image and save/reuse OCR text without running the translation phase."""
         processed_path = None
         compressed_path = None
         try:
+            effective_image_idx = image_idx if image_idx is not None else getattr(self, 'current_image_index', None)
+            effective_chapter_num = chapter_num if chapter_num is not None else getattr(self, 'current_chapter_num', None)
+            effective_image_basename = image_basename or os.path.basename(image_path)
             self.current_image_path = image_path
             self._preserve_current_image = False
             print(f"   🔎 ocr_image called for: {image_path}")
@@ -1866,7 +1870,12 @@ class ImageTranslator:
                 print(f"   ❌ Image file does not exist: {image_path}")
                 return None
 
-            disk_ocr = self._load_saved_ocr_text(kind="single", image_basename=os.path.basename(image_path))
+            disk_ocr = self._load_saved_ocr_text(
+                kind="single",
+                image_basename=effective_image_basename,
+                image_idx=effective_image_idx,
+                chapter_num=effective_chapter_num,
+            )
             if disk_ocr:
                 if self._is_ocr_no_response(disk_ocr):
                     self._preserve_current_image = True
@@ -1888,10 +1897,26 @@ class ImageTranslator:
                     img = img.convert('RGB')
                 if height > self.chunk_height:
                     return self._process_image_chunks_ocr_first_combined(
-                        img, width, height, context, check_stop_fn, translate_after=False
+                        img,
+                        width,
+                        height,
+                        context,
+                        check_stop_fn,
+                        translate_after=False,
+                        image_basename=effective_image_basename,
+                        image_idx=effective_image_idx,
+                        chapter_num=effective_chapter_num,
+                        image_path=image_path,
                     )
                 image_bytes = self._image_to_bytes_with_compression(img)
-                ocr_text = self._call_vision_ocr_api(image_bytes, context, check_stop_fn)
+                ocr_text = self._call_vision_ocr_api(
+                    image_bytes,
+                    context,
+                    check_stop_fn,
+                    image_basename=effective_image_basename,
+                    image_idx=effective_image_idx,
+                    chapter_num=effective_chapter_num,
+                )
                 if self._is_ocr_no_response(ocr_text):
                     self._preserve_current_image = True
                     print("   OCR marked image as cover/illustration; skipping OCR text use")
@@ -2564,6 +2589,7 @@ class ImageTranslator:
                 return self._find_vision_glossary_file()
 
             if check_stop_fn and check_stop_fn():
+                self.update_vision_ocr_glossary_progress(progress_refs, "failed")
                 return None
 
             import extract_glossary_from_epub as glossary_extractor
@@ -3289,7 +3315,7 @@ class ImageTranslator:
                 combined_lines.append(line)
         return "\n".join(combined_lines).strip()
 
-    def _process_image_chunks_ocr_first_combined(self, img, width, height, context, check_stop_fn, translate_after=True):
+    def _process_image_chunks_ocr_first_combined(self, img, width, height, context, check_stop_fn, translate_after=True, image_basename=None, image_idx=None, chapter_num=None, image_path=None):
         """OCR all chunks first, then translate the combined OCR text once."""
         chunk_ranges = self._image_chunk_ranges(height, img)
         num_chunks = len(chunk_ranges)
@@ -3318,7 +3344,10 @@ class ImageTranslator:
                         pass
             print(f"   Debug mode: Saving OCR chunks to {debug_dir}")
 
-        image_basename = os.path.basename(self.current_image_path) if hasattr(self, 'current_image_path') else str(hash(str(img)))
+        effective_image_path = image_path or getattr(self, 'current_image_path', None)
+        effective_image_basename = image_basename or (os.path.basename(effective_image_path) if effective_image_path else str(hash(str(img))))
+        effective_image_idx = image_idx if image_idx is not None else getattr(self, 'current_image_index', None)
+        effective_chapter_num = chapter_num if chapter_num is not None else getattr(self, 'current_chapter_num', None)
 
         image_chunk_prompt_template = os.getenv(
             "IMAGE_CHUNK_PROMPT",
@@ -3332,10 +3361,10 @@ class ImageTranslator:
         for i, (start_y, end_y) in enumerate(chunk_ranges):
             disk_ocr = self._load_saved_ocr_text(
                 kind="chunks",
-                image_basename=image_basename,
+                image_basename=effective_image_basename,
                 chunk_idx=i + 1,
-                image_idx=getattr(self, 'current_image_index', None),
-                chapter_num=getattr(self, 'current_chapter_num', None),
+                image_idx=effective_image_idx,
+                chapter_num=effective_chapter_num,
             )
             if disk_ocr:
                 if self._is_ocr_no_response(disk_ocr):
@@ -3350,7 +3379,7 @@ class ImageTranslator:
                 was_stopped = True
                 break
 
-            current_filename = os.path.basename(self.current_image_path) if hasattr(self, 'current_image_path') else 'unknown'
+            current_filename = os.path.basename(effective_image_path) if effective_image_path else 'unknown'
             print(f"   OCR chunk {i+1}/{num_chunks} (y: {start_y}-{end_y}) for {current_filename}")
             if self.log_callback and hasattr(self.log_callback, '__self__') and hasattr(self.log_callback.__self__, 'append_chunk_progress'):
                 self.log_callback.__self__.append_chunk_progress(
@@ -3394,9 +3423,9 @@ class ImageTranslator:
                 check_stop_fn,
                 i + 1,
                 num_chunks,
-                image_basename=image_basename,
-                image_idx=getattr(self, 'current_image_index', None),
-                chapter_num=getattr(self, 'current_chapter_num', None),
+                image_basename=effective_image_basename,
+                image_idx=effective_image_idx,
+                chapter_num=effective_chapter_num,
             )
             if self._is_ocr_no_response(ocr_text):
                 print(f"   OCR chunk {i+1}/{num_chunks} marked as cover/illustration; excluding from combined OCR")
@@ -3546,7 +3575,13 @@ class ImageTranslator:
         if not combined_ocr:
             print("   Combined OCR was empty")
             return None
-        self._save_ocr_text(combined_ocr, kind="combined", image_basename=image_basename)
+        self._save_ocr_text(
+            combined_ocr,
+            kind="combined",
+            image_basename=effective_image_basename,
+            image_idx=effective_image_idx,
+            chapter_num=effective_chapter_num,
+        )
         if not translate_after:
             return combined_ocr
 
@@ -3860,21 +3895,22 @@ class ImageTranslator:
         chapter_num = scope.get("chapter_num")
         done = int(scope.get("done", 0) or 0)
         total = int(scope.get("total", 0) or 0)
-        if scope.get("write_translation") and self.progress_manager and hasattr(self.progress_manager, "update_ocr_progress"):
-            try:
-                self.progress_manager.update_ocr_progress(
-                    chapter_num,
-                    done,
-                    total,
-                    output_file=scope.get("chapter_file") or None,
-                    chapter_obj=scope.get("chapter_obj") if isinstance(scope.get("chapter_obj"), dict) else None,
-                )
-            except Exception as e:
-                print(f"   ⚠️ Vision OCR translation progress update failed: {e}")
-        if scope.get("write_glossary"):
-            ref = scope.get("glossary_ref")
-            if ref:
-                self.update_vision_ocr_glossary_ocr_progress([ref], done, total)
+        with self._vision_ocr_progress_write_lock:
+            if scope.get("write_translation") and self.progress_manager and hasattr(self.progress_manager, "update_ocr_progress"):
+                try:
+                    self.progress_manager.update_ocr_progress(
+                        chapter_num,
+                        done,
+                        total,
+                        output_file=scope.get("chapter_file") or None,
+                        chapter_obj=scope.get("chapter_obj") if isinstance(scope.get("chapter_obj"), dict) else None,
+                    )
+                except Exception as e:
+                    print(f"   ⚠️ Vision OCR translation progress update failed: {e}")
+            if scope.get("write_glossary"):
+                ref = scope.get("glossary_ref")
+                if ref:
+                    self.update_vision_ocr_glossary_ocr_progress([ref], done, total)
 
     def _call_vision_api(self, image_data, assistant_prompt, check_stop_fn):
         """Make the actual API call for vision translation with retry support"""

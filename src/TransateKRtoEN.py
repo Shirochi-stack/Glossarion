@@ -1778,6 +1778,7 @@ class ProgressManager:
     def __init__(self, payloads_dir):
         self.payloads_dir = payloads_dir
         self.PROGRESS_FILE = os.path.join(payloads_dir, "translation_progress.json")
+        self._save_lock = threading.RLock()
         self.prog = self._init_or_load()
         # Disable auto-dedup unless explicitly enabled; dedup can drop distinct chapters sharing filenames
         if os.getenv("ENABLE_PROGRESS_DEDUP", "0") == "1":
@@ -2016,64 +2017,75 @@ class ProgressManager:
     
     def save(self):
         """Save progress to file with retry logic for Windows file locks"""
-        try:
-            if (
-                os.environ.get("TRANSLATION_CANCELLED") == "1"
-                and os.environ.get("GRACEFUL_STOP") != "1"
-                and os.environ.get("GRACEFUL_STOP_COMPLETED") != "1"
-            ):
-                self.restore_all_in_progress_for_hard_stop()
+        temp_file = None
+        with self._save_lock:
+            try:
+                progress_dir = os.path.dirname(self.PROGRESS_FILE)
+                if progress_dir:
+                    os.makedirs(progress_dir, exist_ok=True)
 
-            self.prog["completed_list"] = []
-            for chapter_key, chapter_info in self.prog.get("chapters", {}).items():
-                if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
-                    actual_num = chapter_info.get("actual_num", 0)
-                    self.prog["completed_list"].append({
-                        "num": actual_num,
-                        "idx": 0,  # idx is not used anymore
-                        "title": f"Chapter {actual_num}",
-                        "file": chapter_info.get("output_file", ""),
-                        "key": chapter_key
-                    })
-            
-            if self.prog.get("completed_list"):
-                self.prog["completed_list"].sort(key=lambda x: x["num"])
-            
-            temp_file = self.PROGRESS_FILE + '.tmp'
-            
-            # Retry loop for writing the temp file (can also be locked)
-            max_retries = 5
-            for attempt in range(max_retries):
-                try:
-                    with open(temp_file, "w", encoding="utf-8") as pf:
-                        json.dump(self.prog, pf, ensure_ascii=False, indent=2)
-                    break  # Write succeeded
-                except PermissionError:
-                    if attempt < max_retries - 1:
-                        time.sleep(0.1 * (2 ** attempt))  # 0.1, 0.2, 0.4, 0.8, 1.6s
-                    else:
-                        raise
-            
-            # Use os.replace() instead of os.remove()+os.rename() — it's atomic on
-            # Windows and avoids the window where the file doesn't exist at all.
-            # Retry the replace in case the target is still locked by another reader.
-            for attempt in range(max_retries):
-                try:
-                    os.replace(temp_file, self.PROGRESS_FILE)
-                    break  # Replace succeeded
-                except PermissionError:
-                    if attempt < max_retries - 1:
-                        time.sleep(0.1 * (2 ** attempt))  # 0.1, 0.2, 0.4, 0.8, 1.6s
-                    else:
-                        raise
-        except Exception as e:
-            print(f"⚠️ Warning: Failed to save progress: {e}")
-            temp_file = self.PROGRESS_FILE + '.tmp'
-            if os.path.exists(temp_file):
-                try:
-                    os.remove(temp_file)
-                except:
-                    pass
+                temp_file = (
+                    f"{self.PROGRESS_FILE}."
+                    f"{os.getpid()}."
+                    f"{threading.get_ident()}."
+                    f"{uuid.uuid4().hex}.tmp"
+                )
+
+                if (
+                    os.environ.get("TRANSLATION_CANCELLED") == "1"
+                    and os.environ.get("GRACEFUL_STOP") != "1"
+                    and os.environ.get("GRACEFUL_STOP_COMPLETED") != "1"
+                ):
+                    self.restore_all_in_progress_for_hard_stop()
+
+                self.prog["completed_list"] = []
+                for chapter_key, chapter_info in self.prog.get("chapters", {}).items():
+                    if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
+                        actual_num = chapter_info.get("actual_num", 0)
+                        self.prog["completed_list"].append({
+                            "num": actual_num,
+                            "idx": 0,  # idx is not used anymore
+                            "title": f"Chapter {actual_num}",
+                            "file": chapter_info.get("output_file", ""),
+                            "key": chapter_key
+                        })
+                
+                if self.prog.get("completed_list"):
+                    self.prog["completed_list"].sort(key=lambda x: x["num"])
+                
+                # Retry loop for writing the temp file (can also be locked)
+                max_retries = 5
+                for attempt in range(max_retries):
+                    try:
+                        with open(temp_file, "w", encoding="utf-8") as pf:
+                            json.dump(self.prog, pf, ensure_ascii=False, indent=2)
+                        break  # Write succeeded
+                    except PermissionError:
+                        if attempt < max_retries - 1:
+                            time.sleep(0.1 * (2 ** attempt))  # 0.1, 0.2, 0.4, 0.8, 1.6s
+                        else:
+                            raise
+                
+                # Use os.replace() instead of os.remove()+os.rename() — it's atomic on
+                # Windows and avoids the window where the file doesn't exist at all.
+                # Retry the replace in case the target is still locked by another reader.
+                for attempt in range(max_retries):
+                    try:
+                        os.replace(temp_file, self.PROGRESS_FILE)
+                        temp_file = None
+                        break  # Replace succeeded
+                    except PermissionError:
+                        if attempt < max_retries - 1:
+                            time.sleep(0.1 * (2 ** attempt))  # 0.1, 0.2, 0.4, 0.8, 1.6s
+                        else:
+                            raise
+            except Exception as e:
+                print(f"⚠️ Warning: Failed to save progress: {e}")
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
 
     @staticmethod
     def restore_in_progress_entry(info):
@@ -2337,6 +2349,15 @@ class ProgressManager:
 
         chapter_info.setdefault("actual_num", actual_num)
         chapter_info.setdefault("chapter_num", actual_num)
+        if output_file:
+            chapter_info["output_file"] = output_file
+        if chapter_obj:
+            if chapter_obj.get('original_basename'):
+                chapter_info["original_basename"] = chapter_obj['original_basename']
+            elif chapter_obj.get('original_filename'):
+                chapter_info["original_basename"] = os.path.basename(chapter_obj['original_filename'])
+            elif chapter_obj.get('filename'):
+                chapter_info["original_basename"] = os.path.basename(chapter_obj['filename'])
         existing_status = str(chapter_info.get("status", "") or "")
         if existing_status.lower() == "in_progress":
             previous_status = chapter_info.get("previous_status")
@@ -8946,10 +8967,17 @@ def _process_chapter_images_vision_ocr_combined(
 
                 if height > image_translator.chunk_height:
                     # Tall single images already have their own internal OCR batching/chunk cache.
-                    image_translator.set_current_chapter(actual_num)
-                    image_translator.current_image_index = idx
                     ocr_text = image_translator._process_image_chunks_ocr_first_combined(
-                        img, width, height, context, check_stop_fn, translate_after=False
+                        img,
+                        width,
+                        height,
+                        context,
+                        check_stop_fn,
+                        translate_after=False,
+                        image_basename=os.path.basename(img_path),
+                        image_idx=idx,
+                        chapter_num=actual_num,
+                        image_path=img_path,
                     )
                 else:
                     image_bytes = image_translator._image_to_bytes_with_compression(img)
@@ -9322,23 +9350,86 @@ def ocr_chapter_images_for_vision_glossary(chapter_html, image_translator, actua
         write_glossary=True,
     )
 
+    jobs = []
     for idx, img_info in enumerate(images, 1):
-        if check_stop_fn and check_stop_fn():
-            print("❌ Vision glossary OCR stopped by user")
-            break
-
         img_src = img_info.get('src', '')
         img_path = _resolve_chapter_image_path(img_src, image_translator, actual_num, idx)
         if not img_path:
             print(f"   ⚠️ Vision glossary OCR image not found: {img_src}")
             continue
 
+        jobs.append((idx, img_info, img_path))
+
+    def _glossary_ocr_job(job):
+        idx, img_info, img_path = job
+        if check_stop_fn and check_stop_fn():
+            return idx, None
         context = ""
         if img_info.get('alt'):
             context += f", Alt text: {img_info['alt']}"
-        image_translator.current_chapter_num = actual_num
-        image_translator.current_image_index = idx
-        ocr_text = image_translator.ocr_image(img_path, context, check_stop_fn)
+        ocr_text = image_translator.ocr_image(
+            img_path,
+            context,
+            check_stop_fn,
+            image_idx=idx,
+            chapter_num=actual_num,
+            image_basename=os.path.basename(img_path),
+        )
+        return idx, ocr_text
+
+    ocr_by_index = {}
+    batch_enabled = bool(getattr(image_translator, "_vision_ocr_batch_enabled", lambda: False)())
+    batch_size = min(len(jobs), int(getattr(image_translator, "_vision_ocr_batch_size", lambda: 1)())) if batch_enabled and jobs else 1
+    if batch_enabled and batch_size > 1 and len(jobs) > 1:
+        print(f"   Vision glossary OCR batch mode enabled: {batch_size} parallel OCR workers")
+        executor = ThreadPoolExecutor(max_workers=batch_size)
+        try:
+            pending = {}
+            next_job_idx = 0
+
+            def _submit_next_glossary_ocr():
+                nonlocal next_job_idx
+                if check_stop_fn and check_stop_fn():
+                    return False
+                if next_job_idx >= len(jobs):
+                    return False
+                job = jobs[next_job_idx]
+                pending[executor.submit(_glossary_ocr_job, job)] = job
+                next_job_idx += 1
+                return True
+
+            while len(pending) < batch_size and _submit_next_glossary_ocr():
+                pass
+
+            while pending:
+                done, _ = wait(pending.keys(), timeout=0.5, return_when=FIRST_COMPLETED)
+                if not done:
+                    continue
+                for future in done:
+                    pending.pop(future, None)
+                    idx, ocr_text = future.result()
+                    if ocr_text:
+                        ocr_by_index[idx] = ocr_text
+                while len(pending) < batch_size and _submit_next_glossary_ocr():
+                    pass
+                if check_stop_fn and check_stop_fn():
+                    print("❌ Vision glossary OCR stopped by user")
+                    for future in pending:
+                        future.cancel()
+                    break
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+    else:
+        for job in jobs:
+            if check_stop_fn and check_stop_fn():
+                print("❌ Vision glossary OCR stopped by user")
+                break
+            idx, ocr_text = _glossary_ocr_job(job)
+            if ocr_text:
+                ocr_by_index[idx] = ocr_text
+
+    for idx in sorted(ocr_by_index):
+        ocr_text = ocr_by_index[idx]
         if ocr_text:
             chapter_ocr_parts.append(ocr_text)
 
@@ -9401,6 +9492,47 @@ def _vision_ocr_translation_glossary_progress_enabled():
     return mode in ("single_pass", "single-pass", "singlepass")
 
 
+def _vision_ocr_glossary_should_skip_special_chapter(chapter):
+    """Return True for cover/nav/toc-style EPUB files that should not be OCRed for glossary."""
+    if not isinstance(chapter, dict):
+        return False
+
+    names = []
+    for key in ("original_basename", "original_filename", "filename", "href", "id", "title"):
+        value = chapter.get(key)
+        if value:
+            names.append(os.path.basename(str(value)).lower())
+
+    stems = []
+    for name in names:
+        stem = os.path.splitext(name)[0].lower()
+        if stem:
+            stems.append(stem)
+
+    # Covers are never useful glossary sources and should follow the normal
+    # translation behavior of leaving cover pages/images alone.
+    if any(stem == "cover" or stem.startswith("cover_") or stem.startswith("cover-") for stem in stems):
+        return True
+
+    translate_special = os.getenv("TRANSLATE_SPECIAL_FILES", "0") == "1"
+    if translate_special:
+        return False
+
+    special_kw_env = os.getenv("SPECIAL_FILE_KEYWORDS", "")
+    special_keywords = (
+        [k.strip().lower() for k in special_kw_env.split(",") if k.strip()]
+        if special_kw_env
+        else ["cover", "title", "toc", "copyright", "preface", "nav", "message", "notice", "colophon", "dedication", "epigraph", "foreword", "acknowledgment", "author", "appendix", "bibliography"]
+    )
+    special_exact_env = os.getenv("SPECIAL_FILE_EXACT", "")
+    special_exact = (
+        [k.strip().lower() for k in special_exact_env.split(",") if k.strip()]
+        if special_exact_env
+        else ["cover", "index", "glossary", "glossary_extension"]
+    )
+    return any(stem in special_exact or any(kw in stem for kw in special_keywords) for stem in stems)
+
+
 def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
     """OCR image chapters and generate auto glossary before Vision translation starts."""
     mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower()
@@ -9430,12 +9562,48 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
     all_ocr = []
     merge_buffer = []
     generated = 0
+    pending_progress_refs = []
+    stopped = False
+
+    def _ref_key(ref):
+        if not isinstance(ref, dict):
+            return None
+        try:
+            return (int(ref.get("chapter_idx", -1)), int(ref.get("chapter_num", -1)))
+        except (TypeError, ValueError):
+            return None
+
+    def _track_pending_ref(ref):
+        key = _ref_key(ref)
+        if key is None:
+            return
+        if all(_ref_key(existing) != key for existing in pending_progress_refs):
+            pending_progress_refs.append(ref)
+
+    def _clear_pending_refs(refs):
+        keys = {_ref_key(ref) for ref in refs if _ref_key(ref) is not None}
+        if not keys:
+            return
+        pending_progress_refs[:] = [
+            ref for ref in pending_progress_refs
+            if _ref_key(ref) not in keys
+        ]
 
     for idx, chapter in enumerate(chapters):
         if check_stop_fn and check_stop_fn():
             print("❌ Vision glossary prepass stopped by user")
+            stopped = True
             break
         actual_num = chapter.get('actual_chapter_num', chapter.get('num', idx + 1))
+        if _vision_ocr_glossary_should_skip_special_chapter(chapter):
+            skipped_name = (
+                chapter.get("original_basename")
+                or chapter.get("original_filename")
+                or chapter.get("filename")
+                or f"chapter {actual_num}"
+            )
+            print(f"⏭️ Vision glossary prepass: skipping special/cover file {os.path.basename(str(skipped_name))}")
+            continue
         progress_ref = _vision_glossary_progress_ref(chapter, idx, actual_num)
         body = _chapter_image_html_for_vision_glossary(chapter)
         if not body or '<img' not in body.lower():
@@ -9449,6 +9617,7 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             actual_num,
         ) or progress_ref
         image_translator.update_vision_ocr_glossary_progress([progress_ref], "in_progress")
+        _track_pending_ref(progress_ref)
         chapter_ocr = ocr_chapter_images_for_vision_glossary(
             body,
             image_translator,
@@ -9457,8 +9626,12 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             progress_ref=progress_ref,
         )
         if not chapter_ocr:
-            if not (check_stop_fn and check_stop_fn()):
+            if check_stop_fn and check_stop_fn():
+                stopped = True
+                image_translator.update_vision_ocr_glossary_progress([progress_ref], "failed")
+            else:
                 image_translator.update_vision_ocr_glossary_progress([progress_ref], "completed")
+            _clear_pending_refs([progress_ref])
             continue
 
         if mode == "minimal":
@@ -9479,12 +9652,27 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
                 merged_refs=refs[1:],
             ):
                 generated += 1
+            _clear_pending_refs(refs)
+            if check_stop_fn and check_stop_fn():
+                stopped = True
+                break
             merge_buffer = []
         else:
             if image_translator._ensure_vision_ocr_glossary(chapter_ocr, mode, check_stop_fn, progress_refs=[progress_ref]):
                 generated += 1
+            _clear_pending_refs([progress_ref])
+            if check_stop_fn and check_stop_fn():
+                stopped = True
+                break
 
-    if mode == "minimal" and all_ocr:
+    if stopped:
+        if pending_progress_refs:
+            image_translator.update_vision_ocr_glossary_progress(pending_progress_refs, "failed")
+            pending_progress_refs = []
+        merge_buffer = []
+        all_ocr = []
+
+    if not stopped and mode == "minimal" and all_ocr:
         full_ocr = "\n\n".join(f"[Chapter {num}]\n{text}" for num, text, _ref in all_ocr)
         refs = [ref for _num, _text, ref in all_ocr if ref]
         image_translator._save_ocr_text(full_ocr, kind="full", image_basename="novel_vision_ocr")
@@ -9496,7 +9684,8 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             merged_refs=refs[1:],
         ):
             generated += 1
-    elif merge_enabled and merge_buffer:
+        _clear_pending_refs(refs)
+    elif not stopped and merge_enabled and merge_buffer:
         merged_text = "\n\n".join(f"[Chapter {num}]\n{text}" for num, text, _ref in merge_buffer)
         refs = [ref for _num, _text, ref in merge_buffer if ref]
         if image_translator._ensure_vision_ocr_glossary(
@@ -9507,6 +9696,11 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             merged_refs=refs[1:],
         ):
             generated += 1
+        _clear_pending_refs(refs)
+
+    if (check_stop_fn and check_stop_fn()) and pending_progress_refs:
+        image_translator.update_vision_ocr_glossary_progress(pending_progress_refs, "failed")
+        pending_progress_refs = []
 
     if generated:
         os.environ["VISION_GLOSSARY_PREPASS_DONE"] = "1"
@@ -13937,13 +14131,13 @@ def main(log_callback=None, stop_callback=None):
     _special_keywords = (
         [k.strip().lower() for k in _special_kw_env.split(',') if k.strip()]
         if _special_kw_env
-        else ['title', 'toc', 'copyright', 'preface', 'nav', 'message', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
+        else ['cover', 'title', 'toc', 'copyright', 'preface', 'nav', 'message', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
     )
     _special_exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
     _special_exact = (
         [k.strip().lower() for k in _special_exact_env.split(',') if k.strip()]
         if _special_exact_env
-        else ['index', 'glossary', 'glossary_extension']
+        else ['cover', 'index', 'glossary', 'glossary_extension']
     )
 
     def _is_configured_special_file(fname):
@@ -13952,6 +14146,27 @@ def main(log_callback=None, stop_callback=None):
         if not name_noext:
             return False
         return name_noext in _special_exact or any(kw in name_noext for kw in _special_keywords)
+
+    def _is_non_special_zero_number_file(chapter, actual_num):
+        try:
+            if float(actual_num) != 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+        name = chapter.get('original_basename') or os.path.basename(chapter.get('filename', ''))
+        if not name or _is_configured_special_file(name):
+            return False
+        return not bool(re.search(r'\d', os.path.splitext(os.path.basename(str(name)))[0]))
+
+    def _range_allows_chapter(chapter, actual_num, chapter_idx=None):
+        if start is None:
+            return True
+        if use_spine_order:
+            spine_pos_1based = _spine_pos_by_idx.get(chapter_idx) if chapter_idx is not None else None
+            return spine_pos_1based is not None and start <= spine_pos_1based <= end
+        if _is_non_special_zero_number_file(chapter, actual_num) and start <= 1:
+            return True
+        return start <= actual_num <= end
 
     # When USE_SPINE_ORDER is active, build a mapping from each extracted
     # chapter's list index → its spine-offset position.  The positions
@@ -14098,17 +14313,7 @@ def main(log_callback=None, stop_callback=None):
                 continue
 
         if start is not None:
-            # When spine order is active, use the OPF-derived offset position
-            # (built from content.opf, matches the preview dialog exactly)
-            if use_spine_order:
-                spine_pos_1based = _spine_pos_by_idx.get(idx)
-                if spine_pos_1based is None:
-                    # Chapter not found in OPF spine — exclude from range
-                    range_match = False
-                else:
-                    range_match = start <= spine_pos_1based <= end
-            else:
-                range_match = start <= c['actual_chapter_num'] <= end
+            range_match = _range_allows_chapter(c, c['actual_chapter_num'], idx)
             if not range_match:
                 # Track skipped chapters for summary (don't print individually)
                 if not hasattr(config, '_range_skipped_chapters'):
@@ -14356,12 +14561,7 @@ def main(log_callback=None, stop_callback=None):
             
             # Skip chapters outside the range
             if start is not None:
-                if use_spine_order:
-                    # Use the OPF-derived offset position
-                    _spine_1based = _spine_pos_by_idx.get(idx)
-                    if _spine_1based is None or not (start <= _spine_1based <= end):
-                        continue
-                elif not (start <= actual_num <= end):
+                if not _range_allows_chapter(c, actual_num, idx):
                     continue
             
             # Check if chapter needs translation
@@ -15214,11 +15414,7 @@ def main(log_callback=None, stop_callback=None):
                         continue
                 
                 if start is not None:
-                    if use_spine_order:
-                        _sp = _spine_pos_by_idx.get(idx)
-                        if _sp is None or not (start <= _sp <= end):
-                            continue
-                    elif not (start <= actual_num <= end):
+                    if not _range_allows_chapter(c, actual_num, idx):
                         continue
                 
                 needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
@@ -15355,11 +15551,7 @@ def main(log_callback=None, stop_callback=None):
                     continue
             
             if start is not None:
-                if use_spine_order:
-                    _sp = _spine_pos_by_idx.get(idx)
-                    if _sp is None or not (start <= _sp <= end):
-                        continue
-                elif not (start <= actual_num <= end):
+                if not _range_allows_chapter(c, actual_num, idx):
                     # Skip silently (already summarized in earlier pass)
                     continue
             
