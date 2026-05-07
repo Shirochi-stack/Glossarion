@@ -11027,6 +11027,130 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
         print("="*50 + "\n")
         return
 
+    nonmerge_batch_enabled = (
+        mode in ("balanced", "full")
+        and os.getenv("BATCH_TRANSLATION", "0").strip().lower() in ("1", "true", "yes", "on")
+    )
+    try:
+        nonmerge_batch_size = max(1, int(os.getenv("BATCH_SIZE", "1") or "1"))
+    except Exception:
+        nonmerge_batch_size = 1
+
+    if nonmerge_batch_enabled and nonmerge_batch_size > 1:
+        chapter_jobs = []
+        for idx, chapter in enumerate(chapters):
+            if check_stop_fn and check_stop_fn():
+                stopped = True
+                break
+            actual_num = chapter.get('actual_chapter_num', chapter.get('num', idx + 1))
+            if _vision_ocr_glossary_should_skip_special_chapter(chapter):
+                skipped_name = (
+                    chapter.get("original_basename")
+                    or chapter.get("original_filename")
+                    or chapter.get("filename")
+                    or f"chapter {actual_num}"
+                )
+                print(f"⏭️ Vision glossary prepass: skipping special/cover file {os.path.basename(str(skipped_name))}")
+                continue
+            progress_ref = _vision_glossary_progress_ref(chapter, idx, actual_num)
+            if _glossary_ref_done(progress_ref, _load_glossary_done_state()):
+                continue
+            body = _chapter_image_html_for_vision_glossary(chapter)
+            text_for_glossary = _chapter_text_for_vision_glossary(chapter)
+            has_images = bool(body and '<img' in body.lower())
+            if not has_images and not text_for_glossary:
+                continue
+            chapter_jobs.append((len(chapter_jobs), idx, chapter, actual_num, body, has_images, text_for_glossary, progress_ref))
+
+        if chapter_jobs and not stopped:
+            workers = min(nonmerge_batch_size, len(chapter_jobs))
+            print(f"📑 Vision glossary full batch enabled: {workers} parallel chapter glossary worker(s)")
+
+            def _run_nonmerge_glossary_job(job):
+                order, chapter_idx, chapter, actual_num, body, has_images, text_for_glossary, progress_ref = job
+                if check_stop_fn and check_stop_fn():
+                    image_translator.update_vision_ocr_glossary_progress([progress_ref], "failed")
+                    return order, False
+
+                worker = _clone_image_translator_for_vision_ocr(image_translator)
+                progress_ref = _set_image_translator_chapter_progress_context(
+                    worker,
+                    chapter,
+                    chapter_idx,
+                    actual_num,
+                    update_env=False,
+                ) or progress_ref
+                worker.current_chapter_num = actual_num
+                worker.update_vision_ocr_glossary_progress([progress_ref], "in_progress")
+                chapter_ocr = ""
+                if has_images:
+                    chapter_ocr = ocr_chapter_images_for_vision_glossary(
+                        body,
+                        worker,
+                        actual_num,
+                        check_stop_fn,
+                        progress_ref=progress_ref,
+                    )
+                chapter_text = "\n\n".join(
+                    part for part in (text_for_glossary, chapter_ocr)
+                    if part and str(part).strip()
+                ).strip()
+                if not chapter_text:
+                    status = "failed" if (check_stop_fn and check_stop_fn()) else "completed"
+                    image_translator.update_vision_ocr_glossary_progress([progress_ref], status)
+                    return order, False
+                result = image_translator._ensure_vision_ocr_glossary(
+                    chapter_text,
+                    mode,
+                    check_stop_fn,
+                    progress_refs=[progress_ref],
+                )
+                return order, bool(result)
+
+            executor = ThreadPoolExecutor(max_workers=workers)
+            future_to_job = {}
+            try:
+                for job in chapter_jobs:
+                    if check_stop_fn and check_stop_fn():
+                        stopped = True
+                        break
+                    future_to_job[executor.submit(_run_nonmerge_glossary_job, job)] = job
+                while future_to_job:
+                    done, _ = wait(future_to_job.keys(), timeout=0.5, return_when=FIRST_COMPLETED)
+                    if not done:
+                        if check_stop_fn and check_stop_fn():
+                            stopped = True
+                            for future in future_to_job:
+                                future.cancel()
+                            break
+                        continue
+                    for future in done:
+                        job = future_to_job.pop(future, None)
+                        try:
+                            _order, ok = future.result()
+                            if ok:
+                                generated += 1
+                        except Exception as e:
+                            if job:
+                                _order, _idx, _chapter, _actual, _body, _has_images, _text, ref = job
+                                image_translator.update_vision_ocr_glossary_progress([ref], "failed")
+                            print(f"⚠️ Vision glossary batch worker failed: {e}")
+                    if check_stop_fn and check_stop_fn():
+                        stopped = True
+                        for future in future_to_job:
+                            future.cancel()
+                        break
+            finally:
+                executor.shutdown(wait=not stopped, cancel_futures=True)
+
+            if generated:
+                os.environ["VISION_GLOSSARY_PREPASS_DONE"] = "1"
+            else:
+                os.environ.pop("VISION_GLOSSARY_PREPASS_DONE", None)
+            print(f"📑 Vision glossary prepass complete ({generated} glossary request group(s))")
+            print("="*50 + "\n")
+            return
+
     for idx, chapter in enumerate(chapters):
         if check_stop_fn and check_stop_fn():
             stopped = True

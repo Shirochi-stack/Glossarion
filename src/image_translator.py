@@ -2930,16 +2930,18 @@ class ImageTranslator:
                 print("   📑 Vision OCR auto glossary: no valid entries found")
                 return self._find_vision_glossary_file()
 
-            existing = []
-            for path in (csv_path, json_path):
-                if os.path.exists(path):
-                    try:
-                        existing.extend(glossary_extractor._load_glossary_file(path))
-                    except Exception:
-                        pass
-            deduped = glossary_extractor.skip_duplicate_entries(existing + valid, output_dir=glossary_dir)
-            glossary_extractor.save_glossary_json(deduped, json_path)
-            glossary_extractor.save_glossary_csv(deduped, json_path)
+            with self._vision_ocr_glossary_file_lock:
+                existing = []
+                for path in (csv_path, json_path):
+                    if os.path.exists(path):
+                        try:
+                            existing.extend(glossary_extractor._load_glossary_file(path))
+                        except Exception:
+                            pass
+                deduped = glossary_extractor.skip_duplicate_entries(existing + valid, output_dir=glossary_dir)
+                glossary_extractor.save_glossary_json(deduped, json_path)
+                glossary_extractor.save_glossary_csv(deduped, json_path)
+                self._vision_glossary_processed_hashes.add(text_hash)
             self._update_vision_ocr_glossary_progress(
                 glossary_extractor,
                 json_path,
@@ -2947,7 +2949,6 @@ class ImageTranslator:
                 "completed",
                 merged_refs=merged_refs,
             )
-            self._vision_glossary_processed_hashes.add(text_hash)
             print(f"   📑 Vision OCR auto glossary: saved {len(valid)} new entries ({len(deduped)} total)")
             return csv_path if os.path.exists(csv_path) else json_path
         except Exception as e:
