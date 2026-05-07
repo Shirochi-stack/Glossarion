@@ -10076,6 +10076,176 @@ def run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, c
         return None
 
 
+def _natural_pdf_image_key(path):
+    name = os.path.basename(str(path))
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", name)]
+
+
+def _vision_ocr_source_pdf_path(input_path):
+    base, _ext = os.path.splitext(os.path.abspath(input_path))
+    return f"{base}_OCR.pdf"
+
+
+def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, check_stop_fn=None):
+    """OCR extracted PDF images into a sibling *_OCR.pdf before translation/glossary work."""
+    if not _vision_ocr_mode_enabled():
+        return None
+    if not input_path or not str(input_path).lower().endswith(".pdf") or not os.path.exists(input_path):
+        return None
+    if image_translator is None:
+        return None
+
+    images_dir = os.path.join(output_dir or getattr(image_translator, "output_dir", ""), "images")
+    if not os.path.isdir(images_dir):
+        print(f"⚠️ Vision OCR source PDF prepass found no images folder: {images_dir}")
+        return None
+
+    image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+    image_paths = [
+        os.path.join(images_dir, name)
+        for name in os.listdir(images_dir)
+        if os.path.isfile(os.path.join(images_dir, name))
+        and os.path.splitext(name)[1].lower() in image_exts
+    ]
+    image_paths.sort(key=_natural_pdf_image_key)
+    if not image_paths:
+        print(f"⚠️ Vision OCR source PDF prepass found no images in: {images_dir}")
+        return None
+
+    output_path = _vision_ocr_source_pdf_path(input_path)
+    print("\n" + "="*50)
+    print("📖 Vision OCR Source PDF Prepass")
+    print("="*50)
+    print(f"📖 OCR source PDF target: {output_path}")
+    print(f"📖 OCRing {len(image_paths)} extracted PDF image(s)")
+
+    previous_suppress_save = getattr(image_translator, "_suppress_ocr_save_logs", False)
+    previous_suppress_detail = getattr(image_translator, "_suppress_image_detail_logs", False)
+    image_translator._suppress_ocr_save_logs = True
+    image_translator._suppress_image_detail_logs = True
+
+    def _ocr_pdf_image(job):
+        idx, image_path = job
+        if check_stop_fn and check_stop_fn():
+            return idx, image_path, None, True
+        context = f"PDF extracted image {idx} of {len(image_paths)}."
+        worker = _clone_image_translator_for_vision_ocr(image_translator)
+        worker._suppress_ocr_save_logs = True
+        worker._suppress_image_detail_logs = True
+        text = worker.ocr_image(
+            image_path,
+            context,
+            check_stop_fn,
+            image_idx=1,
+            chapter_num=idx,
+            image_basename=os.path.basename(image_path),
+        )
+        if not text:
+            cached = worker._load_saved_ocr_text(
+                kind="single",
+                image_basename=os.path.basename(image_path),
+                image_idx=1,
+                chapter_num=idx,
+            )
+            if cached:
+                text = cached
+        return idx, image_path, text, False
+
+    ocr_by_index = {}
+    checked = 0
+    no_text = 0
+    chapter_batch_enabled = os.getenv("BATCH_TRANSLATION", "0").strip().lower() in ("1", "true", "yes", "on")
+    try:
+        requested_workers = int(os.getenv("BATCH_SIZE", "1") or "1")
+    except Exception:
+        requested_workers = 1
+    workers = min(len(image_paths), max(1, requested_workers)) if chapter_batch_enabled else 1
+    if workers > 1:
+        print(f"📖 Vision OCR source PDF batch enabled: {workers} parallel image request worker(s)")
+
+    jobs = list(enumerate(image_paths, 1))
+    try:
+        if workers > 1 and len(jobs) > 1:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                future_to_idx = {executor.submit(_ocr_pdf_image, job): job[0] for job in jobs}
+                for future in as_completed(future_to_idx):
+                    idx, image_path, text, stopped = future.result()
+                    if stopped:
+                        print("⏹️ Vision OCR source PDF prepass stopped")
+                        return None
+                    checked += 1
+                    if text and not image_translator._is_ocr_no_response(text):
+                        ocr_by_index[idx] = (image_path, text.strip())
+                    else:
+                        no_text += 1
+                    if check_stop_fn and check_stop_fn():
+                        print("⏹️ Vision OCR source PDF prepass stopped")
+                        return None
+        else:
+            for job in jobs:
+                idx, image_path, text, stopped = _ocr_pdf_image(job)
+                if stopped:
+                    print("⏹️ Vision OCR source PDF prepass stopped")
+                    return None
+                checked += 1
+                if text and not image_translator._is_ocr_no_response(text):
+                    ocr_by_index[idx] = (image_path, text.strip())
+                else:
+                    no_text += 1
+    finally:
+        image_translator._suppress_ocr_save_logs = previous_suppress_save
+        image_translator._suppress_image_detail_logs = previous_suppress_detail
+
+    if not ocr_by_index:
+        print("⚠️ Vision OCR source PDF prepass found no OCR text")
+        return None
+
+    try:
+        from pdf_extractor import create_pdf_from_html
+
+        page_html = []
+        for idx in sorted(ocr_by_index):
+            image_path, text = ocr_by_index[idx]
+            page_html.append(
+                "<section class=\"ocr-page\">"
+                f"<pre>{html.escape(text)}</pre>"
+                "</section>"
+            )
+        full_html = """<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: serif; margin: 0; }
+        .ocr-page { page-break-after: always; padding: 2em; }
+        .ocr-page:last-child { page-break-after: auto; }
+        pre { white-space: pre-wrap; font-family: serif; font-size: 12pt; line-height: 1.45; }
+    </style>
+</head>
+<body>
+""" + "\n".join(page_html) + "\n</body>\n</html>"
+        if not create_pdf_from_html(full_html, output_path):
+            print("⚠️ Failed to create Vision OCR source PDF")
+            return None
+        os.environ["VISION_OCR_SOURCE_PDF"] = output_path
+        os.environ["GLOSSARY_COMPRESSION_SOURCE_PDF"] = output_path
+        os.environ["QA_VISION_OCR_SOURCE_PDF"] = output_path
+        print(
+            f"✅ Vision OCR source PDF ready: {output_path} "
+            f"({len(ocr_by_index)} OCR page(s), {checked} image(s) checked, {no_text} no-text image(s))"
+        )
+        return output_path
+    except Exception as e:
+        print(f"⚠️ Failed to write Vision OCR source PDF: {e}")
+        return None
+
+
+def run_vision_ocr_source_prepass(chapters, image_translator, input_path, output_dir, check_stop_fn=None):
+    if str(input_path or "").lower().endswith(".pdf"):
+        return run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, check_stop_fn)
+    return run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, check_stop_fn)
+
+
 def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
     """OCR image chapters and generate auto glossary before Vision translation starts."""
     mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower()
@@ -13501,6 +13671,11 @@ def main(log_callback=None, stop_callback=None):
                 import multiprocessing
                 from _pdf_extraction_worker import run_pdf_extraction
                 
+                _pdf_ext_temp_dir = tempfile.mkdtemp(prefix='glossarion_pdf_extract_')
+                _pdf_stop_file = os.path.join(_pdf_ext_temp_dir, '_pdf_extraction_stop')
+                _pdf_ext_config_path = os.path.join(_pdf_ext_temp_dir, '_pdf_extraction_config.json')
+                _pdf_ext_result_path = os.path.join(_pdf_ext_temp_dir, '_pdf_extraction_result.json')
+
                 # Write config JSON for the worker process
                 _pdf_ext_config = {
                     "pdf_path": input_path,
@@ -13510,19 +13685,11 @@ def main(log_callback=None, stop_callback=None):
                     "generate_css": os.getenv("PDF_GENERATE_CSS", "1") == "1",
                     "html2text": os.getenv("USE_HTML2TEXT", "0") == "1",
                     "css_override_path": os.getenv("EPUB_CSS_OVERRIDE_PATH", "").strip(),
-                    "attach_css_enabled": os.getenv("ATTACH_CSS_TO_CHAPTERS", "0") == "1"
+                    "attach_css_enabled": os.getenv("ATTACH_CSS_TO_CHAPTERS", "0") == "1",
+                    "result_path": _pdf_ext_result_path,
                 }
-                # Create a stop file for cross-process cancellation
-                _pdf_stop_file = os.path.join(out, '_pdf_extraction_stop')
-                # Clean up any leftover stop file from a previous run
-                if os.path.exists(_pdf_stop_file):
-                    try:
-                        os.remove(_pdf_stop_file)
-                    except Exception:
-                        pass
                 _pdf_ext_config['stop_file'] = _pdf_stop_file
                 
-                _pdf_ext_config_path = os.path.join(out, '_pdf_extraction_config.json')
                 with open(_pdf_ext_config_path, 'w', encoding='utf-8') as f:
                     json.dump(_pdf_ext_config, f, ensure_ascii=False)
                 
@@ -13531,15 +13698,18 @@ def main(log_callback=None, stop_callback=None):
                 
                 def _drain_log_queue():
                     """Forward all pending log messages from worker to GUI."""
+                    drained = 0
                     while not _log_queue.empty():
                         try:
                             msg = _log_queue.get_nowait()
+                            drained += 1
                             if log_callback:
                                 log_callback(msg)
                             else:
                                 print(msg)
                         except Exception:
                             break
+                    return drained
                 
                 # Run extraction in a worker process (no timeout)
                 _num_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
@@ -13586,17 +13756,28 @@ def main(log_callback=None, stop_callback=None):
                             print("🛑 PDF extraction cancelled by user")
                             # Skip _drain_log_queue() — killing all children also killed the
                             # Manager process that owns the queue, so queue ops would hang.
+                            for _cleanup_path in [_pdf_ext_config_path, _pdf_ext_result_path, _pdf_stop_file]:
+                                try:
+                                    if os.path.exists(_cleanup_path):
+                                        os.remove(_cleanup_path)
+                                except Exception:
+                                    pass
+                            try:
+                                os.rmdir(_pdf_ext_temp_dir)
+                            except Exception:
+                                pass
                             return
-                        _drain_log_queue()
-                        # Heartbeat: show a waiting message every 5s while worker initializes
-                        _now = time.time()
-                        if not _got_first_log and (_now - _last_heartbeat) >= 3.0:
-                            _elapsed = int(_now - _heartbeat_start)
-                            print(f"⏳ PDF worker initializing... ({_elapsed}s elapsed)")
-                            _last_heartbeat = _now
-                        # Track if we've received any log messages from the worker
-                        if not _got_first_log and not _log_queue.empty():
+                        if _drain_log_queue():
                             _got_first_log = True
+                        # Heartbeat: show a waiting message every 3s while the PDF worker is busy.
+                        _now = time.time()
+                        if (_now - _last_heartbeat) >= 3.0:
+                            _elapsed = int(_now - _heartbeat_start)
+                            if _got_first_log:
+                                print(f"⏳ PDF extraction still running... ({_elapsed}s elapsed)")
+                            else:
+                                print(f"⏳ PDF worker initializing... ({_elapsed}s elapsed)")
+                            _last_heartbeat = _now
                         time.sleep(0.3)
                     
                     # Drain any remaining log messages after completion
@@ -13621,7 +13802,7 @@ def main(log_callback=None, stop_callback=None):
                 # Load results from the output JSON
                 _result_path = _pdf_ext_result.get("result_path")
                 if not _result_path:
-                    _result_path = os.path.join(out, '_pdf_extraction_result.json')
+                    _result_path = _pdf_ext_result_path
                 
                 if _result_path and os.path.exists(_result_path):
                     with open(_result_path, 'r', encoding='utf-8') as f:
@@ -13671,12 +13852,16 @@ def main(log_callback=None, stop_callback=None):
                     txt_processor.save_original_structure()
                     
                     # Clean up config and result files
-                    for _cleanup_path in [_pdf_ext_config_path, _result_path]:
+                    for _cleanup_path in [_pdf_ext_config_path, _result_path, _pdf_stop_file]:
                         try:
                             if os.path.exists(_cleanup_path):
                                 os.remove(_cleanup_path)
                         except Exception:
                             pass
+                    try:
+                        os.rmdir(_pdf_ext_temp_dir)
+                    except Exception:
+                        pass
                 else:
                     raise RuntimeError("PDF extraction succeeded but result file not found")
             else:
@@ -13949,7 +14134,7 @@ def main(log_callback=None, stop_callback=None):
         print("\n" + "="*50)
         print("📖 VISION OCR ONLY PHASE")
         print("="*50)
-        ocr_source_epub = None
+        ocr_source_file = None
         try:
             ocr_system = config.get_system_prompt(actual_merge_count=1)
             ocr_image_translator = ImageTranslator(
@@ -13963,13 +14148,13 @@ def main(log_callback=None, stop_callback=None):
                 history_manager,
                 chunk_context_manager,
             )
-            ocr_source_epub = run_vision_ocr_source_epub_prepass(chapters, ocr_image_translator, input_path, check_stop)
+            ocr_source_file = run_vision_ocr_source_prepass(chapters, ocr_image_translator, input_path, out, check_stop)
         except Exception as e:
-            print(f"⚠️ Vision OCR source EPUB prepass failed: {e}")
-        if ocr_source_epub:
-            print(f"📖 Vision OCR skip translation enabled: generated {ocr_source_epub}")
+            print(f"⚠️ Vision OCR source prepass failed: {e}")
+        if ocr_source_file:
+            print(f"📖 Vision OCR skip translation enabled: generated {ocr_source_file}")
         else:
-            print("📖 Vision OCR skip translation enabled: OCR source EPUB was not generated")
+            print("📖 Vision OCR skip translation enabled: OCR source file was not generated")
         print("⏭️ Skipping title translation, metadata translation, glossary extraction, and chapter translation by user setting")
         print("TRANSLATION_COMPLETE_SIGNAL")
         return
@@ -15302,9 +15487,9 @@ def main(log_callback=None, stop_callback=None):
 
     if image_translator is not None:
         try:
-            run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, check_stop)
+            run_vision_ocr_source_prepass(chapters, image_translator, input_path, out, check_stop)
         except Exception as e:
-            print(f"⚠️ Vision OCR source EPUB prepass failed: {e}")
+            print(f"⚠️ Vision OCR source prepass failed: {e}")
         try:
             os.environ.pop("VISION_GLOSSARY_PREPASS_DONE", None)
             run_vision_glossary_prepass(chapters, image_translator, check_stop)

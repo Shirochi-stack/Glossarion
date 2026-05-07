@@ -17,11 +17,12 @@ Config JSON:
         "generate_css": true,
         "html2text": false,
         "css_override_path": "",
-        "attach_css_enabled": false
+        "attach_css_enabled": false,
+        "result_path": "/tmp/glossarion_pdf_result.json"
     }
 
 Output:
-    Writes result JSON to <output_dir>/_pdf_extraction_result.json
+    Writes result JSON to result_path if provided, otherwise <output_dir>/_pdf_extraction_result.json
     Streams [PROGRESS] messages to stdout for real-time log forwarding
 """
 
@@ -202,7 +203,7 @@ def _run_pdf_extraction_inner(config_path):
             log(f"⚠️ Failed to convert HTML to markdown: {e}")
 
     # Write results to output JSON
-    result_path = os.path.join(output_dir, '_pdf_extraction_result.json')
+    result_path = config.get("result_path") or os.path.join(output_dir, '_pdf_extraction_result.json')
 
     # Serialize content: list of [page_num, html] pairs
     serialized_content = []
