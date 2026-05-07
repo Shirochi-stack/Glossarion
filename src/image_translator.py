@@ -2491,6 +2491,29 @@ class ImageTranslator:
             for ref in self._normalize_vision_glossary_progress_refs(merged_refs)
         }
         progress = glossary_extractor.load_progress()
+        chapters = progress.get("chapters", {}) if isinstance(progress.get("chapters"), dict) else {}
+        for key, info in chapters.items():
+            if not isinstance(info, dict):
+                continue
+            try:
+                idx = int(info.get("chapter_index"))
+            except (TypeError, ValueError):
+                try:
+                    idx = int(key)
+                except (TypeError, ValueError):
+                    continue
+            raw_num = info.get("actual_num")
+            if raw_num in (None, ""):
+                raw_num = info.get("chapter_num")
+            try:
+                glossary_extractor._GLOSSARY_CHAPTER_POSITIONS[idx] = int(raw_num)
+                glossary_extractor._GLOSSARY_CHAPTER_NUMBERS[idx] = int(raw_num)
+            except (TypeError, ValueError):
+                pass
+            for file_key in ("output_file", "chapter_file", "original_basename", "filename", "source_filename"):
+                if info.get(file_key):
+                    glossary_extractor._GLOSSARY_CHAPTER_FILENAMES[idx] = os.path.basename(str(info.get(file_key)))
+                    break
         completed = list(progress.get("completed", []))
         failed = list(progress.get("failed", []))
         merged = list(progress.get("merged_indices", []))

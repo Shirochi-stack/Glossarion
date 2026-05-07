@@ -14699,11 +14699,6 @@ def main(log_callback=None, stop_callback=None):
         if config.MODEL.lower() not in known_vision_models:
             print(f"⚠️ Note: {config.MODEL} may not have vision capabilities. Image translation will be attempted anyway.")
 
-        try:
-            os.environ.pop("VISION_GLOSSARY_PREPASS_DONE", None)
-            run_vision_glossary_prepass(chapters, image_translator, check_stop)
-        except Exception as e:
-            print(f"⚠️ Vision auto glossary prepass failed: {e}")
     else:
         print("ℹ️ Image translation disabled by user")
     
@@ -15025,6 +15020,13 @@ def main(log_callback=None, stop_callback=None):
         if len(skipped) <= 5:
             for file in skipped:
                 print(f"   • {file}")
+
+    if image_translator is not None:
+        try:
+            os.environ.pop("VISION_GLOSSARY_PREPASS_DONE", None)
+            run_vision_glossary_prepass(chapters, image_translator, check_stop)
+        except Exception as e:
+            print(f"⚠️ Vision auto glossary prepass failed: {e}")
     
     if config.OUTPUT_MODE in ("refinement", "audio"):
         post_mode_chapters = []
