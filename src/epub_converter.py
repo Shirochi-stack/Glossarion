@@ -2377,7 +2377,7 @@ class EPUBCompiler:
                             'html_files': html_files,
                             'chapter_titles_info': {str(k): list(v) for k, v in chapter_titles_info.items()},
                             'processed_images': processed_images,
-                            'cover_file': cover_file,
+                            'cover_file': cover_file_for_generated_page,
                             'metadata': metadata,
                             'env_vars': {
                                 k: os.environ.get(k, '') for k in [
