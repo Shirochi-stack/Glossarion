@@ -7327,6 +7327,9 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             # Use value from entry if present, otherwise fallback to global translated title
             "book_title": BOOK_TITLE_VALUE if BOOK_TITLE_PRESENT else BOOK_TITLE_TRANSLATED,
             "chapters": chapters,
+            "completed": completed_clean,
+            "failed": failed_clean,
+            "merged_indices": merged_clean,
             "chapter_positions": {str(k): v for k, v in sorted((_GLOSSARY_CHAPTER_POSITIONS or {}).items())},
             "chapter_numbers": {str(k): v for k, v in sorted((_GLOSSARY_CHAPTER_NUMBERS or {}).items())},
             "chapter_filenames": {str(k): v for k, v in sorted((_GLOSSARY_CHAPTER_FILENAMES or {}).items())},

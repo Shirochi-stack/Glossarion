@@ -9342,8 +9342,11 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             continue
 
         image_translator.current_chapter_num = actual_num
+        image_translator.update_vision_ocr_glossary_progress([progress_ref], "in_progress")
         chapter_ocr = ocr_chapter_images_for_vision_glossary(body, image_translator, actual_num, check_stop_fn)
         if not chapter_ocr:
+            if not (check_stop_fn and check_stop_fn()):
+                image_translator.update_vision_ocr_glossary_progress([progress_ref], "completed")
             continue
 
         if mode == "minimal":
@@ -9356,7 +9359,13 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
                 continue
             merged_text = "\n\n".join(f"[Chapter {num}]\n{text}" for num, text, _ref in merge_buffer)
             refs = [ref for _num, _text, ref in merge_buffer if ref]
-            if image_translator._ensure_vision_ocr_glossary(merged_text, mode, check_stop_fn, progress_refs=refs):
+            if image_translator._ensure_vision_ocr_glossary(
+                merged_text,
+                mode,
+                check_stop_fn,
+                progress_refs=refs,
+                merged_refs=refs[1:],
+            ):
                 generated += 1
             merge_buffer = []
         else:
@@ -9367,12 +9376,24 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
         full_ocr = "\n\n".join(f"[Chapter {num}]\n{text}" for num, text, _ref in all_ocr)
         refs = [ref for _num, _text, ref in all_ocr if ref]
         image_translator._save_ocr_text(full_ocr, kind="full", image_basename="novel_vision_ocr")
-        if image_translator._ensure_vision_ocr_glossary(full_ocr, mode, check_stop_fn, progress_refs=refs):
+        if image_translator._ensure_vision_ocr_glossary(
+            full_ocr,
+            mode,
+            check_stop_fn,
+            progress_refs=refs,
+            merged_refs=refs[1:],
+        ):
             generated += 1
     elif merge_enabled and merge_buffer:
         merged_text = "\n\n".join(f"[Chapter {num}]\n{text}" for num, text, _ref in merge_buffer)
         refs = [ref for _num, _text, ref in merge_buffer if ref]
-        if image_translator._ensure_vision_ocr_glossary(merged_text, mode, check_stop_fn, progress_refs=refs):
+        if image_translator._ensure_vision_ocr_glossary(
+            merged_text,
+            mode,
+            check_stop_fn,
+            progress_refs=refs,
+            merged_refs=refs[1:],
+        ):
             generated += 1
 
     if generated:

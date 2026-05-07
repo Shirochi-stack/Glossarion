@@ -2315,10 +2315,14 @@ class ImageTranslator:
             deduped[ref["chapter_idx"]] = ref
         return [deduped[idx] for idx in sorted(deduped)]
 
-    def _update_vision_ocr_glossary_progress(self, glossary_extractor, json_path, progress_refs, status):
+    def _update_vision_ocr_glossary_progress(self, glossary_extractor, json_path, progress_refs, status, merged_refs=None):
         refs = self._normalize_vision_glossary_progress_refs(progress_refs)
         if not refs:
             return
+        merged_ref_indices = {
+            int(ref["chapter_idx"])
+            for ref in self._normalize_vision_glossary_progress_refs(merged_refs)
+        }
         progress = glossary_extractor.load_progress()
         completed = list(progress.get("completed", []))
         failed = list(progress.get("failed", []))
@@ -2340,11 +2344,13 @@ class ImageTranslator:
         index_set = set(indices)
         completed = [idx for idx in completed if idx not in index_set]
         failed = [idx for idx in failed if idx not in index_set]
+        merged = [idx for idx in merged if idx not in index_set]
         in_progress = [idx for idx in in_progress if idx not in index_set]
         if status == "in_progress":
             in_progress.extend(indices)
         elif status == "completed":
-            completed.extend(indices)
+            completed.extend(idx for idx in indices if idx not in merged_ref_indices)
+            merged.extend(idx for idx in indices if idx in merged_ref_indices)
         elif status == "failed":
             failed.extend(indices)
 
@@ -2356,7 +2362,40 @@ class ImageTranslator:
             in_progress=in_progress,
         )
 
-    def _ensure_vision_ocr_glossary(self, ocr_text, mode, check_stop_fn, progress_refs=None):
+    def update_vision_ocr_glossary_progress(self, progress_refs, status, merged_refs=None):
+        """Write Vision OCR glossary progress even while OCR is still running."""
+        original_progress_file = None
+        original_output_file = None
+        try:
+            import extract_glossary_from_epub as glossary_extractor
+            glossary_dir, json_path, _csv_path, progress_path = self._vision_ocr_glossary_paths()
+            os.makedirs(glossary_dir, exist_ok=True)
+            original_progress_file = getattr(glossary_extractor, "PROGRESS_FILE", None)
+            original_output_file = getattr(glossary_extractor, "_GLOSSARY_OUTPUT_FILE", "")
+            glossary_extractor.PROGRESS_FILE = progress_path
+            glossary_extractor._GLOSSARY_OUTPUT_FILE = json_path
+            self._update_vision_ocr_glossary_progress(
+                glossary_extractor,
+                json_path,
+                progress_refs,
+                status,
+                merged_refs=merged_refs,
+            )
+        except Exception as e:
+            print(f"   ⚠️ Vision OCR glossary progress update failed: {e}")
+        finally:
+            try:
+                if "glossary_extractor" in locals():
+                    if original_progress_file is not None:
+                        glossary_extractor.PROGRESS_FILE = original_progress_file
+                    elif hasattr(glossary_extractor, "PROGRESS_FILE"):
+                        delattr(glossary_extractor, "PROGRESS_FILE")
+                    if original_output_file is not None:
+                        glossary_extractor._GLOSSARY_OUTPUT_FILE = original_output_file
+            except Exception:
+                pass
+
+    def _ensure_vision_ocr_glossary(self, ocr_text, mode, check_stop_fn, progress_refs=None, merged_refs=None):
         """Generate/update glossary entries from OCR text for Vision mode."""
         if not ocr_text or not ocr_text.strip():
             return None
@@ -2364,6 +2403,11 @@ class ImageTranslator:
             import hashlib
             text_hash = hashlib.sha256(ocr_text.encode('utf-8', errors='ignore')).hexdigest()
             if text_hash in self._vision_glossary_processed_hashes:
+                self.update_vision_ocr_glossary_progress(
+                    progress_refs,
+                    "completed",
+                    merged_refs=merged_refs,
+                )
                 return self._find_vision_glossary_file()
 
             if check_stop_fn and check_stop_fn():
@@ -2417,7 +2461,13 @@ class ImageTranslator:
                         entry["raw_name"] = entry["raw_name"].strip()
                     valid.append(entry)
             if not valid:
-                self._update_vision_ocr_glossary_progress(glossary_extractor, json_path, progress_refs, "completed")
+                self._update_vision_ocr_glossary_progress(
+                    glossary_extractor,
+                    json_path,
+                    progress_refs,
+                    "completed",
+                    merged_refs=merged_refs,
+                )
                 print("   📑 Vision OCR auto glossary: no valid entries found")
                 return self._find_vision_glossary_file()
 
@@ -2431,7 +2481,13 @@ class ImageTranslator:
             deduped = glossary_extractor.skip_duplicate_entries(existing + valid, output_dir=glossary_dir)
             glossary_extractor.save_glossary_json(deduped, json_path)
             glossary_extractor.save_glossary_csv(deduped, json_path)
-            self._update_vision_ocr_glossary_progress(glossary_extractor, json_path, progress_refs, "completed")
+            self._update_vision_ocr_glossary_progress(
+                glossary_extractor,
+                json_path,
+                progress_refs,
+                "completed",
+                merged_refs=merged_refs,
+            )
             self._vision_glossary_processed_hashes.add(text_hash)
             print(f"   📑 Vision OCR auto glossary: saved {len(valid)} new entries ({len(deduped)} total)")
             return csv_path if os.path.exists(csv_path) else json_path
