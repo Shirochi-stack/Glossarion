@@ -3486,6 +3486,36 @@ class ImageTranslator:
                 return True
             return False
 
+        def _is_compact_list_line(line):
+            stripped = (line or "").strip()
+            if not stripped:
+                return False
+            if re.match(r"^[\u2460-\u2473\u3251-\u325f\u2776-\u277f]\s*", stripped):
+                return True
+            if re.match(r"^[-*+]\s+\S", stripped):
+                return True
+            if re.match(r"^(?:\d+|[A-Za-z])[.)]\s+\S", stripped):
+                return True
+            if re.match(r"^[\[\(（【<《].+[\]\)）】>》]\s*$", stripped):
+                return True
+            return False
+
+        def _next_nonblank(lines, start):
+            for candidate in lines[start:]:
+                if candidate.strip():
+                    return candidate
+            return ""
+
+        def _should_keep_blank_line(previous, next_line):
+            if not (previous or "").strip():
+                return False
+            if not (next_line or "").strip():
+                return True
+            if (_is_compact_list_line(previous)
+                    and _is_compact_list_line(next_line)):
+                return False
+            return True
+
         def _should_merge_chunk_boundary(previous, current):
             prev = (previous or "").rstrip()
             cur = (current or "").lstrip()
@@ -3535,9 +3565,12 @@ class ImageTranslator:
             if overlap:
                 lines = lines[overlap:]
             merged_boundary = False
-            for line in lines:
+            for idx, line in enumerate(lines):
                 if not line.strip():
-                    if combined_lines and combined_lines[-1].strip():
+                    next_line = _next_nonblank(lines, idx + 1)
+                    previous = combined_lines[-1] if combined_lines else ""
+                    if (combined_lines and combined_lines[-1].strip()
+                            and _should_keep_blank_line(previous, next_line)):
                         combined_lines.append("")
                     continue
                 if (not merged_boundary and combined_lines

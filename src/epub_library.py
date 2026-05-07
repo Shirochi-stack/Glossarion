@@ -14674,6 +14674,8 @@ class EpubReaderDialog(QDialog):
             layout.addWidget(results, 1)
 
             close_btn = QPushButton("Close")
+            close_btn.setDefault(False)
+            close_btn.setAutoDefault(False)
             close_btn.clicked.connect(self._close_search)
             layout.addWidget(close_btn)
 
@@ -14864,13 +14866,19 @@ class EpubReaderDialog(QDialog):
         text = query.text().strip()
         if not text:
             return
-        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            results = getattr(self, "_search_dialog_results", None)
-            item = results.currentItem() if results is not None else None
-            if item is not None:
-                self._activate_search_result(item)
+        results = getattr(self, "_search_dialog_results", None)
+        if results is None or results.count() <= 0:
             return
-        self._reader.findText(text)
+        current = results.currentRow()
+        if current < 0:
+            next_row = 0
+        else:
+            next_row = (current + 1) % results.count()
+        results.setCurrentRow(next_row)
+        item = results.item(next_row)
+        if item is not None:
+            results.scrollToItem(item)
+            self._activate_search_result(item)
 
     def _activate_search_result(self, item):
         data = item.data(Qt.UserRole) if item is not None else None
