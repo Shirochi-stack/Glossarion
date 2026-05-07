@@ -9665,6 +9665,15 @@ def ocr_chapter_images_for_vision_glossary(
             chapter_num=actual_num,
             image_basename=os.path.basename(img_path),
         )
+        if not ocr_text and preserve_no_image_markers:
+            cached_ocr = image_translator._load_saved_ocr_text(
+                kind="single",
+                image_basename=os.path.basename(img_path),
+                image_idx=idx,
+                chapter_num=actual_num,
+            )
+            if getattr(image_translator, "_is_ocr_no_response", lambda text: False)(cached_ocr):
+                ocr_text = "No"
         return idx, img_info, ocr_text
 
     ocr_by_index = {}
