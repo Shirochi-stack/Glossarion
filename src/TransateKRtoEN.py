@@ -2337,6 +2337,42 @@ class ProgressManager:
         except (TypeError, ValueError):
             return
 
+        def _norm(fname):
+            if not fname:
+                return ""
+            base = os.path.basename(str(fname).replace("\\", "/"))
+            if base.lower().startswith("response_"):
+                base = base[len("response_"):]
+            while True:
+                stem, ext = os.path.splitext(base)
+                if not ext:
+                    break
+                base = stem
+            return base.lower()
+
+        def _existing_output_file(*candidates):
+            output_dir = self.payloads_dir
+            seen = []
+            for candidate in candidates:
+                if candidate and candidate not in seen:
+                    seen.append(candidate)
+            for candidate in seen:
+                path = candidate if os.path.isabs(str(candidate)) else os.path.join(output_dir, str(candidate))
+                if os.path.isfile(path):
+                    return os.path.basename(path)
+            norms = {_norm(candidate) for candidate in seen if candidate}
+            norms.discard("")
+            if not norms:
+                return None
+            try:
+                for fname in os.listdir(output_dir):
+                    path = os.path.join(output_dir, fname)
+                    if os.path.isfile(path) and _norm(fname) in norms:
+                        return fname
+            except Exception:
+                return None
+            return None
+
         chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
         chapter_info = dict(self.prog.get("chapters", {}).get(chapter_key, {}))
         if not chapter_info:
@@ -2360,6 +2396,47 @@ class ProgressManager:
             elif chapter_obj.get('filename'):
                 chapter_info["original_basename"] = os.path.basename(chapter_obj['filename'])
         existing_status = str(chapter_info.get("status", "") or "")
+        previous_entry = chapter_info.get("previous_progress_entry")
+        previous_status = str(chapter_info.get("previous_status", "") or "")
+        completed_statuses = {"completed", "completed_empty", "completed_image_only"}
+        existing_output = _existing_output_file(
+            output_file,
+            chapter_info.get("output_file"),
+            previous_entry.get("output_file") if isinstance(previous_entry, dict) else None,
+        )
+        completed_snapshot = None
+        if existing_status.lower() in completed_statuses:
+            completed_snapshot = dict(chapter_info)
+        elif (
+            existing_status.lower() == "in_progress"
+            and previous_status.lower() in completed_statuses
+            and isinstance(previous_entry, dict)
+        ):
+            completed_snapshot = dict(previous_entry)
+
+        if completed_snapshot and existing_output:
+            completed_snapshot["actual_num"] = actual_num
+            completed_snapshot["chapter_num"] = actual_num
+            completed_snapshot["content_hash"] = content_hash or completed_snapshot.get("content_hash")
+            completed_snapshot["output_file"] = existing_output
+            if completed_snapshot.get("status") in ("completed_empty", "completed_image_only"):
+                pass
+            else:
+                completed_snapshot["status"] = "completed"
+            completed_snapshot.pop("previous_status", None)
+            completed_snapshot.pop("previous_progress_entry", None)
+            completed_snapshot.pop("previous_status_unknown", None)
+            completed_snapshot["ocr_progress"] = {
+                "done": min(done, total) if total else done,
+                "total": total,
+                "label": f"{min(done, total) if total else done}/{total}",
+                "last_updated": time.time(),
+            }
+            completed_snapshot["last_updated"] = time.time()
+            self.prog.setdefault("chapters", {})[chapter_key] = completed_snapshot
+            self.save()
+            return
+
         if existing_status.lower() == "in_progress":
             previous_status = chapter_info.get("previous_status")
             previous_entry = chapter_info.get("previous_progress_entry")

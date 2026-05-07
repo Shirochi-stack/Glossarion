@@ -3922,7 +3922,7 @@ class ImageTranslator:
             parts.append(f"{no_text} cover/illustration skip(s)")
         if api_requests:
             parts.append(f"{api_requests} new OCR request(s)")
-        print(f"   Vision OCR summary for {label} ({status_label}): {', '.join(parts)}")
+        print(f"   OCR Combined for {label} ({status_label}): {', '.join(parts)}")
 
     def reserve_vision_ocr_progress_units(self, units=1):
         """Reserve known OCR work before cached/fresh requests are split."""

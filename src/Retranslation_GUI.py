@@ -5564,6 +5564,22 @@ class RetranslationMixin:
         if status in ('completed_empty', 'completed_image_only'):
             status = 'completed'
 
+        if status == 'in_progress' and data and data.get('output_dir'):
+            previous_status = str(entry.get('previous_status') or '').lower().strip()
+            previous_entry = entry.get('previous_progress_entry')
+            if previous_status in ('completed', 'completed_empty', 'completed_image_only') or (
+                isinstance(previous_entry, dict)
+                and str(previous_entry.get('status') or '').lower().strip() in ('completed', 'completed_empty', 'completed_image_only')
+            ):
+                _resolved_file, resolved_path = self._resolve_existing_output_path(
+                    data.get('output_dir'),
+                    info.get('output_file') or entry.get('output_file'),
+                    info,
+                    data.get('prog'),
+                )
+                if resolved_path and os.path.exists(resolved_path):
+                    return 'completed'
+
         if status in ('failed', 'qa_failed', 'in_progress', 'pending', 'merged', 'not_translated'):
             return status
         if mode == 'refinement':
