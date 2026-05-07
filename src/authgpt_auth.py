@@ -748,6 +748,8 @@ def _parse_responses_result(data: Dict) -> Dict:
         incomplete = data.get("incomplete_details", {}) or {}
         reason = incomplete.get("reason", "")
         finish_reason = "length" if "tokens" in reason else reason or "incomplete"
+    elif status == "failed":
+        finish_reason = "error"
 
     # Usage
     raw_usage = data.get("usage")
@@ -758,13 +760,16 @@ def _parse_responses_result(data: Dict) -> Dict:
             "total_tokens": raw_usage.get("total_tokens", 0),
         }
 
-    return {
+    result = {
         "content": content,
         "finish_reason": finish_reason,
         "conversation_id": response_id,
         "message_id": response_id,
         "usage": usage,
     }
+    if data.get("error"):
+        result["error_details"] = data.get("error")
+    return result
 
 
 def _parse_sse_responses(raw_text: str) -> Dict:
@@ -809,6 +814,19 @@ def _parse_sse_responses(raw_text: str) -> Dict:
             # Fall back to accumulated deltas when content is empty.
             if not result.get("content") and content_parts:
                 result["content"] = "".join(content_parts)
+            return result
+        elif event_type == "response.failed":
+            resp_obj = data.get("response", data)
+            result = _parse_responses_result(resp_obj)
+            result["content"] = ""
+            result["finish_reason"] = "error"
+            result["error_details"] = (
+                resp_obj.get("error")
+                or data.get("error")
+                or {"type": "response.failed"}
+            )
+            if content_parts:
+                result["partial_content"] = "".join(content_parts)
             return result
 
         last_data = data
