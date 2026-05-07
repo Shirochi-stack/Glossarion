@@ -928,20 +928,16 @@ def _glossary_chapter_actual_num(idx: int) -> int:
         return int(idx) + 1
 
 def _glossary_chapter_key(idx: int) -> str:
-    """Build a translation-style key while avoiding collisions for duplicate numbers."""
-    actual_num = _glossary_chapter_actual_num(idx)
-    filename = os.path.basename(str(_GLOSSARY_CHAPTER_FILENAMES.get(idx, "") or ""))
-    base = os.path.splitext(filename)[0]
-    if not base:
-        return str(actual_num)
-    same_num = [
-        int(other_idx)
-        for other_idx, other_num in (_GLOSSARY_CHAPTER_NUMBERS or _GLOSSARY_CHAPTER_POSITIONS or {}).items()
-        if int(other_num) == actual_num
-    ]
-    if len(same_num) > 1:
-        return f"{actual_num}_{base}"
-    return str(actual_num)
+    """Build a stable zero-based progress key.
+
+    Display chapter numbers can collide for cover/info files and episode 1, so
+    the persisted key must be the internal spine index. The human-facing number
+    remains available on each chapter entry as actual_num/chapter_num.
+    """
+    try:
+        return str(int(idx))
+    except (TypeError, ValueError):
+        return str(idx)
 
 def _glossary_chapter_output_file(idx: int) -> str:
     """Return the stable filename anchor used by the GUI progress manager."""

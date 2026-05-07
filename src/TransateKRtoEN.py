@@ -10752,6 +10752,9 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             num = int(ref.get("chapter_num"))
         except (TypeError, ValueError):
             num = None
+        target_file = os.path.splitext(
+            os.path.basename(str(ref.get("chapter_file") or "").lower())
+        )[0]
         if idx is not None and (idx in completed or idx in merged):
             return True
         for info in chapters.values():
@@ -10764,11 +10767,24 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
                 entry_idx = int(info.get("chapter_index"))
             except (TypeError, ValueError):
                 entry_idx = None
+            entry_file = ""
+            for file_key in ("output_file", "chapter_file", "original_basename", "filename", "source_filename"):
+                if info.get(file_key):
+                    entry_file = os.path.splitext(os.path.basename(str(info.get(file_key)).lower()))[0]
+                    break
+            if idx is not None:
+                if entry_idx == idx:
+                    return True
+                if entry_idx is None and target_file and entry_file and target_file == entry_file:
+                    return True
+                continue
             try:
                 entry_num = int(info.get("actual_num") or info.get("chapter_num"))
             except (TypeError, ValueError):
                 entry_num = None
-            if (idx is not None and entry_idx == idx) or (num is not None and entry_num == num):
+            if target_file and entry_file and target_file == entry_file:
+                return True
+            if num is not None and entry_num == num:
                 return True
         return False
 
