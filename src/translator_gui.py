@@ -2145,7 +2145,7 @@ Text to analyze:
         self.default_vision_ocr_prompt = (
             "Extract all readable text that is physically present in the image, in natural reading order. Return Markdown only, not HTML. "
             "Output plain text by default. Use Markdown only to preserve visible source structure or styling when it is actually present in the image: paragraph breaks, meaningful line breaks, bullet lists, numbered lists, blockquotes, tables, bold, italic, strikethrough/deleted text, inline code/code blocks, or visibly printed Markdown characters. "
-            "Do not invent Markdown formatting. Do not convert titles, centered text, chapter names, large text, or standalone numbers into Markdown headings. Do not add # unless a # character is visibly present in the image. "
+            "Do not invent Markdown formatting. "
             "If the image is primarily cover art, character art, scene illustration, splash art, decorative art, a poster, or a promotional image, reply exactly No when the only readable text is a logo, watermark, title/author/credit text, short decorative words, background writing, or other incidental non-story text. "
             "Do not OCR incidental text from illustrated covers or splash images. "
             "If the image is primarily a text page, title page, chapter title page, document/table/list page, speech-bubble comic page, or mostly blank page with readable non-decorative text, output the readable text. "
@@ -2166,7 +2166,7 @@ Text to analyze:
         )
         self.default_vision_ocr_combined_context_prompt = (
             "The Markdown OCR text below was assembled from {chunk_count} tall-image chunk(s). "
-            "Translate it as one continuous passage, preserving narrative flow, Markdown structure, and removing OCR-only duplication from chunk overlap."
+            "Translate it as one continuous passage, preserving narrative flow and Markdown structure. {ocr_overlap_instruction}"
         )
         self.default_vision_ocr_translation_user_prompt = (
             "{context}\n\n"
@@ -3392,6 +3392,8 @@ Recent translations to summarize:
             or "Return only the base source text. Preserve paragraph breaks and intentional textual layout" in str(self.vision_ocr_prompt)
             or "otherwise not a page of readable story text" in str(self.vision_ocr_prompt)
             or "headings with #" in str(self.vision_ocr_prompt)
+            or "Do not convert titles, centered text, chapter names, large text, or standalone numbers into Markdown headings" in str(self.vision_ocr_prompt)
+            or "Do not add # unless a # character is visibly present in the image" in str(self.vision_ocr_prompt)
             or "If any readable text is present, output it" in str(self.vision_ocr_prompt)
         ):
             self.vision_ocr_prompt = self.default_vision_ocr_prompt
@@ -3409,7 +3411,13 @@ Recent translations to summarize:
         self.vision_ocr_combined_context_prompt = self.config.get('vision_ocr_combined_context_prompt', self.default_vision_ocr_combined_context_prompt)
         if not self.vision_ocr_combined_context_prompt or not str(self.vision_ocr_combined_context_prompt).strip():
             self.vision_ocr_combined_context_prompt = self.default_vision_ocr_combined_context_prompt
-        elif "The OCR text below was assembled from" in str(self.vision_ocr_combined_context_prompt):
+        elif (
+            "The OCR text below was assembled from" in str(self.vision_ocr_combined_context_prompt)
+            or (
+                "removing OCR-only duplication from chunk overlap" in str(self.vision_ocr_combined_context_prompt)
+                and "{ocr_overlap_instruction}" not in str(self.vision_ocr_combined_context_prompt)
+            )
+        ):
             self.vision_ocr_combined_context_prompt = self.default_vision_ocr_combined_context_prompt
             self.config['vision_ocr_combined_context_prompt'] = self.default_vision_ocr_combined_context_prompt
         self.vision_ocr_translation_user_prompt = self.config.get('vision_ocr_translation_user_prompt', self.default_vision_ocr_translation_user_prompt)

@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_VISION_OCR_PROMPT = (
     "Extract all readable text that is physically present in the image, in natural reading order. Return Markdown only, not HTML. "
     "Output plain text by default. Use Markdown only to preserve visible source structure or styling when it is actually present in the image: paragraph breaks, meaningful line breaks, bullet lists, numbered lists, blockquotes, tables, bold, italic, strikethrough/deleted text, inline code/code blocks, or visibly printed Markdown characters. "
-    "Do not invent Markdown formatting. Do not convert titles, centered text, chapter names, large text, or standalone numbers into Markdown headings. Do not add # unless a # character is visibly present in the image. "
+    "Do not invent Markdown formatting. "
     "If the image is primarily cover art, character art, scene illustration, splash art, decorative art, a poster, or a promotional image, reply exactly No when the only readable text is a logo, watermark, title/author/credit text, short decorative words, background writing, or other incidental non-story text. "
     "Do not OCR incidental text from illustrated covers or splash images. "
     "If the image is primarily a text page, title page, chapter title page, document/table/list page, speech-bubble comic page, or mostly blank page with readable non-decorative text, output the readable text. "
@@ -56,6 +56,8 @@ STALE_VISION_OCR_PROMPT_MARKERS = (
     "Return only the base source text. Preserve paragraph breaks and intentional textual layout",
     "otherwise not a page of readable story text",
     "headings with #",
+    "Do not convert titles, centered text, chapter names, large text, or standalone numbers into Markdown headings",
+    "Do not add # unless a # character is visibly present in the image",
     "If any readable text is present, output it",
 )
 
@@ -69,7 +71,11 @@ DEFAULT_VISION_OCR_USER_PROMPT = (
 
 DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT = (
     "The Markdown OCR text below was assembled from {chunk_count} tall-image chunk(s). "
-    "Translate it as one continuous passage, preserving narrative flow, Markdown structure, and removing OCR-only duplication from chunk overlap."
+    "Translate it as one continuous passage, preserving narrative flow and Markdown structure. {ocr_overlap_instruction}"
+)
+
+DEFAULT_VISION_OCR_OVERLAP_INSTRUCTION = (
+    "Remove OCR-only duplicated text caused by the overlapping pixels between adjacent image chunks."
 )
 
 DEFAULT_VISION_OCR_TRANSLATION_USER_PROMPT = (
@@ -400,7 +406,13 @@ class ImageTranslator:
         ):
             self.vision_ocr_user_prompt = DEFAULT_VISION_OCR_USER_PROMPT
         self.vision_ocr_combined_context_prompt = os.getenv("VISION_OCR_COMBINED_CONTEXT_PROMPT", DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT).strip() or DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT
-        if "The OCR text below was assembled from" in self.vision_ocr_combined_context_prompt:
+        if (
+            "The OCR text below was assembled from" in self.vision_ocr_combined_context_prompt
+            or (
+                "removing OCR-only duplication from chunk overlap" in self.vision_ocr_combined_context_prompt
+                and "{ocr_overlap_instruction}" not in self.vision_ocr_combined_context_prompt
+            )
+        ):
             self.vision_ocr_combined_context_prompt = DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT
         self.vision_ocr_translation_user_prompt = os.getenv("VISION_OCR_TRANSLATION_USER_PROMPT", DEFAULT_VISION_OCR_TRANSLATION_USER_PROMPT).strip() or DEFAULT_VISION_OCR_TRANSLATION_USER_PROMPT
         if "Translate the following OCR text according to the system prompt." in self.vision_ocr_translation_user_prompt:
@@ -2396,12 +2408,14 @@ class ImageTranslator:
             template = f"{template}\n\n<OCR_TEXT>\n{ocr_text}\n</OCR_TEXT>"
         return template.strip()
 
-    def _format_vision_ocr_combined_context_prompt(self, chunk_count, total_chunks, context):
+    def _format_vision_ocr_combined_context_prompt(self, chunk_count, total_chunks, context, include_ocr_overlap_instruction=False):
         template = (self.vision_ocr_combined_context_prompt or DEFAULT_VISION_OCR_COMBINED_CONTEXT_PROMPT).strip()
+        overlap_instruction = DEFAULT_VISION_OCR_OVERLAP_INSTRUCTION if include_ocr_overlap_instruction else ""
         replacements = {
             "{chunk_count}": str(chunk_count),
             "{total_chunks}": str(total_chunks),
             "{context}": (context or "").strip(),
+            "{ocr_overlap_instruction}": overlap_instruction,
         }
         for placeholder, value in replacements.items():
             template = template.replace(placeholder, value)
@@ -3884,7 +3898,12 @@ class ImageTranslator:
 
         self.finish_vision_ocr_progress_success()
         print(f"   Step 2/2: Translating combined OCR from {len(ordered_ocr)}/{num_chunks} chunks ({len(combined_ocr)} chars)...")
-        combined_prompt = self._format_vision_ocr_combined_context_prompt(len(ordered_ocr), num_chunks, context)
+        combined_prompt = self._format_vision_ocr_combined_context_prompt(
+            len(ordered_ocr),
+            num_chunks,
+            context,
+            include_ocr_overlap_instruction=overlap > 0 and num_chunks > 1,
+        )
         translated = self._translate_ocr_text(combined_ocr, combined_prompt, check_stop_fn)
         if translated:
             print(f"   Combined OCR text translated ({len(translated)} chars)")

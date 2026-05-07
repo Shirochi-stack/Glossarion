@@ -5267,6 +5267,7 @@ def configure_image_chunk_prompt(self):
         ("{total_chunks}", "Total number of chunks"),
         ("{context}", "Additional context (e.g., chapter info)"),
         ("{chunk_count}", "Number of OCR chunks with text"),
+        ("{ocr_overlap_instruction}", "Remove OCR-only duplicated text caused by the overlapping pixels between adjacent image chunks."),
         ("{ocr_text}", "Combined OCR text (translation prompt only)")
     ]
     
@@ -5334,6 +5335,7 @@ def configure_image_chunk_prompt(self):
                 .replace('{chunk_count}', '7')
                 .replace('{total_chunks}', '7')
                 .replace('{context}', 'Chapter 5: The Great Battle')
+                .replace('{ocr_overlap_instruction}', 'Remove OCR-only duplicated text caused by the overlapping pixels between adjacent image chunks.')
             )
             translation_template = vision_ocr_translation_user_prompt_text.toPlainText()
             translation_example = (
