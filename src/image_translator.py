@@ -425,6 +425,7 @@ class ImageTranslator:
         self._vision_ocr_progress_scope = None
         self._vision_ocr_summary_lock = threading.Lock()
         self._vision_ocr_summary = None
+        self._ocr_cache_invalidated = False
         self._ensure_ocr_cache_valid()
         
         # DEBUG: Log the actual max tokens being used for image translation
@@ -3339,24 +3340,72 @@ class ImageTranslator:
 
         return ranges
 
+    @staticmethod
+    def _canonical_ocr_cache_value(value, kind="str"):
+        if value is None:
+            value = ""
+        raw = str(value).strip()
+        try:
+            if kind == "int":
+                return str(int(float(raw)))
+            if kind == "float":
+                number = float(raw)
+                if number.is_integer():
+                    return str(int(number))
+                return f"{number:.12g}"
+            if kind == "flag":
+                lowered = raw.lower()
+                if lowered in ("1", "true", "yes", "on"):
+                    return "1"
+                if lowered in ("0", "false", "no", "off", ""):
+                    return "0"
+        except Exception:
+            pass
+        return raw
+
+    @classmethod
+    def _normalize_ocr_cache_signature(cls, signature):
+        if not isinstance(signature, dict):
+            return None
+        kinds = {
+            "cache_version": "int",
+            "webnovel_min_height": "int",
+            "max_images_per_chapter": "int",
+            "image_chunk_height": "int",
+            "image_chunk_overlap_percent": "float",
+            "image_chunk_min_overlap_pixels": "int",
+            "image_smart_chunking": "flag",
+            "image_smart_chunk_min_height": "int",
+            "image_smart_chunk_max_foreground_ratio": "float",
+            "image_smart_chunk_min_gap_rows": "int",
+            "image_smart_chunk_cut_padding_rows": "int",
+            "vision_ocr_fuzzy_chunk_dedupe": "flag",
+            "vision_ocr_fuzzy_chunk_dedupe_threshold": "float",
+            "vision_ocr_fuzzy_chunk_dedupe_min_length": "int",
+        }
+        return {
+            key: cls._canonical_ocr_cache_value(signature.get(key, ""), kind)
+            for key, kind in kinds.items()
+        }
+
     def _ocr_cache_signature(self):
         """Settings that change which images/chunks the saved OCR text represents."""
-        return {
+        return self._normalize_ocr_cache_signature({
             "cache_version": 1,
-            "webnovel_min_height": str(os.getenv("WEBNOVEL_MIN_HEIGHT", str(self.webnovel_min_height))),
-            "max_images_per_chapter": str(os.getenv("MAX_IMAGES_PER_CHAPTER", "-1")),
-            "image_chunk_height": str(os.getenv("IMAGE_CHUNK_HEIGHT", str(self.chunk_height))),
-            "image_chunk_overlap_percent": str(os.getenv("IMAGE_CHUNK_OVERLAP_PERCENT", "3")),
-            "image_chunk_min_overlap_pixels": str(os.getenv("IMAGE_CHUNK_MIN_OVERLAP_PIXELS", "80")),
-            "image_smart_chunking": str(os.getenv("IMAGE_SMART_CHUNKING", "1")),
-            "image_smart_chunk_min_height": str(os.getenv("IMAGE_SMART_CHUNK_MIN_HEIGHT", "600")),
-            "image_smart_chunk_max_foreground_ratio": str(os.getenv("IMAGE_SMART_CHUNK_MAX_FOREGROUND_RATIO", "0.01")),
-            "image_smart_chunk_min_gap_rows": str(os.getenv("IMAGE_SMART_CHUNK_MIN_GAP_ROWS", "12")),
-            "image_smart_chunk_cut_padding_rows": str(os.getenv("IMAGE_SMART_CHUNK_CUT_PADDING_ROWS", "4")),
-            "vision_ocr_fuzzy_chunk_dedupe": str(os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE", "0")),
-            "vision_ocr_fuzzy_chunk_dedupe_threshold": str(os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE_THRESHOLD", "0.85")),
-            "vision_ocr_fuzzy_chunk_dedupe_min_length": str(os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE_MIN_LENGTH", "30")),
-        }
+            "webnovel_min_height": os.getenv("WEBNOVEL_MIN_HEIGHT", str(self.webnovel_min_height)),
+            "max_images_per_chapter": os.getenv("MAX_IMAGES_PER_CHAPTER", "-1"),
+            "image_chunk_height": os.getenv("IMAGE_CHUNK_HEIGHT", str(self.chunk_height)),
+            "image_chunk_overlap_percent": os.getenv("IMAGE_CHUNK_OVERLAP_PERCENT", "3"),
+            "image_chunk_min_overlap_pixels": os.getenv("IMAGE_CHUNK_MIN_OVERLAP_PIXELS", "80"),
+            "image_smart_chunking": os.getenv("IMAGE_SMART_CHUNKING", "1"),
+            "image_smart_chunk_min_height": os.getenv("IMAGE_SMART_CHUNK_MIN_HEIGHT", "600"),
+            "image_smart_chunk_max_foreground_ratio": os.getenv("IMAGE_SMART_CHUNK_MAX_FOREGROUND_RATIO", "0.01"),
+            "image_smart_chunk_min_gap_rows": os.getenv("IMAGE_SMART_CHUNK_MIN_GAP_ROWS", "12"),
+            "image_smart_chunk_cut_padding_rows": os.getenv("IMAGE_SMART_CHUNK_CUT_PADDING_ROWS", "4"),
+            "vision_ocr_fuzzy_chunk_dedupe": os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE", "0"),
+            "vision_ocr_fuzzy_chunk_dedupe_threshold": os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE_THRESHOLD", "0.85"),
+            "vision_ocr_fuzzy_chunk_dedupe_min_length": os.getenv("VISION_OCR_FUZZY_CHUNK_DEDUPE_MIN_LENGTH", "30"),
+        })
 
     def _ocr_cache_path(self):
         return os.path.join(getattr(self, 'ocr_dir', os.path.join(self.output_dir, "OCR")), ".cache")
@@ -3406,7 +3455,7 @@ class ImageTranslator:
         if os.path.exists(cache_path):
             try:
                 with open(cache_path, 'r', encoding='utf-8') as f:
-                    previous = json.load(f).get("settings")
+                    previous = self._normalize_ocr_cache_signature(json.load(f).get("settings"))
             except Exception:
                 previous = None
 
@@ -3424,6 +3473,7 @@ class ImageTranslator:
             print("   🔁 OCR cache settings changed; invalidating saved OCR text")
             print(f"      Previous: {previous}")
             print(f"      Current:  {signature}")
+            self._ocr_cache_invalidated = True
             self._clear_ocr_cache_outputs()
             self._write_ocr_cache(signature)
 

@@ -9964,6 +9964,27 @@ def run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, c
             return existing_source
     except Exception:
         pass
+    try:
+        cache_invalidated = bool(getattr(image_translator, "_ocr_cache_invalidated", False))
+        if (
+            not cache_invalidated
+            and output_path
+            and os.path.isfile(output_path)
+            and os.path.getsize(output_path) > 0
+            and os.path.getmtime(output_path) >= os.path.getmtime(input_path)
+        ):
+            with zipfile.ZipFile(output_path, "r") as zf:
+                if any(name.lower().endswith((".xhtml", ".html", ".htm")) for name in zf.namelist()):
+                    os.environ["VISION_OCR_SOURCE_EPUB"] = output_path
+                    os.environ["GLOSSARY_COMPRESSION_SOURCE_EPUB"] = output_path
+                    os.environ["QA_VISION_OCR_SOURCE_EPUB"] = output_path
+                    print("\n" + "="*50)
+                    print("📖 Vision OCR Source EPUB Prepass")
+                    print("="*50)
+                    print(f"✅ Reusing existing Vision OCR source EPUB: {output_path}")
+                    return output_path
+    except Exception:
+        pass
 
     chapter_text_by_filename = {}
     chapter_content_count = 0
