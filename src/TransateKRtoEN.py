@@ -9692,6 +9692,31 @@ def _chapter_image_html_for_vision_glossary(chapter):
     return ContentProcessor.image_processing_html(chapter)
 
 
+def _chapter_text_for_vision_glossary(chapter):
+    """Return visible chapter text so text-only files can join Vision glossary prepasses."""
+    if not isinstance(chapter, dict):
+        return ""
+    for key in ("body", "text", "content", "original_html", "source_html", "raw_html", "html"):
+        value = chapter.get(key)
+        if not value:
+            continue
+        text = str(value)
+        try:
+            soup = BeautifulSoup(text, "html.parser")
+            for tag in soup(["script", "style", "nav"]):
+                tag.decompose()
+            for img in soup.find_all("img"):
+                img.decompose()
+            text = soup.get_text("\n", strip=True)
+        except Exception:
+            text = re.sub(r"<img\b[^>]*>", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"<[^>]+>", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", html.unescape(text or "")).strip()
+        if text and (ContentProcessor.is_meaningful_text_content(text) or len(text) >= 2):
+            return text
+    return ""
+
+
 def _vision_glossary_progress_ref(chapter, chapter_idx, actual_num):
     """Build a glossary progress reference for a Vision OCR chapter/group."""
     chapter_file = _single_pass_progress_chapter_file(chapter)
@@ -9843,6 +9868,7 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
     generated = 0
     pending_progress_refs = []
     stopped = False
+    prepass_satisfied = False
 
     def _ref_key(ref):
         if not isinstance(ref, dict):
@@ -9868,6 +9894,54 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             if _ref_key(ref) not in keys
         ]
 
+    def _load_glossary_done_state():
+        try:
+            _glossary_dir, _json_path, _csv_path, progress_path = image_translator._vision_ocr_glossary_paths()
+            if not os.path.exists(progress_path):
+                return set(), set(), {}
+            with open(progress_path, "r", encoding="utf-8") as f:
+                progress = json.load(f)
+            if not isinstance(progress, dict):
+                return set(), set(), {}
+            completed = {int(idx) for idx in progress.get("completed", [])}
+            merged = {int(idx) for idx in progress.get("merged_indices", [])}
+            chapters = progress.get("chapters", {}) if isinstance(progress.get("chapters"), dict) else {}
+            return completed, merged, chapters
+        except Exception:
+            return set(), set(), {}
+
+    def _glossary_ref_done(ref, done_state):
+        if not isinstance(ref, dict):
+            return False
+        completed, merged, chapters = done_state
+        try:
+            idx = int(ref.get("chapter_idx"))
+        except (TypeError, ValueError):
+            idx = None
+        try:
+            num = int(ref.get("chapter_num"))
+        except (TypeError, ValueError):
+            num = None
+        if idx is not None and (idx in completed or idx in merged):
+            return True
+        for info in chapters.values():
+            if not isinstance(info, dict):
+                continue
+            status = str(info.get("status") or "").lower().strip()
+            if status not in ("completed", "merged"):
+                continue
+            try:
+                entry_idx = int(info.get("chapter_index"))
+            except (TypeError, ValueError):
+                entry_idx = None
+            try:
+                entry_num = int(info.get("actual_num") or info.get("chapter_num"))
+            except (TypeError, ValueError):
+                entry_num = None
+            if (idx is not None and entry_idx == idx) or (num is not None and entry_num == num):
+                return True
+        return False
+
     def _chapter_label(num):
         try:
             value = float(num)
@@ -9881,7 +9955,11 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
         if not group:
             return
         total_images = sum(int(job[5] or 0) for job in group)
-        chapter_bits = [f"Ch.{_chapter_label(job[3])}: {int(job[5] or 0)}" for job in group]
+        text_only = sum(1 for job in group if int(job[5] or 0) <= 0 and (job[6] or "").strip())
+        chapter_bits = [
+            f"Ch.{_chapter_label(job[3])}: {int(job[5] or 0) if int(job[5] or 0) > 0 else 'text'}"
+            for job in group
+        ]
         preview = ", ".join(chapter_bits[:8])
         if len(chapter_bits) > 8:
             preview += f", +{len(chapter_bits) - 8} more"
@@ -9893,8 +9971,11 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             ),
         )
         prefix = f"📑 Vision glossary OCR Combined group {group_number}: " if group_number else "📑 Vision glossary OCR Combined: "
+        counts = [f"{len(group)} chapter(s)", f"{total_images} image(s)"]
+        if text_only:
+            counts.append(f"{text_only} text-only chapter(s)")
         print(
-            f"{prefix}{len(group)} chapter(s), {total_images} image(s) "
+            f"{prefix}{', '.join(counts)} "
             f"({preview}); chapter workers: {chapter_workers}, OCR workers/chapter: up to {max_ocr_workers}"
         )
 
@@ -9906,6 +9987,7 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
         total_cache_no_text = 0
         total_no_text = 0
         total_api_requests = 0
+        text_only_count = 0
         for _order, actual_num, _chapter_ocr, _progress_ref, summary, saved_path in group_results:
             if isinstance(summary, dict):
                 seen = int(summary.get("seen", 0) or 0)
@@ -9918,7 +10000,8 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
                 total_cache_no_text += cache_no_text
                 total_no_text += no_text
                 total_api_requests += api_requests
-                summaries.append(f"Ch.{_chapter_label(actual_num)}: {seen}")
+                text_only_count += int(summary.get("text_only", 0) or 0)
+                summaries.append(f"Ch.{_chapter_label(actual_num)}: {seen if seen else 'text'}")
             if saved_path:
                 saved_count += 1
         if not summaries and not saved_count:
@@ -9935,6 +10018,8 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             parts.append(f"{total_no_text} cover/illustration skip(s)")
         if total_api_requests:
             parts.append(f"{total_api_requests} new OCR request(s)")
+        if text_only_count:
+            parts.append(f"{text_only_count} text-only chapter(s)")
         if saved_count:
             parts.append(f"{saved_count} chapter OCR file(s) saved")
         print(
@@ -9959,13 +10044,15 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
                 print(f"⏭️ Vision glossary prepass: skipping special/cover file {os.path.basename(str(skipped_name))}")
                 continue
             body = _chapter_image_html_for_vision_glossary(chapter)
-            if not body or '<img' not in body.lower():
+            text_for_glossary = _chapter_text_for_vision_glossary(chapter)
+            has_images = bool(body and '<img' in body.lower())
+            if not has_images and not text_for_glossary:
                 continue
-            image_count = len(image_translator.extract_images_from_chapter(body))
-            if image_count <= 0:
+            image_count = len(image_translator.extract_images_from_chapter(body)) if has_images else 0
+            if image_count <= 0 and not text_for_glossary:
                 continue
             progress_ref = _vision_glossary_progress_ref(chapter, idx, actual_num)
-            chapter_jobs.append((len(chapter_jobs), idx, chapter, actual_num, body, image_count, progress_ref))
+            chapter_jobs.append((len(chapter_jobs), idx, chapter, actual_num, body, image_count, text_for_glossary, progress_ref))
 
         batch_enabled = bool(getattr(image_translator, "_vision_ocr_batch_enabled", lambda: False)())
         try:
@@ -9980,7 +10067,7 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             )
 
         def _ocr_merge_chapter_job(job):
-            order, chapter_idx, chapter, actual_num, body, _image_count, progress_ref = job
+            order, chapter_idx, chapter, actual_num, body, image_count, text_for_glossary, progress_ref = job
             worker = _clone_image_translator_for_vision_ocr(image_translator)
             progress_ref = _set_image_translator_chapter_progress_context(
                 worker,
@@ -9993,19 +10080,38 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             worker._suppress_ocr_save_logs = True
             worker._suppress_vision_ocr_summary_log = True
             worker.update_vision_ocr_glossary_progress([progress_ref], "in_progress")
-            chapter_ocr = ocr_chapter_images_for_vision_glossary(
-                body,
-                worker,
-                actual_num,
-                check_stop_fn,
-                progress_ref=progress_ref,
-                log_start=False,
-                log_batch=False,
-            )
+            chapter_ocr = ""
+            if image_count > 0:
+                chapter_ocr = ocr_chapter_images_for_vision_glossary(
+                    body,
+                    worker,
+                    actual_num,
+                    check_stop_fn,
+                    progress_ref=progress_ref,
+                    log_start=False,
+                    log_batch=False,
+                )
+            else:
+                worker._last_vision_ocr_summary = {
+                    "chapter_num": actual_num,
+                    "seen": 0,
+                    "cache_hits": 0,
+                    "cache_no_text": 0,
+                    "no_text": 0,
+                    "api_requests": 0,
+                    "text_only": 1,
+                    "status": "complete",
+                }
+            combined_parts = []
+            if text_for_glossary:
+                combined_parts.append(str(text_for_glossary).strip())
+            if chapter_ocr:
+                combined_parts.append(str(chapter_ocr).strip())
+            combined_text = "\n\n".join(part for part in combined_parts if part).strip()
             return (
                 order,
                 actual_num,
-                chapter_ocr,
+                combined_text,
                 progress_ref,
                 getattr(worker, "_last_vision_ocr_summary", None),
                 getattr(worker, "_last_saved_ocr_text_path", None),
@@ -10015,7 +10121,23 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             if stopped or (check_stop_fn and check_stop_fn()):
                 stopped = True
                 break
-            group = chapter_jobs[group_start:group_start + merge_count]
+            done_state = _load_glossary_done_state()
+            raw_group = chapter_jobs[group_start:group_start + merge_count]
+            skipped_done = sum(1 for job in raw_group if _glossary_ref_done(job[7], done_state))
+            group = [job for job in raw_group if not _glossary_ref_done(job[7], done_state)]
+            if not group:
+                if skipped_done:
+                    prepass_satisfied = True
+                    print(
+                        f"📑 Vision glossary OCR Combined group {group_start // merge_count + 1}: "
+                        f"skipped {skipped_done} already completed/merged chapter(s)"
+                    )
+                continue
+            if skipped_done:
+                print(
+                    f"📑 Vision glossary OCR Combined group {group_start // merge_count + 1}: "
+                    f"skipping {skipped_done} already completed/merged chapter(s)"
+                )
             _log_glossary_ocr_group(
                 group,
                 group_number=group_start // merge_count + 1,
@@ -10037,7 +10159,7 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
                                 group_results.append(future.result())
                             except Exception as e:
                                 if job:
-                                    _order, _idx, _chapter, _actual, _body, _image_count, ref = job
+                                    _order, _idx, _chapter, _actual, _body, _image_count, _text, ref = job
                                     image_translator.update_vision_ocr_glossary_progress([ref], "failed")
                                 print(f"⚠️ Vision glossary OCR chapter worker failed: {e}")
                         if check_stop_fn and check_stop_fn():
@@ -10083,11 +10205,12 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
                     merged_refs=refs[1:],
                 ):
                     generated += 1
+                    prepass_satisfied = True
                 if check_stop_fn and check_stop_fn():
                     stopped = True
                     break
 
-        if generated:
+        if generated or prepass_satisfied:
             os.environ["VISION_GLOSSARY_PREPASS_DONE"] = "1"
         else:
             os.environ.pop("VISION_GLOSSARY_PREPASS_DONE", None)
@@ -10110,8 +10233,12 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             print(f"⏭️ Vision glossary prepass: skipping special/cover file {os.path.basename(str(skipped_name))}")
             continue
         progress_ref = _vision_glossary_progress_ref(chapter, idx, actual_num)
+        if _glossary_ref_done(progress_ref, _load_glossary_done_state()):
+            continue
         body = _chapter_image_html_for_vision_glossary(chapter)
-        if not body or '<img' not in body.lower():
+        text_for_glossary = _chapter_text_for_vision_glossary(chapter)
+        has_images = bool(body and '<img' in body.lower())
+        if not has_images and not text_for_glossary:
             continue
 
         image_translator.current_chapter_num = actual_num
@@ -10123,14 +10250,17 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
         ) or progress_ref
         image_translator.update_vision_ocr_glossary_progress([progress_ref], "in_progress")
         _track_pending_ref(progress_ref)
-        chapter_ocr = ocr_chapter_images_for_vision_glossary(
-            body,
-            image_translator,
-            actual_num,
-            check_stop_fn,
-            progress_ref=progress_ref,
-        )
-        if not chapter_ocr:
+        chapter_ocr = ""
+        if has_images:
+            chapter_ocr = ocr_chapter_images_for_vision_glossary(
+                body,
+                image_translator,
+                actual_num,
+                check_stop_fn,
+                progress_ref=progress_ref,
+            )
+        chapter_text = "\n\n".join(part for part in (text_for_glossary, chapter_ocr) if part and str(part).strip()).strip()
+        if not chapter_text:
             if check_stop_fn and check_stop_fn():
                 stopped = True
                 image_translator.update_vision_ocr_glossary_progress([progress_ref], "failed")
@@ -10140,11 +10270,11 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             continue
 
         if mode == "minimal":
-            all_ocr.append((actual_num, chapter_ocr, progress_ref))
+            all_ocr.append((actual_num, chapter_text, progress_ref))
             continue
 
         if merge_enabled:
-            merge_buffer.append((actual_num, chapter_ocr, progress_ref))
+            merge_buffer.append((actual_num, chapter_text, progress_ref))
             if len(merge_buffer) < merge_count:
                 continue
             merged_text = "\n\n".join(f"[Chapter {num}]\n{text}" for num, text, _ref in merge_buffer)
@@ -10163,7 +10293,7 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
                 break
             merge_buffer = []
         else:
-            if image_translator._ensure_vision_ocr_glossary(chapter_ocr, mode, check_stop_fn, progress_refs=[progress_ref]):
+            if image_translator._ensure_vision_ocr_glossary(chapter_text, mode, check_stop_fn, progress_refs=[progress_ref]):
                 generated += 1
             _clear_pending_refs([progress_ref])
             if check_stop_fn and check_stop_fn():
