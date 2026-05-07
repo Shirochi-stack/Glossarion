@@ -9620,6 +9620,7 @@ def ocr_chapter_images_for_vision_glossary(
     log_batch=True,
     write_translation=True,
     write_glossary=True,
+    preserve_no_image_markers=False,
 ):
     """OCR chapter images for Vision-mode glossary prepasses without translating them."""
     chapter_html = ContentProcessor.normalize_escaped_image_tags(chapter_html)
@@ -9652,7 +9653,7 @@ def ocr_chapter_images_for_vision_glossary(
     def _glossary_ocr_job(job):
         idx, img_info, img_path = job
         if check_stop_fn and check_stop_fn():
-            return idx, None
+            return idx, img_info, None
         context = ""
         if img_info.get('alt'):
             context += f", Alt text: {img_info['alt']}"
@@ -9664,7 +9665,7 @@ def ocr_chapter_images_for_vision_glossary(
             chapter_num=actual_num,
             image_basename=os.path.basename(img_path),
         )
-        return idx, ocr_text
+        return idx, img_info, ocr_text
 
     ocr_by_index = {}
     batch_enabled = bool(getattr(image_translator, "_vision_ocr_batch_enabled", lambda: False)())
@@ -9697,9 +9698,9 @@ def ocr_chapter_images_for_vision_glossary(
                     continue
                 for future in done:
                     pending.pop(future, None)
-                    idx, ocr_text = future.result()
+                    idx, img_info, ocr_text = future.result()
                     if ocr_text:
-                        ocr_by_index[idx] = ocr_text
+                        ocr_by_index[idx] = (img_info, ocr_text)
                 while len(pending) < batch_size and _submit_next_glossary_ocr():
                     pass
                 if check_stop_fn and check_stop_fn():
@@ -9714,13 +9715,16 @@ def ocr_chapter_images_for_vision_glossary(
             if check_stop_fn and check_stop_fn():
                 image_translator.finish_vision_ocr_progress_cancelled()
                 break
-            idx, ocr_text = _glossary_ocr_job(job)
+            idx, img_info, ocr_text = _glossary_ocr_job(job)
             if ocr_text:
-                ocr_by_index[idx] = ocr_text
+                ocr_by_index[idx] = (img_info, ocr_text)
 
     for idx in sorted(ocr_by_index):
-        ocr_text = ocr_by_index[idx]
-        if ocr_text:
+        img_info, ocr_text = ocr_by_index[idx]
+        is_no = getattr(image_translator, "_is_ocr_no_response", lambda text: False)(ocr_text)
+        if is_no and preserve_no_image_markers:
+            chapter_ocr_parts.append(_image_marker_for_combined_ocr(img_info))
+        elif ocr_text and not is_no:
             chapter_ocr_parts.append(ocr_text)
 
     chapter_ocr = _join_vision_ocr_parts(chapter_ocr_parts)
@@ -9972,6 +9976,7 @@ def run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, c
                     log_batch=False,
                     write_translation=True,
                     write_glossary=False,
+                    preserve_no_image_markers=True,
                 )
                 if chapter_ocr:
                     text_parts.append(chapter_ocr)
@@ -9998,6 +10003,7 @@ def run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, c
         ocr_epub = write_ocr_epub(input_path, chapter_text_by_filename, output_path)
         os.environ["VISION_OCR_SOURCE_EPUB"] = ocr_epub
         os.environ["GLOSSARY_COMPRESSION_SOURCE_EPUB"] = ocr_epub
+        os.environ["QA_VISION_OCR_SOURCE_EPUB"] = ocr_epub
         print(
             f"✅ Vision OCR source EPUB ready: {ocr_epub} "
             f"({chapter_content_count} chapter(s), {total_images} image(s), {total_text_only} text-only chapter(s))"

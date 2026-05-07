@@ -83,6 +83,58 @@ def stop_scan():
     print("🛑 STOP SCAN CALLED - Global flag set to True")  # More visible debug
     return True  # Return True to confirm it was called
 
+def _is_vision_output_mode(qa_settings=None):
+    settings = qa_settings if isinstance(qa_settings, dict) else {}
+    mode = (
+        settings.get('_output_mode')
+        or settings.get('output_mode')
+        or os.getenv('OUTPUT_MODE', '')
+    )
+    return str(mode).strip().lower() == 'vision'
+
+
+def _resolve_vision_ocr_qa_source_epub(epub_path, qa_settings=None):
+    """Use the generated *_OCR.epub for source-text QA, but only in Vision mode."""
+    if not _is_vision_output_mode(qa_settings):
+        return epub_path
+    if not epub_path or not str(epub_path).lower().endswith('.epub'):
+        return epub_path
+
+    candidates = [
+        os.getenv('QA_VISION_OCR_SOURCE_EPUB', '').strip(),
+        os.getenv('VISION_OCR_SOURCE_EPUB', '').strip(),
+    ]
+
+    try:
+        base, ext = os.path.splitext(os.path.abspath(epub_path))
+        if base.lower().endswith('_ocr'):
+            candidates.append(base + ext)
+        else:
+            candidates.append(base + '_OCR' + ext)
+    except Exception:
+        pass
+
+    try:
+        source_abs = os.path.normcase(os.path.abspath(epub_path))
+    except Exception:
+        source_abs = None
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            if (
+                os.path.isfile(candidate)
+                and candidate.lower().endswith('.epub')
+                and (source_abs is None or os.path.normcase(os.path.abspath(candidate)) != source_abs)
+            ):
+                return candidate
+        except Exception:
+            continue
+
+    return epub_path
+
+
 # Configuration class for duplicate detection
 class DuplicateDetectionConfig:
     def __init__(self, mode='quick-scan', custom_settings=None):
@@ -7593,6 +7645,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # Debug logging
     if epub_path:
         log(f"📚 Source file: {os.path.basename(epub_path)} | Mode: {'TEXT' if text_file_mode else 'EPUB/HTML'}")
+    source_text_epub_path = _resolve_vision_ocr_qa_source_epub(epub_path, qa_settings)
+    if source_text_epub_path != epub_path:
+        log(f"Vision QA source text: {os.path.basename(source_text_epub_path)}")
     
     # Create a combined stop check function
     _stop_logged = [False]  # mutable so inner fn can flip it once
@@ -7784,8 +7839,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             else:
                 log("   ⚠️ No word_count folder found for truncation detection in text mode")
         elif epub_path and os.path.exists(epub_path):
-            log(f"🔍 Extracting source HTML content from EPUB for truncation detection: {os.path.basename(epub_path)}")
-            original_html_content = extract_epub_html_content(epub_path, log)
+            log(f"🔍 Extracting source HTML content from EPUB for truncation detection: {os.path.basename(source_text_epub_path)}")
+            original_html_content = extract_epub_html_content(source_text_epub_path, log)
         else:
             log("⚠️ Truncation check(s) enabled but no source file provided - skipping")
             check_truncation = False
@@ -7853,9 +7908,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 log("⚠️ Word count cross-reference enabled but no valid text/PDF file provided - skipping this check")
                 check_word_count = False
         elif epub_path and os.path.exists(epub_path):
-            log(f"📚 Extracting word counts from original EPUB: {os.path.basename(epub_path)}")
+            log(f"📚 Extracting word counts from source EPUB: {os.path.basename(source_text_epub_path)}")
             min_length = qa_settings.get('min_file_length', 0)
-            original_word_counts = extract_epub_word_counts(epub_path, log, min_file_length=min_length)
+            original_word_counts = extract_epub_word_counts(source_text_epub_path, log, min_file_length=min_length)
             log(f"   Found word counts for {len(original_word_counts)} chapters (min length: {min_length} chars)")
             
             # Load merge info from translation_progress.json for request merging support
@@ -7918,7 +7973,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         detected_label, detected_method, detected_conf = _auto_detect_source_language_for_log(
             qa_settings,
             folder_path=folder_path,
-            epub_path=epub_path,
+            epub_path=source_text_epub_path,
             text_file_mode=bool(text_file_mode),
             original_word_counts=original_word_counts,
             log_fn=log

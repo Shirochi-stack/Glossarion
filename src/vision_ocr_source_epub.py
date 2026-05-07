@@ -28,6 +28,9 @@ def _copy_zip_info(info: zipfile.ZipInfo) -> zipfile.ZipInfo:
     return copied
 
 
+IMG_TAG_RE = re.compile(r"(<img\b[^>]*?/?>)", re.IGNORECASE | re.DOTALL)
+
+
 def _text_to_xhtml(text: str, title: str = "") -> bytes:
     title = title or "OCR Source"
     escaped_title = html.escape(title, quote=True)
@@ -42,6 +45,59 @@ def _text_to_xhtml(text: str, title: str = "") -> bytes:
         '</html>\n'
     ).format(title=escaped_title, text=escaped_text)
     return doc.encode("utf-8")
+
+
+def _append_ocr_fragment(soup: BeautifulSoup, parent, text: str) -> None:
+    """Append OCR text while allowing preserved No-image <img> markers through."""
+    for part in IMG_TAG_RE.split(text or ""):
+        if not part:
+            continue
+        if IMG_TAG_RE.fullmatch(part.strip()):
+            img_fragment = BeautifulSoup(part, "html.parser")
+            img = img_fragment.find("img")
+            if img:
+                parent.append(img)
+            continue
+
+        pre = soup.new_tag("pre")
+        pre["style"] = "white-space: pre-wrap;"
+        pre.string = part.strip()
+        if pre.string:
+            parent.append(pre)
+
+
+def _html_with_ocr_body(original_data: bytes, replacement: str, title: str = "") -> bytes:
+    """Preserve original HTML head/CSS and replace only the visible body content."""
+    try:
+        original_html = original_data.decode("utf-8", errors="replace")
+    except Exception:
+        original_html = str(original_data)
+
+    soup = BeautifulSoup(original_html, "html.parser")
+    if soup.find("html") is None:
+        html_tag = soup.new_tag("html")
+        html_tag["xmlns"] = "http://www.w3.org/1999/xhtml"
+        html_tag.extend(list(soup.contents))
+        soup.append(html_tag)
+
+    html_tag = soup.find("html") or soup
+    head = soup.find("head")
+    if head is None:
+        head = soup.new_tag("head")
+        html_tag.insert(0, head)
+    if head.find("title") is None:
+        title_tag = soup.new_tag("title")
+        title_tag.string = title or "OCR Source"
+        head.append(title_tag)
+
+    body = soup.find("body")
+    if body is None:
+        body = soup.new_tag("body")
+        html_tag.append(body)
+    body.clear()
+    _append_ocr_fragment(soup, body, replacement or "")
+
+    return str(soup).encode("utf-8")
 
 
 def _lookup_replacement(filename: str, replacements: Dict[str, str]) -> Optional[str]:
@@ -96,7 +152,12 @@ def write_ocr_epub(source_epub_path: str, chapter_text_by_filename: Dict[str, st
             out_info = _copy_zip_info(info)
             replacement = _lookup_replacement(info.filename, replacements)
             if replacement is not None and info.filename.lower().endswith(HTML_EXTS):
-                data = _text_to_xhtml(replacement, os.path.splitext(os.path.basename(info.filename))[0])
+                original_data = zin.read(info.filename)
+                data = _html_with_ocr_body(
+                    original_data,
+                    replacement,
+                    os.path.splitext(os.path.basename(info.filename))[0],
+                )
                 out_info.compress_type = zipfile.ZIP_DEFLATED
                 zout.writestr(out_info, data)
             else:

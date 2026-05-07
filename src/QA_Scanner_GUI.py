@@ -2086,6 +2086,11 @@ class QAScannerMixin:
                         
                         # Pass the QA settings to scan_html_folder
                         # Don't pass text_file_mode explicitly - let scan_html_folder auto-detect from epub_path
+                        try:
+                            current_qa_settings = current_qa_settings.copy()
+                            current_qa_settings['_output_mode'] = self._get_output_mode() if hasattr(self, '_get_output_mode') else self.config.get('output_mode', 'text')
+                        except Exception:
+                            pass
                         
                         # Get scan_html_folder from translator_gui's global scope
                         import translator_gui
