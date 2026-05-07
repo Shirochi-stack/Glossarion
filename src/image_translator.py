@@ -2248,6 +2248,87 @@ class ImageTranslator:
         translated = (translated or "").strip()
         if finish_reason:
             self.last_vision_translation_finish_reason = finish_reason
+
+        retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
+        try:
+            truncation_retry_limit = max(1, int(os.getenv("TRUNCATION_RETRY_ATTEMPTS", "1")))
+        except Exception:
+            truncation_retry_limit = 1
+        retry_tokens_env = os.getenv("MAX_RETRY_TOKENS", "").strip()
+        try:
+            retry_max_tokens = int(retry_tokens_env) if retry_tokens_env else self.image_max_tokens
+        except Exception:
+            retry_max_tokens = self.image_max_tokens
+        if retry_max_tokens <= 0:
+            retry_max_tokens = self.image_max_tokens
+        retry_max_tokens = max(int(self.image_max_tokens or 0), int(retry_max_tokens or 0))
+
+        def _is_truncated_finish(reason):
+            return str(reason or "").strip().lower() in (
+                "length",
+                "max_tokens",
+                "max_length",
+                "truncated",
+                "incomplete",
+                "stop_sequence_limit",
+            )
+
+        retry_attempt = 0
+        while retry_truncated_enabled and _is_truncated_finish(finish_reason) and retry_attempt < truncation_retry_limit:
+            if _stop_new_vision_work_requested(check_stop_fn):
+                self.last_vision_translation_finish_reason = "cancelled"
+                return None
+            retry_attempt += 1
+            print(
+                f"   🔄 Vision OCR truncation retry {retry_attempt}/{truncation_retry_limit} "
+                f"(finish_reason={finish_reason}, max_tokens={self.image_max_tokens} -> {retry_max_tokens})"
+            )
+            try:
+                response = send_text_with_interrupt(
+                    self.client,
+                    messages,
+                    self.temperature,
+                    retry_max_tokens,
+                    stop_check_fn=check_stop_fn,
+                    chunk_timeout=chunk_timeout,
+                    context='translation',
+                    chapter_context=chapter_context,
+                )
+            except UnifiedClientError as e:
+                err_text = str(e).lower()
+                self.last_vision_translation_error = str(e)
+                if getattr(e, "error_type", None) == "prohibited_content" or "content blocked" in err_text or "recitation" in err_text:
+                    self.last_vision_translation_finish_reason = "prohibited_content"
+                    print("   🚫 Vision OCR translation hit content filter/prohibited content")
+                    return None
+                if getattr(e, "error_type", None) == "cancelled" or "stopped by user" in err_text or "cancelled" in err_text:
+                    self.last_vision_translation_finish_reason = "cancelled"
+                    return None
+                raise
+
+            if isinstance(response, tuple):
+                finish_reason = response[1] if len(response) > 1 else None
+                response = response[0]
+            else:
+                finish_reason = getattr(response, 'finish_reason', None)
+
+            if hasattr(response, 'content'):
+                translated = response.content
+            elif hasattr(response, 'text'):
+                translated = response.text
+            else:
+                translated = str(response)
+            translated = (translated or "").strip()
+            if finish_reason:
+                self.last_vision_translation_finish_reason = finish_reason
+            if not _is_truncated_finish(finish_reason):
+                if translated:
+                    print(f"   ✅ Vision OCR truncation retry succeeded: {len(translated)} chars")
+                break
+
+        if retry_truncated_enabled and _is_truncated_finish(finish_reason) and retry_attempt >= truncation_retry_limit:
+            print(f"   ⚠️ Vision OCR truncation retries exhausted ({truncation_retry_limit}); marking chapter TRUNCATED")
+
         if single_pass_enabled:
             try:
                 from TransateKRtoEN import _split_single_pass_glossary_response, _persist_single_pass_glossary
