@@ -1431,8 +1431,21 @@ class UnifiedClient:
     def _detect_safety_filter(self, messages, extracted_content: str, finish_reason: Optional[str], response: Any, provider: str) -> bool:
         # Heuristic patterns consolidated from previous branches
         # 1) Suspicious finish reasons that explicitly indicate content filtering
-        if finish_reason in ['content_filter', 'prohibited_content', 'blocked']:
+        normalized_finish = str(finish_reason or "").strip().lower()
+        if normalized_finish in ['content_filter', 'prohibited_content', 'blocked']:
             return True
+        # Truncation is not a safety block. Vertex/Gemini responses can still
+        # contain safetyRatings/BLOCK_NONE metadata, so return before raw-response
+        # safety-word heuristics can misclassify MAX_TOKENS as prohibited content.
+        if normalized_finish in {
+            'length',
+            'max_tokens',
+            'max_length',
+            'truncated',
+            'incomplete',
+            'stop_sequence_limit',
+        }:
+            return False
         # 2) Safety indicators in raw response/error details
         response_str = ""
         if response is not None:
