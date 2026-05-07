@@ -14690,15 +14690,6 @@ def main(log_callback=None, stop_callback=None):
             history_manager,
             chunk_context_manager
         )
-        
-        known_vision_models = [
-            'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.5-pro',
-            'gpt-4-turbo', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1-nano', 'o4-mini', 'gpt-4.1-mini' 'gemini-3-pro-image-preview',
-        ]
-        
-        if config.MODEL.lower() not in known_vision_models:
-            print(f"⚠️ Note: {config.MODEL} may not have vision capabilities. Image translation will be attempted anyway.")
-
     else:
         print("ℹ️ Image translation disabled by user")
     

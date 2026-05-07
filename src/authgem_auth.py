@@ -1921,11 +1921,11 @@ def _stream_gemini_common(
                         _log(f"   toolConfig: {_tool_cfg!r}")
                     if _sys_inst is not None:
                         _log(f"   systemInstruction: present")
-                    # Always dump the full request body on 4xx so the failing field is visible
-                    try:
-                        _log(f"   FULL REQUEST BODY: {json.dumps(body)}")
-                    except Exception:
-                        _log(f"   FULL REQUEST BODY (repr): {body!r}")
+                    if status != 429:
+                        try:
+                            _log(f"   FULL REQUEST BODY: {json.dumps(body)}")
+                        except Exception:
+                            _log(f"   FULL REQUEST BODY (repr): {body!r}")
                 except Exception as _diag_exc:
                     _log(f"   (diagnostic dump failed: {_diag_exc})")
 
