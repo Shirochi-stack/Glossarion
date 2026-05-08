@@ -2764,7 +2764,7 @@ class ImageTranslator:
                 original_output_file = getattr(glossary_extractor, "_GLOSSARY_OUTPUT_FILE", "")
                 glossary_extractor.PROGRESS_FILE = progress_path
                 glossary_extractor._GLOSSARY_OUTPUT_FILE = json_path
-                self._update_vision_ocr_glossary_progress(
+                self._update_vision_ocr_glossary_progress_locked(
                     glossary_extractor,
                     json_path,
                     progress_refs,
@@ -2784,6 +2784,17 @@ class ImageTranslator:
                             glossary_extractor._GLOSSARY_OUTPUT_FILE = original_output_file
                 except Exception:
                     pass
+
+    def _update_vision_ocr_glossary_progress_locked(self, glossary_extractor, json_path, progress_refs, status, merged_refs=None):
+        """Write Vision OCR glossary status under the same lock as OCR progress patches."""
+        with self.__class__._vision_ocr_glossary_file_lock:
+            self._update_vision_ocr_glossary_progress(
+                glossary_extractor,
+                json_path,
+                progress_refs,
+                status,
+                merged_refs=merged_refs,
+            )
 
     def update_vision_ocr_glossary_ocr_progress(self, progress_refs, done, total):
         """Patch OCR request progress into the Vision/Single Pass glossary progress file."""
@@ -2886,13 +2897,20 @@ class ImageTranslator:
                     if ref.get("chapter_file"):
                         chapters[target_key]["output_file"] = os.path.basename(str(ref.get("chapter_file") or ""))
                 current_status = str(chapters[target_key].get("status") or "").lower().strip()
-                if ref_idx not in completed and ref_idx not in merged and current_status not in ("completed", "merged"):
+                if ref_idx in completed or ref_idx in merged or current_status in ("completed", "merged"):
+                    failed = [idx for idx in failed if idx != ref_idx]
+                    in_progress = [idx for idx in in_progress if idx != ref_idx]
+                else:
                     chapters[target_key]["status"] = "in_progress"
                     failed = [idx for idx in failed if idx != ref_idx]
                     if ref_idx not in in_progress:
                         in_progress.append(ref_idx)
                 chapters[target_key]["ocr_progress"] = dict(ocr_progress)
                 chapters[target_key]["last_updated"] = time.time()
+            done_indices = completed | merged
+            if done_indices:
+                failed = [idx for idx in failed if idx not in done_indices]
+                in_progress = [idx for idx in in_progress if idx not in done_indices]
             progress["failed"] = failed
             progress["in_progress"] = in_progress
 
@@ -2962,7 +2980,7 @@ class ImageTranslator:
 
             print(f"   📑 Vision OCR auto glossary ({mode}): generating entries from OCR text...")
             def _mark_glossary_progress_on_send():
-                self._update_vision_ocr_glossary_progress(
+                self._update_vision_ocr_glossary_progress_locked(
                     glossary_extractor,
                     json_path,
                     progress_refs,
@@ -2981,7 +2999,7 @@ class ImageTranslator:
             raw, finish_reason = _extract_text_response_and_finish_reason(response)
             bad_finish_reason = _bad_vision_glossary_finish_reason(finish_reason)
             if bad_finish_reason:
-                self._update_vision_ocr_glossary_progress(
+                self._update_vision_ocr_glossary_progress_locked(
                     glossary_extractor,
                     json_path,
                     progress_refs,
@@ -2990,7 +3008,7 @@ class ImageTranslator:
                 print(f"   ⚠️ Vision OCR auto glossary failed: finish_reason={finish_reason}")
                 return self._find_vision_glossary_file()
             if check_stop_fn and check_stop_fn():
-                self._update_vision_ocr_glossary_progress(
+                self._update_vision_ocr_glossary_progress_locked(
                     glossary_extractor,
                     json_path,
                     progress_refs,
@@ -3006,7 +3024,7 @@ class ImageTranslator:
                         entry["raw_name"] = entry["raw_name"].strip()
                     valid.append(entry)
             if not valid:
-                self._update_vision_ocr_glossary_progress(
+                self._update_vision_ocr_glossary_progress_locked(
                     glossary_extractor,
                     json_path,
                     progress_refs,
@@ -3016,7 +3034,7 @@ class ImageTranslator:
                 print("   📑 Vision OCR auto glossary: no valid entries found")
                 return self._find_vision_glossary_file()
 
-            with self._vision_ocr_glossary_file_lock:
+            with self.__class__._vision_ocr_glossary_file_lock:
                 existing = []
                 for path in (csv_path, json_path):
                     if os.path.exists(path):
@@ -3028,7 +3046,7 @@ class ImageTranslator:
                 glossary_extractor.save_glossary_json(deduped, json_path)
                 glossary_extractor.save_glossary_csv(deduped, json_path)
                 self._vision_glossary_processed_hashes.add(text_hash)
-            self._update_vision_ocr_glossary_progress(
+            self._update_vision_ocr_glossary_progress_locked(
                 glossary_extractor,
                 json_path,
                 progress_refs,
@@ -3040,7 +3058,7 @@ class ImageTranslator:
         except Exception as e:
             try:
                 if "glossary_extractor" in locals():
-                    self._update_vision_ocr_glossary_progress(glossary_extractor, json_path, progress_refs, "failed")
+                    self._update_vision_ocr_glossary_progress_locked(glossary_extractor, json_path, progress_refs, "failed")
             except Exception:
                 pass
             print(f"   ⚠️ Vision OCR auto glossary failed: {e}")
