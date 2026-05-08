@@ -9112,6 +9112,74 @@ def _vision_should_save_partial_for_qa(qa_issues, config=None):
     return False
 
 
+def _clean_visible_text_for_combined_ocr(text):
+    text = html.unescape(str(text or ""))
+    lines = [re.sub(r'[ \t]+', ' ', line).strip() for line in text.splitlines()]
+    cleaned = "\n".join(line for line in lines if line)
+    return re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+
+
+def _save_visible_text_for_combined_ocr(image_translator, actual_num, segment_idx, text):
+    if not image_translator or not text:
+        return
+    try:
+        image_translator._save_ocr_text(
+            text,
+            kind="single",
+            image_basename=f"visible_text_{int(segment_idx):03d}",
+            chapter_num=actual_num,
+        )
+    except Exception:
+        pass
+
+
+def _combined_ocr_parts_in_document_order(soup, ocr_part_by_index, image_translator=None, actual_num=None):
+    """Interleave existing visible text and image OCR in the original HTML order."""
+    try:
+        scratch = BeautifulSoup(str(soup), 'html.parser')
+        for tag in scratch(['script', 'style', 'nav', 'head', 'title', 'meta', 'link']):
+            tag.decompose()
+        for idx, img in enumerate(scratch.find_all('img'), 1):
+            img.replace_with(f"\n\n__VISION_OCR_IMAGE_{idx}__\n\n")
+
+        text_with_markers = scratch.get_text('\n', strip=False)
+        parts = []
+        visible_chars = 0
+        visible_segments = 0
+        pos = 0
+        marker_re = re.compile(r'__VISION_OCR_IMAGE_(\d+)__')
+        for match in marker_re.finditer(text_with_markers):
+            visible = _clean_visible_text_for_combined_ocr(text_with_markers[pos:match.start()])
+            if visible:
+                visible_segments += 1
+                visible_chars += len(visible)
+                _save_visible_text_for_combined_ocr(image_translator, actual_num, visible_segments, visible)
+                parts.append(f"[Visible Text {visible_segments}]\n{visible}")
+            try:
+                image_idx = int(match.group(1))
+            except Exception:
+                image_idx = None
+            image_part = ocr_part_by_index.get(image_idx) if image_idx is not None else None
+            if image_part and str(image_part).strip():
+                parts.append(str(image_part).strip())
+            pos = match.end()
+
+        visible = _clean_visible_text_for_combined_ocr(text_with_markers[pos:])
+        if visible:
+            visible_segments += 1
+            visible_chars += len(visible)
+            _save_visible_text_for_combined_ocr(image_translator, actual_num, visible_segments, visible)
+            parts.append(f"[Visible Text {visible_segments}]\n{visible}")
+        return parts, visible_chars, visible_segments
+    except Exception:
+        ordered_image_parts = [
+            str(ocr_part_by_index[idx]).strip()
+            for idx in sorted(ocr_part_by_index)
+            if ocr_part_by_index.get(idx) and str(ocr_part_by_index[idx]).strip()
+        ]
+        return ordered_image_parts, 0, 0
+
+
 def _process_chapter_images_vision_ocr_combined(
     soup,
     images,
@@ -9150,7 +9218,7 @@ def _process_chapter_images_vision_ocr_combined(
         except Exception:
             pass
 
-    ocr_parts = []
+    ocr_part_by_index = {}
     processed_srcs = []
     first_img_tag = None
     jobs = []
@@ -9385,30 +9453,39 @@ def _process_chapter_images_vision_ocr_combined(
 
         if is_no:
             marker = _image_marker_for_combined_ocr(img_info)
-            ocr_parts.append(marker)
+            ocr_part_by_index[idx] = marker
             processed_srcs.append(img_src)
             no_count += 1
         elif ocr_text and str(ocr_text).strip():
             cleaned_ocr_text = str(ocr_text).strip()
-            ocr_parts.append(cleaned_ocr_text)
+            ocr_part_by_index[idx] = cleaned_ocr_text
             processed_srcs.append(img_src)
             text_count += 1
             text_chars += len(cleaned_ocr_text)
         else:
             marker = _image_marker_for_combined_ocr(img_info)
-            ocr_parts.append(marker)
+            ocr_part_by_index[idx] = marker
             processed_srcs.append(img_src)
             empty_count += 1
 
+    ordered_ocr_parts, visible_text_chars, visible_text_segments = _combined_ocr_parts_in_document_order(
+        soup,
+        ocr_part_by_index,
+        image_translator=image_translator,
+        actual_num=actual_num,
+    )
+
     if ocr_by_index:
         summary_parts = [f"{text_count} text image(s), {text_chars} OCR chars"]
+        if visible_text_chars:
+            summary_parts.append(f"{visible_text_chars} existing text chars in {visible_text_segments} segment(s)")
         if no_count:
             summary_parts.append(f"{no_count} cover/illustration image(s) preserved")
         if empty_count:
             summary_parts.append(f"{empty_count} empty image(s) preserved")
         print(f"   Vision OCR page complete: {', '.join(summary_parts)}")
 
-    combined_ocr = _join_vision_ocr_parts(ocr_parts)
+    combined_ocr = _join_vision_ocr_parts(ordered_ocr_parts)
     if not combined_ocr:
         print("   Combined page OCR was empty; preserving original image HTML")
         return str(soup), {}
@@ -9475,17 +9552,22 @@ def _process_chapter_images_vision_ocr_combined(
         translation_div.append(child)
     container.append(translation_div)
 
-    if first_img_tag:
+    if visible_text_chars:
+        target = soup.body if soup.body else soup
+        target.clear()
+        target.append(container)
+    elif first_img_tag:
         first_img_tag.replace_with(container)
     else:
         target = soup.body if soup.body else soup
         target.insert(0, container)
 
-    for img in original_img_tags:
-        if img is first_img_tag:
-            continue
-        if getattr(img, 'parent', None):
-            img.decompose()
+    if not visible_text_chars:
+        for img in original_img_tags:
+            if img is first_img_tag:
+                continue
+            if getattr(img, 'parent', None):
+                img.decompose()
 
     image_translations = {"__combined_vision_ocr__": translated}
     image_translator.save_translation_log(actual_num, image_translations)
