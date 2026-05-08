@@ -22,6 +22,37 @@ import traceback
 scan_html_folder = None  # Will be lazy-loaded from translator_gui
 
 
+def _qa_owner_output_mode(owner):
+    try:
+        if hasattr(owner, '_get_output_mode'):
+            return str(owner._get_output_mode() or '').strip().lower()
+    except Exception:
+        pass
+    try:
+        return str(getattr(owner, 'config', {}).get('output_mode', '') or '').strip().lower()
+    except Exception:
+        return ''
+
+
+def _qa_vision_ocr_source_path(path, owner=None):
+    """Return the sibling *_OCR.epub used as the Vision QA source, when available."""
+    if not path or not str(path).lower().endswith('.epub'):
+        return path
+    if _qa_owner_output_mode(owner) != 'vision':
+        return path
+    try:
+        base, ext = os.path.splitext(os.path.abspath(path))
+        if base.lower().endswith('_ocr'):
+            candidate = base + (ext or '.epub')
+        else:
+            candidate = f"{base}_OCR{ext or '.epub'}"
+        if os.path.isfile(candidate):
+            return candidate
+    except Exception:
+        pass
+    return path
+
+
 def _normalize_target_language(display_text):
     """Normalize a human-facing target language label to a canonical value.
 
@@ -2847,12 +2878,13 @@ class QAScannerMixin:
         
         if len(current_epub_files) > 1:
             # Multiple source files in current selection
-            primary_file = os.path.basename(current_epub_files[0])
+            primary_file = os.path.basename(_qa_vision_ocr_source_path(current_epub_files[0], self))
             status_text = f"📖 {len(current_epub_files)} source files selected (Primary: {primary_file})"
             status_color = 'green'
         elif len(current_epub_files) == 1:
             # Single source file in current selection
-            file_name = os.path.basename(current_epub_files[0])
+            display_source_path = _qa_vision_ocr_source_path(current_epub_files[0], self)
+            file_name = os.path.basename(display_source_path)
             lower_name = current_epub_files[0].lower()
             if lower_name.endswith('.txt'):
                 file_type = "TXT"
@@ -2901,9 +2933,12 @@ class QAScannerMixin:
                     file_type = "MD"
                 else:
                     file_type = "EPUB"
-                status_label.setText(f"📖 Current {file_type}: {os.path.basename(epub_path)}")
+                display_source_path = _qa_vision_ocr_source_path(epub_path, self)
+                status_label.setText(f"📖 Current {file_type}: {os.path.basename(display_source_path)}")
                 status_label.setStyleSheet("color: green;")
                 self.append_log(f"✅ Selected {file_type} for QA: {os.path.basename(epub_path)}")
+                if display_source_path != epub_path:
+                    self.append_log(f"   Vision QA source: {os.path.basename(display_source_path)}")
 
         select_epub_btn = QPushButton("Select Source File")
         select_epub_btn.setFont(QFont('Arial', 9))

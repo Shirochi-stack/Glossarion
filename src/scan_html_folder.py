@@ -94,17 +94,13 @@ def _is_vision_output_mode(qa_settings=None):
 
 
 def _resolve_vision_ocr_qa_source_epub(epub_path, qa_settings=None):
-    """Use the generated *_OCR.epub for source-text QA, but only in Vision mode."""
+    """Use the selected book's generated *_OCR.epub for Vision-mode QA when present."""
     if not _is_vision_output_mode(qa_settings):
         return epub_path
     if not epub_path or not str(epub_path).lower().endswith('.epub'):
         return epub_path
 
-    candidates = [
-        os.getenv('QA_VISION_OCR_SOURCE_EPUB', '').strip(),
-        os.getenv('VISION_OCR_SOURCE_EPUB', '').strip(),
-    ]
-
+    candidates = []
     try:
         base, ext = os.path.splitext(os.path.abspath(epub_path))
         if base.lower().endswith('_ocr'):
@@ -114,19 +110,40 @@ def _resolve_vision_ocr_qa_source_epub(epub_path, qa_settings=None):
     except Exception:
         pass
 
+    # Env values are useful when the prepass just ran, but they can be stale
+    # across GUI sessions. Prefer the sibling path derived from the selected source.
+    candidates.extend([
+        os.getenv('QA_VISION_OCR_SOURCE_EPUB', '').strip(),
+        os.getenv('VISION_OCR_SOURCE_EPUB', '').strip(),
+    ])
+
     try:
         source_abs = os.path.normcase(os.path.abspath(epub_path))
     except Exception:
         source_abs = None
 
+    seen_candidates = set()
     for candidate in candidates:
         if not candidate:
             continue
         try:
+            candidate_abs = os.path.normcase(os.path.abspath(candidate))
+            if candidate_abs in seen_candidates:
+                continue
+            seen_candidates.add(candidate_abs)
+            if source_abs is not None:
+                source_base = os.path.splitext(source_abs)[0]
+                candidate_base = os.path.splitext(candidate_abs)[0]
+                if source_base.endswith('_ocr'):
+                    source_base = source_base[:-4]
+                if candidate_base.endswith('_ocr'):
+                    candidate_base = candidate_base[:-4]
+                if candidate_base != source_base:
+                    continue
             if (
                 os.path.isfile(candidate)
                 and candidate.lower().endswith('.epub')
-                and (source_abs is None or os.path.normcase(os.path.abspath(candidate)) != source_abs)
+                and (source_abs is None or candidate_abs != source_abs)
             ):
                 return candidate
         except Exception:
@@ -7753,8 +7770,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     log(f"   No HTML files found in word_count folder for image extraction")
         elif epub_path and os.path.exists(epub_path):
             # For EPUB mode, extract from EPUB
-            log(f"🖼️ Extracting image information from original EPUB: {os.path.basename(epub_path)}")
-            original_image_info = extract_epub_image_info(epub_path, log)
+            image_source_epub_path = source_text_epub_path if _is_vision_output_mode(qa_settings) else epub_path
+            log(f"🖼️ Extracting image information from QA source EPUB: {os.path.basename(image_source_epub_path)}")
+            original_image_info = extract_epub_image_info(image_source_epub_path, log)
             if original_image_info:
                 total_images = sum(info['image_count'] for info in original_image_info.values())
                 log(f"   Found images in {len(original_image_info)} chapters ({total_images} total images)")
