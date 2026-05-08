@@ -9122,14 +9122,65 @@ def _clean_visible_text_for_combined_ocr(text):
     return re.sub(r'\n{3,}', '\n\n', cleaned).strip()
 
 
-def _save_visible_text_for_combined_ocr(image_translator, actual_num, segment_idx, text):
+def _visible_text_location_label(segment_idx, previous_image_idx=None, next_image_idx=None):
+    try:
+        seg = int(segment_idx)
+    except Exception:
+        seg = segment_idx
+    try:
+        prev_idx = int(previous_image_idx) if previous_image_idx is not None else None
+    except Exception:
+        prev_idx = None
+    try:
+        next_idx = int(next_image_idx) if next_image_idx is not None else None
+    except Exception:
+        next_idx = None
+
+    if prev_idx and next_idx:
+        return f"Visible Text {seg} (between image {prev_idx} and image {next_idx})"
+    if next_idx:
+        return f"Visible Text {seg} (before image {next_idx})"
+    if prev_idx:
+        return f"Visible Text {seg} (after image {prev_idx})"
+    return f"Visible Text {seg}"
+
+
+def _visible_text_inspection_basename(segment_idx, previous_image_idx=None, next_image_idx=None):
+    try:
+        seg = int(segment_idx)
+    except Exception:
+        seg = 0
+    try:
+        prev_idx = int(previous_image_idx) if previous_image_idx is not None else None
+    except Exception:
+        prev_idx = None
+    try:
+        next_idx = int(next_image_idx) if next_image_idx is not None else None
+    except Exception:
+        next_idx = None
+
+    if prev_idx and next_idx:
+        return f"img{prev_idx:02d}_visible_before_img{next_idx:02d}_{seg:03d}"
+    if next_idx:
+        return f"img00_visible_before_img{next_idx:02d}_{seg:03d}"
+    if prev_idx:
+        return f"img{prev_idx:02d}_visible_after_{seg:03d}"
+    return f"visible_text_{seg:03d}"
+
+
+def _save_visible_text_for_combined_ocr(image_translator, actual_num, segment_idx, text, previous_image_idx=None, next_image_idx=None):
     if not image_translator or not text:
         return
     try:
+        basename = _visible_text_inspection_basename(
+            segment_idx,
+            previous_image_idx=previous_image_idx,
+            next_image_idx=next_image_idx,
+        )
         image_translator._save_ocr_text(
             text,
             kind="single",
-            image_basename=f"visible_text_{int(segment_idx):03d}",
+            image_basename=basename,
             chapter_num=actual_num,
         )
     except Exception:
@@ -9152,16 +9203,29 @@ def _combined_ocr_parts_in_document_order(soup, ocr_part_by_index, image_transla
         pos = 0
         marker_re = re.compile(r'__VISION_OCR_IMAGE_(\d+)__')
         for match in marker_re.finditer(text_with_markers):
-            visible = _clean_visible_text_for_combined_ocr(text_with_markers[pos:match.start()])
-            if visible:
-                visible_segments += 1
-                visible_chars += len(visible)
-                _save_visible_text_for_combined_ocr(image_translator, actual_num, visible_segments, visible)
-                parts.append(f"[Visible Text {visible_segments}]\n{visible}")
             try:
                 image_idx = int(match.group(1))
             except Exception:
                 image_idx = None
+            visible = _clean_visible_text_for_combined_ocr(text_with_markers[pos:match.start()])
+            if visible:
+                visible_segments += 1
+                visible_chars += len(visible)
+                previous_image_idx = image_idx - 1 if isinstance(image_idx, int) and image_idx > 1 else None
+                _save_visible_text_for_combined_ocr(
+                    image_translator,
+                    actual_num,
+                    visible_segments,
+                    visible,
+                    previous_image_idx=previous_image_idx,
+                    next_image_idx=image_idx,
+                )
+                label = _visible_text_location_label(
+                    visible_segments,
+                    previous_image_idx=previous_image_idx,
+                    next_image_idx=image_idx,
+                )
+                parts.append(f"[{label}]\n{visible}")
             image_part = ocr_part_by_index.get(image_idx) if image_idx is not None else None
             if image_part and str(image_part).strip():
                 parts.append(str(image_part).strip())
@@ -9171,8 +9235,26 @@ def _combined_ocr_parts_in_document_order(soup, ocr_part_by_index, image_transla
         if visible:
             visible_segments += 1
             visible_chars += len(visible)
-            _save_visible_text_for_combined_ocr(image_translator, actual_num, visible_segments, visible)
-            parts.append(f"[Visible Text {visible_segments}]\n{visible}")
+            last_image_idx = 0
+            try:
+                last_image_idx = max([int(idx) for idx in ocr_part_by_index.keys()] or [0])
+            except Exception:
+                last_image_idx = 0
+            previous_image_idx = last_image_idx or None
+            _save_visible_text_for_combined_ocr(
+                image_translator,
+                actual_num,
+                visible_segments,
+                visible,
+                previous_image_idx=previous_image_idx,
+                next_image_idx=None,
+            )
+            label = _visible_text_location_label(
+                visible_segments,
+                previous_image_idx=previous_image_idx,
+                next_image_idx=None,
+            )
+            parts.append(f"[{label}]\n{visible}")
         return parts, visible_chars, visible_segments
     except Exception:
         ordered_image_parts = [
