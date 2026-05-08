@@ -14027,6 +14027,10 @@ def main(log_callback=None, stop_callback=None):
     
     is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.md'))
     is_pdf_file = input_path.lower().endswith('.pdf')
+
+    if not is_pdf_file:
+        for _pdf_env_key in ("VISION_OCR_SOURCE_PDF", "GLOSSARY_COMPRESSION_SOURCE_PDF", "QA_VISION_OCR_SOURCE_PDF"):
+            os.environ.pop(_pdf_env_key, None)
     
     if is_text_file:
         os.environ["IS_TEXT_FILE_TRANSLATION"] = "1"
@@ -14137,6 +14141,8 @@ def main(log_callback=None, stop_callback=None):
     chapter_splitter = ChapterSplitter(model_name=config.MODEL)
     chunk_context_manager = ChunkContextManager()
     progress_manager = ProgressManager(payloads_dir)
+    if not is_pdf_file and progress_manager.prog.pop("pdf_ocr", None) is not None:
+        progress_manager.save()
     
     # Prepare progress callback for chapter extraction
     # Filter to show only every 10% progress update

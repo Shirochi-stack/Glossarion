@@ -5338,6 +5338,15 @@ class RetranslationMixin:
         try:
             prog = data.get('prog') or {}
             pdf_ocr = prog.get('pdf_ocr')
+            current_file = str(data.get('file_path') or '')
+            if current_file and not current_file.lower().endswith('.pdf'):
+                return
+            if not current_file:
+                pdf_source = ""
+                if isinstance(pdf_ocr, dict):
+                    pdf_source = str(pdf_ocr.get('source_file') or '')
+                if not pdf_source or not pdf_source.lower().endswith('.pdf'):
+                    return
             if not isinstance(pdf_ocr, dict):
                 output_dir = data.get('output_dir') or ''
                 image_exts = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tif', '.tiff')
