@@ -3547,6 +3547,7 @@ Recent translations to summarize:
             setattr(self, var_name, create_var(bool, key, default))
         
         self.translate_special_files_var = self.config.get('translate_special_files', False)
+        self.skip_image_title_translation_var = bool(self.config.get('skip_image_title_translation', True))
         # Custom special file keywords (comma-separated)
         _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, copyright, preface, nav, message, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'
         _DEFAULT_SPECIAL_EXACT = 'index, glossary, glossary_extension'
@@ -11464,7 +11465,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             return False
         # Numbered file override: if TRANSLATE_ALL_NUMBERED_HTML is enabled
         # and the filename contains a digit, it's NOT special.
-        if getattr(self, 'translate_all_numbered_html_var', False):
+        if getattr(self, 'translate_all_numbered_html_var', True):
             import re as _re
             if _re.search(r'\d', name_noext):
                 return False
@@ -13584,7 +13585,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         book_title_system_prompt = system_prompt
                     
                     # Translate the image filename/title (unless skipped)
-                    skip_img_title = bool(getattr(self, 'skip_image_title_translation_var', False) or self.config.get('skip_image_title_translation', False) or os.environ.get('SKIP_IMAGE_TITLE_TRANSLATION') == '1')
+                    skip_img_title = bool(getattr(self, 'skip_image_title_translation_var', True) or self.config.get('skip_image_title_translation', True) or os.environ.get('SKIP_IMAGE_TITLE_TRANSLATION') == '1')
                     if skip_img_title:
                         self.append_log("⏭️ Skipping image title translation (setting enabled)")
                         translated_title = base_name
@@ -14506,6 +14507,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',  # Optional assistant prefill
             'TRANSLATE_BOOK_TITLE': "1" if self.translate_book_title_var else "0",
             'SKIP_TXT_TITLE_TRANSLATION': "1" if getattr(self, 'skip_txt_title_translation_var', True) else "0",
+            'SKIP_IMAGE_TITLE_TRANSLATION': "1" if getattr(self, 'skip_image_title_translation_var', True) else "0",
             'BOOK_TITLE_PROMPT': self.book_title_prompt,
             'BOOK_TITLE_SYSTEM_PROMPT': self.config.get('book_title_system_prompt', 
                 "Translate this book title to {target_lang} while retaining any acronyms. Do not output anything other than the translated text."),
@@ -14672,7 +14674,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var else "0",
             'DISABLE_AUTOMATIC_COVER_CREATION': "1" if getattr(self, 'disable_automatic_cover_creation_var', False) else "0",
             'TRANSLATE_SPECIAL_FILES': "1" if getattr(self, 'translate_special_files_var', False) else "0",
-            'TRANSLATE_ALL_NUMBERED_HTML': "1" if getattr(self, 'translate_all_numbered_html_var', False) else "0",
+            'TRANSLATE_ALL_NUMBERED_HTML': "1" if getattr(self, 'translate_all_numbered_html_var', True) else "0",
             'USE_P_TAG_TOC_FALLBACK': "1" if getattr(self, 'use_p_tag_toc_fallback_var', False) else "0",
             'DEDUPLICATE_TOC': "1" if getattr(self, 'deduplicate_toc_var', False) else "0",
             'DEDUPLICATE_TOC_USE_TRANSLATED': "1" if getattr(self, 'deduplicate_toc_use_translated_var', False) else "0",
@@ -22333,6 +22335,7 @@ Important rules:
                 ('include_source_in_history', ['include_source_in_history_var'], False, bool),
                 ('translate_book_title', ['translate_book_title_var'], False, bool),
                 ('skip_txt_title_translation', ['skip_txt_title_translation_var'], False, bool),
+                ('skip_image_title_translation', ['skip_image_title_translation_var'], True, bool),
                 ('emergency_paragraph_restore', ['emergency_restore_var'], False, bool),
                 ('emergency_image_restore', ['emergency_image_restore_var'], False, bool),
                 ('emergency_glossary_compliance', ['emergency_glossary_compliance_var'], False, bool),
@@ -23464,6 +23467,7 @@ Important rules:
                 # Book title handling
                 ('TRANSLATE_BOOK_TITLE', '1' if getattr(self, 'translate_book_title_var', True) else '0'),
                 ('SKIP_TXT_TITLE_TRANSLATION', '1' if getattr(self, 'skip_txt_title_translation_var', True) else '0'),
+                ('SKIP_IMAGE_TITLE_TRANSLATION', '1' if getattr(self, 'skip_image_title_translation_var', True) else '0'),
                 ('BOOK_TITLE_PROMPT', getattr(self, 'book_title_prompt', '')),
                 ('GLOSSARY_INCLUDE_BOOK_TITLE', '1' if getattr(self, 'include_book_title_glossary_var', True) else '0'),
                 ('GLOSSARY_AUTO_INJECT_BOOK_TITLE', '1' if getattr(self, 'auto_inject_book_title_var', self.config.get('auto_inject_book_title', False)) else '0'),
@@ -23502,7 +23506,7 @@ Important rules:
                 ('USE_P_TAG_TOC_FALLBACK', '1' if getattr(self, 'use_p_tag_toc_fallback_var', self.config.get('use_p_tag_toc_fallback', False)) else '0'),
                 # New: Translate special files (cover, nav, toc, message, etc.)
                 ('TRANSLATE_SPECIAL_FILES', '1' if getattr(self, 'translate_special_files_var', False) else '0'),
-                ('TRANSLATE_ALL_NUMBERED_HTML', '1' if getattr(self, 'translate_all_numbered_html_var', False) else '0'),
+                ('TRANSLATE_ALL_NUMBERED_HTML', '1' if getattr(self, 'translate_all_numbered_html_var', True) else '0'),
                 # Custom special file keywords
                 ('SPECIAL_FILE_KEYWORDS', getattr(self, 'special_file_keywords_var', '')),
                 ('SPECIAL_FILE_EXACT', getattr(self, 'special_file_exact_var', '')),

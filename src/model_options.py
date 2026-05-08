@@ -14,12 +14,12 @@ def get_model_options() -> List[str]:
         # - GPT-5.1 retiring March 11 2026, removed
         # - GPT-5.4 released March 5 2026, GPT-5.3 Instant released March 3 2026
         "gpt-5.5","gpt-5.4", "gpt-5.4-pro",
-        "gpt-5.3-chat-latest", "gpt-5.3-codex", "gpt-5.3-codex-spark",
+        "gpt-5.3-codex", "gpt-5.3-codex-spark",
         "gpt-5.2", "gpt-5.2-pro", "gpt-5.2-chat-latest",
         "gpt-5-mini","gpt-5","gpt-5-nano", "gpt-5-chat-latest", "gpt-5-codex", "gpt-5-pro", "gpt-5-pro-2025-10-06",
         "gpt-4.1-nano",
         "gpt-4o-mini",  # Still on API, legacy
-        "o3",
+        "o3", "chatgpt-image-latest",
         
         # Google Gemini Models (as of March 2026)
         # - gemini-3-pro-preview shut down March 9 2026, removed

@@ -16216,6 +16216,7 @@ def main(log_callback=None, stop_callback=None):
     # even if it matches a skip keyword (e.g. chapter_notice0001.xhtml).
     # This is exclusive to the translation context.
     _translate_all_numbered = os.getenv('TRANSLATE_ALL_NUMBERED_HTML', '0') == '1'
+    print(f"📊 Special file settings: TRANSLATE_SPECIAL_FILES={translate_special}, TRANSLATE_ALL_NUMBERED_HTML={_translate_all_numbered} (env={os.getenv('TRANSLATE_ALL_NUMBERED_HTML', 'NOT SET')})")
 
     _special_kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
     _special_keywords = (

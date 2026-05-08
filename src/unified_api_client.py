@@ -1875,6 +1875,7 @@ class UnifiedClient:
         'vertex/': 'vertex_model_garden',
         '@': 'vertex_model_garden',
         'gpt': 'openai',
+        'chatgpt': 'openai',
         'o1': 'openai',
         'o3': 'openai',
         'o4': 'openai',
