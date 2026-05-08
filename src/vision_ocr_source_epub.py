@@ -13,10 +13,24 @@ HTML_EXTS = (".html", ".xhtml", ".htm")
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".avif")
 
 
-def ocr_epub_path_for(source_epub_path: str) -> str:
-    """Return the sibling OCR-source EPUB path for an input EPUB."""
-    base_dir = os.path.dirname(os.path.abspath(source_epub_path))
+def ocr_epub_path_for(source_epub_path: str, output_dir: Optional[str] = None) -> str:
+    """Return the per-book output OCR-source EPUB path for an input EPUB."""
     stem, ext = os.path.splitext(os.path.basename(source_epub_path))
+    if stem.lower().endswith("_ocr"):
+        stem = stem[:-4]
+
+    if output_dir:
+        base_dir = os.path.join(os.path.abspath(output_dir), "OCR")
+    else:
+        output_root = (os.getenv("EPUB_OUTPUT_DIR") or os.getenv("OUTPUT_DIR") or os.getenv("OUTPUT_DIRECTORY") or "").strip()
+        if output_root:
+            root_abs = os.path.abspath(output_root)
+            base_name = os.path.basename(root_abs)
+            base_dir = os.path.join(root_abs if base_name == stem else os.path.join(root_abs, stem), "OCR")
+        else:
+            base_dir = os.path.join(os.getcwd(), stem, "OCR")
+
+    os.makedirs(base_dir, exist_ok=True)
     return os.path.join(base_dir, f"{stem}_OCR{ext or '.epub'}")
 
 

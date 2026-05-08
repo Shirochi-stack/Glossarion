@@ -7717,11 +7717,12 @@ def _split_single_pass_glossary_response(response_text):
     return (response_text[:match.start()] + response_text[match.end():]).strip(), (match.group(1) or "").strip()
 
 def _single_pass_shared_glossary_dir(output_dir=None):
-    override = os.getenv("GLOSSARY_SHARED_DIR", "").strip()
+    override = (os.getenv("OUTPUT_DIRECTORY") or os.getenv("OUTPUT_DIR") or "").strip()
     if override:
-        return override
-    if output_dir:
-        return os.path.join(os.path.abspath(output_dir), "Glossary")
+        return os.path.join(os.path.abspath(override), "Glossary")
+    shared = os.getenv("GLOSSARY_SHARED_DIR", "").strip()
+    if shared:
+        return os.path.abspath(shared)
     return os.path.join(os.getcwd(), "Glossary")
 
 def _single_pass_glossary_paths(output_dir):
@@ -7730,6 +7731,8 @@ def _single_pass_glossary_paths(output_dir):
         base = os.path.splitext(os.path.basename(epub_path))[0]
     else:
         base = os.path.basename(os.path.abspath(output_dir)) or "book"
+    if base.lower().endswith("_ocr"):
+        base = base[:-4]
     glossary_dir = _single_pass_shared_glossary_dir(output_dir)
     os.makedirs(glossary_dir, exist_ok=True)
     return (
@@ -10136,8 +10139,8 @@ def _vision_ocr_glossary_should_skip_special_chapter(chapter):
     return any(stem in special_exact or any(kw in stem for kw in special_keywords) for stem in stems)
 
 
-def run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, check_stop_fn=None):
-    """OCR the EPUB into a sibling *_OCR.epub before translation/glossary compression."""
+def run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, output_dir=None, check_stop_fn=None):
+    """OCR the EPUB into this book's output/OCR *_OCR.epub before translation/glossary compression."""
     if not _vision_ocr_mode_enabled():
         return None
     if not input_path or not str(input_path).lower().endswith(".epub") or not os.path.exists(input_path):
@@ -10151,7 +10154,8 @@ def run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, c
         print(f"⚠️ Vision OCR source EPUB support unavailable: {e}")
         return None
 
-    output_path = ocr_epub_path_for(input_path)
+    per_book_output_dir = output_dir or getattr(image_translator, "output_dir", "")
+    output_path = ocr_epub_path_for(input_path, per_book_output_dir)
     existing_source = (os.getenv("VISION_OCR_SOURCE_EPUB") or "").strip()
     try:
         if existing_source and os.path.exists(existing_source) and os.path.abspath(existing_source) == os.path.abspath(output_path):
@@ -10353,9 +10357,21 @@ def _natural_pdf_image_key(path):
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", name)]
 
 
-def _vision_ocr_source_pdf_path(input_path):
-    base, _ext = os.path.splitext(os.path.abspath(input_path))
-    return f"{base}_OCR.pdf"
+def _vision_ocr_source_pdf_path(input_path, output_dir=None):
+    stem = os.path.splitext(os.path.basename(str(input_path or "")))[0] or "source"
+    if stem.lower().endswith("_ocr"):
+        stem = stem[:-4]
+    if output_dir:
+        base_dir = os.path.join(os.path.abspath(output_dir), "OCR")
+    else:
+        output_root = (os.getenv("EPUB_OUTPUT_DIR") or os.getenv("OUTPUT_DIR") or os.getenv("OUTPUT_DIRECTORY") or "").strip()
+        if output_root:
+            root_abs = os.path.abspath(output_root)
+            base_dir = os.path.join(root_abs if os.path.basename(root_abs) == stem else os.path.join(root_abs, stem), "OCR")
+        else:
+            base_dir = os.path.join(os.getcwd(), stem, "OCR")
+    os.makedirs(base_dir, exist_ok=True)
+    return os.path.join(base_dir, f"{stem}_OCR.pdf")
 
 
 def prepare_pdf_images_for_vision_ocr(input_path, output_dir, check_stop_fn=None):
@@ -10489,7 +10505,7 @@ def prepare_pdf_images_for_vision_ocr(input_path, output_dir, check_stop_fn=None
 
 
 def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, check_stop_fn=None, progress_manager=None):
-    """OCR extracted PDF images into a sibling *_OCR.pdf before translation/glossary work."""
+    """OCR extracted PDF images into this book's output/OCR *_OCR.pdf before translation/glossary work."""
     if not _vision_ocr_mode_enabled():
         return None
     if not input_path or not str(input_path).lower().endswith(".pdf") or not os.path.exists(input_path):
@@ -10497,7 +10513,7 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
     if image_translator is None:
         return None
 
-    output_path = _vision_ocr_source_pdf_path(input_path)
+    output_path = _vision_ocr_source_pdf_path(input_path, output_dir or getattr(image_translator, "output_dir", ""))
     existing_source = os.getenv("VISION_OCR_SOURCE_PDF", "").strip()
     if (
         existing_source
@@ -10823,7 +10839,7 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
 def run_vision_ocr_source_prepass(chapters, image_translator, input_path, output_dir, check_stop_fn=None, progress_manager=None):
     if str(input_path or "").lower().endswith(".pdf"):
         return run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, check_stop_fn, progress_manager=progress_manager)
-    return run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, check_stop_fn)
+    return run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, output_dir, check_stop_fn)
 
 
 def _vision_minimal_ocr_glossary_enabled(config=None):
@@ -14352,6 +14368,11 @@ def main(log_callback=None, stop_callback=None):
     cleanup_previous_extraction(out, preserve_images=preserve_pdf_ocr_images)
 
     os.environ["EPUB_OUTPUT_DIR"] = out
+    glossary_root_override = (os.getenv("OUTPUT_DIRECTORY") or os.getenv("OUTPUT_DIR") or "").strip()
+    if glossary_root_override:
+        os.environ["GLOSSARY_SHARED_DIR"] = os.path.join(os.path.abspath(glossary_root_override), "Glossary")
+    else:
+        os.environ["GLOSSARY_SHARED_DIR"] = os.path.join(os.getcwd(), "Glossary")
     payloads_dir = out
 
     # Manage translation history persistence based on contextual + rolling settings

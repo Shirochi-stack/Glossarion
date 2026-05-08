@@ -2582,9 +2582,15 @@ class ImageTranslator:
             base = os.path.splitext(os.path.basename(epub_path))[0]
         else:
             base = os.path.basename(os.path.abspath(self.output_dir or "")) or "book"
-        glossary_dir = os.getenv("GLOSSARY_SHARED_DIR", "").strip()
-        if not glossary_dir:
-            glossary_dir = os.path.join(self.output_dir, "Glossary")
+        if base.lower().endswith("_ocr"):
+            base = base[:-4]
+        override_root = (os.getenv("OUTPUT_DIRECTORY") or os.getenv("OUTPUT_DIR") or "").strip()
+        if override_root:
+            glossary_dir = os.path.join(os.path.abspath(override_root), "Glossary")
+        else:
+            glossary_dir = os.getenv("GLOSSARY_SHARED_DIR", "").strip()
+            if not glossary_dir:
+                glossary_dir = os.path.join(os.getcwd(), "Glossary")
         return (
             glossary_dir,
             os.path.join(glossary_dir, f"{base}_glossary.json"),

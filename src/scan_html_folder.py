@@ -94,7 +94,7 @@ def _is_vision_output_mode(qa_settings=None):
 
 
 def _resolve_vision_ocr_qa_source_epub(epub_path, qa_settings=None):
-    """Use the selected book's generated *_OCR.epub for Vision-mode QA when present."""
+    """Use the selected book output's generated OCR EPUB for Vision-mode QA when present."""
     if not _is_vision_output_mode(qa_settings):
         return epub_path
     if not epub_path or not str(epub_path).lower().endswith('.epub'):
@@ -102,16 +102,25 @@ def _resolve_vision_ocr_qa_source_epub(epub_path, qa_settings=None):
 
     candidates = []
     try:
-        base, ext = os.path.splitext(os.path.abspath(epub_path))
-        if base.lower().endswith('_ocr'):
-            candidates.append(base + ext)
-        else:
-            candidates.append(base + '_OCR' + ext)
+        stem, ext = os.path.splitext(os.path.basename(os.path.abspath(epub_path)))
+        if stem.lower().endswith('_ocr'):
+            stem = stem[:-4]
+        output_dir = os.getenv('EPUB_OUTPUT_DIR', '').strip()
+        if output_dir:
+            output_abs = os.path.abspath(output_dir)
+            if os.path.basename(output_abs) == stem:
+                candidates.append(os.path.join(output_abs, 'OCR', f"{stem}_OCR{ext or '.epub'}"))
+            else:
+                candidates.append(os.path.join(output_abs, stem, 'OCR', f"{stem}_OCR{ext or '.epub'}"))
+        override_dir = os.getenv('OUTPUT_DIRECTORY') or os.getenv('OUTPUT_DIR')
+        if override_dir:
+            candidates.append(os.path.join(os.path.abspath(override_dir), stem, 'OCR', f"{stem}_OCR{ext or '.epub'}"))
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), stem, 'OCR', f"{stem}_OCR{ext or '.epub'}"))
     except Exception:
         pass
 
     # Env values are useful when the prepass just ran, but they can be stale
-    # across GUI sessions. Prefer the sibling path derived from the selected source.
+    # across GUI sessions. Only accept them after validating the selected book stem.
     candidates.extend([
         os.getenv('QA_VISION_OCR_SOURCE_EPUB', '').strip(),
         os.getenv('VISION_OCR_SOURCE_EPUB', '').strip(),
@@ -132,14 +141,16 @@ def _resolve_vision_ocr_qa_source_epub(epub_path, qa_settings=None):
                 continue
             seen_candidates.add(candidate_abs)
             if source_abs is not None:
-                source_base = os.path.splitext(source_abs)[0]
-                candidate_base = os.path.splitext(candidate_abs)[0]
-                if source_base.endswith('_ocr'):
-                    source_base = source_base[:-4]
-                if candidate_base.endswith('_ocr'):
-                    candidate_base = candidate_base[:-4]
-                if candidate_base != source_base:
+                source_stem = os.path.splitext(os.path.basename(source_abs))[0]
+                candidate_stem = os.path.splitext(os.path.basename(candidate_abs))[0]
+                if source_stem.endswith('_ocr'):
+                    source_stem = source_stem[:-4]
+                if candidate_stem.endswith('_ocr'):
+                    candidate_stem = candidate_stem[:-4]
+                if candidate_stem != source_stem:
                     continue
+            if os.path.basename(os.path.dirname(candidate_abs)).lower() != 'ocr':
+                continue
             if (
                 os.path.isfile(candidate)
                 and candidate.lower().endswith('.epub')

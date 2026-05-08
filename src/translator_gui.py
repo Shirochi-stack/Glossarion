@@ -15056,18 +15056,17 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Set output path environment variable for the script
                 base_name = os.path.splitext(os.path.basename(text_file))[0]
                 
-                # Determine output directory
+                # Determine shared glossary directory. Glossary extraction
+                # state belongs in repo/exe Glossary or output-override Glossary.
                 override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
                 if override_dir:
-                    glossary_dir = os.path.join(override_dir, "Glossary")
+                    glossary_dir = os.path.join(os.path.abspath(override_dir), "Glossary")
                 else:
-                    glossary_dir = "Glossary"
-                # On macOS .app bundles, cwd can be '/' (read-only root).
-                if not os.path.isabs(glossary_dir):
-                    glossary_dir = os.path.join(os.path.dirname(os.path.abspath(text_file)), glossary_dir)
+                    glossary_dir = os.path.join(_get_app_dir(), "Glossary")
                 os.makedirs(glossary_dir, exist_ok=True)
                 output_path = os.path.join(glossary_dir, f"{base_name}_glossary.json")
                 os.environ["OUTPUT_PATH"] = output_path
+                os.environ["GLOSSARY_SHARED_DIR"] = glossary_dir
                 
                 if self._extract_glossary_from_text_file(text_file):
                     successful += 1
@@ -21175,10 +21174,9 @@ Important rules:
         """Auto-detect a glossary for an input file.
 
         Search order (first hit wins):
-        1) App folder: `./Glossary/` (next to the executable/script)
-        2) CWD: `./Glossary/`
-        3) Per-book output folder: `<output>/<book>/Glossary/`
-        4) Per-book output root: `<output>/<book>/glossary.*` (generic names)
+        1) Output override Glossary folder: `<output override>/Glossary/`
+        2) App/repo Glossary folder next to the executable/script
+        3) CWD Glossary folder
 
         Matching rules (case-insensitive) for steps 1-3:
         - Prefer exact stem match to `<epub_stem>_glossary` (ignoring extension)
@@ -21267,38 +21265,13 @@ Important rules:
 
                 return None
 
-            # Determine output directory (override vs CWD-relative)
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-            if override_dir:
-                output_dir = os.path.join(os.path.abspath(override_dir), base)
-            else:
-                output_dir = base
 
-            # When an output override is set, the user explicitly chose a
-            # different output location.  Check the override output paths
-            # FIRST so that glossaries stored next to the EPUBs (source
-            # folder / CWD) don't shadow the correct output-folder ones.
             if override_dir:
-                # A) Shared Glossary/ at override root (e.g. override_dir/Glossary/<book>_glossary.csv)
                 override_shared_glossary = os.path.join(os.path.abspath(override_dir), 'Glossary')
                 hit = _find_in_dir(override_shared_glossary)
                 if hit:
                     return hit
-
-                # B) Per-book output Glossary/  (override)
-                hit = _find_in_dir(os.path.join(output_dir, 'Glossary'))
-                if hit:
-                    return hit
-
-                # B) Per-book output root: generic glossary.* files (override)
-                if os.path.isdir(output_dir):
-                    generic_candidates = [
-                        os.path.join(output_dir, f"glossary{ext}")
-                        for ext in ext_priority  # .csv, .json, .txt, .md
-                    ]
-                    for candidate in generic_candidates:
-                        if os.path.isfile(candidate):
-                            return candidate
 
             # 1) App folder Glossary/
             try:
@@ -21317,21 +21290,6 @@ Important rules:
                     return hit
             except Exception:
                 pass
-
-            # 3-4) Per-book output (no override — not yet checked)
-            if not override_dir:
-                hit = _find_in_dir(os.path.join(output_dir, 'Glossary'))
-                if hit:
-                    return hit
-
-                if os.path.isdir(output_dir):
-                    generic_candidates = [
-                        os.path.join(output_dir, f"glossary{ext}")
-                        for ext in ext_priority  # .csv, .json, .txt, .md
-                    ]
-                    for candidate in generic_candidates:
-                        if os.path.isfile(candidate):
-                            return candidate
 
             return None
         except Exception:

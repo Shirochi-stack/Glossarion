@@ -35,19 +35,51 @@ def _qa_owner_output_mode(owner):
 
 
 def _qa_vision_ocr_source_path(path, owner=None):
-    """Return the sibling *_OCR.epub used as the Vision QA source, when available."""
+    """Return this book output's OCR-source EPUB used for Vision QA, when available."""
     if not path or not str(path).lower().endswith('.epub'):
         return path
     if _qa_owner_output_mode(owner) != 'vision':
         return path
     try:
-        base, ext = os.path.splitext(os.path.abspath(path))
-        if base.lower().endswith('_ocr'):
-            candidate = base + (ext or '.epub')
-        else:
-            candidate = f"{base}_OCR{ext or '.epub'}"
-        if os.path.isfile(candidate):
-            return candidate
+        abs_path = os.path.abspath(path)
+        stem, ext = os.path.splitext(os.path.basename(abs_path))
+        if stem.lower().endswith('_ocr'):
+            stem = stem[:-4]
+        candidates = []
+        env_candidate = os.getenv('QA_VISION_OCR_SOURCE_EPUB', '').strip() or os.getenv('VISION_OCR_SOURCE_EPUB', '').strip()
+        if env_candidate:
+            candidates.append(env_candidate)
+        output_dir = os.getenv('EPUB_OUTPUT_DIR', '').strip()
+        if output_dir:
+            output_abs = os.path.abspath(output_dir)
+            if os.path.basename(output_abs) == stem:
+                candidates.append(os.path.join(output_abs, "OCR", f"{stem}_OCR{ext or '.epub'}"))
+            else:
+                candidates.append(os.path.join(output_abs, stem, "OCR", f"{stem}_OCR{ext or '.epub'}"))
+        override_dir = os.getenv('OUTPUT_DIRECTORY') or os.getenv('OUTPUT_DIR')
+        if override_dir:
+            candidates.append(os.path.join(os.path.abspath(override_dir), stem, "OCR", f"{stem}_OCR{ext or '.epub'}"))
+        try:
+            owner_base_dir = getattr(owner, 'base_dir', '') if owner is not None else ''
+            if owner_base_dir:
+                candidates.append(os.path.join(os.path.abspath(owner_base_dir), stem, "OCR", f"{stem}_OCR{ext or '.epub'}"))
+        except Exception:
+            pass
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), stem, "OCR", f"{stem}_OCR{ext or '.epub'}"))
+        for candidate in candidates:
+            try:
+                candidate_abs = os.path.abspath(candidate)
+                candidate_stem = os.path.splitext(os.path.basename(candidate_abs))[0]
+                if candidate_stem.lower().endswith('_ocr'):
+                    candidate_stem = candidate_stem[:-4]
+                if candidate_stem != stem:
+                    continue
+                if os.path.basename(os.path.dirname(candidate_abs)).lower() != 'ocr':
+                    continue
+                if os.path.isfile(candidate_abs):
+                    return candidate_abs
+            except Exception:
+                continue
     except Exception:
         pass
     return path
