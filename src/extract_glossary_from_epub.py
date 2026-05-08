@@ -902,6 +902,31 @@ _GLOSSARY_CHAPTER_FILENAMES = {}
 _GLOSSARY_TOTAL_CHAPTERS = 0
 _GLOSSARY_OUTPUT_FILE = ""
 
+def _resolved_glossary_progress_file() -> str:
+    """Return the concrete progress path, never the bare cwd default."""
+    progress_file = str(PROGRESS_FILE or "").strip()
+    if progress_file and (
+        os.path.isabs(progress_file)
+        or os.path.basename(progress_file).lower() != "glossary_progress.json"
+    ):
+        return progress_file
+
+    output_file = str(_GLOSSARY_OUTPUT_FILE or "").strip()
+    if output_file:
+        glossary_dir = os.path.dirname(os.path.abspath(output_file))
+        base = os.path.splitext(os.path.basename(output_file))[0]
+        if base.lower().endswith("_glossary"):
+            base = base[:-len("_glossary")]
+    else:
+        glossary_dir = os.getenv("GLOSSARY_SHARED_DIR", "").strip()
+        if not glossary_dir:
+            glossary_dir = os.path.join(os.getcwd(), "Glossary")
+        source_path = os.getenv("EPUB_PATH", "").strip()
+        base = os.path.splitext(os.path.basename(source_path))[0] if source_path else "book"
+
+    os.makedirs(glossary_dir, exist_ok=True)
+    return os.path.join(glossary_dir, f"{base or 'book'}_glossary_progress.json")
+
 def _unique_int_list(values):
     """Return ints in first-seen order, ignoring values that cannot be parsed."""
     seen = set()
@@ -1087,14 +1112,15 @@ _GLOSSARY_DISK_IN_PROGRESS_CACHE = {}
 def _glossary_disk_in_progress_snapshot():
     """Return a cached set of on-disk in-progress indices, or None if the file is gone/unreadable."""
     try:
-        if not os.path.exists(PROGRESS_FILE):
+        progress_file = _resolved_glossary_progress_file()
+        if not os.path.exists(progress_file):
             return None
-        stat = os.stat(PROGRESS_FILE)
-        cache_key = (PROGRESS_FILE, stat.st_mtime_ns, stat.st_size)
+        stat = os.stat(progress_file)
+        cache_key = (progress_file, stat.st_mtime_ns, stat.st_size)
         cached = _GLOSSARY_DISK_IN_PROGRESS_CACHE.get("snapshot")
         if isinstance(cached, dict) and cached.get("cache_key") == cache_key:
             return cached.get("indices", set())
-        with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
+        with open(progress_file, "r", encoding="utf-8") as f:
             disk_progress = json.load(f)
         if not isinstance(disk_progress, dict):
             return None
@@ -2353,9 +2379,10 @@ def trim_context_history(history: List[Dict], limit: int, rolling_window: bool =
         return [{"role": "assistant", "content": combined_memory}]
 
 def load_progress() -> Dict:
-    if os.path.exists(PROGRESS_FILE):
+    progress_file = _resolved_glossary_progress_file()
+    if os.path.exists(progress_file):
         try:
-            with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
+            with open(progress_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 # Validate the structure
                 if not isinstance(data, dict):
@@ -2459,8 +2486,8 @@ def load_progress() -> Dict:
             try:
                 import shutil
                 import time
-                backup_name = f"{PROGRESS_FILE}.corrupted.{int(time.time())}"
-                shutil.copy2(PROGRESS_FILE, backup_name)
+                backup_name = f"{progress_file}.corrupted.{int(time.time())}"
+                shutil.copy2(progress_file, backup_name)
                 print(f"   -> Corrupted file backed up to: {backup_name}")
             except:
                 pass
@@ -5121,11 +5148,12 @@ def main(log_callback=None, stop_callback=None):
     global BOOK_TITLE_RAW, BOOK_TITLE_TRANSLATED, BOOK_TITLE_PRESENT, BOOK_TITLE_VALUE
     BOOK_TITLE_RAW = _extract_raw_title_from_epub(epub_path)
     BOOK_TITLE_TRANSLATED = _extract_translated_title_from_metadata(args.output, epub_path)
+    progress_file = _resolved_glossary_progress_file()
     
     # Check progress file for saved book title to avoid re-translation
-    if not BOOK_TITLE_TRANSLATED and os.path.exists(PROGRESS_FILE):
+    if not BOOK_TITLE_TRANSLATED and os.path.exists(progress_file):
         try:
-            with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
+            with open(progress_file, 'r', encoding='utf-8') as f:
                 saved_prog = json.load(f)
                 saved_title = saved_prog.get('book_title')
                 if saved_title:
@@ -5180,12 +5208,13 @@ def main(log_callback=None, stop_callback=None):
                     # Save immediately to progress
                     try:
                         p_data = {}
-                        if os.path.exists(PROGRESS_FILE):
-                            with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
+                        progress_file = _resolved_glossary_progress_file()
+                        if os.path.exists(progress_file):
+                            with open(progress_file, 'r', encoding='utf-8') as f:
                                 p_data = json.load(f)
                         p_data['book_title'] = translated
                         
-                        with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
+                        with open(progress_file, 'w', encoding='utf-8') as f:
                             json.dump(p_data, f, indent=2, ensure_ascii=False)
                     except Exception as e:
                         print(f"⚠️ Failed to save book title to progress: {e}")
@@ -7099,6 +7128,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         BOOK_TITLE_VALUE = None
 
     _refresh_book_title_flags()
+    progress_file = _resolved_glossary_progress_file()
 
     # Acquire lock to prevent concurrent writes
     with _progress_lock:
@@ -7126,8 +7156,8 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         externally_failed = []
         manual_removed_indices = []
         try:
-            if os.path.exists(PROGRESS_FILE):
-                with open(PROGRESS_FILE, 'r', encoding='utf-8') as existing_f:
+            if os.path.exists(progress_file):
+                with open(progress_file, 'r', encoding='utf-8') as existing_f:
                     existing_progress = json.load(existing_f)
                 if (
                     isinstance(existing_progress, dict)
@@ -7347,7 +7377,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         
         try:
             # Use atomic write with proper temp file handling
-            progress_dir = os.path.dirname(PROGRESS_FILE) or '.'
+            progress_dir = os.path.dirname(progress_file) or '.'
             with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=progress_dir, delete=False, suffix='.tmp') as temp_f:
                 temp_path = temp_f.name
                 json.dump(progress_data, temp_f, ensure_ascii=False, indent=2)
@@ -7356,9 +7386,9 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             
             # Atomic rename
             try:
-                if os.path.exists(PROGRESS_FILE):
-                    os.remove(PROGRESS_FILE)
-                os.rename(temp_path, PROGRESS_FILE)
+                if os.path.exists(progress_file):
+                    os.remove(progress_file)
+                os.rename(temp_path, progress_file)
             except Exception as e:
                 if os.path.exists(temp_path):
                     try:
