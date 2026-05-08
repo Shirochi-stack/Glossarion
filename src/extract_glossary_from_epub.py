@@ -1,4 +1,4 @@
-# extract_glossary_from_epub.py
+﻿# extract_glossary_from_epub.py
 import os
 import json
 import re
@@ -795,7 +795,7 @@ def _extract_translated_title_from_metadata(output_path: str, epub_path: str) ->
     return None
 
 
-def _ensure_book_title_entry(glossary: List[Dict]) -> List[Dict]:
+def _ensure_book_title_entry(glossary: List[Dict], context=None) -> List[Dict]:
     """Insert a 'book' entry (raw + translated title) at the top if enabled and not present."""
     global BOOK_TITLE_PRESENT, BOOK_TITLE_VALUE, BOOK_TITLE_RAW, BOOK_TITLE_TRANSLATED
     
@@ -803,8 +803,12 @@ def _ensure_book_title_entry(glossary: List[Dict]) -> List[Dict]:
     
     # Determine titles to use
     # Prefer specific raw/translated values if available
-    raw_title = BOOK_TITLE_RAW
-    trans_title = BOOK_TITLE_TRANSLATED
+    if isinstance(context, GlossaryProgressContext):
+        raw_title = context.book_title_raw
+        trans_title = context.book_title_translated
+    else:
+        raw_title = BOOK_TITLE_RAW
+        trans_title = BOOK_TITLE_TRANSLATED
     
     # Fallback logic if one is missing
     if not raw_title and trans_title:
@@ -824,8 +828,12 @@ def _ensure_book_title_entry(glossary: List[Dict]) -> List[Dict]:
         # Check against both raw and translated to avoid duplicates
         if (raw == norm_raw or trans == norm_trans or 
             raw == norm_trans or trans == norm_raw):
-            BOOK_TITLE_PRESENT = True
-            BOOK_TITLE_VALUE = entry.get("translated_name") or entry.get("raw_name")
+            if isinstance(context, GlossaryProgressContext):
+                context.book_title_present = True
+                context.book_title_value = entry.get("translated_name") or entry.get("raw_name")
+            else:
+                BOOK_TITLE_PRESENT = True
+                BOOK_TITLE_VALUE = entry.get("translated_name") or entry.get("raw_name")
             return glossary  # Already present
 
     book_entry = {
@@ -835,8 +843,12 @@ def _ensure_book_title_entry(glossary: List[Dict]) -> List[Dict]:
         "gender": ""
     }
     glossary.insert(0, book_entry)
-    BOOK_TITLE_PRESENT = True
-    BOOK_TITLE_VALUE = trans_title or raw_title
+    if isinstance(context, GlossaryProgressContext):
+        context.book_title_present = True
+        context.book_title_value = trans_title or raw_title
+    else:
+        BOOK_TITLE_PRESENT = True
+        BOOK_TITLE_VALUE = trans_title or raw_title
     return glossary
 
 def set_stop_flag(value):
@@ -902,16 +914,72 @@ _GLOSSARY_CHAPTER_FILENAMES = {}
 _GLOSSARY_TOTAL_CHAPTERS = 0
 _GLOSSARY_OUTPUT_FILE = ""
 
-def _resolved_glossary_progress_file() -> str:
+class GlossaryProgressContext:
+    """Per-run glossary progress state.
+
+    Keep file paths and chapter row metadata on this object so parallel
+    glossary callers do not have to mutate module-level progress globals.
+    """
+    def __init__(
+        self,
+        progress_file=None,
+        output_file="",
+        chapter_positions=None,
+        chapter_numbers=None,
+        chapter_filenames=None,
+        total_chapters=0,
+        book_title_raw=None,
+        book_title_translated=None,
+        book_title_present=False,
+        book_title_value=None,
+    ):
+        self.progress_file = progress_file
+        self.output_file = output_file or ""
+        self.chapter_positions = {int(k): int(v) for k, v in (chapter_positions or {}).items()}
+        self.chapter_numbers = {int(k): int(v) for k, v in (chapter_numbers or {}).items()}
+        self.chapter_filenames = {
+            int(k): os.path.basename(str(v or ""))
+            for k, v in (chapter_filenames or {}).items()
+        }
+        self.total_chapters = int(total_chapters or 0)
+        self.book_title_raw = book_title_raw
+        self.book_title_translated = book_title_translated
+        self.book_title_present = bool(book_title_present)
+        self.book_title_value = book_title_value
+
+def make_glossary_progress_context(**kwargs):
+    return GlossaryProgressContext(**kwargs)
+
+def _progress_context_values(context=None):
+    if isinstance(context, GlossaryProgressContext):
+        return (
+            context.progress_file,
+            context.output_file,
+            context.chapter_positions,
+            context.chapter_numbers,
+            context.chapter_filenames,
+            context.total_chapters,
+        )
+    return (
+        PROGRESS_FILE,
+        _GLOSSARY_OUTPUT_FILE,
+        _GLOSSARY_CHAPTER_POSITIONS,
+        _GLOSSARY_CHAPTER_NUMBERS,
+        _GLOSSARY_CHAPTER_FILENAMES,
+        _GLOSSARY_TOTAL_CHAPTERS,
+    )
+
+def _resolved_glossary_progress_file(context=None) -> str:
     """Return the concrete progress path, never the bare cwd default."""
-    progress_file = str(PROGRESS_FILE or "").strip()
+    progress_file, output_file, _positions, _numbers, _filenames, _total = _progress_context_values(context)
+    progress_file = str(progress_file or "").strip()
     if progress_file and (
         os.path.isabs(progress_file)
         or os.path.basename(progress_file).lower() != "glossary_progress.json"
     ):
         return progress_file
 
-    output_file = str(_GLOSSARY_OUTPUT_FILE or "").strip()
+    output_file = str(output_file or "").strip()
     if output_file:
         glossary_dir = os.path.dirname(os.path.abspath(output_file))
         base = os.path.splitext(os.path.basename(output_file))[0]
@@ -941,13 +1009,14 @@ def _unique_int_list(values):
             result.append(idx)
     return result
 
-def _glossary_chapter_actual_num(idx: int) -> int:
+def _glossary_chapter_actual_num(idx: int, context=None) -> int:
     """Return the chapter number used by translation progress for a glossary row."""
+    _progress_file, _output_file, positions, numbers, _filenames, _total = _progress_context_values(context)
     try:
         idx_int = int(idx)
-        return int(_GLOSSARY_CHAPTER_NUMBERS.get(
+        return int(numbers.get(
             idx_int,
-            _GLOSSARY_CHAPTER_POSITIONS.get(idx_int, idx_int + 1)
+            positions.get(idx_int, idx_int + 1)
         ))
     except (TypeError, ValueError):
         return int(idx) + 1
@@ -964,13 +1033,14 @@ def _glossary_chapter_key(idx: int) -> str:
     except (TypeError, ValueError):
         return str(idx)
 
-def _glossary_chapter_output_file(idx: int) -> str:
+def _glossary_chapter_output_file(idx: int, context=None) -> str:
     """Return the stable filename anchor used by the GUI progress manager."""
+    _progress_file, _output_file, _positions, _numbers, filenames, _total = _progress_context_values(context)
     try:
         idx = int(idx)
     except (TypeError, ValueError):
         return ""
-    return _glossary_progress_filename(_GLOSSARY_CHAPTER_FILENAMES.get(idx, ""))
+    return _glossary_progress_filename(filenames.get(idx, ""))
 
 def _glossary_progress_filename(value) -> str:
     """Return a chapter filename for progress, rejecting source-book paths."""
@@ -1109,10 +1179,10 @@ def _glossary_failed_from_in_progress_entry(info):
 
 _GLOSSARY_DISK_IN_PROGRESS_CACHE = {}
 
-def _glossary_disk_in_progress_snapshot():
+def _glossary_disk_in_progress_snapshot(context=None):
     """Return a cached set of on-disk in-progress indices, or None if the file is gone/unreadable."""
     try:
-        progress_file = _resolved_glossary_progress_file()
+        progress_file = _resolved_glossary_progress_file(context)
         if not os.path.exists(progress_file):
             return None
         stat = os.stat(progress_file)
@@ -1139,13 +1209,13 @@ def _glossary_disk_in_progress_snapshot():
     except Exception:
         return None
 
-def _glossary_disk_entry_is_still_in_progress(idx):
+def _glossary_disk_entry_is_still_in_progress(idx, context=None):
     """False means the user deleted or changed the in-progress row on disk."""
     try:
         idx = int(idx)
     except (TypeError, ValueError):
         return False
-    snapshot = _glossary_disk_in_progress_snapshot()
+    snapshot = _glossary_disk_in_progress_snapshot(context)
     return bool(snapshot is not None and idx in snapshot)
 
 def _glossary_is_graceful_stop_active():
@@ -2378,8 +2448,8 @@ def trim_context_history(history: List[Dict], limit: int, rolling_window: bool =
         combined_memory = "\n".join(memory_blocks)
         return [{"role": "assistant", "content": combined_memory}]
 
-def load_progress() -> Dict:
-    progress_file = _resolved_glossary_progress_file()
+def load_progress(context=None) -> Dict:
+    progress_file = _resolved_glossary_progress_file(context)
     if os.path.exists(progress_file):
         try:
             with open(progress_file, 'r', encoding='utf-8') as f:
@@ -5090,6 +5160,10 @@ def main(log_callback=None, stop_callback=None):
         f"{file_base}_glossary_progress.json"
     )
     _GLOSSARY_OUTPUT_FILE = os.path.join(glossary_dir, os.path.basename(args.output))
+    progress_context = make_glossary_progress_context(
+        progress_file=PROGRESS_FILE,
+        output_file=_GLOSSARY_OUTPUT_FILE,
+    )
 
     config = load_config(args.config)
     
@@ -5148,7 +5222,7 @@ def main(log_callback=None, stop_callback=None):
     global BOOK_TITLE_RAW, BOOK_TITLE_TRANSLATED, BOOK_TITLE_PRESENT, BOOK_TITLE_VALUE
     BOOK_TITLE_RAW = _extract_raw_title_from_epub(epub_path)
     BOOK_TITLE_TRANSLATED = _extract_translated_title_from_metadata(args.output, epub_path)
-    progress_file = _resolved_glossary_progress_file()
+    progress_file = _resolved_glossary_progress_file(context=progress_context)
     
     # Check progress file for saved book title to avoid re-translation
     if not BOOK_TITLE_TRANSLATED and os.path.exists(progress_file):
@@ -5208,7 +5282,7 @@ def main(log_callback=None, stop_callback=None):
                     # Save immediately to progress
                     try:
                         p_data = {}
-                        progress_file = _resolved_glossary_progress_file()
+                        progress_file = _resolved_glossary_progress_file(context=progress_context)
                         if os.path.exists(progress_file):
                             with open(progress_file, 'r', encoding='utf-8') as f:
                                 p_data = json.load(f)
@@ -5233,6 +5307,10 @@ def main(log_callback=None, stop_callback=None):
         BOOK_TITLE_TRANSLATED = BOOK_TITLE_RAW
     if not BOOK_TITLE_RAW:
         BOOK_TITLE_RAW = BOOK_TITLE_TRANSLATED
+    progress_context.book_title_raw = BOOK_TITLE_RAW
+    progress_context.book_title_translated = BOOK_TITLE_TRANSLATED
+    progress_context.book_title_present = BOOK_TITLE_PRESENT
+    progress_context.book_title_value = BOOK_TITLE_VALUE
     
     # Check for batch mode
     batch_enabled = os.getenv("BATCH_TRANSLATION", "0") == "1"
@@ -5497,6 +5575,10 @@ def main(log_callback=None, stop_callback=None):
     for _idx, _pos in _GLOSSARY_CHAPTER_POSITIONS.items():
         _GLOSSARY_CHAPTER_NUMBERS.setdefault(_idx, _pos)
     _GLOSSARY_TOTAL_CHAPTERS = len(chapters)
+    progress_context.chapter_positions = dict(_GLOSSARY_CHAPTER_POSITIONS)
+    progress_context.chapter_numbers = dict(_GLOSSARY_CHAPTER_NUMBERS)
+    progress_context.chapter_filenames = dict(_GLOSSARY_CHAPTER_FILENAMES)
+    progress_context.total_chapters = _GLOSSARY_TOTAL_CHAPTERS
 
     if not chapters:
         print("No chapters found. Exiting.")
@@ -5507,7 +5589,7 @@ def main(log_callback=None, stop_callback=None):
         return
 
     global _GLOSSARY_QA_ISSUES_FOUND
-    prog = load_progress()
+    prog = load_progress(context=progress_context)
     _GLOSSARY_QA_ISSUES_FOUND = _normalize_glossary_qa_issues(
         prog.get('qa_issues_found'),
         prog.get('chapters')
@@ -5560,7 +5642,7 @@ def main(log_callback=None, stop_callback=None):
                 in_progress.append(_idx)
                 changed = True
         if changed:
-            save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
+            save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
 
     def _clear_glossary_in_progress(indices):
         remove = set()
@@ -5574,7 +5656,7 @@ def main(log_callback=None, stop_callback=None):
         before = len(in_progress)
         in_progress[:] = [idx for idx in in_progress if idx not in remove]
         if before != len(in_progress):
-            save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
+            save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
 
     def _restore_glossary_in_progress_for_hard_stop(indices):
         forced_failed = []
@@ -5594,9 +5676,9 @@ def main(log_callback=None, stop_callback=None):
                 if _idx in in_progress:
                     in_progress.remove(_idx)
                 _mark_glossary_failed(failed, _idx)
-            save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
+            save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
         else:
-            save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
+            save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
     
     # Request merging configuration (glossary-specific with fallback to global)
     request_merging_enabled = os.getenv('GLOSSARY_REQUEST_MERGING_ENABLED', os.getenv('REQUEST_MERGING_ENABLED', '0')) == '1'
@@ -5713,7 +5795,7 @@ def main(log_callback=None, stop_callback=None):
                 if glossary:
                     print("\U0001F500 Applying deduplication and sorting before exit...")
                     glossary[:] = skip_duplicate_entries(glossary)
-                    save_progress(completed, glossary, merged_indices, failed=failed)
+                    save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
                     save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 return
@@ -5736,7 +5818,7 @@ def main(log_callback=None, stop_callback=None):
                         x.get('raw_name', '').lower()
                     ))
                     
-                    save_progress(completed, glossary, merged_indices, failed=failed)
+                    save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
                     save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     print(f"\u2705 Saved {len(glossary)} entries before graceful exit")
@@ -5761,7 +5843,7 @@ def main(log_callback=None, stop_callback=None):
                         x.get('raw_name', '').lower()
                     ))
                     
-                    save_progress(completed, glossary, merged_indices, failed=failed)
+                    save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
                     save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     
@@ -5899,7 +5981,7 @@ def main(log_callback=None, stop_callback=None):
                                     print(f"[Chapter {idx+1}] Error: {error}")
                                     _mark_glossary_failed(failed, idx, "API_ERROR")
                                     _clear_glossary_in_progress(unit_indices)
-                                    save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
+                                    save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
                                     return
                                 
                                 # Process entries
@@ -5981,7 +6063,7 @@ def main(log_callback=None, stop_callback=None):
                                 print(f"[Chapter {idx+1}] Error: {error}")
                                 _mark_glossary_failed(failed, idx, "API_ERROR")
                                 _clear_glossary_in_progress(unit_indices)
-                                save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
+                                save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
                                 return
                             
                             # Process entries as each chapter completes
@@ -6033,7 +6115,7 @@ def main(log_callback=None, stop_callback=None):
                         
                         # Save progress after each chapter completes (crash-safe with atomic writes)
                         _clear_glossary_in_progress(unit_indices)
-                        save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
+                        save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
                         # Also save glossary files for incremental updates
                         save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
@@ -6065,7 +6147,7 @@ def main(log_callback=None, stop_callback=None):
                             if idx not in completed and idx not in failed:
                                 _mark_glossary_failed(failed, idx, "API_ERROR")
                         _clear_glossary_in_progress(unit_indices)
-                        save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
+                        save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
 
                 if aggressive_mode:
                     # Aggressive mode: keep pool full, auto-refill as futures complete.
@@ -6238,7 +6320,7 @@ def main(log_callback=None, stop_callback=None):
                 print(f"📊 Glossary size: {deduplicated_size} unique entries")
                 
                 # Save final deduplicated and sorted glossary
-                save_progress(completed, glossary, merged_indices, failed=failed)
+                save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
                 save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
             
@@ -6266,7 +6348,7 @@ def main(log_callback=None, stop_callback=None):
                         x.get('raw_name', '').lower()
                     ))
                     
-                    save_progress(completed, glossary, merged_indices, failed=failed)
+                    save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
                     save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     
@@ -6304,7 +6386,7 @@ def main(log_callback=None, stop_callback=None):
                             x.get('raw_name', '').lower()
                         ))
                         
-                        save_progress(completed, glossary, merged_indices, failed=failed)
+                        save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
                         save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     
@@ -7033,7 +7115,7 @@ def main(log_callback=None, stop_callback=None):
                             print(f"⚠️ Failed to save history for chapter {idx+1}: {e}")
 
                 _clear_glossary_in_progress(current_progress_indices)
-                save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
+                save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
                 save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 
@@ -7069,7 +7151,7 @@ def main(log_callback=None, stop_callback=None):
                 print(f"Full traceback: {traceback.format_exc()}")
                 _mark_glossary_failed(failed, idx, "API_ERROR")
                 _clear_glossary_in_progress(locals().get('current_progress_indices', [idx]))
-                save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress)
+                save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
                 # Check for stop even after error
                 if check_stop():
                     print(f"❌ Glossary extraction stopped after error in chapter {idx+1}")
@@ -7091,7 +7173,7 @@ def main(log_callback=None, stop_callback=None):
     # Print failed chapters summary
     if failed:
         print(f"\n⚠️ {len(failed)} chapter(s) failed and will be retried on next run: {[i+1 for i in sorted(failed)]}")
-        save_progress(completed, glossary, merged_indices, failed=failed)
+        save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
     
     print(f"\nDone. Glossary saved to {args.output}")
     
@@ -7104,7 +7186,7 @@ def main(log_callback=None, stop_callback=None):
     except Exception as e:
         print(f"[Warning] Could not save CSV format: {e}")
 
-def save_progress(completed: List[int], glossary: List[Dict], merged_indices: List[int] = None, failed: List[int] = None, in_progress: List[int] = None):
+def save_progress(completed: List[int], glossary: List[Dict], merged_indices: List[int] = None, failed: List[int] = None, in_progress: List[int] = None, context=None):
     """Save progress to JSON file (history is now managed separately)
     
     NOTE: We no longer save the glossary itself in the progress file to avoid
@@ -7114,21 +7196,30 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
     global _progress_lock
     
     # Ensure book title entry is present in-memory before recording status
-    glossary = _ensure_book_title_entry(glossary)
+    glossary = _ensure_book_title_entry(glossary, context=context)
 
     # Refresh book-title status from current glossary snapshot
     def _refresh_book_title_flags():
         global BOOK_TITLE_PRESENT, BOOK_TITLE_VALUE
         for entry in glossary or []:
             if str(entry.get("type", "")).lower() == "book":
-                BOOK_TITLE_PRESENT = True
-                BOOK_TITLE_VALUE = entry.get("translated_name") or entry.get("raw_name")
+                if isinstance(context, GlossaryProgressContext):
+                    context.book_title_present = True
+                    context.book_title_value = entry.get("translated_name") or entry.get("raw_name")
+                else:
+                    BOOK_TITLE_PRESENT = True
+                    BOOK_TITLE_VALUE = entry.get("translated_name") or entry.get("raw_name")
                 return
-        BOOK_TITLE_PRESENT = False
-        BOOK_TITLE_VALUE = None
+        if isinstance(context, GlossaryProgressContext):
+            context.book_title_present = False
+            context.book_title_value = None
+        else:
+            BOOK_TITLE_PRESENT = False
+            BOOK_TITLE_VALUE = None
 
     _refresh_book_title_flags()
-    progress_file = _resolved_glossary_progress_file()
+    progress_file = _resolved_glossary_progress_file(context)
+    _progress_file, output_file, positions, numbers, filenames, total_chapters = _progress_context_values(context)
 
     # Acquire lock to prevent concurrent writes
     with _progress_lock:
@@ -7280,9 +7371,9 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             try:
                 actual_num = int(existing_info.get("actual_num") or existing_info.get("chapter_num"))
             except (TypeError, ValueError):
-                actual_num = _glossary_chapter_actual_num(idx)
+                actual_num = _glossary_chapter_actual_num(idx, context=context)
             chapter_key = _glossary_chapter_key(idx)
-            chapter_file = _glossary_chapter_output_file(idx)
+            chapter_file = _glossary_chapter_output_file(idx, context=context)
             if not chapter_file and isinstance(existing_info, dict):
                 for fname_key in ("output_file", "original_basename", "chapter_file", "source_filename", "filename"):
                     chapter_file = _glossary_progress_filename(existing_info.get(fname_key, ""))
@@ -7351,18 +7442,20 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 chapters[_glossary_chapter_key(idx)] = existing_info
 
         progress_data = {
-            "book_title_present": bool(BOOK_TITLE_PRESENT),
+            "book_title_present": bool(context.book_title_present) if isinstance(context, GlossaryProgressContext) else bool(BOOK_TITLE_PRESENT),
             # Use value from entry if present, otherwise fallback to global translated title
-            "book_title": BOOK_TITLE_VALUE if BOOK_TITLE_PRESENT else BOOK_TITLE_TRANSLATED,
+            "book_title": (
+                context.book_title_value if context.book_title_present else context.book_title_translated
+            ) if isinstance(context, GlossaryProgressContext) else (BOOK_TITLE_VALUE if BOOK_TITLE_PRESENT else BOOK_TITLE_TRANSLATED),
             "chapters": chapters,
             "completed": completed_clean,
             "failed": failed_clean,
             "merged_indices": merged_clean,
-            "chapter_positions": {str(k): v for k, v in sorted((_GLOSSARY_CHAPTER_POSITIONS or {}).items())},
-            "chapter_numbers": {str(k): v for k, v in sorted((_GLOSSARY_CHAPTER_NUMBERS or {}).items())},
-            "chapter_filenames": {str(k): v for k, v in sorted((_GLOSSARY_CHAPTER_FILENAMES or {}).items())},
-            "chapter_count": _GLOSSARY_TOTAL_CHAPTERS,
-            "glossary_output_file": _GLOSSARY_OUTPUT_FILE,
+            "chapter_positions": {str(k): v for k, v in sorted((positions or {}).items())},
+            "chapter_numbers": {str(k): v for k, v in sorted((numbers or {}).items())},
+            "chapter_filenames": {str(k): v for k, v in sorted((filenames or {}).items())},
+            "chapter_count": total_chapters,
+            "glossary_output_file": output_file,
             "progress_schema_version": "2.0",
             "indexing": "chapter_index_zero_based",
             "qa_issues_found": {str(idx): issues for idx, issues in sorted(qa_issues_clean.items())},
