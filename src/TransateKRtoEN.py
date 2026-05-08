@@ -9547,6 +9547,98 @@ def _resolve_image_path_from_rename_map(img_src, image_translator):
     return None
 
 
+def _resolve_image_path_from_unpacked_epub(img_src, image_translator, actual_num=None, idx=None):
+    """Resolve image refs inside extracted EPUB layouts such as EPUB/text -> EPUB/media."""
+    if not img_src or not image_translator:
+        return None
+
+    output_dir = getattr(image_translator, 'output_dir', '') or ''
+    roots = []
+    for root in (output_dir,):
+        if root and root not in roots:
+            roots.append(root)
+    for env_key in ("EPUB_PATH", "VISION_OCR_SOURCE_EPUB", "QA_VISION_OCR_SOURCE_EPUB"):
+        env_path = os.getenv(env_key, "").strip()
+        if not env_path or not env_path.lower().endswith(".epub"):
+            continue
+        try:
+            base = os.path.splitext(os.path.abspath(env_path))[0]
+            if base.lower().endswith("_ocr"):
+                base = base[:-4]
+            if base and base not in roots:
+                roots.append(base)
+        except Exception:
+            continue
+    clean_src = str(img_src).split('?', 1)[0].split('#', 1)[0].replace('\\', '/')
+    basename = os.path.basename(clean_src)
+    candidates = []
+
+    for chapter_num in (actual_num,):
+        if chapter_num is None:
+            continue
+        try:
+            chapter_stem = f"ch{int(chapter_num):03d}"
+        except Exception:
+            chapter_stem = f"ch{chapter_num}"
+        chapter_paths = [
+            os.path.join(root, subdir, f'{chapter_stem}.{ext}')
+            for root in roots
+            for subdir in (os.path.join('EPUB', 'text'), 'text')
+            for ext in ('xhtml', 'html')
+        ]
+        for chapter_path in chapter_paths:
+            if not os.path.isfile(chapter_path):
+                continue
+            candidates.append(os.path.normpath(os.path.join(os.path.dirname(chapter_path), clean_src)))
+
+    generated_match = re.match(r'^ch(\d+)_img_(\d+)\.[^.]+$', basename, re.IGNORECASE)
+    if generated_match:
+        chapter_num = int(generated_match.group(1))
+        image_index = int(generated_match.group(2))
+    else:
+        chapter_num = actual_num
+        image_index = idx
+
+    if chapter_num is not None and image_index is not None:
+        try:
+            chapter_stem = f"ch{int(chapter_num):03d}"
+            image_index = int(image_index)
+        except Exception:
+            chapter_stem = f"ch{chapter_num}"
+        chapter_paths = [
+            os.path.join(root, subdir, f'{chapter_stem}.{ext}')
+            for root in roots
+            for subdir in (os.path.join('EPUB', 'text'), 'text')
+            for ext in ('xhtml', 'html')
+        ]
+        for chapter_path in chapter_paths:
+            if not os.path.isfile(chapter_path):
+                continue
+            try:
+                with open(chapter_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    soup = BeautifulSoup(f.read(), 'html.parser')
+                images = soup.find_all('img')
+                if 1 <= image_index <= len(images):
+                    source_src = str(images[image_index - 1].get('src', '') or '').split('?', 1)[0].split('#', 1)[0].replace('\\', '/')
+                    if source_src:
+                        candidates.append(os.path.normpath(os.path.join(os.path.dirname(chapter_path), source_src)))
+            except Exception:
+                continue
+
+    if basename:
+        candidates.extend(
+            os.path.join(root, subdir, basename)
+            for root in roots
+            for subdir in (os.path.join('EPUB', 'media'), 'media')
+        )
+
+    for candidate in candidates:
+        path = os.path.normpath(candidate)
+        if os.path.exists(path):
+            return path
+    return None
+
+
 def _resolve_chapter_image_path(img_src, image_translator, actual_num, idx):
     """Resolve an HTML image src to a local file path in the extracted output tree."""
     img_path = None
@@ -9592,10 +9684,18 @@ def _resolve_chapter_image_path(img_src, image_translator, actual_num, idx):
             mapped_path = _resolve_image_path_from_rename_map(img_src, image_translator)
             if mapped_path:
                 img_path = mapped_path
+            else:
+                unpacked_path = _resolve_image_path_from_unpacked_epub(img_src, image_translator, actual_num, idx)
+                if unpacked_path:
+                    img_path = unpacked_path
     else:
         mapped_path = _resolve_image_path_from_rename_map(img_src, image_translator)
         if mapped_path:
             img_path = mapped_path
+        else:
+            unpacked_path = _resolve_image_path_from_unpacked_epub(img_src, image_translator, actual_num, idx)
+            if unpacked_path:
+                img_path = unpacked_path
     return img_path if img_path and os.path.exists(img_path) else None
 
 

@@ -3,7 +3,7 @@
 # Bump APP_VERSION here; GUI titles, startup logs, splash text, and PyInstaller
 # spec APP_NAME values read from this module.
 
-APP_VERSION = "8.7.5"
+APP_VERSION = "8.7.6"
 VERSION_TAG = f"v{APP_VERSION}"
 APP_DISPLAY_NAME = f"Glossarion {VERSION_TAG}"
 APP_STARTUP_MESSAGE = f"Starting {APP_DISPLAY_NAME}..."
