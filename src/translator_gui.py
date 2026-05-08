@@ -526,11 +526,20 @@ if '--run-pdf-extraction' in sys.argv:
 
 
 # Enforce a 400 MB cap on app-local debug caches (Payloads/, http_requests/).
-# Runs at startup and again at exit. Both runs log a [CLEANUP] line per
-# folder when anything is actually deleted. See `_sweep_large_caches` for
-# rationale and resolution order.
+# Runs at startup (background thread) and again at exit. Both runs log a
+# [CLEANUP] line per folder when anything is actually deleted. See
+# `_sweep_large_caches` for rationale and resolution order.
+#
+# The startup sweep runs on a daemon thread so it never blocks the GUI from
+# appearing. After PDF extraction the Payloads/ folder can contain thousands
+# of debug dumps; walking + stat-ing them synchronously added 0.5-3+ seconds
+# of perceived startup lag.
 try:
-    _sweep_large_caches(phase="startup")
+    import threading as _sweep_threading
+    _sweep_threading.Thread(
+        target=_sweep_large_caches, args=("startup",), daemon=True,
+        name="CacheSweep-startup",
+    ).start()
 except Exception:
     pass
 try:

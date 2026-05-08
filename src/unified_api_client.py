@@ -145,7 +145,8 @@ except Exception as e:
 import re
 import base64
 import contextlib
-from PIL import Image
+# PIL Image import removed — unused in this module. The top-level import
+# added 200-500ms cold-start latency (plugin discovery + codec loading).
 import io
 import time
 import random
