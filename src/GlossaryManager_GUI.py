@@ -576,42 +576,62 @@ class GlossaryManagerMixin:
         notebook.setTabBar(NoWheelTabBar())
         main_layout.addWidget(notebook)
         
-        # Create and add tabs
+        # Create and add tabs — lazy initialization for tabs 1 and 2.
+        #
+        # Only the first visible tab (Balanced/Full Extraction) is built
+        # eagerly. The other two tabs are constructed on first switch,
+        # saving ~239 widget instantiations from blocking the dialog open.
         tabs = [
-            ("Balanced/Full Extraction", self._setup_manual_glossary_tab),
-            ("Automatic Glossary Generation", self._setup_auto_glossary_tab),
-            ("Glossary Editor", self._setup_glossary_editor_tab)
+            ("Balanced/Full Extraction", self._setup_manual_glossary_tab, False),   # scrollable
+            ("Automatic Glossary Generation", self._setup_auto_glossary_tab, False), # scrollable
+            ("Glossary Editor", self._setup_glossary_editor_tab, True),              # non-scrollable
         ]
-        
-        for tab_name, setup_method in tabs:
-            if tab_name == "Glossary Editor":
-                # Glossary Editor gets its own non-scrolling tab so the tree
-                # fills available space without double-scroll issues
+
+        # Track which deferred tabs have been built
+        _deferred_tab_setup = {}  # idx -> (setup_method, is_editor)
+
+        for tab_idx, (tab_name, setup_method, is_editor) in enumerate(tabs):
+            if is_editor:
                 tab_widget = QWidget()
                 notebook.addTab(tab_widget, tab_name)
-                setup_method(tab_widget)
             else:
-                # Other tabs: wrap in scroll area so long settings pages scroll
                 tab_scroll = QScrollArea()
                 tab_scroll.setWidgetResizable(True)
                 tab_scroll.setFrameShape(QScrollArea.NoFrame)
                 tab_inner = QWidget()
                 tab_scroll.setWidget(tab_inner)
                 notebook.addTab(tab_scroll, tab_name)
+
+            if tab_idx == 0:
+                # Build the first tab eagerly (it's immediately visible)
                 setup_method(tab_inner)
-        
-        # Re-run glossary editor path resolution when switching to Glossary Editor tab
-        try:
-            _editor_tab_idx = 2  # "Glossary Editor" is the 3rd tab
-            def _on_tab_switched(idx):
-                if idx == _editor_tab_idx and hasattr(self, '_refresh_glossary_editor'):
-                    try:
-                        self._refresh_glossary_editor()
-                    except Exception:
-                        pass
-            notebook.currentChanged.connect(_on_tab_switched)
-        except Exception:
-            pass
+            else:
+                # Defer construction until the user actually clicks this tab
+                _deferred_tab_setup[tab_idx] = (setup_method, is_editor)
+
+        _editor_tab_idx = 2  # "Glossary Editor" is the 3rd tab
+
+        def _on_tab_switched(idx):
+            # Lazy-build deferred tabs on first visit
+            if idx in _deferred_tab_setup:
+                setup_method, is_editor = _deferred_tab_setup.pop(idx)
+                try:
+                    if is_editor:
+                        target = notebook.widget(idx)
+                    else:
+                        target = notebook.widget(idx).widget()
+                    setup_method(target)
+                except Exception as e:
+                    print(f"⚠️ Deferred tab {idx} setup failed: {e}")
+
+            # Re-run glossary editor path resolution when switching to that tab
+            if idx == _editor_tab_idx and hasattr(self, '_refresh_glossary_editor'):
+                try:
+                    self._refresh_glossary_editor()
+                except Exception:
+                    pass
+
+        notebook.currentChanged.connect(_on_tab_switched)
         
         # Dialog Controls
         control_frame = QWidget()
