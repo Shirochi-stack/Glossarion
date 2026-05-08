@@ -102,8 +102,14 @@ def _resolve_special_file_lists(config: dict | None = None) -> tuple[list[str], 
 def _special_file_settings_signature(config: dict | None = None) -> str:
     """Stable signature used by caches that filter configured special files."""
     keywords, exact = _resolve_special_file_lists(config)
+    cfg = config or {}
+    _all_numbered = (
+        os.environ.get('TRANSLATE_ALL_NUMBERED_HTML', '0') == '1'
+        or cfg.get('translate_all_numbered_html', False)
+    )
     return hashlib.md5(
-        ("kw=" + ",".join(keywords) + "|exact=" + ",".join(exact)).encode("utf-8")
+        ("kw=" + ",".join(keywords) + "|exact=" + ",".join(exact)
+         + "|numbered=" + str(int(bool(_all_numbered)))).encode("utf-8")
     ).hexdigest()[:10]
 
 
@@ -124,12 +130,28 @@ def _special_file_stem(name: str) -> str:
 
 
 def _is_configured_special_file(name: str, config: dict | None = None) -> bool:
-    """Return True when *name* matches the configured special-file lists."""
+    """Return True when *name* matches the configured special-file lists.
+
+    When ``translate_all_numbered_html`` is enabled in *config*, files whose
+    stem contains a digit are NOT considered special — they will be translated
+    despite matching a skip keyword.
+    """
     stem = _special_file_stem(name)
     if not stem:
         return False
     keywords, exact = _resolve_special_file_lists(config)
-    return stem in exact or any(kw in stem for kw in keywords)
+    is_match = stem in exact or any(kw in stem for kw in keywords)
+    if not is_match:
+        return False
+    # Numbered file override
+    cfg = config or {}
+    _all_numbered = (
+        os.environ.get('TRANSLATE_ALL_NUMBERED_HTML', '0') == '1'
+        or cfg.get('translate_all_numbered_html', False)
+    )
+    if _all_numbered and re.search(r'\d', stem):
+        return False
+    return True
 
 
 def _epub_plain_chapter_text(html: str) -> str:
@@ -11491,10 +11513,10 @@ class BookDetailsDialog(QDialog):
         # as the same visual vocabulary as Other Settings (identical
         # indicator border / fill / hover colours + “✓” overlay).
         self._special_cb = _create_styled_checkbox(
-            "Show special files (nav, toc, title)")
+            "Show skipped files")
         self._special_cb.setToolTip(
-            "When enabled, shows files matching the special-file keywords "
-            "configured in Other Settings."
+            "When enabled, shows files that would be skipped during translation\n"
+            "(matching the special-file keywords configured in Other Settings)."
         )
         self._special_cb.setChecked(self._show_special_files)
         self._special_cb.toggled.connect(self._on_special_files_toggled)

@@ -11422,24 +11422,38 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self._preview_dialog = dlg
 
     def _is_special_file(self, filename):
-        """Check if a filename is a special file using configurable keyword lists."""
+        """Check if a filename is a special file using configurable keyword lists.
+        
+        When ``translate_all_numbered_html_var`` is enabled, files whose name
+        contains a digit are NOT considered special — they will be translated.
+        """
         name_lower = filename.lower()
         name_noext = os.path.splitext(name_lower)[0]
         # Check configured special-file patterns (substring match).
         # Non-numbered filenames are allowed to display as Ch.000 elsewhere, but that
         # must not make them special unless they match these configured lists.
         _kw_str = getattr(self, 'special_file_keywords_var', '')
+        is_keyword_match = False
         if _kw_str:
             _keywords = [k.strip().lower() for k in _kw_str.split(',') if k.strip()]
             if any(kw in name_noext for kw in _keywords):
-                return True
+                is_keyword_match = True
         # Exact-match keywords
-        _exact_str = getattr(self, 'special_file_exact_var', '')
-        if _exact_str:
-            _exact = [k.strip().lower() for k in _exact_str.split(',') if k.strip()]
-            if name_noext in _exact:
-                return True
-        return False
+        if not is_keyword_match:
+            _exact_str = getattr(self, 'special_file_exact_var', '')
+            if _exact_str:
+                _exact = [k.strip().lower() for k in _exact_str.split(',') if k.strip()]
+                if name_noext in _exact:
+                    is_keyword_match = True
+        if not is_keyword_match:
+            return False
+        # Numbered file override: if TRANSLATE_ALL_NUMBERED_HTML is enabled
+        # and the filename contains a digit, it's NOT special.
+        if getattr(self, 'translate_all_numbered_html_var', False):
+            import re as _re
+            if _re.search(r'\d', name_noext):
+                return False
+        return True
 
     def _get_spine_filenames_for_preview(self, epub_path, start, end, spine_mode, translate_special=False):
         """
@@ -14643,6 +14657,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var else "0",
             'DISABLE_AUTOMATIC_COVER_CREATION': "1" if getattr(self, 'disable_automatic_cover_creation_var', False) else "0",
             'TRANSLATE_SPECIAL_FILES': "1" if getattr(self, 'translate_special_files_var', False) else "0",
+            'TRANSLATE_ALL_NUMBERED_HTML': "1" if getattr(self, 'translate_all_numbered_html_var', False) else "0",
             'USE_P_TAG_TOC_FALLBACK': "1" if getattr(self, 'use_p_tag_toc_fallback_var', False) else "0",
             'DEDUPLICATE_TOC': "1" if getattr(self, 'deduplicate_toc_var', False) else "0",
             'DEDUPLICATE_TOC_USE_TRANSLATED': "1" if getattr(self, 'deduplicate_toc_use_translated_var', False) else "0",
@@ -22696,6 +22711,10 @@ Important rules:
             if hasattr(self, 'translate_special_files_var'):
                 self.config['translate_special_files'] = self.translate_special_files_var
 
+            # Translate all numbered HTML files override
+            if hasattr(self, 'translate_all_numbered_html_var'):
+                self.config['translate_all_numbered_html'] = self.translate_all_numbered_html_var
+
             # Custom special file keywords
             if hasattr(self, 'special_file_keywords_var'):
                 self.config['special_file_keywords'] = self.special_file_keywords_var
@@ -23468,6 +23487,7 @@ Important rules:
                 ('USE_P_TAG_TOC_FALLBACK', '1' if getattr(self, 'use_p_tag_toc_fallback_var', self.config.get('use_p_tag_toc_fallback', False)) else '0'),
                 # New: Translate special files (cover, nav, toc, message, etc.)
                 ('TRANSLATE_SPECIAL_FILES', '1' if getattr(self, 'translate_special_files_var', False) else '0'),
+                ('TRANSLATE_ALL_NUMBERED_HTML', '1' if getattr(self, 'translate_all_numbered_html_var', False) else '0'),
                 # Custom special file keywords
                 ('SPECIAL_FILE_KEYWORDS', getattr(self, 'special_file_keywords_var', '')),
                 ('SPECIAL_FILE_EXACT', getattr(self, 'special_file_exact_var', '')),

@@ -1,4 +1,4 @@
-﻿# TransateKRtoEN.py
+# TransateKRtoEN.py
 # -*- coding: utf-8 -*-
 import json
 import logging
@@ -16212,6 +16212,10 @@ def main(log_callback=None, stop_callback=None):
     
     # Check if special files translation is disabled
     translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
+    # When enabled, any file with a number in its filename is force-translated
+    # even if it matches a skip keyword (e.g. chapter_notice0001.xhtml).
+    # This is exclusive to the translation context.
+    _translate_all_numbered = os.getenv('TRANSLATE_ALL_NUMBERED_HTML', '0') == '1'
 
     _special_kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
     _special_keywords = (
@@ -16232,6 +16236,11 @@ def main(log_callback=None, stop_callback=None):
         if not name_noext:
             return False
         return name_noext in _special_exact or any(kw in name_noext for kw in _special_keywords)
+
+    def _has_number_in_filename(fname):
+        """Return True if the filename (without extension) contains a digit."""
+        name_noext = os.path.splitext(os.path.basename(str(fname or '')))[0]
+        return bool(re.search(r'\d', name_noext))
 
     def _is_non_special_zero_number_file(chapter, actual_num):
         try:
@@ -17518,11 +17527,14 @@ def main(log_callback=None, stop_callback=None):
                 content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
                 
                 # Skip configured special files if translation is disabled.
+                # When TRANSLATE_ALL_NUMBERED_HTML is on, files with a number
+                # in their filename bypass the skip (translation context only).
                 raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
                 if not translate_special and not is_text_file:
                     name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
                     if _is_configured_special_file(name):
-                        continue
+                        if not (_translate_all_numbered and _has_number_in_filename(name)):
+                            continue
                 
                 if start is not None:
                     if not _range_allows_chapter(c, actual_num, idx):
@@ -17655,11 +17667,14 @@ def main(log_callback=None, stop_callback=None):
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
             
             # Skip configured special files if translation is disabled.
+            # When TRANSLATE_ALL_NUMBERED_HTML is on, files with a number
+            # in their filename bypass the skip (translation context only).
             raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
             if not translate_special and not is_text_file:
                 name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
                 if _is_configured_special_file(name):
-                    continue
+                    if not (_translate_all_numbered and _has_number_in_filename(name)):
+                        continue
             
             if start is not None:
                 if not _range_allows_chapter(c, actual_num, idx):

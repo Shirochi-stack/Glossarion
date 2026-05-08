@@ -8676,6 +8676,35 @@ def _create_processing_options_section(self, parent):
         edit_keywords_btn.setText("Edit Keywords ▼" if visible else "Edit Keywords ▶")
     edit_keywords_btn.clicked.connect(_toggle_keywords_panel)
     
+    # Translate All Numbered HTML Files (translation-context only)
+    if not hasattr(self, 'translate_all_numbered_html_var'):
+        self.translate_all_numbered_html_var = self.config.get('translate_all_numbered_html', False)
+    
+    numbered_html_cb = self._create_styled_checkbox("Translate All Numbered HTML Files")
+    try:
+        numbered_html_cb.setChecked(bool(self.translate_all_numbered_html_var))
+    except Exception:
+        pass
+    def _on_numbered_html_toggle(checked):
+        try:
+            self.translate_all_numbered_html_var = bool(checked)
+            self.config['translate_all_numbered_html'] = bool(checked)
+            os.environ['TRANSLATE_ALL_NUMBERED_HTML'] = '1' if checked else '0'
+            if checked:
+                self.append_log("✅ Translate All Numbered HTML ENABLED - files with numbers in their name will be translated even if they match skip keywords")
+            else:
+                self.append_log("❌ Translate All Numbered HTML DISABLED - special file keywords apply normally")
+        except Exception:
+            pass
+    numbered_html_cb.toggled.connect(_on_numbered_html_toggle)
+    numbered_html_cb.setContentsMargins(0, 2, 0, 0)
+    section_v.addWidget(numbered_html_cb)
+    
+    numbered_html_desc = QLabel("Send any file with a number in its filename for translation,\neven if it matches a skip keyword (e.g. chapter_notice0001.xhtml).\nOnly affects the translation context — does not change extraction or compilation.")
+    numbered_html_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    numbered_html_desc.setContentsMargins(20, 0, 0, 5)
+    section_v.addWidget(numbered_html_desc)
+    
     # Separator before gallery/cover
     sep_special = QFrame()
     sep_special.setFrameShape(QFrame.HLine)

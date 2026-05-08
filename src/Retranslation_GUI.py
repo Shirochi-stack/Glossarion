@@ -634,11 +634,9 @@ class RetranslationMixin:
                             if item_id and href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):
                                 filename = os.path.basename(href)
                                 
-                                # Detect special files (files without numbers)
-                                import re
-                                # Check if filename contains any digits
-                                has_numbers = bool(re.search(r'\d', filename))
-                                is_special = not has_numbers
+                                # Detect special files using configured keyword lists
+                                # (mirrors TransateKRtoEN._is_configured_special_file)
+                                is_special = self._is_special_file(filename) if hasattr(self, '_is_special_file') else (not bool(re.search(r'\d', filename)))
                                 
                                 # Add all files - UI will handle filtering based on toggle
                                 manifest_chapters[item_id] = {
@@ -1259,10 +1257,7 @@ class RetranslationMixin:
                 original_basename = chapter_info.get("original_basename", "")
                 filename_to_check = original_basename if original_basename else actual_output_file
                 
-                # Check if filename contains any digits
-                import re
-                has_numbers = bool(re.search(r'\d', filename_to_check))
-                is_special = not has_numbers
+                is_special = self._is_special_file(filename_to_check) if hasattr(self, '_is_special_file') else (not bool(re.search(r'\d', filename_to_check)))
                 
                 # Extract chapter number - prioritize stored values
                 chapter_num = None
@@ -1382,9 +1377,9 @@ class RetranslationMixin:
         
         # Add toggle for showing special files
         from PySide6.QtWidgets import QCheckBox
-        show_special_files_cb = QCheckBox("Show special files (cover, nav, toc)")
+        show_special_files_cb = QCheckBox("Show skipped files")
         show_special_files_cb.setChecked(show_special_files[0])  # Preserve the current state
-        show_special_files_cb.setToolTip("When enabled, shows special files (files without chapter numbers like cover, nav, toc, info, message, etc.)")
+        show_special_files_cb.setToolTip("When enabled, shows files that would be skipped during translation\n(matching the special file keywords configured in Other Settings).")
         
         # Register this checkbox and checkmark with parent dialog for cross-tab syncing
         if parent_dialog and not hasattr(parent_dialog, '_all_toggle_checkboxes'):
@@ -5274,14 +5269,11 @@ class RetranslationMixin:
                         ext = ".txt" if file_path.endswith(".txt") else ".html"
                         actual_output_file = f"response_section_{actual_num}{ext}"
             
-            # Check if this is a special file (files without numbers)
+            # Check if this is a special file using configured keyword lists
             original_basename = chapter_info.get("original_basename", "")
             filename_to_check = original_basename if original_basename else actual_output_file
             
-            # Check if filename contains any digits
-            import re
-            has_numbers = bool(re.search(r'\d', filename_to_check))
-            is_special = not has_numbers
+            is_special = self._is_special_file(filename_to_check) if hasattr(self, '_is_special_file') else (not bool(re.search(r'\d', filename_to_check)))
             
             # Don't skip special files here - let the display logic handle hiding them
             # This ensures chapter_display_info contains all items, and the listbox
