@@ -19700,12 +19700,17 @@ class UnifiedClient:
         )
 
     def _send_openai_images_api(self, messages, base_url, response_name) -> UnifiedResponse:
-        """Call POST /v1/images/generations for GPT image models (gpt-image-1, dall-e-3, etc.).
+        """Call OpenAI Images API for GPT image models (gpt-image-1, chatgpt-image-latest, dall-e-3, etc.).
 
-        Extracts the text prompt from the last user message and sends it to the
-        OpenAI images generation endpoint, returning the image URL as the response.
+        If the messages contain an embedded input image (base64 image_url part from
+        _prepare_image_messages), this routes to POST /v1/images/edits with
+        multipart/form-data so the model can see and transform the input image.
+
+        If no input image is found, falls back to POST /v1/images/generations
+        for pure text-to-image generation.
         """
         import requests as _req
+        import io as _io
 
         model_lower = (self.model or '').lower()
 
@@ -19716,8 +19721,11 @@ class UnifiedClient:
                 effective_model = effective_model[len(pfx):]
                 break
 
-        # Extract prompt from last user message
+        # ── Extract prompt and input image from messages ─────────────────────
         prompt = ''
+        input_image_b64 = None   # raw base64 string (no data: prefix)
+        input_image_mime = None   # e.g. "image/png"
+
         for msg in reversed(messages):
             if msg.get('role') == 'user':
                 content = msg.get('content', '')
@@ -19725,10 +19733,23 @@ class UnifiedClient:
                     prompt = content
                 elif isinstance(content, list):
                     for part in content:
-                        if isinstance(part, dict) and part.get('type') == 'text':
+                        if not isinstance(part, dict):
+                            continue
+                        if part.get('type') == 'text' and not prompt:
                             prompt = part.get('text', '')
-                            break
+                        elif part.get('type') == 'image_url' and input_image_b64 is None:
+                            img_url = part.get('image_url', {})
+                            url_str = img_url.get('url', '') if isinstance(img_url, dict) else str(img_url)
+                            if url_str.startswith('data:'):
+                                # data:<mime>;base64,<data>
+                                try:
+                                    header, b64_data = url_str.split(',', 1)
+                                    input_image_mime = header.split(';')[0].replace('data:', '')
+                                    input_image_b64 = b64_data
+                                except Exception:
+                                    pass
                 break
+
         if not prompt:
             # Fall back to system message content
             for msg in messages:
@@ -19739,16 +19760,7 @@ class UnifiedClient:
             prompt = 'Generate an image'
 
         # ── Model family detection ──────────────────────────────────────────
-        # GPT-image series (gpt-image-1, gpt-image-2, …):
-        #   • Does NOT accept response_format — omit it entirely
-        #   • Always returns b64_json output
-        #   • quality: low | medium | high | auto
-        #   • size: WxH (multiples of 16) or 'auto'
-        # DALL-E series:
-        #   • Accepts response_format = url | b64_json
-        #   • dall-e-3 quality: standard | hd
-        # ───────────────────────────────────────────────────────────────────
-        is_gpt_image = 'gpt-image' in model_lower
+        is_gpt_image = 'gpt-image' in model_lower or 'chatgpt-image' in model_lower
         is_dalle2    = 'dall-e-2'  in model_lower
         is_dalle3    = 'dall-e-3'  in model_lower
         is_dalle     = is_dalle2 or is_dalle3
@@ -19768,42 +19780,85 @@ class UnifiedClient:
         else:
             image_quality = None  # dall-e-2 has no quality param
 
-        url = f"{base_url.rstrip('/')}/images/generations"
+        # ── Decide endpoint: /images/edits (has input image) vs /images/generations ──
+        has_input_image = input_image_b64 is not None
+        use_edits = has_input_image and (is_gpt_image or is_dalle2)  # dall-e-3 doesn't support edits
+
+        if use_edits:
+            url = f"{base_url.rstrip('/')}/images/edits"
+        else:
+            url = f"{base_url.rstrip('/')}/images/generations"
+
+        # Auth header (Content-Type is set automatically for multipart)
         headers = {
             'Authorization': f'Bearer {self.api_key}',
-            'Content-Type':  'application/json',
         }
-        payload: dict = {
-            'model':  effective_model,
-            'prompt': prompt,
-            'n':      image_n,
-        }
-
-        # size
-        if image_size and image_size != 'auto':
-            payload['size'] = image_size
-        elif is_gpt_image:
-            payload['size'] = 'auto'
-        elif is_dalle:
-            payload['size'] = '1024x1024'
-
-        # quality
-        if image_quality:
-            payload['quality'] = image_quality
-
-        # response_format: ONLY for DALL-E; GPT-image series rejects this parameter
-        if is_dalle:
-            payload['response_format'] = 'url'
 
         max_retries = self._get_max_retries()
         for attempt in range(max_retries):
             try:
                 if self._is_stop_requested():
                     raise UnifiedClientError('Operation cancelled by user', error_type='cancelled')
-                if not self._is_stop_requested():
-                    print(f"\U0001f5bc\ufe0f [OpenAI Images] {effective_model} | size={payload.get('size','auto')} | n={image_n}")
 
-                resp = _req.post(url, json=payload, headers=headers, timeout=180)
+                if use_edits:
+                    # ── /images/edits: multipart/form-data with image file ──
+                    image_bytes = base64.b64decode(input_image_b64)
+
+                    # Determine file extension from MIME
+                    ext_map = {'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif'}
+                    ext = ext_map.get(input_image_mime, 'png')
+                    mime = input_image_mime or 'image/png'
+
+                    if not self._is_stop_requested():
+                        print(f"\U0001f5bc\ufe0f [OpenAI Images Edit] {effective_model} | size={image_size} | input={len(image_bytes)/1024:.0f}KB ({mime})")
+
+                    files = {
+                        'image': (f'input.{ext}', _io.BytesIO(image_bytes), mime),
+                    }
+                    form_data: dict = {
+                        'model':  effective_model,
+                        'prompt': prompt,
+                        'n':      str(image_n),
+                    }
+                    # size
+                    if image_size and image_size != 'auto':
+                        form_data['size'] = image_size
+                    elif is_gpt_image:
+                        form_data['size'] = 'auto'
+                    elif is_dalle:
+                        form_data['size'] = '1024x1024'
+
+                    # quality (GPT-image only)
+                    if image_quality:
+                        form_data['quality'] = image_quality
+
+                    resp = _req.post(url, headers=headers, data=form_data, files=files, timeout=300)
+                else:
+                    # ── /images/generations: JSON payload (no input image) ──
+                    headers['Content-Type'] = 'application/json'
+                    payload: dict = {
+                        'model':  effective_model,
+                        'prompt': prompt,
+                        'n':      image_n,
+                    }
+                    # size
+                    if image_size and image_size != 'auto':
+                        payload['size'] = image_size
+                    elif is_gpt_image:
+                        payload['size'] = 'auto'
+                    elif is_dalle:
+                        payload['size'] = '1024x1024'
+                    # quality
+                    if image_quality:
+                        payload['quality'] = image_quality
+                    # response_format: ONLY for DALL-E; GPT-image series rejects this parameter
+                    if is_dalle:
+                        payload['response_format'] = 'url'
+
+                    if not self._is_stop_requested():
+                        print(f"\U0001f5bc\ufe0f [OpenAI Images] {effective_model} | size={payload.get('size','auto')} | n={image_n}")
+
+                    resp = _req.post(url, json=payload, headers=headers, timeout=180)
 
                 if resp.status_code == 429:
                     wait = min(2 ** attempt + random.uniform(0, 1), 30)
@@ -19841,7 +19896,8 @@ class UnifiedClient:
                 content_out = '\n'.join(urls) if urls else str(items[0])
 
                 if not self._is_stop_requested():
-                    print(f"\u2705 [OpenAI Images] Generated {len(urls)} image(s)")
+                    endpoint_label = 'Edit' if use_edits else 'Generated'
+                    print(f"\u2705 [OpenAI Images] {endpoint_label} {len(urls)} image(s)")
 
                 return UnifiedResponse(
                     content=content_out,
