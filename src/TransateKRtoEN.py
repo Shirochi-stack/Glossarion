@@ -9855,6 +9855,64 @@ def _vision_ocr_translation_glossary_progress_enabled():
     return mode in ("single_pass", "single-pass", "singlepass")
 
 
+def _clear_vision_ocr_source_env():
+    for key in (
+        "VISION_OCR_SOURCE_EPUB",
+        "VISION_OCR_SOURCE_PDF",
+        "GLOSSARY_COMPRESSION_SOURCE_EPUB",
+        "GLOSSARY_COMPRESSION_SOURCE_PDF",
+        "QA_VISION_OCR_SOURCE_EPUB",
+        "QA_VISION_OCR_SOURCE_PDF",
+        "VISION_GLOSSARY_SOURCE_FILE",
+    ):
+        os.environ.pop(key, None)
+
+
+def _vision_ocr_source_prepass_enabled_for_mode(config=None):
+    """Choose whether Vision mode builds the intermediate *_OCR/_QA source file.
+
+    auto/default preserves the newer source-prepass path for glossary modes that
+    use it directly, while single-pass/off/no-glossary keep the older direct
+    OCR -> translation path. Users can force either behavior with
+    VISION_OCR_SOURCE_PREPASS=1/0.
+    """
+    if not _vision_ocr_mode_enabled():
+        return False
+    value = os.getenv("VISION_OCR_SOURCE_PREPASS", "auto").strip().lower()
+    if value in ("1", "true", "yes", "on", "source", "qa", "new"):
+        return True
+    if value in ("0", "false", "no", "off", "direct", "old"):
+        return False
+    mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower()
+    return mode in ("minimal", "balanced", "full")
+
+
+def _vision_chapter_allowed_by_current_range(chapter, idx):
+    if isinstance(chapter, dict) and chapter.get("_range_allowed_for_translation") is False:
+        return False
+    rng = os.getenv("CHAPTER_RANGE", "").strip()
+    if not rng or not re.match(r"^\d+\s*-\s*\d+$", rng):
+        return True
+    try:
+        start_num, end_num = map(int, re.split(r"\s*-\s*", rng, 1))
+    except Exception:
+        return True
+    if os.getenv("USE_SPINE_ORDER", "0") == "1" and isinstance(chapter, dict):
+        spine_pos = chapter.get("spine_order")
+        if spine_pos is None:
+            spine_pos = chapter.get("opf_spine_position")
+        try:
+            if spine_pos is not None:
+                return start_num <= int(spine_pos) <= end_num
+        except (TypeError, ValueError):
+            pass
+    try:
+        actual_num = chapter.get("actual_chapter_num", chapter.get("num", idx + 1)) if isinstance(chapter, dict) else idx + 1
+        return start_num <= int(float(actual_num)) <= end_num
+    except (TypeError, ValueError):
+        return True
+
+
 def _vision_ocr_glossary_should_skip_special_chapter(chapter):
     """Return True for cover/nav/toc-style EPUB files that should not be OCRed for glossary."""
     if not isinstance(chapter, dict):
@@ -9973,6 +10031,8 @@ def run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, c
             if check_stop_fn and check_stop_fn():
                 result["stopped"] = True
                 return result
+            if not _vision_chapter_allowed_by_current_range(chapter, idx):
+                return result
 
             actual_num = chapter.get('actual_chapter_num', chapter.get('num', idx + 1))
             filename = (
@@ -10035,7 +10095,14 @@ def run_vision_ocr_source_epub_prepass(chapters, image_translator, input_path, c
             result["error"] = str(e)
         return result
 
-    chapter_jobs = list(enumerate(chapters or []))
+    chapter_jobs = [
+        (idx, chapter)
+        for idx, chapter in enumerate(chapters or [])
+        if _vision_chapter_allowed_by_current_range(chapter, idx)
+    ]
+    if not chapter_jobs:
+        print("📖 Vision OCR Source EPUB Prepass: no chapters inside selected range")
+        return None
     chapter_batch_enabled = os.getenv("BATCH_TRANSLATION", "0").strip().lower() in ("1", "true", "yes", "on")
     try:
         requested_chapter_workers = int(os.getenv("BATCH_SIZE", "1") or "1")
@@ -10270,6 +10337,21 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
         and os.path.splitext(name)[1].lower() in image_exts
     ]
     image_paths.sort(key=_natural_pdf_image_key)
+    rng = os.getenv("CHAPTER_RANGE", "").strip()
+    if rng and re.match(r"^\d+\s*-\s*\d+$", rng):
+        try:
+            start_page, end_page = map(int, re.split(r"\s*-\s*", rng, 1))
+            indexed_paths = [
+                (idx, path)
+                for idx, path in enumerate(image_paths, 1)
+                if start_page <= idx <= end_page
+            ]
+            skipped_count = len(image_paths) - len(indexed_paths)
+            image_paths = [path for _idx, path in indexed_paths]
+            if skipped_count:
+                print(f"📖 Vision OCR source PDF: skipped {skipped_count} page image(s) outside range {start_page}-{end_page}")
+        except Exception:
+            pass
     if not image_paths:
         print(f"⚠️ Vision OCR source PDF prepass found no images in: {images_dir}")
         return None
@@ -10570,6 +10652,8 @@ def _vision_minimal_ocr_glossary_enabled(config=None):
     output_mode = (getattr(config, "OUTPUT_MODE", None) or os.getenv("OUTPUT_MODE", "")).strip().lower()
     if output_mode != "vision":
         return False
+    if not _vision_ocr_source_prepass_enabled_for_mode(config):
+        return False
     return os.getenv("VISION_MINIMAL_GLOSSARY_USE_OCR_SOURCE", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
@@ -10839,6 +10923,8 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             if check_stop_fn and check_stop_fn():
                 stopped = True
                 break
+            if not _vision_chapter_allowed_by_current_range(chapter, idx):
+                continue
             actual_num = chapter.get('actual_chapter_num', chapter.get('num', idx + 1))
             if _vision_ocr_glossary_should_skip_special_chapter(chapter):
                 skipped_name = (
@@ -11038,6 +11124,8 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
             if check_stop_fn and check_stop_fn():
                 stopped = True
                 break
+            if not _vision_chapter_allowed_by_current_range(chapter, idx):
+                continue
             actual_num = chapter.get('actual_chapter_num', chapter.get('num', idx + 1))
             if _vision_ocr_glossary_should_skip_special_chapter(chapter):
                 skipped_name = (
@@ -11150,6 +11238,8 @@ def run_vision_glossary_prepass(chapters, image_translator, check_stop_fn=None):
         if check_stop_fn and check_stop_fn():
             stopped = True
             break
+        if not _vision_chapter_allowed_by_current_range(chapter, idx):
+            continue
         actual_num = chapter.get('actual_chapter_num', chapter.get('num', idx + 1))
         if _vision_ocr_glossary_should_skip_special_chapter(chapter):
             skipped_name = (
@@ -16009,6 +16099,7 @@ def main(log_callback=None, stop_callback=None):
         
         # Now we can safely use actual_num
         actual_num = c['actual_chapter_num']
+        c['_range_allowed_for_translation'] = _range_allows_chapter(c, actual_num, idx)
         
         # Skip configured special files if translation is disabled.
         # Display/progress chapter 0 is cosmetic and must not imply special-file skipping.
@@ -16024,7 +16115,7 @@ def main(log_callback=None, stop_callback=None):
                 continue
 
         if start is not None:
-            range_match = _range_allows_chapter(c, c['actual_chapter_num'], idx)
+            range_match = c.get('_range_allowed_for_translation', True)
             if not range_match:
                 # Track skipped chapters for summary (don't print individually)
                 if not hasattr(config, '_range_skipped_chapters'):
@@ -16112,10 +16203,16 @@ def main(log_callback=None, stop_callback=None):
                 print(f"   • {file}")
 
     if image_translator is not None:
-        try:
-            run_vision_ocr_source_prepass(chapters, image_translator, input_path, out, check_stop, progress_manager=progress_manager)
-        except Exception as e:
-            print(f"⚠️ Vision OCR source prepass failed: {e}")
+        if _vision_ocr_source_prepass_enabled_for_mode(config):
+            try:
+                run_vision_ocr_source_prepass(chapters, image_translator, input_path, out, check_stop, progress_manager=progress_manager)
+            except Exception as e:
+                print(f"⚠️ Vision OCR source prepass failed: {e}")
+        else:
+            _clear_vision_ocr_source_env()
+            if _vision_ocr_mode_enabled():
+                mode = (os.getenv("AUTO_GLOSSARY_MODE") or "off").strip().lower()
+                print(f"📖 Vision OCR source prepass disabled for auto glossary mode '{mode}' — using direct OCR → translation")
         try:
             if _vision_minimal_ocr_glossary_enabled(config):
                 source_file = os.environ.get("VISION_GLOSSARY_SOURCE_FILE") or os.environ.get("VISION_OCR_SOURCE_EPUB") or os.environ.get("VISION_OCR_SOURCE_PDF")

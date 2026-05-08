@@ -1620,6 +1620,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.vision_ocr_batch_translation_var = self.config.get('vision_ocr_batch_translation', True)
         self.vision_ocr_batch_size_var = str(self.config.get('vision_ocr_batch_size', '10'))
         self.vision_ocr_skip_translation_var = self.config.get('vision_ocr_skip_translation', False)
+        self.vision_ocr_source_prepass_var = str(self.config.get('vision_ocr_source_prepass', 'auto'))
         os.environ['VISION_OCR_SKIP_TRANSLATION'] = '1' if self.vision_ocr_skip_translation_var else '0'
         self.enable_gemini_thinking_var = self.config.get('enable_gemini_thinking', True)
         self.thinking_budget_var = str(self.config.get('thinking_budget', '-1'))
@@ -14558,6 +14559,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'VISION_OCR_BATCH_TRANSLATION': '1' if _bool_setting(getattr(self, 'vision_ocr_batch_translation_var', None), self.config.get('vision_ocr_batch_translation', True)) else '0',
             'VISION_OCR_BATCH_SIZE': str(getattr(self, 'vision_ocr_batch_size_var', self.config.get('vision_ocr_batch_size', '10'))),
             'VISION_OCR_SKIP_TRANSLATION': '1' if _bool_setting(getattr(self, 'vision_ocr_skip_translation_var', None), self.config.get('vision_ocr_skip_translation', False)) else '0',
+            'VISION_OCR_SOURCE_PREPASS': str(getattr(self, 'vision_ocr_source_prepass_var', self.config.get('vision_ocr_source_prepass', 'auto')) or 'auto'),
             'ENABLE_REFINEMENT_OUTPUT_MODE': "1" if output_mode == 'refinement' else "0",
             'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var else "0",
@@ -16016,6 +16018,7 @@ Important rules:
                     'GLOSSARY_MAX_TITLES': str(self.glossary_max_titles_var),
                     'CONTEXT_WINDOW_SIZE': str(self.context_window_size_var),
                     'GLOSSARY_SHARED_DIR': os.path.join(_get_app_dir(), 'Glossary'),
+                    'VISION_OCR_SOURCE_PREPASS': str(self.config.get('vision_ocr_source_prepass', 'auto') or 'auto'),
                     'ENABLE_AUTO_GLOSSARY': "1" if (self.config.get('auto_glossary_mode', 'off') == 'minimal' or (self.config.get('auto_glossary_mode') is None and self.enable_auto_glossary_var)) else "0",
                     'AUTO_GLOSSARY_MODE': self.config.get('auto_glossary_mode', 'off'),
                     'SINGLE_PASS_GLOSSARY_MODE': '1' if self.config.get('auto_glossary_mode', 'off') == 'single_pass' else '',
@@ -22370,6 +22373,7 @@ Important rules:
                 ('single_api_image_chunks', ['single_api_image_chunks_var'], False, bool),
                 ('vision_ocr_batch_translation', ['vision_ocr_batch_translation_var'], True, bool),
                 ('vision_ocr_skip_translation', ['vision_ocr_skip_translation_var'], False, bool),
+                ('vision_ocr_source_prepass', ['vision_ocr_source_prepass_var'], 'auto', str),
                 ('use_custom_openai_endpoint', ['use_custom_openai_endpoint_var'], False, bool),
                 ('disable_chapter_merging', ['disable_chapter_merging_var'], False, bool),
                 # Request merging settings
@@ -22834,6 +22838,7 @@ Important rules:
                     ('ADD_ADDITIONAL_GLOSSARY', '1' if self.config.get('add_additional_glossary') else '0'),
                     ('ADDITIONAL_GLOSSARY_PATH', self.config.get('additional_glossary_path', '')),
                     ('GLOSSARY_SHARED_DIR', os.path.join(_get_app_dir(), 'Glossary')),
+                    ('VISION_OCR_SOURCE_PREPASS', str(self.config.get('vision_ocr_source_prepass', 'auto') or 'auto')),
                     ('ENABLE_AUTO_GLOSSARY', '1' if self.config.get('auto_glossary_mode', 'off') == 'minimal' else '0'),
                     ('AUTO_GLOSSARY_MODE', self.config.get('auto_glossary_mode', 'off')),
                     ('SINGLE_PASS_GLOSSARY_MODE', '1' if self.config.get('auto_glossary_mode', 'off') == 'single_pass' else ''),
@@ -23061,6 +23066,7 @@ Important rules:
             'VISION_OCR_FUZZY_CHUNK_DEDUPE_MIN_LENGTH': 'Fuzzy OCR chunk dedupe minimum length',
             'VISION_OCR_BATCH_TRANSLATION': 'Batch Vision OCR chunk requests',
             'VISION_OCR_BATCH_SIZE': 'Vision OCR batch worker count',
+            'VISION_OCR_SOURCE_PREPASS': 'Vision OCR source prepass mode (auto/on/off)',
             
             # Metadata and Headers
             'TRANSLATE_METADATA_FIELDS': 'Metadata fields to translate (JSON)',
@@ -23521,6 +23527,7 @@ Important rules:
                 ('VISION_OCR_BATCH_TRANSLATION', '1' if _bool_value(getattr(self, 'vision_ocr_batch_translation_var', True)) else '0'),
                 ('VISION_OCR_BATCH_SIZE', str(getattr(self, 'vision_ocr_batch_size_var', '10'))),
                 ('VISION_OCR_SKIP_TRANSLATION', '1' if _bool_value(getattr(self, 'vision_ocr_skip_translation_var', False)) else '0'),
+                ('VISION_OCR_SOURCE_PREPASS', str(getattr(self, 'vision_ocr_source_prepass_var', self.config.get('vision_ocr_source_prepass', 'auto')) or 'auto')),
                 ('ENABLE_IMAGE_OUTPUT_MODE', self._get_allowed_image_output_mode()),
                 ('ENABLE_VIDEO_OUTPUT_MODE', self._get_allowed_video_output_mode()),
                 ('ENABLE_AUDIO_OUTPUT_MODE', '1' if output_mode == 'audio' else '0'),
