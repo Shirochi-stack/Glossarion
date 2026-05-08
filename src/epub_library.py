@@ -105,7 +105,7 @@ def _special_file_settings_signature(config: dict | None = None) -> str:
     cfg = config or {}
     _all_numbered = (
         os.environ.get('TRANSLATE_ALL_NUMBERED_HTML', '0') == '1'
-        or cfg.get('translate_all_numbered_html', False)
+        or cfg.get('translate_all_numbered_html', True)
     )
     return hashlib.md5(
         ("kw=" + ",".join(keywords) + "|exact=" + ",".join(exact)
@@ -147,7 +147,7 @@ def _is_configured_special_file(name: str, config: dict | None = None) -> bool:
     cfg = config or {}
     _all_numbered = (
         os.environ.get('TRANSLATE_ALL_NUMBERED_HTML', '0') == '1'
-        or cfg.get('translate_all_numbered_html', False)
+        or cfg.get('translate_all_numbered_html', True)
     )
     if _all_numbered and re.search(r'\d', stem):
         return False

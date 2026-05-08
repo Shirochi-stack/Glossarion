@@ -8678,7 +8678,7 @@ def _create_processing_options_section(self, parent):
     
     # Translate All Numbered HTML Files (translation-context only)
     if not hasattr(self, 'translate_all_numbered_html_var'):
-        self.translate_all_numbered_html_var = self.config.get('translate_all_numbered_html', False)
+        self.translate_all_numbered_html_var = self.config.get('translate_all_numbered_html', True)
     
     numbered_html_cb = self._create_styled_checkbox("Translate All Numbered HTML Files")
     try:

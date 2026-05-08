@@ -3543,6 +3543,8 @@ Recent translations to summarize:
         _DEFAULT_SPECIAL_EXACT = 'index, glossary, glossary_extension'
         self.special_file_keywords_var = self.config.get('special_file_keywords', _DEFAULT_SPECIAL_KEYWORDS)
         self.special_file_exact_var = self.config.get('special_file_exact', _DEFAULT_SPECIAL_EXACT)
+        # Numbered HTML override (must be available before Progress Manager opens)
+        self.translate_all_numbered_html_var = self.config.get('translate_all_numbered_html', True)
         
         # String variables
         str_vars = [
@@ -11428,7 +11430,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
         contains a digit are NOT considered special — they will be translated.
         """
         name_lower = filename.lower()
-        name_noext = os.path.splitext(name_lower)[0]
+        base = os.path.basename(name_lower)
+        # Strip response_ prefix (output filenames use this convention)
+        if base.startswith("response_"):
+            base = base[len("response_"):]
+        name_noext = os.path.splitext(base)[0]
         # Check configured special-file patterns (substring match).
         # Non-numbered filenames are allowed to display as Ch.000 elsewhere, but that
         # must not make them special unless they match these configured lists.

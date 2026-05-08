@@ -3019,7 +3019,14 @@ class RetranslationMixin:
                         # Check if this item is marked as special
                         item_data = item.data(Qt.UserRole)
                         if item_data and isinstance(item_data, dict):
-                            is_special = item_data.get('is_special', False)
+                            # Dynamically re-evaluate is_special to respect current
+                            # translate_all_numbered_html setting.
+                            _info = item_data.get('info') or {}
+                            _fname = _info.get('original_filename', '') or _info.get('output_file', '') or _info.get('key', '')
+                            if _fname and hasattr(self, '_is_special_file'):
+                                is_special = self._is_special_file(_fname)
+                            else:
+                                is_special = item_data.get('is_special', False)
                             # Show all items if toggle is on, hide special files if toggle is off
                             item.setHidden(is_special and not show_special_files[0])
         
@@ -3308,6 +3315,10 @@ class RetranslationMixin:
             listbox.addItem(item)
             
             # Then hide special files if toggle is off (must be done after adding to listbox)
+            # Dynamically re-evaluate is_special to respect current settings
+            _fname = info.get('original_filename', '') or info.get('output_file', '') or info.get('key', '')
+            if _fname and hasattr(self, '_is_special_file'):
+                is_special = self._is_special_file(_fname)
             if is_special and not show_special_files[0]:
                 item.setHidden(True)
         
@@ -4832,7 +4843,13 @@ class RetranslationMixin:
                         if not item:
                             continue
                         meta = item.data(Qt.UserRole) or {}
-                        is_special = meta.get('is_special', False)
+                        # Dynamically re-evaluate is_special to respect current settings
+                        _info = meta.get('info') or {}
+                        _fname = _info.get('original_filename', '') or _info.get('output_file', '') or _info.get('key', '')
+                        if _fname and hasattr(self, '_is_special_file'):
+                            is_special = self._is_special_file(_fname)
+                        else:
+                            is_special = meta.get('is_special', False)
                         item.setHidden(is_special and not show_special)
                 data['show_special_files_state'] = show_special
             except Exception:
@@ -5922,6 +5939,10 @@ class RetranslationMixin:
                 item.setText(build_display(info, max_original_len, max_output_len))
                 apply_item_visuals(item, display_status)
                 is_special = info.get('is_special', False)
+                # Dynamically re-evaluate is_special to respect current settings
+                _fname = info.get('original_filename', '') or info.get('output_file', '') or info.get('key', '')
+                if _fname and hasattr(self, '_is_special_file'):
+                    is_special = self._is_special_file(_fname)
                 item.setData(Qt.UserRole, {'is_special': is_special, 'info': info, 'progress_key': info.get('progress_key')})
                 item.setData(Qt.UserRole + 2, display_status)
                 item.setHidden(is_special and not show_special_files)
@@ -5937,6 +5958,10 @@ class RetranslationMixin:
                 display_status = self._progress_display_status(info, data)
                 apply_item_visuals(item, display_status)
                 is_special = info.get('is_special', False)
+                # Dynamically re-evaluate is_special to respect current settings
+                _fname = info.get('original_filename', '') or info.get('output_file', '') or info.get('key', '')
+                if _fname and hasattr(self, '_is_special_file'):
+                    is_special = self._is_special_file(_fname)
                 item.setData(Qt.UserRole, {'is_special': is_special, 'info': info, 'progress_key': info.get('progress_key')})
                 item.setData(Qt.UserRole + 2, display_status)
                 item.setHidden(is_special and not show_special_files)
