@@ -3682,12 +3682,12 @@ class MangaTranslationTab(QObject):
         # Add Advanced Settings button to the tab bar's corner
         advanced_settings_btn_corner = QPushButton("⚙️ Advanced Settings")
         advanced_settings_btn_corner.clicked.connect(self._open_advanced_settings)
-        advanced_settings_btn_corner.setMinimumHeight(28)
+        advanced_settings_btn_corner.setMinimumHeight(34)
         advanced_settings_btn_corner.setStyleSheet("""
             QPushButton {
                 background-color: #3b82f6;
                 color: white;
-                padding: 8px 16px;
+                padding: 7px 16px 9px 16px;
                 margin-top: 2px;
                 margin-bottom: 2px;
                 font-weight: bold;
@@ -7626,9 +7626,46 @@ class MangaTranslationTab(QObject):
             return list(run_files)
         return list(getattr(self, 'selected_files', []) or [])
 
+    def _update_manga_preview_image_list_for_range(self) -> None:
+        """Keep the preview thumbnails aligned with the active visible-order range."""
+        if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget:
+            return
+        files, error = self._manga_range_filtered_files()
+        if error:
+            files = list(getattr(self, 'selected_files', []) or [])
+
+        current_path = getattr(self.image_preview_widget, 'current_image_path', None)
+        self.image_preview_widget.set_image_list(files)
+
+        if not files:
+            return
+        if current_path in files:
+            try:
+                if hasattr(self.image_preview_widget, '_update_thumbnail_selection'):
+                    self.image_preview_widget._update_thumbnail_selection(current_path)
+            except Exception:
+                pass
+            return
+
+        first_path = files[0]
+        try:
+            if first_path in self.selected_files and hasattr(self, 'file_listbox') and self.file_listbox:
+                target_row = self.selected_files.index(first_path)
+                if self.file_listbox.currentRow() != target_row:
+                    self.file_listbox.setCurrentRow(target_row)
+                elif os.path.exists(first_path):
+                    self._current_image_path = first_path
+                    self.image_preview_widget.load_image(first_path)
+            elif os.path.exists(first_path):
+                self._current_image_path = first_path
+                self.image_preview_widget.load_image(first_path)
+        except Exception as exc:
+            print(f"[IMAGE_RANGE_PREVIEW] Failed to sync preview: {exc}")
+
     def _on_manga_image_range_changed(self, text: str = "") -> None:
         self.manga_image_range_value = str(text or '').strip()
         self._update_manga_image_range_display()
+        self._update_manga_preview_image_list_for_range()
 
     def _update_manga_image_range_display(self) -> None:
         """Grey out rows skipped by the current visible-order image range."""
@@ -10409,7 +10446,7 @@ class MangaTranslationTab(QObject):
         
         # Update thumbnail preview list
         if hasattr(self, 'image_preview_widget'):
-            self.image_preview_widget.set_image_list(self.selected_files)
+            self._update_manga_preview_image_list_for_range()
         
         # Persist the file list
         self._persist_selected_files()
@@ -10492,7 +10529,7 @@ class MangaTranslationTab(QObject):
         
         # Update thumbnail preview list
         if hasattr(self, 'image_preview_widget'):
-            self.image_preview_widget.set_image_list(self.selected_files)
+            self._update_manga_preview_image_list_for_range()
         self._update_manga_image_range_display()
         
         # Persist the file list
@@ -10634,7 +10671,7 @@ class MangaTranslationTab(QObject):
         
         # Update thumbnail preview list
         if hasattr(self, 'image_preview_widget'):
-            self.image_preview_widget.set_image_list(self.selected_files)
+            self._update_manga_preview_image_list_for_range()
         
         # Log the action
         direction = 'descending' if reverse else 'ascending'
@@ -10683,7 +10720,7 @@ class MangaTranslationTab(QObject):
             
             # Update thumbnail preview list
             if hasattr(self, 'image_preview_widget'):
-                self.image_preview_widget.set_image_list(self.selected_files)
+                self._update_manga_preview_image_list_for_range()
             
             print(f"[FILE_REORDER] Files reordered via drag-and-drop")
             
@@ -10736,7 +10773,7 @@ class MangaTranslationTab(QObject):
             
             # Update thumbnail preview list
             if hasattr(self, 'image_preview_widget'):
-                self.image_preview_widget.set_image_list(self.selected_files)
+                self._update_manga_preview_image_list_for_range()
             self._update_manga_image_range_display()
             self._refresh_manga_selection_status()
             
