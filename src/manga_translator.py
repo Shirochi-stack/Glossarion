@@ -10420,7 +10420,7 @@ class MangaTranslator:
             
             # MIGRATION: Ensure manga_ prefixed model path keys exist for ONNX methods
             # This fixes compatibility where model paths were saved without manga_ prefix
-            for method_variant in ['anime', 'anime_onnx', 'lama', 'lama_onnx', 'aot', 'aot_onnx']:
+            for method_variant in ['anime', 'anime_onnx', 'lama', 'lama_onnx', 'aot', 'aot_onnx', 'qwen_image_edit']:
                 non_prefixed_key = f'{method_variant}_model_path'
                 prefixed_key = f'manga_{method_variant}_model_path'
                 # If we have the non-prefixed but not the prefixed, migrate it

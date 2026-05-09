@@ -160,8 +160,16 @@ LAMA_JIT_MODELS = {
         'md5': 'de31ffa5ba26916b8ea35319f6c12151ff9654d4261bccf0583a69bb095315f9',
         'name': 'Anime/Manga ONNX (Dynamic)',
         'is_onnx': True  # Flag to indicate this is ONNX
+    },
+    'qwen_image_edit': {
+        'repo_id': 'Qwen/Qwen-Image-Edit-2511',
+        'name': 'Qwen-Image-Edit 2511',
+        'is_diffusers': True,
+        'local_dir_name': 'qwen-image-edit-2511'
     }
 }
+
+QWEN_IMAGE_EDIT_METHODS = {'qwen_image_edit'}
 
 
 def norm_img(img: np.ndarray) -> np.ndarray:
@@ -629,6 +637,7 @@ class LocalInpainter:
         'anime': ('Anime/Manga Inpainting', FFCInpaintModel),
         'anime_onnx': ('Anime ONNX (Fast)', FFCInpaintModel),
         'lama_official': ('Official LaMa', FFCInpaintModel),
+        'qwen_image_edit': ('Qwen-Image-Edit 2511', FFCInpaintModel),
     }
     
     def __init__(self, config_path="config.json", enable_worker_process=None):
@@ -2147,6 +2156,9 @@ class LocalInpainter:
             info = LAMA_JIT_MODELS.get(method)
             if not info:
                 return None
+            if info.get('is_diffusers'):
+                local_dir = os.path.join(CACHE_DIR, info.get('local_dir_name') or info['repo_id'].replace('/', '--'))
+                return local_dir if os.path.exists(os.path.join(local_dir, 'model_index.json')) else None
             # Prefer HF repo mapping
             if 'repo_id' in info and 'filename' in info:
                 candidate = os.path.join(CACHE_DIR, info['filename'])
@@ -2177,8 +2189,23 @@ class LocalInpainter:
                     self.progress_queue.put(('model_file_status', f"📥 Downloading {model_info['name']}..."))
                 
                 model_path = None
+                if model_info.get('is_diffusers'):
+                    from huggingface_hub import snapshot_download
+                    local_dir = os.path.join(
+                        CACHE_DIR,
+                        model_info.get('local_dir_name') or model_info['repo_id'].replace('/', '--')
+                    )
+                    os.makedirs(local_dir, exist_ok=True)
+                    logger.info(f"Downloading diffusers snapshot from Hugging Face: {model_info['repo_id']}")
+                    if hasattr(self, 'progress_queue'):
+                        self.progress_queue.put(('model_file_status', f"Downloading {model_info['name']} snapshot..."))
+                    model_path = snapshot_download(
+                        repo_id=model_info['repo_id'],
+                        local_dir=local_dir,
+                        local_dir_use_symlinks=False
+                    )
                 # Prefer HuggingFace download if repo info is available
-                if 'repo_id' in model_info and 'filename' in model_info:
+                elif 'repo_id' in model_info and 'filename' in model_info:
                     try:
                         model_path = download_model(
                             repo_id=model_info['repo_id'],
@@ -2357,6 +2384,251 @@ class LocalInpainter:
         # Return immediately to keep GUI responsive
         return None
     
+    def _is_qwen_image_edit_method(self, method: str) -> bool:
+        return str(method or '').lower() in QWEN_IMAGE_EDIT_METHODS
+
+    def _get_qwen_torch_dtype(self):
+        dtype_name = os.environ.get('QWEN_IMAGE_EDIT_DTYPE', 'bf16' if self.use_gpu else 'fp32').lower()
+        if dtype_name in ('fp16', 'float16', 'half'):
+            return torch.float16
+        if dtype_name in ('bf16', 'bfloat16'):
+            return torch.bfloat16
+        return torch.float32
+
+    def _load_qwen_image_edit_model(self, model_path: str, force_reload: bool = False) -> bool:
+        """Load Qwen-Image-Edit as a diffusers pipeline."""
+        try:
+            model_ref = (
+                model_path
+                or os.environ.get('QWEN_IMAGE_EDIT_MODEL')
+                or LAMA_JIT_MODELS['qwen_image_edit']['repo_id']
+            )
+            current_ref = getattr(self, '_qwen_image_edit_model_ref', None) or self.config.get('qwen_image_edit_model_path')
+            if (
+                self.model_loaded
+                and self._is_qwen_image_edit_method(self.current_method)
+                and self.model is not None
+                and not force_reload
+                and (not model_path or current_ref == model_ref)
+            ):
+                return True
+
+            try:
+                import diffusers
+            except ImportError:
+                logger.error("diffusers is required for Qwen-Image-Edit. Install with: pip install diffusers accelerate")
+                return False
+
+            dtype = self._get_qwen_torch_dtype()
+            pipeline_cls = (
+                getattr(diffusers, 'QwenImageEditPlusPipeline', None)
+                or getattr(diffusers, 'QwenImageEditPipeline', None)
+                or getattr(diffusers, 'DiffusionPipeline')
+            )
+
+            logger.info(f"Loading Qwen-Image-Edit pipeline from: {model_ref}")
+            last_error = None
+            pipe = None
+            used_kwargs = {}
+            device_map = os.environ.get('QWEN_IMAGE_EDIT_DEVICE_MAP', 'cuda' if self.use_gpu else '').strip()
+            load_kwargs = []
+            for dtype_key in ('torch_dtype', 'dtype'):
+                if device_map:
+                    load_kwargs.append({dtype_key: dtype, 'device_map': device_map})
+                load_kwargs.append({dtype_key: dtype})
+            if device_map:
+                load_kwargs.append({'device_map': device_map})
+            load_kwargs.append({})
+            for kwargs in load_kwargs:
+                try:
+                    pipe = pipeline_cls.from_pretrained(model_ref, **kwargs)
+                    used_kwargs = kwargs
+                    break
+                except (TypeError, ValueError) as e:
+                    last_error = e
+                    continue
+            if pipe is None:
+                raise last_error or RuntimeError("Qwen pipeline could not be initialized")
+
+            try:
+                if 'device_map' in used_kwargs or getattr(pipe, 'hf_device_map', None):
+                    pass
+                elif self.use_gpu and self.device:
+                    pipe.to(self.device)
+                else:
+                    logger.warning("Qwen-Image-Edit is loaded on CPU; this will be very slow and memory intensive")
+                    pipe.to('cpu')
+            except Exception as move_error:
+                logger.warning(f"Could not move Qwen pipeline to target device: {move_error}")
+
+            try:
+                pipe.set_progress_bar_config(disable=True)
+            except Exception:
+                pass
+
+            self.model = pipe
+            self.model_loaded = True
+            self.current_method = 'qwen_image_edit'
+            self.use_onnx = False
+            self.use_onnx_cpp = False
+            self.is_jit_model = False
+            self._qwen_image_edit_model_ref = model_ref
+            self.config['qwen_image_edit_model_path'] = model_ref
+            self.config['manga_qwen_image_edit_model_path'] = model_ref
+            self._save_config()
+            logger.info("Qwen-Image-Edit pipeline loaded successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to load Qwen-Image-Edit: {e}")
+            logger.error(traceback.format_exc())
+            self.model_loaded = False
+            return False
+
+    def _qwen_image_edit_inpaint(self, image, mask, iterations=None):
+        """Use Qwen-Image-Edit for masked manga cleanup, then composite only masked pixels."""
+        try:
+            from PIL import Image
+
+            if self.model is None:
+                logger.error("Qwen-Image-Edit pipeline is not loaded")
+                return image
+
+            if len(mask.shape) == 3:
+                mask_gray = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+            else:
+                mask_gray = mask.copy()
+            _, mask_gray = cv2.threshold(mask_gray, 0, 255, cv2.THRESH_BINARY)
+            if np.count_nonzero(mask_gray) == 0:
+                return image.copy()
+
+            x, y, w, h = cv2.boundingRect(mask_gray)
+            margin = int(os.environ.get('QWEN_IMAGE_EDIT_CROP_MARGIN', '96'))
+            orig_h, orig_w = image.shape[:2]
+            left = max(0, x - margin)
+            top = max(0, y - margin)
+            right = min(orig_w, x + w + margin)
+            bottom = min(orig_h, y + h + margin)
+
+            crop_bgr = image[top:bottom, left:right].copy()
+            crop_mask = mask_gray[top:bottom, left:right].copy()
+            proc_bgr = crop_bgr
+            proc_mask = crop_mask
+            max_side = int(os.environ.get('QWEN_IMAGE_EDIT_MAX_SIDE', '1024'))
+            if max_side > 0 and max(proc_bgr.shape[:2]) > max_side:
+                scale = float(max_side) / float(max(proc_bgr.shape[:2]))
+                new_w = max(1, int(proc_bgr.shape[1] * scale + 0.5))
+                new_h = max(1, int(proc_bgr.shape[0] * scale + 0.5))
+                proc_bgr = cv2.resize(proc_bgr, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+                proc_mask = cv2.resize(proc_mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+
+            input_rgb = cv2.cvtColor(proc_bgr, cv2.COLOR_BGR2RGB)
+            input_pil = Image.fromarray(input_rgb)
+            mask_rgb = np.zeros((proc_mask.shape[0], proc_mask.shape[1], 3), dtype=np.uint8)
+            mask_rgb[proc_mask > 0] = (255, 255, 255)
+            mask_pil = Image.fromarray(mask_rgb)
+
+            prompt = os.environ.get(
+                'QWEN_IMAGE_EDIT_INPAINT_PROMPT',
+                "Remove all visible manga text, SFX lettering, and OCR artifacts only in the white masked area shown in the second image. "
+                "Reconstruct the underlying manga line art, screentone, shading, and speech bubble background. "
+                "Preserve the original style. Do not add any text. Keep everything outside the masked area unchanged."
+            )
+            single_prompt = os.environ.get(
+                'QWEN_IMAGE_EDIT_SINGLE_PROMPT',
+                "Remove the visible manga text and reconstruct the underlying line art, screentone, shading, and speech bubble background. "
+                "Preserve the original manga style and do not add any text."
+            )
+            negative_prompt = os.environ.get('QWEN_IMAGE_EDIT_NEGATIVE_PROMPT', 'text, letters, words, watermark, blur, artifacts')
+            steps = int(os.environ.get('QWEN_IMAGE_EDIT_STEPS', '40'))
+            true_cfg_scale = float(os.environ.get('QWEN_IMAGE_EDIT_CFG_SCALE', '4.0'))
+            guidance_scale = float(os.environ.get('QWEN_IMAGE_EDIT_GUIDANCE_SCALE', '1.0'))
+
+            generator = None
+            seed_value = os.environ.get('QWEN_IMAGE_EDIT_SEED', '')
+            if seed_value.strip():
+                try:
+                    gen_device = 'cuda' if self.use_gpu else 'cpu'
+                    generator = torch.Generator(device=gen_device).manual_seed(int(seed_value))
+                except Exception:
+                    generator = None
+
+            use_mask_reference = os.environ.get('QWEN_IMAGE_EDIT_MASK_REFERENCE', '1').lower() not in ('0', 'false', 'no')
+            image_attempts = []
+            if use_mask_reference:
+                image_attempts.append(([input_pil, mask_pil], prompt))
+            image_attempts.append((input_pil, single_prompt))
+
+            output = None
+            last_error = None
+            for image_arg, active_prompt in image_attempts:
+                base_inputs = {'image': image_arg, 'prompt': active_prompt}
+                candidate_inputs = [
+                    {
+                        **base_inputs,
+                        'generator': generator,
+                        'true_cfg_scale': true_cfg_scale,
+                        'negative_prompt': negative_prompt,
+                        'num_inference_steps': steps,
+                        'guidance_scale': guidance_scale,
+                        'num_images_per_prompt': 1,
+                    },
+                    {
+                        **base_inputs,
+                        'generator': generator,
+                        'negative_prompt': negative_prompt,
+                        'num_inference_steps': steps,
+                    },
+                    {
+                        **base_inputs,
+                        'num_inference_steps': steps,
+                    },
+                    base_inputs,
+                ]
+                for inputs in candidate_inputs:
+                    try:
+                        if self._check_stop():
+                            return image
+                        with torch.inference_mode():
+                            output = self.model(**{k: v for k, v in inputs.items() if v is not None})
+                        break
+                    except (TypeError, ValueError) as e:
+                        last_error = e
+                        continue
+                if output is not None:
+                    break
+
+            if output is None:
+                raise last_error or RuntimeError("Qwen-Image-Edit did not return an output")
+
+            out_pil = output.images[0] if hasattr(output, 'images') else output[0]
+            if isinstance(out_pil, (list, tuple)):
+                out_pil = out_pil[0]
+            out_rgb = np.array(out_pil.convert('RGB'))
+            out_bgr = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
+            if out_bgr.shape[:2] != proc_bgr.shape[:2]:
+                out_bgr = cv2.resize(out_bgr, (proc_bgr.shape[1], proc_bgr.shape[0]), interpolation=cv2.INTER_LANCZOS4)
+            if out_bgr.shape[:2] != crop_bgr.shape[:2]:
+                out_bgr = cv2.resize(out_bgr, (crop_bgr.shape[1], crop_bgr.shape[0]), interpolation=cv2.INTER_LANCZOS4)
+
+            mask_for_blend = crop_mask
+            if mask_for_blend.shape[:2] != crop_bgr.shape[:2]:
+                mask_for_blend = cv2.resize(mask_for_blend, (crop_bgr.shape[1], crop_bgr.shape[0]), interpolation=cv2.INTER_NEAREST)
+            mask_float = mask_for_blend.astype(np.float32) / 255.0
+            mask_float = cv2.GaussianBlur(mask_float, (21, 21), 5)
+            mask_float = np.clip(mask_float, 0.0, 1.0)[:, :, np.newaxis]
+            blended_crop = (out_bgr.astype(np.float32) * mask_float + crop_bgr.astype(np.float32) * (1.0 - mask_float))
+            blended_crop = np.clip(blended_crop, 0, 255).astype(np.uint8)
+
+            result = image.copy()
+            result[top:bottom, left:right] = blended_crop
+            self._log_inpaint_diag('qwen-image-edit', result, mask_gray)
+            logger.info("Qwen-Image-Edit inpainting completed")
+            return result
+        except Exception as e:
+            logger.error(f"Qwen-Image-Edit inpainting failed: {e}")
+            logger.error(traceback.format_exc())
+            return image
+
     def load_model(self, method, model_path, force_reload=False):
         """Load model - supports both JIT and checkpoint files with ONNX conversion"""
         try:
@@ -2411,6 +2683,9 @@ class LocalInpainter:
                     logger.info("Inpainting will be unavailable for this session")
                     return False
             
+            if self._is_qwen_image_edit_method(method):
+                return self._load_qwen_image_edit_model(model_path, force_reload=force_reload)
+
             # Check if already loaded in THIS instance
             if self.model_loaded and self.current_method == method and not force_reload:
                 # Additional check for ONNX - make sure the session exists
@@ -3235,6 +3510,9 @@ class LocalInpainter:
             if self.current_method == 'anime':
                 kernel = np.ones((7, 7), np.uint8)
                 mask = cv2.dilate(mask, kernel, iterations=1)
+
+            if self._is_qwen_image_edit_method(self.current_method):
+                return self._qwen_image_edit_inpaint(image, mask, iterations=iterations)
 
             # Use instance tiling settings for ALL models
             logger.info(f"🔍 Tiling check: enabled={self.tiling_enabled}, tile_size={self.tile_size}, image_size={orig_h}x{orig_w}")

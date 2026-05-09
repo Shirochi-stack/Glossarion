@@ -4581,7 +4581,7 @@ class MangaTranslationTab(QObject):
 
         self.local_model_type_value = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')
         local_model_combo = QComboBox()
-        local_model_combo.addItems(['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local'])
+        local_model_combo.addItems(['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'qwen_image_edit', 'mat', 'ollama', 'sd_local'])
         local_model_combo.setCurrentText(self.local_model_type_value)
         local_model_combo.setMinimumWidth(120)
         local_model_combo.setMaximumWidth(120)
@@ -4602,12 +4602,13 @@ class MangaTranslationTab(QObject):
             'anime': 'Anime/Manga Inpainting',
             'anime_onnx': 'Anime ONNX (Fast/Optimized)',
             'lama_onnx': 'LaMa ONNX (Optimized)',
+            'qwen_image_edit': 'Qwen-Image-Edit 2511 (may require up to 128 GB RAM)',
         }
         self.model_desc_label = QLabel(model_desc.get(self.local_model_type_value, ''))
         desc_font = QFont('Arial', 8)
         self.model_desc_label.setFont(desc_font)
         self.model_desc_label.setStyleSheet("color: gray;")
-        self.model_desc_label.setMaximumWidth(200)
+        self.model_desc_label.setMaximumWidth(420)
         local_model_layout.addWidget(self.model_desc_label)
         local_model_layout.addStretch()
         
@@ -6404,7 +6405,7 @@ class MangaTranslationTab(QObject):
         # Load model paths
         self.local_model_path_value = ''
         _cleared_invalid_inpaint_paths = False
-        for model_type in  ['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'mat', 'ollama', 'sd_local']:
+        for model_type in  ['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'qwen_image_edit', 'mat', 'ollama', 'sd_local']:
             path = inpaint_settings.get(f'{model_type}_model_path', '')
             try:
                 if isinstance(path, str) and path.lower().endswith('.json'):
@@ -6651,7 +6652,7 @@ class MangaTranslationTab(QObject):
                 self.main_gui.config['manga_local_inpaint_model'] = self.local_model_type_value
             
             # Save model paths for each type
-            for model_type in  ['aot', 'lama', 'lama_onnx', 'anime', 'mat', 'ollama', 'sd_local']:
+            for model_type in  ['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'qwen_image_edit', 'mat', 'ollama', 'sd_local']:
                 if hasattr(self, 'local_model_type_value'):
                     if model_type == self.local_model_type_value:
                         if hasattr(self, 'local_model_path_value'):
@@ -9419,6 +9420,7 @@ class MangaTranslationTab(QObject):
             'anime': 'Anime/Manga Inpainting',
             'anime_onnx': 'Anime ONNX (Fast/Optimized)',
             'lama_onnx': 'LaMa ONNX (Optimized)',
+            'qwen_image_edit': 'Qwen-Image-Edit 2511 (may require up to 128 GB RAM)',
         }
         self.model_desc_label.setText(model_desc.get(model_type, ''))
         
@@ -9450,6 +9452,20 @@ class MangaTranslationTab(QObject):
         from PySide6.QtCore import QTimer
         
         model_type = self.local_model_type_value
+
+        if model_type == 'qwen_image_edit':
+            path = QFileDialog.getExistingDirectory(
+                self.dialog,
+                "Select Qwen-Image-Edit model folder",
+                ""
+            )
+            if path:
+                self.local_model_entry.setText(path)
+                self.local_model_path_value = path
+                self.main_gui.config[f'manga_{model_type}_model_path'] = path
+                self._save_rendering_settings()
+                QTimer.singleShot(100, lambda: self._try_load_model(model_type, path))
+            return
         
         if model_type == 'sd_local':
             filter_str = "Model files (*.safetensors *.pt *.pth *.ckpt *.onnx);;SafeTensors (*.safetensors);;Checkpoint files (*.ckpt);;PyTorch models (*.pt *.pth);;ONNX models (*.onnx);;All files (*.*)"
@@ -9489,7 +9505,10 @@ class MangaTranslationTab(QObject):
         try:
             model_type = self.local_model_type_value if hasattr(self, 'local_model_type_value') else None
             path = self.local_model_path_value if hasattr(self, 'local_model_path_value') else ''
-            if not model_type or not path:
+            if not model_type:
+                QMessageBox.information(self.dialog, "Load Model", "Please select a model type first.")
+                return
+            if not path and model_type != 'qwen_image_edit':
                 QMessageBox.information(self.dialog, "Load Model", "Please select a model file first using the Browse button.")
                 return
             # Defer to keep UI responsive using QTimer
@@ -9520,7 +9539,7 @@ class MangaTranslationTab(QObject):
         self.main_gui.append_log(f"⏳ Loading {method.upper()} model...")
         
         # Track result
-        load_result = {'success': False, 'error_msg': None, 'done': False}
+        load_result = {'success': False, 'error_msg': None, 'done': False, 'model_path': None}
         
         def load_in_background():
             """Background thread for model loading - preload into pool"""
@@ -9580,6 +9599,13 @@ class MangaTranslationTab(QObject):
                             normalized_path = os.path.abspath(os.path.normpath(dl_path))
                     except Exception:
                         pass
+
+                if normalized_path:
+                    load_result['model_path'] = normalized_path
+                    try:
+                        self.main_gui.config[f'manga_{method}_model_path'] = normalized_path
+                    except Exception:
+                        pass
                 
                 # Preload 1 inpainter into the pool (concurrent for faster loading)
                 created = mt.preload_local_inpainters_concurrent(method, normalized_path, 1)
@@ -9613,7 +9639,7 @@ class MangaTranslationTab(QObject):
             if load_result['done']:
                 check_timer.stop()
                 # Call completion handler on main thread
-                self._handle_model_load_complete(method, load_result['success'], load_result['error_msg'], show_completion_dialog)
+                self._handle_model_load_complete(method, load_result['success'], load_result['error_msg'], show_completion_dialog, load_result.get('model_path'))
             else:
                 # Process events while waiting
                 QApplication.processEvents()
@@ -9624,7 +9650,7 @@ class MangaTranslationTab(QObject):
         # Return True to indicate load was initiated (not necessarily completed)
         return True
     
-    def _handle_model_load_complete(self, method: str, success: bool, error_msg: str = None, show_dialog: bool = False):
+    def _handle_model_load_complete(self, method: str, success: bool, error_msg: str = None, show_dialog: bool = False, model_path: str = None):
         """Handle model load completion on main thread"""
         from PySide6.QtWidgets import QMessageBox
         
@@ -9638,6 +9664,17 @@ class MangaTranslationTab(QObject):
         print(f"DEBUG: Updating UI after load, success={success}")
         
         if success:
+            if model_path:
+                try:
+                    import os
+                    resolved_path = os.path.abspath(os.path.normpath(model_path))
+                    self.local_model_path_value = resolved_path
+                    self.main_gui.config[f'manga_{method}_model_path'] = resolved_path
+                    if method == getattr(self, 'local_model_type_value', method) and hasattr(self, 'local_model_entry'):
+                        self.local_model_entry.setText(resolved_path)
+                    self._save_rendering_settings()
+                except Exception:
+                    pass
             self._clear_inpainter_preload_failure()
             self.local_model_status_label.setText(f"✅ {method.upper()} model ready")
             self.local_model_status_label.setStyleSheet("color: green;")
@@ -9843,6 +9880,8 @@ class MangaTranslationTab(QObject):
             model_name = model_type.upper()
             if model_type in ['anime_onnx', 'aot_onnx', 'lama_onnx']:
                 model_name = f"Optimized {model_type.split('_')[0].upper()}"
+            elif model_type == 'qwen_image_edit':
+                model_name = "Qwen-Image-Edit 2511"
             elif model_type == 'sd_local':
                 model_name = "Stable Diffusion"
 
@@ -10030,6 +10069,7 @@ class MangaTranslationTab(QObject):
             'lama_onnx': 'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx',  
             'anime': 'https://github.com/Sanster/models/releases/download/AnimeMangaInpainting/anime-manga-big-lama.pt',
             'anime_onnx': 'https://huggingface.co/ogkalu/lama-manga-onnx-dynamic/resolve/main/lama-manga-dynamic.onnx',
+            'qwen_image_edit': '',  # Downloaded as a Hugging Face diffusers snapshot
             'mat': '',  # User must provide
             'ollama': '',  # Not applicable
             'sd_local': ''  # User must provide
@@ -10050,6 +10090,7 @@ class MangaTranslationTab(QObject):
             'anime': 'anime-manga-big-lama.pt',
             'anime_onnx': 'lama-manga-dynamic.onnx',
             'lama_onnx': 'lama_fp32.onnx',
+            'qwen_image_edit': 'qwen-image-edit-2511',
             'fcf_onnx': 'fcf.onnx',
             'sd_inpaint_onnx': 'sd_inpaint_unet.onnx'
         }
@@ -10233,6 +10274,13 @@ class MangaTranslationTab(QObject):
                           "• File size: ~190MB\n"
                           "• DEFAULT for inpainting",
             
+            'qwen_image_edit': "Qwen-Image-Edit 2511:\n\n"
+                               "- Auto-downloads from HuggingFace as a diffusers model folder\n"
+                               "- Strong prompt-guided manga cleanup\n"
+                               "- Uses the mask as a second reference image and composites only masked pixels\n"
+                               "- Requires diffusers, transformers, accelerate, and significant VRAM\n"
+                               "- Best for difficult text removal where LaMa is too weak",
+
             'mat': "MAT Model:\n\n"
                    "• Manual download required\n"
                    "• Get from: github.com/fenglinglwb/MAT\n"

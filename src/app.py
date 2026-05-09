@@ -4538,7 +4538,7 @@ class GlossarionWeb:
                         gr.Markdown("#### Inpainting")
                         
                         local_inpaint_method = gr.Radio(
-                            choices=["anime_onnx", "anime", "lama", "lama_onnx", "aot", "aot_onnx"],
+                            choices=["anime_onnx", "anime", "qwen_image_edit", "lama", "lama_onnx", "aot", "aot_onnx"],
                             value=self.get_config_value('manga_settings', {}).get('inpainting', {}).get('local_method', 'anime_onnx'),
                             label="Local Inpainting Model",
                             interactive=True
@@ -4892,7 +4892,8 @@ class GlossarionWeb:
                                         'lama': 'lama',
                                         'lama_onnx': 'lama_onnx',
                                         'aot': 'aot',
-                                        'aot_onnx': 'aot_onnx'
+                                        'aot_onnx': 'aot_onnx',
+                                        'qwen_image_edit': 'qwen_image_edit'
                                     }
                                     
                                     method_key = method_map.get(inpaint_method_val)
@@ -4962,7 +4963,8 @@ class GlossarionWeb:
                                         'lama': 'lama',
                                         'lama_onnx': 'lama_onnx',
                                         'aot': 'aot',
-                                        'aot_onnx': 'aot_onnx'
+                                        'aot_onnx': 'aot_onnx',
+                                        'qwen_image_edit': 'qwen_image_edit'
                                     }
                                     
                                     method_key = method_map.get(inpaint_method_val)
@@ -4970,11 +4972,9 @@ class GlossarionWeb:
                                         # First check if model exists, download if not
                                         if method_key in LAMA_JIT_MODELS:
                                             model_info = LAMA_JIT_MODELS[method_key]
-                                            cache_dir = os.path.expanduser('~/.cache/inpainting')
-                                            model_filename = os.path.basename(model_info['url'])
-                                            model_path = os.path.join(cache_dir, model_filename)
+                                            model_path = inpainter.get_cached_model_path(method_key)
                                             
-                                            if not os.path.exists(model_path):
+                                            if not model_path or not os.path.exists(model_path):
                                                 messages.append(f"Model not found, downloading first...")
                                                 model_path = inpainter.download_jit_model(method_key)
                                                 if not model_path:
