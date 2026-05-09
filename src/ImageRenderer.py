@@ -6405,7 +6405,7 @@ def _preload_shared_inpainter(self):
             skip_inpainting = False
         if skip_inpainting:
             print("[PRELOAD_INPAINTER] Skipping preload - Skip Inpainter toggle is ON")
-            return
+            return None
 
         # Get current inpainting settings
         inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
@@ -6413,7 +6413,7 @@ def _preload_shared_inpainter(self):
 
         if inpaint_method != 'local':
             print(f"[PRELOAD_INPAINTER] Skipping preload - method is {inpaint_method}, not local")
-            return
+            return None
         
         # Get model path
         model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
@@ -6437,7 +6437,7 @@ def _preload_shared_inpainter(self):
             rec = MangaTranslator._inpaint_pool.get(key)
             if rec and rec.get('spares'):
                 print(f"[PRELOAD_INPAINTER] {local_model} already in pool ({len(rec['spares'])} instance(s))")
-                return
+                return True
         
         # Try to download if path not found
         if not model_path or not os.path.exists(model_path):
@@ -6452,7 +6452,7 @@ def _preload_shared_inpainter(self):
                     print(f"[PRELOAD_INPAINTER] Downloaded and cached model path: {os.path.basename(model_path)}")
             except Exception as e:
                 print(f"[PRELOAD_INPAINTER] Failed to download {local_model}: {e}")
-                return
+                return False
         
         if model_path and os.path.exists(model_path):
             print(f"[PRELOAD_INPAINTER] Preloading {local_model} inpainter into pool...")
@@ -6488,13 +6488,19 @@ def _preload_shared_inpainter(self):
             if created > 0:
                 print(f"[PRELOAD_INPAINTER] Successfully preloaded {created} inpainter instance(s)")
                 self._log(f"🎯 Preloaded {local_model.upper()} inpainting model", "info")
+                return True
             else:
                 print(f"[PRELOAD_INPAINTER] No instances preloaded (may already exist in pool)")
+                return False
+
+        print(f"[PRELOAD_INPAINTER] Model path missing after resolve for {local_model}")
+        return False
         
     except Exception as e:
         print(f"[PRELOAD_INPAINTER] Error during preload: {e}")
         import traceback
         print(f"[PRELOAD_INPAINTER] Traceback: {traceback.format_exc()}")
+        return False
 
 def _run_inpainting_on_region(self, image, mask, region_index, custom_iterations=None):
     """Run inpainting on a specific region with the given mask"""

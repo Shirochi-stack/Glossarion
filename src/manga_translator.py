@@ -10180,8 +10180,10 @@ class MangaTranslator:
                         created += 1
                 except Exception:
                     pass
-        self._log(f"✅ Preloaded {created} local inpainting instance(s)", "info")
-        return created
+        if created > 0:
+            self._log(f"✅ Preloaded {created} local inpainting instance(s)", "info")
+        else:
+            self._log("Failed to preload local inpainting model; no usable instances were created", "error")
         return created
 
     @classmethod

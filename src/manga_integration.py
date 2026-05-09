@@ -924,6 +924,9 @@ class MangaTranslationTab(QObject):
         # Preload shared models in background to avoid lag on first use
         # This spawns worker processes/loads models ahead of time so GUI stays responsive
         self._preload_complete = False
+        self._inpainter_preload_failed = False
+        self._inpainter_preload_error = ""
+        self._inpainter_preload_failure_notified = False
         try:
             def _bg_preload_models():
                 try:
@@ -936,9 +939,11 @@ class MangaTranslationTab(QObject):
                     if self._shutting_down:
                         return
                     # Then preload inpainter (heavier, C++ worker process)
-                    ImageRenderer._preload_shared_inpainter(self)
+                    result = ImageRenderer._preload_shared_inpainter(self)
+                    self._record_inpainter_preload_result(result, "startup")
                 except Exception as e:
                     print(f"[INIT_PRELOAD] Background model preload failed: {e}")
+                    self._record_inpainter_preload_result(False, "startup", str(e))
                 finally:
                     # Mark preload complete regardless of success/failure
                     self._preload_complete = True
@@ -1105,6 +1110,57 @@ class MangaTranslationTab(QObject):
         inpaint_settings = self.main_gui.config.get('manga_settings', {}).get('inpainting', {})
         inpainting_method = inpaint_settings.get('method', 'local')
         return inpainting_method == 'local'
+
+    def _record_inpainter_preload_result(self, result, source: str = "preload", error: str = ""):
+        """Record whether a local inpainter preload actually produced a usable model."""
+        try:
+            if result is False:
+                self._inpainter_preload_failed = True
+                self._inpainter_preload_error = error or f"Local inpainter preload failed during {source}"
+                self._inpainter_preload_failure_notified = False
+            elif result is True:
+                self._clear_inpainter_preload_failure()
+        except Exception:
+            pass
+
+    def _clear_inpainter_preload_failure(self):
+        """Clear the remembered failed-preload state."""
+        self._inpainter_preload_failed = False
+        self._inpainter_preload_error = ""
+        self._inpainter_preload_failure_notified = False
+
+    def _set_translation_buttons_model_failed(self):
+        """Disable inpainting-dependent actions after a local inpainter load failure."""
+        try:
+            self._waiting_for_model = False
+            if not getattr(self, '_inpainter_preload_failure_notified', False):
+                msg = getattr(self, '_inpainter_preload_error', '') or "Local inpainter failed to load"
+                self._log(f"Local inpainter preload failed: {msg}", "error")
+                self._log("Load or download a valid inpainting model, or enable Skip Inpainter to continue without inpainting.", "warning")
+                self._inpainter_preload_failure_notified = True
+
+            if hasattr(self, 'local_model_status_label') and self.local_model_status_label:
+                self.local_model_status_label.setText("Local inpainter failed to load")
+                self.local_model_status_label.setStyleSheet("color: orange;")
+
+            if hasattr(self, 'start_button') and self.start_button:
+                self.start_button.setEnabled(False)
+                if hasattr(self, 'start_button_text'):
+                    self.start_button_text.setText("Inpainter failed")
+
+            if hasattr(self, 'image_preview_widget'):
+                ipw = self.image_preview_widget
+                for attr, text in (
+                    ('translate_btn', 'Inpainter failed'),
+                    ('translate_all_btn', 'Inpainter failed'),
+                    ('clean_btn', 'Inpainter failed'),
+                ):
+                    btn = getattr(ipw, attr, None)
+                    if btn:
+                        btn.setEnabled(False)
+                        btn.setText(text)
+        except Exception as e:
+            print(f"[BUTTON_STATE] Error setting inpainter failure state: {e}")
     
     def _check_preload_status(self):
         """Check preload thread status and update button states accordingly.
@@ -1133,8 +1189,12 @@ class MangaTranslationTab(QObject):
                 self._set_translation_buttons_waiting(True)
                 # Check again in 500ms
                 QTimer.singleShot(500, self._check_preload_status)
+            elif local_inpainting and bool(getattr(self, '_inpainter_preload_failed', False)):
+                self._set_translation_buttons_model_failed()
             else:
                 # Preload complete or not needed - enable buttons
+                if not local_inpainting:
+                    self._clear_inpainter_preload_failure()
                 self._set_translation_buttons_waiting(False)
         except Exception as e:
             print(f"[PRELOAD_CHECK] Error: {e}")
@@ -8836,6 +8896,8 @@ class MangaTranslationTab(QObject):
             # Simple enable/disable logic - no animations, no show/hide, no empty dialogs!
             if self.skip_inpainting_value:
                 print("🚫 Skip Inpainter: ENABLED - Inpainting will be skipped")
+                self._clear_inpainter_preload_failure()
+                self._set_translation_buttons_waiting(False)
                 # Disable all inpainting options
                 try:
                     # Disable parent frames
@@ -8986,6 +9048,8 @@ class MangaTranslationTab(QObject):
                 return
             self._log("🔁 Skip Inpainter disabled — preloading inpainter in background", "info")
 
+            self._clear_inpainter_preload_failure()
+
             def _bg_preload():
                 try:
                     if getattr(self, '_shutting_down', False):
@@ -8994,9 +9058,11 @@ class MangaTranslationTab(QObject):
                     # toggled Skip back ON while we were scheduling.
                     if bool(getattr(self, 'skip_inpainting_value', False)):
                         return
-                    ImageRenderer._preload_shared_inpainter(self)
+                    result = ImageRenderer._preload_shared_inpainter(self)
+                    self._record_inpainter_preload_result(result, "skip-toggle")
                 except Exception as e:
                     print(f"[TOGGLE_PRELOAD] Background inpainter preload failed: {e}")
+                    self._record_inpainter_preload_result(False, "skip-toggle", str(e))
 
             self._toggle_preload_thread = threading.Thread(
                 target=_bg_preload, name="InpainterPreload-AfterToggle", daemon=True
@@ -9300,6 +9366,7 @@ class MangaTranslationTab(QObject):
         print(f"DEBUG: Updating UI after load, success={success}")
         
         if success:
+            self._clear_inpainter_preload_failure()
             self.local_model_status_label.setText(f"✅ {method.upper()} model ready")
             self.local_model_status_label.setStyleSheet("color: green;")
             self.main_gui.append_log(f"✅ {method.upper()} model loaded successfully!")
@@ -9316,9 +9383,15 @@ class MangaTranslationTab(QObject):
             # Show success dialog if requested
             if show_dialog:
                 QMessageBox.information(self.dialog, "Success", f"{method.upper()} model loaded successfully!")
+            try:
+                QTimer.singleShot(0, self._check_preload_status)
+            except Exception:
+                pass
         else:
             self.local_model_status_label.setText("⚠️ Model file found but failed to load")
             self.local_model_status_label.setStyleSheet("color: orange;")
+            if self._is_local_inpainting_enabled():
+                self._record_inpainter_preload_result(False, "manual-load", error_msg or "Manual model load returned 0 instances")
             if error_msg:
                 self.main_gui.append_log(f"❌ Error loading model: {error_msg}")
             else:
@@ -9330,6 +9403,10 @@ class MangaTranslationTab(QObject):
                 if error_msg:
                     msg += f":\n{error_msg}"
                 QMessageBox.warning(self.dialog, "Load Failed", msg)
+            try:
+                QTimer.singleShot(0, self._check_preload_status)
+            except Exception:
+                pass
         
         print(f"DEBUG: UI update completed")
         
