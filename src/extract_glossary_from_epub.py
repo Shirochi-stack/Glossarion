@@ -2993,12 +2993,47 @@ _DESCRIPTION_IN_LANGUAGE_TEXT = " and description"
 #   inactive: ..."But"
 _DESCRIPTION_EXCLUDED_NOTE_TEXT = " (The description column is excluded from this restriction)"
 
+# Example CSV lines for glossary prompts. The description-bearing version is
+# used when description is active; the plain version when it is not.
+_DESCRIPTION_EXAMPLE_TEXT = (
+    'For example:\n'
+    'character,이히리ᐐ 나애,Dihirit Ade,female,"The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision"\n'
+    'character,뢤사난,Kim Sang-hyu,male,"A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress"'
+)
+_EXAMPLE_TEXT = (
+    'For example:\n'
+    'character,이히리ᐐ 나애,Dihirit Ade,female\n'
+    'character,뢤사난,Kim Sang-hyu,male\n'
+    'term,간편헤,Gale Hardest,'
+)
+
+# Name-split example lines. The description-bearing version shows
+# descriptions in the split entries; the plain version omits them.
+_DESCRIPTION_NAME_SPLIT_EXAMPLE_TEXT = (
+    'For character entries, the raw_name must contain ONLY the given name (first name), never a full name. '
+    'If the text mentions a character by full name (e.g. "김상현"), split it: create one entry with raw_name "상현" '
+    '(given name) and a second entry with raw_name "김" (surname). Example output:\n'
+    '  character,상현,Sang-hyun,male,"A knight of the royal guard"\n'
+    '  character,김,Kim,,"Surname of Sang-hyun"\n'
+    '  Do NOT create a single combined full-name entry (e.g. character,김상현,Kim Sang-hyun,male,…) — always split into given name + surname.'
+)
+_NAME_SPLIT_EXAMPLE_TEXT = (
+    'For character entries, the raw_name must contain ONLY the given name (first name), never a full name. '
+    'If the text mentions a character by full name (e.g. "김상현"), split it: create one entry with raw_name "상현" '
+    '(given name) and a second entry with raw_name "김" (surname). Example output:\n'
+    '  character,상현,Sang-hyun,male\n'
+    '  character,김,Kim,\n'
+    '  Do NOT create a single combined full-name entry (e.g. character,김상현,Kim Sang-hyun,male) — always split into given name + surname.'
+)
+
 # Placeholders that occupy their own line in the prompt. When the description
 # field isn't active they get stripped along with the entire line (including
 # any leading ``- `` bullet) so we don't leave orphan bullets behind.
 _DESCRIPTION_LINE_PLACEHOLDERS = (
     '{description_mandatory}',
     '{description_detailed}',
+    '{description_example}',
+    '{description_name_split_example}',
 )
 # Placeholders that appear inline within a larger sentence. When inactive
 # they must be replaced with an empty string — NOT stripped by line —
@@ -3007,35 +3042,71 @@ _DESCRIPTION_INLINE_PLACEHOLDERS = (
     '{description_in_language}',
     '{description_excluded_note}',
 )
+# "No-description" line placeholders — the inverse of _DESCRIPTION_LINE_PLACEHOLDERS.
+# These are stripped when description IS active and expanded when inactive.
+_NO_DESCRIPTION_LINE_PLACEHOLDERS = (
+    '{example}',
+    '{name_split_example}',
+)
 
 
-def _apply_description_rule_placeholders(prompt_text, custom_fields=None):
-    """Replace the three description-rule placeholders.
+def _apply_description_rule_placeholders(prompt_text, custom_fields=None, description_active=None):
+    """Replace description-rule placeholders in glossary prompts.
 
-    Line-owning placeholders (`{description_mandatory}`, `{description_detailed}`):
-    removed with their entire line when description is inactive.
+    Line-owning placeholders (`{description_mandatory}`, `{description_detailed}`,
+    `{description_example}`, `{description_name_split_example}`):
+    expanded when description is active; removed with their entire line when not.
 
-    Inline placeholder (`{description_in_language}`):
+    No-description line placeholders (`{example}`, `{name_split_example}`):
+    the inverse — expanded when description is *inactive*; removed when active.
+
+    Inline placeholders (`{description_in_language}`, `{description_excluded_note}`):
     replaced with "" when inactive (sentence stays intact).
 
-    When description is active, each placeholder is replaced with its
-    canonical text.
+    Args:
+        prompt_text: The prompt string to process.
+        custom_fields: Optional list of custom field names. Used to determine
+            if description is active when ``description_active`` is None.
+        description_active: Explicit override for the description-active flag.
+            When True/False, skips the Custom Fields lookup entirely.
+            Useful for the auto/minimal prompt path which uses the
+            ``GLOSSARY_INCLUDE_DESCRIPTION`` env var instead.
     """
     if not isinstance(prompt_text, str):
         return prompt_text
-    all_placeholders = _DESCRIPTION_LINE_PLACEHOLDERS + _DESCRIPTION_INLINE_PLACEHOLDERS
+    all_placeholders = (
+        _DESCRIPTION_LINE_PLACEHOLDERS
+        + _DESCRIPTION_INLINE_PLACEHOLDERS
+        + _NO_DESCRIPTION_LINE_PLACEHOLDERS
+    )
     if not any(p in prompt_text for p in all_placeholders):
         return prompt_text
-    active = _glossary_description_active(custom_fields)
+    if description_active is not None:
+        active = bool(description_active)
+    else:
+        active = _glossary_description_active(custom_fields)
+    import re as _re_dr
     if active:
         result = prompt_text
         result = result.replace('{description_mandatory}', _DESCRIPTION_MANDATORY_TEXT)
         result = result.replace('{description_detailed}', _DESCRIPTION_DETAILED_TEXT)
         result = result.replace('{description_in_language}', _DESCRIPTION_IN_LANGUAGE_TEXT)
         result = result.replace('{description_excluded_note}', _DESCRIPTION_EXCLUDED_NOTE_TEXT)
+        result = result.replace('{description_example}', _DESCRIPTION_EXAMPLE_TEXT)
+        result = result.replace('{description_name_split_example}', _DESCRIPTION_NAME_SPLIT_EXAMPLE_TEXT)
+        # Strip the no-description placeholders (they are the inverse)
+        for placeholder in _NO_DESCRIPTION_LINE_PLACEHOLDERS:
+            result = _re_dr.sub(
+                r'^[ \t]*-?[ \t]*'
+                + _re_dr.escape(placeholder)
+                + r'[ \t]*\r?\n?',
+                '',
+                result,
+                flags=_re_dr.MULTILINE,
+            )
+        result = _re_dr.sub(r'\n{3,}', '\n\n', result)
         return result
-    # Inactive path: strip line-owners by line, empty inline placeholders.
-    import re as _re_dr
+    # Inactive path: strip description line-owners, expand no-description ones.
     cleaned = prompt_text
     for placeholder in _DESCRIPTION_LINE_PLACEHOLDERS:
         cleaned = _re_dr.sub(
@@ -3048,6 +3119,9 @@ def _apply_description_rule_placeholders(prompt_text, custom_fields=None):
         )
     for placeholder in _DESCRIPTION_INLINE_PLACEHOLDERS:
         cleaned = cleaned.replace(placeholder, '')
+    # Expand the no-description placeholders
+    cleaned = cleaned.replace('{example}', _EXAMPLE_TEXT)
+    cleaned = cleaned.replace('{name_split_example}', _NAME_SPLIT_EXAMPLE_TEXT)
     cleaned = _re_dr.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned
 
@@ -3111,10 +3185,8 @@ IMPORTANT: Use commas to separate columns. Wrap a field value in double quotes O
 Critical Requirement: The translated name{description_in_language} column must be in {language}, While the raw name column must the same as the source language.
 The translated_name column must be a direct translation or transliteration of the raw_name ONLY. Do NOT use role labels, descriptions, or invented names as translations.
 
-For example:
-character,이히리ᐐ 나애,Dihirit Ade,female,"The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision"
-character,뢤사난,Kim Sang-hyu,male,"A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress"
-term,간편헤,Gale Hardest,,"A legendary ancient artifact forged by the Wind God said to control the atmospheric currents, currently sought by the Empire's elite guard to quell the rebellion"
+{description_example}
+{example}
 
 CRITICAL EXTRACTION RULES:
 - Extract All {entries}

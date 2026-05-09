@@ -4573,8 +4573,20 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                                     'Item names', 'Organization names', 'Titles/Ranks']
                     _entries_str = ', '.join(_entry_types[:-1]) + f', & {_entry_types[-1]}'
                     system_prompt = system_prompt.replace('{entries}', _entries_str)
+
+            # Expand (or strip) description-rule placeholders.
+            # The auto/minimal prompt uses the "Include Description Column"
+            # toggle (GLOSSARY_INCLUDE_DESCRIPTION env var) instead of the
+            # Custom Fields list used by the Balanced/Full prompt.
+            try:
+                from extract_glossary_from_epub import _apply_description_rule_placeholders
+                _inc_desc = os.getenv("GLOSSARY_INCLUDE_DESCRIPTION", "0") == "1"
+                system_prompt = _apply_description_rule_placeholders(
+                    system_prompt, description_active=_inc_desc
+                )
+            except Exception as _desc_err:
+                print(f"⚠️ Description placeholder expansion failed: {_desc_err}")
             
-            # Send system prompt and text as separate messages
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"{text_sample}"}

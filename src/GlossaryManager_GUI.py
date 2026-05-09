@@ -1756,7 +1756,8 @@ class GlossaryManagerMixin:
         placeholders_line = QLineEdit(
             "Available placeholders: {fields}, {fields1}, {language}, {entries}, "
             "{description_mandatory}, {description_detailed}, {description_in_language}, "
-            "{description_excluded_note}, {gender_instruction},  Separator: \\x1F"
+            "{description_excluded_note}, {description_example}, {example}, "
+            "{description_name_split_example}, {name_split_example}, {gender_instruction},  Separator: \\x1F"
         )
         placeholders_line.setReadOnly(True)
         placeholders_line.setFrame(False)
@@ -1778,6 +1779,14 @@ class GlossaryManagerMixin:
             "{description_excluded_note} -&gt; appends ' (The description column is excluded from this\n"
             "                            restriction)' to the REJECT-starters rule when 'description'\n"
             "                            is in Custom Fields; blank otherwise\n"
+            "{description_example} -&gt; inserts example CSV lines WITH description column;\n"
+            "                       stripped when 'description' is not in Custom Fields\n"
+            "{example} -&gt; inserts example CSV lines WITHOUT description column;\n"
+            "            stripped when 'description' IS in Custom Fields\n"
+            "{description_name_split_example} -&gt; inserts name-split example lines WITH\n"
+            "                                  description; stripped when not in Custom Fields\n"
+            "{name_split_example} -&gt; inserts name-split example lines WITHOUT description;\n"
+            "                      stripped when 'description' IS in Custom Fields\n"
             "{gender_instruction} -&gt; inserts dynamic gender rules based on which entry types\n"
             "                      have 'has_gender' enabled; blank if none do"
             "</pre></qt>"
@@ -1822,9 +1831,8 @@ IMPORTANT: Use commas to separate columns. Wrap a field value in double quotes O
 Critical Requirement: The translated name{description_in_language} column must be in {language}, While the raw name column must the same as the source language.
 The translated_name column must be a direct translation or transliteration of the raw_name ONLY. Do NOT use role labels, descriptions, or invented names as translations.
 
-For example:
-character,이히리ᐐ 나애,Dihirit Ade,female,"The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision"
-character,뢤사난,Kim Sang-hyu,male,"A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress"
+{description_example}
+{example}
 
 CRITICAL EXTRACTION RULES:
 - Extract All {entries}
@@ -1836,10 +1844,8 @@ CRITICAL EXTRACTION RULES:
 - REJECT generic common nouns, unnamed extras, and bare titles/roles (e.g. "Woman", "Man", "Boy", "Girl", "Villager", "Guard", "Soldier", "Aunt", "Father", "Queen", "Prince", "King", "Princess", "Knight", "Servant", "Maid", 여자, 남자, 소녀, 소년, 아줌마, 아버지, 여왕, 왕자). These are NOT proper nouns and must be skipped.
 - REJECT descriptive noun phrases and adjectives attached to generic nouns (e.g. "Blonde Elf Girl", "Orange-eyed Beastman", "White-bearded Merchant", "Fake Couple", "Bespectacled Student"). Only extract actual names or standardized titles.
 - If unsure whether something is a proper noun/name, skip it
-- For character entries, the raw_name must contain ONLY the given name (first name), never a full name. If the text mentions a character by full name (e.g. "김상현"), split it: create one entry with raw_name "상현" (given name) and a second entry with raw_name "김" (surname). Example output:
-  character,상현,Sang-hyun,male,"A knight of the royal guard"
-  character,김,Kim,,"Surname of Sang-hyun"
-  Do NOT create a single combined full-name entry (e.g. character,김상현,Kim Sang-hyun,male,…) — always split into given name + surname.
+- {description_name_split_example}
+- {name_split_example}
 - {description_detailed}
 - The translated_name MUST be a strict literal dictionary translation or transliteration of the raw_name ONLY. You are FORBIDDEN from injecting story context, roles, or extra adjectives (e.g., do NOT translate "女学生" as "Female Student Assassin" or "주인님" as "The Protagonist").
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
@@ -3430,7 +3436,7 @@ Rules:
         desc_label = QLabel("This prompt guides the AI to extract character names, terms, and titles from the text:")
         glossary_prompt_frame_layout.addWidget(desc_label)
         
-        placeholder_line = QLineEdit("Available placeholders: {fields}, {fields1}, {language}, {entries}, {min_frequency}, {max_names}, {max_titles}, {marker}, {gender_instruction},  Separator: \\x1F")
+        placeholder_line = QLineEdit("Available placeholders: {fields}, {fields1}, {language}, {entries}, {min_frequency}, {max_names}, {max_titles}, {marker}, {description_example}, {example}, {description_name_split_example}, {name_split_example}, {gender_instruction},  Separator: \\x1F")
         placeholder_line.setReadOnly(True)
         placeholder_line.setFrame(False)
         placeholder_line.setCursorPosition(0)
@@ -3445,6 +3451,14 @@ Rules:
             "{max_names} -&gt; max character names\n"
             "{max_titles} -&gt; max titles\n"
             "{marker} -&gt; context window marker count\n"
+            "{description_example} -&gt; inserts example CSV lines WITH description column;\n"
+            "                       stripped when 'description' is not in Custom Fields\n"
+            "{example} -&gt; inserts example CSV lines WITHOUT description column;\n"
+            "            stripped when 'description' IS in Custom Fields\n"
+            "{description_name_split_example} -&gt; inserts name-split example lines WITH\n"
+            "                                  description; stripped when not in Custom Fields\n"
+            "{name_split_example} -&gt; inserts name-split example lines WITHOUT description;\n"
+            "                      stripped when 'description' IS in Custom Fields\n"
             "{gender_instruction} -&gt; inserts dynamic gender rules based on which entry types\n"
             "                      have 'has_gender' enabled; blank if none do"
             "</pre></qt>"
@@ -3467,10 +3481,9 @@ IMPORTANT: Use commas to separate columns. Wrap a field value in double quotes O
 
 Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
 The translated_name column must be a direct translation or transliteration of the raw_name ONLY. Do NOT use role labels, descriptions, or invented names as translations.
+{description_example}
+{example}
 
-For example:
-character,이히리ᐐ 나애,Dihirit Ade,female,"The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision"
-character,뢤사난,Kim Sang-hyu,male,"A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress"
 
 CRITICAL EXTRACTION RULES:
 - Extract All Character names, Terms, Location names, Ability/Skill names, Item names, Organization names, and Titles/Ranks
@@ -3482,10 +3495,8 @@ CRITICAL EXTRACTION RULES:
 - REJECT generic common nouns, unnamed extras, and bare titles/roles (e.g. "Woman", "Man", "Boy", "Girl", "Villager", "Guard", "Soldier", "Aunt", "Father", "Queen", "Prince", "King", "Princess", "Knight", "Servant", "Maid", 여자, 남자, 소녀, 소년, 아줌마, 아버지, 여왕, 왕자). These are NOT proper nouns and must be skipped.
 - REJECT descriptive noun phrases and adjectives attached to generic nouns (e.g. "Blonde Elf Girl", "Orange-eyed Beastman", "White-bearded Merchant", "Fake Couple", "Bespectacled Student"). Only extract actual names or standardized titles.
 - If unsure whether something is a proper noun/name, skip it
-- For character entries, the raw_name must contain ONLY the given name (first name), never a full name. If the text mentions a character by full name (e.g. "김상현"), split it: create one entry with raw_name "상현" (given name) and a second entry with raw_name "김" (surname). Example output:
-  character,상현,Sang-hyun,male,"A knight of the royal guard"
-  character,김,Kim,,"Surname of Sang-hyun"
-  Do NOT create a single combined full-name entry (e.g. character,김상현,Kim Sang-hyun,male,…) — always split into given name + surname.
+- {description_name_split_example}
+- {name_split_example}
 - The description column must contain detailed context/explanation
 - The translated_name MUST be a strict literal dictionary translation or transliteration of the raw_name ONLY. You are FORBIDDEN from injecting story context, roles, or extra adjectives (e.g., do NOT translate "여학생" as "Female Student Assassin" or "주인님" as "The Protagonist").
 - Create at least one glossary entry for EVERY context marker window (lines ending with "=== CONTEXT N END ==="); treat each marker boundary as a required extraction point.
