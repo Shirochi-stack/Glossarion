@@ -4183,10 +4183,72 @@ def _get_loaded_manga_glossary_for_workflow(self) -> str:
 
     return glossary_text
 
-def _append_loaded_manga_glossary_to_system_prompt(self, system_prompt: str) -> str:
+def _manga_workflow_glossary_compression_enabled(self) -> bool:
+    env_value = os.getenv("COMPRESS_GLOSSARY_PROMPT")
+    if env_value is not None:
+        return str(env_value).strip().lower() in ("1", "true", "yes", "on")
+    try:
+        return bool(getattr(self.main_gui, 'config', {}).get('compress_glossary_prompt', True))
+    except Exception:
+        return True
+
+def _compress_loaded_manga_glossary_for_workflow(self, glossary_text: str, source_text: str = "", image_path: str = None) -> str:
+    if not glossary_text or not source_text or not _manga_workflow_glossary_compression_enabled(self):
+        return glossary_text
+    try:
+        from glossary_compressor import compress_glossary
+        glossary_path = ""
+        try:
+            glossary_path = (
+                getattr(self, 'manga_generated_glossary_path', '')
+                or getattr(self, 'manga_custom_glossary_path', '')
+                or getattr(self.main_gui, 'manga_generated_glossary_path', '')
+                or getattr(self.main_gui, 'manga_custom_glossary_path', '')
+                or self.main_gui.config.get('manga_generated_glossary_path', '')
+                or self.main_gui.config.get('manga_custom_glossary_path', '')
+            )
+        except Exception:
+            glossary_path = ""
+        original_length = len(glossary_text)
+        compressed = compress_glossary(
+            glossary_text,
+            source_text,
+            glossary_format='auto',
+            glossary_path=glossary_path,
+            chapter_ref={
+                "chapter_num": None,
+                "chapter_file": os.path.basename(image_path) if image_path else os.getenv("CURRENT_CHAPTER_FILE", ""),
+            },
+        )
+        compressed = compressed if isinstance(compressed, str) else str(compressed or "")
+        if original_length and len(compressed) != original_length:
+            reduction_pct = (original_length - len(compressed)) / original_length * 100
+            try:
+                self._log(
+                    f"Manga glossary compressed for preview: {original_length:,} -> {len(compressed):,} chars ({reduction_pct:.1f}%)",
+                    "info",
+                )
+            except Exception:
+                pass
+        return compressed
+    except Exception as err:
+        try:
+            self._log(f"Warning: Manga glossary compression failed for preview: {err}", "warning")
+        except Exception:
+            pass
+        return glossary_text
+
+def _append_loaded_manga_glossary_to_system_prompt(self, system_prompt: str, source_text: str = "", image_path: str = None) -> str:
     """Append the currently loaded manga glossary to direct preview translations."""
     glossary_text = _get_loaded_manga_glossary_for_workflow(self)
     if not glossary_text:
+        return system_prompt or ""
+    glossary_text = _compress_loaded_manga_glossary_for_workflow(self, glossary_text, source_text, image_path)
+    if not glossary_text or not glossary_text.strip():
+        try:
+            self._log("Manga glossary skipped for preview translation (no matching entries after compression)", "info")
+        except Exception:
+            pass
         return system_prompt or ""
 
     default_append_prompt = "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
@@ -4974,7 +5036,16 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
         system_prompt = _get_system_prompt_from_gui(self, )
         if not system_prompt:
             raise ValueError("No system prompt configured in GUI profile - translation cannot proceed")
-        system_prompt = _append_loaded_manga_glossary_to_system_prompt(self, system_prompt)
+        glossary_source_text = "\n".join(
+            str(text_data.get('text', '') or '') for text_data in recognized_texts
+            if str(text_data.get('text', '') or '').strip()
+        )
+        system_prompt = _append_loaded_manga_glossary_to_system_prompt(
+            self,
+            system_prompt,
+            source_text=glossary_source_text,
+            image_path=image_path,
+        )
         
         # Preload image data once if visual context is enabled
         image_base64 = None

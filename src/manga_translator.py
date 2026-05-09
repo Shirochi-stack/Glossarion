@@ -7368,10 +7368,76 @@ class MangaTranslator:
                 pass
         return ""
 
-    def _append_manga_glossary_to_system_prompt(self, system_prompt: str) -> str:
+    def _get_manga_glossary_path(self) -> str:
+        """Return the saved manga glossary path when available."""
+        for source in (self, getattr(self, 'main_gui', None)):
+            try:
+                for attr in ('manga_generated_glossary_path', 'manga_custom_glossary_path'):
+                    path = getattr(source, attr, '')
+                    if isinstance(path, str) and path.strip():
+                        return path.strip()
+            except Exception:
+                pass
+        try:
+            config = getattr(getattr(self, 'main_gui', None), 'config', {}) or {}
+            return (
+                config.get('manga_generated_glossary_path', '')
+                or config.get('manga_custom_glossary_path', '')
+                or ''
+            )
+        except Exception:
+            return ""
+
+    def _manga_glossary_compression_enabled(self) -> bool:
+        """Return whether glossary prompt compression is enabled for manga."""
+        env_value = os.getenv("COMPRESS_GLOSSARY_PROMPT")
+        if env_value is not None:
+            return str(env_value).strip().lower() in ("1", "true", "yes", "on")
+        try:
+            return bool(getattr(self.main_gui, 'config', {}).get('compress_glossary_prompt', True))
+        except Exception:
+            return True
+
+    def _compress_manga_glossary_for_source(self, glossary_text: str, source_text: str = "", image_path: str = None) -> str:
+        """Use the shared glossary compressor to keep only entries relevant to the current manga text."""
+        if not glossary_text or not source_text or not self._manga_glossary_compression_enabled():
+            return glossary_text
+        try:
+            from glossary_compressor import compress_glossary
+            glossary_path = self._get_manga_glossary_path()
+            chapter_ref = {
+                "chapter_num": None,
+                "chapter_file": os.path.basename(image_path) if image_path else os.getenv("CURRENT_CHAPTER_FILE", ""),
+            }
+            original_length = len(glossary_text)
+            compressed = compress_glossary(
+                glossary_text,
+                source_text,
+                glossary_format='auto',
+                glossary_path=glossary_path,
+                chapter_ref=chapter_ref,
+            )
+            compressed = compressed if isinstance(compressed, str) else str(compressed or "")
+            compressed_length = len(compressed)
+            if original_length and compressed_length != original_length:
+                reduction_pct = (original_length - compressed_length) / original_length * 100
+                self._log(
+                    f"Manga glossary compressed: {original_length:,} -> {compressed_length:,} chars ({reduction_pct:.1f}%)",
+                    "info",
+                )
+            return compressed
+        except Exception as e:
+            self._log(f"Warning: Manga glossary compression failed: {e}", "warning")
+            return glossary_text
+
+    def _append_manga_glossary_to_system_prompt(self, system_prompt: str, source_text: str = "", image_path: str = None) -> str:
         """Append the generated manga glossary using the configured glossary append prompt."""
         glossary_text = self._get_manga_glossary_text()
         if not glossary_text:
+            return system_prompt or ""
+        glossary_text = self._compress_manga_glossary_for_source(glossary_text, source_text, image_path)
+        if not glossary_text or not glossary_text.strip():
+            self._log("Manga glossary skipped for this page (no matching entries after compression)", "info")
             return system_prompt or ""
 
         default_append_prompt = "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
@@ -7436,7 +7502,12 @@ class MangaTranslator:
             else:
                 self._log(f"⚠️ Profile '{profile_name}' not found in prompt_profiles", "warning")
 
-            system_prompt = self._append_manga_glossary_to_system_prompt(system_prompt)
+            glossary_source_text = getattr(self, '_current_page_source_text', '') or text
+            system_prompt = self._append_manga_glossary_to_system_prompt(
+                system_prompt,
+                source_text=glossary_source_text,
+                image_path=image_path,
+            )
 
             self._log(f"{prefix} 📝 System prompt: {system_prompt[:100]}..." if system_prompt else f"{prefix} 📝 No system prompt configured")
 
@@ -8021,7 +8092,12 @@ class MangaTranslator:
                 system_prompt = f"{system_prompt}\n\n{self.full_page_context_prompt}"
             else:
                 system_prompt = self.full_page_context_prompt
-            system_prompt = self._append_manga_glossary_to_system_prompt(system_prompt)
+            glossary_source_text = "\n".join(str(region.text or '') for region in regions if str(region.text or '').strip())
+            system_prompt = self._append_manga_glossary_to_system_prompt(
+                system_prompt,
+                source_text=glossary_source_text,
+                image_path=image_path,
+            )
             
             messages = [{"role": "system", "content": system_prompt}]
             
@@ -13993,6 +14069,14 @@ class MangaTranslator:
         """Translate all text regions with API delay"""
         self._log(f"\n📝 Translating {len(regions)} text regions...")
         
+        try:
+            self._current_page_source_text = "\n".join(
+                str(region.text or '') for region in regions if str(region.text or '').strip()
+            )
+            self._current_page_source_image_path = image_path
+        except Exception:
+            self._current_page_source_text = ""
+
         # Check stop before even starting
         if self._check_stop():
             self._log(f"\n⏹️ Translation stopped before processing any regions", "warning")
