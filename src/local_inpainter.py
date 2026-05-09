@@ -1,4 +1,4 @@
-"""
+﻿"""
 Local inpainting implementation - COMPATIBLE VERSION WITH JIT SUPPORT
 Maintains full backward compatibility while adding proper JIT model support
 """
@@ -61,10 +61,10 @@ if IS_FROZEN:
         import torch.nn.functional as F
         TORCH_AVAILABLE = True
         BaseModel = nn.Module
-        logger.info("✓ PyTorch loaded in frozen environment")
+        logger.info("âœ“ PyTorch loaded in frozen environment")
     except Exception as e:
         logger.error(f"PyTorch not available in frozen environment: {e}")
-        logger.error("❌ Inpainting disabled - PyTorch is required")
+        logger.error("âŒ Inpainting disabled - PyTorch is required")
 else:
     # Normal environment
     try:
@@ -88,7 +88,7 @@ try:
     import onnx
     import onnxruntime as ort
     ONNX_AVAILABLE = True
-    logger.info("✓ ONNX Runtime available")
+    logger.info("âœ“ ONNX Runtime available")
 except ImportError:
     ONNX_AVAILABLE = False
     logger.warning("ONNX Runtime not available")
@@ -105,7 +105,7 @@ BUBBLE_DETECTOR_AVAILABLE = False
 try:
     from bubble_detector import BubbleDetector
     BUBBLE_DETECTOR_AVAILABLE = True
-    logger.info("✓ Bubble detector available")
+    logger.info("âœ“ Bubble detector available")
 except ImportError:
     logger.info("Bubble detector not available - basic inpainting will be used")
 
@@ -208,7 +208,7 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
         cache_path = get_cache_path_by_url(url)
     
     if os.path.exists(cache_path):
-        logger.info(f"✅ Model already cached: {cache_path}")
+        logger.info(f"âœ… Model already cached: {cache_path}")
         if progress_callback:
             try:
                 progress_callback(100, 0, 0, 0)
@@ -220,7 +220,7 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
     if repo_id and filename:
         try:
             from huggingface_hub import hf_hub_download
-            logger.info(f"📥 Downloading from Hugging Face: {repo_id}/{filename}")
+            logger.info(f"ðŸ“¥ Downloading from Hugging Face: {repo_id}/{filename}")
             
             # Download using huggingface_hub (it shows progress in console with tqdm)
             downloaded_path = hf_hub_download(
@@ -234,7 +234,7 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
             if downloaded_path != cache_path:
                 # Check if file already exists at cache_path (might be same file)
                 if os.path.exists(cache_path):
-                    logger.info(f"✅ File already at cache location: {cache_path}")
+                    logger.info(f"âœ… File already at cache location: {cache_path}")
                 else:
                     # Try to copy with retry for file locks
                     import shutil
@@ -242,7 +242,7 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
                     for attempt in range(3):
                         try:
                             shutil.copy2(downloaded_path, cache_path)
-                            logger.info(f"✅ Copied to: {cache_path}")
+                            logger.info(f"âœ… Copied to: {cache_path}")
                             break
                         except (PermissionError, OSError) as e:
                             if attempt < 2:
@@ -253,11 +253,11 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
                                 logger.warning(f"Could not copy to cache_path, using downloaded location: {downloaded_path}")
                                 cache_path = downloaded_path
             
-            logger.info(f"✅ Model ready: {cache_path}")
+            logger.info(f"âœ… Model ready: {cache_path}")
             return cache_path
             
         except Exception as hf_error:
-            logger.error(f"❌ HuggingFace Hub download failed: {hf_error}")
+            logger.error(f"âŒ HuggingFace Hub download failed: {hf_error}")
             # If we have a fallback URL, try that
             if url:
                 logger.info(f"Falling back to direct URL download: {url}")
@@ -267,7 +267,7 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
     # Legacy URL-based download as fallback
     if url:
         try:
-            logger.info(f"📥 Downloading model from {url}")
+            logger.info(f"ðŸ“¥ Downloading model from {url}")
             
             # Check if it's a HF URL we can parse
             if 'huggingface.co' in url:
@@ -294,14 +294,14 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
                         # Copy to expected cache location if different
                         if downloaded_path != cache_path:
                             if os.path.exists(cache_path):
-                                logger.info(f"✅ File already at cache location: {cache_path}")
+                                logger.info(f"âœ… File already at cache location: {cache_path}")
                             else:
                                 import shutil
                                 import time as _time
                                 for attempt in range(3):
                                     try:
                                         shutil.copy2(downloaded_path, cache_path)
-                                        logger.info(f"✅ Copied to: {cache_path}")
+                                        logger.info(f"âœ… Copied to: {cache_path}")
                                         break
                                     except (PermissionError, OSError) as e:
                                         if attempt < 2:
@@ -311,7 +311,7 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
                                             logger.warning(f"Could not copy to cache_path, using downloaded location: {downloaded_path}")
                                             cache_path = downloaded_path
                         
-                        logger.info(f"✅ Model ready: {cache_path}")
+                        logger.info(f"âœ… Model ready: {cache_path}")
                         return cache_path
                         
                 except Exception as hf_error:
@@ -339,7 +339,7 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
                 }
             )
             
-            logger.info(f"🔍 Requesting file info from {url}")
+            logger.info(f"ðŸ” Requesting file info from {url}")
             response = http.request('GET', url, preload_content=False)
             
             if response.status != 200:
@@ -360,9 +360,9 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
                     pass
             
             if total_size > 0:
-                logger.info(f"📦 Download size: {total_mb:.2f} MB")
+                logger.info(f"ðŸ“¦ Download size: {total_mb:.2f} MB")
             else:
-                logger.warning("⚠️ Could not determine file size")
+                logger.warning("âš ï¸ Could not determine file size")
             
             downloaded = 0
             start_time = time.time()
@@ -401,7 +401,7 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
                             elapsed = current_time - start_time
                             speed_mb = (downloaded / elapsed / (1024 * 1024)) if elapsed > 0 else 0
                             downloaded_mb = downloaded / (1024 * 1024)
-                            logger.info(f"📥 Progress: {progress:.1f}% ({downloaded_mb:.1f} MB / {total_mb:.1f} MB) @ {speed_mb:.2f} MB/s")
+                            logger.info(f"ðŸ“¥ Progress: {progress:.1f}% ({downloaded_mb:.1f} MB / {total_mb:.1f} MB) @ {speed_mb:.2f} MB/s")
                             
                             # Update progress through callback
                             if progress_callback and total_size > 0:
@@ -414,11 +414,11 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
                 # Notify GUI that download is complete
             # We don't have GUI context in this function, removed
             
-            logger.info(f"✅ Model downloaded to: {cache_path}")
+            logger.info(f"âœ… Model downloaded to: {cache_path}")
             return cache_path
             
         except Exception as e:
-            logger.error(f"❌ Download failed: {e}")
+            logger.error(f"âŒ Download failed: {e}")
             if os.path.exists(cache_path):
                 os.remove(cache_path)
             raise
@@ -743,7 +743,7 @@ class LocalInpainter:
         # Create directories
         os.makedirs(ONNX_CACHE_DIR, exist_ok=True)
         os.makedirs(CACHE_DIR, exist_ok=True)
-        logger.info(f"📁 ONNX cache directory: {ONNX_CACHE_DIR}")
+        logger.info(f"ðŸ“ ONNX cache directory: {ONNX_CACHE_DIR}")
         logger.info(f"   Contents: {os.listdir(ONNX_CACHE_DIR) if os.path.exists(ONNX_CACHE_DIR) else 'Directory does not exist'}")
 
         
@@ -756,16 +756,16 @@ class LocalInpainter:
                 self.use_gpu = torch.cuda.is_available()
                 self.device = torch.device('cuda' if self.use_gpu else 'cpu')
                 if self.use_gpu:
-                    logger.info(f"🚀 GPU: {torch.cuda.get_device_name(0)}")
+                    logger.info(f"ðŸš€ GPU: {torch.cuda.get_device_name(0)}")
                 else:
-                    logger.info("💻 Using CPU")
+                    logger.info("ðŸ’» Using CPU")
             except AttributeError:
                 # torch module exists but doesn't have cuda attribute
                 self.use_gpu = False
                 self.device = None
-                logger.info("⚠️ PyTorch incomplete - inpainting disabled")
+                logger.info("âš ï¸ PyTorch incomplete - inpainting disabled")
         else:
-            logger.info("⚠️ PyTorch not available - inpainting disabled")
+            logger.info("âš ï¸ PyTorch not available - inpainting disabled")
         
         # Quantization/precision toggle (off by default)
         try:
@@ -827,10 +827,10 @@ class LocalInpainter:
         if BUBBLE_DETECTOR_AVAILABLE:
             try:
                 self.bubble_detector = BubbleDetector()
-                logger.info("🗨️ Bubble detection available")
+                logger.info("ðŸ—¨ï¸ Bubble detection available")
             except:
                 self.bubble_detector = None
-                logger.info("🗨️ Bubble detection not available")
+                logger.info("ðŸ—¨ï¸ Bubble detection not available")
     
     def _start_worker(self):
         try:
@@ -966,15 +966,15 @@ class LocalInpainter:
         # Wait for response with periodic stop flag checks
         # Use 1-second polling intervals to allow fast abort on stop
         poll_interval = 1.0
-        total_timeout = max(0.1, float(timeout))
+        total_timeout = None if timeout is None else max(0.1, float(timeout))
         elapsed = 0.0
         resp = None
         
         try:
-            while elapsed < total_timeout:
+            while total_timeout is None or elapsed < total_timeout:
                 # Check stop flag to allow quick abort
                 if self._check_stop():
-                    logger.warning(f"⏹️ Worker call aborted - stop requested during wait for {expect_type}")
+                    logger.warning(f"â¹ï¸ Worker call aborted - stop requested during wait for {expect_type}")
                     try:
                         del self._mp_pending[call_id]
                     except Exception:
@@ -991,7 +991,7 @@ class LocalInpainter:
                 
                 # Try to get response with short timeout
                 try:
-                    remaining = min(poll_interval, total_timeout - elapsed)
+                    remaining = poll_interval if total_timeout is None else min(poll_interval, total_timeout - elapsed)
                     resp = local_q.get(timeout=max(0.1, remaining))
                     break  # Got response
                 except Empty:
@@ -1023,7 +1023,7 @@ class LocalInpainter:
         
         # Check stop flag before starting model load
         if self._check_stop():
-            self._log("⏹️ Model load aborted - stop requested", "warning")
+            self._log("â¹ï¸ Model load aborted - stop requested", "warning")
             self.model_loaded = False
             return False
         
@@ -1034,7 +1034,7 @@ class LocalInpainter:
         for attempt in range(max_retries + 1):
             # Check stop flag at start of each retry
             if self._check_stop():
-                self._log("⏹️ Model load aborted during retry - stop requested", "warning")
+                self._log("â¹ï¸ Model load aborted during retry - stop requested", "warning")
                 self.model_loaded = False
                 return False
             
@@ -1065,14 +1065,14 @@ class LocalInpainter:
                     self.current_method = method
                 # Log if worker is using C++ backend
                 if self.use_onnx_cpp:
-                    logger.info("✅ Worker process using C++ ONNX backend (2x faster)")
+                    logger.info("âœ… Worker process using C++ ONNX backend (2x faster)")
                 if attempt > 0:
-                    logger.info(f"✅ Worker load_model succeeded on retry {attempt}")
+                    logger.info(f"âœ… Worker load_model succeeded on retry {attempt}")
                 return ok
                 
             except InterruptedError as e:
                 # Stop was requested during worker call - abort immediately without retry
-                self._log(f"⏹️ Model load aborted: {e}", "warning")
+                self._log(f"â¹ï¸ Model load aborted: {e}", "warning")
                 self.model_loaded = False
                 return False
                 
@@ -1080,25 +1080,25 @@ class LocalInpainter:
                 logger.error(f"Worker load_model timeout (attempt {attempt + 1}/{max_retries + 1}): {e}")
                 # Check stop flag before retry
                 if self._check_stop():
-                    self._log("⏹️ Model load aborted on timeout - stop requested", "warning")
+                    self._log("â¹ï¸ Model load aborted on timeout - stop requested", "warning")
                     self.model_loaded = False
                     return False
                 if attempt < max_retries:
-                    logger.warning(f"🔄 Restarting worker and retrying load_model...")
+                    logger.warning(f"ðŸ”„ Restarting worker and retrying load_model...")
                     try:
                         self._stop_worker()
                         import time
                         time.sleep(1)  # Brief pause
                         # Check stop after pause
                         if self._check_stop():
-                            self._log("⏹️ Model load aborted - stop requested during restart", "warning")
+                            self._log("â¹ï¸ Model load aborted - stop requested during restart", "warning")
                             self.model_loaded = False
                             return False
                         self._start_worker()
                     except Exception as restart_error:
                         logger.error(f"Failed to restart worker: {restart_error}")
                 else:
-                    logger.error("💡 Try disabling worker process in settings if this persists")
+                    logger.error("ðŸ’¡ Try disabling worker process in settings if this persists")
                     self.model_loaded = False
                     return False
                     
@@ -1109,7 +1109,7 @@ class LocalInpainter:
                     return False
                 # Check stop before retry
                 if self._check_stop():
-                    self._log("⏹️ Model load aborted on exception - stop requested", "warning")
+                    self._log("â¹ï¸ Model load aborted on exception - stop requested", "warning")
                     self.model_loaded = False
                     return False
         
@@ -1119,7 +1119,7 @@ class LocalInpainter:
     def _mp_inpaint(self, image, mask, refinement='normal', iterations=None):
         # Respect stop flag
         if self._check_stop():
-            self._log("⏹️ Inpainting stopped by user", "warning")
+            self._log("â¹ï¸ Inpainting stopped by user", "warning")
             return image
         if not self.model_loaded:
             self._log("No model loaded (worker)", "error")
@@ -1129,15 +1129,15 @@ class LocalInpainter:
         # After stop+resume the worker process is typically dead (killed by psutil cleanup).
         # Detect this immediately instead of waiting for a 120s+ timeout.
         if not self._check_worker_health():
-            logger.warning("💀 Worker process is dead at start of inpaint — restarting before first attempt")
+            logger.warning("ðŸ’€ Worker process is dead at start of inpaint â€” restarting before first attempt")
             if not self._ensure_worker_healthy():
-                logger.error("Failed to restart worker — returning original image")
+                logger.error("Failed to restart worker â€” returning original image")
                 return image
             # Reload model in the freshly restarted worker
             if hasattr(self, 'current_method') and self.current_method:
                 model_path = getattr(self, '_last_model_path', None)
                 if model_path:
-                    logger.info(f"🔄 Reloading model in restarted worker: {self.current_method}")
+                    logger.info(f"ðŸ”„ Reloading model in restarted worker: {self.current_method}")
                     if not self._mp_load_model(self.current_method, model_path, force_reload=True):
                         logger.error("Failed to reload model after worker restart")
                         return image
@@ -1154,20 +1154,24 @@ class LocalInpainter:
         except Exception:
             base_timeout = 120.0
         
+        qwen_unbounded_timeout = self._is_qwen_image_edit_method(getattr(self, 'current_method', None))
+
         # Retry with conservative timeouts: only restart if worker is actually dead
-        max_retries = 2
+        max_retries = 0 if qwen_unbounded_timeout else 2
+        if qwen_unbounded_timeout:
+            logger.info("Qwen-Image-Edit worker inpaint timeout disabled; use Stop to cancel a long run")
         
         for attempt in range(max_retries + 1):
             # CRITICAL: Check stop flag at start of each retry iteration
             if self._check_stop():
-                self._log("⏹️ Inpainting aborted during retry - stop requested", "warning")
+                self._log("â¹ï¸ Inpainting aborted during retry - stop requested", "warning")
                 return image
             
             try:
                 # Give more time on retries (1x, 1.5x, 2x base timeout)
-                timeout = base_timeout * (1.0 + attempt * 0.5)
+                timeout = None if qwen_unbounded_timeout else base_timeout * (1.0 + attempt * 0.5)
                 if attempt > 0:
-                    logger.info(f"🔄 Retrying inpaint (attempt {attempt + 1}/{max_retries + 1}, timeout={timeout:.0f}s)...")
+                    logger.info(f"ðŸ”„ Retrying inpaint (attempt {attempt + 1}/{max_retries + 1}, timeout={timeout:.0f}s)...")
                 
                 resp = self._mp_call(
                     {'type': 'inpaint', 'image': image, 'mask': mask, 'refinement': refinement, 'iterations': iterations}, 
@@ -1176,65 +1180,67 @@ class LocalInpainter:
                 )
                 if resp.get('success') and resp.get('result') is not None:
                     if attempt > 0:
-                        logger.info(f"✅ Worker inpaint succeeded on retry {attempt}")
+                        logger.info(f"âœ… Worker inpaint succeeded on retry {attempt}")
                     return resp['result']
                 else:
                     error_msg = resp.get('error', 'Unknown error')
                     logger.error(f"Worker inpaint failed: {error_msg}")
                     if attempt < max_retries:
                         if self._check_stop():
-                            self._log("⏹️ Inpainting aborted - stop requested", "warning")
+                            self._log("â¹ï¸ Inpainting aborted - stop requested", "warning")
                             return image
                         continue
                     return image
             except InterruptedError as e:
                 # Stop was requested during worker call - abort immediately without retry
-                self._log(f"⏹️ Inpainting aborted: {e}", "warning")
+                self._log(f"â¹ï¸ Inpainting aborted: {e}", "warning")
                 return image
                 
             except TimeoutError as e:
-                logger.warning(f"⚠️ Worker inpaint timeout (attempt {attempt + 1}/{max_retries + 1}, timeout={timeout:.0f}s): {e}")
+                timeout_label = "disabled" if timeout is None else f"{timeout:.0f}s"
+                logger.warning(f"Worker inpaint timeout (attempt {attempt + 1}/{max_retries + 1}, timeout={timeout_label}): {e}")
                 # Check stop flag before attempting retry/restart
                 if self._check_stop():
-                    self._log("⏹️ Inpainting aborted on timeout - stop requested", "warning")
+                    self._log("â¹ï¸ Inpainting aborted on timeout - stop requested", "warning")
                     return image
                 if attempt < max_retries:
                     # CRITICAL: Check if worker is still alive before killing it.
-                    # If it's alive, it's probably just slow — don't restart, just retry with more time.
+                    # If it's alive, it's probably just slow â€” don't restart, just retry with more time.
                     worker_alive = self._check_worker_health()
                     if worker_alive:
-                        logger.info(f"⏳ Worker is still alive — will retry with longer timeout (not restarting)")
+                        logger.info(f"â³ Worker is still alive â€” will retry with longer timeout (not restarting)")
                         # Worker is processing; skip restart, just loop to retry with a larger timeout
                         continue
                     else:
-                        # Worker is actually dead — restart it
-                        logger.warning(f"💀 Worker process is dead — restarting before retry")
+                        # Worker is actually dead â€” restart it
+                        logger.warning(f"ðŸ’€ Worker process is dead â€” restarting before retry")
                         try:
                             self._stop_worker()
                             import time
                             time.sleep(1)
                             if self._check_stop():
-                                self._log("⏹️ Inpainting aborted - stop requested during restart", "warning")
+                                self._log("â¹ï¸ Inpainting aborted - stop requested during restart", "warning")
                                 return image
                             self._start_worker()
                             # Reload the model only because we had to restart a dead worker
                             if hasattr(self, 'current_method') and self.current_method:
                                 model_path = getattr(self, '_last_model_path', None)
                                 if model_path:
-                                    logger.info(f"🔄 Reloading model in new worker: {self.current_method}")
+                                    logger.info(f"ðŸ”„ Reloading model in new worker: {self.current_method}")
                                     self._mp_load_model(self.current_method, model_path, force_reload=True)
                         except Exception as restart_error:
                             logger.error(f"Failed to restart worker: {restart_error}")
                             return image
                     continue
                 else:
-                    logger.error(f"❌ All retry attempts exhausted (timeout={timeout:.0f}s). Returning original image.")
+                    timeout_label = "disabled" if timeout is None else f"{timeout:.0f}s"
+                    logger.error(f"All retry attempts exhausted (timeout={timeout_label}). Returning original image.")
                     return image
             except Exception as e:
                 logger.error(f"Worker inpaint exception (attempt {attempt + 1}): {e}")
                 if attempt < max_retries:
                     if self._check_stop():
-                        self._log("⏹️ Inpainting aborted on exception - stop requested", "warning")
+                        self._log("â¹ï¸ Inpainting aborted on exception - stop requested", "warning")
                         return image
                     continue
                 return image
@@ -1366,9 +1372,9 @@ class LocalInpainter:
         # Suppress logs when stopped (allow only essential stop confirmation messages)
         if self._check_stop():
             essential_stop_keywords = [
-                "⏹️ Translation stopped by user",
-                "⏹️ Inpainting stopped",
-                "cleanup", "🧹"
+                "â¹ï¸ Translation stopped by user",
+                "â¹ï¸ Inpainting stopped",
+                "cleanup", "ðŸ§¹"
             ]
             if not any(keyword in message for keyword in essential_stop_keywords):
                 return
@@ -1395,10 +1401,10 @@ class LocalInpainter:
             
             # Check if ONNX already exists
             if os.path.exists(onnx_path) and not FORCE_ONNX_REBUILD:
-                logger.info(f"✅ ONNX model already exists: {onnx_path}")
+                logger.info(f"âœ… ONNX model already exists: {onnx_path}")
                 return onnx_path
             
-            logger.info(f"🔄 Converting {method} model to ONNX...")
+            logger.info(f"ðŸ”„ Converting {method} model to ONNX...")
             
             # The model should already be loaded at this point
             if not self.model_loaded or self.current_method != method:
@@ -1412,7 +1418,7 @@ class LocalInpainter:
             # For FFT models, we can't convert directly
             fft_models = ['lama', 'anime', 'lama_official']
             if method in fft_models:
-                logger.warning(f"⚠️ {method.upper()} uses FFT operations that cannot be exported")
+                logger.warning(f"âš ï¸ {method.upper()} uses FFT operations that cannot be exported")
                 return None  # Just return None, don't suggest Carve
             
             # Standard export for non-FFT models
@@ -1432,31 +1438,31 @@ class LocalInpainter:
                         'output': {0: 'batch', 2: 'height', 3: 'width'}
                     }
                 )
-                logger.info(f"✅ ONNX model saved to: {onnx_path}")
+                logger.info(f"âœ… ONNX model saved to: {onnx_path}")
                 return onnx_path
                 
             except torch.onnx.errors.UnsupportedOperatorError as e:
-                logger.error(f"❌ Unsupported operator: {e}")
+                logger.error(f"âŒ Unsupported operator: {e}")
                 return None
             
         except Exception as e:
-            logger.error(f"❌ ONNX conversion failed: {e}")
+            logger.error(f"âŒ ONNX conversion failed: {e}")
             logger.error(traceback.format_exc())
             return None
 
     def load_onnx_model(self, onnx_path: str) -> bool:
         """Load an ONNX model with C++ backend support for 2x performance"""
-        # Try C++ backend first (lazy import — DLL is loaded here, not at module import)
+        # Try C++ backend first (lazy import â€” DLL is loaded here, not at module import)
         try:
             from onnx_cpp_backend import ONNXCppBackend
-            logger.info("🚀 Loading ONNX model with C++ backend...")
+            logger.info("ðŸš€ Loading ONNX model with C++ backend...")
             self.onnx_cpp_backend = ONNXCppBackend()
             if self.onnx_cpp_backend.load_model(onnx_path, use_gpu=self.use_gpu):
                 self.use_onnx = True
                 self.use_onnx_cpp = True
                 self.model_loaded = True
                 self.current_onnx_path = onnx_path
-                logger.info("✅ ONNX C++ backend loaded successfully (Python fallback disabled)")
+                logger.info("âœ… ONNX C++ backend loaded successfully (Python fallback disabled)")
                 return True
             else:
                 logger.warning("C++ backend load failed, falling back to Python")
@@ -1476,12 +1482,12 @@ class LocalInpainter:
         if (self.onnx_session is not None and 
             hasattr(self, 'current_onnx_path') and 
             self.current_onnx_path == onnx_path):
-            logger.debug(f"✅ ONNX model already loaded: {onnx_path}")
+            logger.debug(f"âœ… ONNX model already loaded: {onnx_path}")
             return True
         
         try:
             # Don't log here if we already logged in load_model
-            logger.debug(f"📦 ONNX Runtime loading: {onnx_path}")
+            logger.debug(f"ðŸ“¦ ONNX Runtime loading: {onnx_path}")
             
             # Store the path for later checking
             self.current_onnx_path = onnx_path
@@ -1489,7 +1495,7 @@ class LocalInpainter:
             # Check if this is a Carve model (fixed 512x512)
             is_carve_model = "lama_fp32" in onnx_path or "carve" in onnx_path.lower()
             if is_carve_model:
-                logger.info("📦 Detected Carve ONNX model (fixed 512x512 input)")
+                logger.info("ðŸ“¦ Detected Carve ONNX model (fixed 512x512 input)")
                 self.onnx_fixed_size = (512, 512)
             else:
                 self.onnx_fixed_size = None
@@ -1532,7 +1538,7 @@ class LocalInpainter:
                                 m = _onnx.load(onnx_path)
                                 m_fp16 = _to_fp16(m, keep_io_types=True)
                                 _onnx.save(m_fp16, fp16_path)
-                                logger.info(f"✅ Generated FP16 ONNX for LaMa: {fp16_path}")
+                                logger.info(f"âœ… Generated FP16 ONNX for LaMa: {fp16_path}")
                         except Exception as e:
                             logger.warning(f"FP16 conversion for LaMa failed: {e}")
                     if os.path.exists(fp16_path):
@@ -1544,7 +1550,7 @@ class LocalInpainter:
                             from onnxruntime.quantization import quantize_dynamic, QuantType
                             quant_path = base + '.matmul.int8.onnx'
                             if (not os.path.exists(quant_path)) or FORCE_ONNX_REBUILD:
-                                logger.info("🔻 LaMa: Quantizing ONNX weights to INT8 (dynamic, ops=['MatMul'])...")
+                                logger.info("ðŸ”» LaMa: Quantizing ONNX weights to INT8 (dynamic, ops=['MatMul'])...")
                                 quantize_dynamic(
                                     model_input=onnx_path,
                                     model_output=quant_path,
@@ -1625,7 +1631,7 @@ class LocalInpainter:
                                         pass
                                     quant_path = None
                                 else:
-                                    logger.info(f"✅ Generated MatMul-only INT8 ONNX for LaMa: {quant_path}")
+                                    logger.info(f"âœ… Generated MatMul-only INT8 ONNX for LaMa: {quant_path}")
                                     self.onnx_quantize_applied = True
                             except Exception as st_err:
                                 logger.warning(f"LaMa static MatMul-only quantization failed: {st_err}")
@@ -1633,7 +1639,7 @@ class LocalInpainter:
                         # Use the quantized model if valid
                         if quant_path and os.path.exists(quant_path):
                             session_path = quant_path
-                            logger.info(f"✅ Using LaMa quantized ONNX model: {quant_path}")
+                            logger.info(f"âœ… Using LaMa quantized ONNX model: {quant_path}")
                     # If quantization not enabled or failed, session_path remains onnx_path (FP32)
 
             # Optional dynamic/static quantization for other models (opt-in)
@@ -1646,7 +1652,7 @@ class LocalInpainter:
                     try:
                         ignored_matmul = base + ".matmul.int8.onnx"
                         if os.path.exists(ignored_matmul):
-                            logger.info(f"⏭️ Ignoring MatMul-only quantized file for AOT: {ignored_matmul}")
+                            logger.info(f"â­ï¸ Ignoring MatMul-only quantized file for AOT: {ignored_matmul}")
                     except Exception:
                         pass
                 # Choose target quant file and ops
@@ -1667,7 +1673,7 @@ class LocalInpainter:
                                 sim_path = base + ".sim.onnx"
                                 _onnx.save(_sim_model, sim_path)
                                 quant_input_path = sim_path
-                                logger.info(f"🧰 Simplified AOT ONNX before quantization: {sim_path}")
+                                logger.info(f"ðŸ§° Simplified AOT ONNX before quantization: {sim_path}")
                         except Exception as _sim_err:
                             logger.info(f"AOT simplification skipped: {_sim_err}")
                         # No ONNX shape inference; keep original graph structure
@@ -1681,7 +1687,7 @@ class LocalInpainter:
                                 up_path = base + ".op13.onnx"
                                 _onnx.save(_m13, up_path)
                                 quant_input_path = up_path
-                                logger.info(f"🧰 Upgraded ONNX opset to 13 before QDQ quantization: {up_path}")
+                                logger.info(f"ðŸ§° Upgraded ONNX opset to 13 before QDQ quantization: {up_path}")
                         except Exception as _operr:
                             logger.info(f"Opset upgrade skipped: {_operr}")
                     except Exception:
@@ -1756,14 +1762,14 @@ class LocalInpainter:
                                 except Exception:
                                     pass
                             else:
-                                logger.info(f"✅ Static INT8 quantization produced: {quant_path}")
+                                logger.info(f"âœ… Static INT8 quantization produced: {quant_path}")
                         except Exception as st_err:
                             logger.warning(f"Static ONNX quantization failed: {st_err}")
                     else:
                         # First attempt: dynamic quantization (MatMul)
                         try:
                             from onnxruntime.quantization import quantize_dynamic, QuantType
-                            logger.info("🔻 Quantizing ONNX inpainting model weights to INT8 (dynamic, ops=['MatMul'])...")
+                            logger.info("ðŸ”» Quantizing ONNX inpainting model weights to INT8 (dynamic, ops=['MatMul'])...")
                             quantize_dynamic(
                                 model_input=quant_input_path,
                                 model_output=quant_path,
@@ -1834,7 +1840,7 @@ class LocalInpainter:
                                     except Exception:
                                         pass
                                 else:
-                                    logger.info(f"✅ Static INT8 quantization produced: {quant_path}")
+                                    logger.info(f"âœ… Static INT8 quantization produced: {quant_path}")
                             except Exception as st_err:
                                 logger.warning(f"Static ONNX quantization failed: {st_err}")
                 # Prefer the quantized file if it now exists
@@ -1852,7 +1858,7 @@ class LocalInpainter:
                             pass
                     else:
                         session_path = quant_path
-                        logger.info(f"✅ Using quantized ONNX model: {quant_path}")
+                        logger.info(f"âœ… Using quantized ONNX model: {quant_path}")
                 else:
                     logger.warning("ONNX quantization not applied: quantized file not created")
             # Use conservative ORT memory options to reduce RAM growth
@@ -1880,7 +1886,7 @@ class LocalInpainter:
                     try:
                         if os.path.exists(session_path):
                             os.remove(session_path)
-                            logger.info(f"🧹 Deleted invalid quantized model: {session_path}")
+                            logger.info(f"ðŸ§¹ Deleted invalid quantized model: {session_path}")
                     except Exception:
                         pass
                     try:
@@ -1922,7 +1928,7 @@ class LocalInpainter:
                 logger.info(f"  Model expects fixed size: 512x512")
             
             # Log success with I/O info in a single line
-            logger.debug(f"✅ ONNX session created - Inputs: {self.onnx_input_names}, Outputs: {self.onnx_output_names}")
+            logger.debug(f"âœ… ONNX session created - Inputs: {self.onnx_input_names}, Outputs: {self.onnx_output_names}")
             
             self.use_onnx = True
             # CRITICAL: Set model_loaded flag when ONNX session is successfully created
@@ -1931,7 +1937,7 @@ class LocalInpainter:
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to load ONNX: {e}")
+            logger.error(f"âŒ Failed to load ONNX: {e}")
             import traceback
             logger.debug(f"ONNX load traceback: {traceback.format_exc()}")
             self.use_onnx = False
@@ -2060,8 +2066,8 @@ class LocalInpainter:
         """Load weights with proper mapping"""
         model_dict = model.state_dict()
         
-        logger.info(f"📊 Model expects {len(model_dict)} weights")
-        logger.info(f"📊 Checkpoint has {len(state_dict)} weights")
+        logger.info(f"ðŸ“Š Model expects {len(model_dict)} weights")
+        logger.info(f"ðŸ“Š Checkpoint has {len(state_dict)} weights")
         
         # Filter out num_batches_tracked
         actual_weights = {k: v for k, v in state_dict.items() if 'num_batches_tracked' not in k}
@@ -2087,7 +2093,7 @@ class LocalInpainter:
                     permuted = ckpt_val.permute(1, 0, 2, 3)
                     if target_shape == permuted.shape:
                         mapped[converted_key] = permuted
-                        logger.info(f"   ✅ Permuted: {ckpt_key}")
+                        logger.info(f"   âœ… Permuted: {ckpt_key}")
                         success = True
                 elif len(ckpt_val.shape) == 2 and len(target_shape) == 2:
                     # 2D transpose
@@ -2104,7 +2110,7 @@ class LocalInpainter:
         
         # Try fallback mapping for unmapped
         if unmapped_ckpt:
-            logger.info(f"   🔧 Fallback mapping for {len(unmapped_ckpt)} weights...")
+            logger.info(f"   ðŸ”§ Fallback mapping for {len(unmapped_ckpt)} weights...")
             for ckpt_key in unmapped_ckpt[:]:
                 ckpt_val = actual_weights[ckpt_key]
                 for model_key in unmapped_model[:]:
@@ -2114,7 +2120,7 @@ class LocalInpainter:
                             mapped[model_key] = ckpt_val
                             unmapped_model.remove(model_key)
                             unmapped_ckpt.remove(ckpt_key)
-                            logger.info(f"   ✅ Mapped: {ckpt_key} -> {model_key}")
+                            logger.info(f"   âœ… Mapped: {ckpt_key} -> {model_key}")
                             break
         
         # Initialize missing weights
@@ -2136,15 +2142,15 @@ class LocalInpainter:
                 nn.init.ones_(param)
         
         # Report
-        logger.info(f"✅ Mapped {len(actual_weights) - len(unmapped_ckpt)}/{len(actual_weights)} checkpoint weights")
+        logger.info(f"âœ… Mapped {len(actual_weights) - len(unmapped_ckpt)}/{len(actual_weights)} checkpoint weights")
         logger.info(f"   Filled {len(mapped)}/{len(model_dict)} model positions")
         
         if unmapped_model:
             pct = (len(unmapped_model) / len(model_dict)) * 100
-            logger.info(f"   ⚠️ Initialized {len(unmapped_model)} missing weights ({pct:.1f}%)")
+            logger.info(f"   âš ï¸ Initialized {len(unmapped_model)} missing weights ({pct:.1f}%)")
             if pct > 20:
-                logger.warning("   ⚠️ May produce artifacts - checkpoint is incomplete")
-                logger.warning("   💡 Consider downloading JIT model for better quality:")
+                logger.warning("   âš ï¸ May produce artifacts - checkpoint is incomplete")
+                logger.warning("   ðŸ’¡ Consider downloading JIT model for better quality:")
                 logger.warning(f"      inpainter.download_jit_model('{self.current_method or 'lama'}')")
         
         model.load_state_dict(complete_dict, strict=True)
@@ -2177,16 +2183,16 @@ class LocalInpainter:
         cached = self.get_cached_model_path(method)
         if cached and os.path.exists(cached):
             if hasattr(self, 'progress_queue'):
-                self.progress_queue.put(('model_file_status', '✅ Model found in cache'))
+                self.progress_queue.put(('model_file_status', 'âœ… Model found in cache'))
             return cached
             
         # Not cached, need to download
         try:
             if method in LAMA_JIT_MODELS:
                 model_info = LAMA_JIT_MODELS[method]
-                logger.info(f"📥 Downloading {model_info['name']}...")
+                logger.info(f"ðŸ“¥ Downloading {model_info['name']}...")
                 if hasattr(self, 'progress_queue'):
-                    self.progress_queue.put(('model_file_status', f"📥 Downloading {model_info['name']}..."))
+                    self.progress_queue.put(('model_file_status', f"ðŸ“¥ Downloading {model_info['name']}..."))
                 
                 model_path = None
                 if model_info.get('is_diffusers'):
@@ -2238,26 +2244,26 @@ class LocalInpainter:
                     raise ValueError(f"No download info for {method}")
                 
                 if hasattr(self, 'progress_queue'):
-                    self.progress_queue.put(('model_file_status', '✅ Download complete'))
+                    self.progress_queue.put(('model_file_status', 'âœ… Download complete'))
                 return model_path
             else:
                 error_msg = f"No JIT model available for {method}"
                 logger.warning(error_msg)
                 if hasattr(self, 'progress_queue'):
-                    self.progress_queue.put(('model_file_status', f'❌ {error_msg}'))
+                    self.progress_queue.put(('model_file_status', f'âŒ {error_msg}'))
                 return None
                 
         except Exception as e:
             error_msg = f"Failed to download {method}: {e}"
             logger.error(error_msg)
             if hasattr(self, 'progress_queue'):
-                self.progress_queue.put(('model_file_status', f'❌ {error_msg}'))
+                self.progress_queue.put(('model_file_status', f'âŒ {error_msg}'))
             return None
             try:
                 if method in LAMA_JIT_MODELS:
                     model_info = LAMA_JIT_MODELS[method]
                     model_name = model_info.get('name', method.upper())
-                    logger.info(f"📥 Downloading {model_name}...")
+                    logger.info(f"ðŸ“¥ Downloading {model_name}...")
                     
                     # Send initial progress
                     progress_queue.put(('progress', 0, f"Starting {model_name} download..."))
@@ -2354,7 +2360,7 @@ class LocalInpainter:
                         # Handle errors
                         elif msg_type == 'error':
                             error_msg = msg_data[0]
-                            logger.error(f"❌ {error_msg}")
+                            logger.error(f"âŒ {error_msg}")
                             if hasattr(self, 'update_queue'):
                                 self.update_queue.put(('status', f"Error: {error_msg}"))
                             break
@@ -2363,9 +2369,9 @@ class LocalInpainter:
                         elif msg_type == 'done':
                             success, error = msg_data
                             if success:
-                                logger.info("✅ Download completed successfully")
+                                logger.info("âœ… Download completed successfully")
                             else:
-                                logger.error(f"❌ Download failed: {error if error else 'Unknown error'}")
+                                logger.error(f"âŒ Download failed: {error if error else 'Unknown error'}")
                             break
                             
                     except Empty:
@@ -2665,7 +2671,7 @@ class LocalInpainter:
             # Check if model path changed - but only if we had a previous path saved
             current_saved_path = self.config.get(f'{method}_model_path', '')
             if current_saved_path and current_saved_path != model_path:
-                logger.info(f"📍 Model path changed for {method}")
+                logger.info(f"ðŸ“ Model path changed for {method}")
                 logger.info(f"   Old: {current_saved_path}")
                 logger.info(f"   New: {model_path}")
                 force_reload = True
@@ -2696,38 +2702,38 @@ class LocalInpainter:
             if self.model_loaded and self.current_method == method and not force_reload:
                 # Additional check for ONNX - make sure the session exists
                 if self.use_onnx and self.onnx_session is not None:
-                    logger.debug(f"✅ {method.upper()} ONNX already loaded (skipping reload)")
+                    logger.debug(f"âœ… {method.upper()} ONNX already loaded (skipping reload)")
                     return True
                 elif not self.use_onnx and self.model is not None:
-                    logger.debug(f"✅ {method.upper()} already loaded (skipping reload)")
+                    logger.debug(f"âœ… {method.upper()} already loaded (skipping reload)")
                     return True
                 else:
                     # Model claims to be loaded but objects are missing - force reload
-                    logger.warning(f"⚠️ Model claims loaded but session/model object is None - forcing reload")
+                    logger.warning(f"âš ï¸ Model claims loaded but session/model object is None - forcing reload")
                     force_reload = True
                     self.model_loaded = False
             
             # Clear previous model if force reload
             if force_reload:
-                logger.info(f"🔄 Force reloading {method} model...")
+                logger.info(f"ðŸ”„ Force reloading {method} model...")
                 self.model = None
                 self.onnx_session = None
                 self.model_loaded = False
                 self.is_jit_model = False
                 # Only log loading message when actually loading
-                logger.info(f"📥 Loading {method} from {model_path}")
+                logger.info(f"ðŸ“¥ Loading {method} from {model_path}")
             elif self.model_loaded and self.current_method != method:
                 # If we have a model loaded but it's a different method, clear it
-                logger.info(f"🔄 Switching from {self.current_method} to {method}")
+                logger.info(f"ðŸ”„ Switching from {self.current_method} to {method}")
                 self.model = None
                 self.onnx_session = None
                 self.model_loaded = False
                 self.is_jit_model = False
                 # Only log loading message when actually loading
-                logger.info(f"📥 Loading {method} from {model_path}")
+                logger.info(f"ðŸ“¥ Loading {method} from {model_path}")
             elif not self.model_loaded:
                 # Only log when we're actually going to load
-                logger.info(f"📥 Loading {method} from {model_path}")
+                logger.info(f"ðŸ“¥ Loading {method} from {model_path}")
             # else: model is loaded and current, no logging needed
 
             # Normalize path and enforce expected extension for certain methods
@@ -2752,14 +2758,14 @@ class LocalInpainter:
                                     import shutil as _shutil
                                     _shutil.copy2(model_path, corrected_path)
                                     model_path = corrected_path
-                                    logger.info(f"🔧 Corrected ONNX model extension/path: {model_path}")
+                                    logger.info(f"ðŸ”§ Corrected ONNX model extension/path: {model_path}")
                                 except Exception as _cp_e:
                                     # As a fallback, try in-place rename to .onnx
                                     try:
                                         in_place = os.path.splitext(model_path)[0] + ".onnx"
                                         os.replace(model_path, in_place)
                                         model_path = in_place
-                                        logger.info(f"🔧 Renamed ONNX model to: {model_path}")
+                                        logger.info(f"ðŸ”§ Renamed ONNX model to: {model_path}")
                                     except Exception:
                                         logger.warning(f"Could not correct ONNX extension automatically: {_cp_e}")
                         except Exception:
@@ -2777,7 +2783,7 @@ class LocalInpainter:
                                 _dl = self.download_jit_model("lama_onnx")
                             if _dl and os.path.exists(_dl):
                                 model_path = _dl
-                                logger.info(f"🔧 Using downloaded {_method_lower.upper()} model: {model_path}")
+                                logger.info(f"ðŸ”§ Using downloaded {_method_lower.upper()} model: {model_path}")
                         except Exception:
                             pass
             except Exception:
@@ -2794,7 +2800,7 @@ class LocalInpainter:
                     file_header = f.read(8)
                 if file_header.startswith(b'\x08'):
                     is_onnx = True
-                    logger.debug("📦 Detected ONNX file signature")
+                    logger.debug("ðŸ“¦ Detected ONNX file signature")
             except Exception:
                 pass
             
@@ -2825,10 +2831,10 @@ class LocalInpainter:
                             self._save_config()
                         except Exception as cfg_err:
                             logger.debug(f"Config save after ONNX load failed (non-critical): {cfg_err}")
-                        logger.info(f"✅ {method.upper()} ONNX loaded with method: {self.current_method}")
+                        logger.info(f"âœ… {method.upper()} ONNX loaded with method: {self.current_method}")
                         # Double-check model_loaded flag is still set
                         if not self.model_loaded:
-                            logger.error("❌ CRITICAL: model_loaded flag was unset after successful ONNX load!")
+                            logger.error("âŒ CRITICAL: model_loaded flag was unset after successful ONNX load!")
                             self.model_loaded = True
                         return True
                     else:
@@ -2848,7 +2854,7 @@ class LocalInpainter:
             if is_safetensors:
                 try:
                     from safetensors.torch import load_file
-                    logger.info("📦 Loading safetensors file...")
+                    logger.info("ðŸ“¦ Loading safetensors file...")
                     checkpoint = load_file(model_path)
                     self.is_jit_model = False
                 except ImportError:
@@ -2861,7 +2867,7 @@ class LocalInpainter:
             elif model_path.endswith('.pt'):
                 try:
                     # Try loading as JIT/TorchScript
-                    logger.info("📦 Attempting to load as JIT model...")
+                    logger.info("ðŸ“¦ Attempting to load as JIT model...")
                     self.model = torch.jit.load(model_path, map_location=self.device or 'cpu')
                     self.model.eval()
                     
@@ -2875,14 +2881,14 @@ class LocalInpainter:
                     self.is_jit_model = True
                     self.model_loaded = True
                     self.current_method = method
-                    logger.info("✅ JIT model loaded successfully!")
+                    logger.info("âœ… JIT model loaded successfully!")
                     
                     # Optional FP16 precision on GPU to reduce VRAM
                     if self.quantize_enabled and self.use_gpu:
                         try:
                             if self.torch_precision in ('fp16', 'auto'):
                                 self.model = self.model.half()
-                                logger.info("🔻 Applied FP16 precision to inpainting model (GPU)")
+                                logger.info("ðŸ”» Applied FP16 precision to inpainting model (GPU)")
                             else:
                                 logger.info("Torch precision set to fp32; skipping half()")
                         except Exception as _e:
@@ -2913,10 +2919,10 @@ class LocalInpainter:
                             except Exception:
                                 pass
                             if applied:
-                                logger.info("🔻 Applied INT8 dynamic quantization to JIT inpainting model (CPU)")
+                                logger.info("ðŸ”» Applied INT8 dynamic quantization to JIT inpainting model (CPU)")
                                 self.torch_quantize_applied = True
                             else:
-                                logger.info("ℹ️ INT8 dynamic quantization not applied (unsupported for this JIT graph); using FP32 CPU")
+                                logger.info("â„¹ï¸ INT8 dynamic quantization not applied (unsupported for this JIT graph); using FP32 CPU")
                         except Exception as _qe:
                             logger.warning(f"INT8 quantization skipped: {_qe}")
                     
@@ -2931,12 +2937,12 @@ class LocalInpainter:
                             try:
                                 onnx_path = self.convert_to_onnx(model_path, method)
                                 if onnx_path and self.load_onnx_model(onnx_path):
-                                    logger.info("🚀 Using ONNX model for inference")
+                                    logger.info("ðŸš€ Using ONNX model for inference")
                                 else:
-                                    logger.info("📦 Using PyTorch JIT model for inference")
+                                    logger.info("ðŸ“¦ Using PyTorch JIT model for inference")
                             except Exception as onnx_error:
                                 logger.warning(f"ONNX conversion failed: {onnx_error}")
-                                logger.info("📦 Using PyTorch JIT model for inference")
+                                logger.info("ðŸ“¦ Using PyTorch JIT model for inference")
                         
                         if os.environ.get('AUTO_CONVERT_TO_ONNX_BACKGROUND', 'true').lower() == 'true':
                             threading.Thread(target=_convert_and_switch, daemon=True).start()
@@ -2967,7 +2973,7 @@ class LocalInpainter:
                 try:
                     # Create the appropriate model based on method
                     if method == 'mat':
-                        logger.info("📦 Creating MAT model architecture...")
+                        logger.info("ðŸ“¦ Creating MAT model architecture...")
                         self.model = MATInpaintModel()
                     else:
                         self.model = FFCInpaintModel()
@@ -2975,7 +2981,7 @@ class LocalInpainter:
                     if isinstance(checkpoint, dict):
                         if 'gen_state_dict' in checkpoint:
                             state_dict = checkpoint['gen_state_dict']
-                            logger.info("📦 Found gen_state_dict")
+                            logger.info("ðŸ“¦ Found gen_state_dict")
                         elif 'state_dict' in checkpoint:
                             state_dict = checkpoint['state_dict']
                         elif 'model' in checkpoint:
@@ -2987,7 +2993,7 @@ class LocalInpainter:
                     
                     # For MAT models, use the original architecture
                     if method == 'mat':
-                        logger.info("🔍 Loading MAT with original architecture...")
+                        logger.info("ðŸ” Loading MAT with original architecture...")
                         
                         try:
                             # Import MAT's Generator class
@@ -3005,7 +3011,7 @@ class LocalInpainter:
                             
                             # Create generator with MAT's default parameters
                             # z_dim=512, c_dim=0, w_dim=512, img_resolution=512, img_channels=3
-                            logger.info("🏭 Creating MAT Generator...")
+                            logger.info("ðŸ­ Creating MAT Generator...")
                             generator = Generator(
                                 z_dim=512,
                                 c_dim=0, 
@@ -3015,9 +3021,9 @@ class LocalInpainter:
                             )
                             
                             # Load checkpoint into generator
-                            logger.info("📦 Loading checkpoint into MAT Generator...")
+                            logger.info("ðŸ“¦ Loading checkpoint into MAT Generator...")
                             missing, unexpected = generator.load_state_dict(state_dict, strict=False)
-                            logger.info(f"✅ MAT loaded. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
+                            logger.info(f"âœ… MAT loaded. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
                             
                             # Put generator in eval mode
                             generator.eval()
@@ -3050,8 +3056,8 @@ class LocalInpainter:
                                     inverted_mask = 1.0 - mask
                                     
                                     # Log tensor stats for debugging
-                                    logger.debug(f"🔍 MAT Input - Image: shape={image.shape}, range=[{image.min():.3f}, {image.max():.3f}]")
-                                    logger.debug(f"🔍 MAT Input - Mask (inverted): shape={inverted_mask.shape}, sum={inverted_mask.sum():.0f}")
+                                    logger.debug(f"ðŸ” MAT Input - Image: shape={image.shape}, range=[{image.min():.3f}, {image.max():.3f}]")
+                                    logger.debug(f"ðŸ” MAT Input - Mask (inverted): shape={inverted_mask.shape}, sum={inverted_mask.sum():.0f}")
                                     
                                     # IMPROVEMENT: Use higher truncation_psi for better quality (default 1.0)
                                     # Lower values (0.5-0.8) = more conservative/realistic
@@ -3067,15 +3073,15 @@ class LocalInpainter:
                                             noise_mode='const'   # Deterministic noise
                                         )
                                     
-                                    logger.debug(f"🔍 MAT Output - shape={output.shape}, range=[{output.min():.3f}, {output.max():.3f}]")
+                                    logger.debug(f"ðŸ” MAT Output - shape={output.shape}, range=[{output.min():.3f}, {output.max():.3f}]")
                                     
                                     return output
                             
                             self.model = MATWrapper(generator)
-                            logger.info("✅ MAT wrapper created")
+                            logger.info("âœ… MAT wrapper created")
                             
                         except Exception as mat_err:
-                            logger.error(f"❌ Failed to load MAT with original architecture: {mat_err}")
+                            logger.error(f"âŒ Failed to load MAT with original architecture: {mat_err}")
                             import traceback
                             logger.error(traceback.format_exc())
                             return False
@@ -3097,7 +3103,7 @@ class LocalInpainter:
                         try:
                             import torch.ao.quantization as tq  # type: ignore
                             self.model = tq.quantize_dynamic(self.model, {nn.Linear}, dtype=torch.qint8)  # type: ignore
-                            logger.info("🔻 Applied dynamic INT8 quantization to inpainting model (CPU)")
+                            logger.info("ðŸ”» Applied dynamic INT8 quantization to inpainting model (CPU)")
                             self.torch_quantize_applied = True
                         except Exception as qe:
                             logger.warning(f"INT8 dynamic quantization not applied: {qe}")
@@ -3113,7 +3119,7 @@ class LocalInpainter:
             self.config[f'{method}_model_path'] = model_path
             self._save_config()
             
-            logger.info(f"✅ {method.upper()} loaded!")
+            logger.info(f"âœ… {method.upper()} loaded!")
             
             # ONNX CONVERSION (optionally in background)
             if AUTO_CONVERT_TO_ONNX and model_path.endswith('.pt') and self.model_loaded:
@@ -3121,10 +3127,10 @@ class LocalInpainter:
                     try:
                         onnx_path = self.convert_to_onnx(model_path, method)
                         if onnx_path and self.load_onnx_model(onnx_path):
-                            logger.info("🚀 Using ONNX model for inference")
+                            logger.info("ðŸš€ Using ONNX model for inference")
                     except Exception as onnx_error:
                         logger.warning(f"ONNX conversion failed: {onnx_error}")
-                        logger.info("📦 Continuing with PyTorch model")
+                        logger.info("ðŸ“¦ Continuing with PyTorch model")
                 
                 if os.environ.get('AUTO_CONVERT_TO_ONNX_BACKGROUND', 'true').lower() == 'true':
                     threading.Thread(target=_convert_and_switch, daemon=True).start()
@@ -3134,7 +3140,7 @@ class LocalInpainter:
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to load model: {e}")
+            logger.error(f"âŒ Failed to load model: {e}")
             logger.error(traceback.format_exc())
             logger.info("Note: If running from .exe, some ML libraries may not be included")
             logger.info("This is normal for lightweight builds - inpainting will be disabled")
@@ -3326,7 +3332,7 @@ class LocalInpainter:
                 else:
                     result[y:y_end, x:x_end] = processed_tile
         
-        logger.info(f"✅ Tiled inpainting complete ({orig_w}x{orig_h} in {tile_size}x{tile_size} tiles)")
+        logger.info(f"âœ… Tiled inpainting complete ({orig_w}x{orig_h} in {tile_size}x{tile_size} tiles)")
         return result
 
     def _process_single_tile(self, tile_img, tile_mask, tile_size, refinement):
@@ -3455,7 +3461,7 @@ class LocalInpainter:
         
         # Check for stop at start
         if self._check_stop():
-            self._log("⏹️ Inpainting stopped by user", "warning")
+            self._log("â¹ï¸ Inpainting stopped by user", "warning")
             return image
         
         if not self.model_loaded:
@@ -3521,11 +3527,11 @@ class LocalInpainter:
                 return self._qwen_image_edit_inpaint(image, mask, iterations=iterations)
 
             # Use instance tiling settings for ALL models
-            logger.info(f"🔍 Tiling check: enabled={self.tiling_enabled}, tile_size={self.tile_size}, image_size={orig_h}x{orig_w}")
+            logger.info(f"ðŸ” Tiling check: enabled={self.tiling_enabled}, tile_size={self.tile_size}, image_size={orig_h}x{orig_w}")
 
             # If tiling is enabled and image is larger than tile size
             if (not _skip_tiling) and self.tiling_enabled and (orig_h > self.tile_size or orig_w > self.tile_size):
-                logger.info(f"🔲 Using tiled inpainting: {self.tile_size}x{self.tile_size} tiles with {self.tile_overlap}px overlap")
+                logger.info(f"ðŸ”² Using tiled inpainting: {self.tile_size}x{self.tile_size} tiles with {self.tile_overlap}px overlap")
                 return self._inpaint_tiled(image, mask, self.tile_size, self.tile_overlap, refinement)
                 
             # C++ ONNX inference path (faster)
@@ -3697,7 +3703,7 @@ class LocalInpainter:
                     
                     # Check for stop before inference
                     if self._check_stop():
-                        self._log("⏹️ ONNX inference stopped by user", "warning")
+                        self._log("â¹ï¸ ONNX inference stopped by user", "warning")
                         return image
                     
                     # Run ONNX inference
@@ -3902,13 +3908,13 @@ class LocalInpainter:
 
                     # Determine number of iterations
                     # Log the received iterations parameter for debugging
-                    logger.info(f"🔍 Received iterations parameter: {iterations} (type: {type(iterations).__name__})")
+                    logger.info(f"ðŸ” Received iterations parameter: {iterations} (type: {type(iterations).__name__})")
                     num_iterations = 1
                     if iterations is not None and iterations > 0:
                         num_iterations = int(iterations)
-                        logger.info(f"🔁 Running {num_iterations} iteration(s) for JIT {self.current_method.upper()}")
+                        logger.info(f"ðŸ” Running {num_iterations} iteration(s) for JIT {self.current_method.upper()}")
                     else:
-                        logger.info(f"🔁 Using default single pass (iterations={iterations}) for JIT {self.current_method.upper()}")
+                        logger.info(f"ðŸ” Using default single pass (iterations={iterations}) for JIT {self.current_method.upper()}")
 
                     # Run inference with proper error handling and iteration support
                     with torch.no_grad():
@@ -3990,17 +3996,17 @@ class LocalInpainter:
                 
                 # Determine number of iterations (default 1 for single pass)
                 # Log the received iterations parameter for debugging
-                logger.info(f"🔍 Received iterations parameter: {iterations} (type: {type(iterations).__name__})")
+                logger.info(f"ðŸ” Received iterations parameter: {iterations} (type: {type(iterations).__name__})")
                 num_iterations = 1
                 if iterations is not None and iterations > 0:
                     num_iterations = int(iterations)
-                    logger.info(f"🔁 Running {num_iterations} iteration(s) for {self.current_method.upper()}")
+                    logger.info(f"ðŸ” Running {num_iterations} iteration(s) for {self.current_method.upper()}")
                 else:
-                    logger.info(f"🔁 Using default single pass (iterations={iterations}) for {self.current_method.upper()}")
+                    logger.info(f"ðŸ” Using default single pass (iterations={iterations}) for {self.current_method.upper()}")
                 
                 # For MAT, use 512x512 and convert BGR to RGB
                 if self.current_method == 'mat':
-                    logger.debug("📦 MAT checkpoint inference path")
+                    logger.debug("ðŸ“¦ MAT checkpoint inference path")
                     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                     
                     # IMPROVEMENT: Use LANCZOS4 for downscaling, preserve details
@@ -4011,8 +4017,8 @@ class LocalInpainter:
                     img_norm = img_resized.astype(np.float32) / 127.5 - 1.0
                     mask_norm = mask_resized.astype(np.float32) / 255.0
                     
-                    logger.debug(f"📊 MAT Input Stats - Image: [{img_norm.min():.3f}, {img_norm.max():.3f}], mean={img_norm.mean():.3f}")
-                    logger.debug(f"📊 MAT Mask Stats - range: [{mask_norm.min():.3f}, {mask_norm.max():.3f}], coverage={mask_norm.sum()/(512*512)*100:.1f}%")
+                    logger.debug(f"ðŸ“Š MAT Input Stats - Image: [{img_norm.min():.3f}, {img_norm.max():.3f}], mean={img_norm.mean():.3f}")
+                    logger.debug(f"ðŸ“Š MAT Mask Stats - range: [{mask_norm.min():.3f}, {mask_norm.max():.3f}], coverage={mask_norm.sum()/(512*512)*100:.1f}%")
                 else:
                     img_resized = cv2.resize(image, (size, size), interpolation=cv2.INTER_LANCZOS4)
                     mask_resized = cv2.resize(mask, (size, size), interpolation=cv2.INTER_NEAREST)
@@ -4052,9 +4058,9 @@ class LocalInpainter:
                 
                 # For MAT, clamp to [-1, 1] before denormalizing
                 if self.current_method == 'mat':
-                    logger.debug(f"📊 MAT Raw Output - range: [{result.min():.3f}, {result.max():.3f}], mean={result.mean():.3f}")
+                    logger.debug(f"ðŸ“Š MAT Raw Output - range: [{result.min():.3f}, {result.max():.3f}], mean={result.mean():.3f}")
                     result = np.clip(result, -1.0, 1.0)
-                    logger.debug(f"📊 MAT After Clip - range: [{result.min():.3f}, {result.max():.3f}]")
+                    logger.debug(f"ðŸ“Š MAT After Clip - range: [{result.min():.3f}, {result.max():.3f}]")
                 
                 # Denormalize from [-1, 1] to [0, 255]
                 result = ((result + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
@@ -4062,7 +4068,7 @@ class LocalInpainter:
                 # For MAT, convert RGB back to BGR
                 if self.current_method == 'mat':
                     result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
-                    logger.debug(f"📊 MAT Final Output - shape={result.shape}, dtype={result.dtype}")
+                    logger.debug(f"ðŸ“Š MAT Final Output - shape={result.shape}, dtype={result.dtype}")
                 
                 result = cv2.resize(result, (w, h), interpolation=cv2.INTER_LANCZOS4)
                 self._log_inpaint_diag('ckpt', result, mask)
@@ -4087,21 +4093,21 @@ class LocalInpainter:
             try:
                 if self._is_noop(image, result, mask):
                     if _retry_attempt == 0:
-                        logger.warning("⚠️ Inpainting produced no visible change; retrying with slight mask dilation and fast refinement")
+                        logger.warning("âš ï¸ Inpainting produced no visible change; retrying with slight mask dilation and fast refinement")
                         kernel = np.ones((3, 3), np.uint8)
                         expanded_mask = cv2.dilate(mask, kernel, iterations=1)
                         return self.inpaint(image, expanded_mask, refinement='fast', _retry_attempt=1)
                     elif _retry_attempt == 1:
-                        logger.warning("⚠️ Still no visible change after retry; attempting a second dilation and fast refinement")
+                        logger.warning("âš ï¸ Still no visible change after retry; attempting a second dilation and fast refinement")
                         kernel = np.ones((5, 5), np.uint8)
                         expanded_mask2 = cv2.dilate(mask, kernel, iterations=1)
                         return self.inpaint(image, expanded_mask2, refinement='fast', _retry_attempt=2)
                     else:
-                        logger.warning("⚠️ No further retries; returning last result without fallback")
+                        logger.warning("âš ï¸ No further retries; returning last result without fallback")
             except Exception as e:
                 logger.debug(f"No-op detection step failed: {e}")
             
-            logger.info("✅ Inpainted successfully!")
+            logger.info("âœ… Inpainted successfully!")
             
             # Optional cleanup - only if auto_cleanup_models is enabled
             try:
@@ -4123,7 +4129,7 @@ class LocalInpainter:
             return result
             
         except Exception as e:
-            logger.error(f"❌ Inpainting failed: {e}")
+            logger.error(f"âŒ Inpainting failed: {e}")
             logger.error(traceback.format_exc())
             
             # Return original image on failure
@@ -4151,7 +4157,7 @@ class LocalInpainter:
             self.bubble_model_loaded = True
             self.config['bubble_model_path'] = model_path
             self._save_config()
-            logger.info("✅ Bubble detection model loaded")
+            logger.info("âœ… Bubble detection model loaded")
             return True
         
         return False
@@ -4279,7 +4285,7 @@ def setup_inpainter_for_manga(auto_download=True):
         jit_path = inpainter.download_jit_model('anime')
         if jit_path:
             inpainter.load_model('anime', jit_path)
-            logger.info("✅ Manga inpainter ready with JIT model")
+            logger.info("âœ… Manga inpainter ready with JIT model")
     
     return inpainter
 
@@ -4363,7 +4369,7 @@ if __name__ == "__main__":
                     print(f"\nDownloading {method}...")
                     path = inpainter.download_jit_model(method)
                     if path:
-                        print(f"  ✅ Downloaded to: {path}")
+                        print(f"  âœ… Downloaded to: {path}")
             
             elif len(sys.argv) > 2:
                 # Test with model
