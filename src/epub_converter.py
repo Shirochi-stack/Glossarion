@@ -2282,8 +2282,11 @@ class EPUBCompiler:
                 self.log("🛑 EPUB converter stopped by user")
                 return
             
-            # Add optional gallery (unless disabled)
+            # Add optional gallery (unless disabled or image output passthrough mode)
             disable_gallery = os.environ.get('DISABLE_EPUB_GALLERY', '0') == '1'
+            if not disable_gallery and _image_passthrough:
+                disable_gallery = True
+                self.log("📷 Image gallery skipped — image output passthrough mode")
             if disable_gallery:
                 self.log("📷 Image gallery disabled by user preference")
             else:
@@ -3206,13 +3209,6 @@ class EPUBCompiler:
                                 self.log(f"  Chapter {chapter_num}: {filename}")
                         chapter_num += 1
             
-            # Also include manifest HTML items NOT in the spine (e.g. nav.xhtml,
-            # toc pages).  Assign them order numbers after the last spine entry
-            # so they map correctly instead of triggering "Could not map" warnings.
-            for item_id, filename in manifest.items():
-                if item_id not in spine_ids and filename not in filename_to_order:
-                    filename_to_order[filename] = chapter_num
-                    chapter_num += 1
             
             return filename_to_order
             
@@ -3320,8 +3316,15 @@ class EPUBCompiler:
                         matched = True
                         break
                 if not matched:
+                    # Check if this is a known special file (nav, toc, title, etc.)
+                    # that is in the manifest but not the spine — silently skip it.
+                    _special_kw_str = os.environ.get('SPECIAL_FILE_KEYWORDS', 'title, toc, copyright, preface, nav, message, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography')
+                    _special_keywords = [k.strip().lower() for k in _special_kw_str.split(',') if k.strip()]
+                    _core_lower = core_name.lower()
+                    if any(kw in _core_lower for kw in _special_keywords):
+                        self.log(f"  ℹ️ Skipping non-spine special file: {output_file}")
+                        continue
                     unmapped_files.append(output_file)
-                    # Always log unmapped files (these are warnings)
                     self.log(f"  ⚠️ Could not map: {output_file} (core: {core_name})")
             
             if ordered_files:
