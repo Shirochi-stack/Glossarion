@@ -3181,6 +3181,7 @@ class EPUBCompiler:
             chapter_num = 0  # Start from 0 for array indexing
             
             spine = root.find('.//opf:spine', ns)
+            spine_ids = set()
             if spine is not None:
                 # Count total items first to decide on logging
                 itemrefs = spine.findall('opf:itemref', ns)
@@ -3191,6 +3192,7 @@ class EPUBCompiler:
                 for idx, itemref in enumerate(itemrefs):
                     idref = itemref.get('idref')
                     if idref and idref in manifest:
+                        spine_ids.add(idref)
                         filename = manifest[idref]
                         filename_to_order[filename] = chapter_num
                         # Only log periodically for large EPUBs
@@ -3201,6 +3203,14 @@ class EPUBCompiler:
                             else:
                                 self.log(f"  Chapter {chapter_num}: {filename}")
                         chapter_num += 1
+            
+            # Also include manifest HTML items NOT in the spine (e.g. nav.xhtml,
+            # toc pages).  Assign them order numbers after the last spine entry
+            # so they map correctly instead of triggering "Could not map" warnings.
+            for item_id, filename in manifest.items():
+                if item_id not in spine_ids and filename not in filename_to_order:
+                    filename_to_order[filename] = chapter_num
+                    chapter_num += 1
             
             return filename_to_order
             
