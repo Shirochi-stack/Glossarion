@@ -11128,18 +11128,49 @@ def _restore_translate_all_button(self):
                         }
                     """)
                 
-                # Go back to the first image in the preview list
-                if hasattr(ipw, 'image_paths') and ipw.image_paths:
+                # Go back to the first active image. For manga range mode, row 1 means
+                # the first row inside the current visible-order range, not row 0 overall.
+                if hasattr(self, '_update_manga_preview_image_list_for_range'):
+                    try:
+                        self._update_manga_preview_image_list_for_range()
+                    except Exception as range_sync_err:
+                        print(f"[TRANSLATE_ALL] Range thumbnail sync failed: {range_sync_err}")
+
+                first_image = None
+                file_row = None
+                try:
+                    if hasattr(self, '_manga_range_filtered_files'):
+                        ranged_files, range_error = self._manga_range_filtered_files()
+                        if not range_error and ranged_files:
+                            first_image = ranged_files[0]
+                except Exception as range_err:
+                    print(f"[TRANSLATE_ALL] Failed to read image range: {range_err}")
+
+                if not first_image and hasattr(ipw, 'image_paths') and ipw.image_paths:
                     first_image = ipw.image_paths[0]
+
+                if first_image:
+                    try:
+                        if hasattr(self, 'selected_files') and first_image in self.selected_files:
+                            file_row = self.selected_files.index(first_image)
+                    except Exception:
+                        file_row = None
+
                     ipw.load_image(first_image, preserve_rectangles=True, preserve_text_overlays=True)
-                    # Also update thumbnail selection to first item
+                    # Also update thumbnail selection to the matching ranged thumbnail.
                     if hasattr(ipw, 'thumbnail_list') and ipw.thumbnail_list.count() > 0:
-                        ipw.thumbnail_list.setCurrentRow(0)
-                    # Sync file_listbox selection to first item
-                    if hasattr(self, 'file_listbox') and self.file_listbox and self.file_listbox.count() > 0:
-                        self.file_listbox.setCurrentRow(0)
-                        print(f"[TRANSLATE_ALL] Synced file_listbox to first item")
-                    print(f"[TRANSLATE_ALL] Returned to first image: {os.path.basename(first_image)}")
+                        thumb_row = 0
+                        try:
+                            if hasattr(ipw, 'image_paths') and first_image in ipw.image_paths:
+                                thumb_row = ipw.image_paths.index(first_image)
+                        except Exception:
+                            thumb_row = 0
+                        ipw.thumbnail_list.setCurrentRow(thumb_row)
+                    # Sync file_listbox selection to the original visible row.
+                    if file_row is not None and hasattr(self, 'file_listbox') and self.file_listbox and self.file_listbox.count() > file_row:
+                        self.file_listbox.setCurrentRow(file_row)
+                        print(f"[TRANSLATE_ALL] Synced file_listbox to ranged row {file_row + 1}")
+                    print(f"[TRANSLATE_ALL] Returned to first active image: {os.path.basename(first_image)}")
                 else:
                     # Fallback: refresh current image
                     current_image = getattr(ipw, 'current_image_path', None)
