@@ -3323,9 +3323,11 @@ class EPUBCompiler:
                     final_order.extend(sorted(unmapped_files))
                     # Mark non-response unmapped files as auxiliary (omit from TOC)
                     aux = {f for f in unmapped_files if not f.startswith('response_')}
-                    # If special files override is enabled, do NOT treat special files as auxiliary
+                    # If special files override is enabled, or passthrough mode,
+                    # do NOT treat special files as auxiliary
                     translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
-                    if translate_special:
+                    image_passthrough = os.environ.get('IMAGE_MODE_EPUB_PASSTHROUGH', '0') == '1'
+                    if translate_special or image_passthrough:
                         # Don't exclude any special files when override is enabled
                         aux = set()
                     self.auxiliary_html_files = aux
@@ -3372,9 +3374,11 @@ class EPUBCompiler:
             aux_files = sorted([f for f in html_files if not f.startswith('response_')])
             if aux_files:
                 aux_set = set(aux_files)
-                # If special files override is enabled, don't mark special files as auxiliary
+                # If special files override is enabled or passthrough mode,
+                # don't mark special files as auxiliary
                 translate_special = os.environ.get('TRANSLATE_SPECIAL_FILES', '0') == '1'
-                if translate_special:
+                image_passthrough = os.environ.get('IMAGE_MODE_EPUB_PASSTHROUGH', '0') == '1'
+                if translate_special or image_passthrough:
                     # Don't exclude any files when override is enabled
                     aux_set = set()
                 self.auxiliary_html_files = aux_set
@@ -4264,7 +4268,11 @@ img {
         css_items = []
         
         # Check for explicit CSS override from GUI
+        # Skip CSS override in image mode passthrough — use original source CSS
         override_path = os.getenv('EPUB_CSS_OVERRIDE_PATH', '').strip()
+        image_passthrough = os.environ.get('IMAGE_MODE_EPUB_PASSTHROUGH', '0') == '1'
+        if image_passthrough:
+            override_path = ''  # Force skip CSS override in passthrough mode
         if override_path:
             try:
                 if os.path.isfile(override_path):

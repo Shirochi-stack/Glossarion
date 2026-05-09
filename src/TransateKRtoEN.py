@@ -9532,6 +9532,7 @@ def _process_chapter_images_vision_ocr_combined(
     text_count = 0
     empty_count = 0
     text_chars = 0
+    keep_ocr_images = os.getenv("VISION_OCR_KEEP_IMAGES", "0") == "1"
     for idx in sorted(ocr_by_index):
         img_info, img_src, ocr_text = ocr_by_index[idx]
         is_no = getattr(image_translator, "_is_ocr_no_response", lambda text: False)(ocr_text)
@@ -9543,7 +9544,11 @@ def _process_chapter_images_vision_ocr_combined(
             no_count += 1
         elif ocr_text and str(ocr_text).strip():
             cleaned_ocr_text = str(ocr_text).strip()
-            ocr_part_by_index[idx] = cleaned_ocr_text
+            if keep_ocr_images:
+                marker = _image_marker_for_combined_ocr(img_info)
+                ocr_part_by_index[idx] = f"{marker}\n{cleaned_ocr_text}"
+            else:
+                ocr_part_by_index[idx] = cleaned_ocr_text
             processed_srcs.append(img_src)
             text_count += 1
             text_chars += len(cleaned_ocr_text)
@@ -16551,6 +16556,124 @@ def main(log_callback=None, stop_callback=None):
             os.environ["EPUB_OUTPUT_DIR"] = out
             progress_manager = ProgressManager(payloads_dir)
         _process_refinement_or_tts_mode(config, client, post_mode_chapters, out, progress_manager, check_stop)
+        return
+
+    # ── Image output mode passthrough for EPUB/PDF inputs ──
+    # Copies all HTML as-is, sends extracted images for image generation,
+    # copies original CSS, and builds the final EPUB bypassing QA/CSS/special-file toggles.
+    if config.OUTPUT_MODE == "image" and not is_text_file:
+        print("\n" + "=" * 50)
+        print("🖼️ IMAGE OUTPUT MODE — EPUB/PDF PASSTHROUGH")
+        print("=" * 50)
+        print("Copying raw HTML files, generating images, and preserving original CSS.")
+
+        os.environ["IMAGE_MODE_EPUB_PASSTHROUGH"] = "1"
+
+        # 1) Copy raw chapter HTML as response_ files so epub converter finds them
+        copied_count = 0
+        for c in chapters:
+            if check_stop():
+                return
+            actual_num = c.get('actual_chapter_num', c.get('num'))
+            # Use the exact original markup — never process through extraction
+            original_markup = (
+                c.get("original_html")
+                or c.get("source_html")
+                or c.get("raw_html")
+                or c.get("body")
+                or ""
+            )
+            fname = FileUtilities.create_chapter_filename(c, actual_num)
+            output_path = os.path.join(out, fname)
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(original_markup)
+
+            content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
+            idx = c.get("_progress_idx", c.get("num", 0))
+            progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
+            copied_count += 1
+        progress_manager.save()
+        print(f"✅ Copied {copied_count} HTML files as-is (no translation)")
+
+        # 2) Copy CSS from source epub to css subfolder (already extracted by Chapter_Extractor)
+        css_dir = os.path.join(out, "css")
+        if os.path.isdir(css_dir):
+            css_count = len([f for f in os.listdir(css_dir) if f.endswith('.css')])
+            print(f"✅ {css_count} CSS file(s) already in {css_dir}")
+        else:
+            print("ℹ️ No CSS directory found (source may not contain CSS)")
+
+        # 3) Extract and send images for image generation
+        images_dir = os.path.join(out, "images")
+        if os.path.isdir(images_dir):
+            image_files = [
+                f for f in os.listdir(images_dir)
+                if os.path.isfile(os.path.join(images_dir, f))
+                and f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'))
+            ]
+            if image_files and config.ENABLE_IMAGE_TRANSLATION:
+                print(f"\n🎨 Sending {len(image_files)} images for image generation...")
+                gen_system = config.get_system_prompt(actual_merge_count=1)
+                gen_image_translator = ImageTranslator(
+                    client, out, config.PROFILE_NAME, gen_system,
+                    config.TEMP, log_callback, progress_manager,
+                    history_manager, chunk_context_manager,
+                )
+                gen_image_translator.base_system_prompt = gen_system
+                gen_image_translator.manual_glossary_path = glossary_path if 'glossary_path' in dir() else None
+
+                gen_success = 0
+                gen_fail = 0
+                for img_idx, img_name in enumerate(image_files, 1):
+                    if check_stop():
+                        print("⏹️ Image generation stopped by user")
+                        break
+                    img_path = os.path.join(images_dir, img_name)
+                    print(f"  [{img_idx}/{len(image_files)}] Generating: {img_name}")
+                    try:
+                        context = f"Image from source EPUB/PDF: {img_name}"
+                        result = gen_image_translator.translate_image(img_path, context, check_stop)
+                        if result and "[Image Translation Error:" not in result:
+                            gen_success += 1
+                            print(f"    ✅ Generated successfully")
+                        else:
+                            gen_fail += 1
+                            print(f"    ⚠️ Generation failed or returned error")
+                    except Exception as e:
+                        gen_fail += 1
+                        print(f"    ❌ Error: {e}")
+                    # Delay between API calls
+                    if img_idx < len(image_files):
+                        delay = float(os.getenv('IMAGE_API_DELAY', '1.0'))
+                        time.sleep(delay)
+
+                print(f"\n🎨 Image generation complete: {gen_success} success, {gen_fail} failed")
+            elif image_files:
+                print(f"ℹ️ {len(image_files)} images found but image translation is disabled")
+            else:
+                print("ℹ️ No images found in images directory")
+        else:
+            print("ℹ️ No images directory found")
+
+        # 4) Build final EPUB (epub converter will respect IMAGE_MODE_EPUB_PASSTHROUGH)
+        if not check_stop():
+            print("\n📘 Building final EPUB…")
+            try:
+                from epub_converter import fallback_compile_epub
+                fallback_compile_epub(out, log_callback=log_callback)
+                print("✅ Image mode EPUB passthrough complete:", out)
+            except Exception as e:
+                print(f"❌ EPUB build failed: {e}")
+
+        # Clean up passthrough env var
+        os.environ.pop("IMAGE_MODE_EPUB_PASSTHROUGH", None)
+
+        total_time = time.time() - translation_start_time
+        hours = int(total_time // 3600)
+        minutes = int((total_time % 3600) // 60)
+        seconds = int(total_time % 60)
+        print(f"\n⏱️ Total time: {hours}h {minutes}m {seconds}s")
+        print("TRANSLATION_COMPLETE_SIGNAL")
         return
 
     # Check if no chapters will be processed and provide helpful error

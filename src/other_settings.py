@@ -9838,6 +9838,27 @@ def _create_image_translation_section(self, parent):
     vision_batch_desc.setStyleSheet("color: gray; font-size: 10pt;")
     vision_batch_desc.setWordWrap(True)
     vision_sub_v.addWidget(vision_batch_desc)
+
+    keep_ocr_image_cb = self._create_styled_checkbox("Keep OCR image")
+    try:
+        keep_ocr_image_cb.setChecked(bool(getattr(self, 'vision_ocr_keep_images_var', self.config.get('vision_ocr_keep_images', False))))
+    except Exception:
+        pass
+
+    def _on_keep_ocr_image_toggle(checked):
+        try:
+            self.vision_ocr_keep_images_var = bool(checked)
+            self.config['vision_ocr_keep_images'] = bool(checked)
+            os.environ['VISION_OCR_KEEP_IMAGES'] = '1' if checked else '0'
+        except Exception:
+            pass
+
+    keep_ocr_image_cb.toggled.connect(_on_keep_ocr_image_toggle)
+    vision_sub_v.addWidget(keep_ocr_image_cb)
+    keep_ocr_image_desc = QLabel("Always include the source image alongside OCR text in the combined output. Ensures no OCR images are excluded from the compiled EPUB/PDF.")
+    keep_ocr_image_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    keep_ocr_image_desc.setWordWrap(True)
+    vision_sub_v.addWidget(keep_ocr_image_desc)
     left_v.addWidget(vision_sub)
 
     # ── Show/hide sub-settings based on mode ──
