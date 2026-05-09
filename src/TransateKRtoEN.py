@@ -16770,8 +16770,58 @@ def main(log_callback=None, stop_callback=None):
 
                 _gen_lock = _img_threading.Lock()
 
+                # Build sets of already-processed images for cache-hit detection
+                _already_generated = set()
+                try:
+                    if os.path.isdir(images_generated_dir):
+                        _already_generated = {
+                            f.lower() for f in os.listdir(images_generated_dir)
+                            if os.path.isfile(os.path.join(images_generated_dir, f))
+                        }
+                except Exception:
+                    pass
+
+                _ocr_single_dir = os.path.join(out, "OCR", "single")
+                _already_skipped = set()
+                try:
+                    if os.path.isdir(_ocr_single_dir):
+                        for _ocr_file in os.listdir(_ocr_single_dir):
+                            if not _ocr_file.lower().endswith('.txt'):
+                                continue
+                            _ocr_path = os.path.join(_ocr_single_dir, _ocr_file)
+                            try:
+                                with open(_ocr_path, 'r', encoding='utf-8') as _f:
+                                    _ocr_text = _f.read().strip()
+                                if ImageTranslator._is_ocr_no_response(_ocr_text):
+                                    # Extract the original image stem from OCR filename
+                                    _already_skipped.add(_ocr_file)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+                if _already_generated or _already_skipped:
+                    print(f"    📋 Cache: {len(_already_generated)} already generated, {len(_already_skipped)} already skipped (no text)")
+
+                def _image_stem_in_set(img_name, filename_set):
+                    """Check if any file in the set contains the image stem."""
+                    stem = os.path.splitext(img_name)[0].lower()
+                    for cached in filename_set:
+                        if stem in cached.lower():
+                            return True
+                    return False
+
                 def _gen_one_image(img_idx, img_name):
                     """Worker: generate a single image. Returns (idx, name, status, result)."""
+                    # Cache hit: already generated
+                    if img_name.lower() in _already_generated:
+                        print(f"    ⏩ [{img_idx}/{len(image_files)}] {img_name}: Already generated (cached)")
+                        return (img_idx, img_name, 'cached_success', None)
+                    # Cache hit: OCR said nothing to translate
+                    if _image_stem_in_set(img_name, _already_skipped):
+                        print(f"    ⏩ [{img_idx}/{len(image_files)}] {img_name}: Already skipped — no text (cached)")
+                        return (img_idx, img_name, 'cached_skip', None)
+
                     img_path = os.path.join(images_dir, img_name)
                     try:
                         context = f"Image from source EPUB/PDF: {img_name}"
@@ -16792,6 +16842,14 @@ def main(log_callback=None, stop_callback=None):
                 def _handle_gen_result(img_idx, img_name, status, result):
                     """Process the generated image: archive + replace original."""
                     nonlocal gen_success, gen_fail, gen_skipped
+                    if status == 'cached_success':
+                        gen_success += 1
+                        _igen_progress_image(img_idx, img_name, 'completed')
+                        return
+                    if status == 'cached_skip':
+                        gen_skipped += 1
+                        _igen_progress_image(img_idx, img_name, 'skipped')
+                        return
                     if status == 'skipped':
                         gen_skipped += 1
                         _igen_progress_image(img_idx, img_name, 'skipped')
