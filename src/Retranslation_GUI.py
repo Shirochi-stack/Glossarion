@@ -843,6 +843,13 @@ class RetranslationMixin:
                     if base_name.endswith('.htm'):
                         stripped_base_name = base_name[:-4]  # Remove .htm suffix
                     expected_response = filename  # Use exact OPF filename
+                    
+                    # Also check for response_ prefix version (used by the translator
+                    # when TRANSLATE_ALL_NUMBERED_HTML overrides the special-file skip)
+                    response_with_prefix = f"response_{base_name}.html"
+                    if not os.path.exists(os.path.join(output_dir, expected_response)) and \
+                       os.path.exists(os.path.join(output_dir, response_with_prefix)):
+                        expected_response = response_with_prefix
             
             response_path = os.path.join(output_dir, expected_response)
             
@@ -1146,18 +1153,33 @@ class RetranslationMixin:
                 chapter_key = str(chapter_num)
                 
                 # Check if key already exists (avoid duplicates)
-                if chapter_key not in prog.get("chapters", {}):
-                    prog.setdefault("chapters", {})[chapter_key] = {
-                        "actual_num": chapter_num,
-                        "content_hash": "",  # Unknown since we don't have the source
-                        "output_file": output_file,
-                        "status": "completed",
-                        "last_updated": os.path.getmtime(os.path.join(output_dir, output_file)),
-                        "auto_discovered": True,
-                        "original_basename": filename
-                    }
-                    progress_updated = True
-                    print(f"✅ Auto-discovered and tracked: {filename} -> {output_file}")
+                # If the key exists but points to a DIFFERENT file, use a composite
+                # key to avoid overwriting (e.g. chapter0003 vs chapter_notice0003).
+                existing = prog.get("chapters", {}).get(chapter_key)
+                if existing:
+                    existing_out = existing.get('output_file', '')
+                    existing_base = existing.get('original_basename', '')
+                    # If same output file, this is already tracked
+                    if existing_out == output_file:
+                        continue
+                    # Different file occupies this key — use composite key
+                    base_noext = os.path.splitext(filename)[0]
+                    chapter_key = f"{chapter_num}_{base_noext}"
+                    # Also skip if composite key already exists
+                    if chapter_key in prog.get("chapters", {}):
+                        continue
+                
+                prog.setdefault("chapters", {})[chapter_key] = {
+                    "actual_num": chapter_num,
+                    "content_hash": "",  # Unknown since we don't have the source
+                    "output_file": output_file,
+                    "status": "completed",
+                    "last_updated": os.path.getmtime(os.path.join(output_dir, output_file)),
+                    "auto_discovered": True,
+                    "original_basename": filename
+                }
+                progress_updated = True
+                print(f"✅ Auto-discovered and tracked: {filename} -> {output_file} (key: {chapter_key})")
         
         # Save progress file if we added new entries
         if progress_updated:
