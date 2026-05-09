@@ -13088,9 +13088,12 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapt
                     "Glossary Manager → Automatic Glossary → Glossary Append Format"
                 )
             
-            system += f"{custom_prompt}\n{glossary_text}"
-            
-            defer_batch_log(f"✅ Glossary appended ({len(glossary_text):,} characters)")
+            # Skip appending if compression returned empty (0 matching entries)
+            if glossary_text and glossary_text.strip():
+                system += f"{custom_prompt}\n{glossary_text}"
+                defer_batch_log(f"✅ Glossary appended ({len(glossary_text):,} characters)")
+            else:
+                defer_batch_log("ℹ️ Glossary skipped for this chapter (no matching entries after compression)")
             
             # Check for glossary extension file (only if ADD_ADDITIONAL_GLOSSARY is enabled)
             add_additional_glossary = os.getenv("ADD_ADDITIONAL_GLOSSARY", "0") == "1"

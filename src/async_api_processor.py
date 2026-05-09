@@ -3827,23 +3827,26 @@ class AsyncProcessingDialog:
                 
                 # Use the append prompt format if provided
                 append_prompt = env_vars.get('APPEND_GLOSSARY_PROMPT', '')
-                if append_prompt:
-                    # Replace placeholder with actual glossary
-                    if '{glossary}' in append_prompt:
-                        glossary_section = append_prompt.replace('{glossary}', glossary_text)
+                if glossary_text and glossary_text.strip():
+                    if append_prompt:
+                        # Replace placeholder with actual glossary
+                        if '{glossary}' in append_prompt:
+                            glossary_section = append_prompt.replace('{glossary}', glossary_text)
+                        else:
+                            glossary_section = f"{append_prompt}\n{glossary_text}"
+                        system_prompt = f"{system_prompt}\n\n{glossary_section}"
                     else:
-                        glossary_section = f"{append_prompt}\n{glossary_text}"
-                    system_prompt = f"{system_prompt}\n\n{glossary_section}"
+                        # Default format
+                        system_prompt = f"{system_prompt}\n\nGlossary:\n{glossary_text}"
+                    
+                    logger.info(f"✅ Glossary appended ({len(glossary_text)} characters)")
                 else:
-                    # Default format
-                    system_prompt = f"{system_prompt}\n\nGlossary:\n{glossary_text}"
-                
-                logger.info(f"✅ Glossary appended ({len(glossary_text)} characters)")
+                    logger.info("ℹ️ Glossary skipped for this chapter (no matching entries after compression)")
                 
                 # Log preview for debugging
-                if len(glossary_text) > 200:
+                if glossary_text and len(glossary_text) > 200:
                     logger.info(f"Glossary preview: {glossary_text[:200]}...")
-                else:
+                elif glossary_text:
                     logger.info(f"Glossary: {glossary_text}")
                         
             except FileNotFoundError:

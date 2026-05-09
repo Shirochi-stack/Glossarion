@@ -397,6 +397,7 @@ def _compress_csv_glossary(csv_content, source_text, glossary_path=None, chapter
             return _compress_fallback_text(csv_content, source_text)
         else:
             print("ℹ️ Glossary compression: CSV produced 0 matching entries for this chapter (no fallback in auto mode)")
+            return ""  # Return empty so the caller doesn't append a header-only glossary
     
     return result
 
