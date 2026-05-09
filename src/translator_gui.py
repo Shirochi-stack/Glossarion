@@ -6617,7 +6617,7 @@ Recent translations to summarize:
                                         QApplication, QLineEdit, QMessageBox,
                                         QTabWidget, QWidget, QTableWidget,
                                         QTableWidgetItem, QHeaderView)
-        from PySide6.QtCore import Qt
+        from PySide6.QtCore import Qt, QObject, QEvent
         from PySide6.QtGui import QIcon
 
         # Reuse existing window if it's already open
@@ -6656,6 +6656,34 @@ Recent translations to summarize:
 
         layout = QVBoxLayout(dialog)
         tabs = QTabWidget()
+        tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #3f4d5d;
+                background: #181818;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background: #202020;
+                color: #d7e2f0;
+                border: 1px solid #3a4652;
+                border-bottom: none;
+                padding: 7px 14px;
+                margin-right: 2px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+            }
+            QTabBar::tab:selected {
+                background: #35516d;
+                color: #ffffff;
+                border-color: #6f8faf;
+                font-weight: bold;
+            }
+            QTabBar::tab:!selected:hover {
+                background: #2a3440;
+                color: #ffffff;
+                border-color: #526b84;
+            }
+        """)
         models_tab = QWidget()
         model_layout = QVBoxLayout(models_tab)
 
@@ -6855,18 +6883,95 @@ Recent translations to summarize:
         prefix_table = QTableWidget(0, 2)
         prefix_table.setHorizontalHeaderLabels(["Prefix", "Routing"])
         prefix_table.setSelectionBehavior(QTableWidget.SelectRows)
-        prefix_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        prefix_table.setSelectionMode(QTableWidget.SingleSelection)
+        prefix_table.setAlternatingRowColors(True)
+        prefix_table.setShowGrid(True)
+        prefix_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        prefix_table.setFocusPolicy(Qt.NoFocus)
         prefix_table.verticalHeader().setVisible(False)
-        prefix_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        prefix_table.horizontalHeader().setMinimumSectionSize(140)
+        prefix_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
         prefix_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        prefix_table.setColumnWidth(0, 160)
         prefix_table.setToolTip("Use models like myprefix/model-name. Routing must be an OpenAI-compatible base URL.")
+        prefix_table.setStyleSheet("""
+            QTableWidget {
+                background: #191919;
+                alternate-background-color: #222222;
+                color: #f4f7fb;
+                gridline-color: #3f4d5d;
+                border: 1px solid #3f4d5d;
+                border-radius: 3px;
+                selection-background-color: #243445;
+                selection-color: #ffffff;
+            }
+            QHeaderView::section {
+                background: #111111;
+                color: #ffffff;
+                font-weight: bold;
+                padding: 7px 6px;
+                border: none;
+                border-right: 1px solid #3f4d5d;
+                border-bottom: 1px solid #3f4d5d;
+            }
+            QLineEdit {
+                background: #242424;
+                color: #f5f7fa;
+                border: 1px solid #4a4a4a;
+                border-radius: 3px;
+                padding: 5px 7px;
+                selection-background-color: #4f6f8f;
+                selection-color: #ffffff;
+            }
+            QLineEdit:hover {
+                border-color: #6b7f95;
+                background: #292929;
+            }
+            QLineEdit:focus {
+                background: #2c3035;
+                border: 1px solid #8ba8c7;
+            }
+        """)
+
+        class _PrefixFieldFocusFilter(QObject):
+            def __init__(self, table):
+                super().__init__(table)
+                self.table = table
+
+            def eventFilter(self, obj, event):
+                if event.type() in (QEvent.FocusIn, QEvent.MouseButtonPress):
+                    try:
+                        for r in range(self.table.rowCount()):
+                            for c in range(self.table.columnCount()):
+                                if self.table.cellWidget(r, c) is obj:
+                                    self.table.setCurrentCell(r, c)
+                                    return False
+                    except Exception:
+                        pass
+                return False
+
+        prefix_field_filter = _PrefixFieldFocusFilter(prefix_table)
+        prefix_table._prefix_field_filter = prefix_field_filter
+
+        def _make_prefix_field(text=""):
+            field = QLineEdit()
+            field.setText(str(text or ""))
+            field.setFrame(True)
+            field.installEventFilter(prefix_field_filter)
+            return field
 
         def _add_prefix_row(prefix="", routing=""):
             row = prefix_table.rowCount()
             prefix_table.insertRow(row)
-            prefix_table.setItem(row, 0, QTableWidgetItem(str(prefix or "")))
-            prefix_table.setItem(row, 1, QTableWidgetItem(str(routing or "")))
+            prefix_table.setRowHeight(row, 40)
+            prefix_table.setCellWidget(row, 0, _make_prefix_field(prefix))
+            prefix_table.setCellWidget(row, 1, _make_prefix_field(routing))
             prefix_table.setCurrentCell(row, 0)
+            try:
+                prefix_table.cellWidget(row, 0).setFocus()
+                prefix_table.cellWidget(row, 0).selectAll()
+            except Exception:
+                pass
             return row
 
         for route in self._normalize_custom_prefix_routes(self.config.get('custom_prefix_routes', [])):
@@ -7007,10 +7112,12 @@ Recent translations to summarize:
         routes = []
         seen = set()
         for row in range(table.rowCount()):
+            prefix_widget = table.cellWidget(row, 0)
+            routing_widget = table.cellWidget(row, 1)
             prefix_item = table.item(row, 0)
             routing_item = table.item(row, 1)
-            prefix = prefix_item.text().strip() if prefix_item else ''
-            routing = routing_item.text().strip() if routing_item else ''
+            prefix = prefix_widget.text().strip() if prefix_widget and hasattr(prefix_widget, 'text') else (prefix_item.text().strip() if prefix_item else '')
+            routing = routing_widget.text().strip() if routing_widget and hasattr(routing_widget, 'text') else (routing_item.text().strip() if routing_item else '')
 
             if not prefix and not routing:
                 continue

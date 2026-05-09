@@ -4126,6 +4126,91 @@ def _refresh_live_gui_state_for_manga_action(self):
     except Exception:
         pass
 
+def _get_loaded_manga_glossary_for_workflow(self) -> str:
+    """Return the manga glossary text selected by the manga workflow toggle."""
+    try:
+        if hasattr(self, '_manga_glossary_workflow_enabled'):
+            enabled = bool(self._manga_glossary_workflow_enabled())
+        elif hasattr(self, 'manga_glossary_checkbox'):
+            enabled = bool(self.manga_glossary_checkbox.isChecked())
+        else:
+            enabled = bool(getattr(self.main_gui, 'config', {}).get('manga_glossary_enabled', False))
+    except Exception:
+        enabled = False
+    if not enabled:
+        return ""
+
+    glossary_text = ""
+    try:
+        if hasattr(self, '_get_loaded_manga_glossary_text'):
+            glossary_text = self._get_loaded_manga_glossary_text()
+    except Exception as err:
+        try:
+            self._log(f"Warning: Could not load manga glossary for workflow button: {err}", "warning")
+        except Exception:
+            pass
+        glossary_text = ""
+
+    if not glossary_text:
+        for source in (self, getattr(self, 'main_gui', None)):
+            try:
+                for attr in ('manga_loaded_glossary_text', 'manga_generated_glossary_text'):
+                    value = getattr(source, attr, '')
+                    if isinstance(value, str) and value.strip():
+                        glossary_text = value.strip()
+                        break
+                if glossary_text:
+                    break
+            except Exception:
+                pass
+
+    glossary_text = str(glossary_text or '').strip()
+    if not glossary_text:
+        return ""
+
+    try:
+        self.manga_loaded_glossary_text = glossary_text
+        self.manga_generated_glossary_text = glossary_text
+        setattr(self.main_gui, 'manga_generated_glossary_text', glossary_text)
+        if hasattr(self, '_manga_translator') and self._manga_translator:
+            self._manga_translator.manga_generated_glossary_text = glossary_text
+            self._manga_translator._manga_glossary_prompt_logged = False
+        if hasattr(self, 'translator') and self.translator:
+            self.translator.manga_generated_glossary_text = glossary_text
+            self.translator._manga_glossary_prompt_logged = False
+    except Exception:
+        pass
+
+    return glossary_text
+
+def _append_loaded_manga_glossary_to_system_prompt(self, system_prompt: str) -> str:
+    """Append the currently loaded manga glossary to direct preview translations."""
+    glossary_text = _get_loaded_manga_glossary_for_workflow(self)
+    if not glossary_text:
+        return system_prompt or ""
+
+    default_append_prompt = "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
+    try:
+        append_prompt = (
+            getattr(self.main_gui, 'append_glossary_prompt', None)
+            or self.main_gui.config.get('append_glossary_prompt', default_append_prompt)
+        )
+    except Exception:
+        append_prompt = default_append_prompt
+
+    if not getattr(self, '_workflow_manga_glossary_prompt_logged', False):
+        try:
+            entry_count = sum(1 for line in glossary_text.splitlines() if line.lstrip().startswith("* "))
+            self._log(f"Embedding loaded manga glossary in preview translation prompt ({entry_count} entries)", "info")
+        except Exception:
+            pass
+        self._workflow_manga_glossary_prompt_logged = True
+
+    glossary_block = f"{str(append_prompt).rstrip()}\n{glossary_text}"
+    if system_prompt:
+        return f"{system_prompt}\n\n{glossary_block}"
+    return glossary_block
+
 def _on_translate_text_clicked(self):
     """Translate recognized text using the selected API - runs full pipeline if needed"""
     self._log("🐛 Translate button clicked - starting translation", "info")
@@ -4640,6 +4725,7 @@ def _translate_with_full_page_context(self, recognized_texts: list, image_path: 
         print(f"[DEBUG] Calling translate_full_page_context for {len(regions)} regions")
         self._log(f"🌍 Starting full page context translation...", "info")
         
+        _get_loaded_manga_glossary_for_workflow(self)
         translations_dict = self._manga_translator.translate_full_page_context(regions, image_path)
         print(f"[DEBUG] Got translations dict: {list(translations_dict.keys()) if translations_dict else 'None'}")
         
@@ -4888,6 +4974,7 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
         system_prompt = _get_system_prompt_from_gui(self, )
         if not system_prompt:
             raise ValueError("No system prompt configured in GUI profile - translation cannot proceed")
+        system_prompt = _append_loaded_manga_glossary_to_system_prompt(self, system_prompt)
         
         # Preload image data once if visual context is enabled
         image_base64 = None
