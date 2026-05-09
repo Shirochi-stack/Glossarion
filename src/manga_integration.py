@@ -4423,6 +4423,7 @@ class MangaTranslationTab(QObject):
 
         # Skip inpainting toggle - use value loaded from config
         self.skip_inpainting_checkbox = self._create_styled_checkbox("Skip Inpainter")
+        self.skip_inpainting_checkbox.setToolTip("Skip local inpainting and render translated text over the original image.")
         self.skip_inpainting_checkbox.setChecked(self.skip_inpainting_value)
         self.skip_inpainting_checkbox.stateChanged.connect(self._toggle_inpaint_visibility)
         inpaint_group_layout.addWidget(self.skip_inpainting_checkbox)
@@ -8272,8 +8273,42 @@ class MangaTranslationTab(QObject):
             
             if hasattr(self, 'pool_tracker_label'):
                 self.pool_tracker_label.setText(pool_text)
+            self._sync_skip_inpainter_pool_lock(inpainter_in_use)
         except Exception as e:
             print(f"[POOL_TRACKER] Error updating: {e}")
+
+    def _get_inpainter_pool_usage(self):
+        """Return (total, checked_out) for the shared local inpainter pool."""
+        total = 0
+        in_use = 0
+        try:
+            from manga_translator import MangaTranslator
+            with MangaTranslator._inpaint_pool_lock:
+                for rec in MangaTranslator._inpaint_pool.values():
+                    total += len(rec.get('spares', []) or [])
+                    in_use += len(rec.get('checked_out', []) or [])
+        except Exception:
+            pass
+        return total, in_use
+
+    def _sync_skip_inpainter_pool_lock(self, inpainter_in_use: Optional[int] = None):
+        """Disable Skip Inpainter while a pooled local inpainter is checked out."""
+        checkbox = getattr(self, 'skip_inpainting_checkbox', None)
+        if not checkbox:
+            return
+        try:
+            if inpainter_in_use is None:
+                _, inpainter_in_use = self._get_inpainter_pool_usage()
+            locked = int(inpainter_in_use or 0) > 0
+            checkbox.setEnabled(not locked)
+            if locked:
+                checkbox.setToolTip(
+                    f"Locked while {int(inpainter_in_use)} local inpainter instance(s) are in use."
+                )
+            else:
+                checkbox.setToolTip("Skip local inpainting and render translated text over the original image.")
+        except Exception as e:
+            print(f"[POOL_TRACKER] Failed to sync Skip Inpainter lock: {e}")
     
     def _refresh_context_settings_with_feedback(self):
         """Refresh context settings from main GUI and show feedback"""
@@ -9111,6 +9146,22 @@ class MangaTranslationTab(QObject):
         print(f"Initializing: {getattr(self, '_initializing', 'NO FLAG')}")
         print("="*80 + "\n")
         try:
+            if not getattr(self, '_initializing', False):
+                _, inpainter_in_use = self._get_inpainter_pool_usage()
+                if inpainter_in_use > 0:
+                    previous_value = bool(getattr(self, 'skip_inpainting_value', False))
+                    current_value = self.skip_inpainting_checkbox.isChecked()
+                    if current_value != previous_value:
+                        self.skip_inpainting_checkbox.blockSignals(True)
+                        self.skip_inpainting_checkbox.setChecked(previous_value)
+                        self.skip_inpainting_checkbox.blockSignals(False)
+                        self._log(
+                            f"⏳ Skip Inpainter is locked while {inpainter_in_use} local inpainter instance(s) are in use",
+                            "warning"
+                        )
+                    self._sync_skip_inpainter_pool_lock(inpainter_in_use)
+                    return
+
             # Update the value from the checkbox
             self.skip_inpainting_value = self.skip_inpainting_checkbox.isChecked()
             
