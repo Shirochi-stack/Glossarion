@@ -6400,11 +6400,14 @@ Rules:
                     self.editor_file_combo.setCurrentIndex(0)
                     load_glossary_for_editing()
 
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"⚠️ auto_select_current_glossary failed: {e}")
 
         self._refresh_glossary_editor = auto_select_current_glossary
-        auto_select_current_glossary()
+        # NOTE: Do NOT call auto_select_current_glossary() here — the tab
+        # setup isn't finished yet (toolbar, advanced widgets, etc. come
+        # after this point).  A deferred call is issued at the end of
+        # _setup_glossary_editor_tab instead.
        
         # Quick toolbar above the entry list
         toolbar_widget = QWidget()
@@ -7322,6 +7325,11 @@ Rules:
         _auto_reload_timer.timeout.connect(_silent_glossary_reload)
         _auto_reload_timer.start()
         self._editor_auto_reload_timer = _auto_reload_timer
+
+        # Deferred initial load: all widgets now exist, so load the glossary.
+        # QTimer.singleShot(0, ...) runs after the current event-loop tick,
+        # ensuring the layout is fully realized before we populate the tree.
+        QTimer.singleShot(0, auto_select_current_glossary)
 
     def _on_tree_double_click(self, item, column_idx):
        """Handle double-click on treeview item for inline editing"""
