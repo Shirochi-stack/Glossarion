@@ -95,6 +95,11 @@ class MangaSettingsDialog(QDialog):
                 'rtdetr_model_url': '',
                 'use_rtdetr_for_ocr_regions': True,  # On by default for best accuracy
                 'enable_fallback_ocr': False,  # Disabled by default - fallback OCR for empty RT-DETR blocks
+                'ocr_batch_enabled': True,
+                'ocr_batch_size': 8,
+                'ocr_max_concurrency': 2,
+                'ocr_request_delay_ms': 100,  # Existing Google ROI OCR base delay (adds small jitter)
+                'ocr_max_retries': 0,
                 # Toggles for RT-DETR behavior customization
                 'skip_rtdetr_merging': False,    # Do not merge overlapping RT-DETR regions (manual mode behavior)
                 'preserve_empty_blocks': False,  # Keep empty RT-DETR blocks even if OCR found no text
@@ -2460,6 +2465,11 @@ class MangaSettingsDialog(QDialog):
                 self.ocr_cc_row.setVisible(enabled)
         except Exception:
             pass
+        try:
+            if hasattr(self, 'ocr_delay_row') and self.ocr_delay_row:
+                self.ocr_delay_row.setVisible(enabled)
+        except Exception:
+            pass
 
     def _create_ocr_tab(self):
         """Create OCR settings tab with all options"""
@@ -2890,7 +2900,33 @@ class MangaSettingsDialog(QDialog):
         ocr_cc_desc.setStyleSheet("color: gray;")
         ocr_cc_layout.addWidget(ocr_cc_desc)
         ocr_cc_layout.addStretch()
-        
+
+        # OCR request delay
+        ocr_delay_widget = QWidget()
+        ocr_delay_layout = QHBoxLayout(ocr_delay_widget)
+        ocr_delay_layout.setContentsMargins(0, 0, 0, 0)
+        ocr_batch_layout.addWidget(ocr_delay_widget)
+        self.ocr_delay_row = ocr_delay_widget
+
+        ocr_delay_label = QLabel("OCR Request Delay:")
+        ocr_delay_label.setMinimumWidth(180)
+        ocr_delay_layout.addWidget(ocr_delay_label)
+
+        self.ocr_request_delay_spinbox = QSpinBox()
+        self.ocr_request_delay_spinbox.setRange(0, 5000)
+        self.ocr_request_delay_spinbox.setSingleStep(25)
+        self.ocr_request_delay_spinbox.setSuffix(" ms")
+        self.ocr_request_delay_spinbox.setValue(int(self.settings['ocr'].get('ocr_request_delay_ms', 100)))
+        self.ocr_request_delay_spinbox.setToolTip("Base delay before OCR requests. 100 ms matches the existing Google ROI OCR default; small jitter is still added.")
+        ocr_delay_layout.addWidget(self.ocr_request_delay_spinbox)
+
+        ocr_delay_desc = QLabel("(base delay before OCR requests; 0 disables)")
+        ocr_delay_desc_font = QFont('Arial', 9)
+        ocr_delay_desc.setFont(ocr_delay_desc_font)
+        ocr_delay_desc.setStyleSheet("color: gray;")
+        ocr_delay_layout.addWidget(ocr_delay_desc)
+        ocr_delay_layout.addStretch()
+
         # Apply initial visibility for OCR batching controls
         try:
             self._toggle_ocr_batching_controls()
@@ -4592,6 +4628,8 @@ class MangaSettingsDialog(QDialog):
             if hasattr(self, 'ocr_batch_enabled_var'): self.ocr_batch_enabled_var.set(bool(ocr.get('ocr_batch_enabled', True)))
             if hasattr(self, 'ocr_batch_size_var'): self.ocr_batch_size_var.set(int(ocr.get('ocr_batch_size', 8)))
             if hasattr(self, 'ocr_max_conc_var'): self.ocr_max_conc_var.set(int(ocr.get('ocr_max_concurrency', 2)))
+            if hasattr(self, 'ocr_request_delay_var'): self.ocr_request_delay_var.set(int(ocr.get('ocr_request_delay_ms', 100)))
+            if hasattr(self, 'ocr_request_delay_spinbox'): self.ocr_request_delay_spinbox.setValue(int(ocr.get('ocr_request_delay_ms', 100)))
             if hasattr(self, 'roi_locality_var'): self.roi_locality_var.set(bool(ocr.get('roi_locality_enabled', False)))
             if hasattr(self, 'roi_padding_ratio_var'): self.roi_padding_ratio_var.set(float(ocr.get('roi_padding_ratio', 0.08)))
             if hasattr(self, 'roi_min_side_var'): self.roi_min_side_var.set(int(ocr.get('roi_min_side_px', 12)))
@@ -4878,6 +4916,7 @@ class MangaSettingsDialog(QDialog):
             self.settings['ocr']['ocr_batch_enabled'] = bool(self.ocr_batch_enabled_checkbox.isChecked())
             self.settings['ocr']['ocr_batch_size'] = int(self.ocr_batch_size_spinbox.value())
             self.settings['ocr']['ocr_max_concurrency'] = int(self.ocr_max_conc_spinbox.value())
+            self.settings['ocr']['ocr_request_delay_ms'] = int(self.ocr_request_delay_spinbox.value())
             self.settings['ocr']['ocr_max_retries'] = int(self.ocr_max_retries_spinbox.value())
             self.settings['ocr']['roi_locality_enabled'] = bool(self.roi_locality_checkbox.isChecked())
             self.settings['ocr']['roi_padding_ratio'] = float(self.roi_padding_ratio_slider.value() / 100.0)

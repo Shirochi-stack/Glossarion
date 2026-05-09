@@ -13943,9 +13943,10 @@ class MangaTranslationTab(QObject):
         with concurrent.futures.ThreadPoolExecutor(max_workers=effective_workers) as executor:
             futures = []
             try:
-                stagger_ms = int(advanced.get('panel_start_stagger_ms', 30))
+                ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {})
+                stagger_ms = int(ocr_settings.get('ocr_request_delay_ms', 100))
             except Exception:
-                stagger_ms = 30
+                stagger_ms = 100
 
             for index, filepath in enumerate(files):
                 if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1' or self.stop_flag.is_set():

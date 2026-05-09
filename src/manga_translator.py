@@ -6424,9 +6424,7 @@ class MangaTranslator:
 
         def do_batch(batch):
             # RATE LIMITING: Add small delay before batch submission
-            import time
-            import random
-            time.sleep(0.1 + random.random() * 0.2)  # 0.1-0.3s random delay
+            self._sleep_before_ocr_request(ocr_settings, default_delay_ms=100, jitter_ms=200)
             
             requests = []
             for roi in batch:
@@ -6438,10 +6436,7 @@ class MangaTranslator:
 
         # Execute with concurrency
         if max_concurrency == 1 or len(batches) == 1:
-            iter_batches = [(self.vision_client.batch_annotate_images(requests=[
-                _vision.AnnotateImageRequest(image=_vision.Image(content=roi['bytes']), features=[feature], image_context=_vision.ImageContext(language_hints=list(lang_hints)))
-                for roi in batch
-            ]), batch) for batch in batches]
+            iter_batches = [do_batch(batch) for batch in batches]
         else:
             from concurrent.futures import ThreadPoolExecutor, as_completed
             iter_batches = []
@@ -6502,6 +6497,28 @@ class MangaTranslator:
                 results.append(region)
         return results
 
+    def _ocr_request_delay_seconds(self, ocr_settings: Dict, default_delay_ms: int) -> float:
+        """Return the configured base delay before OCR requests."""
+        try:
+            delay_ms = ocr_settings.get('ocr_request_delay_ms', default_delay_ms)
+            delay_ms = float(delay_ms)
+        except Exception:
+            delay_ms = float(default_delay_ms)
+        return max(0.0, delay_ms / 1000.0)
+
+    def _sleep_before_ocr_request(self, ocr_settings: Dict, default_delay_ms: int, jitter_ms: int = 0) -> None:
+        """Sleep before an OCR request, preserving the old default jitter behavior."""
+        base_delay = self._ocr_request_delay_seconds(ocr_settings, default_delay_ms)
+        if base_delay <= 0:
+            return
+        jitter = 0.0
+        try:
+            import random
+            jitter = random.random() * max(0.0, float(jitter_ms) / 1000.0)
+        except Exception:
+            jitter = 0.0
+        time.sleep(base_delay + jitter)
+
     def _azure_ocr_rois_concurrent(self, rois: List[Dict[str, Any]], ocr_settings: Dict, max_workers: int, page_hash: str) -> List[TextRegion]:
         """Concurrent ROI OCR for Azure Image Analysis API. Each ROI is sent as a separate call.
         Concurrency is bounded by max_workers. Consults/updates cache.
@@ -6555,11 +6572,8 @@ class MangaTranslator:
                 # OPTIMIZATION: Use semaphore to limit concurrent API calls
                 with api_semaphore:
                     # RATE LIMITING: Shorter delay with semaphore protection
-                    import time
-                    import random
-                    # Reduced delay since we're limiting concurrency
-                    time.sleep(0.05 + random.random() * 0.1)  # 0.05-0.15s random delay
-                
+                    self._sleep_before_ocr_request(ocr_settings, default_delay_ms=50, jitter_ms=100)
+
                 # Ensure Azure-supported format for ROI bytes; honor compression preference when possible
                 data = roi['bytes']
                 try:
