@@ -1,4 +1,4 @@
-﻿# extract_glossary_from_epub.py
+# extract_glossary_from_epub.py
 import os
 import json
 import re
@@ -3389,6 +3389,35 @@ def split_single_pass_response(response_text: str) -> tuple:
     return response_text, ""
 
 
+# Cache the description-active flag at module level so it's evaluated once per
+# process and stays consistent across all dedup calls within the same run.
+_DEDUP_DESCRIPTION_ACTIVE = None
+
+def _dedup_field_count(entry):
+    """Count non-empty, non-internal fields for dedup comparison.
+
+    Excludes:
+    - Keys starting with ``_`` (internal bookkeeping like ``_section``)
+    - ``description`` (case-insensitive) when the user has NOT enabled
+      description in their Custom Fields.  This prevents a leaked AI
+      description from giving a newer entry an unfair field-count advantage
+      over a manually-reviewed older entry.
+    """
+    global _DEDUP_DESCRIPTION_ACTIVE
+    if _DEDUP_DESCRIPTION_ACTIVE is None:
+        _DEDUP_DESCRIPTION_ACTIVE = _glossary_description_active()
+    count = 0
+    for k, v in entry.items():
+        k_str = str(k)
+        if k_str.startswith("_"):
+            continue
+        if not _DEDUP_DESCRIPTION_ACTIVE and k_str.strip().lower() == 'description':
+            continue
+        if v and str(v).strip():
+            count += 1
+    return count
+
+
 def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):
     """
     Skip entries with duplicate raw names and translated names using 2-pass deduplication.
@@ -3406,6 +3435,9 @@ def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):
         tuple: (original_entries, dedup_log) when dry_run=True
     """
     # Try to use RapidFuzz for speed, fallback to difflib
+    # Reset the description-active cache so it picks up the current setting
+    global _DEDUP_DESCRIPTION_ACTIVE
+    _DEDUP_DESCRIPTION_ACTIVE = None
     try:
         from rapidfuzz import fuzz
         use_rapidfuzz = True
@@ -3613,8 +3645,8 @@ def _skip_raw_name_duplicates_matrix(glossary, fuzzy_threshold):
             existing_idx = raw_name_to_idx.get(original_raw)
             if existing_idx is not None:
                 existing_entry = deduplicated[existing_idx]
-                current_field_count = len([v for v in entry.values() if v and str(v).strip()])
-                existing_field_count = len([v for v in existing_entry.values() if v and str(v).strip()])
+                current_field_count = _dedup_field_count(entry)
+                existing_field_count = _dedup_field_count(existing_entry)
                 
                 if current_field_count > existing_field_count:
                     deduplicated[existing_idx] = entry
@@ -3987,8 +4019,8 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
 
             existing_index = same_gender_idx if same_gender_idx is not None else exact_indices[0]
             existing_entry = deduplicated[existing_index]
-            current_field_count = len([v for k, v in entry.items() if not str(k).startswith("_") and v and str(v).strip()])
-            existing_field_count = len([v for k, v in existing_entry.items() if not str(k).startswith("_") and v and str(v).strip()])
+            current_field_count = _dedup_field_count(entry)
+            existing_field_count = _dedup_field_count(existing_entry)
             if current_field_count > existing_field_count:
                 deduplicated[existing_index] = entry
                 skipped_count += 1
@@ -4048,8 +4080,8 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
             if existing_index is not None:
                 existing_entry = deduplicated[existing_index]
                 # Count non-empty fields (excluding internal keys starting with _)
-                current_field_count = len([v for k, v in entry.items() if not str(k).startswith("_") and v and str(v).strip()])
-                existing_field_count = len([v for k, v in existing_entry.items() if not str(k).startswith("_") and v and str(v).strip()])
+                current_field_count = _dedup_field_count(entry)
+                existing_field_count = _dedup_field_count(existing_entry)
                 
                 # If current entry has more fields, replace the existing one
                 if current_field_count > existing_field_count:
@@ -4142,8 +4174,8 @@ def _skip_translated_name_duplicates(glossary, dedup_log=None):
                 continue
             
             # Count fields in both entries (more fields = higher priority)
-            current_field_count = len([v for k, v in entry.items() if not str(k).startswith("_") and v and str(v).strip()])
-            existing_field_count = len([v for k, v in existing_entry.items() if not str(k).startswith("_") and v and str(v).strip()])
+            current_field_count = _dedup_field_count(entry)
+            existing_field_count = _dedup_field_count(existing_entry)
             
             # If current entry has more fields, replace the existing one
             if current_field_count > existing_field_count:
@@ -5612,6 +5644,16 @@ def main(log_callback=None, stop_callback=None):
         try:
             with open(output_glossary_path, 'r', encoding='utf-8') as f:
                 glossary = json.load(f)
+            # Strip description keys from loaded entries if description is
+            # no longer in the user's active Custom Fields.  Old glossary
+            # files saved when description WAS active would otherwise carry
+            # ghost fields that inflate the dedup field count and cause
+            # newer entries (without description) to never win — or,
+            # conversely, prevent the loaded entry from being correctly
+            # treated as equal to a freshly-parsed entry.
+            glossary = _strip_unwanted_description_keys(
+                [e for e in glossary if isinstance(e, dict)]
+            )
             print(f"📂 Loaded existing glossary: {len(glossary)} entries")
         except Exception as e:
             print(f"⚠️ Could not load existing glossary, starting fresh: {e}")
