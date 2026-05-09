@@ -13768,6 +13768,338 @@ class MangaTranslationTab(QObject):
             else:
                 self._log(f"❌ No text was translated: {filename}", "error")
 
+    def _build_manga_worker_ocr_config(self) -> Dict[str, Any]:
+        """Build the OCR config used by isolated manga worker translators."""
+        provider = getattr(
+            self,
+            'ocr_provider_value',
+            self.main_gui.config.get('manga_ocr_provider', 'custom-api')
+        )
+        ocr_config: Dict[str, Any] = {'provider': provider}
+        try:
+            if provider == 'google':
+                google_creds = (
+                    self.main_gui.config.get('google_vision_credentials', '') or
+                    self.main_gui.config.get('google_cloud_credentials', '')
+                )
+                if google_creds and os.path.exists(google_creds):
+                    ocr_config['google_credentials_path'] = google_creds
+            elif provider == 'azure':
+                azure_key = self.main_gui.config.get('azure_vision_key', '')
+                azure_endpoint = self.main_gui.config.get('azure_vision_endpoint', '')
+                if azure_key and azure_endpoint:
+                    ocr_config['azure_key'] = azure_key
+                    ocr_config['azure_endpoint'] = azure_endpoint
+        except Exception:
+            pass
+        return ocr_config
+
+    def _create_manga_glossary_worker_translator(self, glossary_text: str) -> MangaTranslator:
+        """Create an isolated translator for one parallel manga glossary page."""
+        translator = MangaTranslator(
+            self._build_manga_worker_ocr_config(),
+            getattr(self.main_gui, 'client', None),
+            self.main_gui,
+            log_callback=self._log
+        )
+        translator.set_stop_flag(self.stop_flag)
+        translator.manga_generated_glossary_text = glossary_text
+        translator._manga_glossary_prompt_logged = False
+
+        try:
+            enabled = (
+                bool(self.context_checkbox.isChecked())
+                if hasattr(self, 'context_checkbox')
+                else bool(getattr(self, 'full_page_context_value', True))
+            )
+            translator.set_full_page_context(
+                enabled=enabled,
+                custom_prompt=getattr(self, 'full_page_context_prompt', None)
+            )
+        except Exception:
+            pass
+
+        try:
+            advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
+            if advanced.get('parallel_panel_translation', False):
+                panel_workers = max(1, int(advanced.get('panel_max_workers', 2)))
+                translator.manga_settings.setdefault('advanced', {})['parallel_processing'] = True
+                translator.manga_settings.setdefault('advanced', {})['max_workers'] = panel_workers
+                translator.parallel_processing = True
+                translator.max_workers = panel_workers
+        except Exception as e:
+            self._log(f"Warning: failed to configure manga glossary worker parallel settings: {e}", "warning")
+
+        return translator
+
+    def _run_parallel_manga_glossary_ocr_pass(self):
+        """Collect OCR for manga glossary generation using page-level concurrency."""
+        advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
+        panel_parallel = bool(advanced.get('parallel_panel_translation', False))
+        files = list(getattr(self, 'selected_files', []) or [])
+        try:
+            requested_workers = max(1, int(advanced.get('panel_max_workers', 2)))
+        except Exception:
+            requested_workers = 2
+
+        effective_workers = min(requested_workers, len(files)) if panel_parallel and len(files) > 1 else 1
+        if effective_workers <= 1:
+            return None
+
+        self._log(f"Parallel manga glossary OCR ENABLED ({effective_workers} workers)", "info")
+
+        progress_lock = threading.Lock()
+        counters = {'started': 0, 'done': 0}
+        total = self.total_files
+        ocr_pages: List[Dict[str, Any]] = []
+        precomputed_regions: Dict[str, List[Any]] = {}
+
+        def process_single(index: int, filepath: str) -> bool:
+            if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1' or self.stop_flag.is_set():
+                return False
+
+            filename = os.path.basename(filepath)
+            translator = None
+            try:
+                translator = self._create_manga_glossary_worker_translator("")
+                translator.skip_inpainting = True
+                translator.use_cloud_inpainting = False
+                translator.inpaint_mode = 'skip'
+                output_path = self._get_manga_output_path_for_file(filepath)
+
+                with progress_lock:
+                    counters['started'] += 1
+                    self.current_file_index = index
+                    self._monitor_translation_output(filepath)
+                    self._update_current_file(filename)
+                    self._update_progress(
+                        counters['done'],
+                        total,
+                        f"OCR for glossary {counters['started']}/{total}: {filename}"
+                    )
+
+                result = translator.process_image(
+                    filepath,
+                    output_path,
+                    batch_index=index + 1,
+                    batch_total=total,
+                    ocr_only=True
+                )
+
+                with progress_lock:
+                    counters['done'] += 1
+                    if result.get('interrupted', False):
+                        self.failed_files += 1
+                        self._log(f"Translation of {filename} was interrupted during glossary OCR", "warning")
+                    elif not result.get('success', False):
+                        self.failed_files += 1
+                        errors = '\n'.join(result.get('errors', ['Unknown OCR error']))
+                        self._log(f"OCR failed for glossary: {filename}\n{errors}", "error")
+                    else:
+                        region_objects = result.get('_region_objects') or []
+                        texts = [
+                            getattr(region, 'text', '')
+                            for region in region_objects
+                            if getattr(region, 'text', '').strip()
+                        ]
+                        precomputed_regions[filepath] = region_objects
+                        ocr_pages.append({
+                            'index': index + 1,
+                            'path': filepath,
+                            'regions': region_objects,
+                            'texts': texts,
+                        })
+                        self._log(f"OCR captured for glossary: {filename} ({len(texts)} text regions)", "success")
+                    self._update_progress(
+                        counters['done'],
+                        total,
+                        f"OCR for glossary complete {counters['done']}/{total}"
+                    )
+                return bool(result.get('success', False))
+            except Exception as e:
+                with progress_lock:
+                    self.failed_files += 1
+                    counters['done'] += 1
+                    self._log(f"OCR glossary pass error for {filename}: {e}", "error")
+                    self._log(traceback.format_exc(), "debug")
+                    self._update_progress(
+                        counters['done'],
+                        total,
+                        f"OCR for glossary complete {counters['done']}/{total}"
+                    )
+                return False
+            finally:
+                try:
+                    if translator:
+                        if hasattr(translator, '_return_inpainter_to_pool'):
+                            translator._return_inpainter_to_pool()
+                        if hasattr(translator, '_return_bubble_detector_to_pool'):
+                            translator._return_bubble_detector_to_pool()
+                        if hasattr(translator, 'clear_internal_state'):
+                            translator.clear_internal_state()
+                except Exception:
+                    pass
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            futures = []
+            try:
+                stagger_ms = int(advanced.get('panel_start_stagger_ms', 30))
+            except Exception:
+                stagger_ms = 30
+
+            for index, filepath in enumerate(files):
+                if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1' or self.stop_flag.is_set():
+                    break
+                futures.append(executor.submit(process_single, index, filepath))
+                if stagger_ms > 0:
+                    time.sleep(stagger_ms / 1000.0)
+
+            for future in concurrent.futures.as_completed(futures):
+                if self.stop_flag.is_set():
+                    for pending in futures:
+                        pending.cancel()
+                    break
+                try:
+                    future.result()
+                except Exception:
+                    pass
+
+        ocr_pages.sort(key=lambda page: page.get('index', 0))
+        return ocr_pages, precomputed_regions
+
+    def _run_parallel_manga_glossary_translation(
+        self,
+        glossary_text: str,
+        *,
+        precomputed_regions: Optional[Dict[str, List[Any]]] = None,
+        progress_label: str = "Translating with glossary"
+    ) -> bool:
+        """Run a manga glossary translation pass using panel-level page concurrency."""
+        advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
+        panel_parallel = bool(advanced.get('parallel_panel_translation', False))
+        files = list(getattr(self, 'selected_files', []) or [])
+        try:
+            requested_workers = max(1, int(advanced.get('panel_max_workers', 2)))
+        except Exception:
+            requested_workers = 2
+
+        effective_workers = min(requested_workers, len(files)) if panel_parallel and len(files) > 1 else 1
+        if effective_workers <= 1:
+            return False
+
+        self._log(f"Parallel manga glossary translation ENABLED ({effective_workers} workers)", "info")
+
+        progress_lock = threading.Lock()
+        counters = {'started': 0, 'done': 0}
+        total = self.total_files
+
+        def process_single(index: int, filepath: str) -> bool:
+            if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1' or self.stop_flag.is_set():
+                return False
+
+            filename = os.path.basename(filepath)
+            regions = None
+            if precomputed_regions is not None:
+                regions = precomputed_regions.get(filepath) or []
+                if not regions:
+                    with progress_lock:
+                        self.failed_files += 1
+                        counters['done'] += 1
+                        self._log(f"No precomputed OCR regions for {filename}; skipping translation", "warning")
+                        self._update_progress(
+                            counters['done'],
+                            total,
+                            f"{progress_label} complete {counters['done']}/{total}"
+                        )
+                    return False
+
+            translator = None
+            try:
+                translator = self._create_manga_glossary_worker_translator(glossary_text)
+                output_path = self._get_manga_output_path_for_file(filepath)
+
+                with progress_lock:
+                    counters['started'] += 1
+                    self.current_file_index = index
+                    self._monitor_translation_output(filepath)
+                    self._update_current_file(filename)
+                    self._update_progress(
+                        counters['done'],
+                        total,
+                        f"{progress_label} {counters['started']}/{total}: {filename}"
+                    )
+
+                result = translator.process_image(
+                    filepath,
+                    output_path,
+                    batch_index=index + 1,
+                    batch_total=total,
+                    precomputed_regions=regions
+                )
+
+                with progress_lock:
+                    self._handle_manga_translation_result(filepath, result)
+                    counters['done'] += 1
+                    self._update_progress(
+                        counters['done'],
+                        total,
+                        f"{progress_label} complete {counters['done']}/{total}"
+                    )
+                return bool(result.get('success', False))
+            except Exception as e:
+                with progress_lock:
+                    self.failed_files += 1
+                    counters['done'] += 1
+                    self._log(f"Translation error for {filename}: {e}", "error")
+                    self._log(traceback.format_exc(), "debug")
+                    self._update_progress(
+                        counters['done'],
+                        total,
+                        f"{progress_label} complete {counters['done']}/{total}"
+                    )
+                return False
+            finally:
+                try:
+                    if translator:
+                        if hasattr(translator, '_return_inpainter_to_pool'):
+                            translator._return_inpainter_to_pool()
+                        if hasattr(translator, '_return_bubble_detector_to_pool'):
+                            translator._return_bubble_detector_to_pool()
+                        if hasattr(translator, 'clear_internal_state'):
+                            translator.clear_internal_state()
+                except Exception:
+                    pass
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            futures = []
+            try:
+                stagger_ms = int(advanced.get('panel_start_stagger_ms', 30))
+            except Exception:
+                stagger_ms = 30
+
+            for index, filepath in enumerate(files):
+                if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1' or self.stop_flag.is_set():
+                    break
+                futures.append(executor.submit(process_single, index, filepath))
+                if stagger_ms > 0:
+                    time.sleep(stagger_ms / 1000.0)
+
+            for future in concurrent.futures.as_completed(futures):
+                if self.stop_flag.is_set():
+                    for pending in futures:
+                        pending.cancel()
+                    break
+                try:
+                    future.result()
+                except Exception:
+                    pass
+
+        try:
+            self._finalize_cbz_jobs()
+        except Exception:
+            pass
+        return True
+
     def _run_manga_loaded_glossary_translation(self, glossary_text: str) -> None:
         """Translate selected pages using a loaded custom glossary without generating a new one."""
         glossary_text = (glossary_text or '').strip()
@@ -13786,6 +14118,11 @@ class MangaTranslationTab(QObject):
         source_path = getattr(self, 'manga_custom_glossary_path', '') or self.main_gui.config.get('manga_custom_glossary_path', '')
         source_name = os.path.basename(source_path) if source_path else "loaded glossary"
         self._log(f"📚 Translating with custom manga glossary: {source_name} ({entry_count} entries)", "info")
+        if self._run_parallel_manga_glossary_translation(
+            glossary_text,
+            progress_label="Translating with loaded glossary"
+        ):
+            return
 
         for index, filepath in enumerate(self.selected_files):
             if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1' or self.stop_flag.is_set():
@@ -13827,6 +14164,32 @@ class MangaTranslationTab(QObject):
         ocr_pages: List[Dict[str, Any]] = []
         precomputed_regions: Dict[str, List[Any]] = {}
         total = self.total_files
+
+        parallel_ocr_result = self._run_parallel_manga_glossary_ocr_pass()
+        if parallel_ocr_result is not None:
+            ocr_pages, precomputed_regions = parallel_ocr_result
+            if self.stop_flag.is_set() or not ocr_pages:
+                return
+
+            self._update_progress(len(ocr_pages), total, "Generating manga glossary...")
+            glossary_text = self._generate_manga_glossary_from_ocr_pages(ocr_pages)
+            if glossary_text is None:
+                self._log("⚠️ Manga glossary generation failed; translation pass skipped", "warning")
+                return
+
+            if glossary_only:
+                self.completed_files = len(ocr_pages)
+                self._update_progress(total, total, f"Glossary generated from {len(ocr_pages)} pages")
+                return
+
+            self._log("➡️ Starting translation pass with generated manga glossary", "info")
+            if self._run_parallel_manga_glossary_translation(
+                glossary_text,
+                precomputed_regions=precomputed_regions,
+                progress_label="Translating with glossary"
+            ):
+                return
+
         original_skip_inpainting = getattr(self.translator, 'skip_inpainting', False)
         try:
             self.translator.skip_inpainting = True
@@ -13902,6 +14265,13 @@ class MangaTranslationTab(QObject):
             return
 
         self._log("➡️ Starting translation pass with generated manga glossary", "info")
+        if self._run_parallel_manga_glossary_translation(
+            glossary_text,
+            precomputed_regions=precomputed_regions,
+            progress_label="Translating with glossary"
+        ):
+            return
+
         for index, filepath in enumerate(self.selected_files):
             if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1' or self.stop_flag.is_set():
                 self._log("⏹️ Manga glossary translation pass stopped", "warning")
