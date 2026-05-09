@@ -6596,8 +6596,15 @@ CRITICAL EXTRACTION RULES:
             menu.addAction("Save Changes", save_edited_glossary)
             menu.addAction("Save As...", save_as_glossary)
             menu.addSeparator()
-            # Edit selected entry using existing inline editor
+            # Ensure right-clicked item is selected (Qt's ExtendedSelection
+            # doesn't auto-select on right-click, making "Delete Selected"
+            # target stale/wrong rows).
             current_item = self.glossary_tree.itemAt(pos)
+            if current_item and current_item not in self.glossary_tree.selectedItems():
+                self.glossary_tree.clearSelection()
+                current_item.setSelected(True)
+                self.glossary_tree.setCurrentItem(current_item)
+            # Edit selected entry using existing inline editor
             current_col = self.glossary_tree.columnAt(pos.x())
             if current_item and current_col > 0:
                 menu.addAction("Edit", lambda: self._on_tree_double_click(current_item, current_col))

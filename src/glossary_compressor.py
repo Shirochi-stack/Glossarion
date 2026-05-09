@@ -24,6 +24,21 @@ except ImportError:
 _gender_bias_log_seen = set()
 
 
+def _should_use_raw_name_fallback():
+    """Return True if raw-name scan fallback is appropriate.
+
+    The raw-name scan is a brute-force approach that only makes sense for
+    user-supplied (manual) glossaries whose format may be arbitrary.  For
+    auto-generated glossaries (Full, Balanced, Minimal, Single Pass, etc.)
+    the structured CSV/JSON parsing is authoritative and a 0-match result
+    simply means no entries are relevant to this chapter.
+
+    Allowed modes: 'off_no_automap' (Manual Glossary Only), 'off', 'off_fuzzy'.
+    """
+    mode = os.getenv('AUTO_GLOSSARY_MODE', 'off').lower().strip()
+    return mode in ('off', 'off_no_automap', 'off_fuzzy')
+
+
 def _get_gender_types():
     """Return a set of entry type names that have has_gender enabled."""
     if _get_custom_entry_types:
@@ -331,8 +346,12 @@ def compress_glossary(glossary_content, source_text, glossary_format='auto', glo
     elif glossary_format == 'json':
         return _compress_json_glossary(glossary_content, source_text, glossary_path=glossary_path, chapter_ref=chapter_ref)
     elif glossary_format == 'text':
-        print("⚠️ Glossary compression: using fallback raw-name scan (unrecognized format)")
-        return _compress_fallback_text(glossary_content, source_text)
+        if _should_use_raw_name_fallback():
+            print("⚠️ Glossary compression: using fallback raw-name scan (unrecognized format)")
+            return _compress_fallback_text(glossary_content, source_text)
+        else:
+            # Auto-generated glossary — skip raw-name scan, return as-is
+            return glossary_content
     else:
         return glossary_content
 
@@ -373,8 +392,11 @@ def _compress_csv_glossary(csv_content, source_text, glossary_path=None, chapter
                               and not l.strip().lower().startswith('glossary'))
     
     if len(result_data_lines) == 0 and original_data_count > 0:
-        print("⚠️ Glossary compression: CSV produced 0 matching entries, falling back to raw-name scan")
-        return _compress_fallback_text(csv_content, source_text)
+        if _should_use_raw_name_fallback():
+            print("⚠️ Glossary compression: CSV produced 0 matching entries, falling back to raw-name scan")
+            return _compress_fallback_text(csv_content, source_text)
+        else:
+            print("ℹ️ Glossary compression: CSV produced 0 matching entries for this chapter (no fallback in auto mode)")
     
     return result
 
@@ -537,8 +559,12 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
         try:
             json_data = json.loads(json_data)
         except json.JSONDecodeError:
-            print("⚠️ Glossary compression: JSON parsing failed, falling back to raw-name scan")
-            return _compress_fallback_text(json_data, source_text)
+            if _should_use_raw_name_fallback():
+                print("⚠️ Glossary compression: JSON parsing failed, falling back to raw-name scan")
+                return _compress_fallback_text(json_data, source_text)
+            else:
+                print("⚠️ Glossary compression: JSON parsing failed (no fallback in auto mode)")
+                return json_data
     gender_tracker = _load_gender_tracker(glossary_path)
     
     def _is_char_entry(val):
@@ -877,8 +903,12 @@ def compress_glossary_file(glossary_path, source_text):
             return json.dumps(compressed_data, ensure_ascii=False, indent=2)
         else:
             # .md, .txt, or any other extension — use text fallback
-            print(f"⚠️ Glossary compression: using fallback raw-name scan (format: {ext or 'unknown'})")
-            return compress_glossary(content, source_text, glossary_format='text')
+            if _should_use_raw_name_fallback():
+                print(f"⚠️ Glossary compression: using fallback raw-name scan (format: {ext or 'unknown'})")
+                return compress_glossary(content, source_text, glossary_format='text')
+            else:
+                # Auto mode — return content as-is, no raw-name scan
+                return content
     except Exception as e:
         print(f"⚠️ Failed to compress glossary: {e}")
         return None
