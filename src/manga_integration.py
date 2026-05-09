@@ -4103,7 +4103,7 @@ class MangaTranslationTab(QObject):
         manga_glossary_toggle_layout.setContentsMargins(20, 0, 0, 0)
         manga_glossary_toggle_layout.setSpacing(10)
 
-        self.manga_glossary_checkbox = self._create_styled_checkbox("Generate glossary after OCR, then translate with it")
+        self.manga_glossary_checkbox = self._create_styled_checkbox("Use loaded/generated glossary for translation")
         self.manga_glossary_checkbox.setChecked(bool(getattr(self, 'manga_glossary_enabled_value', self.main_gui.config.get('manga_glossary_enabled', False))))
         self.manga_glossary_checkbox.stateChanged.connect(self._on_manga_glossary_toggle)
         manga_glossary_toggle_layout.addWidget(self.manga_glossary_checkbox)
@@ -4112,6 +4112,16 @@ class MangaTranslationTab(QObject):
         edit_manga_glossary_btn.clicked.connect(self._edit_manga_glossary_prompt)
         edit_manga_glossary_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
         manga_glossary_toggle_layout.addWidget(edit_manga_glossary_btn)
+
+        load_manga_glossary_btn = QPushButton("Load Glossary")
+        load_manga_glossary_btn.clicked.connect(self._load_manga_custom_glossary)
+        load_manga_glossary_btn.setStyleSheet("QPushButton { background-color: #0d6efd; color: white; padding: 5px 15px; }")
+        manga_glossary_toggle_layout.addWidget(load_manga_glossary_btn)
+
+        clear_manga_glossary_btn = QPushButton("Clear")
+        clear_manga_glossary_btn.clicked.connect(self._clear_manga_custom_glossary)
+        clear_manga_glossary_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        manga_glossary_toggle_layout.addWidget(clear_manga_glossary_btn)
 
         generate_manga_glossary_btn = QPushButton("Generate Glossary")
         generate_manga_glossary_btn.clicked.connect(self._generate_manga_glossary_button_clicked)
@@ -4130,6 +4140,13 @@ class MangaTranslationTab(QObject):
         manga_glossary_toggle_layout.addStretch()
 
         manga_glossary_layout.addWidget(manga_glossary_toggle_frame)
+
+        self.manga_glossary_status_label = QLabel("")
+        self.manga_glossary_status_label.setStyleSheet("color: #b8c7d9; font-size: 8pt; margin-left: 20px;")
+        self.manga_glossary_status_label.setWordWrap(True)
+        manga_glossary_layout.addWidget(self.manga_glossary_status_label)
+        self._update_manga_glossary_status_label()
+
         context_frame_layout.addWidget(manga_glossary_frame)
 
         # Separator
@@ -6398,6 +6415,8 @@ class MangaTranslationTab(QObject):
         # then translates using that generated glossary.
         self.manga_glossary_enabled_value = config.get('manga_glossary_enabled', False)
         self.manga_glossary_prompt = config.get('manga_glossary_prompt', self._default_manga_glossary_prompt())
+        self.manga_custom_glossary_path = config.get('manga_custom_glossary_path', '')
+        self.manga_loaded_glossary_text = ''
         self.manga_generated_glossary_text = ''
  
         # Load OCR prompt (UPDATED: Improved default)
@@ -6640,6 +6659,8 @@ class MangaTranslationTab(QObject):
                 self.main_gui.config['manga_glossary_enabled'] = bool(self.manga_glossary_enabled_value)
             if hasattr(self, 'manga_glossary_prompt'):
                 self.main_gui.config['manga_glossary_prompt'] = self.manga_glossary_prompt
+            if hasattr(self, 'manga_custom_glossary_path'):
+                self.main_gui.config['manga_custom_glossary_path'] = self.manga_custom_glossary_path
             
             # Persist visual context setting alongside other toggles
             if hasattr(self, 'visual_context_enabled_value'):
@@ -7079,6 +7100,201 @@ class MangaTranslationTab(QObject):
             enabled = bool(state)
         self.manga_glossary_enabled_value = enabled
         self._save_rendering_settings()
+
+    def _update_manga_glossary_status_label(self):
+        """Refresh the small status line for loaded manga glossaries."""
+        label = getattr(self, 'manga_glossary_status_label', None)
+        if not label:
+            return
+        path = getattr(self, 'manga_custom_glossary_path', '') or ''
+        if path and os.path.exists(path):
+            label.setText(f"Loaded glossary: {os.path.basename(path)}")
+            label.setToolTip(path)
+        elif path:
+            label.setText(f"Loaded glossary missing: {os.path.basename(path)}")
+            label.setToolTip(path)
+        else:
+            label.setText("Loaded glossary: none")
+            label.setToolTip("")
+
+    def _format_manga_glossary_entries_for_prompt(self, entries: List[Dict[str, Any]]) -> str:
+        """Convert loaded glossary entries to the token-efficient prompt format."""
+        cleaned_entries = []
+        for entry in entries or []:
+            if not isinstance(entry, dict):
+                continue
+            raw_name = str(entry.get('raw_name') or entry.get('source') or entry.get('original') or '').strip()
+            translated_name = str(entry.get('translated_name') or entry.get('target') or entry.get('translated') or entry.get('name') or '').strip()
+            if not raw_name or not translated_name:
+                continue
+            item = dict(entry)
+            item['raw_name'] = raw_name
+            item['translated_name'] = translated_name
+            item['type'] = str(item.get('type') or 'term').strip() or 'term'
+            cleaned_entries.append(item)
+
+        if not cleaned_entries:
+            return ""
+
+        custom_fields = getattr(self.main_gui, 'custom_glossary_fields', None)
+        if custom_fields is None:
+            custom_fields = self.main_gui.config.get('custom_glossary_fields', [])
+        if isinstance(custom_fields, str):
+            try:
+                custom_fields = json.loads(custom_fields)
+            except Exception:
+                custom_fields = []
+
+        header_cols = ['translated_name', 'raw_name', 'gender']
+        if any(any(str(k).strip().lower() == 'description' and str(v or '').strip() for k, v in entry.items()) for entry in cleaned_entries):
+            header_cols.append('description')
+        for field in custom_fields or []:
+            field = str(field).strip()
+            if field and field.lower() not in {c.lower() for c in header_cols}:
+                header_cols.append(field)
+
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for entry in cleaned_entries:
+            entry_type = str(entry.get('type') or 'term').strip() or 'term'
+            grouped.setdefault(entry_type, []).append(entry)
+
+        lines = [f"Glossary Columns: {', '.join(header_cols)}", ""]
+        for entry_type in sorted(grouped.keys()):
+            section = entry_type.upper()
+            if not section.endswith('S'):
+                section += 'S'
+            lines.append(f"=== {section} ===")
+            for entry in grouped[entry_type]:
+                translated_name = entry.get('translated_name', '')
+                raw_name = entry.get('raw_name', '')
+                line = f"* {translated_name} ({raw_name})"
+                gender = str(entry.get('gender', '') or '').strip()
+                if gender and gender.lower() not in {'unknown', 'n/a', 'na', 'none', '-'}:
+                    line += f" [{gender}]"
+
+                description = ''
+                for key, value in entry.items():
+                    if isinstance(key, str) and key.strip().lower() == 'description':
+                        description = str(value or '').strip()
+                        break
+
+                extra_parts = []
+                for field in custom_fields or []:
+                    field = str(field).strip()
+                    if not field or field.lower() == 'description':
+                        continue
+                    value = str(entry.get(field, '') or '').strip()
+                    if value:
+                        extra_parts.append(f"{field}: {value}")
+
+                if description:
+                    line += f": {description}"
+                if extra_parts:
+                    line += f" ({', '.join(extra_parts)})"
+                lines.append(line)
+            lines.append("")
+
+        return "\n".join(lines).strip()
+
+    def _load_manga_glossary_file_as_prompt_text(self, path: str) -> str:
+        """Load JSON/CSV/token-efficient glossary files and return prompt-ready text."""
+        if not path or not os.path.exists(path):
+            return ""
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                raw_text = f.read().strip()
+        except UnicodeDecodeError:
+            with open(path, 'r', encoding='utf-8-sig') as f:
+                raw_text = f.read().strip()
+
+        if raw_text.lower().startswith("glossary columns:") or raw_text.startswith("===") or raw_text.startswith("* "):
+            return raw_text
+
+        try:
+            from extract_glossary_from_epub import _load_glossary_file
+            entries = _load_glossary_file(path)
+        except Exception:
+            entries = []
+
+        if not entries and raw_text:
+            try:
+                from extract_glossary_from_epub import parse_api_response
+                entries = parse_api_response(raw_text)
+            except Exception:
+                entries = []
+
+        return self._format_manga_glossary_entries_for_prompt(entries)
+
+    def _get_loaded_manga_glossary_text(self) -> str:
+        """Return loaded custom glossary text, reloading from disk if needed."""
+        loaded_text = getattr(self, 'manga_loaded_glossary_text', '')
+        if isinstance(loaded_text, str) and loaded_text.strip():
+            return loaded_text.strip()
+
+        path = getattr(self, 'manga_custom_glossary_path', '') or self.main_gui.config.get('manga_custom_glossary_path', '')
+        if path and os.path.exists(path):
+            loaded_text = self._load_manga_glossary_file_as_prompt_text(path)
+            self.manga_loaded_glossary_text = loaded_text
+            return loaded_text.strip()
+        return ""
+
+    def _load_manga_custom_glossary(self):
+        """Pick and load a custom glossary for manga translation."""
+        start_dir = ""
+        try:
+            current_path = getattr(self, 'manga_custom_glossary_path', '') or self.main_gui.config.get('manual_glossary_path', '')
+            if current_path and os.path.exists(current_path):
+                start_dir = os.path.dirname(current_path)
+        except Exception:
+            start_dir = ""
+
+        path, _ = QFileDialog.getOpenFileName(
+            self.dialog,
+            "Load Manga Glossary",
+            start_dir,
+            "Glossary files (*.csv *.json *.txt);;All files (*.*)"
+        )
+        if not path:
+            return
+
+        try:
+            glossary_text = self._load_manga_glossary_file_as_prompt_text(path)
+            if not glossary_text:
+                QMessageBox.warning(self.dialog, "Glossary Not Loaded", "No usable glossary entries were found in that file.")
+                return
+
+            self.manga_custom_glossary_path = path
+            self.manga_loaded_glossary_text = glossary_text
+            self.manga_glossary_enabled_value = True
+            self.main_gui.config['manga_custom_glossary_path'] = path
+            self.main_gui.config['manga_glossary_enabled'] = True
+            setattr(self.main_gui, 'manga_generated_glossary_text', glossary_text)
+            if hasattr(self, 'translator') and self.translator:
+                self.translator.manga_generated_glossary_text = glossary_text
+                self.translator._manga_glossary_prompt_logged = False
+            if hasattr(self, 'manga_glossary_checkbox'):
+                self.manga_glossary_checkbox.setChecked(True)
+            self._update_manga_glossary_status_label()
+            self._save_rendering_settings()
+            entry_count = sum(1 for line in glossary_text.splitlines() if line.lstrip().startswith("* "))
+            self._log(f"📚 Loaded custom manga glossary: {os.path.basename(path)} ({entry_count} entries)", "success")
+        except Exception as e:
+            self._log(f"❌ Failed to load manga glossary: {e}", "error")
+            self._log(traceback.format_exc(), "debug")
+            QMessageBox.critical(self.dialog, "Error", f"Failed to load glossary:\n\n{e}")
+
+    def _clear_manga_custom_glossary(self):
+        """Clear the loaded custom manga glossary path/text."""
+        self.manga_custom_glossary_path = ''
+        self.manga_loaded_glossary_text = ''
+        self.main_gui.config['manga_custom_glossary_path'] = ''
+        setattr(self.main_gui, 'manga_generated_glossary_text', '')
+        if hasattr(self, 'translator') and self.translator:
+            self.translator.manga_generated_glossary_text = ''
+            self.translator._manga_glossary_prompt_logged = False
+        self._update_manga_glossary_status_label()
+        self._save_rendering_settings()
+        self._log("📚 Cleared custom manga glossary", "info")
 
     def _edit_manga_glossary_prompt(self):
         """Open dialog to edit the manga glossary generation prompt."""
@@ -12758,6 +12974,55 @@ class MangaTranslationTab(QObject):
             else:
                 self._log(f"❌ No text was translated: {filename}", "error")
 
+    def _run_manga_loaded_glossary_translation(self, glossary_text: str) -> None:
+        """Translate selected pages using a loaded custom glossary without generating a new one."""
+        glossary_text = (glossary_text or '').strip()
+        if not glossary_text:
+            self._log("⚠️ No loaded manga glossary text available", "warning")
+            return
+
+        self.manga_generated_glossary_text = glossary_text
+        setattr(self.main_gui, 'manga_generated_glossary_text', glossary_text)
+        if hasattr(self, 'translator') and self.translator:
+            self.translator.manga_generated_glossary_text = glossary_text
+            self.translator._manga_glossary_prompt_logged = False
+
+        total = self.total_files
+        entry_count = sum(1 for line in glossary_text.splitlines() if line.lstrip().startswith("* "))
+        source_path = getattr(self, 'manga_custom_glossary_path', '') or self.main_gui.config.get('manga_custom_glossary_path', '')
+        source_name = os.path.basename(source_path) if source_path else "loaded glossary"
+        self._log(f"📚 Translating with custom manga glossary: {source_name} ({entry_count} entries)", "info")
+
+        for index, filepath in enumerate(self.selected_files):
+            if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1' or self.stop_flag.is_set():
+                self._log("⏹️ Custom glossary translation pass stopped", "warning")
+                break
+
+            if hasattr(self.translator, 'reset_for_new_image'):
+                self.translator.reset_for_new_image()
+            self.translator.manga_generated_glossary_text = glossary_text
+
+            filename = os.path.basename(filepath)
+            self.current_file_index = index
+            self._monitor_translation_output(filepath)
+            self._update_current_file(filename)
+            self._update_progress(index, total, f"Translating with loaded glossary {index + 1}/{total}: {filename}")
+
+            try:
+                output_path = self._get_manga_output_path_for_file(filepath)
+                result = self.translator.process_image(
+                    filepath,
+                    output_path,
+                    batch_index=index + 1,
+                    batch_total=total
+                )
+                self._handle_manga_translation_result(filepath, result)
+                time.sleep(0.1)
+            except Exception as e:
+                self.failed_files += 1
+                self._log(f"❌ Translation error for {filename}: {e}", "error")
+                self._log(traceback.format_exc(), "debug")
+
     def _run_manga_glossary_batch(self, glossary_only: bool = False) -> None:
         """Run OCR for all pages, generate one glossary, then optionally translate."""
         self._log("📚 Manga glossary workflow enabled", "info")
@@ -13013,7 +13278,11 @@ class MangaTranslationTab(QObject):
             glossary_only_run = bool(getattr(self, '_manga_glossary_only_run', False))
 
             if self._manga_glossary_workflow_enabled():
-                self._run_manga_glossary_batch(glossary_only=glossary_only_run)
+                loaded_glossary_text = "" if glossary_only_run else self._get_loaded_manga_glossary_text()
+                if loaded_glossary_text:
+                    self._run_manga_loaded_glossary_translation(loaded_glossary_text)
+                else:
+                    self._run_manga_glossary_batch(glossary_only=glossary_only_run)
 
             elif panel_parallel and len(self.selected_files) > 1 and effective_workers > 1:
                 self._log(f"🚀 Parallel PANEL translation ENABLED ({effective_workers} workers)", "info")
