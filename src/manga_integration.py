@@ -4088,6 +4088,50 @@ class MangaTranslationTab(QObject):
         full_page_layout.addWidget(toggle_frame)
         context_frame_layout.addWidget(full_page_frame)
 
+        # Manga glossary generation workflow
+        manga_glossary_frame = QWidget()
+        manga_glossary_layout = QVBoxLayout(manga_glossary_frame)
+        manga_glossary_layout.setContentsMargins(0, 8, 0, 0)
+        manga_glossary_layout.setSpacing(5)
+
+        manga_glossary_title = QLabel("Manga Glossary Workflow:")
+        manga_glossary_title.setFont(title_font2)
+        manga_glossary_layout.addWidget(manga_glossary_title)
+
+        manga_glossary_toggle_frame = QWidget()
+        manga_glossary_toggle_layout = QHBoxLayout(manga_glossary_toggle_frame)
+        manga_glossary_toggle_layout.setContentsMargins(20, 0, 0, 0)
+        manga_glossary_toggle_layout.setSpacing(10)
+
+        self.manga_glossary_checkbox = self._create_styled_checkbox("Generate glossary after OCR, then translate with it")
+        self.manga_glossary_checkbox.setChecked(bool(getattr(self, 'manga_glossary_enabled_value', self.main_gui.config.get('manga_glossary_enabled', False))))
+        self.manga_glossary_checkbox.stateChanged.connect(self._on_manga_glossary_toggle)
+        manga_glossary_toggle_layout.addWidget(self.manga_glossary_checkbox)
+
+        edit_manga_glossary_btn = QPushButton("Glossary Prompt")
+        edit_manga_glossary_btn.clicked.connect(self._edit_manga_glossary_prompt)
+        edit_manga_glossary_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        manga_glossary_toggle_layout.addWidget(edit_manga_glossary_btn)
+
+        generate_manga_glossary_btn = QPushButton("Generate Glossary")
+        generate_manga_glossary_btn.clicked.connect(self._generate_manga_glossary_button_clicked)
+        generate_manga_glossary_btn.setStyleSheet("QPushButton { background-color: #198754; color: white; padding: 5px 15px; }")
+        manga_glossary_toggle_layout.addWidget(generate_manga_glossary_btn)
+
+        manga_glossary_help_btn = QPushButton("?")
+        manga_glossary_help_btn.setFixedWidth(30)
+        manga_glossary_help_btn.clicked.connect(lambda: self._show_help_dialog(
+            "Manga Glossary Workflow",
+            "When enabled, the batch first runs OCR on every selected page, sends all OCR text in one glossary generation request, and then translates each page with that glossary appended to the translation prompt.\n\n"
+            "The Generate Glossary button runs the OCR and glossary generation step without translating pages."
+        ))
+        manga_glossary_help_btn.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px; }")
+        manga_glossary_toggle_layout.addWidget(manga_glossary_help_btn)
+        manga_glossary_toggle_layout.addStretch()
+
+        manga_glossary_layout.addWidget(manga_glossary_toggle_frame)
+        context_frame_layout.addWidget(manga_glossary_frame)
+
         # Separator
         separator3 = QFrame()
         separator3.setFrameShape(QFrame.HLine)
@@ -6348,6 +6392,13 @@ class MangaTranslationTab(QObject):
         if 'manga_full_page_context_prompt' not in config:
             self.main_gui.config['manga_full_page_context_prompt'] = self.full_page_context_prompt
             print("[MANGA_INIT] Saved default full page context prompt to config")
+
+        # Manga glossary workflow settings. When enabled, the batch worker OCRs
+        # every selected page first, generates one glossary from all OCR text,
+        # then translates using that generated glossary.
+        self.manga_glossary_enabled_value = config.get('manga_glossary_enabled', False)
+        self.manga_glossary_prompt = config.get('manga_glossary_prompt', self._default_manga_glossary_prompt())
+        self.manga_generated_glossary_text = ''
  
         # Load OCR prompt (UPDATED: Improved default)
         ocr_prompt_default = (
@@ -6411,6 +6462,8 @@ class MangaTranslationTab(QObject):
         try:
             if hasattr(self, 'context_checkbox'):
                 self.full_page_context_value = bool(self.context_checkbox.isChecked())
+            if hasattr(self, 'manga_glossary_checkbox'):
+                self.manga_glossary_enabled_value = bool(self.manga_glossary_checkbox.isChecked())
             if hasattr(self, 'visual_context_checkbox'):
                 self.visual_context_enabled_value = bool(self.visual_context_checkbox.isChecked())
             if hasattr(self, 'create_cbz_checkbox'):
@@ -6581,6 +6634,12 @@ class MangaTranslationTab(QObject):
                 self.main_gui.config['manga_full_page_context'] = self.full_page_context_value
             if hasattr(self, 'full_page_context_prompt'):
                 self.main_gui.config['manga_full_page_context_prompt'] = self.full_page_context_prompt
+            if hasattr(self, 'manga_glossary_checkbox'):
+                self.manga_glossary_enabled_value = bool(self.manga_glossary_checkbox.isChecked())
+            if hasattr(self, 'manga_glossary_enabled_value'):
+                self.main_gui.config['manga_glossary_enabled'] = bool(self.manga_glossary_enabled_value)
+            if hasattr(self, 'manga_glossary_prompt'):
+                self.main_gui.config['manga_glossary_prompt'] = self.manga_glossary_prompt
             
             # Persist visual context setting alongside other toggles
             if hasattr(self, 'visual_context_enabled_value'):
@@ -6985,6 +7044,102 @@ class MangaTranslationTab(QObject):
         
         # Show dialog
         dialog.exec()
+
+    def _default_manga_glossary_prompt(self) -> str:
+        """Default prompt for manga glossary generation, based on the EPUB glossary extractor."""
+        try:
+            from extract_glossary_from_epub import DEFAULT_GLOSSARY_PROMPT
+            base_prompt = DEFAULT_GLOSSARY_PROMPT.replace(
+                "You are a novel glossary extraction assistant.",
+                "You are a manga/manhwa/manhua glossary extraction assistant."
+            )
+        except Exception:
+            base_prompt = (
+                "You are a manga/manhwa/manhua glossary extraction assistant.\n\n"
+                "Return ONLY CSV rows with columns: type,raw_name,translated_name,gender\n"
+                "Extract character names, terms, places, organizations, abilities, items, and titles.\n"
+                "Do not extract dialogue lines or full sentences."
+            )
+
+        manga_rules = (
+            "\n\nMANGA OCR SOURCE RULES:\n"
+            "- You will receive OCR text from every selected manga page in one request.\n"
+            "- Treat all pages as one continuous chapter/scene for name and term consistency.\n"
+            "- OCR can contain short bubbles, sound effects, broken line order, and repeated fragments.\n"
+            "- Prefer recurring proper nouns and story-specific terms over ordinary dialogue words.\n"
+            "- Keep raw_name exactly in the source script when possible."
+        )
+        return f"{base_prompt}{manga_rules}"
+
+    def _on_manga_glossary_toggle(self, state=None):
+        """Persist manga glossary workflow toggle."""
+        try:
+            enabled = bool(self.manga_glossary_checkbox.isChecked()) if hasattr(self, 'manga_glossary_checkbox') else bool(state)
+        except Exception:
+            enabled = bool(state)
+        self.manga_glossary_enabled_value = enabled
+        self._save_rendering_settings()
+
+    def _edit_manga_glossary_prompt(self):
+        """Open dialog to edit the manga glossary generation prompt."""
+        dialog = QDialog(self.dialog)
+        dialog.setWindowTitle("Manga Glossary Prompt")
+        screen = QApplication.primaryScreen().geometry()
+        dialog.setMinimumSize(int(screen.width() * 0.42), int(screen.height() * 0.55))
+
+        layout = QVBoxLayout(dialog)
+        instructions = QLabel(
+            "Edit the prompt used after the OCR pass to generate one glossary from all selected manga pages."
+        )
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+
+        prompt_editor = QTextEdit()
+        prompt_editor.setPlainText(getattr(self, 'manga_glossary_prompt', self._default_manga_glossary_prompt()))
+        layout.addWidget(prompt_editor)
+
+        button_layout = QHBoxLayout()
+
+        def save_prompt():
+            self.manga_glossary_prompt = prompt_editor.toPlainText().strip() or self._default_manga_glossary_prompt()
+            self.main_gui.config['manga_glossary_prompt'] = self.manga_glossary_prompt
+            self._save_rendering_settings()
+            self._log("✅ Updated manga glossary prompt", "success")
+            dialog.accept()
+
+        def reset_prompt():
+            prompt_editor.setPlainText(self._default_manga_glossary_prompt())
+
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(save_prompt)
+        button_layout.addWidget(save_btn)
+
+        reset_btn = QPushButton("Reset to Default")
+        reset_btn.clicked.connect(reset_prompt)
+        button_layout.addWidget(reset_btn)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+        button_layout.addStretch()
+
+        layout.addLayout(button_layout)
+        dialog.exec()
+
+    def _generate_manga_glossary_button_clicked(self):
+        """Run the OCR + glossary generation pass without translating pages."""
+        if not getattr(self, 'selected_files', None):
+            QMessageBox.warning(self.dialog, "No Images", "Add manga images before generating a glossary.")
+            return
+        if getattr(self, 'is_running', False):
+            QMessageBox.information(self.dialog, "Already Running", "Wait for the current manga job to finish first.")
+            return
+
+        self.manga_glossary_prompt = getattr(self, 'manga_glossary_prompt', self._default_manga_glossary_prompt())
+        self.main_gui.config['manga_glossary_prompt'] = self.manga_glossary_prompt
+        self._manga_glossary_only_run = True
+        self._log("📚 Starting glossary-only manga OCR pass", "info")
+        self._start_translation()
     
     def _update_pool_tracker_label(self):
         """Update the pool tracker label with current preload pool status"""
@@ -12338,6 +12493,391 @@ class MangaTranslationTab(QObject):
                 self._save_rendering_settings()
         except Exception as e:
             self._log(f"Error saving manga output token limit: {e}", "warning")
+
+    def _manga_glossary_workflow_enabled(self) -> bool:
+        """Return True when the new OCR -> glossary -> translation workflow should run."""
+        if bool(getattr(self, '_manga_glossary_only_run', False)):
+            return True
+        try:
+            if hasattr(self, 'manga_glossary_checkbox'):
+                return bool(self.manga_glossary_checkbox.isChecked())
+        except Exception:
+            pass
+        return bool(getattr(self, 'manga_glossary_enabled_value', self.main_gui.config.get('manga_glossary_enabled', False)))
+
+    def _get_manga_output_path_for_file(self, filepath: str) -> str:
+        """Mirror the normal per-image output path routing used by the worker."""
+        filename = os.path.basename(filepath)
+        try:
+            if hasattr(self, 'cbz_image_to_job') and filepath in self.cbz_image_to_job:
+                cbz_file = self.cbz_image_to_job[filepath]
+                job = getattr(self, 'cbz_jobs', {}).get(cbz_file)
+                if job:
+                    output_dir = job.get('out_dir')
+                    os.makedirs(output_dir, exist_ok=True)
+                    return os.path.join(output_dir, filename)
+        except Exception:
+            pass
+
+        base_name = os.path.splitext(filename)[0]
+        parent_dir = os.environ.get('OUTPUT_DIRECTORY') or os.path.dirname(filepath)
+        output_dir = os.path.join(parent_dir, f"{base_name}_translated")
+        os.makedirs(output_dir, exist_ok=True)
+        return os.path.join(output_dir, filename)
+
+    def _build_manga_glossary_input(self, ocr_pages: List[Dict[str, Any]]) -> str:
+        """Build the single glossary-generation request body from all OCR pages."""
+        lines = [
+            "Generate a translation glossary from the OCR text below.",
+            "The text is grouped by manga page. Keep page labels only as context; do not output them.",
+            ""
+        ]
+        for page in ocr_pages:
+            filename = os.path.basename(page.get('path', 'page'))
+            lines.append(f"=== PAGE {page.get('index', '?')} START: {filename} ===")
+            for region_idx, text in enumerate(page.get('texts', [])):
+                text = str(text or '').strip()
+                if text:
+                    lines.append(f"[{region_idx}] {text}")
+            lines.append(f"=== PAGE {page.get('index', '?')} END ===")
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    def _manga_glossary_output_json_path(self) -> str:
+        first_path = self.selected_files[0] if getattr(self, 'selected_files', None) else os.getcwd()
+        parent_dir = os.environ.get('OUTPUT_DIRECTORY') or os.path.dirname(first_path) or os.getcwd()
+        folder_name = os.path.basename(os.path.normpath(parent_dir)) or "manga"
+        safe_name = re.sub(r'[^A-Za-z0-9_.-]+', '_', folder_name).strip('_') or "manga"
+        glossary_dir = os.path.join(parent_dir, "Glossary")
+        os.makedirs(glossary_dir, exist_ok=True)
+        return os.path.join(glossary_dir, f"{safe_name}_manga_glossary.json")
+
+    def _normalize_manga_api_response_text(self, response: Any) -> str:
+        if hasattr(response, 'content'):
+            response = response.content
+        elif hasattr(response, 'text'):
+            response = response.text
+        if isinstance(response, tuple):
+            response = response[0] if response else ""
+        if isinstance(response, (bytes, bytearray)):
+            response = response.decode('utf-8', errors='replace')
+        text = str(response or '').strip()
+        if text.startswith("('") or text.startswith('("'):
+            try:
+                import ast
+                parsed = ast.literal_eval(text)
+                if isinstance(parsed, tuple) and parsed:
+                    text = str(parsed[0]).strip()
+            except Exception:
+                pass
+        return text
+
+    def _prepare_manga_glossary_env(self) -> Dict[str, Optional[str]]:
+        """Set glossary extractor environment variables and return previous values."""
+        keys = [
+            'GLOSSARY_SYSTEM_PROMPT',
+            'GLOSSARY_TARGET_LANGUAGE',
+            'GLOSSARY_CUSTOM_ENTRY_TYPES',
+            'GLOSSARY_CUSTOM_FIELDS',
+            'GLOSSARY_USE_LEGACY_CSV',
+            'GLOSSARY_OUTPUT_LEGACY_JSON',
+        ]
+        previous = {key: os.environ.get(key) for key in keys}
+
+        custom_fields = getattr(self.main_gui, 'custom_glossary_fields', None)
+        if custom_fields is None:
+            custom_fields = self.main_gui.config.get('custom_glossary_fields', self.main_gui.config.get('manual_custom_fields', []))
+        if isinstance(custom_fields, str):
+            try:
+                custom_fields = json.loads(custom_fields)
+            except Exception:
+                custom_fields = []
+
+        os.environ['GLOSSARY_SYSTEM_PROMPT'] = getattr(self, 'manga_glossary_prompt', self._default_manga_glossary_prompt())
+        os.environ['GLOSSARY_TARGET_LANGUAGE'] = (
+            self.main_gui.config.get('glossary_target_language')
+            or self.main_gui.config.get('output_language')
+            or os.environ.get('OUTPUT_LANGUAGE')
+            or 'English'
+        )
+        os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = json.dumps(
+            getattr(self.main_gui, 'custom_entry_types', self.main_gui.config.get('custom_entry_types', {}))
+        )
+        os.environ['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(custom_fields or [])
+        os.environ['GLOSSARY_USE_LEGACY_CSV'] = '1' if self.main_gui.config.get('glossary_use_legacy_csv', False) else '0'
+        os.environ['GLOSSARY_OUTPUT_LEGACY_JSON'] = '0'
+        return previous
+
+    def _restore_manga_glossary_env(self, previous: Dict[str, Optional[str]]) -> None:
+        for key, value in (previous or {}).items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _generate_manga_glossary_from_ocr_pages(self, ocr_pages: List[Dict[str, Any]]) -> Optional[str]:
+        """Generate, save, and return prompt-ready glossary text from OCR pages."""
+        combined_text = self._build_manga_glossary_input(ocr_pages)
+        if not combined_text.strip():
+            self._log("⚠️ No OCR text available for manga glossary generation", "warning")
+            return None
+
+        previous_env = self._prepare_manga_glossary_env()
+        try:
+            from extract_glossary_from_epub import (
+                build_prompt,
+                parse_api_response,
+                validate_extracted_entry,
+                skip_duplicate_entries,
+                save_glossary_csv,
+            )
+            from TransateKRtoEN import send_with_interrupt
+
+            system_prompt, user_prompt = build_prompt(combined_text)
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+
+            temperature = float(self.main_gui.config.get('manual_glossary_temperature', 0.1))
+            glossary_token_cfg = self.main_gui.config.get('glossary_max_output_tokens', -1)
+            if str(glossary_token_cfg) == '-1':
+                max_tokens = int(getattr(self.main_gui, 'max_output_tokens', 8192) or 8192)
+            else:
+                max_tokens = int(glossary_token_cfg)
+
+            total_regions = sum(len(page.get('texts', [])) for page in ocr_pages)
+            self._log(
+                f"📚 Generating manga glossary from {len(ocr_pages)} pages / {total_regions} OCR regions",
+                "info",
+            )
+
+            response, _finish_reason, _raw_obj = send_with_interrupt(
+                messages=messages,
+                client=self.main_gui.client,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stop_check_fn=lambda: self.stop_flag.is_set()
+            )
+            response_text = self._normalize_manga_api_response_text(response)
+            self._log(f"📥 Manga glossary response received ({len(response_text)} chars)", "info")
+
+            parsed_entries = parse_api_response(response_text)
+            entries = []
+            for entry in parsed_entries:
+                try:
+                    if validate_extracted_entry(entry):
+                        entries.append(entry)
+                except Exception:
+                    continue
+
+            if entries:
+                try:
+                    entries = skip_duplicate_entries(entries, output_dir=os.path.dirname(self._manga_glossary_output_json_path()))
+                except Exception as dedupe_err:
+                    self._log(f"⚠️ Manga glossary dedupe skipped: {dedupe_err}", "warning")
+
+            output_json = self._manga_glossary_output_json_path()
+            with open(output_json, 'w', encoding='utf-8') as f:
+                json.dump(entries, f, ensure_ascii=False, indent=2)
+
+            prompt_glossary_text = ""
+            if entries:
+                save_glossary_csv(entries, output_json)
+                csv_path = output_json.replace('.json', '.csv')
+                if os.path.exists(csv_path):
+                    with open(csv_path, 'r', encoding='utf-8') as f:
+                        prompt_glossary_text = f.read().strip()
+                self._log(f"✅ Manga glossary saved: {output_json}", "success")
+                self._log(f"📚 Manga glossary entries: {len(entries)}", "success")
+            else:
+                self._log("⚠️ Manga glossary parser found no valid entries; continuing without embedded glossary", "warning")
+
+            self.manga_generated_glossary_text = prompt_glossary_text
+            self.manga_generated_glossary_entries = entries
+            self.manga_generated_glossary_path = output_json
+            setattr(self.main_gui, 'manga_generated_glossary_text', prompt_glossary_text)
+            setattr(self.main_gui, 'manga_generated_glossary_entries', entries)
+            setattr(self.main_gui, 'manga_generated_glossary_path', output_json)
+            if hasattr(self, 'translator') and self.translator:
+                self.translator.manga_generated_glossary_text = prompt_glossary_text
+                self.translator._manga_glossary_prompt_logged = False
+            return prompt_glossary_text
+
+        except Exception as e:
+            self._log(f"❌ Manga glossary generation failed: {e}", "error")
+            self._log(traceback.format_exc(), "debug")
+            return None
+        finally:
+            self._restore_manga_glossary_env(previous_env)
+
+    def _handle_manga_translation_result(self, filepath: str, result: Dict[str, Any]) -> None:
+        """Apply the normal sequential result handling for glossary workflow pages."""
+        filename = os.path.basename(filepath)
+        if result.get('interrupted', False):
+            self._log(f"⏸️ Translation of {filename} was interrupted", "warning")
+            self.failed_files += 1
+            return
+
+        if not result.get('success', False):
+            self.failed_files += 1
+            errors = '\n'.join(result.get('errors', ['Unknown error']))
+            self._log(f"❌ Translation failed: {filename}\n{errors}", "error")
+            return
+
+        output_exists = result.get('output_path') and os.path.exists(result.get('output_path', ''))
+        has_translations = any(r.get('translated_text', '') for r in result.get('regions', []))
+        if output_exists and has_translations:
+            self.completed_files += 1
+            self._log(f"✅ Translation completed: {filename}", "success")
+
+            if result.get('cleaned_image_path'):
+                try:
+                    if hasattr(self, 'image_state_manager') and self.image_state_manager:
+                        self.image_state_manager.update_state(filepath, {
+                            'cleaned_image_path': result.get('cleaned_image_path')
+                        })
+                except Exception as e:
+                    print(f"[CLEANED] Failed to save cleaned path to state: {e}")
+
+            if hasattr(self, 'image_preview_widget'):
+                current_path = self.image_preview_widget.current_image_path
+                norm_current = os.path.normpath(current_path) if current_path else None
+                norm_source = os.path.normpath(filepath)
+                is_current = (
+                    norm_current == norm_source or
+                    (norm_current and os.path.dirname(norm_current).endswith(f"{os.path.splitext(os.path.basename(filepath))[0]}_translated"))
+                )
+                if is_current:
+                    self.update_queue.put(('preview_update', result.get('output_path')))
+                    self._log("🖼️ Queued preview update to show translated image", "debug")
+        else:
+            self.failed_files += 1
+            if not output_exists:
+                self._log(f"❌ Output file not created: {filename}", "error")
+            else:
+                self._log(f"❌ No text was translated: {filename}", "error")
+
+    def _run_manga_glossary_batch(self, glossary_only: bool = False) -> None:
+        """Run OCR for all pages, generate one glossary, then optionally translate."""
+        self._log("📚 Manga glossary workflow enabled", "info")
+        if getattr(self, 'translator', None):
+            self.translator.manga_generated_glossary_text = ""
+        setattr(self.main_gui, 'manga_generated_glossary_text', "")
+
+        ocr_pages: List[Dict[str, Any]] = []
+        precomputed_regions: Dict[str, List[Any]] = {}
+        total = self.total_files
+        original_skip_inpainting = getattr(self.translator, 'skip_inpainting', False)
+        try:
+            self.translator.skip_inpainting = True
+        except Exception:
+            pass
+
+        for index, filepath in enumerate(self.selected_files):
+            if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1' or self.stop_flag.is_set():
+                self._log("⏹️ Manga glossary OCR pass stopped", "warning")
+                break
+
+            if hasattr(self.translator, 'reset_for_new_image'):
+                self.translator.reset_for_new_image()
+
+            filename = os.path.basename(filepath)
+            self.current_file_index = index
+            self._monitor_translation_output(filepath)
+            self._update_current_file(filename)
+            self._update_progress(index, total, f"OCR for glossary {index + 1}/{total}: {filename}")
+
+            try:
+                output_path = self._get_manga_output_path_for_file(filepath)
+                result = self.translator.process_image(
+                    filepath,
+                    output_path,
+                    batch_index=index + 1,
+                    batch_total=total,
+                    ocr_only=True
+                )
+                if result.get('interrupted', False):
+                    self.failed_files += 1
+                    if self.stop_flag.is_set():
+                        break
+                    continue
+                if not result.get('success', False):
+                    self.failed_files += 1
+                    errors = '\n'.join(result.get('errors', ['Unknown OCR error']))
+                    self._log(f"❌ OCR failed for glossary: {filename}\n{errors}", "error")
+                    continue
+
+                region_objects = result.get('_region_objects') or []
+                texts = [getattr(region, 'text', '') for region in region_objects if getattr(region, 'text', '').strip()]
+                precomputed_regions[filepath] = region_objects
+                ocr_pages.append({
+                    'index': index + 1,
+                    'path': filepath,
+                    'regions': region_objects,
+                    'texts': texts,
+                })
+                self._log(f"✅ OCR captured for glossary: {filename} ({len(texts)} text regions)", "success")
+            except Exception as e:
+                self.failed_files += 1
+                self._log(f"❌ OCR glossary pass error for {filename}: {e}", "error")
+                self._log(traceback.format_exc(), "debug")
+
+        try:
+            self.translator.skip_inpainting = original_skip_inpainting
+        except Exception:
+            pass
+
+        if self.stop_flag.is_set() or not ocr_pages:
+            return
+
+        self._update_progress(len(ocr_pages), total, "Generating manga glossary...")
+        glossary_text = self._generate_manga_glossary_from_ocr_pages(ocr_pages)
+        if glossary_text is None:
+            self._log("⚠️ Manga glossary generation failed; translation pass skipped", "warning")
+            return
+
+        if glossary_only:
+            self.completed_files = len(ocr_pages)
+            self._update_progress(total, total, f"Glossary generated from {len(ocr_pages)} pages")
+            return
+
+        self._log("➡️ Starting translation pass with generated manga glossary", "info")
+        for index, filepath in enumerate(self.selected_files):
+            if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1' or self.stop_flag.is_set():
+                self._log("⏹️ Manga glossary translation pass stopped", "warning")
+                break
+
+            regions = precomputed_regions.get(filepath) or []
+            filename = os.path.basename(filepath)
+            self.current_file_index = index
+            self._monitor_translation_output(filepath)
+            self._update_current_file(filename)
+            self._update_progress(index, total, f"Translating with glossary {index + 1}/{total}: {filename}")
+
+            if not regions:
+                self.failed_files += 1
+                self._log(f"⚠️ No precomputed OCR regions for {filename}; skipping translation", "warning")
+                continue
+
+            try:
+                if hasattr(self.translator, 'reset_for_new_image'):
+                    self.translator.reset_for_new_image()
+                self.translator.manga_generated_glossary_text = glossary_text
+                output_path = self._get_manga_output_path_for_file(filepath)
+                result = self.translator.process_image(
+                    filepath,
+                    output_path,
+                    batch_index=index + 1,
+                    batch_total=total,
+                    precomputed_regions=regions
+                )
+                self._handle_manga_translation_result(filepath, result)
+                time.sleep(0.1)
+            except Exception as e:
+                self.failed_files += 1
+                self._log(f"❌ Translation error for {filename}: {e}", "error")
+                self._log(traceback.format_exc(), "debug")
     
     def _translation_worker(self):
         """Worker thread for translation"""
@@ -12470,7 +13010,12 @@ class MangaTranslationTab(QObject):
             except Exception:
                 pass
 
-            if panel_parallel and len(self.selected_files) > 1 and effective_workers > 1:
+            glossary_only_run = bool(getattr(self, '_manga_glossary_only_run', False))
+
+            if self._manga_glossary_workflow_enabled():
+                self._run_manga_glossary_batch(glossary_only=glossary_only_run)
+
+            elif panel_parallel and len(self.selected_files) > 1 and effective_workers > 1:
                 self._log(f"🚀 Parallel PANEL translation ENABLED ({effective_workers} workers)", "info")
                 
                 import concurrent.futures
@@ -12985,28 +13530,29 @@ class MangaTranslationTab(QObject):
                             self._log(traceback.format_exc(), "error")
                         
             
-            # Finalize CBZ packaging (both modes)
-            try:
-                self._finalize_cbz_jobs()
-            except Exception:
-                pass
-            
-            # Create CBZ from isolated folders if enabled
-            if hasattr(self, 'create_cbz_at_end_value') and self.create_cbz_at_end_value:
+            if not bool(getattr(self, '_manga_glossary_only_run', False)):
+                # Finalize CBZ packaging (both modes)
                 try:
-                    self._create_cbz_from_isolated_folders()
-                except Exception as e:
-                    self._log(f"⚠️ Failed to create CBZ file: {e}", "warning")
-            
-            # Auto-consolidate translated images (silent, no message box) if enabled
-            if hasattr(self, 'auto_consolidate_images_value') and self.auto_consolidate_images_value:
-                try:
-                    if hasattr(self, 'image_preview_widget') and self.image_preview_widget:
-                        self._log("📥 Consolidating translated images...", "info")
-                        self.image_preview_widget._on_download_images_clicked(silent=True)
-                        self._log("✅ Images consolidated successfully", "success")
-                except Exception as e:
-                    self._log(f"⚠️ Image consolidation failed: {e}", "warning")
+                    self._finalize_cbz_jobs()
+                except Exception:
+                    pass
+
+                # Create CBZ from isolated folders if enabled
+                if hasattr(self, 'create_cbz_at_end_value') and self.create_cbz_at_end_value:
+                    try:
+                        self._create_cbz_from_isolated_folders()
+                    except Exception as e:
+                        self._log(f"⚠️ Failed to create CBZ file: {e}", "warning")
+
+                # Auto-consolidate translated images (silent, no message box) if enabled
+                if hasattr(self, 'auto_consolidate_images_value') and self.auto_consolidate_images_value:
+                    try:
+                        if hasattr(self, 'image_preview_widget') and self.image_preview_widget:
+                            self._log("📥 Consolidating translated images...", "info")
+                            self.image_preview_widget._on_download_images_clicked(silent=True)
+                            self._log("✅ Images consolidated successfully", "success")
+                    except Exception as e:
+                        self._log(f"⚠️ Image consolidation failed: {e}", "warning")
             
             # Final summary - only if not stopped
             if not self.stop_flag.is_set():
@@ -13015,8 +13561,9 @@ class MangaTranslationTab(QObject):
                 minutes = int(elapsed_time // 60)
                 seconds = elapsed_time % 60
                 
+                summary_title = "Glossary Summary" if bool(getattr(self, '_manga_glossary_only_run', False)) else "Translation Summary"
                 self._log(f"\n{'='*60}", "info")
-                self._log(f"📊 Translation Summary:", "info")
+                self._log(f"📊 {summary_title}:", "info")
                 self._log(f"   Total files: {self.total_files}", "info")
                 self._log(f"   ✅ Successful: {self.completed_files}", "success")
                 self._log(f"   ❌ Failed: {self.failed_files}", "error" if self.failed_files > 0 else "info")
@@ -13026,14 +13573,20 @@ class MangaTranslationTab(QObject):
                     self._log(f"   ⏱️ Total time: {seconds:.1f}s", "info")
                 self._log(f"{'='*60}\n", "info")
                 
+                complete_label = (
+                    f"Glossary complete! {self.completed_files} pages used, {self.failed_files} failed"
+                    if bool(getattr(self, '_manga_glossary_only_run', False))
+                    else f"Complete! {self.completed_files} successful, {self.failed_files} failed"
+                )
                 self._update_progress(
                     self.total_files,
                     self.total_files,
-                    f"Complete! {self.completed_files} successful, {self.failed_files} failed"
+                    complete_label
                 )
                 
                 # Enable download button and preview mode if translation succeeded
-                if self.completed_files > 0 and hasattr(self, 'image_preview_widget'):
+                if (not bool(getattr(self, '_manga_glossary_only_run', False))
+                        and self.completed_files > 0 and hasattr(self, 'image_preview_widget')):
                     # Determine translated folder path (use parent directory for isolated folders)
                     translated_folder = None
                     if self.selected_files and len(self.selected_files) > 0:
@@ -13054,6 +13607,7 @@ class MangaTranslationTab(QObject):
             self._log(traceback.format_exc(), "error")
         
         finally:
+            self._manga_glossary_only_run = False
             # Check if auto cleanup is enabled in settings
             auto_cleanup_enabled = False  # Default disabled by default
             try:

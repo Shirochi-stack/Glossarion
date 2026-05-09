@@ -7357,6 +7357,40 @@ class MangaTranslator:
                 self._log(f"⚠️ Error loading history context: {str(e)}", "warning")
                 return []
     
+    def _get_manga_glossary_text(self) -> str:
+        """Return the generated manga glossary text for prompt embedding."""
+        for source in (self, getattr(self, 'main_gui', None)):
+            try:
+                glossary_text = getattr(source, 'manga_generated_glossary_text', '')
+                if isinstance(glossary_text, str) and glossary_text.strip():
+                    return glossary_text.strip()
+            except Exception:
+                pass
+        return ""
+
+    def _append_manga_glossary_to_system_prompt(self, system_prompt: str) -> str:
+        """Append the generated manga glossary using the configured glossary append prompt."""
+        glossary_text = self._get_manga_glossary_text()
+        if not glossary_text:
+            return system_prompt or ""
+
+        default_append_prompt = "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
+        append_prompt = default_append_prompt
+        try:
+            append_prompt = getattr(self.main_gui, 'append_glossary_prompt', None) or self.main_gui.config.get('append_glossary_prompt', default_append_prompt)
+        except Exception:
+            append_prompt = default_append_prompt
+
+        glossary_block = f"{str(append_prompt).rstrip()}\n{glossary_text}"
+        if not getattr(self, '_manga_glossary_prompt_logged', False):
+            entry_count = sum(1 for line in glossary_text.splitlines() if line.lstrip().startswith("* "))
+            self._log(f"📚 Embedding generated manga glossary in translation prompt ({entry_count} entries)")
+            self._manga_glossary_prompt_logged = True
+
+        if system_prompt:
+            return f"{system_prompt}\n\n{glossary_block}"
+        return glossary_block
+
     def translate_text(self, text: str, context: Optional[List[Dict]] = None, image_path: str = None, region: TextRegion = None) -> str:
         """Translate text using API with GUI system prompt and full image context"""
         try:
@@ -7401,6 +7435,8 @@ class MangaTranslator:
                 self._log(f"📋 Using profile: {profile_name}")
             else:
                 self._log(f"⚠️ Profile '{profile_name}' not found in prompt_profiles", "warning")
+
+            system_prompt = self._append_manga_glossary_to_system_prompt(system_prompt)
 
             self._log(f"{prefix} 📝 System prompt: {system_prompt[:100]}..." if system_prompt else f"{prefix} 📝 No system prompt configured")
 
@@ -7985,6 +8021,7 @@ class MangaTranslator:
                 system_prompt = f"{system_prompt}\n\n{self.full_page_context_prompt}"
             else:
                 system_prompt = self.full_page_context_prompt
+            system_prompt = self._append_manga_glossary_to_system_prompt(system_prompt)
             
             messages = [{"role": "system", "content": system_prompt}]
             
@@ -14327,8 +14364,15 @@ class MangaTranslator:
                 pass
 
     def process_image(self, image_path: str, output_path: Optional[str] = None, 
-                     batch_index: int = None, batch_total: int = None) -> Dict[str, Any]:
-        """Process a single manga image through the full pipeline"""
+                     batch_index: int = None, batch_total: int = None,
+                     ocr_only: bool = False,
+                     precomputed_regions: Optional[List[TextRegion]] = None) -> Dict[str, Any]:
+        """Process a single manga image through the full pipeline.
+
+        The manga glossary workflow uses ``ocr_only`` to collect all page text
+        first, then passes ``precomputed_regions`` back for the final
+        translation/render pass so OCR is not repeated.
+        """
         # Defensive imports at function start to prevent UnboundLocalError
         import os
         import time
@@ -14501,7 +14545,10 @@ class MangaTranslator:
                 self._log("⏹️ Translation stopped before processing", "warning")
                 return result
             
-            # Format detection if enabled
+            # Format detection if enabled. Webtoon chunk processing currently
+            # owns its full translate/render path, so skip that shortcut for
+            # OCR-only and precomputed-region glossary passes.
+            used_precomputed_regions = precomputed_regions is not None
             if self.manga_settings.get('advanced', {}).get('format_detection', False):
                 self._log("🔍 Analyzing image format...")
                 img = Image.open(image_path)
@@ -14532,20 +14579,35 @@ class MangaTranslator:
                 
                 # Handle webtoon mode if detected and enabled
                 webtoon_mode = self.manga_settings.get('advanced', {}).get('webtoon_mode', 'auto')
-                if format_info['is_webtoon'] and webtoon_mode != 'disabled':
+                if (not ocr_only and not used_precomputed_regions and
+                        format_info['is_webtoon'] and webtoon_mode != 'disabled'):
                     if webtoon_mode == 'auto' or webtoon_mode == 'force':
                         self._log("🔄 Webtoon mode active - will process in chunks for better OCR")
                         # Process webtoon in chunks
                         return self._process_webtoon_chunks(image_path, output_path, result)
             
-            # Step 1: Detect text regions using Google Cloud Vision
-            self._log(f"📍 [STEP 1] Text Detection Phase")
-            regions = self.detect_text_regions(image_path)
+            # Step 1: Detect text regions using OCR, or reuse a prior OCR pass.
+            if used_precomputed_regions:
+                self._log(f"📍 [STEP 1] Reusing precomputed OCR regions")
+                regions = list(precomputed_regions or [])
+                for region in regions:
+                    try:
+                        region.translated_text = None
+                    except Exception:
+                        pass
+            else:
+                self._log(f"📍 [STEP 1] Text Detection Phase")
+                regions = self.detect_text_regions(image_path)
             
             if not regions:
                 error_msg = "No text regions detected by Cloud Vision"
                 self._log(f"⚠️ {error_msg}", "warning")
                 result['errors'].append(error_msg)
+                if ocr_only:
+                    result['success'] = True
+                    result['ocr_only'] = True
+                    result['_region_objects'] = []
+                    return result
                 # Still save the original image as "translated" if no text found
                 if output_path:
                     import shutil
@@ -14558,15 +14620,24 @@ class MangaTranslator:
             
             # OPTIMIZATION: Return bubble detector to pool immediately after detection
             # This frees the model for reuse by other images in batch mode
-            try:
-                self._return_bubble_detector_to_pool()
-                self._log("🔄 Returned detector to pool (available for next image)", "debug")
-            except Exception as e:
-                self._log(f"⚠️ Failed to return detector to pool: {e}", "debug")
+            if not used_precomputed_regions:
+                try:
+                    self._return_bubble_detector_to_pool()
+                    self._log("🔄 Returned detector to pool (available for next image)", "debug")
+                except Exception as e:
+                    self._log(f"⚠️ Failed to return detector to pool: {e}", "debug")
             
             # Save debug outputs only if 'Save intermediate images' is enabled
             if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
                 self._save_debug_image(image_path, regions, debug_base_dir=output_dir)
+
+            if ocr_only:
+                result['regions'] = [r.to_dict() for r in regions]
+                result['_region_objects'] = regions
+                result['ocr_only'] = True
+                result['success'] = True
+                self._log(f"✅ OCR-only pass complete: {len(regions)} regions captured")
+                return result
             
             # Step 2: Translation Phase (inpainting may already be running from detection)
             self._log(f"\n📍 [STEP 2] Translation Phase")
