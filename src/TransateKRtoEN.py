@@ -16826,15 +16826,31 @@ def main(log_callback=None, stop_callback=None):
                     try:
                         context = f"Image from source EPUB/PDF: {img_name}"
                         result = gen_image_translator.translate_image(img_path, context, check_stop)
-                        if result and ImageTranslator._is_ocr_no_response(result):
+                        if not result:
+                            print(f"    ⚠️ [{img_idx}/{len(image_files)}] {img_name}: Generation returned empty")
+                            return (img_idx, img_name, 'fail', result)
+
+                        # Check the RAW translation text (before HTML wrapping) for "No" sentinel.
+                        # translate_image() stores raw text in processed_images before wrapping.
+                        raw_text = gen_image_translator.processed_images.get(img_path, '')
+                        if ImageTranslator._is_ocr_no_response(raw_text):
                             print(f"    ⏭️ [{img_idx}/{len(image_files)}] {img_name}: Nothing to translate — keeping original")
                             return (img_idx, img_name, 'skipped', result)
-                        elif result and "[Image Translation Error:" not in result:
+
+                        # Check if an actual image was generated
+                        if '[GENERATED_IMAGE:' in result:
                             print(f"    ✅ [{img_idx}/{len(image_files)}] {img_name}: Generated successfully")
                             return (img_idx, img_name, 'success', result)
-                        else:
+
+                        # Text was translated but no image generated — this means
+                        # the model returned a text translation, not an edited image.
+                        # Still count as success since the translation was produced.
+                        if "[Image Translation Error:" in result:
                             print(f"    ⚠️ [{img_idx}/{len(image_files)}] {img_name}: Generation failed or returned error")
                             return (img_idx, img_name, 'fail', result)
+
+                        print(f"    ✅ [{img_idx}/{len(image_files)}] {img_name}: Translated (text only, no image edit)")
+                        return (img_idx, img_name, 'success', result)
                     except Exception as e:
                         print(f"    ❌ [{img_idx}/{len(image_files)}] {img_name}: Error: {e}")
                         return (img_idx, img_name, 'fail', None)
