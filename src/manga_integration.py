@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout
                                QProgressBar, QFileDialog, QMessageBox, QColorDialog, QScrollArea,
                                QDialog, QButtonGroup, QApplication, QSizePolicy, QToolButton)
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QEvent, QPropertyAnimation, QEasingCurve, Property, QThread
-from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent, QPixmap, QTransform
+from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent, QPixmap, QTransform, QBrush
 from typing import List, Dict, Optional, Any
 from queue import Queue, Empty
 import logging
@@ -801,6 +801,8 @@ class MangaTranslationTab(QObject):
         except Exception:
             self.executor = None
         self.selected_files = []
+        self.manga_image_range_value = ""
+        self._manga_processing_files = None
         self.current_file_index = 0
         self.font_mapping = {}  # Initialize font mapping dictionary
 
@@ -3543,7 +3545,36 @@ class MangaTranslationTab(QObject):
         
         sort_btn_layout.addStretch()
         file_frame_layout.addWidget(sort_btn_frame)
-        
+
+        range_frame = QWidget()
+        range_layout = QHBoxLayout(range_frame)
+        range_layout.setContentsMargins(0, 0, 0, 0)
+        range_layout.setSpacing(6)
+
+        range_label = QLabel("Image Range:")
+        range_label.setStyleSheet("color: #e0e0e0; font-weight: bold;")
+        range_layout.addWidget(range_label)
+
+        self.manga_image_range_entry = QLineEdit()
+        self.manga_image_range_entry.setPlaceholderText("blank = all, e.g. 3-8")
+        self.manga_image_range_entry.setFixedWidth(150)
+        self.manga_image_range_entry.setToolTip(
+            "Process only these 1-based rows in the currently visible order. "
+            "Supports ranges like 3-8 and lists like 1,3-5."
+        )
+        self.manga_image_range_entry.setStyleSheet(
+            "QLineEdit { background-color: #2b2b2b; color: #ffffff; "
+            "border: 1px solid #555555; padding: 4px 6px; }"
+        )
+        self.manga_image_range_entry.textChanged.connect(self._on_manga_image_range_changed)
+        range_layout.addWidget(self.manga_image_range_entry, 0)
+
+        self.manga_image_range_status_label = QLabel("All images")
+        self.manga_image_range_status_label.setStyleSheet("color: #9fb7d5; font-size: 8pt;")
+        range_layout.addWidget(self.manga_image_range_status_label)
+        range_layout.addStretch()
+        file_frame_layout.addWidget(range_frame)
+
         self.manga_loaded_directory_label = QLabel("Loaded directory: none")
         self.manga_loaded_directory_label.setStyleSheet("color: #b8c7d9; font-size: 8pt;")
         self.manga_loaded_directory_label.setWordWrap(True)
@@ -7486,9 +7517,162 @@ class MangaTranslationTab(QObject):
     def _refresh_manga_selection_status(self, *, allow_autoload: bool = True) -> None:
         """Refresh folder and glossary labels after the selected manga files change."""
         self._update_manga_loaded_directory_label()
+        self._update_manga_image_range_display()
         if allow_autoload:
             self._autoload_manga_glossary_for_selection()
         self._update_manga_glossary_status_label()
+
+    def _add_manga_file_item(self, filepath: str):
+        """Append a file row and store the full path separately from the visible text."""
+        if not hasattr(self, 'file_listbox') or not self.file_listbox:
+            return None
+        self.file_listbox.addItem(os.path.basename(filepath))
+        item = self.file_listbox.item(self.file_listbox.count() - 1)
+        if item:
+            item.setData(Qt.UserRole, filepath)
+            item.setToolTip(filepath)
+        return item
+
+    def _rebuild_manga_file_listbox(self, current_path: Optional[str] = None) -> None:
+        """Rebuild rows from selected_files while preserving full-path row data."""
+        if not hasattr(self, 'file_listbox') or not self.file_listbox:
+            return
+        if current_path is None:
+            row = self.file_listbox.currentRow()
+            if 0 <= row < self.file_listbox.count():
+                item = self.file_listbox.item(row)
+                current_path = item.data(Qt.UserRole) if item else None
+            if not current_path and 0 <= row < len(self.selected_files):
+                current_path = self.selected_files[row]
+
+        self.file_listbox.blockSignals(True)
+        try:
+            self.file_listbox.clear()
+            for filepath in self.selected_files:
+                self._add_manga_file_item(filepath)
+        finally:
+            self.file_listbox.blockSignals(False)
+
+        if current_path and current_path in self.selected_files:
+            self.file_listbox.setCurrentRow(self.selected_files.index(current_path))
+        elif self.file_listbox.count() > 0:
+            self.file_listbox.setCurrentRow(0)
+        self._update_manga_image_range_display()
+
+    def _parse_manga_image_range(self, total: Optional[int] = None):
+        """Parse the 1-based visible image range. Blank means all rows."""
+        text = str(getattr(self, 'manga_image_range_value', '') or '').strip()
+        if not text and hasattr(self, 'manga_image_range_entry'):
+            try:
+                text = self.manga_image_range_entry.text().strip()
+            except Exception:
+                text = ""
+        if not text:
+            return None, None
+
+        text = re.sub(r'\s*-\s*', '-', text)
+        indices = set()
+        tokens = [part for part in re.split(r'[\s,]+', text) if part]
+        if not tokens:
+            return None, None
+
+        for token in tokens:
+            match = re.fullmatch(r'(\d*)\s*-\s*(\d*)', token)
+            if match:
+                start_text, end_text = match.groups()
+                if not start_text and not end_text:
+                    return None, f"Invalid image range token: {token}"
+                start = int(start_text) if start_text else 1
+                if end_text:
+                    end = int(end_text)
+                elif total is not None:
+                    end = int(total)
+                else:
+                    return None, f"Open-ended range needs a loaded file count: {token}"
+            else:
+                if not token.isdigit():
+                    return None, f"Invalid image range token: {token}"
+                start = end = int(token)
+
+            if start < 1 or end < 1:
+                return None, "Image range uses 1-based row numbers."
+            if start > end:
+                return None, f"Image range start is after end: {token}"
+
+            if total is not None:
+                if start > total:
+                    continue
+                end = min(end, int(total))
+            indices.update(range(start, end + 1))
+
+        if total is not None:
+            indices = {idx for idx in indices if 1 <= idx <= int(total)}
+        return indices, None
+
+    def _manga_range_filtered_files(self):
+        """Return the files selected by the current image range, in visible order."""
+        files = list(getattr(self, 'selected_files', []) or [])
+        indices, error = self._parse_manga_image_range(len(files))
+        if error:
+            return [], error
+        if indices is None:
+            return files, None
+        return [path for idx, path in enumerate(files, start=1) if idx in indices], None
+
+    def _current_manga_processing_files(self) -> List[str]:
+        """Files for the current run; falls back to the full visible list outside a run."""
+        run_files = getattr(self, '_manga_processing_files', None)
+        if run_files is not None:
+            return list(run_files)
+        return list(getattr(self, 'selected_files', []) or [])
+
+    def _on_manga_image_range_changed(self, text: str = "") -> None:
+        self.manga_image_range_value = str(text or '').strip()
+        self._update_manga_image_range_display()
+
+    def _update_manga_image_range_display(self) -> None:
+        """Grey out rows skipped by the current visible-order image range."""
+        if not hasattr(self, 'file_listbox') or not self.file_listbox:
+            return
+        total = self.file_listbox.count()
+        indices, error = self._parse_manga_image_range(total)
+        active_filter = indices is not None and error is None
+
+        active_brush = QBrush(QColor("#ffffff"))
+        skipped_brush = QBrush(QColor("#7d8795"))
+        active_background = QBrush(QColor("#2b2b2b"))
+        skipped_background = QBrush(QColor("#202020"))
+
+        for row in range(total):
+            item = self.file_listbox.item(row)
+            if not item:
+                continue
+            filepath = item.data(Qt.UserRole)
+            if not filepath and row < len(self.selected_files):
+                filepath = self.selected_files[row]
+                item.setData(Qt.UserRole, filepath)
+            basename = os.path.basename(filepath or item.text().replace("[SKIP] ", "", 1))
+            skipped = active_filter and (row + 1) not in indices
+            item.setText(f"[SKIP] {basename}" if skipped else basename)
+            item.setForeground(skipped_brush if skipped else active_brush)
+            item.setBackground(skipped_background if skipped else active_background)
+            if skipped:
+                item.setToolTip(f"Skipped by image range ({row + 1}): {filepath or basename}")
+            else:
+                item.setToolTip(filepath or basename)
+
+        status = getattr(self, 'manga_image_range_status_label', None)
+        if status:
+            if error:
+                status.setText(error)
+                status.setStyleSheet("color: #ff6b6b; font-size: 8pt;")
+            elif not active_filter:
+                status.setText(f"All {total} images" if total else "All images")
+                status.setStyleSheet("color: #9fb7d5; font-size: 8pt;")
+            else:
+                active_count = sum(1 for idx in range(1, total + 1) if idx in indices)
+                status.setText(f"Processing {active_count}/{total}")
+                status.setStyleSheet("color: #9be38f; font-size: 8pt;")
 
     def _autoload_manga_glossary_for_selection(self) -> None:
         """Load an existing generated glossary from the selected folder's Glossary subfolder."""
@@ -10206,7 +10390,7 @@ class MangaTranslationTab(QObject):
                                 target_path = os.path.join(root, fn)
                                 if target_path not in self.selected_files:
                                     self.selected_files.append(target_path)
-                                    self.file_listbox.addItem(os.path.basename(target_path))
+                                    self._add_manga_file_item(target_path)
                                     added += 1
                                 # Map extracted image to its CBZ job
                                 self.cbz_image_to_job[target_path] = path
@@ -10216,11 +10400,12 @@ class MangaTranslationTab(QObject):
             else:
                 if path not in self.selected_files:
                     self.selected_files.append(path)
-                    self.file_listbox.addItem(os.path.basename(path))
+                    self._add_manga_file_item(path)
         
         # Auto-select first image to trigger preview
         if len(self.selected_files) > 0 and self.file_listbox.count() > 0:
             self.file_listbox.setCurrentRow(0)
+        self._update_manga_image_range_display()
         
         # Update thumbnail preview list
         if hasattr(self, 'image_preview_widget'):
@@ -10265,7 +10450,7 @@ class MangaTranslationTab(QObject):
             if any(lower.endswith(ext) for ext in image_extensions):
                 if filepath not in self.selected_files:
                     self.selected_files.append(filepath)
-                    item = self.file_listbox.addItem(filename)
+                    self._add_manga_file_item(filepath)
                     # Auto-select first image to trigger preview
                     if len(self.selected_files) == 1:
                         self.file_listbox.setCurrentRow(0)
@@ -10297,7 +10482,7 @@ class MangaTranslationTab(QObject):
                                 target_path = os.path.join(root, fn)
                                 if target_path not in self.selected_files:
                                     self.selected_files.append(target_path)
-                                    self.file_listbox.addItem(os.path.basename(target_path))
+                                    self._add_manga_file_item(target_path)
                                     added += 1
                                 # Map extracted image to its CBZ job
                                 self.cbz_image_to_job[target_path] = filepath
@@ -10308,8 +10493,10 @@ class MangaTranslationTab(QObject):
         # Update thumbnail preview list
         if hasattr(self, 'image_preview_widget'):
             self.image_preview_widget.set_image_list(self.selected_files)
+        self._update_manga_image_range_display()
         
         # Persist the file list
+        self._update_manga_image_range_display()
         self._persist_selected_files()
     
     def _remove_selected(self):
@@ -10363,6 +10550,7 @@ class MangaTranslationTab(QObject):
         
         self.file_listbox.clear()
         self.selected_files.clear()
+        self._update_manga_image_range_display()
         # Clear image preview when list is cleared
         if hasattr(self, 'image_preview_widget'):
             self.image_preview_widget.clear()
@@ -10441,17 +10629,8 @@ class MangaTranslationTab(QObject):
             # Sort by file modification date
             self.selected_files.sort(key=lambda x: os.path.getmtime(x) if os.path.exists(x) else 0, reverse=reverse)
         
-        # Rebuild the listbox
-        self.file_listbox.clear()
-        for filepath in self.selected_files:
-            self.file_listbox.addItem(os.path.basename(filepath))
-        
-        # Restore selection to the same file if possible
-        if current_path and current_path in self.selected_files:
-            new_row = self.selected_files.index(current_path)
-            self.file_listbox.setCurrentRow(new_row)
-        elif self.file_listbox.count() > 0:
-            self.file_listbox.setCurrentRow(0)
+        # Rebuild the listbox and restore selection to the same file if possible.
+        self._rebuild_manga_file_listbox(current_path=current_path)
         
         # Update thumbnail preview list
         if hasattr(self, 'image_preview_widget'):
@@ -10475,16 +10654,29 @@ class MangaTranslationTab(QObject):
         We need to sync the selected_files list with the new listbox order.
         """
         try:
+            old_order = list(self.selected_files)
             # Rebuild selected_files list based on current listbox order
             new_order = []
+            seen_paths = set()
             for i in range(self.file_listbox.count()):
                 item = self.file_listbox.item(i)
-                filename = item.text()
-                # Find the corresponding full path
-                for filepath in self.selected_files:
-                    if os.path.basename(filepath) == filename:
-                        new_order.append(filepath)
-                        break
+                filepath = item.data(Qt.UserRole) if item else None
+                if not filepath:
+                    filename = item.text().replace("[SKIP] ", "", 1) if item else ""
+                    # Fallback for older rows that do not have full-path data yet.
+                    for candidate in old_order:
+                        if candidate in seen_paths:
+                            continue
+                        if os.path.basename(candidate) == filename:
+                            filepath = candidate
+                            break
+                if filepath and filepath in old_order and filepath not in seen_paths:
+                    new_order.append(filepath)
+                    seen_paths.add(filepath)
+
+            for filepath in old_order:
+                if filepath not in seen_paths:
+                    new_order.append(filepath)
             
             # Update selected_files with new order
             self.selected_files = new_order
@@ -10536,7 +10728,7 @@ class MangaTranslationTab(QObject):
             for filepath in valid_files:
                 if filepath not in self.selected_files:
                     self.selected_files.append(filepath)
-                    self.file_listbox.addItem(os.path.basename(filepath))
+                    self._add_manga_file_item(filepath)
             
             # Auto-select first image
             if self.file_listbox.count() > 0:
@@ -10545,6 +10737,7 @@ class MangaTranslationTab(QObject):
             # Update thumbnail preview list
             if hasattr(self, 'image_preview_widget'):
                 self.image_preview_widget.set_image_list(self.selected_files)
+            self._update_manga_image_range_display()
             self._refresh_manga_selection_status()
             
             self._log(f"📂 Restored {len(valid_files)} images from previous session", "info")
@@ -10633,8 +10826,12 @@ class MangaTranslationTab(QObject):
             self._last_selected_row = row
             
             # Get the corresponding file path
-            if 0 <= row < len(self.selected_files):
+            current_item = self.file_listbox.item(row) if 0 <= row < self.file_listbox.count() else None
+            image_path = current_item.data(Qt.UserRole) if current_item else None
+            if not image_path and 0 <= row < len(self.selected_files):
                 image_path = self.selected_files[row]
+
+            if image_path:
                 
                 # Update current image path for state tracking
                 self._current_image_path = image_path
@@ -10684,13 +10881,14 @@ class MangaTranslationTab(QObject):
         """Create a single CBZ file from all isolated *_translated folders"""
         import zipfile
         
-        if not self.selected_files or len(self.selected_files) == 0:
+        source_files = self._current_manga_processing_files()
+        if not source_files:
             raise FileNotFoundError("No images loaded. Please load some images first.")
         
         try:
             
             # Get parent directory - respect OUTPUT_DIRECTORY override
-            first_file = self.selected_files[0]
+            first_file = source_files[0]
             
             # Check for output directory override
             override_dir = None
@@ -10706,9 +10904,13 @@ class MangaTranslationTab(QObject):
             
             # Find all *_translated folders
             translated_folders = []
+            allowed_folders = {
+                f"{os.path.splitext(os.path.basename(path))[0]}_translated"
+                for path in source_files
+            }
             for item in os.listdir(parent_dir):
                 item_path = os.path.join(parent_dir, item)
-                if os.path.isdir(item_path) and item.endswith('_translated'):
+                if os.path.isdir(item_path) and item.endswith('_translated') and item in allowed_folders:
                     translated_folders.append(item_path)
             
             if not translated_folders:
@@ -10758,6 +10960,7 @@ class MangaTranslationTab(QObject):
             if not hasattr(self, 'cbz_jobs') or not self.cbz_jobs:
                 return
             import zipfile
+            active_run_files = set(self._current_manga_processing_files())
             # Read debug flag from settings
             save_debug = False
             try:
@@ -10780,6 +10983,8 @@ class MangaTranslationTab(QObject):
                 try:
                     if hasattr(self, 'cbz_image_to_job'):
                         for img_path, job_path in self.cbz_image_to_job.items():
+                            if active_run_files and img_path not in active_run_files:
+                                continue
                             if job_path == cbz_path:
                                 original_basenames.add(os.path.basename(img_path))
                 except Exception:
@@ -10802,6 +11007,8 @@ class MangaTranslationTab(QObject):
                                     fn_lower = fn.lower()
                                     # Skip debug artifacts
                                     if any(p in fn_lower for p in excluded_patterns):
+                                        continue
+                                    if original_basenames and fn not in original_basenames:
                                         continue
                                     translated_images.append((fp, fn))
                 
@@ -12108,6 +12315,21 @@ class MangaTranslationTab(QObject):
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self.dialog, "No Files", "Please select manga images to translate.")
             return
+
+        processing_files, range_error = self._manga_range_filtered_files()
+        if range_error:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self.dialog, "Invalid Image Range", range_error)
+            return
+        if not processing_files:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self.dialog,
+                "No Files In Range",
+                "The image range does not include any loaded rows."
+            )
+            return
+        self._manga_processing_files = None
         
         # Disable ALL workflow buttons to prevent concurrent operations
         # Note: show_stop_button=False because Start Translation has its own stop mechanism
@@ -13025,8 +13247,22 @@ class MangaTranslationTab(QObject):
         except Exception:
             pass
         
+        # Reset progress using the visible-order image range, if one is active.
+        processing_files, range_error = self._manga_range_filtered_files()
+        if range_error or not processing_files:
+            self._log(f"Invalid image range: {range_error or 'range matched no files'}", "error")
+            self.update_queue.put(('ui_state', 'translation_complete'))
+            return
+        self._manga_processing_files = processing_files
+        range_text = str(getattr(self, 'manga_image_range_value', '') or '').strip()
+        if range_text and len(processing_files) != len(self.selected_files):
+            self._log(
+                f"Image range active: processing {len(processing_files)}/{len(self.selected_files)} visible images ({range_text})",
+                "info"
+            )
+
         # Reset progress
-        self.total_files = len(self.selected_files)
+        self.total_files = len(processing_files)
         self.completed_files = 0
         self.failed_files = 0
         self.current_file_index = 0
@@ -13836,7 +14072,7 @@ class MangaTranslationTab(QObject):
         """Collect OCR for manga glossary generation using page-level concurrency."""
         advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
         panel_parallel = bool(advanced.get('parallel_panel_translation', False))
-        files = list(getattr(self, 'selected_files', []) or [])
+        files = self._current_manga_processing_files()
         try:
             requested_workers = max(1, int(advanced.get('panel_max_workers', 2)))
         except Exception:
@@ -13850,7 +14086,7 @@ class MangaTranslationTab(QObject):
 
         progress_lock = threading.Lock()
         counters = {'started': 0, 'done': 0}
-        total = self.total_files
+        total = len(files)
         ocr_pages: List[Dict[str, Any]] = []
         precomputed_regions: Dict[str, List[Any]] = {}
 
@@ -13978,7 +14214,7 @@ class MangaTranslationTab(QObject):
         """Run a manga glossary translation pass using panel-level page concurrency."""
         advanced = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
         panel_parallel = bool(advanced.get('parallel_panel_translation', False))
-        files = list(getattr(self, 'selected_files', []) or [])
+        files = self._current_manga_processing_files()
         try:
             requested_workers = max(1, int(advanced.get('panel_max_workers', 2)))
         except Exception:
@@ -13992,7 +14228,7 @@ class MangaTranslationTab(QObject):
 
         progress_lock = threading.Lock()
         counters = {'started': 0, 'done': 0}
-        total = self.total_files
+        total = len(files)
 
         def process_single(index: int, filepath: str) -> bool:
             if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1' or self.stop_flag.is_set():
@@ -14114,7 +14350,8 @@ class MangaTranslationTab(QObject):
             self.translator.manga_generated_glossary_text = glossary_text
             self.translator._manga_glossary_prompt_logged = False
 
-        total = self.total_files
+        files = self._current_manga_processing_files()
+        total = len(files)
         entry_count = sum(1 for line in glossary_text.splitlines() if line.lstrip().startswith("* "))
         source_path = getattr(self, 'manga_custom_glossary_path', '') or self.main_gui.config.get('manga_custom_glossary_path', '')
         source_name = os.path.basename(source_path) if source_path else "loaded glossary"
@@ -14125,7 +14362,7 @@ class MangaTranslationTab(QObject):
         ):
             return
 
-        for index, filepath in enumerate(self.selected_files):
+        for index, filepath in enumerate(files):
             if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1' or self.stop_flag.is_set():
                 self._log("⏹️ Custom glossary translation pass stopped", "warning")
                 break
@@ -14164,7 +14401,8 @@ class MangaTranslationTab(QObject):
 
         ocr_pages: List[Dict[str, Any]] = []
         precomputed_regions: Dict[str, List[Any]] = {}
-        total = self.total_files
+        files = self._current_manga_processing_files()
+        total = len(files)
 
         parallel_ocr_result = self._run_parallel_manga_glossary_ocr_pass()
         if parallel_ocr_result is not None:
@@ -14197,7 +14435,7 @@ class MangaTranslationTab(QObject):
         except Exception:
             pass
 
-        for index, filepath in enumerate(self.selected_files):
+        for index, filepath in enumerate(files):
             if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1' or self.stop_flag.is_set():
                 self._log("⏹️ Manga glossary OCR pass stopped", "warning")
                 break
@@ -14273,7 +14511,7 @@ class MangaTranslationTab(QObject):
         ):
             return
 
-        for index, filepath in enumerate(self.selected_files):
+        for index, filepath in enumerate(files):
             if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1' or self.stop_flag.is_set():
                 self._log("⏹️ Manga glossary translation pass stopped", "warning")
                 break
@@ -14326,6 +14564,10 @@ class MangaTranslationTab(QObject):
                 return
             if hasattr(self.translator, 'set_stop_flag'):
                 self.translator.set_stop_flag(self.stop_flag)
+            run_files = self._current_manga_processing_files()
+            if not run_files:
+                self._log("No manga files selected for this run", "warning")
+                return
             
             # Ensure API parallelism (batch API calls) is controlled independently of local parallel processing.
             # Propagate the GUI "Batch Translation" toggle into environment so Unified API Client applies it globally
@@ -14361,7 +14603,7 @@ class MangaTranslationTab(QObject):
             requested_panel_workers = int(advanced.get('panel_max_workers', 2))
 
             # Decouple from global parallel processing: panel concurrency is governed ONLY by panel settings
-            effective_workers = requested_panel_workers if (panel_parallel and len(self.selected_files) > 1) else 1
+            effective_workers = requested_panel_workers if (panel_parallel and len(run_files) > 1) else 1
 
             # Model preloading phase
             self._log("🔧 Model preloading phase", "info")
@@ -14381,7 +14623,7 @@ class MangaTranslationTab(QObject):
                     and hasattr(self, 'translator')
                     and self.translator
                 ):
-                    desired_bd = min(int(effective_workers), max(1, int(len(self.selected_files) or 1)))
+                    desired_bd = min(int(effective_workers), max(1, int(len(run_files) or 1)))
                     self._log(f"🧰 Preloading bubble detector instances for {desired_bd} panel worker(s)...", "info")
                     try:
                         import time as _time
@@ -14417,7 +14659,7 @@ class MangaTranslationTab(QObject):
                     
                     # Preload one shared instance plus spares for parallel panel processing
                     # Constrain to actual number of files (no need for more workers than files)
-                    desired_inp = min(int(effective_workers), max(1, int(len(self.selected_files) or 1)))
+                    desired_inp = min(int(effective_workers), max(1, int(len(run_files) or 1)))
                     self._log(f"🧰 Preloading {desired_inp} local inpainting instance(s) for panel workers...", "info")
                     try:
                         import time as _time
@@ -14449,7 +14691,7 @@ class MangaTranslationTab(QObject):
                 else:
                     self._run_manga_glossary_batch(glossary_only=glossary_only_run)
 
-            elif panel_parallel and len(self.selected_files) > 1 and effective_workers > 1:
+            elif panel_parallel and len(run_files) > 1 and effective_workers > 1:
                 self._log(f"🚀 Parallel PANEL translation ENABLED ({effective_workers} workers)", "info")
                 
                 import concurrent.futures
@@ -14729,7 +14971,7 @@ class MangaTranslationTab(QObject):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, effective_workers)) as executor:
                     futures = []
                     stagger_ms = int(advanced.get('panel_start_stagger_ms', 30))
-                    for idx, filepath in enumerate(self.selected_files):
+                    for idx, filepath in enumerate(run_files):
                         # Graceful stop check: if an API call completed, stop submitting new work
                         if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
                             self._log("✅ Graceful stop: Image completed, stopping...", "info")
@@ -14780,7 +15022,7 @@ class MangaTranslationTab(QObject):
                 
             else:
                 # Sequential processing (or panel parallel requested but capped to 1 by global setting)
-                for index, filepath in enumerate(self.selected_files):
+                for index, filepath in enumerate(run_files):
                     # Graceful stop check: if an API call completed, stop now
                     if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
                         self._log("✅ Graceful stop: Image completed, stopping...", "info")
@@ -15023,8 +15265,9 @@ class MangaTranslationTab(QObject):
                         and self.completed_files > 0 and hasattr(self, 'image_preview_widget')):
                     # Determine translated folder path (use parent directory for isolated folders)
                     translated_folder = None
-                    if self.selected_files and len(self.selected_files) > 0:
-                        first_file = self.selected_files[0]
+                    run_files_for_preview = self._current_manga_processing_files()
+                    if run_files_for_preview:
+                        first_file = run_files_for_preview[0]
                         # Always use parent directory now - isolated folders are children of this
                         translated_folder = os.path.dirname(first_file)
                     
@@ -15259,6 +15502,9 @@ class MangaTranslationTab(QObject):
             except Exception as e:
                 self._log(f"⚠️ Warning: Failed to restore print: {e}", "debug")
             
+            self._manga_processing_files = None
+            self._update_manga_image_range_display()
+
             # Reset UI state (PySide6 - must call on main thread)
             try:
                 # Use the existing update_queue to schedule UI reset on main thread
