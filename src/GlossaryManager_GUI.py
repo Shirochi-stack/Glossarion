@@ -1839,7 +1839,7 @@ CRITICAL EXTRACTION RULES:
 - For character entries, the raw_name must contain ONLY the given name (first name), never a full name. If the text mentions a character by full name (e.g. "김상현"), split it: create one entry with raw_name "상현" (given name) and a second entry with raw_name "김" (surname). Example output:
   character,상현,Sang-hyun,male,"A knight of the royal guard"
   character,김,Kim,,"Surname of Sang-hyun"
-  Do NOT create a single entry like: character,김상현,Kim Sang-hyun,male,...
+  Do NOT create a single combined full-name entry (e.g. character,김상현,Kim Sang-hyun,male,…) — always split into given name + surname.
 - {description_detailed}
 - The translated_name MUST be a strict literal dictionary translation or transliteration of the raw_name ONLY. You are FORBIDDEN from injecting story context, roles, or extra adjectives (e.g., do NOT translate "女学生" as "Female Student Assassin" or "주인님" as "The Protagonist").
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
@@ -3485,7 +3485,7 @@ CRITICAL EXTRACTION RULES:
 - For character entries, the raw_name must contain ONLY the given name (first name), never a full name. If the text mentions a character by full name (e.g. "김상현"), split it: create one entry with raw_name "상현" (given name) and a second entry with raw_name "김" (surname). Example output:
   character,상현,Sang-hyun,male,"A knight of the royal guard"
   character,김,Kim,,"Surname of Sang-hyun"
-  Do NOT create a single entry like: character,김상현,Kim Sang-hyun,male,...
+  Do NOT create a single combined full-name entry (e.g. character,김상현,Kim Sang-hyun,male,…) — always split into given name + surname.
 - The description column must contain detailed context/explanation
 - The translated_name MUST be a strict literal dictionary translation or transliteration of the raw_name ONLY. You are FORBIDDEN from injecting story context, roles, or extra adjectives (e.g., do NOT translate "여학생" as "Female Student Assassin" or "주인님" as "The Protagonist").
 - Create at least one glossary entry for EVERY context marker window (lines ending with "=== CONTEXT N END ==="); treat each marker boundary as a required extraction point.
