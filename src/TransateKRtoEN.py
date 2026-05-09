@@ -16675,74 +16675,178 @@ def main(log_callback=None, stop_callback=None):
                 images_generated_dir = os.path.join(out, "images_generated")
                 os.makedirs(images_generated_dir, exist_ok=True)
 
-                for img_idx, img_name in enumerate(image_files, 1):
-                    if check_stop():
-                        print("⏹️ Image generation stopped by user")
-                        break
+                # ── Parallel-aware image generation ──────────────────────────
+                _img_batch_enabled = config.BATCH_TRANSLATION and config.BATCH_SIZE > 1
+                _img_batch_size = min(len(image_files), config.BATCH_SIZE) if _img_batch_enabled else 1
+
+                import re as _re_gen
+                import shutil as _shutil_gen
+                from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+                import threading as _img_threading
+
+                _gen_lock = _img_threading.Lock()
+
+                def _gen_one_image(img_idx, img_name):
+                    """Worker: generate a single image. Returns (idx, name, status, result)."""
                     img_path = os.path.join(images_dir, img_name)
-                    print(f"  [{img_idx}/{len(image_files)}] Generating: {img_name}")
                     try:
                         context = f"Image from source EPUB/PDF: {img_name}"
                         result = gen_image_translator.translate_image(img_path, context, check_stop)
-                        # Check if model replied "No" (nothing to translate) — keep original
                         if result and ImageTranslator._is_ocr_no_response(result):
-                            gen_skipped += 1
-                            print(f"    ⏭️ Nothing to translate — keeping original image")
+                            print(f"    ⏭️ [{img_idx}/{len(image_files)}] {img_name}: Nothing to translate — keeping original")
+                            return (img_idx, img_name, 'skipped', result)
                         elif result and "[Image Translation Error:" not in result:
-                            gen_success += 1
-                            print(f"    ✅ Generated successfully")
-
-                            # Extract generated image path from [GENERATED_IMAGE:path] sentinel
-                            import re as _re_gen
-                            _gen_match = _re_gen.search(r'\[GENERATED_IMAGE:(.+?)\]', result)
-                            if _gen_match:
-                                generated_path = _gen_match.group(1).strip()
-                                if os.path.isfile(generated_path):
-                                    import shutil
-                                    # Archive the generated image into images_generated/
-                                    gen_archive_path = os.path.join(images_generated_dir, img_name)
-                                    shutil.copy2(generated_path, gen_archive_path)
-                                    print(f"    📂 Archived generated image → images_generated/{img_name}")
-
-                                    # Replace the original in images/ with the generated version
-                                    shutil.copy2(generated_path, img_path)
-                                    print(f"    🔄 Replaced original image with generated version")
-
-                                    # Clean up the generated file from the root output dir
-                                    try:
-                                        os.unlink(generated_path)
-                                    except Exception:
-                                        pass
-                                else:
-                                    print(f"    ⚠️ Generated image path not found: {generated_path}")
-                            else:
-                                # No sentinel — check if the API saved directly to output dir
-                                # Look for any recently created image file in the output dir
-                                _check_name = os.path.splitext(img_name)[0]
-                                for _f in os.listdir(out):
-                                    _fp = os.path.join(out, _f)
-                                    if os.path.isfile(_fp) and _f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')) and _f != img_name:
-                                        if _check_name in _f or 'generated_media' in _f:
-                                            import shutil
-                                            gen_archive_path = os.path.join(images_generated_dir, img_name)
-                                            shutil.copy2(_fp, gen_archive_path)
-                                            shutil.copy2(_fp, img_path)
-                                            print(f"    🔄 Replaced original with generated image (auto-detected)")
-                                            try:
-                                                os.unlink(_fp)
-                                            except Exception:
-                                                pass
-                                            break
+                            print(f"    ✅ [{img_idx}/{len(image_files)}] {img_name}: Generated successfully")
+                            return (img_idx, img_name, 'success', result)
                         else:
-                            gen_fail += 1
-                            print(f"    ⚠️ Generation failed or returned error")
+                            print(f"    ⚠️ [{img_idx}/{len(image_files)}] {img_name}: Generation failed or returned error")
+                            return (img_idx, img_name, 'fail', result)
                     except Exception as e:
+                        print(f"    ❌ [{img_idx}/{len(image_files)}] {img_name}: Error: {e}")
+                        return (img_idx, img_name, 'fail', None)
+
+                def _handle_gen_result(img_idx, img_name, status, result):
+                    """Process the generated image: archive + replace original."""
+                    nonlocal gen_success, gen_fail, gen_skipped
+                    if status == 'skipped':
+                        gen_skipped += 1
+                        return
+                    if status == 'fail':
                         gen_fail += 1
-                        print(f"    ❌ Error: {e}")
-                    # Delay between API calls
-                    if img_idx < len(image_files):
-                        delay = float(os.getenv('IMAGE_API_DELAY', '1.0'))
-                        time.sleep(delay)
+                        return
+                    gen_success += 1
+                    if not result:
+                        return
+                    img_path = os.path.join(images_dir, img_name)
+                    _gen_match = _re_gen.search(r'\[GENERATED_IMAGE:(.+?)\]', result)
+                    if _gen_match:
+                        generated_path = _gen_match.group(1).strip()
+                        if os.path.isfile(generated_path):
+                            with _gen_lock:
+                                gen_archive_path = os.path.join(images_generated_dir, img_name)
+                                _shutil_gen.copy2(generated_path, gen_archive_path)
+                                print(f"    📂 [{img_idx}] Archived → images_generated/{img_name}")
+                                _shutil_gen.copy2(generated_path, img_path)
+                                print(f"    🔄 [{img_idx}] Replaced original with generated version")
+                                try:
+                                    os.unlink(generated_path)
+                                except Exception:
+                                    pass
+                        else:
+                            print(f"    ⚠️ [{img_idx}] Generated image path not found: {generated_path}")
+                    else:
+                        _check_name = os.path.splitext(img_name)[0]
+                        with _gen_lock:
+                            for _f in os.listdir(out):
+                                _fp = os.path.join(out, _f)
+                                if os.path.isfile(_fp) and _f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')) and _f != img_name:
+                                    if _check_name in _f or 'generated_media' in _f:
+                                        gen_archive_path = os.path.join(images_generated_dir, img_name)
+                                        _shutil_gen.copy2(_fp, gen_archive_path)
+                                        _shutil_gen.copy2(_fp, img_path)
+                                        print(f"    🔄 [{img_idx}] Replaced original with generated image (auto-detected)")
+                                        try:
+                                            os.unlink(_fp)
+                                        except Exception:
+                                            pass
+                                        break
+
+                if _img_batch_enabled and _img_batch_size > 1:
+                    # ── Parallel mode ────────────────────────────────────────
+                    os.environ["BATCH_TRANSLATION"] = "1"
+                    batching_mode = getattr(config, 'BATCHING_MODE', 'aggressive')
+                    if batching_mode not in ('aggressive', 'direct', 'conservative'):
+                        batching_mode = 'aggressive'
+                    print(f"⚡ Image generation batch mode: {_img_batch_size} parallel workers ({batching_mode})")
+
+                    if batching_mode == 'aggressive':
+                        # "No batching" — keep slots full, submit new work as slots open
+                        executor = ThreadPoolExecutor(max_workers=_img_batch_size, thread_name_prefix="ImgGen")
+                        force_cancelled = False
+                        try:
+                            active_futures = {}
+                            next_job_idx = 0
+
+                            def _submit_next_img():
+                                nonlocal next_job_idx
+                                if check_stop():
+                                    return False
+                                if next_job_idx >= len(image_files):
+                                    return False
+                                _name = image_files[next_job_idx]
+                                _idx = next_job_idx + 1
+                                next_job_idx += 1
+                                fut = executor.submit(_gen_one_image, _idx, _name)
+                                active_futures[fut] = (_idx, _name)
+                                return True
+
+                            while len(active_futures) < _img_batch_size and _submit_next_img():
+                                pass
+
+                            while active_futures:
+                                if check_stop():
+                                    force_cancelled = True
+                                    print("⏹️ Image generation stopped by user")
+                                    for future in active_futures:
+                                        future.cancel()
+                                    break
+                                done, _ = wait(active_futures.keys(), timeout=0.5, return_when=FIRST_COMPLETED)
+                                if not done:
+                                    continue
+                                for future in done:
+                                    idx, name = active_futures.pop(future)
+                                    try:
+                                        r_idx, r_name, r_status, r_result = future.result()
+                                        _handle_gen_result(r_idx, r_name, r_status, r_result)
+                                    except Exception as e:
+                                        gen_fail += 1
+                                        print(f"    ❌ [{idx}] {name}: Unexpected error: {e}")
+                                while len(active_futures) < _img_batch_size and _submit_next_img():
+                                    pass
+                        finally:
+                            executor.shutdown(wait=not force_cancelled, cancel_futures=True)
+                    else:
+                        # Conservative / Direct: fixed-size groups
+                        if batching_mode == 'conservative':
+                            group_multiplier = max(1, int(os.getenv("BATCH_GROUP_SIZE", "3") or "3"))
+                            group_size = min(len(image_files), _img_batch_size * group_multiplier)
+                        else:
+                            group_size = _img_batch_size
+
+                        for batch_start in range(0, len(image_files), group_size):
+                            if check_stop():
+                                print("⏹️ Image generation stopped by user")
+                                break
+                            batch = image_files[batch_start:batch_start + group_size]
+                            workers = min(_img_batch_size, len(batch))
+                            executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ImgGen")
+                            try:
+                                futures = {}
+                                for i, _name in enumerate(batch, batch_start + 1):
+                                    futures[executor.submit(_gen_one_image, i, _name)] = (i, _name)
+                                for future in as_completed(futures):
+                                    idx, name = futures[future]
+                                    try:
+                                        r_idx, r_name, r_status, r_result = future.result()
+                                        _handle_gen_result(r_idx, r_name, r_status, r_result)
+                                    except Exception as e:
+                                        gen_fail += 1
+                                        print(f"    ❌ [{idx}] {name}: Unexpected error: {e}")
+                            finally:
+                                executor.shutdown(wait=True)
+                else:
+                    # ── Sequential mode ──────────────────────────────────────
+                    for img_idx, img_name in enumerate(image_files, 1):
+                        if check_stop():
+                            print("⏹️ Image generation stopped by user")
+                            break
+                        print(f"  [{img_idx}/{len(image_files)}] Generating: {img_name}")
+                        r_idx, r_name, r_status, r_result = _gen_one_image(img_idx, img_name)
+                        _handle_gen_result(r_idx, r_name, r_status, r_result)
+                        # Delay between API calls
+                        if img_idx < len(image_files):
+                            delay = float(os.getenv('IMAGE_API_DELAY', '1.0'))
+                            time.sleep(delay)
 
                 print(f"\n🎨 Image generation complete: {gen_success} success, {gen_skipped} skipped (no text), {gen_fail} failed")
 
