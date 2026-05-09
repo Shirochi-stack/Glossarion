@@ -966,12 +966,12 @@ class LocalInpainter:
         # Wait for response with periodic stop flag checks
         # Use 1-second polling intervals to allow fast abort on stop
         poll_interval = 1.0
-        total_timeout = max(0.1, float(timeout))
+        total_timeout = None if timeout is None else max(0.1, float(timeout))
         elapsed = 0.0
         resp = None
         
         try:
-            while elapsed < total_timeout:
+            while total_timeout is None or elapsed < total_timeout:
                 # Check stop flag to allow quick abort
                 if self._check_stop():
                     logger.warning(f"⏹️ Worker call aborted - stop requested during wait for {expect_type}")
@@ -991,7 +991,7 @@ class LocalInpainter:
                 
                 # Try to get response with short timeout
                 try:
-                    remaining = min(poll_interval, total_timeout - elapsed)
+                    remaining = poll_interval if total_timeout is None else min(poll_interval, total_timeout - elapsed)
                     resp = local_q.get(timeout=max(0.1, remaining))
                     break  # Got response
                 except Empty:
@@ -1020,6 +1020,7 @@ class LocalInpainter:
     def _mp_load_model(self, method, model_path, force_reload=False) -> bool:
         # Store model path for worker restart scenarios
         self._last_model_path = model_path
+        self._last_model_method = method
         
         # Check stop flag before starting model load
         if self._check_stop():
@@ -1154,8 +1155,18 @@ class LocalInpainter:
         except Exception:
             base_timeout = 120.0
         
+        last_model_path = str(getattr(self, '_last_model_path', '') or '').lower()
+        qwen_unbounded_timeout = (
+            self._is_qwen_image_edit_method(getattr(self, 'current_method', None))
+            or self._is_qwen_image_edit_method(getattr(self, '_last_model_method', None))
+            or 'qwen-image-edit' in last_model_path
+            or 'qwen_image_edit' in last_model_path
+        )
+
         # Retry with conservative timeouts: only restart if worker is actually dead
-        max_retries = 2
+        max_retries = 0 if qwen_unbounded_timeout else 2
+        if qwen_unbounded_timeout:
+            logger.info("Qwen-Image-Edit worker inpaint timeout disabled; use Stop to cancel a long run")
         
         for attempt in range(max_retries + 1):
             # CRITICAL: Check stop flag at start of each retry iteration
@@ -1165,7 +1176,7 @@ class LocalInpainter:
             
             try:
                 # Give more time on retries (1x, 1.5x, 2x base timeout)
-                timeout = base_timeout * (1.0 + attempt * 0.5)
+                timeout = None if qwen_unbounded_timeout else base_timeout * (1.0 + attempt * 0.5)
                 if attempt > 0:
                     logger.info(f"🔄 Retrying inpaint (attempt {attempt + 1}/{max_retries + 1}, timeout={timeout:.0f}s)...")
                 
@@ -1193,7 +1204,8 @@ class LocalInpainter:
                 return image
                 
             except TimeoutError as e:
-                logger.warning(f"⚠️ Worker inpaint timeout (attempt {attempt + 1}/{max_retries + 1}, timeout={timeout:.0f}s): {e}")
+                timeout_label = "disabled" if timeout is None else f"{timeout:.0f}s"
+                logger.warning(f"⚠️ Worker inpaint timeout (attempt {attempt + 1}/{max_retries + 1}, timeout={timeout_label}): {e}")
                 # Check stop flag before attempting retry/restart
                 if self._check_stop():
                     self._log("⏹️ Inpainting aborted on timeout - stop requested", "warning")
@@ -1228,7 +1240,8 @@ class LocalInpainter:
                             return image
                     continue
                 else:
-                    logger.error(f"❌ All retry attempts exhausted (timeout={timeout:.0f}s). Returning original image.")
+                    timeout_label = "disabled" if timeout is None else f"{timeout:.0f}s"
+                    logger.error(f"❌ All retry attempts exhausted (timeout={timeout_label}). Returning original image.")
                     return image
             except Exception as e:
                 logger.error(f"Worker inpaint exception (attempt {attempt + 1}): {e}")
