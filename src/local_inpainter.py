@@ -2416,15 +2416,21 @@ class LocalInpainter:
             try:
                 import diffusers
             except ImportError:
-                logger.error("diffusers is required for Qwen-Image-Edit. Install with: pip install diffusers accelerate")
+                logger.error("diffusers is required for Qwen-Image-Edit. Install with: python -m pip install -U \"diffusers>=0.36.0\" accelerate")
                 return False
 
             dtype = self._get_qwen_torch_dtype()
             pipeline_cls = (
                 getattr(diffusers, 'QwenImageEditPlusPipeline', None)
                 or getattr(diffusers, 'QwenImageEditPipeline', None)
-                or getattr(diffusers, 'DiffusionPipeline')
             )
+            if pipeline_cls is None:
+                installed_version = getattr(diffusers, '__version__', 'unknown')
+                logger.error(
+                    "Qwen-Image-Edit requires diffusers with QwenImageEditPipeline/QwenImageEditPlusPipeline support. "
+                    f"Installed diffusers={installed_version}. Upgrade with: python -m pip install -U \"diffusers>=0.36.0\""
+                )
+                return False
 
             logger.info(f"Loading Qwen-Image-Edit pipeline from: {model_ref}")
             last_error = None

@@ -6,6 +6,7 @@
 !README.md
 !LICENSE
 !requirements.txt
+!requirements_Cuda.txt
 !install_requirements.bat
 !build_msix.bat
 requirements-dev.txt
@@ -65,6 +66,7 @@ logs/
 *.txt
 # But always include requirements files
 !requirements.txt
+!requirements_Cuda.txt
 !requirements-*.txt
 howtoruntest.txt
 
