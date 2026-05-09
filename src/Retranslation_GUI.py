@@ -5243,6 +5243,8 @@ class RetranslationMixin:
             }
             chapter_display_info.append(display_info)
         
+        self._append_pdf_ocr_display_info(data, chapter_display_info)
+        self._append_image_gen_display_info(data, chapter_display_info)
         data['chapter_display_info'] = chapter_display_info
     
     def _rebuild_chapter_display_info(self, data):
