@@ -2007,6 +2007,79 @@ class UnifiedClient:
     _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
 
     @staticmethod
+    def _is_local_openai_base_url(url: str) -> bool:
+        """Return True for localhost/private OpenAI-compatible endpoints."""
+        try:
+            url_l = (url or '').lower()
+            if not url_l:
+                return False
+            local_indicators = (
+                'localhost', '127.0.0.1', '127.1.1.1', '0.0.0.0', '::1',
+                '192.168.', '10.', '172.16.', '172.17.', '172.18.', '172.19.',
+                '172.20.', '172.21.', '172.22.', '172.23.', '172.24.', '172.25.',
+                '172.26.', '172.27.', '172.28.', '172.29.', '172.30.', '172.31.',
+                ':11434', ':8080', ':5000', ':8000', ':1234', 'host.docker.internal',
+            )
+            return any(indicator in url_l for indicator in local_indicators)
+        except Exception:
+            return False
+
+    @classmethod
+    def _load_custom_prefix_routes(cls) -> List[Dict[str, str]]:
+        """Load GUI-defined OpenAI-compatible prefix routes from the environment."""
+        raw = os.environ.get('CUSTOM_OPENAI_PREFIX_ROUTES', '') or ''
+        if not raw.strip():
+            return []
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return []
+
+        if isinstance(parsed, dict):
+            iterable = [{'prefix': k, 'routing': v} for k, v in parsed.items()]
+        elif isinstance(parsed, list):
+            iterable = parsed
+        else:
+            iterable = []
+
+        routes = []
+        seen = set()
+        for entry in iterable:
+            if not isinstance(entry, dict):
+                continue
+            prefix = str(entry.get('prefix', '') or '').strip().replace('\\', '/').lstrip('/')
+            routing = str(entry.get('routing', entry.get('base_url', '')) or '').strip().rstrip('/')
+            if not prefix or not routing:
+                continue
+            if not prefix.endswith('/'):
+                prefix = f"{prefix}/"
+            if not routing.lower().startswith(('http://', 'https://')):
+                continue
+            key = prefix.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            routes.append({'prefix': prefix, 'routing': routing})
+
+        routes.sort(key=lambda r: len(r.get('prefix', '')), reverse=True)
+        return routes
+
+    @classmethod
+    def _get_custom_prefix_route_for_model(cls, model: str) -> Optional[Dict[str, str]]:
+        """Return the custom prefix route matching a model, if any."""
+        try:
+            model_l = (model or '').strip().lower()
+            if not model_l:
+                return None
+            for route in cls._load_custom_prefix_routes():
+                prefix = (route.get('prefix') or '').lower()
+                if prefix and model_l.startswith(prefix):
+                    return route
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
     def _is_local_custom_endpoint() -> bool:
         """Return True if user has enabled a custom OpenAI endpoint pointing to localhost.
 
@@ -2019,7 +2092,7 @@ class UnifiedClient:
             url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
             if not url:
                 return False
-            return ('localhost' in url) or ('127.0.0.1' in url) or ('0.0.0.0' in url) or ('::1' in url)
+            return UnifiedClient._is_local_openai_base_url(url)
         except Exception:
             return False
 
@@ -2030,6 +2103,9 @@ class UnifiedClient:
         if cls._is_local_custom_endpoint():
             return False
         model_lower = model.lower()
+        custom_route = cls._get_custom_prefix_route_for_model(model_lower)
+        if custom_route and cls._is_local_openai_base_url(custom_route.get('routing', '')):
+            return False
         # Vertex AI models use service account credentials, not API keys
         if '@' in model_lower:
             return False
@@ -3561,6 +3637,9 @@ class UnifiedClient:
 
     def _apply_custom_endpoint_if_needed(self):
         """Apply custom endpoint configuration if needed"""
+        if getattr(self, 'client_type', None) == 'custom_openai' or self._get_custom_prefix_route_for_model(getattr(self, 'model', '')):
+            return
+
         use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
         custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
         
@@ -5239,10 +5318,19 @@ class UnifiedClient:
         # Determine client_type (no lock needed, just reading)
         self.client_type = None
         self._authgem_account_id = None  # account slot for numbered authgem prefixes
-        for prefix, provider in self.MODEL_PROVIDERS.items():
-            if model_lower.startswith(prefix):
-                self.client_type = provider
-                break
+        custom_prefix_route = self._get_custom_prefix_route_for_model(model_snapshot)
+        self._custom_prefix_route = custom_prefix_route
+        if custom_prefix_route:
+            self.client_type = 'custom_openai'
+            logger.info(
+                f"Custom prefix route matched {custom_prefix_route.get('prefix')} -> "
+                f"{custom_prefix_route.get('routing')}"
+            )
+        else:
+            for prefix, provider in self.MODEL_PROVIDERS.items():
+                if model_lower.startswith(prefix):
+                    self.client_type = provider
+                    break
 
         # Dynamic fallback: match numbered authgem variants (authgem1/, authgem-vertex2/, etc.)
         if self.client_type is None:
@@ -5318,6 +5406,8 @@ class UnifiedClient:
                     use_gemini_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
                     if not use_gemini_endpoint:
                         self._log_once(f"Gemini model detected, not overriding with custom OpenAI endpoint (use USE_GEMINI_OPENAI_ENDPOINT instead)")
+            elif self.client_type == 'custom_openai':
+                logger.info(f"Using custom prefix route for model: {model_snapshot}")
             else:
                 # Override other model types to use custom OpenAI endpoint when toggle is enabled
                 original_client_type = self.client_type
@@ -5354,7 +5444,7 @@ class UnifiedClient:
         gemini_endpoint = ""
         
         # Prepare provider-specific settings (but don't create clients yet)
-        if self.client_type == 'openai':
+        if self.client_type in ('openai', 'custom_openai'):
             if openai is None:
                 raise ImportError("OpenAI library not installed. Install with: pip install openai")
             
@@ -5494,17 +5584,22 @@ class UnifiedClient:
         # MICROSECOND LOCK: Create ALL clients with thread safety
         # =====================================================
         
-        if self.client_type == 'openai':
+        if self.client_type in ('openai', 'custom_openai'):
             # Skip if individual endpoint already applied
             if hasattr(self, '_individual_endpoint_applied') and self._individual_endpoint_applied:
                 return
                 
             # MICROSECOND LOCK for OpenAI client
             with self._model_lock:
+                base_url_for_client = 'https://api.openai.com/v1'
+                if self.client_type == 'custom_openai':
+                    route = self._get_custom_prefix_route_for_model(model_snapshot)
+                    if route:
+                        base_url_for_client = route.get('routing') or base_url_for_client
                 # Use regular OpenAI client - individual endpoint will be set later
                 self.openai_client = openai.OpenAI(
                     api_key=api_key_snapshot,
-                    base_url='https://api.openai.com/v1'  # Default, will be overridden by individual endpoint
+                    base_url=base_url_for_client
                 )
         
         elif self.client_type == 'gemini':
@@ -13817,6 +13912,7 @@ class UnifiedClient:
         # Map client types to their handler methods
         handlers = {
             'openai': self._send_openai,
+            'custom_openai': self._send_openai_provider_router,
             'gemini': self._send_gemini,
             'deepseek': self._send_openai_provider_router,  # Consolidated
             'anthropic': self._send_anthropic,
@@ -14176,7 +14272,7 @@ class UnifiedClient:
         # Apply parameters based on provider capabilities
         params = {}
         
-        if self.client_type in ['openai', 'deepseek', 'groq', 'electronhub', 'openrouter']:
+        if self.client_type in ['openai', 'custom_openai', 'deepseek', 'groq', 'electronhub', 'openrouter']:
             # OpenAI-compatible providers
             if frequency_penalty > 0:
                 params["frequency_penalty"] = frequency_penalty
@@ -17161,6 +17257,14 @@ class UnifiedClient:
             # Read instance model under microsecond lock to avoid cross-thread contamination
             with self._model_lock:
                 effective_model = self.model
+        custom_prefix_route = None
+        if provider == 'custom_openai':
+            custom_prefix_route = self._get_custom_prefix_route_for_model(effective_model)
+            if custom_prefix_route:
+                prefix = custom_prefix_route.get('prefix', '')
+                if prefix and effective_model.lower().startswith(prefix.lower()):
+                    effective_model = effective_model[len(prefix):].strip()
+                base_url = custom_prefix_route.get('routing', base_url).rstrip('/')
         # Provider-specific model normalization (transport-only)
         if provider == 'openrouter':
             for prefix in ('or/', 'openrouter/'):
@@ -17201,7 +17305,7 @@ class UnifiedClient:
         # Never override OpenRouter base_url with custom endpoint
         # CRITICAL: Also skip if individual endpoint was already applied
         skip_custom = getattr(self, '_skip_global_custom_endpoint', False)
-        if use_custom_endpoint and provider not in ("gemini-openai", "openrouter") and not skip_custom:
+        if use_custom_endpoint and provider not in ("gemini-openai", "openrouter", "custom_openai") and not skip_custom:
             custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
             if custom_base_url:
                 # Check if it's Azure
@@ -17362,6 +17466,11 @@ class UnifiedClient:
                     #print(f"   ☁️  Using actual API key for cloud endpoint")
                     pass
         
+        if provider == 'custom_openai' and custom_prefix_route:
+            if os.getenv('IS_LOCAL_LLM', '0') == '1' or self._is_local_openai_base_url(base_url):
+                is_local_endpoint = True
+                actual_api_key = "dummy-key-for-local-llm"
+
         # For all other providers, use the actual API key
         # Remove the special case for gemini-openai - it needs the real API key
         if not is_local_endpoint:
@@ -17381,7 +17490,7 @@ class UnifiedClient:
         
         # Use OpenAI SDK for providers known to work well with it
         sdk_compatible = ['openai', 'deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq', 
-                         'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu', 'nanogpt', 'sambanova']
+                         'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu', 'nanogpt', 'sambanova', 'custom_openai']
         
         # Allow forcing HTTP-only for OpenRouter via toggle (default: disabled)
         openrouter_http_only = os.getenv('OPENROUTER_USE_HTTP_ONLY', '0') == '1'
@@ -21574,6 +21683,19 @@ class UnifiedClient:
             pass
 
         provider = self._get_actual_provider()
+        if provider == 'custom_openai':
+            route = self._get_custom_prefix_route_for_model(getattr(self, 'model', ''))
+            if not route:
+                raise UnifiedClientError(f"No custom prefix route for model: {getattr(self, 'model', '')}")
+            return self._send_openai_compatible(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                base_url=route.get('routing', '').rstrip('/'),
+                response_name=response_name,
+                provider='custom_openai'
+            )
+
         # If a per-key individual endpoint was already applied (non-Azure), always use it
         # instead of the prefix-based provider URL map to avoid being overridden.
         if getattr(self, "_individual_endpoint_applied", False) and getattr(self, "openai_client", None):

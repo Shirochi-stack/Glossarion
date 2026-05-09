@@ -1925,6 +1925,11 @@ Text to analyze:
         self.groq_base_url_var = self.config.get('groq_base_url', '')
         self.fireworks_base_url_var = self.config.get('fireworks_base_url', '')
         self.use_custom_openai_endpoint_var = self.config.get('use_custom_openai_endpoint', False)
+        self.custom_prefix_routes = self._normalize_custom_prefix_routes(
+            self.config.get('custom_prefix_routes', [])
+        )
+        self.config['custom_prefix_routes'] = self.custom_prefix_routes
+        self._sync_custom_prefix_routes_env()
         
         # Initialize metadata/batch variables the same way.
         #
@@ -6609,7 +6614,9 @@ Recent translations to summarize:
         """Open a dialog for managing the model dropdown list."""
         from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
                                         QListWidget, QPushButton, QLabel,
-                                        QApplication, QLineEdit, QMessageBox)
+                                        QApplication, QLineEdit, QMessageBox,
+                                        QTabWidget, QWidget, QTableWidget,
+                                        QTableWidgetItem, QHeaderView)
         from PySide6.QtCore import Qt
         from PySide6.QtGui import QIcon
 
@@ -6648,6 +6655,9 @@ Recent translations to summarize:
             pass
 
         layout = QVBoxLayout(dialog)
+        tabs = QTabWidget()
+        models_tab = QWidget()
+        model_layout = QVBoxLayout(models_tab)
 
         # Instructions
         instructions = QLabel(
@@ -6655,7 +6665,7 @@ Recent translations to summarize:
         )
         instructions.setWordWrap(True)
         instructions.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
-        layout.addWidget(instructions)
+        model_layout.addWidget(instructions)
 
         # --- Add-model row ---
         add_row = QHBoxLayout()
@@ -6684,7 +6694,7 @@ Recent translations to summarize:
         add_btn.clicked.connect(_add_model)
         add_entry.returnPressed.connect(_add_model)
         add_row.addWidget(add_btn)
-        layout.addLayout(add_row)
+        model_layout.addLayout(add_row)
 
         # Horizontal layout for list and buttons
         content_layout = QHBoxLayout()
@@ -6833,7 +6843,60 @@ Recent translations to summarize:
         button_column.addStretch()
 
         content_layout.addLayout(button_column)
-        layout.addLayout(content_layout)
+        model_layout.addLayout(content_layout)
+
+        prefix_tab = QWidget()
+        prefix_layout = QVBoxLayout(prefix_tab)
+
+        prefix_label = QLabel("Custom OpenAI-compatible prefixes:")
+        prefix_label.setStyleSheet("font-weight: bold; margin-bottom: 6px;")
+        prefix_layout.addWidget(prefix_label)
+
+        prefix_table = QTableWidget(0, 2)
+        prefix_table.setHorizontalHeaderLabels(["Prefix", "Routing"])
+        prefix_table.setSelectionBehavior(QTableWidget.SelectRows)
+        prefix_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        prefix_table.verticalHeader().setVisible(False)
+        prefix_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        prefix_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        prefix_table.setToolTip("Use models like myprefix/model-name. Routing must be an OpenAI-compatible base URL.")
+
+        def _add_prefix_row(prefix="", routing=""):
+            row = prefix_table.rowCount()
+            prefix_table.insertRow(row)
+            prefix_table.setItem(row, 0, QTableWidgetItem(str(prefix or "")))
+            prefix_table.setItem(row, 1, QTableWidgetItem(str(routing or "")))
+            prefix_table.setCurrentCell(row, 0)
+            return row
+
+        for route in self._normalize_custom_prefix_routes(self.config.get('custom_prefix_routes', [])):
+            _add_prefix_row(route.get('prefix', ''), route.get('routing', ''))
+
+        prefix_layout.addWidget(prefix_table)
+
+        prefix_buttons = QHBoxLayout()
+        add_prefix_btn = QPushButton("Add Prefix")
+        add_prefix_btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold;")
+        add_prefix_btn.clicked.connect(lambda: _add_prefix_row())
+        prefix_buttons.addWidget(add_prefix_btn)
+
+        delete_prefix_btn = QPushButton("Delete")
+        delete_prefix_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
+        def _delete_prefix_rows():
+            rows = sorted({idx.row() for idx in prefix_table.selectedIndexes()}, reverse=True)
+            if not rows:
+                current = prefix_table.currentRow()
+                rows = [current] if current >= 0 else []
+            for row in rows:
+                prefix_table.removeRow(row)
+        delete_prefix_btn.clicked.connect(_delete_prefix_rows)
+        prefix_buttons.addWidget(delete_prefix_btn)
+        prefix_buttons.addStretch()
+        prefix_layout.addLayout(prefix_buttons)
+
+        tabs.addTab(models_tab, "Models")
+        tabs.addTab(prefix_tab, "Custom Prefixes")
+        layout.addWidget(tabs)
 
         # Bottom button row
         button_layout = QHBoxLayout()
@@ -6845,7 +6908,7 @@ Recent translations to summarize:
 
         save_btn = QPushButton("Save")
         save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
-        save_btn.clicked.connect(lambda: self._save_model_order(list_widget, dialog))
+        save_btn.clicked.connect(lambda: self._save_model_manager_state(list_widget, prefix_table, dialog))
         button_layout.addWidget(save_btn)
 
         layout.addLayout(button_layout)
@@ -6886,6 +6949,110 @@ Recent translations to summarize:
 
         self.append_log("✓ Model list updated")
         dialog.accept()
+
+    def _normalize_custom_prefix_routes(self, routes):
+        """Return validated custom prefix route dictionaries for OpenAI-compatible endpoints."""
+        normalized = []
+        seen = set()
+
+        if isinstance(routes, dict):
+            iterable = [{'prefix': k, 'routing': v} for k, v in routes.items()]
+        elif isinstance(routes, list):
+            iterable = routes
+        else:
+            iterable = []
+
+        for entry in iterable:
+            if not isinstance(entry, dict):
+                continue
+            prefix = str(entry.get('prefix', '') or '').strip()
+            routing = str(entry.get('routing', entry.get('base_url', '')) or '').strip()
+            if not prefix or not routing:
+                continue
+            prefix = prefix.replace('\\', '/').lstrip('/')
+            if not prefix.endswith('/'):
+                prefix = f"{prefix}/"
+            routing = routing.rstrip('/')
+            if not routing.lower().startswith(('http://', 'https://')):
+                continue
+            key = prefix.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append({'prefix': prefix, 'routing': routing})
+
+        return normalized
+
+    def _custom_prefix_routes_env_json(self):
+        """Serialize custom prefix routes for UnifiedClient subprocess/thread routing."""
+        try:
+            routes = self._normalize_custom_prefix_routes(
+                getattr(self, 'custom_prefix_routes', self.config.get('custom_prefix_routes', []))
+            )
+            return json.dumps(routes, ensure_ascii=False)
+        except Exception:
+            return "[]"
+
+    def _sync_custom_prefix_routes_env(self):
+        """Expose custom prefix routes to UnifiedClient."""
+        try:
+            os.environ['CUSTOM_OPENAI_PREFIX_ROUTES'] = self._custom_prefix_routes_env_json()
+        except Exception:
+            pass
+
+    def _collect_custom_prefix_routes_from_table(self, table, dialog):
+        """Validate and collect custom prefix routes from the model manager table."""
+        from PySide6.QtWidgets import QMessageBox
+
+        routes = []
+        seen = set()
+        for row in range(table.rowCount()):
+            prefix_item = table.item(row, 0)
+            routing_item = table.item(row, 1)
+            prefix = prefix_item.text().strip() if prefix_item else ''
+            routing = routing_item.text().strip() if routing_item else ''
+
+            if not prefix and not routing:
+                continue
+            if not prefix or not routing:
+                QMessageBox.warning(dialog, "Incomplete Prefix Route",
+                                    f"Row {row + 1} needs both a prefix and routing URL.")
+                return None
+
+            prefix = prefix.replace('\\', '/').lstrip('/')
+            if any(ch.isspace() for ch in prefix):
+                QMessageBox.warning(dialog, "Invalid Prefix",
+                                    f"Prefix on row {row + 1} cannot contain spaces.")
+                return None
+            if not prefix.endswith('/'):
+                prefix = f"{prefix}/"
+
+            routing = routing.rstrip('/')
+            if not routing.lower().startswith(('http://', 'https://')):
+                QMessageBox.warning(dialog, "Invalid Routing URL",
+                                    f"Routing URL on row {row + 1} must start with http:// or https://.")
+                return None
+
+            key = prefix.lower()
+            if key in seen:
+                QMessageBox.warning(dialog, "Duplicate Prefix",
+                                    f"'{prefix}' is already listed.")
+                return None
+            seen.add(key)
+            routes.append({'prefix': prefix, 'routing': routing})
+
+        return routes
+
+    def _save_model_manager_state(self, list_widget, prefix_table, dialog):
+        """Save model ordering and custom OpenAI-compatible prefix routes together."""
+        routes = self._collect_custom_prefix_routes_from_table(prefix_table, dialog)
+        if routes is None:
+            return
+
+        self.custom_prefix_routes = routes
+        self.config['custom_prefix_routes'] = routes
+        self._sync_custom_prefix_routes_env()
+        self._save_model_order(list_widget, dialog)
 
     def _create_settings_section(self):
         """Create all settings controls"""
@@ -14628,6 +14795,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'OPENROUTER_PREFERRED_PROVIDER': self.config.get('openrouter_preferred_provider', 'Auto'),
             # Custom API endpoints
             'OPENAI_CUSTOM_BASE_URL': self.openai_base_url_var if self.openai_base_url_var else '',
+            'CUSTOM_OPENAI_PREFIX_ROUTES': self._custom_prefix_routes_env_json(),
             'OPENAI_TTS_ENDPOINT': getattr(self, 'openai_tts_endpoint_var', '') or (self.openai_base_url_var if str(self.openai_base_url_var).rstrip('/').endswith('/audio/speech') else ''),
             'TTS_VOICE': getattr(self, 'tts_voice_var', '') or '',
             'GROQ_API_URL': self.groq_base_url_var if self.groq_base_url_var else '',
@@ -15122,6 +15290,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT'] = '1' if getattr(self, 'override_gemma_for_custom_endpoint_var', True) else '0'
                 os.environ['USE_CUSTOM_OPENAI_ENDPOINT'] = '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0'
                 os.environ['OPENAI_CUSTOM_BASE_URL'] = getattr(self, 'openai_base_url_var', '') or ''
+                os.environ['CUSTOM_OPENAI_PREFIX_ROUTES'] = self._custom_prefix_routes_env_json()
                 os.environ['OPENAI_TTS_ENDPOINT'] = getattr(self, 'openai_tts_endpoint_var', '') or (getattr(self, 'openai_base_url_var', '') if str(getattr(self, 'openai_base_url_var', '')).rstrip('/').endswith('/audio/speech') else '')
                 os.environ['GROQ_API_URL'] = getattr(self, 'groq_base_url_var', '') or ''
                 os.environ['FIREWORKS_API_URL'] = getattr(self, 'fireworks_base_url_var', '') or ''
@@ -16013,6 +16182,7 @@ Important rules:
                     'OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT': '1' if getattr(self, 'override_gemma_for_custom_endpoint_var', True) else '0',
                     'USE_CUSTOM_OPENAI_ENDPOINT': '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0',
                     'OPENAI_CUSTOM_BASE_URL': getattr(self, 'openai_base_url_var', '') or '',
+                    'CUSTOM_OPENAI_PREFIX_ROUTES': self._custom_prefix_routes_env_json(),
                     'OPENAI_TTS_ENDPOINT': getattr(self, 'openai_tts_endpoint_var', '') or (getattr(self, 'openai_base_url_var', '') if str(getattr(self, 'openai_base_url_var', '')).rstrip('/').endswith('/audio/speech') else ''),
                     'GROQ_API_URL': getattr(self, 'groq_base_url_var', '') or '',
                     'FIREWORKS_API_URL': getattr(self, 'fireworks_base_url_var', '') or '',
@@ -22564,6 +22734,11 @@ Important rules:
                     # (prevents wiping loaded values when save_config is called before widgets exist)
                     self.config[key] = default
 
+            if hasattr(self, 'custom_prefix_routes'):
+                self.custom_prefix_routes = self._normalize_custom_prefix_routes(self.custom_prefix_routes)
+                self.config['custom_prefix_routes'] = self.custom_prefix_routes
+                self._sync_custom_prefix_routes_env()
+
             # --- 3. Handle Special Cases and Complex Logic ---
             
             # Fuzzy matching threshold with range validation
@@ -22937,6 +23112,7 @@ Important rules:
             
             # API Endpoints
             'OPENAI_CUSTOM_BASE_URL': 'Custom OpenAI API base URL',
+            'CUSTOM_OPENAI_PREFIX_ROUTES': 'Custom OpenAI-compatible prefix routes',
             'GROQ_API_URL': 'Groq API endpoint',
             'FIREWORKS_API_URL': 'Fireworks API endpoint',
             'USE_CUSTOM_OPENAI_ENDPOINT': 'Use custom OpenAI endpoint',
@@ -23472,6 +23648,7 @@ Important rules:
 
                 # Custom API endpoints
                 ('OPENAI_CUSTOM_BASE_URL', getattr(self, 'openai_base_url_var', '')),
+                ('CUSTOM_OPENAI_PREFIX_ROUTES', self._custom_prefix_routes_env_json()),
                 ('OPENAI_TTS_ENDPOINT', getattr(self, 'openai_tts_endpoint_var', '') or (getattr(self, 'openai_base_url_var', '') if str(getattr(self, 'openai_base_url_var', '')).rstrip('/').endswith('/audio/speech') else '')),
                 ('TTS_VOICE', getattr(self, 'tts_voice_var', '') or ''),
                 ('GROQ_API_URL', getattr(self, 'groq_base_url_var', '')),
