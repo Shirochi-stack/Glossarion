@@ -16781,24 +16781,25 @@ def main(log_callback=None, stop_callback=None):
                 except Exception:
                     pass
 
-                _ocr_single_dir = os.path.join(out, "OCR", "single")
                 _already_skipped = set()
-                try:
-                    if os.path.isdir(_ocr_single_dir):
-                        for _ocr_file in os.listdir(_ocr_single_dir):
-                            if not _ocr_file.lower().endswith('.txt'):
-                                continue
-                            _ocr_path = os.path.join(_ocr_single_dir, _ocr_file)
-                            try:
-                                with open(_ocr_path, 'r', encoding='utf-8') as _f:
-                                    _ocr_text = _f.read().strip()
-                                if ImageTranslator._is_ocr_no_response(_ocr_text):
-                                    # Extract the original image stem from OCR filename
-                                    _already_skipped.add(_ocr_file)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
+                # Scan OCR cache directories for "No" responses (illustration-only images)
+                for _ocr_subdir in ("single", "translations"):
+                    _ocr_scan_dir = os.path.join(out, "OCR", _ocr_subdir)
+                    try:
+                        if os.path.isdir(_ocr_scan_dir):
+                            for _ocr_file in os.listdir(_ocr_scan_dir):
+                                if not _ocr_file.lower().endswith('.txt'):
+                                    continue
+                                _ocr_path = os.path.join(_ocr_scan_dir, _ocr_file)
+                                try:
+                                    with open(_ocr_path, 'r', encoding='utf-8') as _f:
+                                        _ocr_text = _f.read().strip()
+                                    if ImageTranslator._is_ocr_no_response(_ocr_text):
+                                        _already_skipped.add(_ocr_file)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
 
                 if _already_generated or _already_skipped:
                     print(f"    📋 Cache: {len(_already_generated)} already generated, {len(_already_skipped)} already skipped (no text)")
