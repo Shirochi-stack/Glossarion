@@ -44,20 +44,50 @@ binaries = []
 hiddenimports = []
 
 # Add custom DLL and CPP files
-binaries.extend([
-    ('libgcc_s_seh-1.dll', '.'),
-    ('libonnx_inpainter.dll', '.'),
-    ('onnx_inpainter.dll', '.'),
-    ('libstdc++-6.dll', '.'),
-    ('libwinpthread-1.dll', '.'),
-    ('onnxruntime.dll', '.'),
-    ('onnxruntime_providers_shared.dll', '.'),
-    ('onnxruntime_providers_cuda.dll', '.'),
-    ('onnxruntime_providers_tensorrt.dll', '.'),
-    ('onnx_inpainter.cpp', '.'),
-    ('vfcompat.dll', '.'),
-    ('appverifUI.dll', '.')
-])
+def add_binary_if_exists(filename, dest='.', search_dirs=None):
+    """Add a binary/data file only if it exists on this build machine."""
+    search_dirs = search_dirs or [SPEC_DIR]
+    candidates = [filename] if os.path.isabs(filename) else []
+    if not os.path.isabs(filename):
+        candidates.extend(os.path.join(search_dir, filename) for search_dir in search_dirs if search_dir)
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            normalized = os.path.normcase(os.path.abspath(candidate))
+            if not any(os.path.normcase(os.path.abspath(src)) == normalized for src, _dst in binaries):
+                binaries.append((candidate, dest))
+                print(f"  Added binary: {os.path.basename(candidate)}")
+            return True
+    print(f"  Optional binary not found, skipping: {filename}")
+    return False
+
+local_optional_files = [
+    'libgcc_s_seh-1.dll',
+    'libonnx_inpainter.dll',
+    'onnx_inpainter.dll',
+    'libstdc++-6.dll',
+    'libwinpthread-1.dll',
+    'onnx_inpainter.cpp',
+    'vfcompat.dll',
+    'appverifUI.dll',
+]
+for optional_file in local_optional_files:
+    add_binary_if_exists(optional_file)
+
+onnxruntime_search_dirs = [SPEC_DIR]
+try:
+    import onnxruntime as _ort
+    _ort_dir = os.path.dirname(_ort.__file__)
+    onnxruntime_search_dirs.extend([_ort_dir, os.path.join(_ort_dir, 'capi')])
+except Exception as _ort_err:
+    print(f"  Warning: Could not inspect onnxruntime package: {_ort_err}")
+
+for ort_dll in [
+    'onnxruntime.dll',
+    'onnxruntime_providers_shared.dll',
+    'onnxruntime_providers_cuda.dll',
+    'onnxruntime_providers_tensorrt.dll',
+]:
+    add_binary_if_exists(ort_dll, '.', onnxruntime_search_dirs)
 
 # Add MSYS2 DLLs for WeasyPrint (PDF generation with formatting and images)
 import glob
@@ -1158,7 +1188,7 @@ if platform.system() == 'Windows':
                     if not any(b[0] == full_path for b in binaries):
                         binaries.append((full_path, 'torch/lib'))
                         dll_count += 1
-                        print(f"    ✓ {filename}")
+                        print(f"    OK {filename}")
             print(f"  Total torch DLLs added: {dll_count}\n")
     except Exception as e:
         print(f"  Warning: Could not collect torch DLLs: {e}")

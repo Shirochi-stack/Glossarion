@@ -853,6 +853,12 @@ class LocalInpainter:
                         break
                     if not isinstance(msg, dict):
                         continue
+                    if msg.get('type') == 'inpaint_progress':
+                        try:
+                            self._log(msg.get('message') or 'Local inpainting progress', msg.get('level', 'info'))
+                        except Exception:
+                            logger.info(msg.get('message') or 'Local inpainting progress')
+                        continue
                     msg_id = msg.get('id')
                     if msg_id is None:
                         # Ignore broadcast messages for now
@@ -2579,6 +2585,38 @@ class LocalInpainter:
 
             output = None
             last_error = None
+            self._log(f"Qwen-Image-Edit diffusion starting ({steps} steps)", "info")
+
+            def _qwen_step_callback(*callback_args, **callback_kwargs):
+                step_index = None
+                timestep = None
+                callback_state = None
+                try:
+                    if len(callback_args) >= 2 and not isinstance(callback_args[0], int):
+                        # Newer diffusers callbacks pass (pipeline, step, timestep, callback_kwargs).
+                        step_index = callback_args[1]
+                        timestep = callback_args[2] if len(callback_args) > 2 else None
+                        callback_state = callback_args[3] if len(callback_args) > 3 else None
+                    else:
+                        step_index = callback_args[0] if callback_args else callback_kwargs.get('step')
+                        timestep = callback_args[1] if len(callback_args) > 1 else callback_kwargs.get('timestep')
+                        callback_state = callback_args[2] if len(callback_args) > 2 else callback_kwargs.get('callback_kwargs')
+                    current = int(step_index) + 1 if step_index is not None else 0
+                    total = max(1, int(steps))
+                    pct = min(100.0, max(0.0, (current / total) * 100.0)) if current else 0.0
+                    if timestep is not None:
+                        message = f"Qwen-Image-Edit diffusion step {current}/{total} ({pct:.0f}%), timestep={timestep}"
+                    else:
+                        message = f"Qwen-Image-Edit diffusion step {current}/{total} ({pct:.0f}%)"
+                    progress_cb = getattr(self, '_inpaint_progress_callback', None)
+                    if callable(progress_cb):
+                        progress_cb(current, total, message)
+                    else:
+                        self._log(message, "info")
+                except Exception:
+                    pass
+                return callback_state if isinstance(callback_state, dict) else None
+
             for image_arg, active_prompt in image_attempts:
                 base_inputs = {'image': image_arg, 'prompt': active_prompt}
                 candidate_inputs = [
@@ -2590,16 +2628,19 @@ class LocalInpainter:
                         'num_inference_steps': steps,
                         'guidance_scale': guidance_scale,
                         'num_images_per_prompt': 1,
+                        'callback_on_step_end': _qwen_step_callback,
                     },
                     {
                         **base_inputs,
                         'generator': generator,
                         'negative_prompt': negative_prompt,
                         'num_inference_steps': steps,
+                        'callback_on_step_end': _qwen_step_callback,
                     },
                     {
                         **base_inputs,
                         'num_inference_steps': steps,
+                        'callback_on_step_end': _qwen_step_callback,
                     },
                     base_inputs,
                 ]
@@ -2641,6 +2682,7 @@ class LocalInpainter:
             result = image.copy()
             result[top:bottom, left:right] = blended_crop
             self._log_inpaint_diag('qwen-image-edit', result, mask_gray)
+            self._log("Qwen-Image-Edit diffusion complete", "info")
             logger.info("Qwen-Image-Edit inpainting completed")
             return result
         except Exception as e:
@@ -4349,11 +4391,29 @@ class _LocalInpainterWorker(mp.Process):
                 try:
                     img = task.get('image')
                     m = task.get('mask')
+                    def _worker_progress(current, total, message):
+                        try:
+                            self.result_q.put({
+                                'type': 'inpaint_progress',
+                                'id': task_id,
+                                'current': int(current or 0),
+                                'total': int(total or 0),
+                                'message': str(message),
+                                'level': 'info',
+                            })
+                        except Exception:
+                            pass
+                    core._inpaint_progress_callback = _worker_progress
                     res = core.inpaint(img, m, refinement=task.get('refinement', 'normal'), iterations=task.get('iterations'))
                     self.result_q.put({'type': 'inpaint_result', 'id': task_id, 'success': True, 'result': res})
                 except Exception as e:
                     try:
                         self.result_q.put({'type': 'inpaint_result', 'id': task_id, 'success': False, 'error': str(e)})
+                    except Exception:
+                        pass
+                finally:
+                    try:
+                        core._inpaint_progress_callback = None
                     except Exception:
                         pass
             else:
