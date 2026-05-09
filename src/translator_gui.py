@@ -2428,8 +2428,10 @@ Text to analyze:
                 "- Output the translated image at the same resolution as the input.\n"
             ),
             "NanoBanana_Image": (
-                "Edit the raw text in this image with a {target_lang} translation. "
-                "If there is nothing to translate, then just reply exactly with the word No.\n"
+                "This is an image editing task. "
+                "Edit this image by replacing all foreign-language text with its {target_lang} translation. "
+                "Do NOT return plain text or OCR — you MUST return the generated edited image. "
+                "If the image has no translatable text, reply exactly: No\n"
             ),
             "Original": "Return everything exactly as seen on the source."
         }

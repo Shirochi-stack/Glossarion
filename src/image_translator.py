@@ -4737,9 +4737,17 @@ class ImageTranslator:
                 print(f"   Error: {error_msg}")
                 print(f"   Error Type: {type(e).__name__}")
                 
-                # Handle user stop
-                if "stopped by user" in error_msg:
-                    print("   ❌ Image translation stopped by user")
+                # Handle user stop / graceful stop / cancellation
+                error_lower = error_msg.lower()
+                is_cancel = (
+                    "stopped by user" in error_lower
+                    or "graceful stop active" in error_lower
+                    or "operation cancelled" in error_lower
+                    or "cancelled by user" in error_lower
+                    or (isinstance(e, UnifiedClientError) and getattr(e, 'error_type', None) == 'cancelled')
+                )
+                if is_cancel:
+                    print(f"   ⏹️ Image translation stopped: {error_msg}")
                     return None
                 # Handle timeout specifically
                 if "took" in error_msg and "timeout:" in error_msg:

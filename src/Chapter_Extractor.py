@@ -850,7 +850,13 @@ def extract_chapters(zf, output_dir, parser=None, progress_callback=None, patter
         return []
     
     # Rename images to chapter-based format (chapter001_img_1.jpg, etc.)
-    chapters = _rename_images_to_chapter_format(chapters, output_dir, progress_callback)
+    # Skip renaming in image output mode — that mode copies raw HTML from the
+    # source EPUB which references the original image filenames.  Renaming
+    # would cause a mismatch between the HTML refs and the files on disk.
+    if os.environ.get("ENABLE_IMAGE_OUTPUT_MODE", "0") != "1":
+        chapters = _rename_images_to_chapter_format(chapters, output_dir, progress_callback)
+    else:
+        print("📸 Skipping image rename — image output mode preserves original names")
     
     chapters_info_path = os.path.join(output_dir, 'chapters_info.json')
     chapters_info = []
