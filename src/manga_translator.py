@@ -4520,7 +4520,7 @@ class MangaTranslator:
                             target_fmt = 'PNG'
 
                     if convert_needed:
-                        self._log(f"⚠️ Converting image to {target_fmt} for Azure compatibility")
+                        self._log(f"🔄 Converting image to {target_fmt} for Azure compatibility")
                         try:
                             if img2 is None:
                                 from PIL import Image as _PILImage
