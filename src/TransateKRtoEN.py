@@ -16624,6 +16624,7 @@ def main(log_callback=None, stop_callback=None):
 
                 gen_success = 0
                 gen_fail = 0
+                gen_skipped = 0
                 for img_idx, img_name in enumerate(image_files, 1):
                     if check_stop():
                         print("⏹️ Image generation stopped by user")
@@ -16633,7 +16634,11 @@ def main(log_callback=None, stop_callback=None):
                     try:
                         context = f"Image from source EPUB/PDF: {img_name}"
                         result = gen_image_translator.translate_image(img_path, context, check_stop)
-                        if result and "[Image Translation Error:" not in result:
+                        # Check if model replied "No" (nothing to translate) — keep original
+                        if result and ImageTranslator._is_ocr_no_response(result):
+                            gen_skipped += 1
+                            print(f"    ⏭️ Nothing to translate — keeping original image")
+                        elif result and "[Image Translation Error:" not in result:
                             gen_success += 1
                             print(f"    ✅ Generated successfully")
                         else:
@@ -16647,7 +16652,7 @@ def main(log_callback=None, stop_callback=None):
                         delay = float(os.getenv('IMAGE_API_DELAY', '1.0'))
                         time.sleep(delay)
 
-                print(f"\n🎨 Image generation complete: {gen_success} success, {gen_fail} failed")
+                print(f"\n🎨 Image generation complete: {gen_success} success, {gen_skipped} skipped (no text), {gen_fail} failed")
             elif image_files:
                 print(f"ℹ️ {len(image_files)} images found but image translation is disabled")
             else:

@@ -2426,6 +2426,10 @@ Text to analyze:
                 "- Do NOT add watermarks, signatures, or any extra markings.\n"
                 "- Output the translated image at the same resolution as the input.\n"
             ),
+            "NanoBanana_Image": (
+                "Edit the raw text in this image with an English translation {target_lang}. "
+                "If there is nothing to translate, then just reply exactly with the word No.\n"
+            ),
             "Original": "Return everything exactly as seen on the source."
         }
 
@@ -3649,6 +3653,7 @@ Recent translations to summarize:
             # RPG Maker GTool profiles
             "RPGMaker_GTool",
             "RPGMaker_GTool_Image",
+            "NanoBanana_Image",
         ]
         
         # Add missing required profiles while preserving existing profile positions
