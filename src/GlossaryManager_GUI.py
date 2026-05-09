@@ -4981,7 +4981,9 @@ Rules:
                    self._redo_btn.setEnabled(len(self._redo_stack) > 0)
                
            except Exception as e:
-               #QMessageBox.critical(parent, "Error", f"Failed to load glossary: {e}")
+               import traceback
+               print(f"⚠️ load_glossary_for_editing failed: {e}")
+               traceback.print_exc()
                self.append_log(f"❌ Failed to load glossary: {e}")
        
         def browse_glossary():
@@ -6404,10 +6406,11 @@ Rules:
                 print(f"⚠️ auto_select_current_glossary failed: {e}")
 
         self._refresh_glossary_editor = auto_select_current_glossary
-        # NOTE: Do NOT call auto_select_current_glossary() here — the tab
-        # setup isn't finished yet (toolbar, advanced widgets, etc. come
-        # after this point).  A deferred call is issued at the end of
-        # _setup_glossary_editor_tab instead.
+        # Populate the combo now (this finds glossary files and sets up the
+        # combo entries). load_glossary_for_editing() may fail because some
+        # widgets aren't created yet — that's OK; the deferred call at the
+        # end of this method will retry once everything is ready.
+        auto_select_current_glossary()
        
         # Quick toolbar above the entry list
         toolbar_widget = QWidget()
@@ -7140,6 +7143,11 @@ Rules:
             try:
                 path = self.editor_file_entry.text()
                 if not path or not os.path.exists(path):
+                    # No glossary loaded yet — poll for newly generated files
+                    try:
+                        auto_select_current_glossary()
+                    except Exception:
+                        pass
                     return
 
                 current_mtime = os.path.getmtime(path)
@@ -7326,10 +7334,17 @@ Rules:
         _auto_reload_timer.start()
         self._editor_auto_reload_timer = _auto_reload_timer
 
-        # Deferred initial load: all widgets now exist, so load the glossary.
-        # QTimer.singleShot(0, ...) runs after the current event-loop tick,
-        # ensuring the layout is fully realized before we populate the tree.
-        QTimer.singleShot(0, auto_select_current_glossary)
+        # Deferred retry: the mid-setup call above populates the combo but
+        # load_glossary_for_editing() may have silently failed because some
+        # widgets were not yet constructed.  Re-run after the event loop
+        # completes this tick so the tree actually renders.
+        def _deferred_editor_load():
+            try:
+                if self.glossary_tree.topLevelItemCount() == 0 and self.editor_file_combo.count() > 0:
+                    load_glossary_for_editing()
+            except Exception as e:
+                print(f"⚠️ Deferred glossary editor load failed: {e}")
+        QTimer.singleShot(0, _deferred_editor_load)
 
     def _on_tree_double_click(self, item, column_idx):
        """Handle double-click on treeview item for inline editing"""
