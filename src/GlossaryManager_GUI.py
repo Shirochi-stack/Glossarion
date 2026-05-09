@@ -1769,26 +1769,30 @@ class GlossaryManagerMixin:
             "{fields1} -&gt; \\x1F-separated columns/entry types list (recommended)\n"
             "{language} -&gt; target language\n"
             "{entries} -&gt; enabled custom entry types (comma list with ampersand)\n"
-            "{description_mandatory} -&gt; inserts 'description column is mandatory...' line when\n"
-            "                         'description' is in Custom Fields; stripped otherwise\n"
-            "{description_detailed} -&gt; inserts 'description column must contain detailed...' rule\n"
-            "                         when 'description' is in Custom Fields; stripped otherwise\n"
-            "{description_in_language} -&gt; inserts ' and description' (inline) so the 'Critical Requirement'\n"
-            "                          sentence reads 'translated name and description column...'\n"
-            "                          when 'description' is in Custom Fields; blank otherwise\n"
-            "{description_excluded_note} -&gt; appends ' (The description column is excluded from this\n"
-            "                            restriction)' to the REJECT-starters rule when 'description'\n"
-            "                            is in Custom Fields; blank otherwise\n"
-            "{description_example} -&gt; inserts example CSV lines WITH description column;\n"
-            "                       stripped when 'description' is not in Custom Fields\n"
-            "{example} -&gt; inserts example CSV lines WITHOUT description column;\n"
-            "            stripped when 'description' IS in Custom Fields\n"
-            "{description_name_split_example} -&gt; inserts name-split example lines WITH\n"
-            "                                  description; stripped when not in Custom Fields\n"
-            "{name_split_example} -&gt; inserts name-split example lines WITHOUT description;\n"
-            "                      stripped when 'description' IS in Custom Fields\n"
-            "{gender_instruction} -&gt; inserts dynamic gender rules based on which entry types\n"
-            "                      have 'has_gender' enabled; blank if none do"
+            "{description_mandatory} -&gt; 'The description column is mandatory and must be detailed'\n"
+            "                         active when 'description' in Custom Fields; stripped otherwise\n"
+            "{description_detailed} -&gt; 'The description column must contain detailed context/explanation'\n"
+            "                         active when 'description' in Custom Fields; stripped otherwise\n"
+            "{description_in_language} -&gt; ' and description'  (inline append)\n"
+            "                          active when 'description' in Custom Fields; blank otherwise\n"
+            "{description_excluded_note} -&gt; ' (The description column is excluded from this restriction)'\n"
+            "                            active when 'description' in Custom Fields; blank otherwise\n"
+            "{description_example} -&gt; 'For example:\\n"\
+            "  character,...,female,\"description text\"\\n  character,...,male,\"description text\"'\n"
+            "                       active when 'description' in Custom Fields; stripped otherwise\n"
+            "{example} -&gt; 'For example:\\n"\
+            "  character,...,female\\n  character,...,male\\n  term,...'\n"
+            "            active when 'description' NOT in Custom Fields; stripped otherwise\n"
+            "{description_name_split_example} -&gt; 'For character entries...split...Example output:\\n"\
+            "  character,상현,Sang-hyun,male,\"A knight of the royal guard\"\\n"\
+            "  character,김,Kim,,\"Surname of Sang-hyun\"\\n  Do NOT create...'\n"
+            "  active when 'description' in Custom Fields; stripped otherwise\n"
+            "{name_split_example} -&gt; 'For character entries...split...Example output:\\n"\
+            "  character,상현,Sang-hyun,male\\n"\
+            "  character,김,Kim,\\n  Do NOT create...'\n"
+            "  active when 'description' NOT in Custom Fields; stripped otherwise\n"
+            "{gender_instruction} -&gt; 'The gender column applies only to [types] entries —\n"
+            "                      determine gender from context...'; blank if no types have gender"
             "</pre></qt>"
         )
         prompt_frame_layout.addWidget(placeholders_line)
@@ -3451,16 +3455,22 @@ Rules:
             "{max_names} -&gt; max character names\n"
             "{max_titles} -&gt; max titles\n"
             "{marker} -&gt; context window marker count\n"
-            "{description_example} -&gt; inserts example CSV lines WITH description column;\n"
-            "                       stripped when 'description' is not in Custom Fields\n"
-            "{example} -&gt; inserts example CSV lines WITHOUT description column;\n"
-            "            stripped when 'description' IS in Custom Fields\n"
-            "{description_name_split_example} -&gt; inserts name-split example lines WITH\n"
-            "                                  description; stripped when not in Custom Fields\n"
-            "{name_split_example} -&gt; inserts name-split example lines WITHOUT description;\n"
-            "                      stripped when 'description' IS in Custom Fields\n"
-            "{gender_instruction} -&gt; inserts dynamic gender rules based on which entry types\n"
-            "                      have 'has_gender' enabled; blank if none do"
+            "{description_example} -&gt; 'For example:\\n"\
+            "  character,...,female,\"description text\"\\n  character,...,male,\"description text\"'\n"
+            "                       active when Include Description Column is ON; stripped otherwise\n"
+            "{example} -&gt; 'For example:\\n"\
+            "  character,...,female\\n  character,...,male\\n  term,...'\n"
+            "            active when Include Description Column is OFF; stripped otherwise\n"
+            "{description_name_split_example} -&gt; 'For character entries...split...Example output:\\n"\
+            "  character,상현,Sang-hyun,male,\"A knight of the royal guard\"\\n"\
+            "  character,김,Kim,,\"Surname of Sang-hyun\"\\n  Do NOT create...'\n"
+            "  active when Include Description Column is ON; stripped otherwise\n"
+            "{name_split_example} -&gt; 'For character entries...split...Example output:\\n"\
+            "  character,상현,Sang-hyun,male\\n"\
+            "  character,김,Kim,\\n  Do NOT create...'\n"
+            "  active when Include Description Column is OFF; stripped otherwise\n"
+            "{gender_instruction} -&gt; 'The gender column applies only to [types] entries —\n"
+            "                      determine gender from context...'; blank if no types have gender"
             "</pre></qt>"
         )
         glossary_prompt_frame_layout.addWidget(placeholder_line)
