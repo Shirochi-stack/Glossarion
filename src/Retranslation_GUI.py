@@ -5473,7 +5473,16 @@ class RetranslationMixin:
             image_gen = prog.get('image_gen')
             if not isinstance(image_gen, dict):
                 return
-            # The presence of image_gen in the progress dict is proof of image output mode.
+            # Hide the row when the user switches output mode away from 'image'.
+            # Check the live GUI combo directly — it's the most reliable source.
+            combo = getattr(self, '_output_mode_combo', None)
+            if combo is not None:
+                try:
+                    live_mode = {0: 'text', 1: 'vision', 2: 'image', 3: 'video', 4: 'audio', 5: 'refinement'}.get(combo.currentIndex(), 'text')
+                    if live_mode != 'image':
+                        return
+                except Exception:
+                    pass
             # Verify the source is epub/pdf using the stored source_file or the current file.
             source_file = str(image_gen.get('source_file') or data.get('file_path') or '')
             if source_file and not source_file.lower().endswith(('.epub', '.pdf')):
