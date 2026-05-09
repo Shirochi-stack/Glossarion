@@ -16862,6 +16862,12 @@ def main(log_callback=None, stop_callback=None):
                     if status == 'cached_success':
                         gen_success += 1
                         _igen_progress_image(img_idx, img_name, 'completed')
+                        # Extraction may have overwritten images/ with raw originals —
+                        # restore the generated version from the archive.
+                        archived = os.path.join(images_generated_dir, img_name)
+                        if os.path.isfile(archived):
+                            dest = os.path.join(images_dir, img_name)
+                            _shutil_gen.copy2(archived, dest)
                         return
                     if status == 'cached_skip':
                         gen_skipped += 1

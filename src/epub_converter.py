@@ -2152,8 +2152,10 @@ class EPUBCompiler:
             # Load metadata
             metadata = self._load_metadata()
 
-            # Translate metadata if configured
-            if hasattr(self, 'metadata_translator') and self.metadata_translator:
+            # Translate metadata if configured (skip in image output passthrough mode —
+            # content is not translated, only images are edited)
+            _image_passthrough = os.environ.get('IMAGE_MODE_EPUB_PASSTHROUGH', '0') == '1'
+            if hasattr(self, 'metadata_translator') and self.metadata_translator and not _image_passthrough:
                 if hasattr(self, 'translate_metadata_fields') and any(self.translate_metadata_fields.values()):
                     self.log("🌐 Translating metadata fields...")
                     
