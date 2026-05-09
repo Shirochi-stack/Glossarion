@@ -109,6 +109,8 @@ torchvision==0.25.0+cpu
 onnxruntime
 safetensors
 transformers
+diffusers
+accelerate
 huggingface-hub<1.0.0
 
 # Encryption/Decryption
