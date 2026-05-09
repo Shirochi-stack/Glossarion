@@ -1726,23 +1726,51 @@ class RetranslationMixin:
                     return ch_num
                 return 0
 
-            def _gp_auto_completed_indices():
-                result = set()
-                for ci, fname in (panel_state.get('chapter_map') or {}).items():
+            def _gp_filename_keys(name):
+                """Normalize a filename into a set of lowercase lookup keys."""
+                base = os.path.basename(str(name or ""))
+                if not base:
+                    return set()
+                stem = os.path.splitext(base)[0]
+                keys = {base.lower(), stem.lower()}
+                if stem.lower().startswith('response_'):
+                    keys.add(stem[9:].lower())
+                return {k for k in keys if k}
+
+            def _rebuild_reverse_lookups():
+                """Rebuild O(1) lookup dicts from chapter_map. Call after chapter_map changes."""
+                cmap = panel_state.get('chapter_map') or {}
+                # filename key -> chapter index (first wins)
+                fk_to_ci = {}
+                for ci, mapped_name in cmap.items():
+                    for key in _gp_filename_keys(mapped_name):
+                        fk_to_ci.setdefault(key, ci)
+                panel_state['_fk_to_ci'] = fk_to_ci
+                # actual_num (from filename) -> list of chapter indices
+                anum_to_ci = {}
+                for ci, fname in cmap.items():
+                    num = _gp_filename_chapter_num(fname)
+                    if num is not None:
+                        anum_to_ci.setdefault(num, []).append(ci)
+                panel_state['_anum_to_ci'] = anum_to_ci
+                # auto-completed (cover pages) — cached set
+                auto_comp = set()
+                for ci, fname in cmap.items():
                     stem = os.path.splitext(os.path.basename(str(fname or "")))[0].lower()
                     if stem == 'cover':
-                        result.add(ci)
-                return result
+                        auto_comp.add(ci)
+                panel_state['_auto_completed'] = auto_comp
+
+            def _gp_auto_completed_indices():
+                return panel_state.get('_auto_completed') or set()
 
             def _gp_index_for_actual_num(actual_num, _d=None):
                 try:
                     actual_num = int(actual_num)
                 except (TypeError, ValueError):
                     return None
-                matches = []
-                for ci, fname in (panel_state.get('chapter_map') or {}).items():
-                    if _gp_filename_chapter_num(fname) == actual_num:
-                        matches.append(ci)
+                # O(1) reverse lookup from cached dict
+                matches = list(panel_state.get('_anum_to_ci', {}).get(actual_num, []))
                 if not matches:
                     chapter_numbers = (_d or gp_data).get('chapter_numbers', {})
                     if isinstance(chapter_numbers, dict):
@@ -1760,27 +1788,17 @@ class RetranslationMixin:
                 if not isinstance(info, dict):
                     info = {}
 
-                def _gp_filename_keys(name):
-                    base = os.path.basename(str(name or ""))
-                    if not base:
-                        return set()
-                    stem = os.path.splitext(base)[0]
-                    keys = {base.lower(), stem.lower()}
-                    if stem.lower().startswith('response_'):
-                        keys.add(stem[9:].lower())
-                    return {k for k in keys if k}
-
                 had_filename_anchor = False
+                fk_to_ci = panel_state.get('_fk_to_ci') or {}
                 for fname_key in ('output_file', 'original_basename', 'chapter_file', 'source_filename', 'filename'):
                     fname = os.path.basename(str(info.get(fname_key, "") or ""))
                     if not fname:
                         continue
                     had_filename_anchor = True
-                    fname_keys = _gp_filename_keys(fname)
-                    for ci, mapped_name in (panel_state.get('chapter_map') or {}).items():
-                        mapped_keys = _gp_filename_keys(mapped_name)
-                        if fname_keys & mapped_keys:
-                            return ci
+                    # O(1) lookup via reverse dict instead of scanning chapter_map
+                    for k in _gp_filename_keys(fname):
+                        if k in fk_to_ci:
+                            return fk_to_ci[k]
                 if had_filename_anchor:
                     return None
 
@@ -1855,7 +1873,7 @@ class RetranslationMixin:
                 comp -= fail
                 return comp, fail, merg
 
-            def _gp_in_progress_set(_d):
+            def _gp_in_progress_set(_d, _precomputed_sets=None):
                 if not isinstance(_d, dict):
                     _d = {}
                 result = set()
@@ -1873,12 +1891,15 @@ class RetranslationMixin:
                     ci = _gp_index_for_progress_value(value, _d)
                     if ci is not None:
                         result.add(ci)
-                comp, fail, merg = _gp_sets(_d)
+                if _precomputed_sets:
+                    comp, fail, merg = _precomputed_sets
+                else:
+                    comp, fail, merg = _gp_sets(_d)
                 return result - comp - fail - merg
 
             def _gp_status_cache(_d):
                 comp, fail, merg = _gp_sets(_d)
-                in_prog = _gp_in_progress_set(_d)
+                in_prog = _gp_in_progress_set(_d, _precomputed_sets=(comp, fail, merg))
                 issues = _gp_qa_issue_map(_d)
                 qa_failed = set()
                 chapters = _d.get('chapters', {}) if isinstance(_d, dict) else {}
@@ -2103,6 +2124,15 @@ class RetranslationMixin:
                         panel_state['chapter_map'] = {}
                         panel_state['spine_index_map'] = {}
             
+            # Build O(1) reverse lookups from chapter_map
+            _rebuild_reverse_lookups()
+            
+            # Track file mtime for dirty-checking on refresh
+            try:
+                panel_state['_last_mtime'] = os.path.getmtime(gp_path) if os.path.isfile(gp_path) else 0
+            except OSError:
+                panel_state['_last_mtime'] = 0
+            
             panel = QWidget(parent_widget)
             p_layout = QVBoxLayout(panel)
             p_layout.setContentsMargins(4, 4, 4, 4)
@@ -2116,7 +2146,7 @@ class RetranslationMixin:
             
             # Stats row (clickable)
             _comp_set_init, _fail_set_init, _merg_set_init = _gp_sets(gp_data)
-            _in_prog_set_init = _gp_in_progress_set(gp_data)
+            _in_prog_set_init = _gp_in_progress_set(gp_data, _precomputed_sets=(_comp_set_init, _fail_set_init, _merg_set_init))
             # Completed count excludes chapters that are also merged
             n_completed = len(_comp_set_init - _merg_set_init - _fail_set_init)
             n_failed = len(_fail_set_init)
@@ -2245,7 +2275,7 @@ class RetranslationMixin:
             # Helper to refresh stats labels from a loaded progress dict
             def _refresh_stats_from_dict(_d):
                 _comp2, _fail2, _merg2 = _gp_sets(_d)
-                _prog2 = _gp_in_progress_set(_d)
+                _prog2 = _gp_in_progress_set(_d, _precomputed_sets=(_comp2, _fail2, _merg2))
                 _total = panel_state['total']
                 lbl_total.setText(f"Total: {_total} | ")
                 lbl_gp_completed.setText(f"✅ Completed: {len(_comp2 - _merg2)} | ")
@@ -2590,10 +2620,22 @@ class RetranslationMixin:
                     _rp = _find_gp_for_file(fp)
                     if not _rp or not os.path.isfile(_rp):
                         return
+                    
+                    # Dirty-check: skip full recomputation if file hasn't changed
+                    # and the special-files toggle is the same
+                    try:
+                        _cur_mtime = os.path.getmtime(_rp)
+                    except OSError:
+                        _cur_mtime = 0
+                    _cur_ts = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
+                    if (_cur_mtime == panel_state.get('_last_mtime', -1)
+                            and _cur_ts == panel_state.get('translate_special')):
+                        return  # Nothing changed — skip
+                    panel_state['_last_mtime'] = _cur_mtime
+                    
                     _d = _gp_load_progress_dict(_rp)
                     
                     # Check if TRANSLATE_SPECIAL_FILES toggle changed — rebuild chapter map if so
-                    _cur_ts = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
                     if _cur_ts != panel_state['translate_special']:
                         panel_state['translate_special'] = _cur_ts
                         new_cmap, new_total, new_spine_idx = _read_spine_map(fp, _cur_ts)
@@ -2605,12 +2647,14 @@ class RetranslationMixin:
                             _comp0, _fail0, _merg0 = _gp_sets(_d)
                             _all_idx = _comp0 | _fail0 | _merg0
                             panel_state['total'] = (max(_all_idx, default=0) + 1) if _all_idx else 1
+                        # Rebuild reverse lookups after chapter_map change
+                        _rebuild_reverse_lookups()
                         _rebuild_listbox(_d)
                         _refresh_stats_from_dict(_d)
                         return
                     
                     _comp, _fail, _merg = _gp_sets(_d)
-                    _prog = _gp_in_progress_set(_d)
+                    _prog = _gp_in_progress_set(_d, _precomputed_sets=(_comp, _fail, _merg))
                     _total = panel_state['total']
                     _cmap = panel_state['chapter_map']
                     
@@ -2942,9 +2986,14 @@ class RetranslationMixin:
         glossary_progress_btn.clicked.connect(_show_glossary_progress)
         title_layout.addWidget(glossary_progress_btn)
         
-        # Periodic check: show/hide button based on file existence (2s)
+        # Periodic check: show/hide button based on file existence (3s)
+        # Uses single-pass caching to avoid redundant filesystem scans
         def _check_glossary_btn_visibility():
             try:
+                # Skip if parent dialog is not visible (no point scanning filesystem)
+                if hasattr(dialog, 'isVisible') and not dialog.isVisible():
+                    return
+                
                 # Check all EPUBs from multi-file dialog, or just this file
                 all_epubs = [file_path]
                 if parent_dialog and hasattr(parent_dialog, '_epub_files_in_dialog'):
@@ -2952,15 +3001,18 @@ class RetranslationMixin:
                 if not all_epubs:
                     all_epubs = [file_path]
                 
-                any_exists = any(_find_gp_for_file(fp) for fp in all_epubs)
                 is_multi = len(all_epubs) > 1
+                # Single pass: resolve all paths once, cache results
+                gp_results = {fp: _find_gp_for_file(fp) for fp in all_epubs}
+                found_paths = {fp: gp for fp, gp in gp_results.items() if gp}
+                any_exists = bool(found_paths)
                 # In multi-file mode, always show button (dialog shows all EPUBs);
                 # in single-file mode, only show when a progress file exists.
                 glossary_progress_btn.setVisible(any_exists or is_multi)
                 if any_exists:
-                    count = sum(1 for fp in all_epubs if _find_gp_for_file(fp))
+                    count = len(found_paths)
                     if count == 1:
-                        gp = next((_find_gp_for_file(fp) for fp in all_epubs if _find_gp_for_file(fp)), None)
+                        gp = next(iter(found_paths.values()))
                         glossary_progress_btn.setToolTip(f"View glossary extraction progress\n{gp}")
                     else:
                         glossary_progress_btn.setToolTip(f"View glossary extraction progress ({count}/{len(all_epubs)} files)")
@@ -2971,7 +3023,7 @@ class RetranslationMixin:
                 _gp_vis_timer.stop()
         
         _gp_vis_timer = QTimer()
-        _gp_vis_timer.setInterval(2000)
+        _gp_vis_timer.setInterval(3000)
         _gp_vis_timer.timeout.connect(_check_glossary_btn_visibility)
         _gp_vis_timer.start()
         # Parent timer to container so it dies with the dialog
