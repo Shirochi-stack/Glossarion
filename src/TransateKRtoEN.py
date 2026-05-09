@@ -15118,7 +15118,9 @@ def main(log_callback=None, stop_callback=None):
         print("TRANSLATION_COMPLETE_SIGNAL")
         return
         
-    if "title" in metadata and config.TRANSLATE_BOOK_TITLE and not metadata.get("title_translated", False):
+    if config.OUTPUT_MODE == "image" and not is_text_file:
+        print("⏭️ Skipping title/metadata translation (image output mode)")
+    elif "title" in metadata and config.TRANSLATE_BOOK_TITLE and not metadata.get("title_translated", False):
         # Skip title translation for non-book file types
         _non_book_ext = input_path.lower().endswith(('.csv', '.json', '.md'))
         is_txt = input_path.lower().endswith(('.txt',))
@@ -15149,13 +15151,15 @@ def main(log_callback=None, stop_callback=None):
                 print(f"⚠️ Title unchanged (interrupted or failed) — will retry on next run")
             
     # Translate other metadata fields if configured
+    # (skip entirely in image output mode — we're just copying HTML as-is)
+    _skip_metadata_translation = config.OUTPUT_MODE == "image" and not is_text_file
     translate_metadata_fields_str = os.getenv('TRANSLATE_METADATA_FIELDS', '{}')
     metadata_translation_mode = os.getenv('METADATA_TRANSLATION_MODE', 'together')
 
     try:
         translate_metadata_fields = json.loads(translate_metadata_fields_str)
         
-        if translate_metadata_fields and any(translate_metadata_fields.values()):
+        if not _skip_metadata_translation and translate_metadata_fields and any(translate_metadata_fields.values()):
             # Filter out fields that should be translated (excluding already translated fields)
             fields_to_translate = {}
             skipped_fields = []
@@ -16562,6 +16566,7 @@ def main(log_callback=None, stop_callback=None):
     # Copies all HTML as-is, sends extracted images for image generation,
     # copies original CSS, and builds the final EPUB bypassing QA/CSS/special-file toggles.
     if config.OUTPUT_MODE == "image" and not is_text_file:
+        translation_start_time = time.time()
         print("\n" + "=" * 50)
         print("🖼️ IMAGE OUTPUT MODE — EPUB/PDF PASSTHROUGH")
         print("=" * 50)
@@ -16570,30 +16575,64 @@ def main(log_callback=None, stop_callback=None):
         os.environ["IMAGE_MODE_EPUB_PASSTHROUGH"] = "1"
 
         # 1) Copy raw chapter HTML as response_ files so epub converter finds them
+        #    Read bytes directly from the source EPUB zip to get truly unmodified markup.
+        epub_path = os.getenv("EPUB_PATH", "").strip()
+        _epub_zip = None
+        if epub_path and os.path.isfile(epub_path) and epub_path.lower().endswith(('.epub',)):
+            try:
+                import zipfile as _zf
+                _epub_zip = _zf.ZipFile(epub_path, 'r')
+            except Exception as _ze:
+                print(f"  ⚠️ Could not open source EPUB for raw copy: {_ze}")
+
         copied_count = 0
         for c in chapters:
             if check_stop():
+                if _epub_zip:
+                    _epub_zip.close()
                 return
             actual_num = c.get('actual_chapter_num', c.get('num'))
-            # Use the exact original markup — never process through extraction
-            original_markup = (
-                c.get("original_html")
-                or c.get("source_html")
-                or c.get("raw_html")
-                or c.get("body")
-                or ""
-            )
+
+            # Try reading the exact raw bytes from the source EPUB zip
+            raw_markup = None
+            zip_internal_path = c.get("filename", "")
+            if _epub_zip and zip_internal_path:
+                try:
+                    raw_bytes = _epub_zip.read(zip_internal_path)
+                    # Decode, trying common encodings
+                    for enc in ('utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr'):
+                        try:
+                            raw_markup = raw_bytes.decode(enc)
+                            break
+                        except (UnicodeDecodeError, LookupError):
+                            continue
+                except Exception:
+                    pass
+
+            # Fallback to in-memory fields if zip read failed
+            if not raw_markup:
+                raw_markup = (
+                    c.get("original_html")
+                    or c.get("source_html")
+                    or c.get("raw_html")
+                    or c.get("body")
+                    or ""
+                )
+
             fname = FileUtilities.create_chapter_filename(c, actual_num)
             output_path = os.path.join(out, fname)
             with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(original_markup)
+                f.write(raw_markup)
 
-            content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
+            content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c.get("body", ""))
             idx = c.get("_progress_idx", c.get("num", 0))
             progress_manager.update(idx, actual_num, content_hash, fname, status="completed", chapter_obj=c)
             copied_count += 1
+
+        if _epub_zip:
+            _epub_zip.close()
         progress_manager.save()
-        print(f"✅ Copied {copied_count} HTML files as-is (no translation)")
+        print(f"✅ Copied {copied_count} HTML files as-is from source EPUB (no translation)")
 
         # 2) Copy CSS from source epub to css subfolder (already extracted by Chapter_Extractor)
         css_dir = os.path.join(out, "css")
@@ -16613,6 +16652,14 @@ def main(log_callback=None, stop_callback=None):
             ]
             if image_files and config.ENABLE_IMAGE_TRANSLATION:
                 print(f"\n🎨 Sending {len(image_files)} images for image generation...")
+
+                # Disable OCR-specific preprocessing for image generation —
+                # compression and watermark removal are meant for OCR, not gen.
+                _saved_compression = os.environ.get("ENABLE_IMAGE_COMPRESSION")
+                _saved_watermark = os.environ.get("ENABLE_WATERMARK_REMOVAL")
+                os.environ["ENABLE_IMAGE_COMPRESSION"] = "0"
+                os.environ["ENABLE_WATERMARK_REMOVAL"] = "0"
+
                 gen_system = config.get_system_prompt(actual_merge_count=1)
                 gen_image_translator = ImageTranslator(
                     client, out, config.PROFILE_NAME, gen_system,
@@ -16653,6 +16700,16 @@ def main(log_callback=None, stop_callback=None):
                         time.sleep(delay)
 
                 print(f"\n🎨 Image generation complete: {gen_success} success, {gen_skipped} skipped (no text), {gen_fail} failed")
+
+                # Restore OCR preprocessing env vars
+                if _saved_compression is not None:
+                    os.environ["ENABLE_IMAGE_COMPRESSION"] = _saved_compression
+                else:
+                    os.environ.pop("ENABLE_IMAGE_COMPRESSION", None)
+                if _saved_watermark is not None:
+                    os.environ["ENABLE_WATERMARK_REMOVAL"] = _saved_watermark
+                else:
+                    os.environ.pop("ENABLE_WATERMARK_REMOVAL", None)
             elif image_files:
                 print(f"ℹ️ {len(image_files)} images found but image translation is disabled")
             else:

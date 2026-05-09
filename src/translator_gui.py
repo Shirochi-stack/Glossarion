@@ -1224,6 +1224,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             "Chinese_html2text",
             "RPGMaker_GTool",
             "RPGMaker_GTool_Image",
+            "NanoBanana_Image",
         }
         return protected
 
