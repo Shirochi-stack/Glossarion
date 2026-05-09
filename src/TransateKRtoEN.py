@@ -16399,15 +16399,18 @@ def main(log_callback=None, stop_callback=None):
         # Skip configured special files if translation is disabled.
         # Display/progress chapter 0 is cosmetic and must not imply special-file skipping.
         # IMPORTANT: Never skip text-file chapters — "special files" only apply to EPUBs.
+        # When TRANSLATE_ALL_NUMBERED_HTML is on, files with a number
+        # in their filename bypass the skip (translation context only).
         if not translate_special and not is_text_file:
             name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
             if _is_configured_special_file(name):
-                # Track skipped special files
-                if not hasattr(config, '_skipped_special_files'):
-                    config._skipped_special_files = []
-                config._skipped_special_files.append(c.get('original_basename', f'Chapter {actual_num}'))
-                chunks_per_chapter[idx] = 0
-                continue
+                if not (_translate_all_numbered and _has_number_in_filename(name)):
+                    # Track skipped special files
+                    if not hasattr(config, '_skipped_special_files'):
+                        config._skipped_special_files = []
+                    config._skipped_special_files.append(c.get('original_basename', f'Chapter {actual_num}'))
+                    chunks_per_chapter[idx] = 0
+                    continue
 
         if start is not None:
             range_match = c.get('_range_allowed_for_translation', True)
@@ -16674,11 +16677,14 @@ def main(log_callback=None, stop_callback=None):
                 actual_num = c.get('actual_chapter_num', c['num'])  # Now this will exist!
             
             # Skip configured special files if translation is disabled.
+            # When TRANSLATE_ALL_NUMBERED_HTML is on, files with a number
+            # in their filename bypass the skip (translation context only).
             raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
             if not translate_special and not is_text_file:
                 name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
                 if _is_configured_special_file(name):
-                    continue
+                    if not (_translate_all_numbered and _has_number_in_filename(name)):
+                        continue
             
             # Skip chapters outside the range
             if start is not None:
