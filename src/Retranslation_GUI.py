@@ -1322,6 +1322,7 @@ class RetranslationMixin:
             chapter_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
 
         self._append_pdf_ocr_display_info({'prog': prog, 'file_path': file_path, 'output_dir': output_dir}, chapter_display_info)
+        self._append_image_gen_display_info({'prog': prog, 'file_path': file_path, 'output_dir': output_dir}, chapter_display_info)
         
         # =====================================================
         # CREATE UI
@@ -5360,6 +5361,7 @@ class RetranslationMixin:
         chapter_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
         
         self._append_pdf_ocr_display_info(data, chapter_display_info)
+        self._append_image_gen_display_info(data, chapter_display_info)
 
         # Update data with rebuilt list
         data['chapter_display_info'] = chapter_display_info
@@ -5461,6 +5463,64 @@ class RetranslationMixin:
             })
         except Exception as e:
             print(f"Warning: could not read PDF OCR progress: {e}")
+
+    def _append_image_gen_display_info(self, data, chapter_display_info):
+        """Add a lightweight summary row for image generation progress (image output mode)."""
+        try:
+            prog = data.get('prog') or {}
+            image_gen = prog.get('image_gen')
+            if not isinstance(image_gen, dict):
+                return
+            # The presence of image_gen in the progress dict is proof of image output mode.
+            # Verify the source is epub/pdf using the stored source_file or the current file.
+            source_file = str(image_gen.get('source_file') or data.get('file_path') or '')
+            if source_file and not source_file.lower().endswith(('.epub', '.pdf')):
+                return
+
+            total = int(image_gen.get('total') or 0)
+            if total <= 0:
+                return
+            done = int(image_gen.get('done') or 0)
+            success = int(image_gen.get('success') or 0)
+            skipped = int(image_gen.get('skipped') or 0)
+            failed = int(image_gen.get('failed') or 0)
+            status = str(image_gen.get('status') or 'in_progress').lower().strip()
+            if status not in ('completed', 'failed', 'cancelled'):
+                status = 'in_progress'
+            elif status == 'cancelled':
+                status = 'failed'
+
+            source_file = os.path.basename(str(image_gen.get('source_file') or data.get('file_path') or 'EPUB'))
+            label_bits = [f"{min(done, total)}/{total} images"]
+            if success:
+                label_bits.append(f"{success} generated")
+            if skipped:
+                label_bits.append(f"{skipped} skipped")
+            if failed:
+                label_bits.append(f"{failed} failed")
+            output_label = f"🎨 Image Generation: {source_file} ({', '.join(label_bits)})"
+
+            info = dict(image_gen)
+            info['status'] = status
+            info['image_gen_progress'] = {
+                'done': min(done, total),
+                'total': total,
+                'label': f"{min(done, total)}/{total}",
+            }
+            chapter_display_info.insert(0, {
+                'key': '__image_gen__',
+                'num': 0,
+                'info': info,
+                'output_file': output_label,
+                'status': status,
+                'duplicate_count': 1,
+                'entries': [],
+                'is_special': False,
+                'progress_key': '__image_gen__',
+                'image_gen': True,
+            })
+        except Exception as e:
+            print(f"Warning: could not read image gen progress: {e}")
     
     def _current_progress_output_mode(self, data=None, entry=None):
         """Prefer the live GUI output mode over stale mode values saved in progress JSON."""

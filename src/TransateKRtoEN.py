@@ -16675,6 +16675,91 @@ def main(log_callback=None, stop_callback=None):
                 images_generated_dir = os.path.join(out, "images_generated")
                 os.makedirs(images_generated_dir, exist_ok=True)
 
+                # ── Image generation progress tracking (mirrors pdf_ocr pattern) ──
+                import threading as _img_threading
+                _igen_progress_lock = _img_threading.Lock()
+                _igen_progress_last_save = [0.0]
+
+                def _igen_progress_save(force=False):
+                    if progress_manager is None:
+                        return
+                    now = time.time()
+                    if not force and now - _igen_progress_last_save[0] < 2.0:
+                        return
+                    _igen_progress_last_save[0] = now
+                    try:
+                        progress_manager.save()
+                    except Exception:
+                        pass
+
+                def _igen_progress_init():
+                    if progress_manager is None:
+                        return
+                    with _igen_progress_lock:
+                        progress_manager.prog["image_gen"] = {
+                            "source_file": os.path.abspath(input_path),
+                            "status": "in_progress",
+                            "total": len(image_files),
+                            "done": 0,
+                            "success": 0,
+                            "skipped": 0,
+                            "failed": 0,
+                            "last_updated": time.time(),
+                            "images": progress_manager.prog.get("image_gen", {}).get("images", {}),
+                        }
+                        images_dict = progress_manager.prog["image_gen"].setdefault("images", {})
+                        for idx, img_name in enumerate(image_files, 1):
+                            key = str(idx)
+                            img_entry = images_dict.get(key) if isinstance(images_dict.get(key), dict) else {}
+                            img_entry.update({
+                                "index": idx,
+                                "image_file": img_name,
+                                "status": img_entry.get("status", "pending"),
+                                "last_updated": img_entry.get("last_updated", time.time()),
+                            })
+                            images_dict[key] = img_entry
+                        _igen_progress_save(force=True)
+
+                def _igen_progress_image(idx, img_name, status, error=None):
+                    if progress_manager is None:
+                        return
+                    with _igen_progress_lock:
+                        root = progress_manager.prog.setdefault("image_gen", {})
+                        root["status"] = "in_progress"
+                        root["total"] = len(image_files)
+                        root["done"] = gen_success + gen_fail + gen_skipped
+                        root["success"] = gen_success
+                        root["skipped"] = gen_skipped
+                        root["failed"] = gen_fail
+                        root["last_updated"] = time.time()
+                        images_dict = root.setdefault("images", {})
+                        entry = {
+                            "index": idx,
+                            "image_file": img_name,
+                            "status": status,
+                            "last_updated": time.time(),
+                        }
+                        if error:
+                            entry["error"] = str(error)
+                        images_dict[str(idx)] = entry
+                        _igen_progress_save()
+
+                def _igen_progress_finish(status):
+                    if progress_manager is None:
+                        return
+                    with _igen_progress_lock:
+                        root = progress_manager.prog.setdefault("image_gen", {})
+                        root["status"] = status
+                        root["total"] = len(image_files)
+                        root["done"] = gen_success + gen_fail + gen_skipped
+                        root["success"] = gen_success
+                        root["skipped"] = gen_skipped
+                        root["failed"] = gen_fail
+                        root["last_updated"] = time.time()
+                        _igen_progress_save(force=True)
+
+                _igen_progress_init()
+
                 # ── Parallel-aware image generation ──────────────────────────
                 _img_batch_enabled = config.BATCH_TRANSLATION and config.BATCH_SIZE > 1
                 _img_batch_size = min(len(image_files), config.BATCH_SIZE) if _img_batch_enabled else 1
@@ -16682,7 +16767,6 @@ def main(log_callback=None, stop_callback=None):
                 import re as _re_gen
                 import shutil as _shutil_gen
                 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
-                import threading as _img_threading
 
                 _gen_lock = _img_threading.Lock()
 
@@ -16710,11 +16794,14 @@ def main(log_callback=None, stop_callback=None):
                     nonlocal gen_success, gen_fail, gen_skipped
                     if status == 'skipped':
                         gen_skipped += 1
+                        _igen_progress_image(img_idx, img_name, 'skipped')
                         return
                     if status == 'fail':
                         gen_fail += 1
+                        _igen_progress_image(img_idx, img_name, 'failed')
                         return
                     gen_success += 1
+                    _igen_progress_image(img_idx, img_name, 'completed')
                     if not result:
                         return
                     img_path = os.path.join(images_dir, img_name)
@@ -16848,6 +16935,10 @@ def main(log_callback=None, stop_callback=None):
                             delay = float(os.getenv('IMAGE_API_DELAY', '1.0'))
                             time.sleep(delay)
 
+                _final_status = 'completed' if gen_fail == 0 else 'failed'
+                if check_stop():
+                    _final_status = 'cancelled'
+                _igen_progress_finish(_final_status)
                 print(f"\n🎨 Image generation complete: {gen_success} success, {gen_skipped} skipped (no text), {gen_fail} failed")
 
                 # Restore OCR preprocessing env vars
