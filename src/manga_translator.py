@@ -14823,10 +14823,9 @@ class MangaTranslator:
                         # The main flow will wait for it and get the result
                         return self._inpainting_future
                     
-                    # If we get here, early inpainting was NOT started
-                    # This only happens when RT-DETR/bubble detection is disabled
-                    self._log(f"⚠️ No early inpainting (bubble detection disabled or no bubbles found)")
-                    
+                    # If we get here, early inpainting was not pre-started.
+                    # That is normal for reused/precomputed OCR regions; regular inpainting runs below.
+
                     # CRITICAL: Re-check the skip flag from config at runtime (don't use cached value)
                     # This ensures toggle changes are respected even after MangaTranslator initialization
                     skip_flag = False
