@@ -3484,6 +3484,11 @@ class MangaTranslationTab(QObject):
         sort_btn_layout.addStretch()
         file_frame_layout.addWidget(sort_btn_frame)
         
+        self.manga_loaded_directory_label = QLabel("Loaded directory: none")
+        self.manga_loaded_directory_label.setStyleSheet("color: #b8c7d9; font-size: 8pt;")
+        self.manga_loaded_directory_label.setWordWrap(True)
+        file_frame_layout.addWidget(self.manga_loaded_directory_label)
+
         # File listbox (QListWidget handles scrolling automatically)
         self.file_listbox = QListWidget()
         self.file_listbox.setSelectionMode(QListWidget.ExtendedSelection)
@@ -6449,6 +6454,7 @@ class MangaTranslationTab(QObject):
         self.manga_custom_glossary_path = config.get('manga_custom_glossary_path', '')
         self.manga_generated_glossary_path = config.get('manga_generated_glossary_path', '')
         self.manga_glossary_auto_load_suppressed = config.get('manga_glossary_auto_load_suppressed', False)
+        self.manga_glossary_auto_load_suppressed_root = config.get('manga_glossary_auto_load_suppressed_root', '')
         self.compress_glossary_prompt_value = self._get_compress_glossary_prompt_value()
         self.manga_loaded_glossary_text = ''
         self.manga_generated_glossary_text = ''
@@ -6701,6 +6707,8 @@ class MangaTranslationTab(QObject):
                 self.main_gui.config['manga_generated_glossary_path'] = self.manga_generated_glossary_path
             if hasattr(self, 'manga_glossary_auto_load_suppressed'):
                 self.main_gui.config['manga_glossary_auto_load_suppressed'] = bool(self.manga_glossary_auto_load_suppressed)
+            if hasattr(self, 'manga_glossary_auto_load_suppressed_root'):
+                self.main_gui.config['manga_glossary_auto_load_suppressed_root'] = self.manga_glossary_auto_load_suppressed_root
             if hasattr(self, 'compress_glossary_prompt_value'):
                 self._sync_compress_glossary_prompt_setting(self.compress_glossary_prompt_value)
             
@@ -7273,15 +7281,259 @@ class MangaTranslationTab(QObject):
                 label.setText("Loaded glossary: none")
                 label.setToolTip("")
 
+    def _manga_source_root_for_path(self, path: str) -> str:
+        """Return the user-facing manga source folder for an image or CBZ-derived image."""
+        if not path:
+            return ""
+        try:
+            mapped_cbz = getattr(self, 'cbz_image_to_job', {}).get(path)
+            if mapped_cbz:
+                path = mapped_cbz
+            abs_path = os.path.abspath(path)
+            if os.path.isdir(abs_path):
+                return abs_path
+            return os.path.dirname(abs_path)
+        except Exception:
+            return ""
+
+    def _manga_selected_source_roots(self) -> List[str]:
+        """Return unique source roots currently represented by the file list."""
+        roots = []
+        seen = set()
+        for path in getattr(self, 'selected_files', []) or []:
+            if not path or not os.path.exists(path):
+                continue
+            root = self._manga_source_root_for_path(path)
+            if not root:
+                continue
+            norm = os.path.normcase(os.path.abspath(root))
+            if norm not in seen:
+                seen.add(norm)
+                roots.append(root)
+        return roots
+
+    def _manga_source_roots_for_paths(self, paths: List[str]) -> List[str]:
+        """Return unique source roots for paths being added."""
+        roots = []
+        seen = set()
+        for path in paths or []:
+            root = self._manga_source_root_for_path(path)
+            if not root:
+                continue
+            norm = os.path.normcase(os.path.abspath(root))
+            if norm not in seen:
+                seen.add(norm)
+                roots.append(root)
+        return roots
+
+    def _same_manga_source_root(self, left: str, right: str) -> bool:
+        try:
+            return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+        except Exception:
+            return False
+
+    def _warn_manga_source_mismatch(self, message: str) -> None:
+        self._log(f"⚠️ {message}", "warning")
+        try:
+            QMessageBox.warning(self.dialog, "One Manga Folder Only", message)
+        except Exception:
+            pass
+
+    def _can_add_manga_paths_from_single_source(self, paths: List[str]) -> bool:
+        """Block adding images from more than one manga folder."""
+        new_roots = self._manga_source_roots_for_paths(paths)
+        if not new_roots:
+            return True
+        if len(new_roots) > 1:
+            self._warn_manga_source_mismatch(
+                "Please load manga images from one folder at a time. The selected files span multiple directories."
+            )
+            return False
+
+        current_roots = self._manga_selected_source_roots()
+        if len(current_roots) > 1:
+            self._clear_manga_selection_for_source_switch()
+            return True
+        if current_roots and not self._same_manga_source_root(current_roots[0], new_roots[0]):
+            self._clear_manga_selection_for_source_switch()
+            return True
+        return True
+
+    def _clear_manga_selection_for_source_switch(self) -> None:
+        """Clear the current manga selection before loading a different source folder."""
+        try:
+            self._clear_all()
+        except Exception:
+            try:
+                self.file_listbox.clear()
+                self.selected_files.clear()
+                if hasattr(self, 'image_preview_widget'):
+                    self.image_preview_widget.clear()
+                    self.image_preview_widget.set_image_list([])
+                self._current_image_path = None
+            except Exception:
+                pass
+        self._reset_manga_glossary_selection_for_source_switch()
+        self._log("📂 Cleared previous manga folder; loading new selection", "info")
+
+    def _filter_manga_paths_to_single_source(self, paths: List[str]) -> List[str]:
+        """Keep only the first source folder from a restored mixed file list."""
+        kept = []
+        root = ""
+        skipped = 0
+        for path in paths or []:
+            path_root = self._manga_source_root_for_path(path)
+            if not path_root:
+                continue
+            if not root:
+                root = path_root
+            elif not self._same_manga_source_root(root, path_root):
+                skipped += 1
+                continue
+            kept.append(path)
+        if skipped:
+            self._log(f"⚠️ Skipped {skipped} restored manga file(s) from other folders", "warning")
+        return kept
+
+    def _current_manga_source_dir(self) -> str:
+        """Return the single source directory represented by the file list."""
+        roots = self._manga_selected_source_roots()
+        if len(roots) == 1:
+            return roots[0]
+        if roots:
+            return roots[0]
+        return ""
+
+    def _update_manga_loaded_directory_label(self) -> None:
+        """Refresh the file-list directory status label."""
+        label = getattr(self, 'manga_loaded_directory_label', None)
+        if not label:
+            return
+        roots = self._manga_selected_source_roots()
+        if not roots:
+            label.setText("Loaded directory: none")
+            label.setToolTip("")
+            return
+
+        if len(roots) > 1:
+            label.setText(f"Loaded directories: {len(roots)} folders (unsupported)")
+            label.setToolTip("\n".join(roots[:25]))
+        else:
+            source_dir = roots[0]
+            label.setText(f"Loaded directory: {source_dir}")
+            label.setToolTip(source_dir)
+
+    def _refresh_manga_selection_status(self, *, allow_autoload: bool = True) -> None:
+        """Refresh folder and glossary labels after the selected manga files change."""
+        self._update_manga_loaded_directory_label()
+        if allow_autoload:
+            self._autoload_manga_glossary_for_selection()
+        self._update_manga_glossary_status_label()
+
+    def _autoload_manga_glossary_for_selection(self) -> None:
+        """Load an existing generated glossary from the selected folder's Glossary subfolder."""
+        if getattr(self, 'manga_custom_glossary_path', ''):
+            return
+        if self._manga_glossary_auto_load_is_suppressed():
+            return
+        if not getattr(self, 'selected_files', None):
+            self._clear_auto_loaded_manga_glossary_cache()
+            return
+        if len(self._manga_selected_source_roots()) != 1:
+            self._clear_auto_loaded_manga_glossary_cache()
+            return
+        previous_path = getattr(self, 'manga_generated_glossary_path', '')
+        generated_path = self._find_generated_manga_glossary_path()
+        if not generated_path:
+            self._clear_auto_loaded_manga_glossary_cache()
+            return
+        try:
+            glossary_text = self._load_manga_glossary_file_as_prompt_text(generated_path)
+            if not glossary_text.strip():
+                return
+            self.manga_loaded_glossary_text = glossary_text
+            self.manga_generated_glossary_path = generated_path
+            self.manga_generated_glossary_text = glossary_text
+            self.manga_glossary_auto_load_suppressed = False
+            self.manga_glossary_auto_load_suppressed_root = ''
+            self.main_gui.config['manga_generated_glossary_path'] = generated_path
+            self.main_gui.config['manga_glossary_auto_load_suppressed'] = False
+            self.main_gui.config['manga_glossary_auto_load_suppressed_root'] = ''
+            setattr(self.main_gui, 'manga_generated_glossary_text', glossary_text)
+            setattr(self.main_gui, 'manga_generated_glossary_path', generated_path)
+            if hasattr(self, 'translator') and self.translator:
+                self.translator.manga_generated_glossary_text = glossary_text
+                self.translator.manga_generated_glossary_path = generated_path
+                self.translator._manga_glossary_prompt_logged = False
+            if previous_path != generated_path:
+                self._log(f"📚 Auto-loaded manga glossary: {os.path.basename(generated_path)}", "info")
+        except Exception as err:
+            self._log(f"⚠️ Could not auto-load manga glossary: {err}", "warning")
+
+    def _clear_auto_loaded_manga_glossary_cache(self) -> None:
+        """Clear cached generated glossary text without touching manual glossary selection."""
+        if getattr(self, 'manga_custom_glossary_path', ''):
+            return
+        self.manga_loaded_glossary_text = ''
+        self.manga_generated_glossary_text = ''
+        self.manga_generated_glossary_entries = []
+        self.manga_generated_glossary_path = ''
+        self.main_gui.config['manga_generated_glossary_path'] = ''
+        setattr(self.main_gui, 'manga_generated_glossary_text', '')
+        setattr(self.main_gui, 'manga_generated_glossary_entries', [])
+        setattr(self.main_gui, 'manga_generated_glossary_path', '')
+        if hasattr(self, 'translator') and self.translator:
+            self.translator.manga_generated_glossary_text = ''
+            self.translator.manga_generated_glossary_path = ''
+            self.translator._manga_glossary_prompt_logged = False
+
+    def _reset_manga_glossary_selection_for_source_switch(self) -> None:
+        """Clear folder-bound glossary state without deleting any glossary files."""
+        self.manga_custom_glossary_path = ''
+        self.manga_loaded_glossary_text = ''
+        self.manga_generated_glossary_text = ''
+        self.manga_generated_glossary_entries = []
+        self.manga_generated_glossary_path = ''
+        self.manga_glossary_auto_load_suppressed = False
+        self.manga_glossary_auto_load_suppressed_root = ''
+        self.main_gui.config['manga_custom_glossary_path'] = ''
+        self.main_gui.config['manga_generated_glossary_path'] = ''
+        self.main_gui.config['manga_glossary_auto_load_suppressed'] = False
+        self.main_gui.config['manga_glossary_auto_load_suppressed_root'] = ''
+        setattr(self.main_gui, 'manga_custom_glossary_path', '')
+        setattr(self.main_gui, 'manga_generated_glossary_text', '')
+        setattr(self.main_gui, 'manga_generated_glossary_entries', [])
+        setattr(self.main_gui, 'manga_generated_glossary_path', '')
+        if hasattr(self, 'translator') and self.translator:
+            self.translator.manga_generated_glossary_text = ''
+            self.translator.manga_generated_glossary_path = ''
+            self.translator._manga_glossary_prompt_logged = False
+        self._update_manga_glossary_status_label()
+
     def _manga_glossary_auto_load_is_suppressed(self) -> bool:
         """Return True after the user explicitly clears the manga glossary."""
         try:
-            return bool(
+            suppressed = bool(
                 getattr(self, 'manga_glossary_auto_load_suppressed', False)
                 or self.main_gui.config.get('manga_glossary_auto_load_suppressed', False)
             )
+            if not suppressed:
+                return False
+            suppressed_root = (
+                getattr(self, 'manga_glossary_auto_load_suppressed_root', '')
+                or self.main_gui.config.get('manga_glossary_auto_load_suppressed_root', '')
+            )
+            if not suppressed_root:
+                return False
+            current_root = self._current_manga_source_dir()
+            if not current_root:
+                return False
+            return bool(
+                os.path.normcase(os.path.abspath(suppressed_root))
+                == os.path.normcase(os.path.abspath(current_root))
+            )
         except Exception:
-            return bool(getattr(self, 'manga_glossary_auto_load_suppressed', False))
+            return False
 
     def _find_generated_manga_glossary_path(self) -> str:
         """Find a saved manga glossary generated by this workflow."""
@@ -7289,27 +7541,18 @@ class MangaTranslationTab(QObject):
             getattr(self, 'manga_generated_glossary_path', '')
             or self.main_gui.config.get('manga_generated_glossary_path', '')
         )
-        candidates = []
+        exact_candidates = []
         current_glossary_dir = ""
         if getattr(self, 'selected_files', None):
             try:
-                output_json = self._manga_glossary_output_json_path()
-                candidates.extend([output_json.replace('.json', '.csv'), output_json])
-                current_glossary_dir = os.path.dirname(output_json)
+                safe_name = self._manga_glossary_source_name()
+                current_glossary_dir = self._manga_glossary_output_dir()
+                output_json = os.path.join(current_glossary_dir, f"{safe_name}_manga_glossary.json")
+                exact_candidates.extend([output_json.replace('.json', '.csv'), output_json])
             except Exception:
                 pass
 
-        try:
-            for glossary_dir in self._manga_glossary_candidate_dirs():
-                current_glossary_dir = current_glossary_dir or glossary_dir
-                if glossary_dir and os.path.isdir(glossary_dir):
-                    for name in os.listdir(glossary_dir):
-                        if name.lower().endswith(('_manga_glossary.csv', '_manga_glossary.json')):
-                            candidates.append(os.path.join(glossary_dir, name))
-        except Exception:
-            pass
-
-        existing = [path for path in candidates if path and os.path.exists(path)]
+        existing = [path for path in exact_candidates if path and os.path.exists(path)]
         if existing:
             existing.sort(key=lambda p: os.path.getmtime(p), reverse=True)
             generated_path = existing[0]
@@ -7318,6 +7561,14 @@ class MangaTranslationTab(QObject):
             return generated_path
 
         if configured and os.path.exists(configured):
+            if exact_candidates:
+                try:
+                    configured_abs = os.path.normcase(os.path.abspath(configured))
+                    exact_abs = {os.path.normcase(os.path.abspath(path)) for path in exact_candidates}
+                    if configured_abs not in exact_abs:
+                        return ""
+                except Exception:
+                    return ""
             if current_glossary_dir:
                 try:
                     configured_abs = os.path.abspath(configured)
@@ -7440,6 +7691,28 @@ class MangaTranslationTab(QObject):
 
         return self._format_manga_glossary_entries_for_prompt(entries)
 
+    def _copy_loaded_manga_glossary_to_output(self, source_path: str, glossary_text: str) -> str:
+        """Copy a manually loaded glossary into the selected manga's Glossary folder."""
+        if not source_path or not os.path.exists(source_path):
+            return ""
+        if not getattr(self, 'selected_files', None):
+            return ""
+        output_json = self._manga_glossary_output_json_path()
+        ext = os.path.splitext(source_path)[1].lower()
+        target_path = output_json if ext == '.json' else output_json.replace('.json', '.csv')
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+
+        source_abs = os.path.normcase(os.path.abspath(source_path))
+        target_abs = os.path.normcase(os.path.abspath(target_path))
+        if source_abs != target_abs:
+            if ext in {'.csv', '.json'}:
+                shutil.copy2(source_path, target_path)
+            else:
+                with open(target_path, 'w', encoding='utf-8') as f:
+                    f.write((glossary_text or '').strip() + "\n")
+        os.utime(target_path, None)
+        return target_path
+
     def _get_loaded_manga_glossary_text(self) -> str:
         """Return loaded or generated glossary text, reloading from disk if needed."""
         loaded_text = getattr(self, 'manga_loaded_glossary_text', '')
@@ -7477,6 +7750,14 @@ class MangaTranslationTab(QObject):
             current_path = getattr(self, 'manga_custom_glossary_path', '') or self.main_gui.config.get('manual_glossary_path', '')
             if current_path and os.path.exists(current_path):
                 start_dir = os.path.dirname(current_path)
+            else:
+                glossary_dir = self._manga_glossary_output_dir()
+                if glossary_dir and os.path.isdir(glossary_dir):
+                    start_dir = glossary_dir
+                else:
+                    source_dir = self._current_manga_source_dir()
+                    if source_dir and os.path.isdir(source_dir):
+                        start_dir = source_dir
         except Exception:
             start_dir = ""
 
@@ -7495,27 +7776,36 @@ class MangaTranslationTab(QObject):
                 QMessageBox.warning(self.dialog, "Glossary Not Loaded", "No usable glossary entries were found in that file.")
                 return
 
-            self.manga_custom_glossary_path = path
+            source_path = path
+            copied_path = self._copy_loaded_manga_glossary_to_output(source_path, glossary_text)
+            active_path = copied_path or source_path
+
+            self.manga_custom_glossary_path = active_path
             self.manga_loaded_glossary_text = glossary_text
             self.manga_generated_glossary_path = ''
             self.manga_glossary_auto_load_suppressed = False
+            self.manga_glossary_auto_load_suppressed_root = ''
             self.manga_glossary_enabled_value = True
-            self.main_gui.config['manga_custom_glossary_path'] = path
+            self.main_gui.config['manga_custom_glossary_path'] = active_path
             self.main_gui.config['manga_generated_glossary_path'] = ''
             self.main_gui.config['manga_glossary_auto_load_suppressed'] = False
+            self.main_gui.config['manga_glossary_auto_load_suppressed_root'] = ''
             self.main_gui.config['manga_glossary_enabled'] = True
-            setattr(self.main_gui, 'manga_custom_glossary_path', path)
+            setattr(self.main_gui, 'manga_custom_glossary_path', active_path)
             setattr(self.main_gui, 'manga_generated_glossary_path', '')
             setattr(self.main_gui, 'manga_generated_glossary_text', glossary_text)
             if hasattr(self, 'translator') and self.translator:
                 self.translator.manga_generated_glossary_text = glossary_text
+                self.translator.manga_generated_glossary_path = active_path
                 self.translator._manga_glossary_prompt_logged = False
             if hasattr(self, 'manga_glossary_checkbox'):
                 self.manga_glossary_checkbox.setChecked(True)
             self._update_manga_glossary_status_label()
             self._save_rendering_settings()
             entry_count = sum(1 for line in glossary_text.splitlines() if line.lstrip().startswith("* "))
-            self._log(f"📚 Loaded custom manga glossary: {os.path.basename(path)} ({entry_count} entries)", "success")
+            if copied_path and os.path.normcase(os.path.abspath(copied_path)) != os.path.normcase(os.path.abspath(source_path)):
+                self._log(f"📚 Copied loaded manga glossary to: {copied_path}", "info")
+            self._log(f"📚 Loaded custom manga glossary: {os.path.basename(active_path)} ({entry_count} entries)", "success")
         except Exception as e:
             self._log(f"❌ Failed to load manga glossary: {e}", "error")
             self._log(traceback.format_exc(), "debug")
@@ -7541,9 +7831,11 @@ class MangaTranslationTab(QObject):
         self.manga_generated_glossary_entries = []
         self.manga_generated_glossary_path = ''
         self.manga_glossary_auto_load_suppressed = True
+        self.manga_glossary_auto_load_suppressed_root = self._current_manga_source_dir()
         self.main_gui.config['manga_custom_glossary_path'] = ''
         self.main_gui.config['manga_generated_glossary_path'] = ''
         self.main_gui.config['manga_glossary_auto_load_suppressed'] = True
+        self.main_gui.config['manga_glossary_auto_load_suppressed_root'] = self.manga_glossary_auto_load_suppressed_root
         setattr(self.main_gui, 'manga_generated_glossary_text', '')
         setattr(self.main_gui, 'manga_generated_glossary_entries', [])
         setattr(self.main_gui, 'manga_generated_glossary_path', '')
@@ -9749,6 +10041,9 @@ class MangaTranslationTab(QObject):
         
         if not files:
             return
+
+        if not self._can_add_manga_paths_from_single_source(files):
+            return
         
         # Ensure temp root for CBZ extraction lives for the session
         cbz_temp_root = getattr(self, 'cbz_temp_root', None)
@@ -9823,6 +10118,9 @@ class MangaTranslationTab(QObject):
             "Select Folder with Manga Images or CBZ"
         )
         if not folder:
+            return
+
+        if not self._can_add_manga_paths_from_single_source([folder]):
             return
         
         # Extensions
@@ -10090,6 +10388,7 @@ class MangaTranslationTab(QObject):
             # Only save files that still exist
             valid_files = [f for f in self.selected_files if os.path.exists(f)]
             self.main_gui.config['manga_selected_files'] = valid_files
+            self._refresh_manga_selection_status()
             if hasattr(self.main_gui, 'save_config'):
                 self.main_gui.save_config(show_message=False)
             print(f"[FILE_PERSIST] Saved {len(valid_files)} files to config")
@@ -10107,6 +10406,7 @@ class MangaTranslationTab(QObject):
             
             # Filter to only files that still exist
             valid_files = [f for f in saved_files if os.path.exists(f)]
+            valid_files = self._filter_manga_paths_to_single_source(valid_files)
             if not valid_files:
                 return
             
@@ -10125,6 +10425,7 @@ class MangaTranslationTab(QObject):
             # Update thumbnail preview list
             if hasattr(self, 'image_preview_widget'):
                 self.image_preview_widget.set_image_list(self.selected_files)
+            self._refresh_manga_selection_status()
             
             self._log(f"📂 Restored {len(valid_files)} images from previous session", "info")
         except Exception as e:
@@ -13021,8 +13322,7 @@ class MangaTranslationTab(QObject):
         return "\n".join(lines).strip()
 
     def _manga_glossary_source_name(self) -> str:
-        first_path = self.selected_files[0] if getattr(self, 'selected_files', None) else ''
-        source_dir = os.path.dirname(first_path) if first_path else ''
+        source_dir = self._current_manga_source_dir()
         folder_name = os.path.basename(os.path.normpath(source_dir)) if source_dir else ''
         if not folder_name:
             output_root = os.environ.get('OUTPUT_DIRECTORY') or getattr(self.main_gui, 'config', {}).get('output_directory') or os.getcwd()
@@ -13038,8 +13338,8 @@ class MangaTranslationTab(QObject):
 
     def _manga_glossary_output_dir(self) -> str:
         """Primary manga glossary directory used for runtime auto-mapping."""
-        first_path = self.selected_files[0] if getattr(self, 'selected_files', None) else ''
-        parent_dir = os.environ.get('OUTPUT_DIRECTORY') or (os.path.dirname(first_path) if first_path else '') or os.getcwd()
+        source_dir = self._current_manga_source_dir()
+        parent_dir = os.environ.get('OUTPUT_DIRECTORY') or source_dir or os.getcwd()
         return os.path.join(parent_dir, "Glossary")
 
     def _manga_glossary_backup_dir(self) -> str:
@@ -13050,10 +13350,6 @@ class MangaTranslationTab(QObject):
         dirs = []
         try:
             dirs.append(self._manga_glossary_output_dir())
-        except Exception:
-            pass
-        try:
-            dirs.append(self._manga_glossary_backup_dir())
         except Exception:
             pass
         seen = set()
@@ -13279,9 +13575,11 @@ class MangaTranslationTab(QObject):
             self.manga_generated_glossary_entries = entries
             self.manga_generated_glossary_path = output_json if output_legacy_json and os.path.exists(output_json) else output_csv
             self.manga_glossary_auto_load_suppressed = False
+            self.manga_glossary_auto_load_suppressed_root = ''
             self.manga_loaded_glossary_text = prompt_glossary_text
             self.main_gui.config['manga_generated_glossary_path'] = self.manga_generated_glossary_path
             self.main_gui.config['manga_glossary_auto_load_suppressed'] = False
+            self.main_gui.config['manga_glossary_auto_load_suppressed_root'] = ''
             setattr(self.main_gui, 'manga_generated_glossary_text', prompt_glossary_text)
             setattr(self.main_gui, 'manga_generated_glossary_entries', entries)
             setattr(self.main_gui, 'manga_generated_glossary_path', self.manga_generated_glossary_path)
