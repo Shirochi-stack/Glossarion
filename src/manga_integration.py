@@ -1655,7 +1655,7 @@ class MangaTranslationTab(QObject):
         """)
         
         # Create checkmark overlay
-        checkmark = QLabel("✓", checkbox)
+        checkmark = QLabel("\u2713", checkbox)
         checkmark.setStyleSheet("""
             QLabel {
                 color: white;
@@ -1678,6 +1678,8 @@ class MangaTranslationTab(QObject):
             if checkbox.isChecked():
                 position_checkmark()
                 checkmark.show()
+                checkmark.raise_()
+                checkmark.update()
             else:
                 checkmark.hide()
         
@@ -7161,25 +7163,49 @@ class MangaTranslationTab(QObject):
 
         return bool(value)
 
-    def _set_checkbox_checked_safely(self, checkbox, checked: bool) -> None:
+    def _set_checkbox_checked_safely(self, checkbox, checked: bool, *, block_signals: bool = True) -> None:
         if checkbox is None or not hasattr(checkbox, 'setChecked'):
             return
         try:
             if hasattr(checkbox, 'isChecked') and bool(checkbox.isChecked()) == bool(checked):
+                self._refresh_synced_checkbox_style(checkbox)
                 return
         except Exception:
             pass
         previous = None
         try:
-            if hasattr(checkbox, 'blockSignals'):
+            if block_signals and hasattr(checkbox, 'blockSignals'):
                 previous = checkbox.blockSignals(True)
             checkbox.setChecked(bool(checked))
         finally:
+            self._refresh_synced_checkbox_style(checkbox)
             try:
                 if previous is not None and hasattr(checkbox, 'blockSignals'):
                     checkbox.blockSignals(previous)
             except Exception:
                 pass
+
+    def _refresh_synced_checkbox_style(self, checkbox) -> None:
+        """Refresh custom checkbox visuals after blocked programmatic updates."""
+        try:
+            if hasattr(checkbox, 'style'):
+                checkbox.style().unpolish(checkbox)
+                checkbox.style().polish(checkbox)
+            update_checkmark = getattr(checkbox, '_update_checkmark', None)
+            if callable(update_checkmark):
+                update_checkmark()
+            checkmark = getattr(checkbox, '_checkmark_label', None)
+            if bool(getattr(checkbox, 'isChecked', lambda: False)()) and checkmark is not None:
+                if hasattr(checkmark, 'show'):
+                    checkmark.show()
+                if hasattr(checkmark, 'raise_'):
+                    checkmark.raise_()
+                if hasattr(checkmark, 'update'):
+                    checkmark.update()
+            if hasattr(checkbox, 'update'):
+                checkbox.update()
+        except Exception:
+            pass
 
     def _sync_compress_glossary_prompt_setting(self, enabled: bool) -> None:
         """Keep manga and Glossary Manager compression toggles on the same setting."""
@@ -7205,10 +7231,12 @@ class MangaTranslationTab(QObject):
         self._set_checkbox_checked_safely(
             getattr(self, 'manga_compress_glossary_checkbox', None),
             enabled,
+            block_signals=True,
         )
         self._set_checkbox_checked_safely(
             getattr(self.main_gui, 'compress_glossary_checkbox', None),
             enabled,
+            block_signals=False,
         )
 
     def _on_manga_compress_glossary_toggle(self, state=None):
@@ -7258,15 +7286,12 @@ class MangaTranslationTab(QObject):
                 pass
 
         try:
-            first_path = self.selected_files[0] if getattr(self, 'selected_files', None) else ''
-            parent_dir = os.environ.get('OUTPUT_DIRECTORY') or (os.path.dirname(first_path) if first_path else '')
-            glossary_dir = os.path.join(parent_dir, "Glossary") if parent_dir else ''
-            if glossary_dir:
+            for glossary_dir in self._manga_glossary_candidate_dirs():
                 current_glossary_dir = current_glossary_dir or glossary_dir
-            if glossary_dir and os.path.isdir(glossary_dir):
-                for name in os.listdir(glossary_dir):
-                    if name.lower().endswith(('_manga_glossary.csv', '_manga_glossary.json')):
-                        candidates.append(os.path.join(glossary_dir, name))
+                if glossary_dir and os.path.isdir(glossary_dir):
+                    for name in os.listdir(glossary_dir):
+                        if name.lower().endswith(('_manga_glossary.csv', '_manga_glossary.json')):
+                            candidates.append(os.path.join(glossary_dir, name))
         except Exception:
             pass
 
@@ -12949,12 +12974,72 @@ class MangaTranslationTab(QObject):
             lines.append("")
         return "\n".join(lines).strip()
 
+    def _save_glossary_in_output_enabled(self) -> bool:
+        """Return True when glossary files should be saved in the output/source folder."""
+        try:
+            checkbox = getattr(self.main_gui, 'save_glossary_in_output_checkbox', None)
+            if checkbox is not None and hasattr(checkbox, 'isChecked'):
+                return bool(checkbox.isChecked())
+            live_var = getattr(self.main_gui, 'save_glossary_in_output_var', None)
+            if live_var is not None:
+                return bool(live_var)
+            return bool(getattr(self.main_gui, 'config', {}).get('save_glossary_in_output', False))
+        except Exception:
+            env_value = os.environ.get('SAVE_GLOSSARY_IN_OUTPUT')
+            if env_value is not None:
+                return str(env_value).strip().lower() in ('1', 'true', 'yes', 'on')
+            return False
+
+    def _manga_glossary_source_name(self) -> str:
+        first_path = self.selected_files[0] if getattr(self, 'selected_files', None) else ''
+        source_dir = os.path.dirname(first_path) if first_path else ''
+        folder_name = os.path.basename(os.path.normpath(source_dir)) if source_dir else ''
+        if not folder_name:
+            output_root = os.environ.get('OUTPUT_DIRECTORY') or getattr(self.main_gui, 'config', {}).get('output_directory') or os.getcwd()
+            folder_name = os.path.basename(os.path.normpath(output_root)) or 'manga'
+        return re.sub(r'[^A-Za-z0-9_.-]+', '_', folder_name).strip('_') or 'manga'
+
+    def _manga_glossary_shared_root(self) -> str:
+        """Match the shared glossary root used by regular glossary extraction."""
+        override_dir = os.environ.get('OUTPUT_DIRECTORY') or getattr(self.main_gui, 'config', {}).get('output_directory')
+        if override_dir:
+            return os.path.abspath(override_dir)
+        return _get_app_dir()
+
+    def _manga_glossary_output_dir(self) -> str:
+        if self._save_glossary_in_output_enabled():
+            first_path = self.selected_files[0] if getattr(self, 'selected_files', None) else ''
+            parent_dir = os.environ.get('OUTPUT_DIRECTORY') or (os.path.dirname(first_path) if first_path else '') or os.getcwd()
+            return os.path.join(parent_dir, "Glossary")
+        return os.path.join(self._manga_glossary_shared_root(), "MangaGlossary")
+
+    def _manga_glossary_candidate_dirs(self) -> List[str]:
+        dirs = []
+        try:
+            dirs.append(self._manga_glossary_output_dir())
+        except Exception:
+            pass
+        try:
+            first_path = self.selected_files[0] if getattr(self, 'selected_files', None) else ''
+            legacy_parent = os.environ.get('OUTPUT_DIRECTORY') or (os.path.dirname(first_path) if first_path else '')
+            if legacy_parent:
+                dirs.append(os.path.join(legacy_parent, "Glossary"))
+        except Exception:
+            pass
+        seen = set()
+        unique_dirs = []
+        for path in dirs:
+            if not path:
+                continue
+            norm = os.path.normcase(os.path.abspath(path))
+            if norm not in seen:
+                seen.add(norm)
+                unique_dirs.append(path)
+        return unique_dirs
+
     def _manga_glossary_output_json_path(self) -> str:
-        first_path = self.selected_files[0] if getattr(self, 'selected_files', None) else os.getcwd()
-        parent_dir = os.environ.get('OUTPUT_DIRECTORY') or os.path.dirname(first_path) or os.getcwd()
-        folder_name = os.path.basename(os.path.normpath(parent_dir)) or "manga"
-        safe_name = re.sub(r'[^A-Za-z0-9_.-]+', '_', folder_name).strip('_') or "manga"
-        glossary_dir = os.path.join(parent_dir, "Glossary")
+        safe_name = self._manga_glossary_source_name()
+        glossary_dir = self._manga_glossary_output_dir()
         os.makedirs(glossary_dir, exist_ok=True)
         return os.path.join(glossary_dir, f"{safe_name}_manga_glossary.json")
 
@@ -12989,6 +13074,7 @@ class MangaTranslationTab(QObject):
             'GLOSSARY_OUTPUT_LEGACY_JSON',
             'USE_GLOSSARY_KEYS',
             'GLOSSARY_API_KEYS',
+            'SAVE_GLOSSARY_IN_OUTPUT',
         ]
         previous = {key: os.environ.get(key) for key in keys}
 
@@ -13024,6 +13110,7 @@ class MangaTranslationTab(QObject):
 
         os.environ['GLOSSARY_USE_LEGACY_CSV'] = '1' if use_legacy_csv else '0'
         os.environ['GLOSSARY_OUTPUT_LEGACY_JSON'] = '1' if output_legacy_json else '0'
+        os.environ['SAVE_GLOSSARY_IN_OUTPUT'] = '1' if self._save_glossary_in_output_enabled() else '0'
 
         use_glossary_keys = bool(
             getattr(self.main_gui, 'use_glossary_keys_var', self.main_gui.config.get('use_glossary_keys', False))

@@ -1699,6 +1699,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         if not hasattr(self, 'fuzzy_threshold_var'):
             self.fuzzy_threshold_var = self.config.get('glossary_fuzzy_threshold', 0.90)
         self.use_legacy_csv_var = self.config.get('glossary_use_legacy_csv', False)
+        self.save_glossary_in_output_var = self.config.get('save_glossary_in_output', False)
         # Legacy JSON output toggle (was not persisted previously)
         self.glossary_output_legacy_json_var = self.config.get('glossary_output_legacy_json', False)
         # Dynamic limit expansion toggle (include all characters)
@@ -3812,7 +3813,7 @@ Recent translations to summarize:
         """)
         
         # Create checkmark overlay
-        checkmark = QLabel("✓", checkbox)
+        checkmark = QLabel("\u2713", checkbox)
         checkmark.setStyleSheet("""
             QLabel {
                 color: white;
@@ -3843,11 +3844,22 @@ Recent translations to summarize:
                     if checkbox.isChecked():
                         position_checkmark()
                         checkmark.show()
+                        checkmark.raise_()
+                        checkmark.update()
                     else:
                         checkmark.hide()
             except RuntimeError:
                 # Widget was already deleted
                 pass
+
+        # Programmatic syncs may block stateChanged to avoid recursion, so
+        # expose the repaint helper for callers that update shared settings.
+        try:
+            checkbox._checkmark_label = checkmark
+            checkbox._position_checkmark = position_checkmark
+            checkbox._update_checkmark = update_checkmark
+        except Exception:
+            pass
         
         checkbox.stateChanged.connect(update_checkmark)
         # Delay initial positioning to ensure widget is properly rendered
@@ -14704,6 +14716,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.text()),
             'EPUB_OUTPUT_DIR': _get_app_dir(),
             'GLOSSARY_SHARED_DIR': os.path.join(_get_app_dir(), 'Glossary'),
+            'SAVE_GLOSSARY_IN_OUTPUT': '1' if self.config.get('save_glossary_in_output', False) else '0',
             # Whether to include previous source text as memory context
             'INCLUDE_SOURCE_IN_HISTORY': "1" if getattr(self, 'include_source_in_history_var', False) else "0",
             'APPEND_GLOSSARY': "0" if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ("1" if self.append_glossary_var else "0"),
@@ -15179,7 +15192,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
             # Create Glossary folder
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-            if override_dir:
+            save_glossary_in_output = bool(self.config.get('save_glossary_in_output', False))
+            if save_glossary_in_output and override_dir:
+                glossary_base_dir = os.path.abspath(override_dir)
+            elif save_glossary_in_output and self.selected_files:
+                glossary_base_dir = os.path.dirname(os.path.abspath(self.selected_files[0]))
+            elif override_dir:
                 glossary_base_dir = os.path.join(override_dir, "Glossary")
             else:
                 glossary_base_dir = "Glossary"
@@ -15245,7 +15263,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 if self._process_image_folder_for_glossary(folder_name, images, glossary_base_dir):
                     successful += 1
                     # Use absolute path for log if override is set, otherwise relative
-                    if override_dir:
+                    if override_dir or save_glossary_in_output:
                         display_path = os.path.join(glossary_base_dir, f"{folder_name}_glossary.json")
                     else:
                         display_path = f"Glossary/{folder_name}_glossary.json"
@@ -15272,7 +15290,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Determine shared glossary directory. Glossary extraction
                 # state belongs in repo/exe Glossary or output-override Glossary.
                 override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
-                if override_dir:
+                save_glossary_in_output = bool(self.config.get('save_glossary_in_output', False))
+                if save_glossary_in_output and override_dir:
+                    glossary_dir = os.path.abspath(override_dir)
+                elif save_glossary_in_output:
+                    glossary_dir = os.path.dirname(os.path.abspath(text_file))
+                elif override_dir:
                     glossary_dir = os.path.join(os.path.abspath(override_dir), "Glossary")
                 else:
                     glossary_dir = os.path.join(_get_app_dir(), "Glossary")
@@ -15280,6 +15303,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 output_path = os.path.join(glossary_dir, f"{base_name}_glossary.json")
                 os.environ["OUTPUT_PATH"] = output_path
                 os.environ["GLOSSARY_SHARED_DIR"] = glossary_dir
+                os.environ["SAVE_GLOSSARY_IN_OUTPUT"] = "1" if save_glossary_in_output else "0"
                 
                 if self._extract_glossary_from_text_file(text_file):
                     successful += 1
@@ -16162,8 +16186,13 @@ Important rules:
             # Determine output directory
             epub_base = os.path.splitext(os.path.basename(file_path))[0]
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+            save_glossary_in_output = bool(self.config.get('save_glossary_in_output', False))
             
-            if override_dir:
+            if save_glossary_in_output and override_dir:
+                glossary_dir = os.path.abspath(override_dir)
+            elif save_glossary_in_output:
+                glossary_dir = os.path.dirname(os.path.abspath(file_path))
+            elif override_dir:
                 glossary_dir = os.path.join(override_dir, "Glossary")
             else:
                 glossary_dir = "Glossary"
@@ -16230,7 +16259,8 @@ Important rules:
                     'GLOSSARY_MAX_NAMES': str(self.glossary_max_names_var),
                     'GLOSSARY_MAX_TITLES': str(self.glossary_max_titles_var),
                     'CONTEXT_WINDOW_SIZE': str(self.context_window_size_var),
-                    'GLOSSARY_SHARED_DIR': os.path.join(_get_app_dir(), 'Glossary'),
+                    'GLOSSARY_SHARED_DIR': glossary_dir,
+                    'SAVE_GLOSSARY_IN_OUTPUT': '1' if save_glossary_in_output else '0',
                     'VISION_OCR_SOURCE_PREPASS': str(self.config.get('vision_ocr_source_prepass', 'auto') or 'auto'),
                     'ENABLE_AUTO_GLOSSARY': "1" if (self.config.get('auto_glossary_mode', 'off') == 'minimal' or (self.config.get('auto_glossary_mode') is None and self.enable_auto_glossary_var)) else "0",
                     'AUTO_GLOSSARY_MODE': self.config.get('auto_glossary_mode', 'off'),
@@ -22667,6 +22697,7 @@ Important rules:
                 ('add_additional_glossary', ['add_additional_glossary_checkbox', 'add_additional_glossary_var'], False, bool),
                 ('additional_glossary_path', [('config', 'additional_glossary_path')], '', str),
                 ('compress_glossary_prompt', ['compress_glossary_checkbox', 'compress_glossary_prompt_var'], True, bool),
+                ('save_glossary_in_output', ['save_glossary_in_output_checkbox', 'save_glossary_in_output_var'], False, bool),
                 ('include_gender_context', ['include_gender_context_checkbox', 'include_gender_context_var'], False, bool),
                 ('enable_gender_nuance', ['enable_gender_nuance_checkbox', 'enable_gender_nuance_var'], True, bool),
                 ('include_description', ['include_description_checkbox', 'include_description_var'], False, bool),
@@ -23022,6 +23053,7 @@ Important rules:
                     ('ADD_ADDITIONAL_GLOSSARY', '1' if self.config.get('add_additional_glossary') else '0'),
                     ('ADDITIONAL_GLOSSARY_PATH', self.config.get('additional_glossary_path', '')),
                     ('GLOSSARY_SHARED_DIR', os.path.join(_get_app_dir(), 'Glossary')),
+                    ('SAVE_GLOSSARY_IN_OUTPUT', '1' if self.config.get('save_glossary_in_output', False) else '0'),
                     ('VISION_OCR_SOURCE_PREPASS', str(self.config.get('vision_ocr_source_prepass', 'auto') or 'auto')),
                     ('ENABLE_AUTO_GLOSSARY', '1' if self.config.get('auto_glossary_mode', 'off') == 'minimal' else '0'),
                     ('AUTO_GLOSSARY_MODE', self.config.get('auto_glossary_mode', 'off')),

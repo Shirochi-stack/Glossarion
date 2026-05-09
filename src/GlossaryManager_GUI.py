@@ -160,9 +160,77 @@ class GlossaryManagerMixin:
         QTimer.singleShot(0, position_arrow)
     
     def _create_styled_checkbox(self, text):
-        """Create a checkbox; styling is handled by the dialog's global stylesheet."""
-        from PySide6.QtWidgets import QCheckBox
-        return QCheckBox(text)
+        """Create a checkbox with the same overlay checkmark used by the main GUI."""
+        from PySide6.QtWidgets import QCheckBox, QLabel
+        from PySide6.QtCore import Qt, QTimer
+
+        checkbox = QCheckBox(text)
+        checkmark = QLabel("\u2713", checkbox)
+        checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        checkmark.setAlignment(Qt.AlignCenter)
+        checkmark.hide()
+        checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+        def position_checkmark():
+            try:
+                checkmark.setGeometry(2, 1, 14, 14)
+            except RuntimeError:
+                pass
+
+        def update_checkmark():
+            try:
+                if checkbox.isChecked():
+                    position_checkmark()
+                    checkmark.show()
+                    checkmark.raise_()
+                    checkmark.update()
+                else:
+                    checkmark.hide()
+            except RuntimeError:
+                pass
+
+        try:
+            checkbox._checkmark_label = checkmark
+            checkbox._position_checkmark = position_checkmark
+            checkbox._update_checkmark = update_checkmark
+        except Exception:
+            pass
+
+        checkbox.stateChanged.connect(update_checkmark)
+        QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
+        return checkbox
+
+    def _on_glossary_manager_compress_glossary_toggle(self, state=None):
+        """Sync Glossary Manager compression toggle to manga without repaint glitches."""
+        try:
+            enabled = bool(self.compress_glossary_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['compress_glossary_prompt'] = enabled
+            self.compress_glossary_prompt_var = enabled
+            os.environ['COMPRESS_GLOSSARY_PROMPT'] = '1' if enabled else '0'
+        except Exception:
+            pass
+
+        manga_tab = getattr(self, 'manga_translator', None)
+        if manga_tab is not None:
+            try:
+                manga_tab.compress_glossary_prompt_value = enabled
+                manga_tab._set_checkbox_checked_safely(
+                    getattr(manga_tab, 'manga_compress_glossary_checkbox', None),
+                    enabled,
+                    block_signals=True,
+                )
+            except Exception:
+                pass
 
     def glossary_manager(self):
         """Open comprehensive glossary management dialog"""
@@ -176,6 +244,7 @@ class GlossaryManagerMixin:
                     ('append_glossary_checkbox', 'append_glossary', False),
                     ('append_glossary_auto_load_checkbox', 'append_glossary_auto_load', False),
                     ('fuzzy_auto_mapping_checkbox', 'fuzzy_auto_mapping', False),
+                    ('save_glossary_in_output_checkbox', 'save_glossary_in_output', False),
                 ]
                 for attr, cfg_key, default in _sync_pairs:
                     if hasattr(self, attr):
@@ -668,6 +737,7 @@ class GlossaryManagerMixin:
                     # auto_glossary_mode_combo is handled separately below (it's a QComboBox, not a checkbox)
                     ('add_additional_glossary_checkbox', 'add_additional_glossary_var'),
                     ('compress_glossary_checkbox', 'compress_glossary_prompt_var'),
+                    ('save_glossary_in_output_checkbox', 'save_glossary_in_output_var'),
                     ('enable_gender_nuance_checkbox', 'enable_gender_nuance_var'),
                     ('include_gender_context_checkbox', 'include_gender_context_var'),
                     ('include_description_checkbox', 'include_description_var'),
@@ -709,6 +779,8 @@ class GlossaryManagerMixin:
                             self.config['add_additional_glossary'] = bool(checked)
                         elif checkbox_name == 'compress_glossary_checkbox':
                             self.config['compress_glossary_prompt'] = bool(checked)
+                        elif checkbox_name == 'save_glossary_in_output_checkbox':
+                            self.config['save_glossary_in_output'] = bool(checked)
                         elif checkbox_name == 'enable_gender_nuance_checkbox':
                             self.config['enable_gender_nuance'] = bool(checked)
                         elif checkbox_name == 'include_gender_context_checkbox':
@@ -2655,6 +2727,9 @@ Rules:
         if not hasattr(self, 'compress_glossary_checkbox'):
             self.compress_glossary_checkbox = self._create_styled_checkbox("Compress Glossary Prompt")
             self.compress_glossary_checkbox.setChecked(self.config.get('compress_glossary_prompt', True))
+        if not getattr(self.compress_glossary_checkbox, '_glossary_manager_sync_connected', False):
+            self.compress_glossary_checkbox.stateChanged.connect(self._on_glossary_manager_compress_glossary_toggle)
+            self.compress_glossary_checkbox._glossary_manager_sync_connected = True
         self.compress_glossary_checkbox.setToolTip(
             "Only send glossary entries that appear in the current source text.\n"
             "Saves tokens and cost; recommended ON."
@@ -2665,6 +2740,24 @@ Rules:
         # label3.setStyleSheet("color: white; font-size: 10pt; font-style: italic;")
         compress_layout.addWidget(label3)
         compress_layout.addStretch()
+
+        # Save location toggle
+        output_save_widget = QWidget()
+        output_save_layout = QHBoxLayout(output_save_widget)
+        output_save_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(output_save_widget)
+
+        if not hasattr(self, 'save_glossary_in_output_checkbox'):
+            self.save_glossary_in_output_checkbox = self._create_styled_checkbox("Save Glossary in Output")
+            self.save_glossary_in_output_checkbox.setChecked(self.config.get('save_glossary_in_output', False))
+        self.save_glossary_in_output_checkbox.setToolTip(
+            "Save generated glossary files in the current output/source folder instead of shared glossary folders."
+        )
+        output_save_layout.addWidget(self.save_glossary_in_output_checkbox)
+
+        output_save_hint = QLabel("(When off, generated glossaries use the shared Glossary/MangaGlossary folders)")
+        output_save_layout.addWidget(output_save_hint)
+        output_save_layout.addStretch()
         
         
         # Include all characters toggle (Dynamic Max Limit)

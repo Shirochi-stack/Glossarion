@@ -5297,9 +5297,17 @@ def main(log_callback=None, stop_callback=None):
     if args.output == 'glossary.json':
         args.output = f"{file_base}_glossary.json" 
 
-    # ensure we have a Glossary subfolder next to the JSON/MD outputs
+    # By default, keep regular EPUB glossaries in the shared Glossary subfolder.
+    # When requested, save directly in the current output/source folder instead.
+    save_glossary_in_output = os.getenv("SAVE_GLOSSARY_IN_OUTPUT", "0").strip().lower() in ("1", "true", "yes", "on")
     base_out_dir = os.path.dirname(args.output)
-    if os.path.basename(os.path.abspath(base_out_dir)).lower() == "glossary":
+    base_out_dir_abs = os.path.abspath(base_out_dir or os.getcwd())
+    if save_glossary_in_output:
+        if os.path.basename(base_out_dir_abs).lower() == "glossary":
+            glossary_dir = os.path.dirname(base_out_dir_abs)
+        else:
+            glossary_dir = base_out_dir_abs
+    elif os.path.basename(base_out_dir_abs).lower() == "glossary":
         glossary_dir = base_out_dir
     else:
         glossary_dir = os.path.join(base_out_dir, "Glossary")
@@ -5312,6 +5320,7 @@ def main(log_callback=None, stop_callback=None):
         f"{file_base}_glossary_progress.json"
     )
     _GLOSSARY_OUTPUT_FILE = os.path.join(glossary_dir, os.path.basename(args.output))
+    args.output = _GLOSSARY_OUTPUT_FILE
     progress_context = make_glossary_progress_context(
         progress_file=PROGRESS_FILE,
         output_file=_GLOSSARY_OUTPUT_FILE,
