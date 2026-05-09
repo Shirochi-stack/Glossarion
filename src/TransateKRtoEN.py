@@ -16672,6 +16672,9 @@ def main(log_callback=None, stop_callback=None):
                 gen_success = 0
                 gen_fail = 0
                 gen_skipped = 0
+                images_generated_dir = os.path.join(out, "images_generated")
+                os.makedirs(images_generated_dir, exist_ok=True)
+
                 for img_idx, img_name in enumerate(image_files, 1):
                     if check_stop():
                         print("⏹️ Image generation stopped by user")
@@ -16688,6 +16691,48 @@ def main(log_callback=None, stop_callback=None):
                         elif result and "[Image Translation Error:" not in result:
                             gen_success += 1
                             print(f"    ✅ Generated successfully")
+
+                            # Extract generated image path from [GENERATED_IMAGE:path] sentinel
+                            import re as _re_gen
+                            _gen_match = _re_gen.search(r'\[GENERATED_IMAGE:(.+?)\]', result)
+                            if _gen_match:
+                                generated_path = _gen_match.group(1).strip()
+                                if os.path.isfile(generated_path):
+                                    import shutil
+                                    # Archive the generated image into images_generated/
+                                    gen_archive_path = os.path.join(images_generated_dir, img_name)
+                                    shutil.copy2(generated_path, gen_archive_path)
+                                    print(f"    📂 Archived generated image → images_generated/{img_name}")
+
+                                    # Replace the original in images/ with the generated version
+                                    shutil.copy2(generated_path, img_path)
+                                    print(f"    🔄 Replaced original image with generated version")
+
+                                    # Clean up the generated file from the root output dir
+                                    try:
+                                        os.unlink(generated_path)
+                                    except Exception:
+                                        pass
+                                else:
+                                    print(f"    ⚠️ Generated image path not found: {generated_path}")
+                            else:
+                                # No sentinel — check if the API saved directly to output dir
+                                # Look for any recently created image file in the output dir
+                                _check_name = os.path.splitext(img_name)[0]
+                                for _f in os.listdir(out):
+                                    _fp = os.path.join(out, _f)
+                                    if os.path.isfile(_fp) and _f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')) and _f != img_name:
+                                        if _check_name in _f or 'generated_media' in _f:
+                                            import shutil
+                                            gen_archive_path = os.path.join(images_generated_dir, img_name)
+                                            shutil.copy2(_fp, gen_archive_path)
+                                            shutil.copy2(_fp, img_path)
+                                            print(f"    🔄 Replaced original with generated image (auto-detected)")
+                                            try:
+                                                os.unlink(_fp)
+                                            except Exception:
+                                                pass
+                                            break
                         else:
                             gen_fail += 1
                             print(f"    ⚠️ Generation failed or returned error")
