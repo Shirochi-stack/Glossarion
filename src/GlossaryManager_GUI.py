@@ -1845,38 +1845,13 @@ class GlossaryManagerMixin:
         
         # Always reload prompt from config to ensure fresh state
         # Treat empty strings as missing so users always get a usable default.
-        default_manual_prompt = """You are a novel glossary extraction assistant.
-
-You must strictly return ONLY CSV format with columns separated by commas.
-Columns and entry types in this exact order provided:
-
-{fields}
-
-{gender_instruction}
-{description_mandatory}
-IMPORTANT: Use commas to separate columns. Wrap a field value in double quotes ONLY when the value itself contains a comma.
-
-Critical Requirement: The translated name{description_in_language} column must be in {language}, While the raw name column must the same as the source language.
-The translated_name column must be a direct translation or transliteration of the raw_name ONLY. Do NOT use role labels, descriptions, or invented names as translations.
-
-{description_example}
-{example}
-
-CRITICAL EXTRACTION RULES:
-- Extract All {entries}
-- Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
-- REJECT entries that contain verbs or end with punctuation (?, !, .)
-- REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But"{description_excluded_note}
-- Do NOT create entries for common pronouns (나, 저, 너, 그, 그녀, 우리, 私, 僕, 俺, я, etc.) — these are NOT character names. Do NOT translate pronouns as role labels like "Narrator", "Protagonist", "Main Character", or "MC"
-- Do NOT output any entries that are rejected by the above rules; skip them entirely
-- REJECT generic common nouns, unnamed extras, and bare titles/roles (e.g. "Woman", "Man", "Boy", "Girl", "Villager", "Guard", "Soldier", "Aunt", "Father", "Queen", "Prince", "King", "Princess", "Knight", "Servant", "Maid", 여자, 남자, 소녀, 소년, 아줌마, 아버지, 여왕, 왕자). These are NOT proper nouns and must be skipped.
-- REJECT descriptive noun phrases and adjectives attached to generic nouns (e.g. "Blonde Elf Girl", "Orange-eyed Beastman", "White-bearded Merchant", "Fake Couple", "Bespectacled Student"). Only extract actual names or standardized titles.
-- If unsure whether something is a proper noun/name, skip it
-- {description_name_split_example}
-- {name_split_example}
-- {description_detailed}
-- The translated_name MUST be a strict literal dictionary translation or transliteration of the raw_name ONLY. You are FORBIDDEN from injecting story context, roles, or extra adjectives (e.g., do NOT translate "女学生" as "Female Student Assassin" or "주인님" as "The Protagonist").
-- You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
+        # Import the canonical default from extract_glossary_from_epub so there
+        # is only one authoritative copy of the default prompt.
+        try:
+            from extract_glossary_from_epub import DEFAULT_GLOSSARY_PROMPT
+            default_manual_prompt = DEFAULT_GLOSSARY_PROMPT
+        except ImportError:
+            default_manual_prompt = ""
         # Keep a copy for later (e.g., when saving and the field was cleared)
         self.default_manual_glossary_prompt = default_manual_prompt
 
@@ -3528,38 +3503,12 @@ Rules:
         self.auto_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
         glossary_prompt_frame_layout.addWidget(self.auto_prompt_text)
         
-        # Default unified prompt (combines system + extraction instructions)
-        default_unified_prompt = """You are a novel glossary extraction assistant.
-
-You must strictly return ONLY CSV format with columns separated by commas.
-Columns in this exact order: type,raw_name,translated_name,gender,description
-{gender_instruction}
-The description column is optional and can contain brief context (role, location, significance).
-IMPORTANT: Use commas to separate columns. Wrap a field value in double quotes ONLY when the value itself contains a comma.
-
-Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
-The translated_name column must be a direct translation or transliteration of the raw_name ONLY. Do NOT use role labels, descriptions, or invented names as translations.
-{description_example}
-{example}
-
-
-CRITICAL EXTRACTION RULES:
-- Extract All Character names, Terms, Location names, Ability/Skill names, Item names, Organization names, and Titles/Ranks
-- Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
-- REJECT entries that contain verbs or end with punctuation (?, !, .)
-- REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But" (The description column is excluded from this restriction)
-- Do NOT create entries for common pronouns (나, 저, 너, 그, 그녀, 우리, 私, 僕, 俺, я, etc.) — these are NOT character names. Do NOT translate pronouns as role labels like "Narrator", "Protagonist", "Main Character", or "MC"
-- Do NOT output any entries that are rejected by the above rules; skip them entirely
-- REJECT generic common nouns, unnamed extras, and bare titles/roles (e.g. "Woman", "Man", "Boy", "Girl", "Villager", "Guard", "Soldier", "Aunt", "Father", "Queen", "Prince", "King", "Princess", "Knight", "Servant", "Maid", 여자, 남자, 소녀, 소년, 아줌마, 아버지, 여왕, 왕자). These are NOT proper nouns and must be skipped.
-- REJECT descriptive noun phrases and adjectives attached to generic nouns (e.g. "Blonde Elf Girl", "Orange-eyed Beastman", "White-bearded Merchant", "Fake Couple", "Bespectacled Student"). Only extract actual names or standardized titles.
-- If unsure whether something is a proper noun/name, skip it
-- {description_name_split_example}
-- {name_split_example}
-- The description column must contain detailed context/explanation
-- The translated_name MUST be a strict literal dictionary translation or transliteration of the raw_name ONLY. You are FORBIDDEN from injecting story context, roles, or extra adjectives (e.g., do NOT translate "여학생" as "Female Student Assassin" or "주인님" as "The Protagonist").
-- Create at least one glossary entry for EVERY context marker window (lines ending with "=== CONTEXT N END ==="); treat each marker boundary as a required extraction point.
-- You must create {marker} glossary entries (one or more per window; do not invent placeholders).
-- You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
+        # Default unified prompt — imported from canonical source of truth
+        try:
+            from extract_glossary_from_epub import DEFAULT_AUTO_GLOSSARY_PROMPT
+            default_unified_prompt = DEFAULT_AUTO_GLOSSARY_PROMPT
+        except ImportError:
+            default_unified_prompt = ""
         
         # Load from config or use default
         # Note: Ignoring old '...prompt2' key to force update to new prompt

@@ -48,40 +48,12 @@ def _build_header(*extra_cols):
     cols.extend(extra_cols)
     return GLOSSARY_SEP.join(cols)
 
-# Default unified auto-glossary prompt (used when AUTO_GLOSSARY_PROMPT is unset/empty).
-# NOTE: This matches the GUI's default_unified_prompt in GlossaryManager_GUI.py.
-# IMPORTANT: Examples use commas as field separators.
-DEFAULT_AUTO_GLOSARY_PROMPT3 = """You are a novel glossary extraction assistant.
-
-You must strictly return ONLY CSV format with columns separated by commas.
-Columns in this exact order: type,raw_name,translated_name,gender,description
-For character entries, determine gender from context, leave empty if context is insufficient.
-For non-character entries, leave gender empty.
-The description column is optional and can contain brief context (role, location, significance).
-IMPORTANT: Use commas to separate columns. Wrap a field value in double quotes ONLY when the value itself contains a comma.
-
-Critical Requirement: The translated name and description column must be in {language}, While the raw name column must the same as the source language.
-The translated_name column must be a direct translation or transliteration of the raw_name ONLY. Do NOT use role labels, descriptions, or invented names as translations.
-
-For example:
-character,이히리ᐐ 나애,Dihirit Ade,female,"The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision"
-character,뢤사난,Kim Sang-hyu,male,"A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress"
-
-CRITICAL EXTRACTION RULES:
-- Extract All Character names, Terms, Location names, Ability/Skill names, Item names, Organization names, and Titles/Ranks.
-- Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
-- REJECT entries that contain verbs or end with punctuation (?, !, .)
-- REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But" (The description column is excluded from this restriction)
-- Do NOT create entries for common pronouns (나, 저, 너, 그, 그녀, 우리, 私, 僕, 俺, я, etc.) — these are NOT character names. Do NOT translate pronouns as role labels like "Narrator", "Protagonist", "Main Character", or "MC"
-- Do NOT output any entries that are rejected by the above rules; skip them entirely
-- REJECT generic common nouns, unnamed extras, and bare titles/roles (e.g. "Woman", "Man", "Boy", "Girl", "Villager", "Guard", "Soldier", "Aunt", "Father", "Queen", "Prince", "King", "Princess", "Knight", "Servant", "Maid", 여자, 남자, 소녀, 소년, 아줌마, 아버지, 여왕, 왕자). These are NOT proper nouns and must be skipped.
-- REJECT descriptive noun phrases and adjectives attached to generic nouns (e.g. "Blonde Elf Girl", "Orange-eyed Beastman", "White-bearded Merchant", "Fake Couple", "Bespectacled Student"). Only extract actual names or standardized titles.
-- If unsure whether something is a proper noun/name, skip it
-- The description column must contain detailed context/explanation
-- The translated_name MUST be a strict literal dictionary translation or transliteration of the raw_name ONLY. You are FORBIDDEN from injecting story context, roles, or extra adjectives (e.g., do NOT translate "여학생" as "Female Student Assassin" or "주인님" as "The Protagonist").
-- Create at least one glossary entry for EVERY context marker window (lines ending with "=== CONTEXT N END ==="); treat each marker boundary as a required extraction point.
-- You must create {{marker}} glossary entries (one or more per window; do not invent placeholders).
-- You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
+# Default unified auto-glossary prompt — imported from the canonical source of
+# truth in extract_glossary_from_epub so there is only one copy to maintain.
+try:
+    from extract_glossary_from_epub import DEFAULT_AUTO_GLOSSARY_PROMPT as DEFAULT_AUTO_GLOSARY_PROMPT3
+except ImportError:
+    DEFAULT_AUTO_GLOSARY_PROMPT3 = ""
 
 
 # Class-level shared lock for API submission timing
