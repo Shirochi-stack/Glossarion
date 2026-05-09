@@ -7528,10 +7528,19 @@ class MangaTranslationTab(QObject):
             current_root = self._current_manga_source_dir()
             if not current_root:
                 return False
-            return bool(
+            same_root = (
                 os.path.normcase(os.path.abspath(suppressed_root))
                 == os.path.normcase(os.path.abspath(current_root))
             )
+            if not same_root:
+                return False
+            if self._find_generated_manga_glossary_path():
+                self.manga_glossary_auto_load_suppressed = False
+                self.manga_glossary_auto_load_suppressed_root = ''
+                self.main_gui.config['manga_glossary_auto_load_suppressed'] = False
+                self.main_gui.config['manga_glossary_auto_load_suppressed_root'] = ''
+                return False
+            return True
         except Exception:
             return False
 
@@ -7747,7 +7756,7 @@ class MangaTranslationTab(QObject):
         """Pick and load a custom glossary for manga translation."""
         start_dir = ""
         try:
-            current_path = getattr(self, 'manga_custom_glossary_path', '') or self.main_gui.config.get('manual_glossary_path', '')
+            current_path = getattr(self, 'manga_custom_glossary_path', '') or self.main_gui.config.get('manga_custom_glossary_path', '')
             if current_path and os.path.exists(current_path):
                 start_dir = os.path.dirname(current_path)
             else:
@@ -7755,9 +7764,10 @@ class MangaTranslationTab(QObject):
                 if glossary_dir and os.path.isdir(glossary_dir):
                     start_dir = glossary_dir
                 else:
-                    source_dir = self._current_manga_source_dir()
-                    if source_dir and os.path.isdir(source_dir):
-                        start_dir = source_dir
+                    backup_dir = self._manga_glossary_backup_dir()
+                    if backup_dir:
+                        os.makedirs(backup_dir, exist_ok=True)
+                        start_dir = backup_dir
         except Exception:
             start_dir = ""
 
@@ -7828,7 +7838,6 @@ class MangaTranslationTab(QObject):
                 file_lines = "  (folder is empty)"
             message = (
                 "This will delete the manga glossary folder used for auto-loading.\n\n"
-                f"Folder:\n{glossary_dir}\n\n"
                 f"Files to delete:\n{file_lines}\n\n"
                 "Continue?"
             )
