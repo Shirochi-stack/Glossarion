@@ -832,6 +832,7 @@ def load_config():
             with open(path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
                 config = decrypt_config(config)
+                config["save_glossary_in_output"] = True
                 # Remember which config file we actually used (debugging aid)
                 config["_source_config"] = path
                 return config
@@ -843,7 +844,7 @@ def load_config():
 
     sys.stderr.write("[CONFIG] No config.json found in expected locations; using empty config\n")
     sys.stderr.flush()
-    return {}
+    return {"save_glossary_in_output": True}
 
 
 @bot.event
@@ -1438,6 +1439,7 @@ async def translate(
         os.environ['GLOSSARY_SKIP_FREQUENCY_CHECK'] = '0'  # Enable frequency checking
         os.environ['CONTEXT_WINDOW_SIZE'] = str(config.get('glossary_context_window', 2))
         os.environ['GLOSSARY_USE_LEGACY_CSV'] = '0'  # Use modern JSON format
+        os.environ['SAVE_GLOSSARY_IN_OUTPUT'] = '1'
         os.environ['GLOSSARY_DUPLICATE_KEY_MODE'] = config.get('glossary_duplicate_key_mode', 'auto')
         os.environ['GLOSSARY_DUPLICATE_CUSTOM_FIELD'] = config.get('glossary_duplicate_custom_field', '')
         os.environ['GLOSSARY_DUPLICATE_ALGORITHM'] = duplicate_algorithm
@@ -2370,6 +2372,7 @@ async def extract(
         os.environ['CONTEXT_WINDOW_SIZE'] = str(config.get('glossary_context_window', 2))
         os.environ['GLOSSARY_CONTEXT_LIMIT'] = str(config.get('manual_context_limit', 2))
         os.environ['GLOSSARY_USE_LEGACY_CSV'] = '0'
+        os.environ['SAVE_GLOSSARY_IN_OUTPUT'] = '1'
         os.environ['GLOSSARY_DUPLICATE_KEY_MODE'] = 'skip'
         os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if config.get('glossary_disable_honorifics_filter', False) else '0'
         # Ensure glossary output language matches the command's target_language

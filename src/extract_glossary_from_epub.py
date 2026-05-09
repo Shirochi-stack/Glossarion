@@ -13,6 +13,7 @@ import queue
 import ebooklib
 import re
 import tempfile
+import shutil
 from ebooklib import epub
 from chapter_splitter import ChapterSplitter
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
@@ -1881,6 +1882,23 @@ def save_glossary_json(glossary: List[Dict], output_path: str):
             except Exception as e2:
                 print(f"[Error] Failed to save glossary JSON: {e2}")
 
+def _mirror_glossary_outputs_to_backup(output_path: str):
+    """Copy current glossary outputs to the optional output-side backup folder."""
+    backup_dir = os.getenv("GLOSSARY_OUTPUT_BACKUP_DIR", "").strip()
+    if not backup_dir:
+        return
+    try:
+        output_dir = os.path.dirname(os.path.abspath(output_path)) or os.getcwd()
+        backup_abs = os.path.abspath(backup_dir)
+        if os.path.normcase(output_dir) == os.path.normcase(backup_abs):
+            return
+        os.makedirs(backup_abs, exist_ok=True)
+        for src_path in (output_path, output_path.replace('.json', '.csv')):
+            if src_path and os.path.exists(src_path):
+                shutil.copy2(src_path, os.path.join(backup_abs, os.path.basename(src_path)))
+    except Exception as e:
+        print(f"[Warning] Could not save glossary backup copies: {e}")
+
 def save_glossary_csv(glossary: List[Dict], output_path: str):
     """Save glossary in CSV or token-efficient format based on environment variable"""
     global _glossary_csv_lock
@@ -2187,6 +2205,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                             f.write("\n")
             except Exception as e2:
                 print(f"[Error] Failed to save CSV: {e2}")
+        _mirror_glossary_outputs_to_backup(output_path)
             
 def extract_chapters_from_epub(epub_path: str, return_metadata: bool = False) -> List:
     """Extract chapters from EPUB for glossary extraction.
@@ -5297,21 +5316,22 @@ def main(log_callback=None, stop_callback=None):
     if args.output == 'glossary.json':
         args.output = f"{file_base}_glossary.json" 
 
-    # By default, keep regular EPUB glossaries in the shared Glossary subfolder.
-    # When requested, save directly in the current output/source folder instead.
-    save_glossary_in_output = os.getenv("SAVE_GLOSSARY_IN_OUTPUT", "0").strip().lower() in ("1", "true", "yes", "on")
+    # Keep regular EPUB glossaries in the shared Glossary subfolder. When
+    # requested, also mirror the outputs to an output-side Glossary_Backup folder.
+    save_glossary_backup_in_output = os.getenv("SAVE_GLOSSARY_IN_OUTPUT", "0").strip().lower() in ("1", "true", "yes", "on")
     base_out_dir = os.path.dirname(args.output)
     base_out_dir_abs = os.path.abspath(base_out_dir or os.getcwd())
-    if save_glossary_in_output:
-        if os.path.basename(base_out_dir_abs).lower() == "glossary":
-            glossary_dir = os.path.dirname(base_out_dir_abs)
-        else:
-            glossary_dir = base_out_dir_abs
-    elif os.path.basename(base_out_dir_abs).lower() == "glossary":
+    if os.path.basename(base_out_dir_abs).lower() == "glossary":
         glossary_dir = base_out_dir
+        backup_parent_dir = os.path.dirname(base_out_dir_abs)
     else:
         glossary_dir = os.path.join(base_out_dir, "Glossary")
+        backup_parent_dir = base_out_dir_abs
     os.makedirs(glossary_dir, exist_ok=True)
+    if save_glossary_backup_in_output:
+        os.environ["GLOSSARY_OUTPUT_BACKUP_DIR"] = os.path.join(backup_parent_dir, "Glossary_Backup")
+    else:
+        os.environ.pop("GLOSSARY_OUTPUT_BACKUP_DIR", None)
 
     # override the module‐level PROGRESS_FILE to include epub name
     global PROGRESS_FILE, _GLOSSARY_OUTPUT_FILE

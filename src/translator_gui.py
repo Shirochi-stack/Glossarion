@@ -15193,11 +15193,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Create Glossary folder
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
             save_glossary_in_output = bool(self.config.get('save_glossary_in_output', False))
-            if save_glossary_in_output and override_dir:
-                glossary_base_dir = os.path.abspath(override_dir)
-            elif save_glossary_in_output and self.selected_files:
-                glossary_base_dir = os.path.dirname(os.path.abspath(self.selected_files[0]))
-            elif override_dir:
+            if override_dir:
                 glossary_base_dir = os.path.join(override_dir, "Glossary")
             else:
                 glossary_base_dir = "Glossary"
@@ -15263,7 +15259,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 if self._process_image_folder_for_glossary(folder_name, images, glossary_base_dir):
                     successful += 1
                     # Use absolute path for log if override is set, otherwise relative
-                    if override_dir or save_glossary_in_output:
+                    if override_dir:
                         display_path = os.path.join(glossary_base_dir, f"{folder_name}_glossary.json")
                     else:
                         display_path = f"Glossary/{folder_name}_glossary.json"
@@ -15291,11 +15287,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # state belongs in repo/exe Glossary or output-override Glossary.
                 override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
                 save_glossary_in_output = bool(self.config.get('save_glossary_in_output', False))
-                if save_glossary_in_output and override_dir:
-                    glossary_dir = os.path.abspath(override_dir)
-                elif save_glossary_in_output:
-                    glossary_dir = os.path.dirname(os.path.abspath(text_file))
-                elif override_dir:
+                if override_dir:
                     glossary_dir = os.path.join(os.path.abspath(override_dir), "Glossary")
                 else:
                     glossary_dir = os.path.join(_get_app_dir(), "Glossary")
@@ -15914,6 +15906,22 @@ Important rules:
                         writer.writerow(row)
                 
                 self.append_log(f"💾 Also saved as CSV: {os.path.basename(csv_file)}")
+
+                if bool(self.config.get('save_glossary_in_output', False)):
+                    try:
+                        import shutil
+                        backup_root = os.environ.get('OUTPUT_DIRECTORY') or (
+                            os.path.dirname(os.path.abspath(image_files[0])) if image_files else os.path.dirname(os.path.abspath(output_dir))
+                        )
+                        backup_dir = os.path.join(os.path.abspath(backup_root), "Glossary_Backup")
+                        if os.path.normcase(os.path.abspath(backup_dir)) != os.path.normcase(os.path.abspath(output_dir)):
+                            os.makedirs(backup_dir, exist_ok=True)
+                            for src_path in (output_file, csv_file):
+                                if src_path and os.path.exists(src_path):
+                                    shutil.copy2(src_path, os.path.join(backup_dir, os.path.basename(src_path)))
+                            self.append_log(f"💾 Also saved backup copies to: {backup_dir}")
+                    except Exception as backup_err:
+                        self.append_log(f"⚠️ Could not save glossary backup copies: {backup_err}")
                 
                 # Verify files were created
                 if os.path.exists(output_file):
@@ -16188,11 +16196,7 @@ Important rules:
             override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
             save_glossary_in_output = bool(self.config.get('save_glossary_in_output', False))
             
-            if save_glossary_in_output and override_dir:
-                glossary_dir = os.path.abspath(override_dir)
-            elif save_glossary_in_output:
-                glossary_dir = os.path.dirname(os.path.abspath(file_path))
-            elif override_dir:
+            if override_dir:
                 glossary_dir = os.path.join(override_dir, "Glossary")
             else:
                 glossary_dir = "Glossary"

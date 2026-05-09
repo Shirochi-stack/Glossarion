@@ -2748,14 +2748,14 @@ Rules:
         auto_layout.addWidget(output_save_widget)
 
         if not hasattr(self, 'save_glossary_in_output_checkbox'):
-            self.save_glossary_in_output_checkbox = self._create_styled_checkbox("Save Glossary in Output")
+            self.save_glossary_in_output_checkbox = self._create_styled_checkbox("Save Glossary Backup in Output")
             self.save_glossary_in_output_checkbox.setChecked(self.config.get('save_glossary_in_output', False))
         self.save_glossary_in_output_checkbox.setToolTip(
-            "Save generated glossary files in the current output/source folder instead of shared glossary folders."
+            "Also save duplicate glossary files in the current output/source folder. Primary glossary mapping stays unchanged."
         )
         output_save_layout.addWidget(self.save_glossary_in_output_checkbox)
 
-        output_save_hint = QLabel("(When off, generated glossaries use the shared Glossary/MangaGlossary folders)")
+        output_save_hint = QLabel("(Creates output-side Glossary_Backup copies; manga always also writes MangaGlossary_Backup)")
         output_save_layout.addWidget(output_save_hint)
         output_save_layout.addStretch()
         

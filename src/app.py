@@ -499,6 +499,7 @@ class GlossarionWeb:
             'thread_submission_delay': 0.1,  # CRITICAL: Default threading delay
             'prompt_profiles': {},  # Will be populated from default_prompts in __init__
             'active_profile': 'Universal',  # Default active profile
+            'save_glossary_in_output': True,
             'ocr_provider': 'custom-api',
             'bubble_detection_enabled': True,
             'inpainting_enabled': True,
@@ -701,6 +702,7 @@ class GlossarionWeb:
         os.environ['STRIP_HONORIFICS'] = '1' if config('strip_honorifics', True) else '0'
         os.environ['MANUAL_GLOSSARY_FUZZY_THRESHOLD'] = str(config('manual_glossary_fuzzy_threshold', 0.90))
         os.environ['GLOSSARY_USE_LEGACY_CSV'] = '1' if config('glossary_use_legacy_csv', False) else '0'
+        os.environ['SAVE_GLOSSARY_IN_OUTPUT'] = '1'
         
         # QA Scanner Settings
         os.environ['ENABLE_POST_TRANSLATION_SCAN'] = '1' if config('enable_post_translation_scan', False) else '0'
@@ -1587,6 +1589,7 @@ class GlossarionWeb:
             os.environ['GLOSSARY_STRIP_HONORIFICS'] = '1' if strip_honorifics else '0'
             os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(fuzzy_threshold)
             os.environ['GLOSSARY_USE_LEGACY_CSV'] = '1' if use_legacy_csv else '0'
+            os.environ['SAVE_GLOSSARY_IN_OUTPUT'] = '1'
             
             # Set prompts if provided
             if extraction_prompt:
