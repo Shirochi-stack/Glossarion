@@ -7811,15 +7811,49 @@ class MangaTranslationTab(QObject):
             self._log(traceback.format_exc(), "debug")
             QMessageBox.critical(self.dialog, "Error", f"Failed to load glossary:\n\n{e}")
 
+    def _confirm_delete_manga_glossary_folder(self, glossary_dir: str) -> bool:
+        """Ask before deleting the output-side manga Glossary folder."""
+        try:
+            entries = []
+            for root, _, files in os.walk(glossary_dir):
+                for filename in files:
+                    entries.append(os.path.join(root, filename))
+            entries.sort()
+            shown_entries = entries[:25]
+            if entries:
+                file_lines = "\n".join(f"  {path}" for path in shown_entries)
+                if len(entries) > len(shown_entries):
+                    file_lines += f"\n  ...and {len(entries) - len(shown_entries)} more file(s)"
+            else:
+                file_lines = "  (folder is empty)"
+            message = (
+                "This will delete the manga glossary folder used for auto-loading.\n\n"
+                f"Folder:\n{glossary_dir}\n\n"
+                f"Files to delete:\n{file_lines}\n\n"
+                "Continue?"
+            )
+            reply = QMessageBox.question(
+                self.dialog,
+                "Delete Manga Glossary Folder?",
+                message,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            return reply == QMessageBox.Yes
+        except Exception:
+            return False
+
     def _clear_manga_custom_glossary(self):
         """Clear loaded/generated manga glossary path/text and suppress auto-reload."""
         deleted_glossary_dir = ''
         try:
-            output_root = os.environ.get('OUTPUT_DIRECTORY') or getattr(self.main_gui, 'config', {}).get('output_directory')
-            glossary_dir = os.path.abspath(os.path.join(output_root, "Glossary")) if output_root else ''
+            glossary_dir = os.path.abspath(self._manga_glossary_output_dir())
             # This button is scoped to manga glossary state. Only remove the
             # configured output-side Glossary subfolder; backups stay intact.
             if glossary_dir and os.path.basename(os.path.normpath(glossary_dir)).lower() == 'glossary' and os.path.isdir(glossary_dir):
+                if not self._confirm_delete_manga_glossary_folder(glossary_dir):
+                    self._log("📚 Manga glossary clear cancelled", "info")
+                    return
                 shutil.rmtree(glossary_dir)
                 deleted_glossary_dir = glossary_dir
         except Exception as delete_err:
