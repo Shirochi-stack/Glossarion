@@ -4131,6 +4131,26 @@ class MangaTranslationTab(QObject):
 
         manga_glossary_layout.addWidget(manga_glossary_toggle_frame)
 
+        manga_glossary_compress_frame = QWidget()
+        manga_glossary_compress_layout = QHBoxLayout(manga_glossary_compress_frame)
+        manga_glossary_compress_layout.setContentsMargins(20, 0, 0, 0)
+        manga_glossary_compress_layout.setSpacing(10)
+
+        self.manga_compress_glossary_checkbox = self._create_styled_checkbox("Compress Glossary Prompt")
+        self.manga_compress_glossary_checkbox.setChecked(self._get_compress_glossary_prompt_value())
+        self.manga_compress_glossary_checkbox.setToolTip(
+            "Only send glossary entries that appear in the current manga OCR text.\n"
+            "This mirrors the Glossary Manager compression setting."
+        )
+        self.manga_compress_glossary_checkbox.stateChanged.connect(self._on_manga_compress_glossary_toggle)
+        manga_glossary_compress_layout.addWidget(self.manga_compress_glossary_checkbox)
+
+        manga_compress_hint = QLabel("(same setting as Glossary Manager)")
+        manga_compress_hint.setStyleSheet("color: #b8c7d9; font-size: 8pt;")
+        manga_glossary_compress_layout.addWidget(manga_compress_hint)
+        manga_glossary_compress_layout.addStretch()
+        manga_glossary_layout.addWidget(manga_glossary_compress_frame)
+
         manga_glossary_load_frame = QWidget()
         manga_glossary_load_layout = QHBoxLayout(manga_glossary_load_frame)
         manga_glossary_load_layout.setContentsMargins(20, 0, 0, 0)
@@ -6425,6 +6445,7 @@ class MangaTranslationTab(QObject):
         self.manga_glossary_prompt = config.get('manga_glossary_prompt', self._default_manga_glossary_prompt())
         self.manga_custom_glossary_path = config.get('manga_custom_glossary_path', '')
         self.manga_generated_glossary_path = config.get('manga_generated_glossary_path', '')
+        self.compress_glossary_prompt_value = self._get_compress_glossary_prompt_value()
         self.manga_loaded_glossary_text = ''
         self.manga_generated_glossary_text = ''
  
@@ -6492,6 +6513,8 @@ class MangaTranslationTab(QObject):
                 self.full_page_context_value = bool(self.context_checkbox.isChecked())
             if hasattr(self, 'manga_glossary_checkbox'):
                 self.manga_glossary_enabled_value = bool(self.manga_glossary_checkbox.isChecked())
+            if hasattr(self, 'manga_compress_glossary_checkbox'):
+                self.compress_glossary_prompt_value = bool(self.manga_compress_glossary_checkbox.isChecked())
             if hasattr(self, 'visual_context_checkbox'):
                 self.visual_context_enabled_value = bool(self.visual_context_checkbox.isChecked())
             if hasattr(self, 'create_cbz_checkbox'):
@@ -6672,6 +6695,8 @@ class MangaTranslationTab(QObject):
                 self.main_gui.config['manga_custom_glossary_path'] = self.manga_custom_glossary_path
             if hasattr(self, 'manga_generated_glossary_path'):
                 self.main_gui.config['manga_generated_glossary_path'] = self.manga_generated_glossary_path
+            if hasattr(self, 'compress_glossary_prompt_value'):
+                self._sync_compress_glossary_prompt_setting(self.compress_glossary_prompt_value)
             
             # Persist visual context setting alongside other toggles
             if hasattr(self, 'visual_context_enabled_value'):
@@ -7110,6 +7135,89 @@ class MangaTranslationTab(QObject):
         except Exception:
             enabled = bool(state)
         self.manga_glossary_enabled_value = enabled
+        self._save_rendering_settings()
+
+    def _get_compress_glossary_prompt_value(self) -> bool:
+        """Read the shared glossary compression toggle from live UI/config."""
+        value = True
+        try:
+            value = self.main_gui.config.get('compress_glossary_prompt', True)
+        except Exception:
+            value = True
+
+        try:
+            live_var = getattr(self.main_gui, 'compress_glossary_prompt_var', None)
+            if live_var is not None:
+                value = live_var.get() if hasattr(live_var, 'get') else live_var
+        except Exception:
+            pass
+
+        try:
+            glossary_checkbox = getattr(self.main_gui, 'compress_glossary_checkbox', None)
+            if glossary_checkbox is not None and hasattr(glossary_checkbox, 'isChecked'):
+                value = glossary_checkbox.isChecked()
+        except Exception:
+            pass
+
+        return bool(value)
+
+    def _set_checkbox_checked_safely(self, checkbox, checked: bool) -> None:
+        if checkbox is None or not hasattr(checkbox, 'setChecked'):
+            return
+        try:
+            if hasattr(checkbox, 'isChecked') and bool(checkbox.isChecked()) == bool(checked):
+                return
+        except Exception:
+            pass
+        previous = None
+        try:
+            if hasattr(checkbox, 'blockSignals'):
+                previous = checkbox.blockSignals(True)
+            checkbox.setChecked(bool(checked))
+        finally:
+            try:
+                if previous is not None and hasattr(checkbox, 'blockSignals'):
+                    checkbox.blockSignals(previous)
+            except Exception:
+                pass
+
+    def _sync_compress_glossary_prompt_setting(self, enabled: bool) -> None:
+        """Keep manga and Glossary Manager compression toggles on the same setting."""
+        enabled = bool(enabled)
+        self.compress_glossary_prompt_value = enabled
+        try:
+            self.main_gui.config['compress_glossary_prompt'] = enabled
+        except Exception:
+            pass
+        try:
+            live_var = getattr(self.main_gui, 'compress_glossary_prompt_var', None)
+            if live_var is not None and hasattr(live_var, 'set'):
+                live_var.set(enabled)
+            else:
+                setattr(self.main_gui, 'compress_glossary_prompt_var', enabled)
+        except Exception:
+            pass
+        try:
+            os.environ['COMPRESS_GLOSSARY_PROMPT'] = '1' if enabled else '0'
+        except Exception:
+            pass
+
+        self._set_checkbox_checked_safely(
+            getattr(self, 'manga_compress_glossary_checkbox', None),
+            enabled,
+        )
+        self._set_checkbox_checked_safely(
+            getattr(self.main_gui, 'compress_glossary_checkbox', None),
+            enabled,
+        )
+
+    def _on_manga_compress_glossary_toggle(self, state=None):
+        """Persist the shared glossary compression toggle from the manga panel."""
+        try:
+            enabled = bool(self.manga_compress_glossary_checkbox.isChecked()) if hasattr(self, 'manga_compress_glossary_checkbox') else bool(state)
+        except Exception:
+            enabled = bool(state)
+        self._sync_compress_glossary_prompt_setting(enabled)
         self._save_rendering_settings()
 
     def _update_manga_glossary_status_label(self):

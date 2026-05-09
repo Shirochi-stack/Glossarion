@@ -7419,12 +7419,11 @@ class MangaTranslator:
             )
             compressed = compressed if isinstance(compressed, str) else str(compressed or "")
             compressed_length = len(compressed)
-            if original_length and compressed_length != original_length:
-                reduction_pct = (original_length - compressed_length) / original_length * 100
-                self._log(
-                    f"Manga glossary compressed: {original_length:,} -> {compressed_length:,} chars ({reduction_pct:.1f}%)",
-                    "info",
-                )
+            reduction_pct = ((original_length - compressed_length) / original_length * 100) if original_length else 0
+            self._log(
+                f"🗜️ Manga glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%)",
+                "info",
+            )
             return compressed
         except Exception as e:
             self._log(f"Warning: Manga glossary compression failed: {e}", "warning")
@@ -7452,6 +7451,7 @@ class MangaTranslator:
             entry_count = sum(1 for line in glossary_text.splitlines() if line.lstrip().startswith("* "))
             self._log(f"📚 Embedding generated manga glossary in translation prompt ({entry_count} entries)")
             self._manga_glossary_prompt_logged = True
+        self._log(f"✅ Manga glossary appended ({len(glossary_text):,} characters)", "info")
 
         if system_prompt:
             return f"{system_prompt}\n\n{glossary_block}"

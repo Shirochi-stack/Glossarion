@@ -4221,15 +4221,14 @@ def _compress_loaded_manga_glossary_for_workflow(self, glossary_text: str, sourc
             },
         )
         compressed = compressed if isinstance(compressed, str) else str(compressed or "")
-        if original_length and len(compressed) != original_length:
-            reduction_pct = (original_length - len(compressed)) / original_length * 100
-            try:
-                self._log(
-                    f"Manga glossary compressed for preview: {original_length:,} -> {len(compressed):,} chars ({reduction_pct:.1f}%)",
-                    "info",
-                )
-            except Exception:
-                pass
+        reduction_pct = ((original_length - len(compressed)) / original_length * 100) if original_length else 0
+        try:
+            self._log(
+                f"🗜️ Manga glossary: {original_length:,}→{len(compressed):,} chars ({reduction_pct:.1f}%)",
+                "info",
+            )
+        except Exception:
+            pass
         return compressed
     except Exception as err:
         try:
@@ -4269,6 +4268,10 @@ def _append_loaded_manga_glossary_to_system_prompt(self, system_prompt: str, sou
         self._workflow_manga_glossary_prompt_logged = True
 
     glossary_block = f"{str(append_prompt).rstrip()}\n{glossary_text}"
+    try:
+        self._log(f"✅ Manga glossary appended ({len(glossary_text):,} characters)", "info")
+    except Exception:
+        pass
     if system_prompt:
         return f"{system_prompt}\n\n{glossary_block}"
     return glossary_block
