@@ -16,7 +16,7 @@ from app_version import get_spec_app_name
 if os.name == 'nt' and os.path.exists(r'C:\msys64\mingw64\bin'):
     os.environ['PATH'] = r'C:\msys64\mingw64\bin' + os.pathsep + os.environ.get('PATH', '')
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files, copy_metadata
 
 # ============================================================================
 # CONFIGURATION
@@ -104,6 +104,32 @@ for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'charde
         hiddenimports.extend(hidden)
     except:
         pass
+
+# Heavy CUDA build: Qwen-Image-Edit/diffusers load these lazily at runtime.
+# PyInstaller can otherwise bundle diffusers dummy pipeline classes and miss the
+# real transformers backend, which causes "requires the transformers library"
+# errors inside the packaged exe.
+heavy_hf_packages = [
+    'diffusers',
+    'transformers',
+    'accelerate',
+    'huggingface_hub',
+    'tokenizers',
+    'safetensors',
+]
+for package in heavy_hf_packages:
+    try:
+        data, bins, hidden = collect_all(package)
+        datas.extend(data)
+        binaries.extend(bins)
+        hiddenimports.extend(hidden)
+        try:
+            datas.extend(copy_metadata(package, recursive=True))
+        except Exception:
+            pass
+        print(f"  Collected Heavy HF package: {package}")
+    except Exception as collect_err:
+        print(f"  Warning: Could not collect Heavy HF package {package}: {collect_err}")
 
 
 # ============================================================================
