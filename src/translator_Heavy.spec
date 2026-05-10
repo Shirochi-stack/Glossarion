@@ -1193,6 +1193,15 @@ if platform.system() == 'Windows':
     except Exception as e:
         print(f"  Warning: Could not collect torch DLLs: {e}")
 
+# Include only runtime hooks that exist in this checkout. Some local builds have
+# extra hooks that are not present in CI.
+runtime_hooks = []
+for hook_file in ['pyi_rth_win32_runtime.py', os.path.join('hooks', 'rthook_torch.py')]:
+    if os.path.exists(os.path.join(SPEC_DIR, hook_file)):
+        runtime_hooks.append(hook_file)
+    else:
+        print(f"  Optional runtime hook not found, skipping: {hook_file}")
+
 # ============================================================================
 # ANALYSIS
 # ============================================================================
@@ -1205,7 +1214,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=['.', './hooks'],  # Custom hooks: R6034 fix + torch hooks
     hooksconfig={},
-    runtime_hooks=['pyi_rth_win32_runtime.py', 'hooks/rthook_torch.py'],  # Fix R6034 + torch env
+    runtime_hooks=runtime_hooks,  # Optional local runtime hooks
     excludes=excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
