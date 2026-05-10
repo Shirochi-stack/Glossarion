@@ -93,9 +93,27 @@ def _is_vision_output_mode(qa_settings=None):
     return str(mode).strip().lower() == 'vision'
 
 
+def _is_truncation_qa_context(qa_settings=None):
+    settings = qa_settings if isinstance(qa_settings, dict) else {}
+    context = (
+        settings.get('_qa_context')
+        or settings.get('qa_context')
+        or settings.get('context')
+        or settings.get('_context')
+        or ''
+    )
+    if str(context).strip().lower() in ('truncation', 'qa_truncation'):
+        return True
+    return False
+
+
+def _should_use_vision_ocr_qa_source(qa_settings=None):
+    return _is_vision_output_mode(qa_settings) or _is_truncation_qa_context(qa_settings)
+
+
 def _resolve_vision_ocr_qa_source_epub(epub_path, qa_settings=None):
-    """Use the selected book output's generated OCR EPUB for Vision-mode QA when present."""
-    if not _is_vision_output_mode(qa_settings):
+    """Use the selected book output's generated OCR EPUB for Vision/truncation QA when present."""
+    if not _should_use_vision_ocr_qa_source(qa_settings):
         return epub_path
     if not epub_path or not str(epub_path).lower().endswith('.epub'):
         return epub_path
@@ -7868,8 +7886,13 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             else:
                 log("   ⚠️ No word_count folder found for truncation detection in text mode")
         elif epub_path and os.path.exists(epub_path):
-            log(f"🔍 Extracting source HTML content from EPUB for truncation detection: {os.path.basename(source_text_epub_path)}")
-            original_html_content = extract_epub_html_content(source_text_epub_path, log)
+            truncation_source_epub_path = source_text_epub_path
+            if check_ai_truncation:
+                truncation_qa_settings = dict(qa_settings)
+                truncation_qa_settings['_qa_context'] = 'qa_truncation'
+                truncation_source_epub_path = _resolve_vision_ocr_qa_source_epub(epub_path, truncation_qa_settings)
+            log(f"🔍 Extracting source HTML content from EPUB for truncation detection: {os.path.basename(truncation_source_epub_path)}")
+            original_html_content = extract_epub_html_content(truncation_source_epub_path, log)
         else:
             log("⚠️ Truncation check(s) enabled but no source file provided - skipping")
             check_truncation = False

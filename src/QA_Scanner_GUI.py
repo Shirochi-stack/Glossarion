@@ -34,11 +34,28 @@ def _qa_owner_output_mode(owner):
         return ''
 
 
+def _qa_owner_uses_truncation_context(owner):
+    try:
+        settings = getattr(owner, 'config', {}).get('qa_scanner_settings', {}) or {}
+        context = (
+            settings.get('_qa_context')
+            or settings.get('qa_context')
+            or settings.get('context')
+            or settings.get('_context')
+            or ''
+        )
+        if str(context).strip().lower() in ('truncation', 'qa_truncation'):
+            return True
+        return bool(settings.get('check_ai_truncation_detection', False))
+    except Exception:
+        return False
+
+
 def _qa_vision_ocr_source_path(path, owner=None):
-    """Return this book output's OCR-source EPUB used for Vision QA, when available."""
+    """Return this book output's OCR-source EPUB used for Vision/truncation QA, when available."""
     if not path or not str(path).lower().endswith('.epub'):
         return path
-    if _qa_owner_output_mode(owner) != 'vision':
+    if _qa_owner_output_mode(owner) != 'vision' and not _qa_owner_uses_truncation_context(owner):
         return path
     try:
         abs_path = os.path.abspath(path)
