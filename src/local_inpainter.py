@@ -1034,9 +1034,17 @@ class LocalInpainter:
             self.model_loaded = False
             return False
         
+        qwen_unbounded_load_timeout = (
+            self._is_qwen_image_edit_method(method)
+            or 'qwen-image-edit' in str(model_path or '').lower()
+            or 'qwen_image_edit' in str(model_path or '').lower()
+        )
+
         # Retry logic with worker restart for stuck/dead workers
-        max_retries = 2
-        timeout_values = [180.0, 180.0, 180.0]  # 3 minutes per attempt
+        max_retries = 0 if qwen_unbounded_load_timeout else 2
+        timeout_values = [None] if qwen_unbounded_load_timeout else [180.0, 180.0, 180.0]
+        if qwen_unbounded_load_timeout:
+            logger.info("Qwen-Image-Edit worker load timeout disabled; use Stop to cancel a long load")
         
         for attempt in range(max_retries + 1):
             # Check stop flag at start of each retry
@@ -1084,7 +1092,8 @@ class LocalInpainter:
                 return False
                 
             except TimeoutError as e:
-                logger.error(f"Worker load_model timeout (attempt {attempt + 1}/{max_retries + 1}): {e}")
+                timeout_label = "disabled" if timeout is None else f"{timeout:.0f}s"
+                logger.error(f"Worker load_model timeout (attempt {attempt + 1}/{max_retries + 1}, timeout={timeout_label}): {e}")
                 # Check stop flag before retry
                 if self._check_stop():
                     self._log("⏹️ Model load aborted on timeout - stop requested", "warning")
