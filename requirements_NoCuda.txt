@@ -92,6 +92,27 @@ isodate
 azure-core
 azure-identity
 
+# YOLO Bubble Detection
+onnxruntime
+# onnxruntime-gpu  # Optional, uncomment for GPU support
+ultralytics  # Optional, for PT to ONNX conversion
+lap>=0.5.12 
+
+# Inpainting
+replicate
+
+# heavy imports (increases .exe file size by 1.5gb)
+# CPU-only PyTorch wheels (avoid CUDA DLL load errors on Windows)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.10.0+cpu
+torchvision==0.25.0+cpu
+onnxruntime
+safetensors
+transformers
+diffusers>=0.36.0
+accelerate
+huggingface-hub<1.0.0
+
 # Encryption/Decryption
 cryptography
 
