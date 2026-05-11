@@ -6706,6 +6706,11 @@ class EpubLibraryDialog(QDialog):
         self._loading_widget.hide()
         self._tabs.show()
 
+    def _schedule_grid_reflow(self):
+        """Refresh card columns after Qt has settled scroll-area geometry."""
+        for delay in (0, 50, 150):
+            QTimer.singleShot(delay, self._refresh_view)
+
     def _set_sort(self, mode):
         self._sort_mode = mode
         for k, btn in self._sort_btns.items():
@@ -6828,6 +6833,8 @@ class EpubLibraryDialog(QDialog):
         self._prev_content_tab = index
         self._current_tab = index
         self._config["epub_library_tab"] = index
+        if self._ip_cards or self._comp_cards:
+            self._schedule_grid_reflow()
 
     # -- Actions ------------------------------------------------------------
 
@@ -8609,12 +8616,12 @@ class EpubLibraryDialog(QDialog):
         self._hide_loading()
         self._refresh_view()
         self._update_organize_counts()
-        # Schedule a deferred re-layout so the grid sees the widget's
-        # real dimensions after Qt finishes processing the pending
-        # show / layout events. Without this the initial column count
-        # is computed from a stale/zero width and the cards don't fill
-        # the viewport until the user triggers a manual resize.
-        QTimer.singleShot(0, self._refresh_view)
+        # Schedule deferred re-layouts so the grid sees the scroll
+        # viewport's real dimensions after Qt finishes processing the
+        # pending show / layout events. Without this the initial column
+        # count can be computed from a stale width and the cards don't
+        # fill the viewport until the user triggers a manual resize.
+        self._schedule_grid_reflow()
 
     @staticmethod
     def _card_signature(book: dict) -> tuple:
@@ -8659,6 +8666,7 @@ class EpubLibraryDialog(QDialog):
         selected_paths: set[str] | None = None,
         card_cache: dict | None = None,
         full_books: list[dict] | None = None,
+        scroll_area: QScrollArea | None = None,
     ):
         """Shared render pipeline used by both tabs.
 
@@ -8760,14 +8768,21 @@ class EpubLibraryDialog(QDialog):
         spacing = preset["spacing"]
         grid_layout.setHorizontalSpacing(spacing)
         grid_layout.setVerticalSpacing(spacing + 2)
-        # Prefer the grid container's own width — that's exactly the
-        # surface cards lay out on. Falling back to the dialog width
-        # minus a fudge factor covers the first paint when the grid
-        # hasn't been sized yet.
+        # Prefer the scroll viewport width: it is the actual visible
+        # surface for the card grid. The grid widget itself can briefly
+        # report an old/shrunken width while QScrollArea is settling
+        # after the loading overlay hides, which used to make the first
+        # paint render too few columns until a manual zoom/resize.
         try:
-            viewport_w = int(grid_widget.width()) if grid_widget else 0
+            viewport = scroll_area.viewport() if scroll_area is not None else None
+            viewport_w = int(viewport.width()) if viewport is not None else 0
         except Exception:
             viewport_w = 0
+        if viewport_w <= 0:
+            try:
+                viewport_w = int(grid_widget.width()) if grid_widget else 0
+            except Exception:
+                viewport_w = 0
         if viewport_w <= 0:
             viewport_w = max(0, self.width() - 40)
         # Reserve room for the vertical scrollbar. The scroll area's
@@ -8920,6 +8935,7 @@ class EpubLibraryDialog(QDialog):
             self._ip_count_label, self._ip_empty_label, "novel",
             selected_paths=self._selected_paths_ip,
             card_cache=self._ip_card_cache,
+            scroll_area=self._ip_scroll,
             # Pass the full unfiltered scan result so the cache's
             # stale-entry sweep only removes cards whose underlying
             # book is genuinely gone. Filter misses stay in the
@@ -8937,6 +8953,7 @@ class EpubLibraryDialog(QDialog):
             selected_paths=self._selected_paths_comp,
             card_cache=self._comp_card_cache,
             full_books=self._completed_books,
+            scroll_area=self._comp_scroll,
         )
 
     def _active_selection(self) -> tuple[set[str], list[_BookCard]]:
@@ -10429,6 +10446,8 @@ class EpubLibraryDialog(QDialog):
     def showEvent(self, event):
         super().showEvent(event)
         self._reposition_overlays()
+        if self._ip_cards or self._comp_cards:
+            self._schedule_grid_reflow()
 
     def closeEvent(self, event):
         """Hide the dialog instead of closing \u2014 persist settings.
