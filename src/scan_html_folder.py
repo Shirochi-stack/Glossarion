@@ -5029,6 +5029,29 @@ def extract_epub_html_content(epub_path, log=print):
     Returns:
         Dict[int, dict]: {spine_index: {'html': raw_html_string, 'filename': basename}}
     """
+    def _fallback_extract_html_files(zf):
+        log("⚠️ Could not read spine order, falling back to file extraction")
+        fallback_contents = {}
+        html_files = [
+            f for f in zf.namelist()
+            if f.lower().endswith(('.html', '.xhtml', '.htm'))
+            and not f.startswith('__MACOSX')
+            and 'cover' not in f.lower()
+        ]
+        html_files.sort()
+
+        for idx, file_path in enumerate(html_files, start=1):
+            try:
+                content = zf.read(file_path).decode('utf-8', errors='ignore')
+                fallback_contents[idx] = {
+                    'html': content,
+                    'filename': os.path.basename(file_path),
+                }
+            except Exception as e:
+                log(f"⚠️ Could not read HTML file {file_path} for truncation detection: {e}")
+
+        return fallback_contents
+
     try:
         html_contents = {}
 
@@ -5046,7 +5069,7 @@ def extract_epub_html_content(epub_path, log=print):
 
             if not content_opf_data:
                 log("⚠️ Could not find content.opf for truncation detection")
-                return {}
+                return _fallback_extract_html_files(zf)
 
             soup_opf = BeautifulSoup(content_opf_data, 'xml')
 
@@ -5061,7 +5084,7 @@ def extract_epub_html_content(epub_path, log=print):
             spine = soup_opf.find('spine')
             if not spine:
                 log("⚠️ No spine found in content.opf for truncation detection")
-                return {}
+                return _fallback_extract_html_files(zf)
 
             base_dir = ''
             if content_opf_path:
@@ -5096,6 +5119,9 @@ def extract_epub_html_content(epub_path, log=print):
 
         if html_contents:
             log(f"   Extracted HTML content for {len(html_contents)} spine items")
+        else:
+            with zipfile.ZipFile(epub_path, 'r') as zf:
+                html_contents = _fallback_extract_html_files(zf)
         return html_contents
 
     except Exception as e:
