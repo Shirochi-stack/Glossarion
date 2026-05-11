@@ -6172,8 +6172,8 @@ class MultiAPIKeyDialog(QDialog):
         
         # Description
         desc_label = QLabel(
-                "Configure dedicated keys for vision OCR, image scans, and AI truncation detection calls.\n"
-                "These keys are used for Vision/OCR contexts before falling back to the main key pool.\n"
+                "Configure dedicated keys for vision OCR and image scan calls.\n"
+                "AI truncation detection uses text requests, but currently shares this key pool.\n"
                 "If no Vision keys are configured or the pool is disabled, the main key pool is used instead.")
         desc_label.setStyleSheet("color: gray;")
         desc_label.setWordWrap(True)
