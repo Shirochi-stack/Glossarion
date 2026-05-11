@@ -3794,6 +3794,7 @@ class AsyncProcessingDialog:
                 
                 # Apply glossary compression if enabled
                 compress_glossary_enabled = env_vars.get('COMPRESS_GLOSSARY_PROMPT') == '1'
+                glossary_compression_logged = False
                 if compress_glossary_enabled and content:
                     try:
                         from glossary_compressor import compress_glossary
@@ -3806,6 +3807,7 @@ class AsyncProcessingDialog:
                         )
                         compressed_length = len(glossary_text)
                         reduction_pct = ((original_length - compressed_length) / original_length * 100) if original_length > 0 else 0
+                        glossary_compression_logged = True
                         
                         # Calculate token savings if tiktoken is available
                         try:

@@ -5369,21 +5369,17 @@ class BatchTranslationProcessor:
                     image_translations = {}
                     print(f"✅ Processed {len(image_translations)} images for Chapter {actual_num}")
             
-            # Build chapter-specific system prompt (glossary compression + logging handled by build_system_prompt).
-            # Single Pass refreshes this again per request below so each request sees the latest persisted glossary.
+            # Build chapter-specific system prompts inside the chunk worker.
+            # Batch mode uses an inner chunk executor even for one chunk; keeping
+            # prompt construction there preserves deferred glossary compression logs.
             glossary_path = find_glossary_file(self.out_dir)
+            chapter_base_system_prompt = self.config.get_system_prompt(actual_merge_count=1)
             chapter_ref = {
                 "chapter_num": actual_num,
                 "chapter_file": _single_pass_progress_chapter_file(chapter, fname),
             }
             os.environ["CURRENT_CHAPTER_FILE"] = str(chapter_ref["chapter_file"] or "")
             os.environ["CURRENT_CHAPTER_NUM"] = str(actual_num)
-            chapter_system_prompt = build_system_prompt(
-                self.config.get_system_prompt(actual_merge_count=1),
-                glossary_path,
-                source_text=chapter_body,
-                chapter_ref=chapter_ref,
-            )
             
             # Check if chapter needs chunking
             from chapter_splitter import ChapterSplitter
@@ -5557,15 +5553,13 @@ class BatchTranslationProcessor:
                 if getattr(self.config, 'ASSISTANT_PROMPT', '') and self.config.ASSISTANT_PROMPT.strip():
                     assistant_prefill_msgs = [{"role": "assistant", "content": self.config.ASSISTANT_PROMPT.strip()}]
 
-                current_chapter_system_prompt = chapter_system_prompt
-                if _single_pass_glossary_mode():
-                    current_glossary_path = find_glossary_file(self.out_dir)
-                    current_chapter_system_prompt = build_system_prompt(
-                        self.config.get_system_prompt(actual_merge_count=1),
-                        current_glossary_path,
-                        source_text=chunk_html,
-                        chapter_ref=chapter_ref,
-                    )
+                current_glossary_path = find_glossary_file(self.out_dir) if _single_pass_glossary_mode() else glossary_path
+                current_chapter_system_prompt = build_system_prompt(
+                    chapter_base_system_prompt,
+                    current_glossary_path,
+                    source_text=chunk_html,
+                    chapter_ref=chapter_ref,
+                )
 
                 chapter_msgs = (
                     [{"role": "system", "content": current_chapter_system_prompt}]
@@ -13053,6 +13047,7 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapt
             # Apply glossary compression if enabled and source text is provided
             compress_glossary_enabled = os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1"
             compression_source_text = _glossary_compression_source_text(source_text, chapter_ref)
+            glossary_compression_logged = False
             if compress_glossary_enabled and compression_source_text:
                 try:
                     from glossary_compressor import compress_glossary
@@ -13083,9 +13078,11 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapt
                         token_reduction_pct = (token_reduction / original_tokens * 100) if original_tokens > 0 else 0
                         
                         defer_batch_log(f"🗜️ Glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%), {original_tokens:,}→{compressed_tokens:,} tokens ({token_reduction_pct:.1f}%)")
+                        glossary_compression_logged = True
                     except ImportError:
                         # If tiktoken is not available, just show character reduction
                         defer_batch_log(f"🗜️ Glossary compressed: {original_length:,} → {compressed_length:,} chars ({reduction_pct:.1f}% reduction)")
+                        glossary_compression_logged = True
                 except Exception as e:
                     print(f"⚠️ Glossary compression failed: {e}")
                     # Continue with uncompressed glossary
@@ -13104,7 +13101,8 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None, chapt
             # Skip appending if compression returned empty (0 matching entries)
             if glossary_text and glossary_text.strip():
                 system += f"{custom_prompt}\n{glossary_text}"
-                defer_batch_log(f"✅ Glossary appended ({len(glossary_text):,} characters)")
+                if not glossary_compression_logged:
+                    defer_batch_log(f"✅ Glossary appended ({len(glossary_text):,} characters)")
             else:
                 defer_batch_log("ℹ️ Glossary skipped for this chapter (no matching entries after compression)")
             
