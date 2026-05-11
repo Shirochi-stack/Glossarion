@@ -671,12 +671,11 @@ class LocalInpainter:
             except Exception:
                 parallel_mode = False
         
-        # Only enable CUDA debugging if NOT in parallel mode
-        # These settings force sequential execution, which is useful for debugging but kills performance
-        if not parallel_mode:
-            # Enable CUDA debugging in sequential mode
+        # CUDA debug flags force synchronous kernel execution and can make
+        # diffusion models crawl. Keep them opt-in only.
+        if os.environ.get('GLOSSARION_CUDA_DEBUG', '0') == '1':
             os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-            os.environ['TORCH_USE_CUDA_DSA'] = '1'  # Enable device-side assertions
+            os.environ['TORCH_USE_CUDA_DSA'] = '1'
 
         # Set thread limits early if environment indicates single-threaded mode AND not in parallel mode
         try:
@@ -2536,7 +2535,7 @@ class LocalInpainter:
                 return image.copy()
 
             x, y, w, h = cv2.boundingRect(mask_gray)
-            margin = int(os.environ.get('QWEN_IMAGE_EDIT_CROP_MARGIN', '96'))
+            margin = int(os.environ.get('QWEN_IMAGE_EDIT_CROP_MARGIN', '64'))
             orig_h, orig_w = image.shape[:2]
             left = max(0, x - margin)
             top = max(0, y - margin)
@@ -2547,7 +2546,7 @@ class LocalInpainter:
             crop_mask = mask_gray[top:bottom, left:right].copy()
             proc_bgr = crop_bgr
             proc_mask = crop_mask
-            max_side = int(os.environ.get('QWEN_IMAGE_EDIT_MAX_SIDE', '1024'))
+            max_side = int(os.environ.get('QWEN_IMAGE_EDIT_MAX_SIDE', '768'))
             if max_side > 0 and max(proc_bgr.shape[:2]) > max_side:
                 scale = float(max_side) / float(max(proc_bgr.shape[:2]))
                 new_w = max(1, int(proc_bgr.shape[1] * scale + 0.5))
@@ -2573,7 +2572,7 @@ class LocalInpainter:
                 "Preserve the original manga style and do not add any text."
             )
             negative_prompt = os.environ.get('QWEN_IMAGE_EDIT_NEGATIVE_PROMPT', 'text, letters, words, watermark, blur, artifacts')
-            steps = int(os.environ.get('QWEN_IMAGE_EDIT_STEPS', '40'))
+            steps = int(os.environ.get('QWEN_IMAGE_EDIT_STEPS', '24'))
             true_cfg_scale = float(os.environ.get('QWEN_IMAGE_EDIT_CFG_SCALE', '4.0'))
             guidance_scale = float(os.environ.get('QWEN_IMAGE_EDIT_GUIDANCE_SCALE', '1.0'))
 
@@ -2594,7 +2593,23 @@ class LocalInpainter:
 
             output = None
             last_error = None
-            self._log(f"Qwen-Image-Edit diffusion starting ({steps} steps)", "info")
+            try:
+                model_device = (
+                    getattr(self.model, 'device', None)
+                    or getattr(self.model, 'hf_device_map', None)
+                    or getattr(self, 'device', None)
+                    or ('cuda' if self.use_gpu else 'cpu')
+                )
+            except Exception:
+                model_device = 'unknown'
+            mask_pct = (float(np.count_nonzero(proc_mask)) / float(proc_mask.size)) * 100.0
+            self._log(
+                "Qwen-Image-Edit diffusion starting "
+                f"({steps} steps, crop={crop_bgr.shape[1]}x{crop_bgr.shape[0]}, "
+                f"proc={proc_bgr.shape[1]}x{proc_bgr.shape[0]}, mask={mask_pct:.1f}%, "
+                f"device={model_device})",
+                "info"
+            )
 
             def _qwen_step_callback(*callback_args, **callback_kwargs):
                 step_index = None
