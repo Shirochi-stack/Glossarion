@@ -1215,6 +1215,22 @@ def flush_deferred_batch_logs() -> None:
             print(msg)
         _deferred_batch_logs.messages.clear()
 
+def pop_deferred_batch_logs() -> list:
+    """Return and clear deferred batch log messages for the current thread."""
+    if hasattr(_deferred_batch_logs, 'messages') and _deferred_batch_logs.messages:
+        messages = list(_deferred_batch_logs.messages)
+        _deferred_batch_logs.messages.clear()
+        return messages
+    return []
+
+def extend_deferred_batch_logs(messages) -> None:
+    """Append deferred batch log messages to the current thread's buffer."""
+    if not messages:
+        return
+    if not hasattr(_deferred_batch_logs, 'messages'):
+        _deferred_batch_logs.messages = []
+    _deferred_batch_logs.messages.extend(messages)
+
 class UnifiedClient:
     # ----- Helper methods to reduce duplication -----
 

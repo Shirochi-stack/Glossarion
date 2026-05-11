@@ -23,7 +23,13 @@ except ImportError:
     # Older versions of BeautifulSoup might not have this warning
     pass
 from collections import Counter
-from unified_api_client import UnifiedClient, UnifiedClientError, defer_batch_log
+from unified_api_client import (
+    UnifiedClient,
+    UnifiedClientError,
+    defer_batch_log,
+    extend_deferred_batch_logs,
+    pop_deferred_batch_logs,
+)
 
 # Translation thread submission throttling (batch) to align queued logs with actual delay
 _translation_thread_submit_lock = threading.Lock()
@@ -12691,6 +12697,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     
     result_queue = queue.Queue()
     cancel_event = threading.Event()
+    deferred_batch_logs = pop_deferred_batch_logs()
 
     # Honor RETRY_TIMEOUT toggle: when off, disable chunk timeout entirely
     retry_env = os.getenv("RETRY_TIMEOUT")
@@ -12726,6 +12733,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     def api_call():
         try:
             start_time = time.time()
+            extend_deferred_batch_logs(deferred_batch_logs)
 
             # Apply chapter/chunk context in THIS thread so UnifiedClient's
             # thread-local chapter_info is visible to payload saving.

@@ -2244,6 +2244,12 @@ class EPUBCompiler:
 
             # Add images to book
             self._add_images_to_book(book, processed_images, cover_file_for_generated_page)
+
+            # Reusing cover.html should only suppress creating a duplicate cover
+            # page. The cover image still needs OPF metadata for reader thumbnails.
+            if existing_cover_html and cover_file:
+                if not self._set_cover_image_metadata(book, cover_file):
+                    self._add_cover_image_item(book, cover_file, processed_images)
             
             # Check stop flag
             if self.is_stopped():
@@ -2292,7 +2298,7 @@ class EPUBCompiler:
             else:
                 gallery_images = self._filter_gallery_images_for_ocr(
                     processed_images,
-                    cover_file_for_generated_page,
+                    cover_file,
                 )
                 if gallery_images:
                     self.log(f"📷 Creating image gallery with {len(gallery_images)} images...")
@@ -4789,6 +4795,95 @@ img {
         else:
             self.log(f"✅ Successfully added {added}/{len(images_to_add)} images to EPUB")
     
+    def _set_cover_image_metadata(self, book: epub.EpubBook, cover_file: Optional[str]) -> bool:
+        """Mark an existing image item as the EPUB cover image.
+
+        Reader library thumbnails are discovered from OPF metadata, not from a
+        visible cover XHTML page. Keep both EPUB3 and EPUB2-style markers.
+        """
+        if not cover_file:
+            return False
+
+        expected_name = f"images/{cover_file}"
+        cover_item = None
+        for item in book.get_items():
+            get_name = getattr(item, 'get_name', None)
+            item_name = getattr(item, 'file_name', '') or (get_name() if callable(get_name) else '')
+            if item_name == expected_name or os.path.basename(item_name) == cover_file:
+                cover_item = item
+                break
+
+        if cover_item is None:
+            self.log(f"[WARNING] Cover image metadata skipped; image item not found: {cover_file}")
+            return False
+
+        cover_id_item = book.get_item_with_id("cover-image")
+        if cover_id_item is None or cover_id_item is cover_item:
+            cover_item.id = "cover-image"
+
+        properties = list(getattr(cover_item, 'properties', []) or [])
+        if "cover-image" not in properties:
+            properties.append("cover-image")
+        cover_item.properties = properties
+
+        cover_id = cover_item.id
+        existing_meta = book.metadata.get(None, {}).get('meta', [])
+        has_cover_meta = any(
+            isinstance(attrs, dict)
+            and attrs.get('name') == 'cover'
+            and attrs.get('content') == cover_id
+            for _value, attrs in existing_meta
+        )
+        if not has_cover_meta:
+            book.add_metadata(None, 'meta', '', {'name': 'cover', 'content': cover_id})
+
+        self.log(f"[INFO] Set cover image metadata: {cover_file} ({cover_id})")
+        return True
+
+    def _add_cover_image_item(
+        self,
+        book: epub.EpubBook,
+        cover_file: str,
+        processed_images: Dict[str, str],
+    ) -> bool:
+        """Add the cover image item when filters did not already include it."""
+        original_cover = None
+        for orig, safe in processed_images.items():
+            if safe == cover_file:
+                original_cover = orig
+                break
+
+        if not original_cover:
+            self.log(f"[WARNING] Cover image item skipped; source image not found: {cover_file}")
+            return False
+
+        cover_path = os.path.join(self.images_dir, original_cover)
+        if not os.path.isfile(cover_path):
+            cover_ext = os.path.splitext(cover_file)[1]
+            if cover_ext:
+                alt_path = os.path.join(
+                    self.images_dir,
+                    os.path.splitext(original_cover)[0] + cover_ext
+                )
+                if os.path.isfile(alt_path):
+                    cover_path = alt_path
+
+        try:
+            with open(cover_path, 'rb') as f:
+                cover_data = f.read()
+
+            cover_img = epub.EpubItem(
+                uid="cover-image",
+                file_name=f"images/{cover_file}",
+                media_type=mimetypes.guess_type(cover_path)[0] or "image/jpeg",
+                content=cover_data
+            )
+            book.add_item(cover_img)
+            return self._set_cover_image_metadata(book, cover_file)
+        except Exception as e:
+            self.log(f"[WARNING] Failed to add cover image item: {e}")
+            return False
+
     def _create_cover_page(self, book: epub.EpubBook, cover_file: str, 
                           processed_images: Dict[str, str], css_items: List[epub.EpubItem],
                           metadata: dict) -> Optional[epub.EpubHtml]:
@@ -4832,8 +4927,7 @@ img {
             book.add_item(cover_img)
             
             # Set cover metadata
-            cover_img.properties = ["cover-image"]
-            book.add_metadata('http://purl.org/dc/elements/1.1/', 'cover', 'cover-image')
+            self._set_cover_image_metadata(book, cover_file)
             
             # Create cover page
             text_dirname = "Text" if getattr(self, 'legacy_epub_structure', False) else ""
