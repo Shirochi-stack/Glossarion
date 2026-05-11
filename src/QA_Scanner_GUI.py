@@ -21,81 +21,6 @@ import traceback
 # Qt handles window management and UI utilities automatically
 scan_html_folder = None  # Will be lazy-loaded from translator_gui
 
-QA_SOURCE_FILE_EXTENSIONS = ('.epub', '.txt', '.pdf', '.md')
-
-
-def _qa_existing_source_path(path):
-    try:
-        if not path:
-            return None
-        path = str(path).strip().strip('"')
-        if not path or "files selected" in path:
-            return None
-        if " (from " in path:
-            path = path.split(" (from ", 1)[0].strip()
-        if path.lower().endswith(QA_SOURCE_FILE_EXTENSIONS) and os.path.exists(path):
-            return os.path.abspath(path)
-    except Exception:
-        return None
-    return None
-
-
-def _qa_current_source_files(owner):
-    """Resolve current QA source files, ignoring stale saved/selected paths."""
-    candidates = []
-
-    def add_path(path):
-        resolved = _qa_existing_source_path(path)
-        if resolved:
-            candidates.append(resolved)
-
-    try:
-        for path in list(getattr(owner, 'selected_files', []) or []):
-            add_path(path)
-    except Exception:
-        pass
-
-    try:
-        entry = getattr(owner, 'entry_epub', None)
-        if entry is not None:
-            add_path(entry.text())
-    except Exception:
-        pass
-
-    try:
-        for path in list(getattr(owner, 'selected_epub_files', []) or []):
-            add_path(path)
-    except Exception:
-        pass
-
-    try:
-        add_path(getattr(owner, 'selected_epub_path', None))
-    except Exception:
-        pass
-
-    try:
-        if hasattr(owner, 'get_current_epub_path'):
-            add_path(owner.get_current_epub_path())
-    except Exception:
-        pass
-
-    try:
-        add_path(getattr(owner, 'config', {}).get('last_epub_path'))
-    except Exception:
-        pass
-
-    deduped = []
-    seen = set()
-    for path in candidates:
-        try:
-            key = os.path.normcase(os.path.normpath(path))
-        except Exception:
-            key = path
-        if key not in seen:
-            seen.add(key)
-            deduped.append(path)
-    return deduped
-
 
 def _qa_owner_output_mode(owner):
     try:
@@ -1637,8 +1562,10 @@ class QAScannerMixin:
         
         # ALWAYS populate epub_files_to_scan for auto-search, regardless of word count checking
         # First check if current selection actually contains source files (EPUB, TXT, PDF, or MD)
-        current_epub_files = _qa_current_source_files(self)
-        if current_epub_files:
+        current_epub_files = []
+        if hasattr(self, 'selected_files') and self.selected_files:
+            # Check for EPUB, TXT, PDF, and MD files
+            current_epub_files = [f for f in self.selected_files if f.lower().endswith(('.epub', '.txt', '.pdf', '.md'))]
             epub_count = len([f for f in current_epub_files if f.lower().endswith('.epub')])
             txt_count = len([f for f in current_epub_files if f.lower().endswith('.txt')])
             pdf_count = len([f for f in current_epub_files if f.lower().endswith('.pdf')])
@@ -2991,7 +2918,12 @@ class QAScannerMixin:
         epub_layout.setContentsMargins(0, 10, 0, 5)
 
         # Get source files (EPUB, TXT, PDF, or MD) from actual current selection
-        current_epub_files = _qa_current_source_files(self)
+        current_epub_files = []
+        if hasattr(self, 'selected_files') and self.selected_files:
+            current_epub_files = [
+                f for f in self.selected_files
+                if f.lower().endswith(('.epub', '.txt', '.pdf', '.md'))
+            ]
         
         if len(current_epub_files) > 1:
             # Multiple source files in current selection
@@ -3025,17 +2957,14 @@ class QAScannerMixin:
 
         def select_epub_for_qa():
             # Allow selecting EPUB, TXT, PDF, or MD files as source
-            current_sources = _qa_current_source_files(self)
-            initial_dir = os.path.dirname(current_sources[0]) if current_sources else ""
             epub_path, _ = QFileDialog.getOpenFileName(
                 dialog,
                 "Select Source File",
-                initial_dir,
+                "",
                 "Source files (*.epub *.txt *.pdf *.md);;EPUB files (*.epub);;Text files (*.txt);;PDF files (*.pdf);;Markdown files (*.md);;All files (*.*)"
             )
             
             if epub_path:
-                epub_path = os.path.abspath(epub_path)
                 self.selected_epub_path = epub_path
                 self.config['last_epub_path'] = epub_path
                 self.save_config(show_message=False)
@@ -3043,21 +2972,6 @@ class QAScannerMixin:
                 # Clear multiple EPUB tracking when manually selecting a single file
                 if hasattr(self, 'selected_epub_files'):
                     self.selected_epub_files = [epub_path]
-                try:
-                    selected_sources = [
-                        p for p in list(getattr(self, 'selected_files', []) or [])
-                        if str(p).lower().endswith(QA_SOURCE_FILE_EXTENSIONS)
-                    ]
-                    existing_sources = [p for p in selected_sources if os.path.exists(p)]
-                    if not existing_sources or len(selected_sources) == 1:
-                        self.selected_files = [epub_path]
-                        self.file_path = epub_path
-                        if hasattr(self, 'entry_epub') and self.entry_epub is not None:
-                            self.entry_epub.setText(epub_path)
-                        if hasattr(self, '_update_entry_epub_tooltip'):
-                            self._update_entry_epub_tooltip()
-                except Exception:
-                    pass
                 
                 lower_name = epub_path.lower()
                 if lower_name.endswith('.txt'):
