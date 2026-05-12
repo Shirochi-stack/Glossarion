@@ -8,8 +8,8 @@ Handles multiple API keys with round-robin load balancing and rate limit managem
 try:
     from PySide6.QtCore import QMetaObject, Q_ARG
     from PySide6.QtWidgets import (
-        QApplication, QMainWindow, QWidget, QLabel, QPushButton, QLineEdit, 
-        QTextEdit, QScrollArea, QFileDialog, QMessageBox, QComboBox, QCheckBox, 
+        QApplication, QMainWindow, QWidget, QLabel, QPushButton, QLineEdit,
+        QTextEdit, QScrollArea, QFileDialog, QMessageBox, QComboBox, QCheckBox,
         QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QSpinBox, QDoubleSpinBox,
         QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
         QCompleter, QDialogButtonBox
@@ -64,26 +64,26 @@ class RateLimitCache:
     def __init__(self):
         self._cache = {}  # key_id -> expiry_time
         self._lock = threading.Lock()
-    
+
     def add_rate_limit(self, key_id: str, cooldown_seconds: int):
         """Add a key to rate limit cache"""
         with self._lock:
             self._cache[key_id] = time.time() + cooldown_seconds
             logger.info(f"Added {key_id} to rate limit cache for {cooldown_seconds}s")
-    
+
     def is_rate_limited(self, key_id: str) -> bool:
         """Check if key is rate limited"""
         with self._lock:
             if key_id not in self._cache:
                 return False
-            
+
             if time.time() >= self._cache[key_id]:
                 # Expired, remove it
                 del self._cache[key_id]
                 return False
-            
+
             return True
-    
+
     def clear_expired(self):
         """Remove expired entries"""
         with self._lock:
@@ -91,7 +91,7 @@ class RateLimitCache:
             expired = [k for k, v in self._cache.items() if current_time >= v]
             for k in expired:
                 del self._cache[k]
-    
+
     def get_remaining_cooldown(self, key_id: str) -> float:
         """Get remaining cooldown time in seconds"""
         with self._lock:
@@ -103,7 +103,7 @@ class RateLimitCache:
 
 class APIKeyEntry:
     """Enhanced API key entry with thread-safe operations"""
-    def __init__(self, api_key: str, model: str, cooldown: int = 60, enabled: bool = True, 
+    def __init__(self, api_key: str, model: str, cooldown: int = 60, enabled: bool = True,
                  google_credentials: str = None, azure_endpoint: str = None, google_region: str = None,
                  azure_api_version: str = None, use_individual_endpoint: bool = False, individual_output_token_limit: Optional[int] = None,
                  individual_key_temperature: Optional[float] = None, api_call_delay: float = 0.0):
@@ -148,15 +148,15 @@ class APIKeyEntry:
         self.last_used_time = None
         self.times_used = 0  # Incremented whenever this key is assigned/used
         self.is_cooling_down = False
-        
+
         # Add lock for thread-safe modifications
         self._lock = threading.Lock()
-        
+
         # Add test result storage
         self.last_test_result = None
         self.last_test_time = None
         self.last_test_message = None
-    
+
     def is_available(self) -> bool:
         with self._lock:
             if not self.enabled:
@@ -168,7 +168,7 @@ class APIKeyEntry:
                 else:
                     self.is_cooling_down = False
             return True
-    
+
     def mark_error(self, error_code: int = None):
         with self._lock:
             self.error_count += 1
@@ -176,21 +176,21 @@ class APIKeyEntry:
             self.last_error_time = time.time()
             if error_code == 429:
                 self.is_cooling_down = True
-    
+
     def mark_success(self):
         with self._lock:
             self.success_count += 1
             self.times_used = getattr(self, 'times_used', 0) + 1
             self.last_used_time = time.time()
             self.error_count = 0
-    
+
     def set_test_result(self, result: str, message: str = None):
         """Store test result"""
         with self._lock:
             self.last_test_result = result
             self.last_test_time = time.time()
             self.last_test_message = message
-            
+
     def to_dict(self):
         """Convert to dictionary for saving"""
         return {
@@ -220,24 +220,24 @@ class APIKeyPool:
         self._rotation_index = 0
         self._thread_assignments = {}
         self._rate_limit_cache = RateLimitCache()
-        
+
         # NEW LOCKS:
         self.key_locks = {}  # Will be populated when keys are loaded
         self.key_selection_lock = threading.Lock()  # For coordinating key selection across threads
-        
+
         # Track which keys are currently being used by which threads
         self._keys_in_use = {}  # key_index -> set of thread_ids
         self._usage_lock = threading.Lock()
-        
+
         # Stop flag callback - can be set by UnifiedClient to check for stop requests
         self._stop_check_callback = None
-    
+
     def set_stop_check_callback(self, callback):
         """Set a callback function to check if stop has been requested.
         The callback should return True if stop is requested, False otherwise.
         """
         self._stop_check_callback = callback
-    
+
     def _is_stop_requested(self) -> bool:
         """Check if stop has been requested via callback or global flag."""
         # Check callback first if set
@@ -247,7 +247,7 @@ class APIKeyPool:
                     return True
             except Exception:
                 pass
-        
+
         # Also check the module-level stop flag from unified_api_client if available
         try:
             from unified_api_client import is_stop_requested
@@ -255,9 +255,9 @@ class APIKeyPool:
                 return True
         except ImportError:
             pass
-        
+
         return False
-    
+
     def load_from_list(self, key_list: List[dict]):
         with self.lock:
             # Preserve existing counters by mapping old entries by (api_key, model)
@@ -265,10 +265,10 @@ class APIKeyPool:
             for old in getattr(self, 'keys', []):
                 key = (getattr(old, 'api_key', ''), getattr(old, 'model', ''))
                 old_map[key] = old
-            
+
             self.keys.clear()
             self.key_locks.clear()  # Clear existing locks
-            
+
             for i, key_data in enumerate(key_list):
                 api_key = key_data.get('api_key', '')
                 model = key_data.get('model', '')
@@ -309,7 +309,7 @@ class APIKeyPool:
                 self.keys.append(entry)
                 # Create a lock for each key
                 self.key_locks[i] = threading.Lock()
-            
+
             # Keep rotation index if possible
             if getattr(self, '_rotation_index', 0) >= len(self.keys):
                 self._rotation_index = 0
@@ -317,85 +317,85 @@ class APIKeyPool:
                 self._rotation_index = getattr(self, '_rotation_index', 0)
             self._keys_in_use.clear()
             logger.info(f"Loaded {len(self.keys)} API keys into pool with individual locks (preserved counters where possible)")
-    
-    def get_key_for_thread(self, force_rotation: bool = False, 
+
+    def get_key_for_thread(self, force_rotation: bool = False,
                           rotation_frequency: int = 1) -> Optional[Tuple[APIKeyEntry, int, str]]:
         """Get a key for the current thread with proper rotation logic"""
         # Check for stop request at start
         if self._is_stop_requested():
             logger.info("Stop requested during key selection, returning None")
             return None
-        
+
         thread_id = threading.current_thread().ident
         thread_name = threading.current_thread().name
-        
+
         # Clear expired rate limits first
         self._rate_limit_cache.clear_expired()
-        
+
         # Use key_selection_lock for the entire selection process
         with self.key_selection_lock:
             if not self.keys:
                 return None
-            
+
             # Check if thread already has an assignment
             if thread_id in self._thread_assignments and not force_rotation:
                 key_index, assignment_time = self._thread_assignments[thread_id]
                 if key_index < len(self.keys):
                     key = self.keys[key_index]
                     key_id = f"Key#{key_index+1} ({key.model})"
-                    
+
                     # Check if the assigned key is still available
                     # Use the key-specific lock for checking availability
                     with self.key_locks.get(key_index, threading.Lock()):
                         if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
                             logger.debug(f"[Thread-{thread_name}] Reusing assigned {key_id}")
-                            
+
                             # Track usage
                             with self._usage_lock:
                                 if key_index not in self._keys_in_use:
                                     self._keys_in_use[key_index] = set()
                                 self._keys_in_use[key_index].add(thread_id)
-                            
+
                             return key, key_index, key_id
                         else:
                             # Remove invalid assignment
                             del self._thread_assignments[thread_id]
-            
+
             # Find next available key using round-robin
             start_index = self._rotation_index
             attempts = 0
-            
+
             while attempts < len(self.keys):
                 # Check for stop request in loop
                 if self._is_stop_requested():
                     logger.info("Stop requested during key rotation loop")
                     return None
-                
+
                 # Get current index and immediately increment for next thread
                 key_index = self._rotation_index
                 self._rotation_index = (self._rotation_index + 1) % len(self.keys)
-                
+
                 key = self.keys[key_index]
                 key_id = f"Key#{key_index+1} ({key.model})"
-                
+
                 # Use key-specific lock when checking and modifying key state
                 with self.key_locks.get(key_index, threading.Lock()):
                     if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
                         # Assign to thread
                         self._thread_assignments[thread_id] = (key_index, time.time())
-                        
+
                         # Increment usage counter on assignment
                         try:
                             key.times_used += 1
                         except Exception:
                             pass
-                        
+
                         # Track usage
                         with self._usage_lock:
                             if key_index not in self._keys_in_use:
                                 self._keys_in_use[key_index] = set()
                             self._keys_in_use[key_index].add(thread_id)
-                        
+
                         # Clean up old assignments
                         current_time = time.time()
                         expired_threads = [
@@ -410,32 +410,32 @@ class APIKeyPool:
                                     self._keys_in_use[k_idx].discard(tid)
                                     if not self._keys_in_use[k_idx]:
                                         del self._keys_in_use[k_idx]
-                        
+
                         logger.info(f"[Thread-{thread_name}] Assigned {key_id}")
                         time.sleep(0.5)  # Brief pause to improve retry responsiveness
                         logger.debug("💤 Pausing briefly to improve retry responsiveness after key assignment")
                         return key, key_index, key_id
-                
+
                 attempts += 1
-            
+
             # No available keys - find one with shortest cooldown
             best_key_index = None
             min_cooldown = float('inf')
-            
+
             for i, key in enumerate(self.keys):
                 if key.enabled:  # At least check if enabled
                     key_id = f"Key#{i+1} ({key.model})"
                     remaining = self._rate_limit_cache.get_remaining_cooldown(key_id)
-                    
+
                     # Also check key's own cooldown
                     if key.is_cooling_down and key.last_error_time:
                         key_cooldown = key.cooldown - (time.time() - key.last_error_time)
                         remaining = max(remaining, key_cooldown)
-                    
+
                     if remaining < min_cooldown:
                         min_cooldown = remaining
                         best_key_index = i
-            
+
             if best_key_index is not None:
                 key = self.keys[best_key_index]
                 key_id = f"Key#{best_key_index+1} ({key.model})"
@@ -444,10 +444,10 @@ class APIKeyPool:
                 time.sleep(0.5)  # Brief pause to improve retry responsiveness
                 logger.debug("💤 Pausing briefly to improve retry responsiveness after cooldown key selection")
                 return key, best_key_index, key_id
-            
+
             logger.error(f"[Thread-{thread_name}] No keys available at all")
             return None
-    
+
     def mark_key_error(self, key_index: int, error_code: int = None):
         """Mark a key as having an error (thread-safe with key-specific lock)"""
         if 0 <= key_index < len(self.keys):
@@ -455,13 +455,13 @@ class APIKeyPool:
             with self.key_locks.get(key_index, threading.Lock()):
                 # Mark error on the key itself
                 self.keys[key_index].mark_error(error_code)
-                
+
                 # Add to rate limit cache if it's a 429
                 if error_code == 429:
                     key = self.keys[key_index]
                     key_id = f"Key#{key_index+1} ({key.model})"
                     self._rate_limit_cache.add_rate_limit(key_id, key.cooldown)
-                    
+
                     logger.debug(f"Marked key {key_id} with an error code")
                     time.sleep(0.5)  # Brief pause to improve retry responsiveness
                     logger.debug("💤 Pausing briefly to improve retry responsiveness after marking key error")
@@ -472,28 +472,28 @@ class APIKeyPool:
             # Use key-specific lock for this operation
             with self.key_locks.get(key_index, threading.Lock()):
                 self.keys[key_index].mark_success()
-                
+
                 key = self.keys[key_index]
                 logger.debug(f"Marked key {key_index} ({key.model}) as successful")
-    
+
     def release_thread_assignment(self, thread_id: int = None):
         """Release key assignment for a thread"""
         if thread_id is None:
             thread_id = threading.current_thread().ident
-        
+
         with self.key_selection_lock:
             # Remove from assignments
             if thread_id in self._thread_assignments:
                 key_index, _ = self._thread_assignments[thread_id]
                 del self._thread_assignments[thread_id]
-                
+
                 # Remove from usage tracking
                 with self._usage_lock:
                     if key_index in self._keys_in_use:
                         self._keys_in_use[key_index].discard(thread_id)
                         if not self._keys_in_use[key_index]:
                             del self._keys_in_use[key_index]
-                
+
                 logger.debug(f"Released key assignment for thread {thread_id}")
 
     def get_all_keys(self) -> List[APIKeyEntry]:
@@ -515,7 +515,7 @@ class APIKeyPool:
                 self._rotation_index = value % len(self.keys)
             else:
                 self._rotation_index = 0
-            
+
     def add_key(self, key_entry: APIKeyEntry):
         """Add a new key to the pool"""
         with self.lock:
@@ -535,48 +535,48 @@ class APIKeyPool:
                     elif key_index > index:
                         # Adjust indices for keys after the removed one
                         self._thread_assignments[thread_id] = (key_index - 1, self._thread_assignments[thread_id][1])
-                
+
                 for thread_id in threads_to_remove:
                     del self._thread_assignments[thread_id]
-                
+
                 # Reset rotation index if needed
                 if self._rotation_index >= len(self.keys) and len(self.keys) > 0:
                     self._rotation_index = 0
-                
+
                 logger.info(f"Removed key for model {removed_key.model} from pool")
 
 
 class RefusalPatternsDialog(QDialog):
     """Dialog for managing AI refusal patterns"""
-    
+
     def __init__(self, parent, translator_gui):
         super().__init__(parent)
         self.translator_gui = translator_gui
         self.setWindowTitle("Manage Refusal Patterns")
         self.setAttribute(Qt.WA_DeleteOnClose, False)
-        
+
         # Set dialog size based on screen size (35% width, 40% height)
         from PySide6.QtWidgets import QApplication
         screen = QApplication.primaryScreen().geometry()
         dialog_width = int(screen.width() * 0.25)
         dialog_height = int(screen.height() * 0.4)
         self.resize(dialog_width, dialog_height)
-        
+
         # Set window icon
         self._set_icon()
-        
+
         # Load patterns from config
         self.patterns = self._load_patterns()
         self.disable_refusal_checks = self._load_disable_refusal_checks()
         self.refusal_length_limit = self._load_refusal_length_limit()
-        
+
         self._create_dialog()
-    
+
     def closeEvent(self, event):
         """Hide instead of closing."""
         event.ignore()
         self.hide()
-    
+
     def _set_icon(self):
         """Set Halgakos.ico as window icon if available."""
         try:
@@ -591,13 +591,13 @@ class RefusalPatternsDialog(QDialog):
                 self.setWindowIcon(icon)
         except Exception:
             pass
-    
+
     def _load_patterns(self):
         """Load refusal patterns from config"""
         if hasattr(self.translator_gui, 'config'):
             return self.translator_gui.config.get('refusal_patterns', self._get_default_patterns())
         return self._get_default_patterns()
-    
+
     def _get_default_patterns(self):
         """Get default refusal patterns"""
         return [
@@ -620,7 +620,7 @@ class RefusalPatternsDialog(QDialog):
             "i cannot translate this content",
             "i can't translate this content",
         ]
-    
+
     def _load_disable_refusal_checks(self):
         """Load refusal check disable toggle from config"""
         try:
@@ -629,7 +629,7 @@ class RefusalPatternsDialog(QDialog):
         except Exception:
             pass
         return True
-    
+
     def _load_refusal_length_limit(self):
         """Load refusal length limit from config"""
         try:
@@ -638,7 +638,7 @@ class RefusalPatternsDialog(QDialog):
         except Exception:
             pass
         return 1000
-    
+
     def _reload_from_config(self):
         """Reload patterns/toggles from config and refresh UI controls."""
         try:
@@ -656,7 +656,7 @@ class RefusalPatternsDialog(QDialog):
                 self.translator_gui.refusal_pattern_length_limit_var = int(self.refusal_length_limit)
         except Exception:
             pass
-    
+
     def _load_halgakos_pixmap(self, logical_size: int = 36):
         """Load the Halgakos icon as a HiDPI-aware pixmap scaled to logical_size."""
         try:
@@ -680,7 +680,7 @@ class RefusalPatternsDialog(QDialog):
             return scaled
         except Exception:
             return None
-    
+
     def _create_styled_checkbox(self, text):
         """Create a checkbox with proper checkmark using text overlay"""
         checkbox = QCheckBox(text)
@@ -704,7 +704,7 @@ class RefusalPatternsDialog(QDialog):
                 border-color: #7bb3e0;
             }
         """)
-        
+
         # Create checkmark overlay
         checkmark = QLabel("✓", checkbox)
         checkmark.setStyleSheet("""
@@ -718,14 +718,14 @@ class RefusalPatternsDialog(QDialog):
         checkmark.setAlignment(Qt.AlignCenter)
         checkmark.hide()
         checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
-        
+
         def position_checkmark():
             try:
                 if checkmark:
                     checkmark.setGeometry(2, 1, 14, 14)
             except RuntimeError:
                 pass
-        
+
         def update_checkmark():
             try:
                 if checkbox and checkmark:
@@ -736,20 +736,20 @@ class RefusalPatternsDialog(QDialog):
                         checkmark.hide()
             except RuntimeError:
                 pass
-        
+
         checkbox.stateChanged.connect(update_checkmark)
-        
+
         def safe_init():
             try:
                 position_checkmark()
                 update_checkmark()
             except RuntimeError:
                 pass
-        
+
         QTimer.singleShot(0, safe_init)
-        
+
         return checkbox
-    
+
     def _create_dialog(self):
         """Create the dialog UI"""
         # Apply stylesheet matching other dialogs
@@ -799,18 +799,18 @@ class RefusalPatternsDialog(QDialog):
                 padding: 4px;
             }
         """)
-        
+
         # Main layout
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(20, 20, 20, 20)
-        
+
         # Title with icons on both sides
         title_container = QWidget()
         title_layout = QHBoxLayout(title_container)
         title_layout.setContentsMargins(0, 0, 0, 0)
         title_layout.setSpacing(15)
         title_layout.setAlignment(Qt.AlignCenter)
-        
+
         # Left Icon
         icon_label_left = QLabel()
         left_pixmap = self._load_halgakos_pixmap(36)
@@ -818,9 +818,9 @@ class RefusalPatternsDialog(QDialog):
             icon_label_left.setPixmap(left_pixmap)
             icon_label_left.setFixedSize(36, 36)
         icon_label_left.setAlignment(Qt.AlignCenter)
-        
+
         title_layout.addWidget(icon_label_left, 0, Qt.AlignVCenter)
-        
+
         # Title text
         title_label = QLabel("Refusal Pattern Management")
         title_font = QFont()
@@ -829,7 +829,7 @@ class RefusalPatternsDialog(QDialog):
         title_label.setFont(title_font)
         title_label.setAlignment(Qt.AlignCenter)
         title_layout.addWidget(title_label, 0, Qt.AlignVCenter)
-        
+
         # Right Icon (mirror of left)
         icon_label_right = QLabel()
         right_pixmap = self._load_halgakos_pixmap(36)
@@ -837,11 +837,11 @@ class RefusalPatternsDialog(QDialog):
             icon_label_right.setPixmap(right_pixmap)
             icon_label_right.setFixedSize(36, 36)
         icon_label_right.setAlignment(Qt.AlignCenter)
-        
+
         title_layout.addWidget(icon_label_right, 0, Qt.AlignVCenter)
-        
+
         main_layout.addWidget(title_container)
-        
+
         # Description
         desc_label = QLabel(
             "Patterns used to detect AI refusals in responses. "
@@ -850,21 +850,21 @@ class RefusalPatternsDialog(QDialog):
         desc_label.setStyleSheet("color: gray; padding: 5px 0px 10px 0px;")
         desc_label.setWordWrap(True)
         main_layout.addWidget(desc_label)
-        
+
 
         # Controls row: disable toggle + length limit
         controls_row = QWidget()
         controls_h = QHBoxLayout(controls_row)
         controls_h.setContentsMargins(0, 0, 0, 10)
-        
+
         self.disable_refusal_checks_cb = self._create_styled_checkbox("Disable refusal pattern checks")
         try:
             self.disable_refusal_checks_cb.setChecked(bool(self.disable_refusal_checks))
         except Exception:
             pass
         controls_h.addWidget(self.disable_refusal_checks_cb)
-        
-        
+
+
         controls_h.addSpacing(12)
         controls_h.addWidget(QLabel("Length limit:"))
         self.refusal_length_limit_entry = QLineEdit()
@@ -876,7 +876,7 @@ class RefusalPatternsDialog(QDialog):
         controls_h.addWidget(self.refusal_length_limit_entry)
         controls_h.addWidget(QLabel("chars"))
         controls_h.addStretch()
-        
+
         load_btn = QPushButton("📂 Load Patterns")
         load_btn.setStyleSheet("""
             QPushButton {
@@ -899,9 +899,9 @@ class RefusalPatternsDialog(QDialog):
         load_btn.clicked.connect(self._load_patterns_from_file)
         self._load_btn = load_btn
         controls_h.addWidget(load_btn)
-        
+
         main_layout.addWidget(controls_row)
-        
+
         # Tree widget for patterns
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Pattern"])
@@ -925,15 +925,15 @@ class RefusalPatternsDialog(QDialog):
         self.tree.itemChanged.connect(self._on_item_edited)
         self.tree.itemDelegate().closeEditor.connect(self._on_editor_closed)
         main_layout.addWidget(self.tree)
-        
+
         # Load patterns into tree
         self._refresh_tree()
-        
+
         # Add/Edit/Delete buttons
         button_frame = QWidget()
         button_layout = QHBoxLayout(button_frame)
         button_layout.setContentsMargins(0, 10, 0, 0)
-        
+
         add_btn = QPushButton("➕ Add Pattern")
         add_btn.setStyleSheet("""
             QPushButton {
@@ -954,7 +954,7 @@ class RefusalPatternsDialog(QDialog):
         """)
         add_btn.clicked.connect(self._add_pattern)
         button_layout.addWidget(add_btn)
-        
+
         edit_btn = QPushButton("✏️ Edit Selected")
         edit_btn.setStyleSheet("""
             QPushButton {
@@ -975,7 +975,7 @@ class RefusalPatternsDialog(QDialog):
         """)
         edit_btn.clicked.connect(self._edit_pattern)
         button_layout.addWidget(edit_btn)
-        
+
         delete_btn = QPushButton("🗑️ Delete Selected")
         delete_btn.setStyleSheet("""
             QPushButton {
@@ -996,9 +996,9 @@ class RefusalPatternsDialog(QDialog):
         """)
         delete_btn.clicked.connect(self._delete_patterns)
         button_layout.addWidget(delete_btn)
-        
+
         button_layout.addStretch()
-        
+
         reset_btn = QPushButton("🔄 Reset to Defaults")
         reset_btn.setStyleSheet("""
             QPushButton {
@@ -1019,22 +1019,22 @@ class RefusalPatternsDialog(QDialog):
         """)
         reset_btn.clicked.connect(self._reset_to_defaults)
         button_layout.addWidget(reset_btn)
-        
+
         main_layout.addWidget(button_frame)
-        
+
         # Save/Cancel buttons (centered)
         save_cancel_frame = QWidget()
         save_cancel_layout = QHBoxLayout(save_cancel_frame)
         save_cancel_layout.setContentsMargins(0, 10, 0, 0)
         save_cancel_layout.addStretch()
 
-        
+
         cancel_btn = QPushButton("Close")
         cancel_btn.setMinimumHeight(38)
         cancel_btn.setMinimumWidth(100)
         cancel_btn.clicked.connect(self.reject)
         save_cancel_layout.addWidget(cancel_btn)
-        
+
         save_btn = QPushButton("Save Refusal Patterns")
         save_btn.setMinimumHeight(38)
         save_btn.setMinimumWidth(200)
@@ -1051,11 +1051,11 @@ class RefusalPatternsDialog(QDialog):
         save_btn.clicked.connect(self._save_and_close)
         self._save_btn = save_btn
         save_cancel_layout.addWidget(save_btn)
-        
+
         save_cancel_layout.addStretch()
-        
+
         main_layout.addWidget(save_cancel_frame)
-    
+
     def _on_double_click(self, item, column):
         """Edit pattern on double-click"""
         if item:
@@ -1064,32 +1064,32 @@ class RefusalPatternsDialog(QDialog):
             item.setData(0, Qt.UserRole, "edit")
             item.setData(0, Qt.UserRole + 1, old_pattern)
             self.tree.editItem(item, 0)
-    
+
     def _show_context_menu(self, position):
         """Show right-click context menu for tree items"""
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
         menu.setStyleSheet("QMenu { menu-scrollable: 1; } QMenu::icon { width: 0px; }")
-        
+
         add_action = menu.addAction("➕ Add New Pattern")
         add_action.triggered.connect(self._add_pattern)
-        
+
         item = self.tree.itemAt(position)
         selected = self.tree.selectedItems()
-        
+
         if item:
             menu.addSeparator()
-            
+
             edit_action = menu.addAction("✏️ Edit")
             edit_action.triggered.connect(self._edit_pattern)
-            
+
             delete_action = menu.addAction("🗑️ Delete")
             if len(selected) > 1:
                 delete_action.setText(f"🗑️ Delete ({len(selected)} selected)")
             delete_action.triggered.connect(self._delete_patterns)
-        
+
         menu.exec_(self.tree.viewport().mapToGlobal(position))
-    
+
     def _refresh_tree(self):
         """Refresh the tree widget with current patterns"""
         self.tree.blockSignals(True)
@@ -1098,7 +1098,7 @@ class RefusalPatternsDialog(QDialog):
             item = QTreeWidgetItem([pattern])
             self.tree.addTopLevelItem(item)
         self.tree.blockSignals(False)
-    
+
     def _add_pattern(self):
         """Add a new pattern directly in the tree"""
         item = QTreeWidgetItem()
@@ -1111,11 +1111,11 @@ class RefusalPatternsDialog(QDialog):
         self.tree.setCurrentItem(item)
         self.tree.scrollToItem(item)
         self.tree.editItem(item, 0)
-    
+
     def _on_editor_closed(self, editor, hint=None):
         """Clean up empty new items when editor closes without input"""
         QTimer.singleShot(100, self._cleanup_empty_new_items)
-    
+
     def _cleanup_empty_new_items(self):
         """Remove any lingering empty 'new' items"""
         try:
@@ -1126,13 +1126,13 @@ class RefusalPatternsDialog(QDialog):
                     break
         except Exception:
             pass
-    
+
     def _on_item_edited(self, item, column):
         """Handle inline edit completion for add/edit"""
         pattern = item.text(0).strip().lower()
         is_new = item.data(0, Qt.UserRole) == "new"
         old_pattern = item.data(0, Qt.UserRole + 1)
-        
+
         if not pattern:
             if is_new:
                 index = self.tree.indexOfTopLevelItem(item)
@@ -1143,7 +1143,7 @@ class RefusalPatternsDialog(QDialog):
                 item.setText(0, old_pattern)
                 self.tree.blockSignals(False)
             return
-        
+
         if is_new:
             if pattern in self.patterns:
                 index = self.tree.indexOfTopLevelItem(item)
@@ -1161,32 +1161,32 @@ class RefusalPatternsDialog(QDialog):
                     return
                 idx = self.patterns.index(old_pattern)
                 self.patterns[idx] = pattern
-        
+
         item.setData(0, Qt.UserRole + 1, pattern)
         self.tree.blockSignals(True)
         item.setText(0, pattern)
         self.tree.blockSignals(False)
-    
+
     def _edit_pattern(self):
         """Edit the selected pattern inline"""
         selected = self.tree.selectedItems()
         if not selected:
             return
-        
+
         item = selected[0]
         old_pattern = item.text(0)
         item.setFlags(item.flags() | Qt.ItemIsEditable)
         item.setData(0, Qt.UserRole, "edit")
         item.setData(0, Qt.UserRole + 1, old_pattern)
         self.tree.editItem(item, 0)
-    
+
     def _delete_patterns(self):
         """Delete selected patterns"""
         selected = self.tree.selectedItems()
         if not selected:
             QMessageBox.warning(self, "Warning", "Please select patterns to delete")
             return
-        
+
         # Confirm deletion
         reply = QMessageBox.question(
             self,
@@ -1195,14 +1195,14 @@ class RefusalPatternsDialog(QDialog):
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
-        
+
         if reply == QMessageBox.Yes:
             for item in selected:
                 pattern = item.text(0)
                 if pattern in self.patterns:
                     self.patterns.remove(pattern)
             self._refresh_tree()
-    
+
     def _reset_to_defaults(self):
         """Reset patterns to defaults"""
         msg = QMessageBox(self)
@@ -1222,7 +1222,7 @@ class RefusalPatternsDialog(QDialog):
         for child in msg.findChildren(QDialogButtonBox):
             child.setCenterButtons(True)
         reply = msg.exec_()
-        
+
         if reply == QMessageBox.Yes:
             try:
                 import winsound
@@ -1232,7 +1232,7 @@ class RefusalPatternsDialog(QDialog):
             self.patterns = self._get_default_patterns()
             self._refresh_tree()
 
-    
+
     def _load_patterns_from_file(self):
         """Load patterns from a text file (one per line), merging with existing"""
         filename, _ = QFileDialog.getOpenFileName(
@@ -1246,7 +1246,7 @@ class RefusalPatternsDialog(QDialog):
         try:
             with open(filename, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
-            
+
             added = 0
             skipped = 0
             for line in lines:
@@ -1258,9 +1258,9 @@ class RefusalPatternsDialog(QDialog):
                 else:
                     self.patterns.append(pattern)
                     added += 1
-            
+
             self._refresh_tree()
-            
+
             # Flash the load button with result
             try:
                 _orig_style = self._load_btn.styleSheet()
@@ -1291,7 +1291,7 @@ class RefusalPatternsDialog(QDialog):
                 pass
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load file: {e}")
-    
+
     def _save_and_close(self):
         """Save patterns and close dialog"""
         if hasattr(self.translator_gui, 'config'):
@@ -1366,18 +1366,18 @@ class RefusalPatternsDialog(QDialog):
 
 class MultiAPIKeyDialog(QDialog):
     """Dialog for managing multiple API keys"""
-    
+
     @staticmethod
     def show_dialog(parent, translator_gui):
         """Static method to create and show the dialog non-modally.
-        
+
         This ensures proper PySide6 application context.
         """
         # Ensure QApplication exists
         app = QApplication.instance()
         if app is None:
             app = QApplication([])
-        
+
         # Check if dialog already exists on the translator_gui
         if not hasattr(translator_gui, '_multi_api_key_dialog') or translator_gui._multi_api_key_dialog is None:
             # Create and show dialog non-modally
@@ -1388,39 +1388,39 @@ class MultiAPIKeyDialog(QDialog):
             translator_gui._multi_api_key_dialog = dialog
         else:
             dialog = translator_gui._multi_api_key_dialog
-        
+
         # Show and raise the dialog
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
-        
+
         return dialog
-    
+
     def __init__(self, parent, translator_gui):
         # PySide6 dialogs need QWidget parents or None
         # Create as standalone top-level dialog
         super().__init__(None)  # Create as top-level dialog
-        
+
         self.translator_gui = translator_gui
         self.tree = None
         self.test_results = queue.Queue()
-        
+
         self.key_pool = APIKeyPool()
-        
+
         # Attempt to bind to UnifiedClient's shared pool so UI reflects live usage
         self._bind_shared_pool()
-        
+
         # Load existing keys from config
         self._load_keys_from_config()
-        
+
         # Create and show dialog (suppress toggle logs during init)
         self._initializing = True
         self._create_dialog()
         self._initializing = False
-        
+
         # Make it a window (not just a dialog)
         self.setWindowFlags(self.windowFlags() | Qt.Window)
-        
+
     def _set_icon(self, window):
         """Set Halgakos.ico as window icon if available."""
         try:
@@ -1433,11 +1433,11 @@ class MultiAPIKeyDialog(QDialog):
                     pass
         except Exception:
             pass
-    
+
     def _create_styled_checkbox(self, text):
         """Create a checkbox with proper checkmark using text overlay"""
         checkbox = QCheckBox(text)
-        
+
         # Create checkmark overlay
         checkmark = QLabel("✓", checkbox)
         checkmark.setStyleSheet("""
@@ -1451,14 +1451,14 @@ class MultiAPIKeyDialog(QDialog):
         checkmark.setAlignment(Qt.AlignCenter)
         checkmark.hide()
         checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
-        
+
         def position_checkmark():
             try:
                 if checkmark:
                     checkmark.setGeometry(2, 1, 14, 14)
             except RuntimeError:
                 pass
-        
+
         def update_checkmark():
             try:
                 if checkbox and checkmark:
@@ -1469,25 +1469,25 @@ class MultiAPIKeyDialog(QDialog):
                         checkmark.hide()
             except RuntimeError:
                 pass
-        
+
         checkbox.stateChanged.connect(update_checkmark)
-        
+
         def safe_init():
             try:
                 position_checkmark()
                 update_checkmark()
             except RuntimeError:
                 pass
-        
+
         QTimer.singleShot(0, safe_init)
-        
+
         return checkbox
-    
-    
+
+
     def _disable_spinbox_mousewheel(self, spinbox):
         """Disable mousewheel scrolling on a spinbox (PySide6)"""
         spinbox.wheelEvent = lambda event: None
-    
+
     def _disable_combobox_mousewheel(self, combobox):
         """Disable mousewheel scrolling on a combobox (PySide6)"""
         combobox.wheelEvent = lambda event: None
@@ -1513,7 +1513,7 @@ class MultiAPIKeyDialog(QDialog):
         if hasattr(self.translator_gui, 'config'):
             multi_api_keys = self.translator_gui.config.get('multi_api_keys', [])
             self.key_pool.load_from_list(multi_api_keys)
-    
+
     def _update_rotation_display(self, *args):
         """Update the rotation description based on settings"""
         # Read current state from widgets
@@ -1525,17 +1525,17 @@ class MultiAPIKeyDialog(QDialog):
                 desc = f"Keys will rotate every {freq} requests"
         else:
             desc = "Keys will only rotate on errors or rate limits"
-        
+
         if hasattr(self, 'rotation_desc_label'):
             self.rotation_desc_label.setText(desc)
-    
+
     def _save_keys_to_config(self):
         """Save API keys and rotation settings to translator GUI config"""
         if hasattr(self.translator_gui, 'config'):
             # Convert keys to list of dicts
             key_list = [key.to_dict() for key in self.key_pool.get_all_keys()]
             self.translator_gui.config['multi_api_keys'] = key_list
-            
+
             # Save fallback settings - read from checkbox
             use_fallback = self.use_fallback_checkbox.isChecked() if hasattr(self, 'use_fallback_checkbox') else False
             self.translator_gui.config['use_fallback_keys'] = use_fallback
@@ -1552,35 +1552,39 @@ class MultiAPIKeyDialog(QDialog):
                 except:
                     self.translator_gui.use_fallback_keys_var = use_fallback
             # Fallback keys are already saved when added/removed
-            
+
             # Use the current state of the toggle - read from checkbox
             enabled = self.enabled_checkbox.isChecked() if hasattr(self, 'enabled_checkbox') else False
             self.translator_gui.config['use_multi_api_keys'] = enabled
-            
+
             # Save rotation settings - read from widgets
             force_rotation = self.force_rotation_checkbox.isChecked() if hasattr(self, 'force_rotation_checkbox') else True
             rotation_freq = self.frequency_spinbox.value() if hasattr(self, 'frequency_spinbox') else 1
             self.translator_gui.config['force_key_rotation'] = force_rotation
             self.translator_gui.config['rotation_frequency'] = rotation_freq
-            
+
             # Save glossary keys toggle
             use_glossary = self.use_glossary_keys_checkbox.isChecked() if hasattr(self, 'use_glossary_keys_checkbox') else False
             self.translator_gui.config['use_glossary_keys'] = use_glossary
-            
+
             # Save Vision keys toggle (stored under the legacy qa_scan config key)
             use_qa_scan = self.use_qa_scan_keys_checkbox.isChecked() if hasattr(self, 'use_qa_scan_keys_checkbox') else False
             self.translator_gui.config['use_qa_scan_keys'] = use_qa_scan
-            
+
+            # Save Inpainter keys toggle
+            use_inpainter = self.use_inpainter_keys_checkbox.isChecked() if hasattr(self, 'use_inpainter_keys_checkbox') else False
+            self.translator_gui.config['use_inpainter_keys'] = use_inpainter
+
             # Save config
             self.translator_gui.save_config(show_message=False)
-            
+
             # Update multi-key status label in other settings if it exists
             if hasattr(self.translator_gui, '_update_multi_key_status_label'):
                 try:
                     self.translator_gui._update_multi_key_status_label()
                 except Exception:
                     pass
-    
+
     def _create_dialog(self):
         """Create the main dialog using PySide6"""
         # Set window properties
@@ -1590,7 +1594,7 @@ class MultiAPIKeyDialog(QDialog):
         width = int(screen.width() * 0.52)  # 52% of screen width
         height = int(screen.height() * 0.68)  # 68% of screen height
         self.resize(width, height)
-        
+
         # Apply comprehensive stylesheet matching other settings dialogs
         self.setStyleSheet("""
             QDialog {
@@ -1737,50 +1741,50 @@ class MultiAPIKeyDialog(QDialog):
                 max-height: 1px;
             }
         """)
-        
+
         # Create scroll area
         scroll_area = QScrollArea(self)
         scroll_area.setWidgetResizable(True)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        
+
         # Create scrollable content widget
         scrollable_widget = QWidget()
         scrollable_layout = QVBoxLayout(scrollable_widget)
         scrollable_layout.setContentsMargins(20, 10, 20, 20)  # Reduced top margin from 20 to 10
         scrollable_layout.setSpacing(10)  # Set spacing between widgets
         scroll_area.setWidget(scrollable_widget)
-        
+
         # Set main layout - will have scroll area AND button bar
         dialog_layout = QVBoxLayout(self)
         dialog_layout.setContentsMargins(0, 0, 0, 0)
         dialog_layout.setSpacing(0)
         dialog_layout.addWidget(scroll_area)
-        
+
         # Store references
         self.main_frame = scrollable_widget
         self.scrollable_frame = scrollable_widget
         self.main_layout = scrollable_layout
         self.scrollable_layout = scrollable_layout  # Store for adjusting spacing
-        
+
         # Title and description
         title_frame = QWidget()
         title_layout = QHBoxLayout(title_frame)
         title_layout.setContentsMargins(0, 0, 0, 5)  # Reduced bottom margin from 10 to 5
-        
+
         title_label = QLabel("Multi API Key Management")
         title_font = QFont()
         title_font.setPointSize(16)
         title_font.setBold(True)
         title_label.setFont(title_font)
         title_layout.addWidget(title_label)
-        
+
         # Enable/Disable toggle with spinning icon
         self.enabled_var = self.translator_gui.config.get('use_multi_api_keys', False)
         self.enabled_checkbox = self._create_styled_checkbox("Enable Multi-Key Mode")
         self.enabled_checkbox.setChecked(self.enabled_var)
         self.enabled_checkbox.toggled.connect(self._toggle_multi_key_mode)
-        
+
         # Add spinning icon next to multi-key mode checkbox (HiDPI-aware like Extract Glossary)
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
         self.multikey_icon = QLabel()
@@ -1808,13 +1812,13 @@ class MultiAPIKeyDialog(QDialog):
         self.multikey_icon.setFixedSize(36, 36)
         self.multikey_icon.setAlignment(Qt.AlignCenter)
         self.enabled_checkbox.toggled.connect(lambda: animate_icon(self.multikey_icon))
-        
+
         title_layout.addStretch()
         title_layout.addWidget(self.multikey_icon)
         title_layout.addWidget(self.enabled_checkbox)
-        
+
         scrollable_layout.addWidget(title_frame)
-        
+
         # Store reference to description label for hide/show
         self.multikey_desc_label = QLabel(
                 "Manage multiple API keys with automatic rotation and rate limit handling.\n"
@@ -1823,23 +1827,23 @@ class MultiAPIKeyDialog(QDialog):
         self.multikey_desc_label.setStyleSheet("color: gray; padding-bottom: 10px;")
         self.multikey_desc_label.setWordWrap(True)
         scrollable_layout.addWidget(self.multikey_desc_label)
-        
+
         # Rotation settings frame - store reference for enabling/disabling
         self.rotation_frame = QGroupBox("Rotation Settings")
         rotation_frame_layout = QVBoxLayout(self.rotation_frame)
         rotation_frame_layout.setContentsMargins(15, 10, 15, 10)
-        
+
         # Force rotation toggle
         rotation_settings = QWidget()
         rotation_settings_layout = QHBoxLayout(rotation_settings)
         rotation_settings_layout.setContentsMargins(0, 0, 0, 0)
-        
+
         self.force_rotation_var = self.translator_gui.config.get('force_key_rotation', True)
         self.force_rotation_checkbox = self._create_styled_checkbox("Force Key Rotation")
         self.force_rotation_checkbox.setChecked(self.force_rotation_var)
         self.force_rotation_checkbox.toggled.connect(self._update_rotation_display)
         rotation_settings_layout.addWidget(self.force_rotation_checkbox)
-        
+
         # Rotation frequency
         rotation_settings_layout.addSpacing(20)
         rotation_settings_layout.addWidget(QLabel("Every"))
@@ -1853,57 +1857,60 @@ class MultiAPIKeyDialog(QDialog):
         rotation_settings_layout.addWidget(self.frequency_spinbox)
         rotation_settings_layout.addWidget(QLabel("requests"))
         rotation_settings_layout.addStretch()
-        
+
         rotation_frame_layout.addWidget(rotation_settings)
-        
+
         # Rotation description
         self.rotation_desc_label = QLabel()
         self.rotation_desc_label.setStyleSheet("color: #5a9fd4; font-style: italic;")
         rotation_frame_layout.addWidget(self.rotation_desc_label)
         self._update_rotation_display()
-        
+
         scrollable_layout.addWidget(self.rotation_frame)
-        
+
         # Add key section
         self._create_add_key_section(scrollable_layout)
-        
+
         # Separator - store reference to hide when multi-key mode is off
         self.multikey_separator = QFrame()
         self.multikey_separator.setFrameShape(QFrame.HLine)
         self.multikey_separator.setFrameShadow(QFrame.Sunken)
         scrollable_layout.addWidget(self.multikey_separator)
-        
+
         # Key list section
         self._create_key_list_section(scrollable_layout)
-        
+
         # Add stretch before fallback that only appears when multi-key is enabled
         # This will be removed when multi-key is disabled to bring fallback closer
         scrollable_layout.addStretch(0)
-        
+
         # Create fallback container (hidden by default)
         self._create_fallback_section(scrollable_layout)
-        
+
         # Create glossary keys container (hidden by default)
         self._create_glossary_section(scrollable_layout)
-        
+
         # Create Vision keys container (hidden by default)
         self._create_qa_scan_section(scrollable_layout)
-        
+
+        # Create Inpainter keys container (hidden by default)
+        self._create_inpainter_section(scrollable_layout)
+
         # Add stretch to fill remaining space in scroll area
         scrollable_layout.addStretch(1)
-        
+
         # Button bar at the bottom - moved outside scroll area below
         # (will be added to dialog_layout instead)
-        
+
         # Load existing keys into tree
         self._refresh_key_list()
-        
+
         # Create button bar outside scroll area (fixed at bottom)
         self._create_button_bar(dialog_layout)
-        
+
         # Set icon
         self._set_icon(self)
-        
+
         # Apply initial state for multi-key mode toggle
         self._toggle_multi_key_mode()
 
@@ -1913,18 +1920,18 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_container = QWidget()
         fallback_container_layout = QVBoxLayout(self.fallback_container)
         fallback_container_layout.setContentsMargins(0, 5, 0, 0)  # Reduced top margin from 10 to 5
-        
+
         # Separator - store reference to hide when multi-key mode is off
         self.fallback_separator = QFrame()
         self.fallback_separator.setFrameShape(QFrame.HLine)
         self.fallback_separator.setFrameShadow(QFrame.Sunken)
         fallback_container_layout.addWidget(self.fallback_separator)
-        
+
         # Main fallback frame
         fallback_frame = QGroupBox("Fallback Keys (For Prohibited Content)")
         fallback_frame_layout = QVBoxLayout(fallback_frame)
         fallback_frame_layout.setContentsMargins(15, 15, 15, 15)
-        
+
         # Description
         desc_label = QLabel(
                 "Configure fallback keys that will be used when content is blocked.\n"
@@ -1934,18 +1941,18 @@ class MultiAPIKeyDialog(QDialog):
         desc_label.setStyleSheet("color: gray;")
         desc_label.setWordWrap(True)
         fallback_frame_layout.addWidget(desc_label)
-        
+
         # Enable fallback checkbox with spinning icon
         fallback_checkbox_container = QWidget()
         fallback_checkbox_layout = QHBoxLayout(fallback_checkbox_container)
         fallback_checkbox_layout.setContentsMargins(0, 0, 0, 0)
         fallback_checkbox_layout.setSpacing(8)
-        
+
         self.use_fallback_var = self.translator_gui.config.get('use_fallback_keys', False)
         self.use_fallback_checkbox = self._create_styled_checkbox("Enable Fallback Keys")
         self.use_fallback_checkbox.setChecked(self.use_fallback_var)
         self.use_fallback_checkbox.toggled.connect(self._toggle_fallback_section)
-        
+
         # Add spinning icon next to fallback keys checkbox (HiDPI-aware like Extract Glossary)
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
         self.fallback_icon = QLabel()
@@ -1973,11 +1980,11 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_icon.setFixedSize(36, 36)
         self.fallback_icon.setAlignment(Qt.AlignCenter)
         self.use_fallback_checkbox.toggled.connect(lambda: animate_icon(self.fallback_icon))
-        
+
         fallback_checkbox_layout.addWidget(self.fallback_icon)
         fallback_checkbox_layout.addWidget(self.use_fallback_checkbox)
         fallback_checkbox_layout.addStretch()
-        
+
         fallback_frame_layout.addWidget(fallback_checkbox_container)
 
         # Toggle: use main GUI key as first fallback entry
@@ -1985,31 +1992,31 @@ class MultiAPIKeyDialog(QDialog):
         self.use_main_key_fallback_checkbox = self._create_styled_checkbox("Use Main GUI Key as Fallback #1")
         self.use_main_key_fallback_checkbox.setChecked(self.use_main_key_fallback_var)
         fallback_frame_layout.addWidget(self.use_main_key_fallback_checkbox)
-        
+
         # Toggle: fallback key shuffle (skip cooling-down keys instead of waiting)
         self.fallback_key_shuffle_var = self.translator_gui.config.get('fallback_key_shuffle', False)
         self.fallback_key_shuffle_checkbox = self._create_styled_checkbox(
             "Fallback Key Shuffle (skip keys on API delay cooldown, try next available)")
         self.fallback_key_shuffle_checkbox.setChecked(self.fallback_key_shuffle_var)
         fallback_frame_layout.addWidget(self.fallback_key_shuffle_checkbox)
-        
+
         # Add fallback key section - store reference for opacity effect
         self.add_fallback_frame = QWidget()
         add_fallback_grid = QGridLayout(self.add_fallback_frame)
         add_fallback_grid.setContentsMargins(0, 0, 0, 10)
-        
+
         # Row 0: Fallback API Key and Model
         add_fallback_grid.addWidget(QLabel("Fallback API Key:"), 0, 0, Qt.AlignLeft)
         self.fallback_key_entry = QLineEdit()
         self.fallback_key_entry.setEchoMode(QLineEdit.Password)
         add_fallback_grid.addWidget(self.fallback_key_entry, 0, 1)
-        
+
         # Toggle fallback visibility
         self.show_fallback_btn = QPushButton("👁")
         self.show_fallback_btn.setFixedWidth(40)
         self.show_fallback_btn.clicked.connect(self._toggle_fallback_visibility)
         add_fallback_grid.addWidget(self.show_fallback_btn, 0, 2)
-        
+
         # Fallback Model
         add_fallback_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
         fallback_models = get_model_options()
@@ -2018,18 +2025,18 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_model_combo.setEditable(True)
         self._disable_combobox_mousewheel(self.fallback_model_combo)  # Disable mousewheel
         add_fallback_grid.addWidget(self.fallback_model_combo, 0, 4)
-        
+
         # Add fallback button
         add_fallback_btn = QPushButton("Add Fallback Key")
         add_fallback_btn.clicked.connect(self._add_fallback_key)
         add_fallback_grid.addWidget(add_fallback_btn, 0, 5, Qt.AlignRight)
-        
+
         # Set column stretch
         add_fallback_grid.setColumnStretch(1, 1)
         add_fallback_grid.setColumnStretch(4, 1)
-        
+
         fallback_frame_layout.addWidget(self.add_fallback_frame)
-        
+
         # Row 1: Google Credentials (optional, discretely styled)
         google_creds_label = QLabel("Google Creds:")
         google_creds_label.setStyleSheet("color: gray; font-size: 8pt;")
@@ -2037,13 +2044,13 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_google_creds_entry = QLineEdit()
         self.fallback_google_creds_entry.setStyleSheet("font-size: 7pt;")
         add_fallback_grid.addWidget(self.fallback_google_creds_entry, 1, 1)
-        
+
         # Google credentials browse button
         browse_google_btn = QPushButton("📁")
         browse_google_btn.setFixedWidth(40)
         browse_google_btn.clicked.connect(self._browse_fallback_google_credentials)
         add_fallback_grid.addWidget(browse_google_btn, 1, 2)
-        
+
         # Google region field for fallback
         region_label = QLabel("Region:")
         region_label.setStyleSheet("color: gray;")
@@ -2052,14 +2059,14 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_google_region_entry.setStyleSheet("font-size: 7pt;")
         self.fallback_google_region_entry.setMaximumWidth(100)
         add_fallback_grid.addWidget(self.fallback_google_region_entry, 1, 4, 1, 1, Qt.AlignLeft)
-        
+
         # Row 2: Individual Endpoint Toggle for fallback
         self.fallback_use_individual_endpoint_var = False
         self.fallback_individual_endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
         self.fallback_individual_endpoint_toggle.setChecked(False)
         self.fallback_individual_endpoint_toggle.toggled.connect(self._toggle_fallback_individual_endpoint_fields)
         add_fallback_grid.addWidget(self.fallback_individual_endpoint_toggle, 2, 0, 1, 2, Qt.AlignLeft)
-        
+
         # Row 3: Individual Endpoint (initially hidden)
         self.fallback_individual_endpoint_label = QLabel("Individual Endpoint:")
         self.fallback_individual_endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
@@ -2067,14 +2074,14 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_azure_endpoint_entry = QLineEdit()
         self.fallback_azure_endpoint_entry.setStyleSheet("font-size: 8pt;")
         add_fallback_grid.addWidget(self.fallback_azure_endpoint_entry, 3, 1, 1, 2)
-        
+
         # Individual Endpoint API Version (small dropdown, initially hidden)
         self.fallback_individual_api_version_label = QLabel("API Ver:")
         self.fallback_individual_api_version_label.setStyleSheet("color: gray;")
         add_fallback_grid.addWidget(self.fallback_individual_api_version_label, 3, 3, Qt.AlignLeft)
         fallback_azure_versions = [
             '2025-01-01-preview',
-            '2024-12-01-preview', 
+            '2024-12-01-preview',
             '2024-10-01-preview',
             '2024-08-01-preview',
             '2024-06-01',
@@ -2088,18 +2095,18 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_azure_api_version_combo.setMaximumWidth(180)
         self._disable_combobox_mousewheel(self.fallback_azure_api_version_combo)  # Disable mousewheel
         add_fallback_grid.addWidget(self.fallback_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
-        
-        
+
+
         # Initially hide the endpoint fields when toggle is off
         self._toggle_fallback_individual_endpoint_fields()
-        
+
         # Fallback keys list
         self._create_fallback_list(fallback_frame_layout)
-        
+
         # Add fallback container to parent
         fallback_container_layout.addWidget(fallback_frame)
         parent_layout.addWidget(self.fallback_container)
-        
+
         # Initially disable if checkbox is unchecked
         self._toggle_fallback_section()
 
@@ -2111,57 +2118,57 @@ class MultiAPIKeyDialog(QDialog):
         list_label_font.setBold(True)
         self.fallback_list_label.setFont(list_label_font)
         parent_layout.addWidget(self.fallback_list_label)
-        
+
         # Container for tree and buttons
         self.fallback_tree_container = QWidget()
         container_layout = QHBoxLayout(self.fallback_tree_container)
         container_layout.setContentsMargins(0, 0, 0, 0)
-        
+
         # Left side: Move buttons - store reference for hide/show
         self.fallback_move_frame = QWidget()
         move_layout = QVBoxLayout(self.fallback_move_frame)
         move_layout.setContentsMargins(0, 0, 5, 0)
-        
+
         order_label = QLabel("Reorder")
         order_font = QFont()
         order_font.setBold(True)
         order_label.setFont(order_font)
         move_layout.addWidget(order_label)
-        
+
         # Move to top button
         top_btn = QPushButton("↑ ↑")
         top_btn.setFixedSize(55, 32)
         top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
         top_btn.clicked.connect(lambda: self._move_fallback_key('top'))
         move_layout.addWidget(top_btn)
-        
+
         up_btn = QPushButton("↑")
         up_btn.setFixedSize(55, 32)
         up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
         up_btn.clicked.connect(lambda: self._move_fallback_key('up'))
         move_layout.addWidget(up_btn)
-        
+
         down_btn = QPushButton("↓")
         down_btn.setFixedSize(55, 32)
         down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
         down_btn.clicked.connect(lambda: self._move_fallback_key('down'))
         move_layout.addWidget(down_btn)
-        
+
         # Move to bottom button
         bottom_btn = QPushButton("↓ ↓")
         bottom_btn.setFixedSize(55, 32)
         bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
         bottom_btn.clicked.connect(lambda: self._move_fallback_key('bottom'))
         move_layout.addWidget(bottom_btn)
-        
+
         move_layout.addSpacing(10)
-        
+
         self.fallback_position_label = QLabel()
         self.fallback_position_label.setStyleSheet("color: gray;")
         move_layout.addWidget(self.fallback_position_label)
         move_layout.addStretch()
         container_layout.addWidget(self.fallback_move_frame)
-        
+
         # Right side: TreeWidget with drag and drop
         self.fallback_tree = QTreeWidget()
         # Add explicit column for per-key output token limit
@@ -2175,38 +2182,38 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_tree.setColumnWidth(6, 75)   # Success
         self.fallback_tree.setColumnWidth(7, 55)   # Errors
         self.fallback_tree.setColumnWidth(8, 80)   # Times Used
-        
+
         # Set header font to match multi-key tree
         fb_header = self.fallback_tree.header()
         fb_header_font = QFont()
         fb_header_font.setBold(True)
         fb_header_font.setPointSize(11)
         fb_header.setFont(fb_header_font)
-        
+
         self.fallback_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.fallback_tree.customContextMenuRequested.connect(self._show_fallback_context_menu)
         self.fallback_tree.setMinimumHeight(150)
-        
+
         # Enable drag and drop for fallback tree using InternalMove (like profile manager)
         self.fallback_tree.setDragDropMode(QAbstractItemView.InternalMove)
         self.fallback_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        
+
         # Connect to model's rowsMoved signal to sync data after Qt moves items
         self.fallback_tree.model().rowsMoved.connect(self._on_fallback_rows_moved)
         self.fallback_tree.itemSelectionChanged.connect(self._on_fallback_selection_change)
-        
+
         # Connect double-click for inline editing (consistent with multi-key tree)
         self.fallback_tree.itemDoubleClicked.connect(self._on_fallback_click)
-        
+
         container_layout.addWidget(self.fallback_tree)
-        
+
         parent_layout.addWidget(self.fallback_tree_container)
-        
+
         # Action buttons - store reference for toggling
         self.fallback_action_frame = QWidget()
         fallback_action_layout = QHBoxLayout(self.fallback_action_frame)
         fallback_action_layout.setContentsMargins(0, 10, 0, 0)
-        
+
         test_selected_btn = QPushButton("Test Selected")
         test_selected_btn.clicked.connect(self._test_selected_fallback)
         fallback_action_layout.addWidget(test_selected_btn)
@@ -2222,47 +2229,47 @@ class MultiAPIKeyDialog(QDialog):
         disable_selected_btn = QPushButton("Disable Selected")
         disable_selected_btn.clicked.connect(self._disable_selected_fallback)
         fallback_action_layout.addWidget(disable_selected_btn)
-    
+
         remove_selected_btn = QPushButton("Remove Selected")
         remove_selected_btn.clicked.connect(self._remove_selected_fallback)
         fallback_action_layout.addWidget(remove_selected_btn)
-        
+
         clear_all_btn = QPushButton("Clear All")
         clear_all_btn.clicked.connect(self._clear_all_fallbacks)
         fallback_action_layout.addWidget(clear_all_btn)
-        
+
         fallback_action_layout.addStretch()
         # Status label specific to fallback actions
         self.fallback_status_label = QLabel()
         self.fallback_status_label.setStyleSheet("color: gray;")
         fallback_action_layout.addWidget(self.fallback_status_label)
         parent_layout.addWidget(self.fallback_action_frame)
-        
+
         # Load existing fallback keys
         self._load_fallback_keys()
 
     def _test_all_fallbacks(self):
         """Test all fallback keys in parallel"""
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
-        
+
         if not fallback_keys:
             QMessageBox.warning(self, "Warning", "No fallback keys to test")
             return
-        
+
         # Update UI to show testing status for all keys
         for i in range(self.fallback_tree.topLevelItemCount()):
             item = self.fallback_tree.topLevelItem(i)
             if item:
                 # Status column is index 3 (after Output Limit)
                 item.setText(3, "⏳ Testing...")
-        
+
         # Ensure UnifiedClient uses the same shared pool instance
         try:
             from unified_api_client import UnifiedClient
             UnifiedClient._api_key_pool = self.key_pool
         except Exception:
             pass
-        
+
         # Submit all tests to executor in parallel
         for i, key_data in enumerate(fallback_keys):
             self._test_single_fallback_key(key_data, i)
@@ -2273,19 +2280,19 @@ class MultiAPIKeyDialog(QDialog):
         item = self.fallback_tree.itemAt(position)
         if not item:
             return
-        
+
         # Select item if not already selected
         if item not in self.fallback_tree.selectedItems():
             self.fallback_tree.setCurrentItem(item)
-        
+
         # Create context menu
         menu = QMenu(self)
-        
+
         # Get index for position info
         index = self.fallback_tree.indexOfTopLevelItem(item)
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         total = len(fallback_keys)
-        
+
         # Reorder submenu
         if total > 1:  # Only show reorder if there's more than one key
             reorder_menu = menu.addMenu("Reorder")
@@ -2296,7 +2303,7 @@ class MultiAPIKeyDialog(QDialog):
                 down_action = reorder_menu.addAction("Move Down")
                 down_action.triggered.connect(lambda: self._move_fallback_key('down'))
             menu.addSeparator()
-        
+
         # Add Change Model option
         selected_count = len(self.fallback_tree.selectedItems())
         if selected_count > 1:
@@ -2304,15 +2311,15 @@ class MultiAPIKeyDialog(QDialog):
         else:
             change_model_action = menu.addAction("Change Model")
         change_model_action.triggered.connect(self._change_fallback_model_for_selected)
-        
+
         menu.addSeparator()
-        
+
         # Individual Endpoint options for fallback keys
         if index < len(fallback_keys):
             key_data = fallback_keys[index]
             endpoint_enabled = key_data.get('use_individual_endpoint', False)
             endpoint_url = key_data.get('azure_endpoint', '')
-            
+
             if endpoint_enabled and endpoint_url:
                 config_action = menu.addAction("✅ Individual Endpoint")
                 config_action.triggered.connect(lambda: self._configure_fallback_individual_endpoint(index))
@@ -2321,9 +2328,9 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 config_action = menu.addAction("🔧 Configure Individual Endpoint")
                 config_action.triggered.connect(lambda: self._configure_fallback_individual_endpoint(index))
-        
+
         menu.addSeparator()
-        
+
         # Per-key output token limit options for fallback keys
         selected_items = self.fallback_tree.selectedItems()
         selected_count = len(selected_items)
@@ -2334,7 +2341,7 @@ class MultiAPIKeyDialog(QDialog):
         set_limit_action.triggered.connect(self._set_fallback_output_token_limit_for_selected)
         clear_limit_action = menu.addAction("Clear Output Token Limit")
         clear_limit_action.triggered.connect(self._clear_fallback_output_token_limit_for_selected)
-        
+
         # Per-key temperature options for fallback keys
         if selected_count > 1:
             set_temp_action = menu.addAction(f"Set Key Temperature ({selected_count} selected)")
@@ -2343,7 +2350,7 @@ class MultiAPIKeyDialog(QDialog):
         set_temp_action.triggered.connect(self._set_fallback_key_temperature_for_selected)
         clear_temp_action = menu.addAction("Clear Key Temperature")
         clear_temp_action.triggered.connect(self._clear_fallback_key_temperature_for_selected)
-        
+
         # Per-key API call delay options for fallback keys
         if selected_count > 1:
             set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
@@ -2352,9 +2359,9 @@ class MultiAPIKeyDialog(QDialog):
         set_delay_action.triggered.connect(self._set_fallback_api_call_delay_for_selected)
         clear_delay_action = menu.addAction("Clear API Call Delay")
         clear_delay_action.triggered.connect(self._clear_fallback_api_call_delay_for_selected)
-        
+
         menu.addSeparator()
-        
+
         # Test, Enable/Disable, and Remove options
         test_action = menu.addAction("Test")
         test_action.triggered.connect(self._test_selected_fallback)
@@ -2365,11 +2372,11 @@ class MultiAPIKeyDialog(QDialog):
         menu.addSeparator()
         remove_action = menu.addAction("Remove")
         remove_action.triggered.connect(self._remove_selected_fallback)
-        
+
         if total > 1:
             clear_action = menu.addAction("Clear All")
             clear_action.triggered.connect(self._clear_all_fallbacks)
-        
+
         # Show menu
         menu.exec_(self.fallback_tree.viewport().mapToGlobal(position))
 
@@ -2379,10 +2386,10 @@ class MultiAPIKeyDialog(QDialog):
         selected = self.fallback_tree.selectedItems()
         if not selected:
             return
-        
+
         # Get fallback keys
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
-        
+
         # Create simple dialog
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Change Model for {len(selected)} Fallback Keys")
@@ -2392,30 +2399,30 @@ class MultiAPIKeyDialog(QDialog):
         height = int(screen.height() * 0.13)  # 13% of screen height
         dialog.resize(width, height)
         self._set_icon(dialog)
-        
+
         # Main layout
         main_layout = QVBoxLayout(dialog)
         main_layout.setContentsMargins(20, 20, 20, 20)
-        
+
         # Label
         label = QLabel("Enter new model name (press Enter to apply):")
         main_layout.addWidget(label)
-        
+
         # Full model list
         all_models = get_model_options()
-        
+
         model_combo = QComboBox()
         model_combo.addItems(all_models)
         model_combo.setEditable(True)
         main_layout.addWidget(model_combo)
-        
+
         # Get current model from first selected item as default
         selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
         if selected_indices and selected_indices[0] < len(fallback_keys):
             current_model = fallback_keys[selected_indices[0]].get('model', '')
             model_combo.setCurrentText(current_model)
             model_combo.lineEdit().selectAll()
-        
+
         def apply_change():
             new_model = model_combo.currentText().strip()
             if new_model:
@@ -2424,65 +2431,65 @@ class MultiAPIKeyDialog(QDialog):
                     index = self.fallback_tree.indexOfTopLevelItem(item)
                     if index < len(fallback_keys):
                         fallback_keys[index]['model'] = new_model
-                
+
                 # Save to config
                 self.translator_gui.config['fallback_keys'] = fallback_keys
                 self.translator_gui.save_config(show_message=False)
-                
+
                 # Reload the list
                 self._load_fallback_keys()
-                
+
                 # Show status
                 self._show_fallback_status(f"Changed model to '{new_model}' for {len(selected)} fallback keys")
-                
+
                 dialog.accept()
-        
+
         # Buttons
         button_layout = QHBoxLayout()
         button_layout.addStretch()
-        
+
         apply_btn = QPushButton("Apply")
         apply_btn.clicked.connect(apply_change)
         apply_btn.setDefault(True)
         button_layout.addWidget(apply_btn)
-        
+
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(dialog.reject)
         button_layout.addWidget(cancel_btn)
-        
+
         main_layout.addLayout(button_layout)
-        
+
         # Focus on the combobox
         model_combo.setFocus()
-        
+
         # Show dialog
         dialog.exec_()
 
     def _load_fallback_keys(self):
         """Load fallback keys from config"""
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
-        
+
         # Save scroll position and selection
         v_scroll = self.fallback_tree.verticalScrollBar().value()
         h_scroll = self.fallback_tree.horizontalScrollBar().value()
-        
+
         # Save selection (by index)
         selected_indices = []
         for item in self.fallback_tree.selectedItems():
             selected_indices.append(self.fallback_tree.indexOfTopLevelItem(item))
-        
+
         # Clear tree
         self.fallback_tree.clear()
-        
+
         # Add keys to tree
         for key_data in fallback_keys:
             api_key = key_data.get('api_key', '')
             model = key_data.get('model', '')
             times_used = int(key_data.get('times_used', 0))
-            
+
             # Mask API key
             masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
-            
+
             # Determine per-key output token limit display value
             try:
                 raw_limit = key_data.get('individual_output_token_limit')
@@ -2493,7 +2500,7 @@ class MultiAPIKeyDialog(QDialog):
                 output_limit_str = str(per_key_limit)
             else:
                 output_limit_str = "global"
-            
+
             # Determine per-key temperature display value
             try:
                 raw_temp = key_data.get('individual_key_temperature')
@@ -2504,7 +2511,7 @@ class MultiAPIKeyDialog(QDialog):
                 temp_str = str(per_key_temp)
             else:
                 temp_str = "global"
-            
+
             # Determine status and coloring (match multi-key tree style)
             enabled = key_data.get('enabled', True)
             test_result = key_data.get('last_test_result')
@@ -2526,7 +2533,7 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 status = "Enabled"
                 color = Qt.gray
-            
+
             # Determine per-key API call delay display value
             try:
                 raw_delay = key_data.get('api_call_delay')
@@ -2534,7 +2541,7 @@ class MultiAPIKeyDialog(QDialog):
             except Exception:
                 per_key_delay = 0.0
             delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
-            
+
             # Insert into tree (with Success and Errors columns matching multi-key tree)
             success_count = int(key_data.get('success_count', 0))
             error_count = int(key_data.get('error_count', 0))
@@ -2542,7 +2549,7 @@ class MultiAPIKeyDialog(QDialog):
             # Apply status-based coloring (consistent with multi-key tree)
             for col in range(item.columnCount()):
                 item.setForeground(col, color)
-            
+
             # Tooltip for per-key settings
             tooltip_parts = []
             if per_key_limit and per_key_limit > 0:
@@ -2560,17 +2567,17 @@ class MultiAPIKeyDialog(QDialog):
             tooltip = "\n".join(tooltip_parts)
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
-            
+
             # Disable drop on this item to prevent nesting (keep it a flat list)
             item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
             self.fallback_tree.addTopLevelItem(item)
-            
+
         # Restore selection
         for index in selected_indices:
             if index < self.fallback_tree.topLevelItemCount():
                 item = self.fallback_tree.topLevelItem(index)
                 item.setSelected(True)
-        
+
         # Restore scroll position
         self.fallback_tree.verticalScrollBar().setValue(v_scroll)
         self.fallback_tree.horizontalScrollBar().setValue(h_scroll)
@@ -2581,26 +2588,26 @@ class MultiAPIKeyDialog(QDialog):
         model = self.fallback_model_combo.currentText().strip()
         google_credentials = self.fallback_google_creds_entry.text().strip() or None
         google_region = self.fallback_google_region_entry.text().strip() or None
-        
+
         # Only use individual endpoint if toggle is enabled
         use_individual_endpoint = self.fallback_individual_endpoint_toggle.isChecked()
         azure_endpoint = self.fallback_azure_endpoint_entry.text().strip() if use_individual_endpoint else None
         azure_api_version = self.fallback_azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
-        
+
         if not model:
             QMessageBox.critical(self, "Error", "Please enter a model name")
             return
-        
 
-        
+
+
         # Get current fallback keys
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
-        
+
         # Per-key output token limit and temperature default to None (global)
         # Users can set these later via the right-click context menu
         individual_output_token_limit = None
         individual_key_temperature = None
-        
+
         # Add new key with additional fields
         fallback_keys.append({
             'api_key': api_key,
@@ -2615,11 +2622,11 @@ class MultiAPIKeyDialog(QDialog):
             'api_call_delay': 0.0,
             'times_used': 0
         })
-        
+
         # Save to config
         self.translator_gui.config['fallback_keys'] = fallback_keys
         self.translator_gui.save_config(show_message=False)
-        
+
         # Clear inputs
         self.fallback_key_entry.clear()
         self.fallback_model_combo.setCurrentText("")
@@ -2631,20 +2638,20 @@ class MultiAPIKeyDialog(QDialog):
 
         # Update the UI to disable endpoint fields
         self._toggle_fallback_individual_endpoint_fields()
-        
+
         # Reload list
         self._load_fallback_keys()
-        
+
         # Show success
         extras = []
         if google_credentials:
             extras.append(f"Google: {os.path.basename(google_credentials)}")
         if azure_endpoint:
             extras.append(f"Azure: {azure_endpoint[:30]}...")
-        
+
         extra_info = f" ({', '.join(extras)})" if extras else ""
         self._show_fallback_status(f"Added fallback key for model: {model}{extra_info}")
-        
+
         # Re-evaluate AuthGPT login button visibility
         self._notify_authgpt_visibility()
 
@@ -2653,16 +2660,16 @@ class MultiAPIKeyDialog(QDialog):
         selected = self.fallback_tree.selectedItems()
         if not selected:
             return
-        
+
         item = selected[0]
         index = self.fallback_tree.indexOfTopLevelItem(item)
-        
+
         # Get current fallback keys
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
-        
+
         if index >= len(fallback_keys):
             return
-        
+
         new_index = index
         if direction == 'top' and index > 0:
             new_index = 0
@@ -2672,19 +2679,19 @@ class MultiAPIKeyDialog(QDialog):
             new_index = index + 1
         elif direction == 'bottom' and index < len(fallback_keys) - 1:
             new_index = len(fallback_keys) - 1
-        
+
         if new_index != index:
             # Move key to new position (pop and insert for top/bottom support)
             key = fallback_keys.pop(index)
             fallback_keys.insert(new_index, key)
-            
+
             # Save to config
             self.translator_gui.config['fallback_keys'] = fallback_keys
             self.translator_gui.save_config(show_message=False)
-            
+
             # Reload list
             self._load_fallback_keys()
-            
+
             # Reselect item
             if new_index < self.fallback_tree.topLevelItemCount():
                 item = self.fallback_tree.topLevelItem(new_index)
@@ -2698,29 +2705,29 @@ class MultiAPIKeyDialog(QDialog):
         if not selected:
             QMessageBox.warning(self, "Warning", "Please select a fallback key to test")
             return
-        
+
         index = self.fallback_tree.indexOfTopLevelItem(selected[0])
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
-        
+
         if index >= len(fallback_keys):
             return
-        
+
         # Update UI to show testing status immediately
         if index < self.fallback_tree.topLevelItemCount():
             item = self.fallback_tree.topLevelItem(index)
             if item:
                 # Status column is index 3 (after Output Limit)
                 item.setText(3, "⏳ Testing...")
-        
+
         key_data = fallback_keys[index]
-        
+
         # Ensure UnifiedClient uses the same shared pool instance
         try:
             from unified_api_client import UnifiedClient
             UnifiedClient._api_key_pool = self.key_pool
         except Exception:
             pass
-        
+
         # Run test on main thread using QTimer (non-blocking)
         QTimer.singleShot(100, lambda: self._test_single_fallback_key(key_data, index))
 
@@ -2742,7 +2749,7 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.save_config(show_message=False)
             except Exception:
                 pass
-        
+
         if index < self.fallback_tree.topLevelItemCount():
             item = self.fallback_tree.topLevelItem(index)
             if item:
@@ -2786,22 +2793,22 @@ class MultiAPIKeyDialog(QDialog):
         """Test a single fallback key - REAL API TEST"""
         api_key = key_data.get('api_key', '')
         model = key_data.get('model', '')
-        
+
         print(f"[DEBUG] Starting REAL fallback key test for {model}")
-        
+
         # Run REAL API test using executor like translation does
         from concurrent.futures import ThreadPoolExecutor
         from unified_api_client import UnifiedClient
-        
+
         # Use shared executor from main GUI
         if hasattr(self.translator_gui, '_ensure_executor'):
             self.translator_gui._ensure_executor()
         executor = getattr(self.translator_gui, 'executor', None)
-        
+
         # Shared refs so timeout wrapper can hard-cancel and suppress stale results
         client_ref = [None]
         timed_out = [False]
-        
+
         def run_api_test():
             try:
                 client = UnifiedClient(
@@ -2810,7 +2817,7 @@ class MultiAPIKeyDialog(QDialog):
                     output_dir=None
                 )
                 client_ref[0] = client  # expose to timeout wrapper
-                
+
                 # Force 1 retries for testing to speed up failure detection
                 try:
                     tls = client._get_thread_local_client()
@@ -2818,20 +2825,20 @@ class MultiAPIKeyDialog(QDialog):
                     print(f"[DEBUG] Set max_retries_override=1 for fallback key test")
                 except Exception:
                     pass
-                
-                
+
+
                 # Set Google credentials and other key-specific settings
                 google_credentials = key_data.get('google_credentials')
                 if google_credentials:
                     client.current_key_google_creds = google_credentials
                     client.google_creds_path = google_credentials
                     print(f"[DEBUG] Set Google credentials for fallback test: {os.path.basename(google_credentials)}")
-                
+
                 google_region = key_data.get('google_region')
                 if google_region:
                     client.current_key_google_region = google_region
                     print(f"[DEBUG] Set Google region for fallback test: {google_region}")
-                
+
                 # Set Azure endpoint settings if configured
                 use_individual_endpoint = key_data.get('use_individual_endpoint', False)
                 if use_individual_endpoint:
@@ -2840,22 +2847,22 @@ class MultiAPIKeyDialog(QDialog):
                         client.current_key_azure_endpoint = azure_endpoint
                         client.current_key_use_individual_endpoint = True
                         print(f"[DEBUG] Set Azure endpoint for fallback test: {azure_endpoint[:50]}...")
-                    
+
                     azure_api_version = key_data.get('azure_api_version')
                     if azure_api_version:
                         client.current_key_azure_api_version = azure_api_version
-                
+
                 messages = [
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": "Say 'API test successful' and nothing else."}
                 ]
-                
+
                 response = client.send(
                     messages,
                     temperature=0.7,
                     max_tokens=1000
                 )
-                
+
                 if response and isinstance(response, tuple):
                     content, _ = response
                     if content and "test successful" in content.lower():
@@ -2866,7 +2873,7 @@ class MultiAPIKeyDialog(QDialog):
                             else:
                                 self._update_fallback_test_result(index, True)
                         return
-                
+
                 # Failed
                 print(f"[DEBUG] Fallback key test completed for {model}: FAILED")
                 if not timed_out[0]:
@@ -2881,7 +2888,7 @@ class MultiAPIKeyDialog(QDialog):
                         QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
                     else:
                         self._update_fallback_test_result(index, False)
-        
+
         # Submit to shared executor with 30-second timeout
         def run_with_timeout():
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
@@ -2916,7 +2923,7 @@ class MultiAPIKeyDialog(QDialog):
                         self._update_fallback_timeout_status(index)
                 except Exception:
                     pass  # Already handled inside run_api_test
-        
+
         if executor:
             executor.submit(run_with_timeout)
         else:
@@ -2928,18 +2935,18 @@ class MultiAPIKeyDialog(QDialog):
         selected = self.fallback_tree.selectedItems()
         if not selected:
             return
-        
+
         reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected fallback key(s)?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             indices = sorted([self.fallback_tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
-            
+
             fallback_keys = self.translator_gui.config.get('fallback_keys', [])
-            
+
             for index in indices:
                 if index < len(fallback_keys):
                     del fallback_keys[index]
-            
+
             self.translator_gui.config['fallback_keys'] = fallback_keys
             self.translator_gui.save_config(show_message=False)
             self._load_fallback_keys()
@@ -2982,50 +2989,50 @@ class MultiAPIKeyDialog(QDialog):
         """Clear all fallback keys"""
         if self.fallback_tree.topLevelItemCount() == 0:
             return
-        
+
         reply = QMessageBox.question(self, "Confirm", "Remove ALL fallback keys?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             # Clear fallback keys
             self.translator_gui.config['fallback_keys'] = []
             self.translator_gui.save_config(show_message=False)
-            
+
             # Reload list
             self._load_fallback_keys()
-            
+
             self._show_fallback_status("Cleared all fallback keys")
-            
+
             # Re-evaluate AuthGPT login button visibility
             self._notify_authgpt_visibility()
 
     def _toggle_fallback_section(self):
         """Toggle fallback section - simply hide/show elements"""
         enabled = self.use_fallback_checkbox.isChecked()
-        
+
         # Show/hide the input frame
         if hasattr(self, 'add_fallback_frame'):
             self.add_fallback_frame.setVisible(enabled)
-        
+
         # Show/hide the list label
         if hasattr(self, 'fallback_list_label'):
             self.fallback_list_label.setVisible(enabled)
-        
+
         # Show/hide the tree container (includes move buttons and tree)
         if hasattr(self, 'fallback_tree_container'):
             self.fallback_tree_container.setVisible(enabled)
-        
+
         # Show/hide action buttons
         if hasattr(self, 'fallback_action_frame'):
             self.fallback_action_frame.setVisible(enabled)
-        
+
         # Clear selection when disabled
         if hasattr(self, 'fallback_tree') and not enabled:
             self.fallback_tree.clearSelection()
-        
+
         # === Check if multi-key is also disabled ===
         multikey_enabled = self.enabled_checkbox.isChecked() if hasattr(self, 'enabled_checkbox') else False
         both_disabled = not enabled and not multikey_enabled
-        
+
         # === Adjust fallback container spacing ===
         if hasattr(self, 'fallback_container'):
             layout = self.fallback_container.layout()
@@ -3034,18 +3041,18 @@ class MultiAPIKeyDialog(QDialog):
                     layout.setContentsMargins(0, 0, 0, 0)  # No top margin when both are off
                 else:
                     layout.setContentsMargins(0, 5, 0, 0)  # Normal spacing otherwise
-        
+
         # === Hide fallback separator when both are off ===
         if hasattr(self, 'fallback_separator'):
             self.fallback_separator.setVisible(not both_disabled)
-        
+
         # === Adjust layout spacing ===
         if hasattr(self, 'scrollable_layout'):
             if both_disabled:
                 self.scrollable_layout.setSpacing(0)  # No spacing when both disabled
             else:
                 self.scrollable_layout.setSpacing(10)  # Normal spacing otherwise
-        
+
         # Show status message
         status = "enabled" if enabled else "disabled"
         self._show_fallback_status(f"Fallback Keys {status}")
@@ -3062,7 +3069,7 @@ class MultiAPIKeyDialog(QDialog):
                     print(msg)  # fallback to print only if append_log fails
             else:
                 print(msg)
-        
+
         # Sync env vars immediately
         try:
             import os as _os
@@ -3072,7 +3079,7 @@ class MultiAPIKeyDialog(QDialog):
                 _os.environ['USE_FALLBACK_KEYS'] = '0'
         except Exception:
             pass
-        
+
         # Re-evaluate AuthGPT login button visibility
         self._notify_authgpt_visibility()
 
@@ -3084,33 +3091,33 @@ class MultiAPIKeyDialog(QDialog):
         else:
             self.fallback_key_entry.setEchoMode(QLineEdit.Password)
             self.show_fallback_btn.setText('👁')
-    
+
     def _toggle_fallback_individual_endpoint_fields(self):
         """Toggle visibility and state of fallback individual endpoint fields"""
         enabled = self.fallback_individual_endpoint_toggle.isChecked()
-        
+
         # Show/hide and enable/disable endpoint fields
         self.fallback_individual_endpoint_label.setVisible(enabled)
         self.fallback_azure_endpoint_entry.setVisible(enabled)
         self.fallback_individual_api_version_label.setVisible(enabled)
         self.fallback_azure_api_version_combo.setVisible(enabled)
-        
+
         self.fallback_azure_endpoint_entry.setEnabled(enabled)
         self.fallback_azure_api_version_combo.setEnabled(enabled)
-        
+
         if not enabled:
             # Clear the fields when disabled
             self.fallback_azure_endpoint_entry.clear()
             self.fallback_azure_api_version_combo.setCurrentText('2025-01-01-preview')
-    
+
     def _configure_fallback_individual_endpoint(self, fallback_index):
         """Configure individual endpoint for a fallback key"""
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         if fallback_index >= len(fallback_keys):
             return
-        
+
         key_data = fallback_keys[fallback_index]
-        
+
         # Create a temporary APIKeyEntry object for compatibility with IndividualEndpointDialog
         temp_key = APIKeyEntry(
             api_key=key_data.get('api_key', ''),
@@ -3123,44 +3130,44 @@ class MultiAPIKeyDialog(QDialog):
             azure_api_version=key_data.get('azure_api_version'),
             use_individual_endpoint=key_data.get('use_individual_endpoint', False)
         )
-        
+
         # Define callback to update config after dialog closes
         def on_endpoint_configured():
             # Update the fallback key with new values
             fallback_keys[fallback_index]['azure_endpoint'] = temp_key.azure_endpoint
             fallback_keys[fallback_index]['azure_api_version'] = temp_key.azure_api_version
             fallback_keys[fallback_index]['use_individual_endpoint'] = temp_key.use_individual_endpoint
-            
+
             # Save to config
             self.translator_gui.config['fallback_keys'] = fallback_keys
             self.translator_gui.save_config(show_message=False)
-            
+
             # Reload the fallback list
             self._load_fallback_keys()
-            
+
             # Show status
             status = "configured" if temp_key.use_individual_endpoint else "disabled"
             self._show_fallback_status(f"Individual endpoint {status} for fallback key")
-        
+
         # Create individual endpoint dialog using the class
         if IndividualEndpointDialog is None:
             QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
             return
         dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_fallback_status)
         dialog.exec_()
-    
+
     def _set_fallback_output_token_limit_for_selected(self):
         """Set per-key output token limit for selected fallback keys"""
         from PySide6.QtWidgets import QInputDialog
         selected = self.fallback_tree.selectedItems()
         if not selected:
             return
-        
+
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
         if not selected_indices:
             return
-        
+
         # Determine default from first selected fallback key or global setting
         default_val = None
         first_idx = selected_indices[0]
@@ -3178,7 +3185,7 @@ class MultiAPIKeyDialog(QDialog):
                 default_val = int(getattr(self.translator_gui, 'max_output_tokens', 8192))
             except Exception:
                 default_val = 8192
-        
+
         value, ok = QInputDialog.getInt(
             self,
             "Set Fallback Output Token Limit",
@@ -3190,7 +3197,7 @@ class MultiAPIKeyDialog(QDialog):
         )
         if not ok or value <= 0:
             return
-        
+
         for idx in selected_indices:
             if 0 <= idx < len(fallback_keys):
                 fallback_keys[idx]['individual_output_token_limit'] = int(value)
@@ -3198,13 +3205,13 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
         self._show_fallback_status(f"Set fallback output token limit to {value} for {len(selected_indices)} key(s)")
-    
+
     def _clear_fallback_output_token_limit_for_selected(self):
         """Clear per-key output token limit for selected fallback keys"""
         selected = self.fallback_tree.selectedItems()
         if not selected:
             return
-        
+
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
         for idx in selected_indices:
@@ -3215,19 +3222,19 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
         self._show_fallback_status(f"Cleared fallback output token limit for {len(selected_indices)} key(s)")
-    
+
     def _set_fallback_key_temperature_for_selected(self):
         """Set per-key temperature for selected fallback keys"""
         from PySide6.QtWidgets import QInputDialog
         selected = self.fallback_tree.selectedItems()
         if not selected:
             return
-        
+
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
         if not selected_indices:
             return
-        
+
         default_val = 0.7
         first_idx = selected_indices[0]
         if 0 <= first_idx < len(fallback_keys):
@@ -3237,7 +3244,7 @@ class MultiAPIKeyDialog(QDialog):
                     default_val = float(raw)
             except Exception:
                 pass
-        
+
         value, ok = QInputDialog.getDouble(
             self,
             "Set Fallback Key Temperature",
@@ -3249,7 +3256,7 @@ class MultiAPIKeyDialog(QDialog):
         )
         if not ok:
             return
-        
+
         for idx in selected_indices:
             if 0 <= idx < len(fallback_keys):
                 fallback_keys[idx]['individual_key_temperature'] = value
@@ -3257,13 +3264,13 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
         self._show_fallback_status(f"Set fallback key temperature to {value} for {len(selected_indices)} key(s)")
-    
+
     def _clear_fallback_key_temperature_for_selected(self):
         """Clear per-key temperature for selected fallback keys"""
         selected = self.fallback_tree.selectedItems()
         if not selected:
             return
-        
+
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
         for idx in selected_indices:
@@ -3274,7 +3281,7 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
         self._show_fallback_status(f"Cleared fallback key temperature for {len(selected_indices)} key(s)")
-    
+
     def _set_fallback_api_call_delay_for_selected(self):
         """Set per-key API call delay for selected fallback keys"""
         from PySide6.QtWidgets import QInputDialog
@@ -3318,22 +3325,22 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
         self._show_fallback_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
-    
+
     def _toggle_fallback_individual_endpoint(self, fallback_index, enabled):
         """Quick toggle individual endpoint on/off for fallback key"""
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         if fallback_index >= len(fallback_keys):
             return
-        
+
         fallback_keys[fallback_index]['use_individual_endpoint'] = enabled
-        
+
         # Save to config
         self.translator_gui.config['fallback_keys'] = fallback_keys
         self.translator_gui.save_config(show_message=False)
-        
+
         # Reload fallback list
         self._load_fallback_keys()
-        
+
         # Show status
         status = "enabled" if enabled else "disabled"
         model = fallback_keys[fallback_index].get('model', 'unknown')
@@ -3346,14 +3353,14 @@ class MultiAPIKeyDialog(QDialog):
         button_container_layout = QVBoxLayout(button_container)
         button_container_layout.setContentsMargins(0, 0, 0, 0)
         button_container_layout.setSpacing(0)
-        
+
         # Add separator line
         separator = QFrame()
         separator.setFrameShape(QFrame.HLine)
         separator.setFrameShadow(QFrame.Sunken)
         separator.setStyleSheet("QFrame { color: #3a3a3a; background-color: #3a3a3a; }")
         button_container_layout.addWidget(separator)
-        
+
         # Create button frame
         self.button_frame = QWidget()
         self.button_frame.setStyleSheet("""
@@ -3364,20 +3371,20 @@ class MultiAPIKeyDialog(QDialog):
         """)
         button_layout = QHBoxLayout(self.button_frame)
         button_layout.setContentsMargins(20, 15, 20, 15)
-        
+
         # Import/Export
         import_btn = QPushButton("Import")
         import_btn.setMinimumHeight(40)
         import_btn.setStyleSheet("QPushButton { font-size: 11pt; padding: 8px 20px; }")
         import_btn.clicked.connect(self._import_keys)
         button_layout.addWidget(import_btn)
-        
+
         export_btn = QPushButton("Export")
         export_btn.setMinimumHeight(40)
         export_btn.setStyleSheet("QPushButton { font-size: 11pt; padding: 8px 20px; }")
         export_btn.clicked.connect(self._export_keys)
         button_layout.addWidget(export_btn)
-        
+
         # Manage Refusal Patterns button
         _refusal_disabled = self.translator_gui.config.get('disable_refusal_checks', True)
         _refusal_status = "Disabled" if _refusal_disabled else "Enabled"
@@ -3404,9 +3411,9 @@ class MultiAPIKeyDialog(QDialog):
         """)
         refusal_btn.clicked.connect(self._manage_refusal_patterns)
         button_layout.addWidget(refusal_btn)
-        
+
         button_layout.addStretch()
-        
+
         # Close button
         cancel_btn = QPushButton("Close")
         cancel_btn.setMinimumHeight(44)
@@ -3414,7 +3421,7 @@ class MultiAPIKeyDialog(QDialog):
         cancel_btn.setStyleSheet("QPushButton { font-size: 11pt; padding: 10px 24px; }")
         cancel_btn.clicked.connect(self._on_close)
         button_layout.addWidget(cancel_btn)
-        
+
         # Save button
         save_btn = QPushButton("Save")
         save_btn.setMinimumHeight(44)
@@ -3434,20 +3441,20 @@ class MultiAPIKeyDialog(QDialog):
         save_btn.clicked.connect(self._save_and_close)
         self._save_btn = save_btn
         button_layout.addWidget(save_btn)
-        
+
         # Add button frame to container
         button_container_layout.addWidget(self.button_frame)
-        
+
         # Add button container to parent layout
         parent_layout.addWidget(button_container)
- 
+
     def _create_key_list_section(self, parent_layout):
         """Create the key list section with inline editing and rearrangement controls"""
         # Store reference for enabling/disabling
         self.key_list_frame = QGroupBox("API Keys")
         list_frame_layout = QVBoxLayout(self.key_list_frame)
         list_frame_layout.setContentsMargins(15, 15, 15, 15)
-        
+
         # Add primary key indicator frame at the top with improved styling
         primary_frame = QFrame()
         primary_frame.setStyleSheet("""
@@ -3460,7 +3467,7 @@ class MultiAPIKeyDialog(QDialog):
         """)
         primary_frame_layout = QVBoxLayout(primary_frame)
         primary_frame_layout.setContentsMargins(8, 8, 8, 8)
-        
+
         self.primary_key_label = QLabel("⭐ PRIMARY KEY: Position #1 will be used first in rotation ⭐")
         self.primary_key_label.setStyleSheet("""
             QLabel {
@@ -3477,64 +3484,64 @@ class MultiAPIKeyDialog(QDialog):
         self.primary_key_label.setFont(primary_label_font)
         self.primary_key_label.setAlignment(Qt.AlignCenter)
         primary_frame_layout.addWidget(self.primary_key_label)
-        
+
         list_frame_layout.addWidget(primary_frame)
-        
+
         # Main container with treeview and controls
         main_container = QWidget()
         main_container_layout = QHBoxLayout(main_container)
         main_container_layout.setContentsMargins(0, 0, 0, 0)
-        
+
         # Left side: Move buttons
         move_frame = QWidget()
         move_layout = QVBoxLayout(move_frame)
         move_layout.setContentsMargins(0, 0, 5, 0)
-        
+
         reorder_label = QLabel("Reorder")
         reorder_font = QFont()
         reorder_font.setBold(True)
         reorder_label.setFont(reorder_font)
         move_layout.addWidget(reorder_label)
-        
+
         # Move to top button with expanded width
         top_btn = QPushButton("↑ ↑")
         top_btn.setFixedSize(55, 32)
         top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
         top_btn.clicked.connect(lambda: self._move_key('top'))
         move_layout.addWidget(top_btn)
-        
+
         # Move up button with expanded width
         up_btn = QPushButton("↑")
         up_btn.setFixedSize(55, 32)
         up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
         up_btn.clicked.connect(lambda: self._move_key('up'))
         move_layout.addWidget(up_btn)
-        
+
         # Move down button with expanded width
         down_btn = QPushButton("↓")
         down_btn.setFixedSize(55, 32)
         down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
         down_btn.clicked.connect(lambda: self._move_key('down'))
         move_layout.addWidget(down_btn)
-        
+
         # Move to bottom button with expanded width
         bottom_btn = QPushButton("↓ ↓")
         bottom_btn.setFixedSize(55, 32)
         bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
         bottom_btn.clicked.connect(lambda: self._move_key('bottom'))
         move_layout.addWidget(bottom_btn)
-        
+
         # Spacer
         move_layout.addSpacing(10)
-        
+
         # Position label
         self.position_label = QLabel()
         self.position_label.setStyleSheet("color: gray;")
         move_layout.addWidget(self.position_label)
         move_layout.addStretch()
-        
+
         main_container_layout.addWidget(move_frame)
-        
+
         # Right side: TreeWidget with drag and drop support
         self.tree = QTreeWidget()
         # Add explicit column for per-key output token limit
@@ -3550,66 +3557,66 @@ class MultiAPIKeyDialog(QDialog):
         self.tree.setColumnWidth(7, 75)   # Success
         self.tree.setColumnWidth(8, 55)   # Errors
         self.tree.setColumnWidth(9, 80)   # Times Used
-        
+
         # Set header font
         header = self.tree.header()
         header_font = QFont()
         header_font.setBold(True)
         header_font.setPointSize(11)
         header.setFont(header_font)
-        
+
         # Set context menu
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
-        
+
         # Set selection mode
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        
+
         # Enable drag and drop using InternalMove (like profile manager)
         # This is the simplest approach - let Qt handle everything
         self.tree.setDragDropMode(QAbstractItemView.InternalMove)
-        
+
         # Connect to model's rowsMoved signal to sync data after Qt moves items
         self.tree.model().rowsMoved.connect(self._on_tree_rows_moved)
-        
+
         # Connect signals
         self.tree.itemDoubleClicked.connect(self._on_click)
         self.tree.itemSelectionChanged.connect(self._on_selection_change)
-        
+
         # Track editing state
         self.edit_widget = None
-        
+
         main_container_layout.addWidget(self.tree)
         list_frame_layout.addWidget(main_container)
-        
+
         # Action buttons
         action_frame = QWidget()
         action_layout = QHBoxLayout(action_frame)
         action_layout.setContentsMargins(0, 10, 0, 0)
-        
+
         # Store references to action buttons for enabling/disabling
         self.test_selected_btn = QPushButton("Test Selected")
         self.test_selected_btn.clicked.connect(self._test_selected)
         action_layout.addWidget(self.test_selected_btn)
-        
+
         self.test_all_btn = QPushButton("Test All")
         self.test_all_btn.clicked.connect(self._test_all)
         action_layout.addWidget(self.test_all_btn)
-        
+
         self.enable_selected_btn = QPushButton("Enable Selected")
         self.enable_selected_btn.clicked.connect(self._enable_selected)
         action_layout.addWidget(self.enable_selected_btn)
-        
+
         self.disable_selected_btn = QPushButton("Disable Selected")
         self.disable_selected_btn.clicked.connect(self._disable_selected)
         action_layout.addWidget(self.disable_selected_btn)
-        
+
         self.remove_selected_btn = QPushButton("Remove Selected")
         self.remove_selected_btn.clicked.connect(self._remove_selected)
         action_layout.addWidget(self.remove_selected_btn)
-        
+
         action_layout.addStretch()
-        
+
         # Stats label
         self.stats_label = QLabel()
         self.stats_label.setStyleSheet("color: gray;")
@@ -3617,29 +3624,29 @@ class MultiAPIKeyDialog(QDialog):
         stats_font.setPointSize(11)
         self.stats_label.setFont(stats_font)
         action_layout.addWidget(self.stats_label)
-        
+
         list_frame_layout.addWidget(action_frame)
         parent_layout.addWidget(self.key_list_frame)
- 
+
     def _create_add_key_section(self, parent_layout):
         """Create the add key section with Google credentials and Azure endpoint support"""
         # Store reference for enabling/disabling
         self.add_key_frame = QGroupBox("Add New API Key")
         add_grid = QGridLayout(self.add_key_frame)
         add_grid.setContentsMargins(15, 15, 15, 15)
-        
+
         # Row 0: API Key and Model
         add_grid.addWidget(QLabel("API Key:"), 0, 0, Qt.AlignLeft)
         self.api_key_entry = QLineEdit()
         self.api_key_entry.setEchoMode(QLineEdit.Password)
         add_grid.addWidget(self.api_key_entry, 0, 1)
-        
+
         # Toggle visibility button
         self.show_key_btn = QPushButton("👁")
         self.show_key_btn.setFixedWidth(40)
         self.show_key_btn.clicked.connect(self._toggle_key_visibility)
         add_grid.addWidget(self.show_key_btn, 0, 2)
-        
+
         # Model
         add_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
         add_models = get_model_options()
@@ -3648,43 +3655,43 @@ class MultiAPIKeyDialog(QDialog):
         self.model_combo.setEditable(True)
         self._disable_combobox_mousewheel(self.model_combo)  # Disable mousewheel
         add_grid.addWidget(self.model_combo, 0, 4)
-        
+
         # Row 1: Cooldown and buttons
         add_grid.addWidget(QLabel("Cooldown (s):"), 1, 0, Qt.AlignLeft)
         cooldown_widget = QWidget()
         cooldown_layout = QHBoxLayout(cooldown_widget)
         cooldown_layout.setContentsMargins(0, 0, 0, 0)
-        
+
         self.cooldown_spinbox = QSpinBox()
         self.cooldown_spinbox.setRange(10, 3600)
         self.cooldown_spinbox.setValue(60)
         self.cooldown_spinbox.setMaximumWidth(100)
         self._disable_spinbox_mousewheel(self.cooldown_spinbox)  # Disable mousewheel
         cooldown_layout.addWidget(self.cooldown_spinbox)
-        
+
         cooldown_hint = QLabel("(10-3600)")
         cooldown_hint.setStyleSheet("color: gray;")
         cooldown_layout.addWidget(cooldown_hint)
         cooldown_layout.addStretch()
         add_grid.addWidget(cooldown_widget, 1, 1)
-        
+
         # Add button and Copy Current Key button
         button_widget = QWidget()
         button_layout = QHBoxLayout(button_widget)
         button_layout.setContentsMargins(0, 0, 0, 0)
         button_layout.addStretch()
-        
+
         # Store references for enabling/disabling
         self.add_key_btn = QPushButton("Add Key")
         self.add_key_btn.clicked.connect(self._add_key)
         button_layout.addWidget(self.add_key_btn)
-        
+
         self.copy_current_btn = QPushButton("Copy Current Key")
         self.copy_current_btn.clicked.connect(self._copy_current_settings)
         button_layout.addWidget(self.copy_current_btn)
-        
+
         add_grid.addWidget(button_widget, 1, 4, Qt.AlignRight)
-        
+
         # Row 2: Google Credentials (optional, discretely styled)
         google_creds_label = QLabel("Google Creds:")
         google_creds_label.setStyleSheet("color: gray; font-size: 9pt;")
@@ -3692,13 +3699,13 @@ class MultiAPIKeyDialog(QDialog):
         self.google_creds_entry = QLineEdit()
         self.google_creds_entry.setStyleSheet("font-size: 8pt;")
         add_grid.addWidget(self.google_creds_entry, 2, 1)
-        
+
         # Google credentials browse button
         google_browse_btn = QPushButton("📁")
         google_browse_btn.setFixedWidth(40)
         google_browse_btn.clicked.connect(self._browse_google_credentials)
         add_grid.addWidget(google_browse_btn, 2, 2)
-        
+
         # Google region field
         region_label = QLabel("Region:")
         region_label.setStyleSheet("color: gray;")
@@ -3707,14 +3714,14 @@ class MultiAPIKeyDialog(QDialog):
         self.google_region_entry.setStyleSheet("font-size: 8pt;")
         self.google_region_entry.setMaximumWidth(120)
         add_grid.addWidget(self.google_region_entry, 2, 4, 1, 1, Qt.AlignLeft)
-        
+
         # Row 3: Individual Endpoint Toggle
         self.use_individual_endpoint_var = False
         self.individual_endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
         self.individual_endpoint_toggle.setChecked(False)
         self.individual_endpoint_toggle.toggled.connect(self._toggle_individual_endpoint_fields)
         add_grid.addWidget(self.individual_endpoint_toggle, 3, 0, 1, 2, Qt.AlignLeft)
-        
+
         # Row 4: Individual Endpoint (initially hidden)
         self.individual_endpoint_label = QLabel("Individual Endpoint:")
         self.individual_endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
@@ -3723,14 +3730,14 @@ class MultiAPIKeyDialog(QDialog):
         self.azure_endpoint_entry.setStyleSheet("font-size: 8pt;")
         self.azure_endpoint_entry.setEnabled(False)
         add_grid.addWidget(self.azure_endpoint_entry, 4, 1, 1, 2)
-        
+
         # Individual Endpoint API Version (small dropdown, initially hidden)
         self.individual_api_version_label = QLabel("API Ver:")
         self.individual_api_version_label.setStyleSheet("color: gray;")
         add_grid.addWidget(self.individual_api_version_label, 4, 3, Qt.AlignLeft)
         azure_versions = [
             '2025-01-01-preview',
-            '2024-12-01-preview', 
+            '2024-12-01-preview',
             '2024-10-01-preview',
             '2024-08-01-preview',
             '2024-06-01',
@@ -3745,49 +3752,49 @@ class MultiAPIKeyDialog(QDialog):
         self.azure_api_version_combo.setEnabled(False)
         self._disable_combobox_mousewheel(self.azure_api_version_combo)  # Disable mousewheel
         add_grid.addWidget(self.azure_api_version_combo, 4, 4, 1, 1, Qt.AlignLeft)
-        
-        
+
+
         # Set column stretch
         add_grid.setColumnStretch(1, 1)
         add_grid.setColumnStretch(4, 1)
-        
+
         # Initially hide the endpoint fields
         self._toggle_individual_endpoint_fields()
-        
+
         parent_layout.addWidget(self.add_key_frame)
-    
+
     def _toggle_individual_endpoint_fields(self):
         """Toggle visibility and state of individual endpoint fields"""
         enabled = self.individual_endpoint_toggle.isChecked()
-        
+
         # Show/hide and enable/disable endpoint fields
         self.individual_endpoint_label.setVisible(enabled)
         self.azure_endpoint_entry.setVisible(enabled)
         self.individual_api_version_label.setVisible(enabled)
         self.azure_api_version_combo.setVisible(enabled)
-        
+
         self.azure_endpoint_entry.setEnabled(enabled)
         self.azure_api_version_combo.setEnabled(enabled)
-        
+
         if not enabled:
             # Clear the fields when disabled
             self.azure_endpoint_entry.clear()
             self.azure_api_version_combo.setCurrentText('2025-01-01-preview')
-    
+
     def _move_key(self, direction):
         """Move selected key in the specified direction"""
         selected = self.tree.selectedItems()
         if not selected or len(selected) != 1:
             return
-        
+
         item = selected[0]
         index = self.tree.indexOfTopLevelItem(item)
-        
+
         if index >= len(self.key_pool.keys):
             return
-        
+
         new_index = index
-        
+
         if direction == 'up' and index > 0:
             new_index = index - 1
         elif direction == 'down' and index < len(self.key_pool.keys) - 1:
@@ -3796,16 +3803,16 @@ class MultiAPIKeyDialog(QDialog):
             new_index = 0
         elif direction == 'bottom':
             new_index = len(self.key_pool.keys) - 1
-        
+
         if new_index != index:
             # Swap keys in the pool
             with self.key_pool.lock:
                 self.key_pool.keys[index], self.key_pool.keys[new_index] = \
                     self.key_pool.keys[new_index], self.key_pool.keys[index]
-            
+
             # Refresh display
             self._refresh_key_list()
-            
+
             # Reselect the moved item
             if new_index < self.tree.topLevelItemCount():
                 new_item = self.tree.topLevelItem(new_index)
@@ -3813,10 +3820,10 @@ class MultiAPIKeyDialog(QDialog):
                     self.tree.setCurrentItem(new_item)
                     new_item.setSelected(True)
                     self.tree.scrollToItem(new_item)
-            
+
             # Show status
             self._show_status(f"Moved key to position {new_index + 1}")
-            
+
     def _on_selection_change(self):
         """Update position label when selection changes"""
         selected = self.tree.selectedItems()
@@ -3842,32 +3849,32 @@ class MultiAPIKeyDialog(QDialog):
                     if key_masked == masked_key and key.model == model and key not in new_order:
                         new_order.append(key)
                         break
-        
+
         # Update the pool if we got a valid reordering
         if len(new_order) == len(self.key_pool.keys):
             with self.key_pool.lock:
                 self.key_pool.keys = new_order
-            
+
             # Save to config
             self._save_keys_to_config()
-            
+
             # Update primary key label
             if hasattr(self, 'primary_key_label') and new_order:
                 first_key = new_order[0]
                 masked = first_key.api_key[:8] + "..." + first_key.api_key[-4:] if len(first_key.api_key) > 12 else first_key.api_key
                 self.primary_key_label.setText(f"⭐ PRIMARY KEY: {first_key.model} ({masked}) ⭐")
-            
+
             self._show_status("Reordered keys")
 
     def _show_fallback_status(self, message: str):
         """Show status message in the fallback section."""
         if hasattr(self, 'fallback_status_label'):
             self.fallback_status_label.setText(message)
-    
+
     def _on_fallback_rows_moved(self):
         """Sync fallback_keys config with tree order after Qt moves rows via drag-drop"""
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
-        
+
         # Read the new order from the tree
         new_order = []
         for i in range(self.fallback_tree.topLevelItemCount()):
@@ -3882,7 +3889,7 @@ class MultiAPIKeyDialog(QDialog):
                     if key_masked == masked_key and key_data.get('model', '') == model and key_data not in new_order:
                         new_order.append(key_data)
                         break
-        
+
         # Update config if we got a valid reordering
         if len(new_order) == len(fallback_keys):
             self.translator_gui.config['fallback_keys'] = new_order
@@ -3903,12 +3910,12 @@ class MultiAPIKeyDialog(QDialog):
         """Handle double-click on fallback tree item for inline editing (consistent with multi-key tree)"""
         if not item:
             return
-        
+
         index = self.fallback_tree.indexOfTopLevelItem(item)
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         if index >= len(fallback_keys):
             return
-        
+
         # Column 1 = Model (editable)
         # Column 2 = Output Limit (editable)
         # Column 3 = Temp (editable)
@@ -3984,15 +3991,15 @@ class MultiAPIKeyDialog(QDialog):
         # Save scroll position and selection
         v_scroll = self.tree.verticalScrollBar().value()
         h_scroll = self.tree.horizontalScrollBar().value()
-        
+
         # Save selection (by index)
         selected_indices = []
         for item in self.tree.selectedItems():
             selected_indices.append(self.tree.indexOfTopLevelItem(item))
-            
+
         # Clear tree
         self.tree.clear()
-        
+
         # Update primary key label if it exists
         if hasattr(self, 'primary_key_label'):
             keys = self.key_pool.get_all_keys()
@@ -4000,39 +4007,39 @@ class MultiAPIKeyDialog(QDialog):
                 first_key = keys[0]
                 masked = first_key.api_key[:8] + "..." + first_key.api_key[-4:] if len(first_key.api_key) > 12 else first_key.api_key
                 self.primary_key_label.setText(f"⭐ PRIMARY KEY: {first_key.model} ({masked}) ⭐")
-        
+
         # Add keys
         keys = self.key_pool.get_all_keys()
         for i, key in enumerate(keys):
             # Mask API key for display
             masked_key = key.api_key[:8] + "..." + key.api_key[-4:] if len(key.api_key) > 12 else key.api_key
-            
+
             # Determine per-key output token limit display value
             per_key_limit = getattr(key, 'individual_output_token_limit', None)
             if per_key_limit and per_key_limit > 0:
                 output_limit_str = str(per_key_limit)
             else:
                 output_limit_str = "global"
-            
+
             # Determine per-key temperature display value
             per_key_temp = getattr(key, 'individual_key_temperature', None)
             if per_key_temp is not None:
                 temp_str = str(per_key_temp)
             else:
                 temp_str = "global"
-            
+
             # Determine per-key API call delay display value
             per_key_delay = getattr(key, 'api_call_delay', 0.0)
             if per_key_delay and per_key_delay > 0:
                 delay_str = str(per_key_delay)
             else:
                 delay_str = "global"
-            
+
             # Position indicator (not currently shown in a column, but kept for potential future use)
             position = f"#{i+1}"
             if i == 0:
                 position = "⭐ #1"
-            
+
             # Determine status based on test results and current state
             if key.last_test_result is None and hasattr(key, '_testing'):
                 status = "⏳ Testing..."
@@ -4069,10 +4076,10 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 status = "Active"
                 tags = ('active',)
-            
+
             # Times used (counter)
             times_used = getattr(key, 'times_used', key.success_count + key.error_count)
-            
+
             # Insert into tree (now includes explicit Output Limit and Temp columns)
             item = QTreeWidgetItem([
                 masked_key,
@@ -4086,7 +4093,7 @@ class MultiAPIKeyDialog(QDialog):
                 str(key.error_count),
                 str(times_used),
             ])
-            
+
             # Tooltip for per-key settings
             tooltip_parts = []
             if per_key_limit and per_key_limit > 0:
@@ -4104,7 +4111,7 @@ class MultiAPIKeyDialog(QDialog):
             tooltip = "\n".join(tooltip_parts)
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
-            
+
             # Set colors based on status
             if tags == ('active',):
                 for col in range(item.columnCount()):
@@ -4133,23 +4140,23 @@ class MultiAPIKeyDialog(QDialog):
             elif tags == ('error',):
                 for col in range(item.columnCount()):
                     item.setForeground(col, Qt.darkRed)
-            
+
             # Disable drop on this item to prevent nesting (keep it a flat list)
             item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
             self.tree.addTopLevelItem(item)
-        
+
         # Update stats
         active_count = sum(1 for k in keys if k.enabled and not k.is_cooling_down)
         total_count = len(keys)
         passed_count = sum(1 for k in keys if k.last_test_result == 'passed')
         self.stats_label.setText(f"Keys: {active_count} active / {total_count} total | {passed_count} passed tests")
-        
+
         # Restore selection
         for index in selected_indices:
             if index < self.tree.topLevelItemCount():
                 item = self.tree.topLevelItem(index)
                 item.setSelected(True)
-        
+
         # Restore scroll position
         self.tree.verticalScrollBar().setValue(v_scroll)
         self.tree.horizontalScrollBar().setValue(h_scroll)
@@ -4158,13 +4165,13 @@ class MultiAPIKeyDialog(QDialog):
         """Handle click on tree item for inline editing"""
         if not item:
             return
-        
+
         index = self.tree.indexOfTopLevelItem(item)
         if index >= len(self.key_pool.keys):
             return
-        
+
         key = self.key_pool.keys[index]
-        
+
         # Column 1 = Model (editable)
         # Column 2 = Cooldown (editable)
         # Column 3 = Output Limit (editable)
@@ -4226,17 +4233,17 @@ class MultiAPIKeyDialog(QDialog):
                 key.api_call_delay = value if value > 0 else 0.0
                 self._refresh_key_list()
                 self._show_status(f"Updated API delay to: {value if value > 0 else 'global'}")
-    
+
     def _show_model_edit_dialog(self, current_value):
         """Show dialog for editing model name"""
         from PySide6.QtWidgets import QInputDialog
         all_models = get_model_options()
-        
+
         # Use QComboBox-based input dialog
         dialog = QDialog(self)
         dialog.setWindowTitle("Edit Model")
         layout = QVBoxLayout(dialog)
-        
+
         layout.addWidget(QLabel("Model Name:"))
         combo = QComboBox()
         combo.addItems(all_models)
@@ -4244,29 +4251,29 @@ class MultiAPIKeyDialog(QDialog):
         combo.setCurrentText(current_value)
         combo.lineEdit().selectAll()
         layout.addWidget(combo)
-        
+
         # Buttons
         button_layout = QHBoxLayout()
         ok_btn = QPushButton("OK")
         ok_btn.setDefault(True)
         cancel_btn = QPushButton("Cancel")
-        
+
         def accept_dialog():
             dialog.accept()
-        
+
         ok_btn.clicked.connect(accept_dialog)
         cancel_btn.clicked.connect(dialog.reject)
-        
+
         button_layout.addStretch()
         button_layout.addWidget(ok_btn)
         button_layout.addWidget(cancel_btn)
         layout.addLayout(button_layout)
-        
+
         combo.setFocus()
-        
+
         result = dialog.exec_()
         return (combo.currentText(), result == QDialog.Accepted)
-    
+
     def _show_cooldown_edit_dialog(self, current_value):
         """Show dialog for editing cooldown"""
         from PySide6.QtWidgets import QInputDialog
@@ -4282,14 +4289,14 @@ class MultiAPIKeyDialog(QDialog):
         item = self.tree.itemAt(position)
         if not item:
             return
-        
+
         # Select item if not already selected
         if item not in self.tree.selectedItems():
             self.tree.setCurrentItem(item)
-        
+
         # Create context menu
         menu = QMenu(self)
-        
+
         # Reorder submenu
         reorder_menu = menu.addMenu("Reorder")
         top_action = reorder_menu.addAction("Move to Top")
@@ -4300,9 +4307,9 @@ class MultiAPIKeyDialog(QDialog):
         down_action.triggered.connect(lambda: self._move_key('down'))
         bottom_action = reorder_menu.addAction("Move to Bottom")
         bottom_action.triggered.connect(lambda: self._move_key('bottom'))
-        
+
         menu.addSeparator()
-        
+
         # Add change model option
         selected_items = self.tree.selectedItems()
         selected_count = len(selected_items)
@@ -4311,7 +4318,7 @@ class MultiAPIKeyDialog(QDialog):
         else:
             change_action = menu.addAction("Change Model")
         change_action.triggered.connect(self._change_model_for_selected)
-        
+
         # Per-key output token limit options
         if selected_count > 1:
             set_limit_action = menu.addAction(f"Set Output Token Limit ({selected_count} selected)")
@@ -4320,7 +4327,7 @@ class MultiAPIKeyDialog(QDialog):
         set_limit_action.triggered.connect(self._set_output_token_limit_for_selected)
         clear_limit_action = menu.addAction("Clear Output Token Limit")
         clear_limit_action.triggered.connect(self._clear_output_token_limit_for_selected)
-        
+
         # Per-key temperature options
         if selected_count > 1:
             set_temp_action = menu.addAction(f"Set Key Temperature ({selected_count} selected)")
@@ -4329,7 +4336,7 @@ class MultiAPIKeyDialog(QDialog):
         set_temp_action.triggered.connect(self._set_key_temperature_for_selected)
         clear_temp_action = menu.addAction("Clear Key Temperature")
         clear_temp_action.triggered.connect(self._clear_key_temperature_for_selected)
-        
+
         # Per-key API call delay options
         if selected_count > 1:
             set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
@@ -4338,16 +4345,16 @@ class MultiAPIKeyDialog(QDialog):
         set_delay_action.triggered.connect(self._set_api_call_delay_for_selected)
         clear_delay_action = menu.addAction("Clear API Call Delay")
         clear_delay_action.triggered.connect(self._clear_api_call_delay_for_selected)
-        
+
         menu.addSeparator()
-        
+
         # Individual Endpoint options
         index = self.tree.indexOfTopLevelItem(item)
         if index < len(self.key_pool.keys):
             key = self.key_pool.keys[index]
             endpoint_enabled = getattr(key, 'use_individual_endpoint', False)
             endpoint_url = getattr(key, 'azure_endpoint', '')
-            
+
             if endpoint_enabled and endpoint_url:
                 config_action = menu.addAction("✅ Individual Endpoint")
                 config_action.triggered.connect(lambda: self._configure_individual_endpoint(index))
@@ -4356,7 +4363,7 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 config_action = menu.addAction("🔧 Configure Individual Endpoint")
                 config_action.triggered.connect(lambda: self._configure_individual_endpoint(index))
-        
+
         menu.addSeparator()
         test_action = menu.addAction("Test")
         test_action.triggered.connect(self._test_selected)
@@ -4367,7 +4374,7 @@ class MultiAPIKeyDialog(QDialog):
         menu.addSeparator()
         remove_action = menu.addAction("Remove")
         remove_action.triggered.connect(self._remove_selected)
-        
+
         # Show menu
         menu.exec_(self.tree.viewport().mapToGlobal(position))
 
@@ -4377,7 +4384,7 @@ class MultiAPIKeyDialog(QDialog):
         selected = self.tree.selectedItems()
         if not selected:
             return
-        
+
         # Determine default value from first selected key or global setting
         selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
         default_val = None
@@ -4393,7 +4400,7 @@ class MultiAPIKeyDialog(QDialog):
                 default_val = int(getattr(self.translator_gui, 'max_output_tokens', 8192))
             except Exception:
                 default_val = 8192
-        
+
         value, ok = QInputDialog.getInt(
             self,
             "Set Output Token Limit",
@@ -4405,13 +4412,13 @@ class MultiAPIKeyDialog(QDialog):
         )
         if not ok or value <= 0:
             return
-        
+
         for idx in selected_indices:
             if 0 <= idx < len(self.key_pool.keys):
                 self.key_pool.keys[idx].individual_output_token_limit = value
         self._refresh_key_list()
         self._show_status(f"Set output token limit to {value} for {len(selected_indices)} key(s)")
-    
+
     def _clear_output_token_limit_for_selected(self):
         """Clear per-key output token limit for selected multi-key entries"""
         selected = self.tree.selectedItems()
@@ -4423,14 +4430,14 @@ class MultiAPIKeyDialog(QDialog):
                 self.key_pool.keys[idx].individual_output_token_limit = None
         self._refresh_key_list()
         self._show_status(f"Cleared output token limit for {len(selected_indices)} key(s)")
-    
+
     def _set_key_temperature_for_selected(self):
         """Set per-key temperature for selected multi-key entries"""
         from PySide6.QtWidgets import QInputDialog
         selected = self.tree.selectedItems()
         if not selected:
             return
-        
+
         selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
         default_val = 0.7
         for idx in selected_indices:
@@ -4440,7 +4447,7 @@ class MultiAPIKeyDialog(QDialog):
                 if per_key is not None:
                     default_val = per_key
                     break
-        
+
         value, ok = QInputDialog.getDouble(
             self,
             "Set Key Temperature",
@@ -4452,13 +4459,13 @@ class MultiAPIKeyDialog(QDialog):
         )
         if not ok:
             return
-        
+
         for idx in selected_indices:
             if 0 <= idx < len(self.key_pool.keys):
                 self.key_pool.keys[idx].individual_key_temperature = value
         self._refresh_key_list()
         self._show_status(f"Set key temperature to {value} for {len(selected_indices)} key(s)")
-    
+
     def _clear_key_temperature_for_selected(self):
         """Clear per-key temperature for selected multi-key entries"""
         selected = self.tree.selectedItems()
@@ -4470,7 +4477,7 @@ class MultiAPIKeyDialog(QDialog):
                 self.key_pool.keys[idx].individual_key_temperature = None
         self._refresh_key_list()
         self._show_status(f"Cleared key temperature for {len(selected_indices)} key(s)")
-    
+
     def _set_api_call_delay_for_selected(self):
         """Set per-key API call delay for selected multi-key entries"""
         from PySide6.QtWidgets import QInputDialog
@@ -4508,18 +4515,18 @@ class MultiAPIKeyDialog(QDialog):
                 self.key_pool.keys[idx].api_call_delay = 0.0
         self._refresh_key_list()
         self._show_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
-    
+
     def _change_model_for_selected(self):
         """Change model for all selected entries"""
         selected = self.tree.selectedItems()
         if not selected:
             return
-        
+
         # Create dialog
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Change Model for {len(selected)} Keys")
         dialog.setMinimumWidth(400)
-        
+
         # Set icon
         try:
             icon_path = os.path.join(os.path.dirname(__file__), 'icon.ico')
@@ -4527,24 +4534,24 @@ class MultiAPIKeyDialog(QDialog):
                 dialog.setWindowIcon(QIcon(icon_path))
         except Exception:
             pass
-        
+
         # Main layout
         main_layout = QVBoxLayout(dialog)
         main_layout.setContentsMargins(20, 20, 20, 20)
-        
+
         # Label
         label = QLabel("Enter new model name (press Enter to apply):")
         label_font = QFont()
         label_font.setPointSize(10)
         label.setFont(label_font)
         main_layout.addWidget(label)
-        
+
         # Model combo box
         all_models = get_model_options()
         model_combo = QComboBox()
         model_combo.addItems(all_models)
         model_combo.setEditable(True)
-        
+
         # Get current model from first selected item as default
         selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
         if selected_indices and selected_indices[0] < len(self.key_pool.keys):
@@ -4552,9 +4559,9 @@ class MultiAPIKeyDialog(QDialog):
             model_combo.setCurrentText(current_model)
             if model_combo.lineEdit():
                 model_combo.lineEdit().selectAll()
-        
+
         main_layout.addWidget(model_combo)
-        
+
         def apply_change():
             new_model = model_combo.currentText().strip()
             if new_model:
@@ -4563,30 +4570,30 @@ class MultiAPIKeyDialog(QDialog):
                     index = self.tree.indexOfTopLevelItem(item)
                     if index < len(self.key_pool.keys):
                         self.key_pool.keys[index].model = new_model
-                
+
                 # Refresh the display
                 self._refresh_key_list()
-                
+
                 # Show status
                 self._show_status(f"Changed model to '{new_model}' for {len(selected)} keys")
-                
+
                 dialog.accept()
-        
+
         # Button layout
         button_layout = QHBoxLayout()
         button_layout.addStretch()
-        
+
         ok_btn = QPushButton("Apply")
         ok_btn.setDefault(True)
         ok_btn.clicked.connect(apply_change)
         button_layout.addWidget(ok_btn)
-        
+
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(dialog.reject)
         button_layout.addWidget(cancel_btn)
-        
+
         main_layout.addLayout(button_layout)
-        
+
         # Set up keyboard shortcuts
         from PySide6.QtGui import QShortcut, QKeySequence
         return_shortcut = QShortcut(QKeySequence(Qt.Key_Return), dialog)
@@ -4595,44 +4602,44 @@ class MultiAPIKeyDialog(QDialog):
         enter_shortcut.activated.connect(apply_change)
         escape_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), dialog)
         escape_shortcut.activated.connect(dialog.reject)
-        
+
         # Focus on the combobox
         model_combo.setFocus()
-        
+
         # Show dialog
         dialog.exec_()
-    
+
     def _configure_individual_endpoint(self, key_index):
         """Configure individual endpoint for a specific key"""
         if key_index >= len(self.key_pool.keys):
             return
-        
+
         key = self.key_pool.keys[key_index]
-        
+
         # Create individual endpoint dialog using the class
         if IndividualEndpointDialog is None:
             QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
             return
         dialog = IndividualEndpointDialog(self, self.translator_gui, key, self._refresh_key_list, self._show_status)
         dialog.exec_()
-    
+
     def _toggle_endpoint_fields(self, enable_checkbox, endpoint_entry, version_combo):
         """Toggle endpoint configuration fields based on enable state"""
         enabled = enable_checkbox.isChecked()
         endpoint_entry.setEnabled(enabled)
         version_combo.setEnabled(enabled)
-    
+
     def _toggle_individual_endpoint(self, key_index, enabled):
         """Quick toggle individual endpoint on/off"""
         if key_index >= len(self.key_pool.keys):
             return
-        
+
         key = self.key_pool.keys[key_index]
         key.use_individual_endpoint = enabled
-        
+
         # Refresh display
         self._refresh_key_list()
-        
+
         # Show status
         status = "enabled" if enabled else "disabled"
         self._show_status(f"Individual endpoint {status} for {key.model}")
@@ -4658,9 +4665,9 @@ class MultiAPIKeyDialog(QDialog):
                 self._refresh_key_list()
                 return True
         return False
-    
+
     # Note: Duplicate _create_button_bar removed - PySide6 version defined earlier at line 1491
-    
+
     def _browse_google_credentials(self):
         """Browse for Google Cloud credentials JSON file"""
         filename, _ = QFileDialog.getOpenFileName(
@@ -4669,7 +4676,7 @@ class MultiAPIKeyDialog(QDialog):
             "",
             "JSON files (*.json);;All files (*.*)"
         )
-        
+
         if filename:
             try:
                 # Validate it's a valid Google Cloud credentials file
@@ -4681,12 +4688,12 @@ class MultiAPIKeyDialog(QDialog):
                     else:
                         QMessageBox.critical(
                             self,
-                            "Error", 
+                            "Error",
                             "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
                         )
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
-    
+
     def _browse_fallback_google_credentials(self):
         """Browse for Google Cloud credentials JSON file for fallback keys"""
         filename, _ = QFileDialog.getOpenFileName(
@@ -4695,7 +4702,7 @@ class MultiAPIKeyDialog(QDialog):
             "",
             "JSON files (*.json);;All files (*.*)"
         )
-        
+
         if filename:
             try:
                 # Validate it's a valid Google Cloud credentials file
@@ -4707,12 +4714,12 @@ class MultiAPIKeyDialog(QDialog):
                     else:
                         QMessageBox.critical(
                             self,
-                            "Error", 
+                            "Error",
                             "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
                         )
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
-    
+
     # ===================================================================
     # GLOSSARY KEYS SECTION — mirrors fallback keys for glossary API calls
     # ===================================================================
@@ -4723,18 +4730,18 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_container = QWidget()
         glossary_container_layout = QVBoxLayout(self.glossary_container)
         glossary_container_layout.setContentsMargins(0, 5, 0, 0)
-        
+
         # Separator
         self.glossary_separator = QFrame()
         self.glossary_separator.setFrameShape(QFrame.HLine)
         self.glossary_separator.setFrameShadow(QFrame.Sunken)
         glossary_container_layout.addWidget(self.glossary_separator)
-        
+
         # Main glossary frame
         glossary_frame = QGroupBox("Glossary Keys (For Glossary API Calls)")
         glossary_frame_layout = QVBoxLayout(glossary_frame)
         glossary_frame_layout.setContentsMargins(15, 15, 15, 15)
-        
+
         # Description
         desc_label = QLabel(
                 "Configure dedicated keys for glossary-context API calls.\n"
@@ -4743,18 +4750,18 @@ class MultiAPIKeyDialog(QDialog):
         desc_label.setStyleSheet("color: gray;")
         desc_label.setWordWrap(True)
         glossary_frame_layout.addWidget(desc_label)
-        
+
         # Enable checkbox with spinning icon
         glossary_checkbox_container = QWidget()
         glossary_checkbox_layout = QHBoxLayout(glossary_checkbox_container)
         glossary_checkbox_layout.setContentsMargins(0, 0, 0, 0)
         glossary_checkbox_layout.setSpacing(8)
-        
+
         self.use_glossary_keys_var = self.translator_gui.config.get('use_glossary_keys', False)
         self.use_glossary_keys_checkbox = self._create_styled_checkbox("Enable Glossary Keys")
         self.use_glossary_keys_checkbox.setChecked(self.use_glossary_keys_var)
         self.use_glossary_keys_checkbox.toggled.connect(self._toggle_glossary_section)
-        
+
         # spinning icon
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
         self.glossary_icon = QLabel()
@@ -4782,30 +4789,30 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_icon.setFixedSize(36, 36)
         self.glossary_icon.setAlignment(Qt.AlignCenter)
         self.use_glossary_keys_checkbox.toggled.connect(lambda: animate_icon(self.glossary_icon))
-        
+
         glossary_checkbox_layout.addWidget(self.glossary_icon)
         glossary_checkbox_layout.addWidget(self.use_glossary_keys_checkbox)
         glossary_checkbox_layout.addStretch()
-        
+
         glossary_frame_layout.addWidget(glossary_checkbox_container)
-        
+
         # Add glossary key section
         self.add_glossary_frame = QWidget()
         add_glossary_grid = QGridLayout(self.add_glossary_frame)
         add_glossary_grid.setContentsMargins(0, 0, 0, 10)
-        
+
         # Row 0: API Key and Model
         add_glossary_grid.addWidget(QLabel("Glossary API Key:"), 0, 0, Qt.AlignLeft)
         self.glossary_key_entry = QLineEdit()
         self.glossary_key_entry.setEchoMode(QLineEdit.Password)
         add_glossary_grid.addWidget(self.glossary_key_entry, 0, 1)
-        
+
         # Toggle visibility
         self.show_glossary_btn = QPushButton("👁")
         self.show_glossary_btn.setFixedWidth(40)
         self.show_glossary_btn.clicked.connect(self._toggle_glossary_visibility)
         add_glossary_grid.addWidget(self.show_glossary_btn, 0, 2)
-        
+
         # Model
         add_glossary_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
         glossary_models = get_model_options()
@@ -4814,17 +4821,17 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_model_combo.setEditable(True)
         self._disable_combobox_mousewheel(self.glossary_model_combo)
         add_glossary_grid.addWidget(self.glossary_model_combo, 0, 4)
-        
+
         # Add button
         add_glossary_btn = QPushButton("Add Glossary Key")
         add_glossary_btn.clicked.connect(self._add_glossary_key)
         add_glossary_grid.addWidget(add_glossary_btn, 0, 5, Qt.AlignRight)
-        
+
         add_glossary_grid.setColumnStretch(1, 1)
         add_glossary_grid.setColumnStretch(4, 1)
-        
+
         glossary_frame_layout.addWidget(self.add_glossary_frame)
-        
+
         # Row 1: Google Credentials
         google_creds_label = QLabel("Google Creds:")
         google_creds_label.setStyleSheet("color: gray; font-size: 8pt;")
@@ -4832,12 +4839,12 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_google_creds_entry = QLineEdit()
         self.glossary_google_creds_entry.setStyleSheet("font-size: 7pt;")
         add_glossary_grid.addWidget(self.glossary_google_creds_entry, 1, 1)
-        
+
         browse_google_btn = QPushButton("📁")
         browse_google_btn.setFixedWidth(40)
         browse_google_btn.clicked.connect(self._browse_glossary_google_credentials)
         add_glossary_grid.addWidget(browse_google_btn, 1, 2)
-        
+
         region_label = QLabel("Region:")
         region_label.setStyleSheet("color: gray;")
         add_glossary_grid.addWidget(region_label, 1, 3, Qt.AlignLeft)
@@ -4845,14 +4852,14 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_google_region_entry.setStyleSheet("font-size: 7pt;")
         self.glossary_google_region_entry.setMaximumWidth(100)
         add_glossary_grid.addWidget(self.glossary_google_region_entry, 1, 4, 1, 1, Qt.AlignLeft)
-        
+
         # Row 2: Individual Endpoint Toggle
         self.glossary_use_individual_endpoint_var = False
         self.glossary_individual_endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
         self.glossary_individual_endpoint_toggle.setChecked(False)
         self.glossary_individual_endpoint_toggle.toggled.connect(self._toggle_glossary_individual_endpoint_fields)
         add_glossary_grid.addWidget(self.glossary_individual_endpoint_toggle, 2, 0, 1, 2, Qt.AlignLeft)
-        
+
         # Row 3: Individual Endpoint (initially hidden)
         self.glossary_individual_endpoint_label = QLabel("Individual Endpoint:")
         self.glossary_individual_endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
@@ -4860,13 +4867,13 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_azure_endpoint_entry = QLineEdit()
         self.glossary_azure_endpoint_entry.setStyleSheet("font-size: 8pt;")
         add_glossary_grid.addWidget(self.glossary_azure_endpoint_entry, 3, 1, 1, 2)
-        
+
         self.glossary_individual_api_version_label = QLabel("API Ver:")
         self.glossary_individual_api_version_label.setStyleSheet("color: gray;")
         add_glossary_grid.addWidget(self.glossary_individual_api_version_label, 3, 3, Qt.AlignLeft)
         glossary_azure_versions = [
             '2025-01-01-preview',
-            '2024-12-01-preview', 
+            '2024-12-01-preview',
             '2024-10-01-preview',
             '2024-08-01-preview',
             '2024-06-01',
@@ -4880,18 +4887,18 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_azure_api_version_combo.setMaximumWidth(180)
         self._disable_combobox_mousewheel(self.glossary_azure_api_version_combo)
         add_glossary_grid.addWidget(self.glossary_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
-        
-        
+
+
         # Initially hide endpoint fields
         self._toggle_glossary_individual_endpoint_fields()
-        
+
         # Glossary keys list
         self._create_glossary_list(glossary_frame_layout)
-        
+
         # Add container to parent
         glossary_container_layout.addWidget(glossary_frame)
         parent_layout.addWidget(self.glossary_container)
-        
+
         # Initially disable if checkbox is unchecked
         self._toggle_glossary_section()
 
@@ -4902,55 +4909,55 @@ class MultiAPIKeyDialog(QDialog):
         list_label_font.setBold(True)
         self.glossary_list_label.setFont(list_label_font)
         parent_layout.addWidget(self.glossary_list_label)
-        
+
         # Container for tree and buttons
         self.glossary_tree_container = QWidget()
         container_layout = QHBoxLayout(self.glossary_tree_container)
         container_layout.setContentsMargins(0, 0, 0, 0)
-        
+
         # Left side: Move buttons
         self.glossary_move_frame = QWidget()
         move_layout = QVBoxLayout(self.glossary_move_frame)
         move_layout.setContentsMargins(0, 0, 5, 0)
-        
+
         order_label = QLabel("Reorder")
         order_font = QFont()
         order_font.setBold(True)
         order_label.setFont(order_font)
         move_layout.addWidget(order_label)
-        
+
         top_btn = QPushButton("↑ ↑")
         top_btn.setFixedSize(55, 32)
         top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
         top_btn.clicked.connect(lambda: self._move_glossary_key('top'))
         move_layout.addWidget(top_btn)
-        
+
         up_btn = QPushButton("↑")
         up_btn.setFixedSize(55, 32)
         up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
         up_btn.clicked.connect(lambda: self._move_glossary_key('up'))
         move_layout.addWidget(up_btn)
-        
+
         down_btn = QPushButton("↓")
         down_btn.setFixedSize(55, 32)
         down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
         down_btn.clicked.connect(lambda: self._move_glossary_key('down'))
         move_layout.addWidget(down_btn)
-        
+
         bottom_btn = QPushButton("↓ ↓")
         bottom_btn.setFixedSize(55, 32)
         bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
         bottom_btn.clicked.connect(lambda: self._move_glossary_key('bottom'))
         move_layout.addWidget(bottom_btn)
-        
+
         move_layout.addSpacing(10)
-        
+
         self.glossary_position_label = QLabel()
         self.glossary_position_label.setStyleSheet("color: gray;")
         move_layout.addWidget(self.glossary_position_label)
         move_layout.addStretch()
         container_layout.addWidget(self.glossary_move_frame)
-        
+
         # Right side: TreeWidget with drag and drop
         self.glossary_tree = QTreeWidget()
         self.glossary_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', 'Success', 'Errors', 'Times Used'])
@@ -4963,32 +4970,32 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_tree.setColumnWidth(6, 75)
         self.glossary_tree.setColumnWidth(7, 55)
         self.glossary_tree.setColumnWidth(8, 80)
-        
+
         gl_header = self.glossary_tree.header()
         gl_header_font = QFont()
         gl_header_font.setBold(True)
         gl_header_font.setPointSize(11)
         gl_header.setFont(gl_header_font)
-        
+
         self.glossary_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.glossary_tree.customContextMenuRequested.connect(self._show_glossary_context_menu)
         self.glossary_tree.setMinimumHeight(150)
-        
+
         self.glossary_tree.setDragDropMode(QAbstractItemView.InternalMove)
         self.glossary_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        
+
         self.glossary_tree.model().rowsMoved.connect(self._on_glossary_rows_moved)
         self.glossary_tree.itemSelectionChanged.connect(self._on_glossary_selection_change)
         self.glossary_tree.itemDoubleClicked.connect(self._on_glossary_click)
-        
+
         container_layout.addWidget(self.glossary_tree)
         parent_layout.addWidget(self.glossary_tree_container)
-        
+
         # Action buttons
         self.glossary_action_frame = QWidget()
         glossary_action_layout = QHBoxLayout(self.glossary_action_frame)
         glossary_action_layout.setContentsMargins(0, 10, 0, 0)
-        
+
         test_selected_btn = QPushButton("Test Selected")
         test_selected_btn.clicked.connect(self._test_selected_glossary)
         glossary_action_layout.addWidget(test_selected_btn)
@@ -5004,44 +5011,44 @@ class MultiAPIKeyDialog(QDialog):
         disable_selected_btn = QPushButton("Disable Selected")
         disable_selected_btn.clicked.connect(self._disable_selected_glossary)
         glossary_action_layout.addWidget(disable_selected_btn)
-    
+
         remove_selected_btn = QPushButton("Remove Selected")
         remove_selected_btn.clicked.connect(self._remove_selected_glossary)
         glossary_action_layout.addWidget(remove_selected_btn)
-        
+
         clear_all_btn = QPushButton("Clear All")
         clear_all_btn.clicked.connect(self._clear_all_glossary)
         glossary_action_layout.addWidget(clear_all_btn)
-        
+
         glossary_action_layout.addStretch()
         self.glossary_status_label = QLabel()
         self.glossary_status_label.setStyleSheet("color: gray;")
         glossary_action_layout.addWidget(self.glossary_status_label)
         parent_layout.addWidget(self.glossary_action_frame)
-        
+
         # Load existing glossary keys
         self._load_glossary_keys()
 
     def _load_glossary_keys(self):
         """Load glossary keys from config"""
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
-        
+
         v_scroll = self.glossary_tree.verticalScrollBar().value()
         h_scroll = self.glossary_tree.horizontalScrollBar().value()
-        
+
         selected_indices = []
         for item in self.glossary_tree.selectedItems():
             selected_indices.append(self.glossary_tree.indexOfTopLevelItem(item))
-        
+
         self.glossary_tree.clear()
-        
+
         for key_data in glossary_keys:
             api_key = key_data.get('api_key', '')
             model = key_data.get('model', '')
             times_used = int(key_data.get('times_used', 0))
-            
+
             masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
-            
+
             try:
                 raw_limit = key_data.get('individual_output_token_limit')
                 per_key_limit = int(raw_limit) if raw_limit not in (None, "") else None
@@ -5051,7 +5058,7 @@ class MultiAPIKeyDialog(QDialog):
                 output_limit_str = str(per_key_limit)
             else:
                 output_limit_str = "global"
-            
+
             # Determine per-key temperature display value
             try:
                 raw_temp = key_data.get('individual_key_temperature')
@@ -5062,7 +5069,7 @@ class MultiAPIKeyDialog(QDialog):
                 temp_str = str(per_key_temp)
             else:
                 temp_str = "global"
-            
+
             enabled = key_data.get('enabled', True)
             test_result = key_data.get('last_test_result')
             if not enabled:
@@ -5083,7 +5090,7 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 status = "Enabled"
                 color = Qt.gray
-            
+
             # Determine per-key API call delay display value
             try:
                 raw_delay = key_data.get('api_call_delay')
@@ -5091,13 +5098,13 @@ class MultiAPIKeyDialog(QDialog):
             except Exception:
                 per_key_delay = 0.0
             delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
-            
+
             success_count = int(key_data.get('success_count', 0))
             error_count = int(key_data.get('error_count', 0))
             item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
             for col in range(item.columnCount()):
                 item.setForeground(col, color)
-            
+
             # Tooltip for per-key settings
             tooltip_parts = []
             if per_key_limit and per_key_limit > 0:
@@ -5115,18 +5122,18 @@ class MultiAPIKeyDialog(QDialog):
             tooltip = "\n".join(tooltip_parts)
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
-            
+
             item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
             self.glossary_tree.addTopLevelItem(item)
-            
+
         for index in selected_indices:
             if index < self.glossary_tree.topLevelItemCount():
                 item = self.glossary_tree.topLevelItem(index)
                 item.setSelected(True)
-        
+
         self.glossary_tree.verticalScrollBar().setValue(v_scroll)
         self.glossary_tree.horizontalScrollBar().setValue(h_scroll)
-        
+
         # Auto-refresh the in-memory pool so changes take effect immediately
         if not getattr(self, '_initializing', False):
             self._refresh_glossary_pool()
@@ -5137,24 +5144,24 @@ class MultiAPIKeyDialog(QDialog):
         model = self.glossary_model_combo.currentText().strip()
         google_credentials = self.glossary_google_creds_entry.text().strip() or None
         google_region = self.glossary_google_region_entry.text().strip() or None
-        
+
         use_individual_endpoint = self.glossary_individual_endpoint_toggle.isChecked()
         azure_endpoint = self.glossary_azure_endpoint_entry.text().strip() if use_individual_endpoint else None
         azure_api_version = self.glossary_azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
-        
+
         if not model:
             QMessageBox.critical(self, "Error", "Please enter a model name")
             return
-        
 
-        
+
+
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
-        
+
         # Per-key output token limit and temperature default to None (global)
         # Users can set these later via the right-click context menu
         individual_output_token_limit = None
         individual_key_temperature = None
-        
+
         glossary_keys.append({
             'api_key': api_key,
             'model': model,
@@ -5168,10 +5175,10 @@ class MultiAPIKeyDialog(QDialog):
             'api_call_delay': 0.0,
             'times_used': 0
         })
-        
+
         self.translator_gui.config['glossary_keys'] = glossary_keys
         self.translator_gui.save_config(show_message=False)
-        
+
         # Clear inputs
         self.glossary_key_entry.clear()
         self.glossary_model_combo.setCurrentText("")
@@ -5182,9 +5189,9 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_individual_endpoint_toggle.setChecked(False)
 
         self._toggle_glossary_individual_endpoint_fields()
-        
+
         self._load_glossary_keys()
-        
+
         extras = []
         if google_credentials:
             extras.append(f"Google: {os.path.basename(google_credentials)}")
@@ -5192,7 +5199,7 @@ class MultiAPIKeyDialog(QDialog):
             extras.append(f"Azure: {azure_endpoint[:30]}...")
         extra_info = f" ({', '.join(extras)})" if extras else ""
         self._show_glossary_status(f"Added glossary key for model: {model}{extra_info}")
-        
+
         self._notify_authgpt_visibility()
 
     def _move_glossary_key(self, direction):
@@ -5200,14 +5207,14 @@ class MultiAPIKeyDialog(QDialog):
         selected = self.glossary_tree.selectedItems()
         if not selected:
             return
-        
+
         item = selected[0]
         index = self.glossary_tree.indexOfTopLevelItem(item)
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
-        
+
         if index >= len(glossary_keys):
             return
-        
+
         new_index = index
         if direction == 'top' and index > 0:
             new_index = 0
@@ -5217,16 +5224,16 @@ class MultiAPIKeyDialog(QDialog):
             new_index = index + 1
         elif direction == 'bottom' and index < len(glossary_keys) - 1:
             new_index = len(glossary_keys) - 1
-        
+
         if new_index != index:
             key = glossary_keys.pop(index)
             glossary_keys.insert(new_index, key)
-            
+
             self.translator_gui.config['glossary_keys'] = glossary_keys
             self.translator_gui.save_config(show_message=False)
-            
+
             self._load_glossary_keys()
-            
+
             if new_index < self.glossary_tree.topLevelItemCount():
                 item = self.glossary_tree.topLevelItem(new_index)
                 if item:
@@ -5239,47 +5246,47 @@ class MultiAPIKeyDialog(QDialog):
         if not selected:
             QMessageBox.warning(self, "Warning", "Please select a glossary key to test")
             return
-        
+
         index = self.glossary_tree.indexOfTopLevelItem(selected[0])
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
-        
+
         if index >= len(glossary_keys):
             return
-        
+
         if index < self.glossary_tree.topLevelItemCount():
             item = self.glossary_tree.topLevelItem(index)
             if item:
                 item.setText(3, "⏳ Testing...")
-        
+
         key_data = glossary_keys[index]
-        
+
         try:
             from unified_api_client import UnifiedClient
             UnifiedClient._api_key_pool = self.key_pool
         except Exception:
             pass
-        
+
         QTimer.singleShot(100, lambda: self._test_single_glossary_key(key_data, index))
 
     def _test_all_glossary(self):
         """Test all glossary keys in parallel"""
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
-        
+
         if not glossary_keys:
             QMessageBox.warning(self, "Warning", "No glossary keys to test")
             return
-        
+
         for i in range(self.glossary_tree.topLevelItemCount()):
             item = self.glossary_tree.topLevelItem(i)
             if item:
                 item.setText(3, "⏳ Testing...")
-        
+
         try:
             from unified_api_client import UnifiedClient
             UnifiedClient._api_key_pool = self.key_pool
         except Exception:
             pass
-        
+
         for i, key_data in enumerate(glossary_keys):
             self._test_single_glossary_key(key_data, i)
 
@@ -5298,7 +5305,7 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.save_config(show_message=False)
             except Exception:
                 pass
-        
+
         if index < self.glossary_tree.topLevelItemCount():
             item = self.glossary_tree.topLevelItem(index)
             if item:
@@ -5339,19 +5346,19 @@ class MultiAPIKeyDialog(QDialog):
         """Test a single glossary key — REAL API TEST"""
         api_key = key_data.get('api_key', '')
         model = key_data.get('model', '')
-        
+
         print(f"[DEBUG] Starting REAL glossary key test for {model}")
-        
+
         from concurrent.futures import ThreadPoolExecutor
         from unified_api_client import UnifiedClient
-        
+
         if hasattr(self.translator_gui, '_ensure_executor'):
             self.translator_gui._ensure_executor()
         executor = getattr(self.translator_gui, 'executor', None)
-        
+
         client_ref = [None]
         timed_out = [False]
-        
+
         def run_api_test():
             try:
                 client = UnifiedClient(
@@ -5360,22 +5367,22 @@ class MultiAPIKeyDialog(QDialog):
                     output_dir=None
                 )
                 client_ref[0] = client
-                
+
                 try:
                     tls = client._get_thread_local_client()
                     tls.max_retries_override = 1
                 except Exception:
                     pass
-                
+
                 google_credentials = key_data.get('google_credentials')
                 if google_credentials:
                     client.current_key_google_creds = google_credentials
                     client.google_creds_path = google_credentials
-                
+
                 google_region = key_data.get('google_region')
                 if google_region:
                     client.current_key_google_region = google_region
-                
+
                 use_individual_endpoint = key_data.get('use_individual_endpoint', False)
                 if use_individual_endpoint:
                     azure_endpoint = key_data.get('azure_endpoint')
@@ -5385,14 +5392,14 @@ class MultiAPIKeyDialog(QDialog):
                     azure_api_version = key_data.get('azure_api_version')
                     if azure_api_version:
                         client.current_key_azure_api_version = azure_api_version
-                
+
                 messages = [
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": "Say 'API test successful' and nothing else."}
                 ]
-                
+
                 response = client.send(messages, temperature=0.7, max_tokens=1000)
-                
+
                 if response and isinstance(response, tuple):
                     content, _ = response
                     if content and "test successful" in content.lower():
@@ -5403,7 +5410,7 @@ class MultiAPIKeyDialog(QDialog):
                             else:
                                 self._update_glossary_test_result(index, True)
                         return
-                
+
                 print(f"[DEBUG] Glossary key test completed for {model}: FAILED")
                 if not timed_out[0]:
                     if HAS_GUI:
@@ -5417,7 +5424,7 @@ class MultiAPIKeyDialog(QDialog):
                         QMetaObject.invokeMethod(self, "_update_glossary_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
                     else:
                         self._update_glossary_test_result(index, False)
-        
+
         def run_with_timeout():
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
             with ThreadPoolExecutor(max_workers=1) as timeout_pool:
@@ -5449,7 +5456,7 @@ class MultiAPIKeyDialog(QDialog):
                         self._update_glossary_timeout_status(index)
                 except Exception:
                     pass
-        
+
         if executor:
             executor.submit(run_with_timeout)
         else:
@@ -5461,18 +5468,18 @@ class MultiAPIKeyDialog(QDialog):
         selected = self.glossary_tree.selectedItems()
         if not selected:
             return
-        
+
         reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected glossary key(s)?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             indices = sorted([self.glossary_tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
-            
+
             glossary_keys = self.translator_gui.config.get('glossary_keys', [])
-            
+
             for index in indices:
                 if index < len(glossary_keys):
                     del glossary_keys[index]
-            
+
             self.translator_gui.config['glossary_keys'] = glossary_keys
             self.translator_gui.save_config(show_message=False)
             self._load_glossary_keys()
@@ -5515,7 +5522,7 @@ class MultiAPIKeyDialog(QDialog):
         """Clear all glossary keys"""
         if self.glossary_tree.topLevelItemCount() == 0:
             return
-        
+
         reply = QMessageBox.question(self, "Confirm", "Remove ALL glossary keys?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
@@ -5528,7 +5535,7 @@ class MultiAPIKeyDialog(QDialog):
     def _toggle_glossary_section(self):
         """Toggle glossary section visibility"""
         enabled = self.use_glossary_keys_checkbox.isChecked()
-        
+
         if hasattr(self, 'add_glossary_frame'):
             self.add_glossary_frame.setVisible(enabled)
         if hasattr(self, 'glossary_list_label'):
@@ -5539,15 +5546,15 @@ class MultiAPIKeyDialog(QDialog):
             self.glossary_action_frame.setVisible(enabled)
         if hasattr(self, 'glossary_tree') and not enabled:
             self.glossary_tree.clearSelection()
-        
+
         self._show_glossary_status(f"Glossary Keys {'enabled' if enabled else 'disabled'}")
-        
+
         # Update in-memory config immediately so glossary extraction reads the correct value
         # (config is also saved when the dialog is closed/saved via the normal save handler)
         self.translator_gui.config['use_glossary_keys'] = enabled
         if hasattr(self.translator_gui, 'use_glossary_keys_var'):
             self.translator_gui.use_glossary_keys_var = enabled
-        
+
         if not getattr(self, '_initializing', False):
             glossary_keys = self.translator_gui.config.get('glossary_keys', [])
             if enabled:
@@ -5561,13 +5568,13 @@ class MultiAPIKeyDialog(QDialog):
                     print(msg)
             else:
                 print(msg)
-        
+
         try:
             import os as _os
             _os.environ['USE_GLOSSARY_KEYS'] = '1' if enabled else '0'
         except Exception:
             pass
-        
+
         if enabled:
             # Setup in-memory glossary pool so keys work immediately without restart
             try:
@@ -5584,7 +5591,7 @@ class MultiAPIKeyDialog(QDialog):
                 UnifiedClient.clear_in_memory_glossary_keys()
             except Exception:
                 pass
-        
+
         self._notify_authgpt_visibility()
 
     def _refresh_glossary_pool(self):
@@ -5611,19 +5618,19 @@ class MultiAPIKeyDialog(QDialog):
         else:
             self.glossary_key_entry.setEchoMode(QLineEdit.Password)
             self.show_glossary_btn.setText('👁')
-    
+
     def _toggle_glossary_individual_endpoint_fields(self):
         """Toggle visibility of glossary individual endpoint fields"""
         enabled = self.glossary_individual_endpoint_toggle.isChecked()
-        
+
         self.glossary_individual_endpoint_label.setVisible(enabled)
         self.glossary_azure_endpoint_entry.setVisible(enabled)
         self.glossary_individual_api_version_label.setVisible(enabled)
         self.glossary_azure_api_version_combo.setVisible(enabled)
-        
+
         self.glossary_azure_endpoint_entry.setEnabled(enabled)
         self.glossary_azure_api_version_combo.setEnabled(enabled)
-        
+
         if not enabled:
             self.glossary_azure_endpoint_entry.clear()
             self.glossary_azure_api_version_combo.setCurrentText('2025-01-01-preview')
@@ -5633,16 +5640,16 @@ class MultiAPIKeyDialog(QDialog):
         item = self.glossary_tree.itemAt(position)
         if not item:
             return
-        
+
         if item not in self.glossary_tree.selectedItems():
             self.glossary_tree.setCurrentItem(item)
-        
+
         menu = QMenu(self)
-        
+
         index = self.glossary_tree.indexOfTopLevelItem(item)
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
         total = len(glossary_keys)
-        
+
         # Reorder submenu
         if total > 1:
             reorder_menu = menu.addMenu("Reorder")
@@ -5653,7 +5660,7 @@ class MultiAPIKeyDialog(QDialog):
                 down_action = reorder_menu.addAction("Move Down")
                 down_action.triggered.connect(lambda: self._move_glossary_key('down'))
             menu.addSeparator()
-        
+
         # Change Model
         selected_count = len(self.glossary_tree.selectedItems())
         if selected_count > 1:
@@ -5661,15 +5668,15 @@ class MultiAPIKeyDialog(QDialog):
         else:
             change_model_action = menu.addAction("Change Model")
         change_model_action.triggered.connect(self._change_glossary_model_for_selected)
-        
+
         menu.addSeparator()
-        
+
         # Individual Endpoint options
         if index < len(glossary_keys):
             key_data = glossary_keys[index]
             endpoint_enabled = key_data.get('use_individual_endpoint', False)
             endpoint_url = key_data.get('azure_endpoint', '')
-            
+
             if endpoint_enabled and endpoint_url:
                 config_action = menu.addAction("✅ Individual Endpoint")
                 config_action.triggered.connect(lambda: self._configure_glossary_individual_endpoint(index))
@@ -5678,9 +5685,9 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 config_action = menu.addAction("🔧 Configure Individual Endpoint")
                 config_action.triggered.connect(lambda: self._configure_glossary_individual_endpoint(index))
-        
+
         menu.addSeparator()
-        
+
         # Per-key output token limit options
         selected_items = self.glossary_tree.selectedItems()
         selected_count = len(selected_items)
@@ -5691,7 +5698,7 @@ class MultiAPIKeyDialog(QDialog):
         set_limit_action.triggered.connect(self._set_glossary_output_token_limit_for_selected)
         clear_limit_action = menu.addAction("Clear Output Token Limit")
         clear_limit_action.triggered.connect(self._clear_glossary_output_token_limit_for_selected)
-        
+
         # Per-key temperature options for glossary keys
         if selected_count > 1:
             set_temp_action = menu.addAction(f"Set Key Temperature ({selected_count} selected)")
@@ -5700,7 +5707,7 @@ class MultiAPIKeyDialog(QDialog):
         set_temp_action.triggered.connect(self._set_glossary_key_temperature_for_selected)
         clear_temp_action = menu.addAction("Clear Key Temperature")
         clear_temp_action.triggered.connect(self._clear_glossary_key_temperature_for_selected)
-        
+
         # Per-key API call delay options for glossary keys
         if selected_count > 1:
             set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
@@ -5709,9 +5716,9 @@ class MultiAPIKeyDialog(QDialog):
         set_delay_action.triggered.connect(self._set_glossary_api_call_delay_for_selected)
         clear_delay_action = menu.addAction("Clear API Call Delay")
         clear_delay_action.triggered.connect(self._clear_glossary_api_call_delay_for_selected)
-        
+
         menu.addSeparator()
-        
+
         test_action = menu.addAction("Test")
         test_action.triggered.connect(self._test_selected_glossary)
         enable_action = menu.addAction("Enable")
@@ -5721,11 +5728,11 @@ class MultiAPIKeyDialog(QDialog):
         menu.addSeparator()
         remove_action = menu.addAction("Remove")
         remove_action.triggered.connect(self._remove_selected_glossary)
-        
+
         if total > 1:
             clear_action = menu.addAction("Clear All")
             clear_action.triggered.connect(self._clear_all_glossary)
-        
+
         menu.exec_(self.glossary_tree.viewport().mapToGlobal(position))
 
     def _change_glossary_model_for_selected(self):
@@ -5733,9 +5740,9 @@ class MultiAPIKeyDialog(QDialog):
         selected = self.glossary_tree.selectedItems()
         if not selected:
             return
-        
+
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
-        
+
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Change Model for {len(selected)} Glossary Keys")
         screen = QApplication.primaryScreen().geometry()
@@ -5743,25 +5750,25 @@ class MultiAPIKeyDialog(QDialog):
         height = int(screen.height() * 0.13)
         dialog.resize(width, height)
         self._set_icon(dialog)
-        
+
         main_layout = QVBoxLayout(dialog)
         main_layout.setContentsMargins(20, 20, 20, 20)
-        
+
         label = QLabel("Enter new model name (press Enter to apply):")
         main_layout.addWidget(label)
-        
+
         all_models = get_model_options()
         model_combo = QComboBox()
         model_combo.addItems(all_models)
         model_combo.setEditable(True)
         main_layout.addWidget(model_combo)
-        
+
         selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
         if selected_indices and selected_indices[0] < len(glossary_keys):
             current_model = glossary_keys[selected_indices[0]].get('model', '')
             model_combo.setCurrentText(current_model)
             model_combo.lineEdit().selectAll()
-        
+
         def apply_change():
             new_model = model_combo.currentText().strip()
             if new_model:
@@ -5774,7 +5781,7 @@ class MultiAPIKeyDialog(QDialog):
                 self._load_glossary_keys()
                 self._show_glossary_status(f"Changed model to '{new_model}' for {len(selected)} glossary keys")
                 dialog.accept()
-        
+
         button_layout = QHBoxLayout()
         button_layout.addStretch()
         apply_btn = QPushButton("Apply")
@@ -5785,14 +5792,14 @@ class MultiAPIKeyDialog(QDialog):
         cancel_btn.clicked.connect(dialog.reject)
         button_layout.addWidget(cancel_btn)
         main_layout.addLayout(button_layout)
-        
+
         model_combo.setFocus()
         dialog.exec_()
 
     def _on_glossary_rows_moved(self):
         """Sync glossary_keys config with tree order after drag-drop"""
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
-        
+
         new_order = []
         for i in range(self.glossary_tree.topLevelItemCount()):
             item = self.glossary_tree.topLevelItem(i)
@@ -5805,7 +5812,7 @@ class MultiAPIKeyDialog(QDialog):
                     if key_masked == masked_key and key_data.get('model', '') == model and key_data not in new_order:
                         new_order.append(key_data)
                         break
-        
+
         if len(new_order) == len(glossary_keys):
             self.translator_gui.config['glossary_keys'] = new_order
             self.translator_gui.save_config(show_message=False)
@@ -5825,12 +5832,12 @@ class MultiAPIKeyDialog(QDialog):
         """Handle double-click on glossary tree item for inline editing"""
         if not item:
             return
-        
+
         index = self.glossary_tree.indexOfTopLevelItem(item)
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
         if index >= len(glossary_keys):
             return
-        
+
         # Column 1 = Model, 2 = Output Limit, 3 = Temp, 4 = API Delay
         if column == 1:
             old_value = item.text(1)
@@ -5908,9 +5915,9 @@ class MultiAPIKeyDialog(QDialog):
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
         if glossary_index >= len(glossary_keys):
             return
-        
+
         key_data = glossary_keys[glossary_index]
-        
+
         temp_key = APIKeyEntry(
             api_key=key_data.get('api_key', ''),
             model=key_data.get('model', ''),
@@ -5922,7 +5929,7 @@ class MultiAPIKeyDialog(QDialog):
             azure_api_version=key_data.get('azure_api_version'),
             use_individual_endpoint=key_data.get('use_individual_endpoint', False)
         )
-        
+
         def on_endpoint_configured():
             glossary_keys[glossary_index]['azure_endpoint'] = temp_key.azure_endpoint
             glossary_keys[glossary_index]['azure_api_version'] = temp_key.azure_api_version
@@ -5932,25 +5939,25 @@ class MultiAPIKeyDialog(QDialog):
             self._load_glossary_keys()
             status = "configured" if temp_key.use_individual_endpoint else "disabled"
             self._show_glossary_status(f"Individual endpoint {status} for glossary key")
-        
+
         if IndividualEndpointDialog is None:
             QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
             return
         dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_glossary_status)
         dialog.exec_()
-    
+
     def _set_glossary_output_token_limit_for_selected(self):
         """Set per-key output token limit for selected glossary keys"""
         from PySide6.QtWidgets import QInputDialog
         selected = self.glossary_tree.selectedItems()
         if not selected:
             return
-        
+
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
         selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
         if not selected_indices:
             return
-        
+
         default_val = None
         first_idx = selected_indices[0]
         if 0 <= first_idx < len(glossary_keys):
@@ -5967,7 +5974,7 @@ class MultiAPIKeyDialog(QDialog):
                 default_val = int(getattr(self.translator_gui, 'max_output_tokens', 8192))
             except Exception:
                 default_val = 8192
-        
+
         value, ok = QInputDialog.getInt(
             self, "Set Glossary Output Token Limit",
             "Max output tokens for selected glossary key(s):",
@@ -5975,7 +5982,7 @@ class MultiAPIKeyDialog(QDialog):
         )
         if not ok or value <= 0:
             return
-        
+
         for idx in selected_indices:
             if 0 <= idx < len(glossary_keys):
                 glossary_keys[idx]['individual_output_token_limit'] = int(value)
@@ -5983,13 +5990,13 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
         self._show_glossary_status(f"Set glossary output token limit to {value} for {len(selected_indices)} key(s)")
-    
+
     def _clear_glossary_output_token_limit_for_selected(self):
         """Clear per-key output token limit for selected glossary keys"""
         selected = self.glossary_tree.selectedItems()
         if not selected:
             return
-        
+
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
         selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
         for idx in selected_indices:
@@ -6000,19 +6007,19 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
         self._show_glossary_status(f"Cleared glossary output token limit for {len(selected_indices)} key(s)")
-    
+
     def _set_glossary_key_temperature_for_selected(self):
         """Set per-key temperature for selected glossary keys"""
         from PySide6.QtWidgets import QInputDialog
         selected = self.glossary_tree.selectedItems()
         if not selected:
             return
-        
+
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
         selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
         if not selected_indices:
             return
-        
+
         default_val = 0.7
         first_idx = selected_indices[0]
         if 0 <= first_idx < len(glossary_keys):
@@ -6022,7 +6029,7 @@ class MultiAPIKeyDialog(QDialog):
                     default_val = float(raw)
             except Exception:
                 pass
-        
+
         value, ok = QInputDialog.getDouble(
             self,
             "Set Glossary Key Temperature",
@@ -6034,7 +6041,7 @@ class MultiAPIKeyDialog(QDialog):
         )
         if not ok:
             return
-        
+
         for idx in selected_indices:
             if 0 <= idx < len(glossary_keys):
                 glossary_keys[idx]['individual_key_temperature'] = value
@@ -6042,13 +6049,13 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
         self._show_glossary_status(f"Set glossary key temperature to {value} for {len(selected_indices)} key(s)")
-    
+
     def _clear_glossary_key_temperature_for_selected(self):
         """Clear per-key temperature for selected glossary keys"""
         selected = self.glossary_tree.selectedItems()
         if not selected:
             return
-        
+
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
         selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
         for idx in selected_indices:
@@ -6059,7 +6066,7 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
         self._show_glossary_status(f"Cleared glossary key temperature for {len(selected_indices)} key(s)")
-    
+
     def _set_glossary_api_call_delay_for_selected(self):
         """Set per-key API call delay for selected glossary keys"""
         from PySide6.QtWidgets import QInputDialog
@@ -6103,18 +6110,18 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
         self._show_glossary_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
-    
+
     def _toggle_glossary_individual_endpoint(self, glossary_index, enabled):
         """Quick toggle individual endpoint on/off for glossary key"""
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
         if glossary_index >= len(glossary_keys):
             return
-        
+
         glossary_keys[glossary_index]['use_individual_endpoint'] = enabled
         self.translator_gui.config['glossary_keys'] = glossary_keys
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
-        
+
         status = "enabled" if enabled else "disabled"
         model = glossary_keys[glossary_index].get('model', 'unknown')
         self._show_glossary_status(f"Individual endpoint {status} for glossary key ({model})")
@@ -6127,7 +6134,7 @@ class MultiAPIKeyDialog(QDialog):
             "",
             "JSON files (*.json);;All files (*.*)"
         )
-        
+
         if filename:
             try:
                 with open(filename, 'r') as f:
@@ -6138,7 +6145,7 @@ class MultiAPIKeyDialog(QDialog):
                     else:
                         QMessageBox.critical(
                             self,
-                            "Error", 
+                            "Error",
                             "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
                         )
             except Exception as e:
@@ -6158,18 +6165,18 @@ class MultiAPIKeyDialog(QDialog):
         self.qa_scan_container = QWidget()
         qa_scan_container_layout = QVBoxLayout(self.qa_scan_container)
         qa_scan_container_layout.setContentsMargins(0, 5, 0, 0)
-        
+
         # Separator
         self.qa_scan_separator = QFrame()
         self.qa_scan_separator.setFrameShape(QFrame.HLine)
         self.qa_scan_separator.setFrameShadow(QFrame.Sunken)
         qa_scan_container_layout.addWidget(self.qa_scan_separator)
-        
+
         # Main Vision keys frame
         qa_scan_frame = QGroupBox("Vision Keys")
         qa_scan_frame_layout = QVBoxLayout(qa_scan_frame)
         qa_scan_frame_layout.setContentsMargins(15, 15, 15, 15)
-        
+
         # Description
         desc_label = QLabel(
                 "Configure dedicated keys for vision OCR and image scan calls.\n"
@@ -6178,18 +6185,18 @@ class MultiAPIKeyDialog(QDialog):
         desc_label.setStyleSheet("color: gray;")
         desc_label.setWordWrap(True)
         qa_scan_frame_layout.addWidget(desc_label)
-        
+
         # Enable checkbox with spinning icon
         qa_scan_checkbox_container = QWidget()
         qa_scan_checkbox_layout = QHBoxLayout(qa_scan_checkbox_container)
         qa_scan_checkbox_layout.setContentsMargins(0, 0, 0, 0)
         qa_scan_checkbox_layout.setSpacing(8)
-        
+
         self.use_qa_scan_keys_var = self.translator_gui.config.get('use_qa_scan_keys', False)
         self.use_qa_scan_keys_checkbox = self._create_styled_checkbox("Enable Vision Keys")
         self.use_qa_scan_keys_checkbox.setChecked(self.use_qa_scan_keys_var)
         self.use_qa_scan_keys_checkbox.toggled.connect(self._toggle_qa_scan_section)
-        
+
         # spinning icon
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
         self.qa_scan_icon = QLabel()
@@ -6217,30 +6224,30 @@ class MultiAPIKeyDialog(QDialog):
         self.qa_scan_icon.setFixedSize(36, 36)
         self.qa_scan_icon.setAlignment(Qt.AlignCenter)
         self.use_qa_scan_keys_checkbox.toggled.connect(lambda: animate_icon(self.qa_scan_icon))
-        
+
         qa_scan_checkbox_layout.addWidget(self.qa_scan_icon)
         qa_scan_checkbox_layout.addWidget(self.use_qa_scan_keys_checkbox)
         qa_scan_checkbox_layout.addStretch()
-        
+
         qa_scan_frame_layout.addWidget(qa_scan_checkbox_container)
-        
+
         # Add Vision key section
         self.add_qa_scan_frame = QWidget()
         add_qa_scan_grid = QGridLayout(self.add_qa_scan_frame)
         add_qa_scan_grid.setContentsMargins(0, 0, 0, 10)
-        
+
         # Row 0: API Key and Model
         add_qa_scan_grid.addWidget(QLabel("Vision API Key:"), 0, 0, Qt.AlignLeft)
         self.qa_scan_key_entry = QLineEdit()
         self.qa_scan_key_entry.setEchoMode(QLineEdit.Password)
         add_qa_scan_grid.addWidget(self.qa_scan_key_entry, 0, 1)
-        
+
         # Toggle visibility
         self.show_qa_scan_btn = QPushButton("👁")
         self.show_qa_scan_btn.setFixedWidth(40)
         self.show_qa_scan_btn.clicked.connect(self._toggle_qa_scan_visibility)
         add_qa_scan_grid.addWidget(self.show_qa_scan_btn, 0, 2)
-        
+
         # Model
         add_qa_scan_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
         qa_scan_models = get_model_options()
@@ -6249,17 +6256,17 @@ class MultiAPIKeyDialog(QDialog):
         self.qa_scan_model_combo.setEditable(True)
         self._disable_combobox_mousewheel(self.qa_scan_model_combo)
         add_qa_scan_grid.addWidget(self.qa_scan_model_combo, 0, 4)
-        
+
         # Add button
         add_qa_scan_btn = QPushButton("Add Vision Key")
         add_qa_scan_btn.clicked.connect(self._add_qa_scan_key)
         add_qa_scan_grid.addWidget(add_qa_scan_btn, 0, 5, Qt.AlignRight)
-        
+
         add_qa_scan_grid.setColumnStretch(1, 1)
         add_qa_scan_grid.setColumnStretch(4, 1)
-        
+
         qa_scan_frame_layout.addWidget(self.add_qa_scan_frame)
-        
+
         # Row 1: Google Credentials
         google_creds_label = QLabel("Google Creds:")
         google_creds_label.setStyleSheet("color: gray; font-size: 8pt;")
@@ -6267,12 +6274,12 @@ class MultiAPIKeyDialog(QDialog):
         self.qa_scan_google_creds_entry = QLineEdit()
         self.qa_scan_google_creds_entry.setStyleSheet("font-size: 7pt;")
         add_qa_scan_grid.addWidget(self.qa_scan_google_creds_entry, 1, 1)
-        
+
         browse_google_btn = QPushButton("📁")
         browse_google_btn.setFixedWidth(40)
         browse_google_btn.clicked.connect(self._browse_qa_scan_google_credentials)
         add_qa_scan_grid.addWidget(browse_google_btn, 1, 2)
-        
+
         region_label = QLabel("Region:")
         region_label.setStyleSheet("color: gray;")
         add_qa_scan_grid.addWidget(region_label, 1, 3, Qt.AlignLeft)
@@ -6280,14 +6287,14 @@ class MultiAPIKeyDialog(QDialog):
         self.qa_scan_google_region_entry.setStyleSheet("font-size: 7pt;")
         self.qa_scan_google_region_entry.setMaximumWidth(100)
         add_qa_scan_grid.addWidget(self.qa_scan_google_region_entry, 1, 4, 1, 1, Qt.AlignLeft)
-        
+
         # Row 2: Individual Endpoint Toggle
         self.qa_scan_use_individual_endpoint_var = False
         self.qa_scan_individual_endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
         self.qa_scan_individual_endpoint_toggle.setChecked(False)
         self.qa_scan_individual_endpoint_toggle.toggled.connect(self._toggle_qa_scan_individual_endpoint_fields)
         add_qa_scan_grid.addWidget(self.qa_scan_individual_endpoint_toggle, 2, 0, 1, 2, Qt.AlignLeft)
-        
+
         # Row 3: Individual Endpoint (initially hidden)
         self.qa_scan_individual_endpoint_label = QLabel("Individual Endpoint:")
         self.qa_scan_individual_endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
@@ -6295,13 +6302,13 @@ class MultiAPIKeyDialog(QDialog):
         self.qa_scan_azure_endpoint_entry = QLineEdit()
         self.qa_scan_azure_endpoint_entry.setStyleSheet("font-size: 8pt;")
         add_qa_scan_grid.addWidget(self.qa_scan_azure_endpoint_entry, 3, 1, 1, 2)
-        
+
         self.qa_scan_individual_api_version_label = QLabel("API Ver:")
         self.qa_scan_individual_api_version_label.setStyleSheet("color: gray;")
         add_qa_scan_grid.addWidget(self.qa_scan_individual_api_version_label, 3, 3, Qt.AlignLeft)
         qa_scan_azure_versions = [
             '2025-01-01-preview',
-            '2024-12-01-preview', 
+            '2024-12-01-preview',
             '2024-10-01-preview',
             '2024-08-01-preview',
             '2024-06-01',
@@ -6315,17 +6322,17 @@ class MultiAPIKeyDialog(QDialog):
         self.qa_scan_azure_api_version_combo.setMaximumWidth(180)
         self._disable_combobox_mousewheel(self.qa_scan_azure_api_version_combo)
         add_qa_scan_grid.addWidget(self.qa_scan_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
-        
+
         # Initially hide endpoint fields
         self._toggle_qa_scan_individual_endpoint_fields()
-        
+
         # Vision keys list
         self._create_qa_scan_list(qa_scan_frame_layout)
-        
+
         # Add container to parent
         qa_scan_container_layout.addWidget(qa_scan_frame)
         parent_layout.addWidget(self.qa_scan_container)
-        
+
         # Initially disable if checkbox is unchecked
         self._toggle_qa_scan_section()
 
@@ -6336,55 +6343,55 @@ class MultiAPIKeyDialog(QDialog):
         list_label_font.setBold(True)
         self.qa_scan_list_label.setFont(list_label_font)
         parent_layout.addWidget(self.qa_scan_list_label)
-        
+
         # Container for tree and buttons
         self.qa_scan_tree_container = QWidget()
         container_layout = QHBoxLayout(self.qa_scan_tree_container)
         container_layout.setContentsMargins(0, 0, 0, 0)
-        
+
         # Left side: Move buttons
         self.qa_scan_move_frame = QWidget()
         move_layout = QVBoxLayout(self.qa_scan_move_frame)
         move_layout.setContentsMargins(0, 0, 5, 0)
-        
+
         order_label = QLabel("Reorder")
         order_font = QFont()
         order_font.setBold(True)
         order_label.setFont(order_font)
         move_layout.addWidget(order_label)
-        
+
         top_btn = QPushButton("↑ ↑")
         top_btn.setFixedSize(55, 32)
         top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
         top_btn.clicked.connect(lambda: self._move_qa_scan_key('top'))
         move_layout.addWidget(top_btn)
-        
+
         up_btn = QPushButton("↑")
         up_btn.setFixedSize(55, 32)
         up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
         up_btn.clicked.connect(lambda: self._move_qa_scan_key('up'))
         move_layout.addWidget(up_btn)
-        
+
         down_btn = QPushButton("↓")
         down_btn.setFixedSize(55, 32)
         down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
         down_btn.clicked.connect(lambda: self._move_qa_scan_key('down'))
         move_layout.addWidget(down_btn)
-        
+
         bottom_btn = QPushButton("↓ ↓")
         bottom_btn.setFixedSize(55, 32)
         bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
         bottom_btn.clicked.connect(lambda: self._move_qa_scan_key('bottom'))
         move_layout.addWidget(bottom_btn)
-        
+
         move_layout.addSpacing(10)
-        
+
         self.qa_scan_position_label = QLabel()
         self.qa_scan_position_label.setStyleSheet("color: gray;")
         move_layout.addWidget(self.qa_scan_position_label)
         move_layout.addStretch()
         container_layout.addWidget(self.qa_scan_move_frame)
-        
+
         # Right side: TreeWidget with drag and drop
         self.qa_scan_tree = QTreeWidget()
         self.qa_scan_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', 'Success', 'Errors', 'Times Used'])
@@ -6397,32 +6404,32 @@ class MultiAPIKeyDialog(QDialog):
         self.qa_scan_tree.setColumnWidth(6, 75)
         self.qa_scan_tree.setColumnWidth(7, 55)
         self.qa_scan_tree.setColumnWidth(8, 80)
-        
+
         qs_header = self.qa_scan_tree.header()
         qs_header_font = QFont()
         qs_header_font.setBold(True)
         qs_header_font.setPointSize(11)
         qs_header.setFont(qs_header_font)
-        
+
         self.qa_scan_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.qa_scan_tree.customContextMenuRequested.connect(self._show_qa_scan_context_menu)
         self.qa_scan_tree.setMinimumHeight(150)
-        
+
         self.qa_scan_tree.setDragDropMode(QAbstractItemView.InternalMove)
         self.qa_scan_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        
+
         self.qa_scan_tree.model().rowsMoved.connect(self._on_qa_scan_rows_moved)
         self.qa_scan_tree.itemSelectionChanged.connect(self._on_qa_scan_selection_change)
         self.qa_scan_tree.itemDoubleClicked.connect(self._on_qa_scan_click)
-        
+
         container_layout.addWidget(self.qa_scan_tree)
         parent_layout.addWidget(self.qa_scan_tree_container)
-        
+
         # Action buttons
         self.qa_scan_action_frame = QWidget()
         qa_scan_action_layout = QHBoxLayout(self.qa_scan_action_frame)
         qa_scan_action_layout.setContentsMargins(0, 10, 0, 0)
-        
+
         test_selected_btn = QPushButton("Test Selected")
         test_selected_btn.clicked.connect(self._test_selected_qa_scan)
         qa_scan_action_layout.addWidget(test_selected_btn)
@@ -6438,44 +6445,44 @@ class MultiAPIKeyDialog(QDialog):
         disable_selected_btn = QPushButton("Disable Selected")
         disable_selected_btn.clicked.connect(self._disable_selected_qa_scan)
         qa_scan_action_layout.addWidget(disable_selected_btn)
-    
+
         remove_selected_btn = QPushButton("Remove Selected")
         remove_selected_btn.clicked.connect(self._remove_selected_qa_scan)
         qa_scan_action_layout.addWidget(remove_selected_btn)
-        
+
         clear_all_btn = QPushButton("Clear All")
         clear_all_btn.clicked.connect(self._clear_all_qa_scan)
         qa_scan_action_layout.addWidget(clear_all_btn)
-        
+
         qa_scan_action_layout.addStretch()
         self.qa_scan_status_label = QLabel()
         self.qa_scan_status_label.setStyleSheet("color: gray;")
         qa_scan_action_layout.addWidget(self.qa_scan_status_label)
         parent_layout.addWidget(self.qa_scan_action_frame)
-        
+
         # Load existing Vision keys
         self._load_qa_scan_keys()
 
     def _load_qa_scan_keys(self):
         """Load Vision keys from config."""
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        
+
         v_scroll = self.qa_scan_tree.verticalScrollBar().value()
         h_scroll = self.qa_scan_tree.horizontalScrollBar().value()
-        
+
         selected_indices = []
         for item in self.qa_scan_tree.selectedItems():
             selected_indices.append(self.qa_scan_tree.indexOfTopLevelItem(item))
-        
+
         self.qa_scan_tree.clear()
-        
+
         for key_data in qa_scan_keys:
             api_key = key_data.get('api_key', '')
             model = key_data.get('model', '')
             times_used = int(key_data.get('times_used', 0))
-            
+
             masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
-            
+
             try:
                 raw_limit = key_data.get('individual_output_token_limit')
                 per_key_limit = int(raw_limit) if raw_limit not in (None, "") else None
@@ -6485,7 +6492,7 @@ class MultiAPIKeyDialog(QDialog):
                 output_limit_str = str(per_key_limit)
             else:
                 output_limit_str = "global"
-            
+
             # Determine per-key temperature display value
             try:
                 raw_temp = key_data.get('individual_key_temperature')
@@ -6496,7 +6503,7 @@ class MultiAPIKeyDialog(QDialog):
                 temp_str = str(per_key_temp)
             else:
                 temp_str = "global"
-            
+
             enabled = key_data.get('enabled', True)
             test_result = key_data.get('last_test_result')
             if not enabled:
@@ -6517,7 +6524,7 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 status = "Enabled"
                 color = Qt.gray
-            
+
             # Determine per-key API call delay display value
             try:
                 raw_delay = key_data.get('api_call_delay')
@@ -6525,13 +6532,13 @@ class MultiAPIKeyDialog(QDialog):
             except Exception:
                 per_key_delay = 0.0
             delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
-            
+
             success_count = int(key_data.get('success_count', 0))
             error_count = int(key_data.get('error_count', 0))
             item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
             for col in range(item.columnCount()):
                 item.setForeground(col, color)
-            
+
             # Tooltip for per-key settings
             tooltip_parts = []
             if per_key_limit and per_key_limit > 0:
@@ -6549,18 +6556,18 @@ class MultiAPIKeyDialog(QDialog):
             tooltip = "\n".join(tooltip_parts)
             for col in range(item.columnCount()):
                 item.setToolTip(col, tooltip)
-            
+
             item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
             self.qa_scan_tree.addTopLevelItem(item)
-            
+
         for index in selected_indices:
             if index < self.qa_scan_tree.topLevelItemCount():
                 item = self.qa_scan_tree.topLevelItem(index)
                 item.setSelected(True)
-        
+
         self.qa_scan_tree.verticalScrollBar().setValue(v_scroll)
         self.qa_scan_tree.horizontalScrollBar().setValue(h_scroll)
-        
+
         # Auto-refresh the in-memory pool so changes take effect immediately
         if not getattr(self, '_initializing', False):
             self._refresh_qa_scan_pool()
@@ -6571,22 +6578,22 @@ class MultiAPIKeyDialog(QDialog):
         model = self.qa_scan_model_combo.currentText().strip()
         google_credentials = self.qa_scan_google_creds_entry.text().strip() or None
         google_region = self.qa_scan_google_region_entry.text().strip() or None
-        
+
         use_individual_endpoint = self.qa_scan_individual_endpoint_toggle.isChecked()
         azure_endpoint = self.qa_scan_azure_endpoint_entry.text().strip() if use_individual_endpoint else None
         azure_api_version = self.qa_scan_azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
-        
+
         if not model:
             QMessageBox.critical(self, "Error", "Please enter a model name")
             return
-        
 
-        
+
+
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        
+
         individual_output_token_limit = None
         individual_key_temperature = None
-        
+
         qa_scan_keys.append({
             'api_key': api_key,
             'model': model,
@@ -6600,10 +6607,10 @@ class MultiAPIKeyDialog(QDialog):
             'api_call_delay': 0.0,
             'times_used': 0
         })
-        
+
         self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
         self.translator_gui.save_config(show_message=False)
-        
+
         # Clear inputs
         self.qa_scan_key_entry.clear()
         self.qa_scan_model_combo.setCurrentText("")
@@ -6614,9 +6621,9 @@ class MultiAPIKeyDialog(QDialog):
         self.qa_scan_individual_endpoint_toggle.setChecked(False)
 
         self._toggle_qa_scan_individual_endpoint_fields()
-        
+
         self._load_qa_scan_keys()
-        
+
         extras = []
         if google_credentials:
             extras.append(f"Google: {os.path.basename(google_credentials)}")
@@ -6624,7 +6631,7 @@ class MultiAPIKeyDialog(QDialog):
             extras.append(f"Azure: {azure_endpoint[:30]}...")
         extra_info = f" ({', '.join(extras)})" if extras else ""
         self._show_qa_scan_status(f"Added Vision key for model: {model}{extra_info}")
-        
+
         self._notify_authgpt_visibility()
 
     def _move_qa_scan_key(self, direction):
@@ -6632,14 +6639,14 @@ class MultiAPIKeyDialog(QDialog):
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
             return
-        
+
         item = selected[0]
         index = self.qa_scan_tree.indexOfTopLevelItem(item)
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        
+
         if index >= len(qa_scan_keys):
             return
-        
+
         new_index = index
         if direction == 'top' and index > 0:
             new_index = 0
@@ -6649,16 +6656,16 @@ class MultiAPIKeyDialog(QDialog):
             new_index = index + 1
         elif direction == 'bottom' and index < len(qa_scan_keys) - 1:
             new_index = len(qa_scan_keys) - 1
-        
+
         if new_index != index:
             key = qa_scan_keys.pop(index)
             qa_scan_keys.insert(new_index, key)
-            
+
             self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
             self.translator_gui.save_config(show_message=False)
-            
+
             self._load_qa_scan_keys()
-            
+
             if new_index < self.qa_scan_tree.topLevelItemCount():
                 item = self.qa_scan_tree.topLevelItem(new_index)
                 if item:
@@ -6671,47 +6678,47 @@ class MultiAPIKeyDialog(QDialog):
         if not selected:
             QMessageBox.warning(self, "Warning", "Please select a Vision key to test")
             return
-        
+
         index = self.qa_scan_tree.indexOfTopLevelItem(selected[0])
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        
+
         if index >= len(qa_scan_keys):
             return
-        
+
         if index < self.qa_scan_tree.topLevelItemCount():
             item = self.qa_scan_tree.topLevelItem(index)
             if item:
                 item.setText(3, "⏳ Testing...")
-        
+
         key_data = qa_scan_keys[index]
-        
+
         try:
             from unified_api_client import UnifiedClient
             UnifiedClient._api_key_pool = self.key_pool
         except Exception:
             pass
-        
+
         QTimer.singleShot(100, lambda: self._test_single_qa_scan_key(key_data, index))
 
     def _test_all_qa_scan(self):
         """Test all Vision keys in parallel."""
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        
+
         if not qa_scan_keys:
             QMessageBox.warning(self, "Warning", "No Vision keys to test")
             return
-        
+
         for i in range(self.qa_scan_tree.topLevelItemCount()):
             item = self.qa_scan_tree.topLevelItem(i)
             if item:
                 item.setText(3, "⏳ Testing...")
-        
+
         try:
             from unified_api_client import UnifiedClient
             UnifiedClient._api_key_pool = self.key_pool
         except Exception:
             pass
-        
+
         for i, key_data in enumerate(qa_scan_keys):
             self._test_single_qa_scan_key(key_data, i)
 
@@ -6730,7 +6737,7 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.save_config(show_message=False)
             except Exception:
                 pass
-        
+
         if index < self.qa_scan_tree.topLevelItemCount():
             item = self.qa_scan_tree.topLevelItem(index)
             if item:
@@ -6771,19 +6778,19 @@ class MultiAPIKeyDialog(QDialog):
         """Test a single QA scan key — REAL API TEST"""
         api_key = key_data.get('api_key', '')
         model = key_data.get('model', '')
-        
+
         print(f"[DEBUG] Starting REAL Vision key test for {model}")
-        
+
         from concurrent.futures import ThreadPoolExecutor
         from unified_api_client import UnifiedClient
-        
+
         if hasattr(self.translator_gui, '_ensure_executor'):
             self.translator_gui._ensure_executor()
         executor = getattr(self.translator_gui, 'executor', None)
-        
+
         client_ref = [None]
         timed_out = [False]
-        
+
         def run_api_test():
             try:
                 client = UnifiedClient(
@@ -6792,22 +6799,22 @@ class MultiAPIKeyDialog(QDialog):
                     output_dir=None
                 )
                 client_ref[0] = client
-                
+
                 try:
                     tls = client._get_thread_local_client()
                     tls.max_retries_override = 1
                 except Exception:
                     pass
-                
+
                 google_credentials = key_data.get('google_credentials')
                 if google_credentials:
                     client.current_key_google_creds = google_credentials
                     client.google_creds_path = google_credentials
-                
+
                 google_region = key_data.get('google_region')
                 if google_region:
                     client.current_key_google_region = google_region
-                
+
                 use_individual_endpoint = key_data.get('use_individual_endpoint', False)
                 if use_individual_endpoint:
                     azure_endpoint = key_data.get('azure_endpoint')
@@ -6817,14 +6824,14 @@ class MultiAPIKeyDialog(QDialog):
                     azure_api_version = key_data.get('azure_api_version')
                     if azure_api_version:
                         client.current_key_azure_api_version = azure_api_version
-                
+
                 messages = [
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": "Say 'API test successful' and nothing else."}
                 ]
-                
+
                 response = client.send(messages, temperature=0.7, max_tokens=1000)
-                
+
                 if response and isinstance(response, tuple):
                     content, _ = response
                     if content and "test successful" in content.lower():
@@ -6835,7 +6842,7 @@ class MultiAPIKeyDialog(QDialog):
                             else:
                                 self._update_qa_scan_test_result(index, True)
                         return
-                
+
                 print(f"[DEBUG] Vision key test completed for {model}: FAILED")
                 if not timed_out[0]:
                     if HAS_GUI:
@@ -6849,7 +6856,7 @@ class MultiAPIKeyDialog(QDialog):
                         QMetaObject.invokeMethod(self, "_update_qa_scan_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
                     else:
                         self._update_qa_scan_test_result(index, False)
-        
+
         def run_with_timeout():
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
             with ThreadPoolExecutor(max_workers=1) as timeout_pool:
@@ -6881,7 +6888,7 @@ class MultiAPIKeyDialog(QDialog):
                         self._update_qa_scan_timeout_status(index)
                 except Exception:
                     pass
-        
+
         if executor:
             executor.submit(run_with_timeout)
         else:
@@ -6893,18 +6900,18 @@ class MultiAPIKeyDialog(QDialog):
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
             return
-        
+
         reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected Vision key(s)?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             indices = sorted([self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
-            
+
             qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-            
+
             for index in indices:
                 if index < len(qa_scan_keys):
                     del qa_scan_keys[index]
-            
+
             self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
             self.translator_gui.save_config(show_message=False)
             self._load_qa_scan_keys()
@@ -6948,7 +6955,7 @@ class MultiAPIKeyDialog(QDialog):
         """Clear all Vision keys."""
         if self.qa_scan_tree.topLevelItemCount() == 0:
             return
-        
+
         reply = QMessageBox.question(self, "Confirm", "Remove ALL Vision keys?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
@@ -6961,7 +6968,7 @@ class MultiAPIKeyDialog(QDialog):
     def _toggle_qa_scan_section(self):
         """Toggle QA scan section visibility"""
         enabled = self.use_qa_scan_keys_checkbox.isChecked()
-        
+
         if hasattr(self, 'add_qa_scan_frame'):
             self.add_qa_scan_frame.setVisible(enabled)
         if hasattr(self, 'qa_scan_list_label'):
@@ -6972,14 +6979,14 @@ class MultiAPIKeyDialog(QDialog):
             self.qa_scan_action_frame.setVisible(enabled)
         if hasattr(self, 'qa_scan_tree') and not enabled:
             self.qa_scan_tree.clearSelection()
-        
+
         self._show_qa_scan_status(f"Vision Keys {'enabled' if enabled else 'disabled'}")
-        
+
         # Update in-memory config immediately
         self.translator_gui.config['use_qa_scan_keys'] = enabled
         if hasattr(self.translator_gui, 'use_qa_scan_keys_var'):
             self.translator_gui.use_qa_scan_keys_var = enabled
-        
+
         if not getattr(self, '_initializing', False):
             qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
             if enabled:
@@ -6993,7 +7000,7 @@ class MultiAPIKeyDialog(QDialog):
                     print(msg)
             else:
                 print(msg)
-        
+
         try:
             import os as _os
             import json as _json
@@ -7004,7 +7011,7 @@ class MultiAPIKeyDialog(QDialog):
             _os.environ['QA_SCAN_API_KEYS'] = _os.environ['VISION_API_KEYS']
         except Exception:
             pass
-        
+
         if enabled:
             try:
                 from unified_api_client import UnifiedClient
@@ -7019,7 +7026,7 @@ class MultiAPIKeyDialog(QDialog):
                 UnifiedClient.clear_in_memory_vision_keys()
             except Exception:
                 pass
-        
+
         self._notify_authgpt_visibility()
 
     def _refresh_qa_scan_pool(self):
@@ -7052,19 +7059,19 @@ class MultiAPIKeyDialog(QDialog):
         else:
             self.qa_scan_key_entry.setEchoMode(QLineEdit.Password)
             self.show_qa_scan_btn.setText('👁')
-    
+
     def _toggle_qa_scan_individual_endpoint_fields(self):
         """Toggle visibility of QA scan individual endpoint fields"""
         enabled = self.qa_scan_individual_endpoint_toggle.isChecked()
-        
+
         self.qa_scan_individual_endpoint_label.setVisible(enabled)
         self.qa_scan_azure_endpoint_entry.setVisible(enabled)
         self.qa_scan_individual_api_version_label.setVisible(enabled)
         self.qa_scan_azure_api_version_combo.setVisible(enabled)
-        
+
         self.qa_scan_azure_endpoint_entry.setEnabled(enabled)
         self.qa_scan_azure_api_version_combo.setEnabled(enabled)
-        
+
         if not enabled:
             self.qa_scan_azure_endpoint_entry.clear()
             self.qa_scan_azure_api_version_combo.setCurrentText('2025-01-01-preview')
@@ -7074,16 +7081,16 @@ class MultiAPIKeyDialog(QDialog):
         item = self.qa_scan_tree.itemAt(position)
         if not item:
             return
-        
+
         if item not in self.qa_scan_tree.selectedItems():
             self.qa_scan_tree.setCurrentItem(item)
-        
+
         menu = QMenu(self)
-        
+
         index = self.qa_scan_tree.indexOfTopLevelItem(item)
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
         total = len(qa_scan_keys)
-        
+
         # Reorder submenu
         if total > 1:
             reorder_menu = menu.addMenu("Reorder")
@@ -7094,7 +7101,7 @@ class MultiAPIKeyDialog(QDialog):
                 down_action = reorder_menu.addAction("Move Down")
                 down_action.triggered.connect(lambda: self._move_qa_scan_key('down'))
             menu.addSeparator()
-        
+
         # Change Model
         selected_count = len(self.qa_scan_tree.selectedItems())
         if selected_count > 1:
@@ -7102,15 +7109,15 @@ class MultiAPIKeyDialog(QDialog):
         else:
             change_model_action = menu.addAction("Change Model")
         change_model_action.triggered.connect(self._change_qa_scan_model_for_selected)
-        
+
         menu.addSeparator()
-        
+
         # Individual Endpoint options
         if index < len(qa_scan_keys):
             key_data = qa_scan_keys[index]
             endpoint_enabled = key_data.get('use_individual_endpoint', False)
             endpoint_url = key_data.get('azure_endpoint', '')
-            
+
             if endpoint_enabled and endpoint_url:
                 config_action = menu.addAction("✅ Individual Endpoint")
                 config_action.triggered.connect(lambda: self._configure_qa_scan_individual_endpoint(index))
@@ -7119,9 +7126,9 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 config_action = menu.addAction("🔧 Configure Individual Endpoint")
                 config_action.triggered.connect(lambda: self._configure_qa_scan_individual_endpoint(index))
-        
+
         menu.addSeparator()
-        
+
         # Per-key output token limit options
         selected_items = self.qa_scan_tree.selectedItems()
         selected_count = len(selected_items)
@@ -7132,7 +7139,7 @@ class MultiAPIKeyDialog(QDialog):
         set_limit_action.triggered.connect(self._set_qa_scan_output_token_limit_for_selected)
         clear_limit_action = menu.addAction("Clear Output Token Limit")
         clear_limit_action.triggered.connect(self._clear_qa_scan_output_token_limit_for_selected)
-        
+
         # Per-key temperature options
         if selected_count > 1:
             set_temp_action = menu.addAction(f"Set Key Temperature ({selected_count} selected)")
@@ -7141,7 +7148,7 @@ class MultiAPIKeyDialog(QDialog):
         set_temp_action.triggered.connect(self._set_qa_scan_key_temperature_for_selected)
         clear_temp_action = menu.addAction("Clear Key Temperature")
         clear_temp_action.triggered.connect(self._clear_qa_scan_key_temperature_for_selected)
-        
+
         # Per-key API call delay options for Vision keys
         if selected_count > 1:
             set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
@@ -7150,9 +7157,9 @@ class MultiAPIKeyDialog(QDialog):
         set_delay_action.triggered.connect(self._set_qa_scan_api_call_delay_for_selected)
         clear_delay_action = menu.addAction("Clear API Call Delay")
         clear_delay_action.triggered.connect(self._clear_qa_scan_api_call_delay_for_selected)
-        
+
         menu.addSeparator()
-        
+
         test_action = menu.addAction("Test")
         test_action.triggered.connect(self._test_selected_qa_scan)
         enable_action = menu.addAction("Enable")
@@ -7162,11 +7169,11 @@ class MultiAPIKeyDialog(QDialog):
         menu.addSeparator()
         remove_action = menu.addAction("Remove")
         remove_action.triggered.connect(self._remove_selected_qa_scan)
-        
+
         if total > 1:
             clear_action = menu.addAction("Clear All")
             clear_action.triggered.connect(self._clear_all_qa_scan)
-        
+
         menu.exec_(self.qa_scan_tree.viewport().mapToGlobal(position))
 
     def _change_qa_scan_model_for_selected(self):
@@ -7174,9 +7181,9 @@ class MultiAPIKeyDialog(QDialog):
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
             return
-        
+
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        
+
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Change Model for {len(selected)} Vision Keys")
         screen = QApplication.primaryScreen().geometry()
@@ -7184,25 +7191,25 @@ class MultiAPIKeyDialog(QDialog):
         height = int(screen.height() * 0.13)
         dialog.resize(width, height)
         self._set_icon(dialog)
-        
+
         main_layout = QVBoxLayout(dialog)
         main_layout.setContentsMargins(20, 20, 20, 20)
-        
+
         label = QLabel("Enter new model name (press Enter to apply):")
         main_layout.addWidget(label)
-        
+
         all_models = get_model_options()
         model_combo = QComboBox()
         model_combo.addItems(all_models)
         model_combo.setEditable(True)
         main_layout.addWidget(model_combo)
-        
+
         selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
         if selected_indices and selected_indices[0] < len(qa_scan_keys):
             current_model = qa_scan_keys[selected_indices[0]].get('model', '')
             model_combo.setCurrentText(current_model)
             model_combo.lineEdit().selectAll()
-        
+
         def apply_change():
             new_model = model_combo.currentText().strip()
             if new_model:
@@ -7215,7 +7222,7 @@ class MultiAPIKeyDialog(QDialog):
                 self._load_qa_scan_keys()
                 self._show_qa_scan_status(f"Changed model to '{new_model}' for {len(selected)} Vision keys")
                 dialog.accept()
-        
+
         button_layout = QHBoxLayout()
         button_layout.addStretch()
         apply_btn = QPushButton("Apply")
@@ -7226,14 +7233,14 @@ class MultiAPIKeyDialog(QDialog):
         cancel_btn.clicked.connect(dialog.reject)
         button_layout.addWidget(cancel_btn)
         main_layout.addLayout(button_layout)
-        
+
         model_combo.setFocus()
         dialog.exec_()
 
     def _on_qa_scan_rows_moved(self):
         """Sync qa_scan_keys config with tree order after drag-drop"""
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        
+
         new_order = []
         for i in range(self.qa_scan_tree.topLevelItemCount()):
             item = self.qa_scan_tree.topLevelItem(i)
@@ -7246,7 +7253,7 @@ class MultiAPIKeyDialog(QDialog):
                     if key_masked == masked_key and key_data.get('model', '') == model and key_data not in new_order:
                         new_order.append(key_data)
                         break
-        
+
         if len(new_order) == len(qa_scan_keys):
             self.translator_gui.config['qa_scan_keys'] = new_order
             self.translator_gui.save_config(show_message=False)
@@ -7266,12 +7273,12 @@ class MultiAPIKeyDialog(QDialog):
         """Handle double-click on QA scan tree item for inline editing"""
         if not item:
             return
-        
+
         index = self.qa_scan_tree.indexOfTopLevelItem(item)
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
         if index >= len(qa_scan_keys):
             return
-        
+
         if column == 1:
             old_value = item.text(1)
             new_value, ok = self._show_model_edit_dialog(old_value)
@@ -7348,9 +7355,9 @@ class MultiAPIKeyDialog(QDialog):
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
         if qa_scan_index >= len(qa_scan_keys):
             return
-        
+
         key_data = qa_scan_keys[qa_scan_index]
-        
+
         temp_key = APIKeyEntry(
             api_key=key_data.get('api_key', ''),
             model=key_data.get('model', ''),
@@ -7362,7 +7369,7 @@ class MultiAPIKeyDialog(QDialog):
             azure_api_version=key_data.get('azure_api_version'),
             use_individual_endpoint=key_data.get('use_individual_endpoint', False)
         )
-        
+
         def on_endpoint_configured():
             qa_scan_keys[qa_scan_index]['azure_endpoint'] = temp_key.azure_endpoint
             qa_scan_keys[qa_scan_index]['azure_api_version'] = temp_key.azure_api_version
@@ -7372,25 +7379,25 @@ class MultiAPIKeyDialog(QDialog):
             self._load_qa_scan_keys()
             status = "configured" if temp_key.use_individual_endpoint else "disabled"
             self._show_qa_scan_status(f"Individual endpoint {status} for Vision key")
-        
+
         if IndividualEndpointDialog is None:
             QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
             return
         dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_qa_scan_status)
         dialog.exec_()
-    
+
     def _set_qa_scan_output_token_limit_for_selected(self):
         """Set per-key output token limit for selected Vision keys."""
         from PySide6.QtWidgets import QInputDialog
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
             return
-        
+
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
         selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
         if not selected_indices:
             return
-        
+
         default_val = None
         first_idx = selected_indices[0]
         if 0 <= first_idx < len(qa_scan_keys):
@@ -7407,7 +7414,7 @@ class MultiAPIKeyDialog(QDialog):
                 default_val = int(getattr(self.translator_gui, 'max_output_tokens', 8192))
             except Exception:
                 default_val = 8192
-        
+
         value, ok = QInputDialog.getInt(
             self, "Set Vision Key Output Token Limit",
             "Max output tokens for selected Vision key(s):",
@@ -7415,7 +7422,7 @@ class MultiAPIKeyDialog(QDialog):
         )
         if not ok or value <= 0:
             return
-        
+
         for idx in selected_indices:
             if 0 <= idx < len(qa_scan_keys):
                 qa_scan_keys[idx]['individual_output_token_limit'] = int(value)
@@ -7423,13 +7430,13 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_qa_scan_keys()
         self._show_qa_scan_status(f"Set Vision key output token limit to {value} for {len(selected_indices)} key(s)")
-    
+
     def _clear_qa_scan_output_token_limit_for_selected(self):
         """Clear per-key output token limit for selected Vision keys."""
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
             return
-        
+
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
         selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
         for idx in selected_indices:
@@ -7440,19 +7447,19 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_qa_scan_keys()
         self._show_qa_scan_status(f"Cleared Vision key output token limit for {len(selected_indices)} key(s)")
-    
+
     def _set_qa_scan_key_temperature_for_selected(self):
         """Set per-key temperature for selected Vision keys."""
         from PySide6.QtWidgets import QInputDialog
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
             return
-        
+
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
         selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
         if not selected_indices:
             return
-        
+
         default_val = 0.7
         first_idx = selected_indices[0]
         if 0 <= first_idx < len(qa_scan_keys):
@@ -7462,7 +7469,7 @@ class MultiAPIKeyDialog(QDialog):
                     default_val = float(raw)
             except Exception:
                 pass
-        
+
         value, ok = QInputDialog.getDouble(
             self,
             "Set Vision Key Temperature",
@@ -7474,7 +7481,7 @@ class MultiAPIKeyDialog(QDialog):
         )
         if not ok:
             return
-        
+
         for idx in selected_indices:
             if 0 <= idx < len(qa_scan_keys):
                 qa_scan_keys[idx]['individual_key_temperature'] = value
@@ -7482,13 +7489,13 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_qa_scan_keys()
         self._show_qa_scan_status(f"Set Vision key temperature to {value} for {len(selected_indices)} key(s)")
-    
+
     def _clear_qa_scan_key_temperature_for_selected(self):
         """Clear per-key temperature for selected Vision keys."""
         selected = self.qa_scan_tree.selectedItems()
         if not selected:
             return
-        
+
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
         selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
         for idx in selected_indices:
@@ -7499,7 +7506,7 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_qa_scan_keys()
         self._show_qa_scan_status(f"Cleared Vision key temperature for {len(selected_indices)} key(s)")
-    
+
     def _set_qa_scan_api_call_delay_for_selected(self):
         """Set per-key API call delay for selected Vision keys."""
         from PySide6.QtWidgets import QInputDialog
@@ -7543,18 +7550,18 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_qa_scan_keys()
         self._show_qa_scan_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
-    
+
     def _toggle_qa_scan_individual_endpoint(self, qa_scan_index, enabled):
         """Quick toggle individual endpoint on/off for QA scan key"""
         qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
         if qa_scan_index >= len(qa_scan_keys):
             return
-        
+
         qa_scan_keys[qa_scan_index]['use_individual_endpoint'] = enabled
         self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
         self.translator_gui.save_config(show_message=False)
         self._load_qa_scan_keys()
-        
+
         status = "enabled" if enabled else "disabled"
         model = qa_scan_keys[qa_scan_index].get('model', 'unknown')
         self._show_qa_scan_status(f"Individual endpoint {status} for Vision key ({model})")
@@ -7567,7 +7574,7 @@ class MultiAPIKeyDialog(QDialog):
             "",
             "JSON files (*.json);;All files (*.*)"
         )
-        
+
         if filename:
             try:
                 with open(filename, 'r') as f:
@@ -7578,7 +7585,7 @@ class MultiAPIKeyDialog(QDialog):
                     else:
                         QMessageBox.critical(
                             self,
-                            "Error", 
+                            "Error",
                             "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
                         )
             except Exception as e:
@@ -7586,6 +7593,1443 @@ class MultiAPIKeyDialog(QDialog):
 
     # ===================================================================
     # END QA SCAN KEYS SECTION
+    # ===================================================================
+
+    # ===================================================================
+    # INPAINTER KEYS SECTION
+    # ===================================================================
+
+    def _create_inpainter_section(self, parent_layout):
+        """Create the Inpainter keys section below glossary."""
+        # Container that can be hidden
+        self.inpainter_container = QWidget()
+        inpainter_container_layout = QVBoxLayout(self.inpainter_container)
+        inpainter_container_layout.setContentsMargins(0, 5, 0, 0)
+
+        # Separator
+        self.inpainter_separator = QFrame()
+        self.inpainter_separator.setFrameShape(QFrame.HLine)
+        self.inpainter_separator.setFrameShadow(QFrame.Sunken)
+        inpainter_container_layout.addWidget(self.inpainter_separator)
+
+        # Main Inpainter keys frame
+        inpainter_frame = QGroupBox("Inpainter Keys")
+        inpainter_frame_layout = QVBoxLayout(inpainter_frame)
+        inpainter_frame_layout.setContentsMargins(15, 15, 15, 15)
+
+        # Description
+        desc_label = QLabel(
+                "Configure dedicated keys for manga custom-image-edit inpainting calls.\n"
+                "Requests sent with context=Inpainter use this pool exclusively.\n"
+                "If no Inpainter keys are configured or the pool is disabled, the main key pool/current provider is used instead.")
+        desc_label.setStyleSheet("color: gray;")
+        desc_label.setWordWrap(True)
+        inpainter_frame_layout.addWidget(desc_label)
+
+        # Enable checkbox with spinning icon
+        inpainter_checkbox_container = QWidget()
+        inpainter_checkbox_layout = QHBoxLayout(inpainter_checkbox_container)
+        inpainter_checkbox_layout.setContentsMargins(0, 0, 0, 0)
+        inpainter_checkbox_layout.setSpacing(8)
+
+        self.use_inpainter_keys_var = self.translator_gui.config.get('use_inpainter_keys', False)
+        self.use_inpainter_keys_checkbox = self._create_styled_checkbox("Enable Inpainter Keys")
+        self.use_inpainter_keys_checkbox.setChecked(self.use_inpainter_keys_var)
+        self.use_inpainter_keys_checkbox.toggled.connect(self._toggle_inpainter_section)
+
+        # spinning icon
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        self.inpainter_icon = QLabel()
+        self.inpainter_icon.setStyleSheet("background-color: transparent;")
+        if os.path.exists(icon_path):
+            from PySide6.QtGui import QIcon, QPixmap
+            from PySide6.QtCore import QSize
+            icon = QIcon(icon_path)
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            logical_px = 16
+            dev_px = int(logical_px * max(1.0, dpr))
+            pm = icon.pixmap(QSize(dev_px, dev_px))
+            if pm.isNull():
+                raw = QPixmap(icon_path)
+                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pm = QPixmap.fromImage(img)
+            try:
+                pm.setDevicePixelRatio(dpr)
+            except Exception:
+                pass
+            self.inpainter_icon.setPixmap(pm)
+        self.inpainter_icon.setFixedSize(36, 36)
+        self.inpainter_icon.setAlignment(Qt.AlignCenter)
+        self.use_inpainter_keys_checkbox.toggled.connect(lambda: animate_icon(self.inpainter_icon))
+
+        inpainter_checkbox_layout.addWidget(self.inpainter_icon)
+        inpainter_checkbox_layout.addWidget(self.use_inpainter_keys_checkbox)
+        inpainter_checkbox_layout.addStretch()
+
+        inpainter_frame_layout.addWidget(inpainter_checkbox_container)
+
+        # Add Inpainter key section
+        self.add_inpainter_frame = QWidget()
+        add_inpainter_grid = QGridLayout(self.add_inpainter_frame)
+        add_inpainter_grid.setContentsMargins(0, 0, 0, 10)
+
+        # Row 0: API Key and Model
+        add_inpainter_grid.addWidget(QLabel("Inpainter API Key:"), 0, 0, Qt.AlignLeft)
+        self.inpainter_key_entry = QLineEdit()
+        self.inpainter_key_entry.setEchoMode(QLineEdit.Password)
+        add_inpainter_grid.addWidget(self.inpainter_key_entry, 0, 1)
+
+        # Toggle visibility
+        self.show_inpainter_btn = QPushButton("👁")
+        self.show_inpainter_btn.setFixedWidth(40)
+        self.show_inpainter_btn.clicked.connect(self._toggle_inpainter_visibility)
+        add_inpainter_grid.addWidget(self.show_inpainter_btn, 0, 2)
+
+        # Model
+        add_inpainter_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
+        inpainter_models = get_model_options()
+        self.inpainter_model_combo = QComboBox()
+        self.inpainter_model_combo.addItems(inpainter_models)
+        self.inpainter_model_combo.setEditable(True)
+        self._disable_combobox_mousewheel(self.inpainter_model_combo)
+        add_inpainter_grid.addWidget(self.inpainter_model_combo, 0, 4)
+
+        # Add button
+        add_inpainter_btn = QPushButton("Add Inpainter Key")
+        add_inpainter_btn.clicked.connect(self._add_inpainter_key)
+        add_inpainter_grid.addWidget(add_inpainter_btn, 0, 5, Qt.AlignRight)
+
+        add_inpainter_grid.setColumnStretch(1, 1)
+        add_inpainter_grid.setColumnStretch(4, 1)
+
+        inpainter_frame_layout.addWidget(self.add_inpainter_frame)
+
+        # Row 1: Google Credentials
+        google_creds_label = QLabel("Google Creds:")
+        google_creds_label.setStyleSheet("color: gray; font-size: 8pt;")
+        add_inpainter_grid.addWidget(google_creds_label, 1, 0, Qt.AlignLeft)
+        self.inpainter_google_creds_entry = QLineEdit()
+        self.inpainter_google_creds_entry.setStyleSheet("font-size: 7pt;")
+        add_inpainter_grid.addWidget(self.inpainter_google_creds_entry, 1, 1)
+
+        browse_google_btn = QPushButton("📁")
+        browse_google_btn.setFixedWidth(40)
+        browse_google_btn.clicked.connect(self._browse_inpainter_google_credentials)
+        add_inpainter_grid.addWidget(browse_google_btn, 1, 2)
+
+        region_label = QLabel("Region:")
+        region_label.setStyleSheet("color: gray;")
+        add_inpainter_grid.addWidget(region_label, 1, 3, Qt.AlignLeft)
+        self.inpainter_google_region_entry = QLineEdit("us-east5")
+        self.inpainter_google_region_entry.setStyleSheet("font-size: 7pt;")
+        self.inpainter_google_region_entry.setMaximumWidth(100)
+        add_inpainter_grid.addWidget(self.inpainter_google_region_entry, 1, 4, 1, 1, Qt.AlignLeft)
+
+        # Row 2: Individual Endpoint Toggle
+        self.inpainter_use_individual_endpoint_var = False
+        self.inpainter_individual_endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
+        self.inpainter_individual_endpoint_toggle.setChecked(False)
+        self.inpainter_individual_endpoint_toggle.toggled.connect(self._toggle_inpainter_individual_endpoint_fields)
+        add_inpainter_grid.addWidget(self.inpainter_individual_endpoint_toggle, 2, 0, 1, 2, Qt.AlignLeft)
+
+        # Row 3: Individual Endpoint (initially hidden)
+        self.inpainter_individual_endpoint_label = QLabel("Individual Endpoint:")
+        self.inpainter_individual_endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
+        add_inpainter_grid.addWidget(self.inpainter_individual_endpoint_label, 3, 0, Qt.AlignLeft)
+        self.inpainter_azure_endpoint_entry = QLineEdit()
+        self.inpainter_azure_endpoint_entry.setStyleSheet("font-size: 8pt;")
+        add_inpainter_grid.addWidget(self.inpainter_azure_endpoint_entry, 3, 1, 1, 2)
+
+        self.inpainter_individual_api_version_label = QLabel("API Ver:")
+        self.inpainter_individual_api_version_label.setStyleSheet("color: gray;")
+        add_inpainter_grid.addWidget(self.inpainter_individual_api_version_label, 3, 3, Qt.AlignLeft)
+        inpainter_azure_versions = [
+            '2025-01-01-preview',
+            '2024-12-01-preview',
+            '2024-10-01-preview',
+            '2024-08-01-preview',
+            '2024-06-01',
+            '2024-02-01',
+            '2023-12-01-preview'
+        ]
+        self.inpainter_azure_api_version_combo = QComboBox()
+        self.inpainter_azure_api_version_combo.addItems(inpainter_azure_versions)
+        self.inpainter_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+        self.inpainter_azure_api_version_combo.setStyleSheet("font-size: 7pt;")
+        self.inpainter_azure_api_version_combo.setMaximumWidth(180)
+        self._disable_combobox_mousewheel(self.inpainter_azure_api_version_combo)
+        add_inpainter_grid.addWidget(self.inpainter_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
+
+        # Initially hide endpoint fields
+        self._toggle_inpainter_individual_endpoint_fields()
+
+        # Inpainter keys list
+        self._create_inpainter_list(inpainter_frame_layout)
+
+        # Add container to parent
+        inpainter_container_layout.addWidget(inpainter_frame)
+        parent_layout.addWidget(self.inpainter_container)
+
+        # Initially disable if checkbox is unchecked
+        self._toggle_inpainter_section()
+
+    def _create_inpainter_list(self, parent_layout):
+        """Create the Inpainter keys list."""
+        self.inpainter_list_label = QLabel("Inpainter Keys (tried in order):")
+        list_label_font = QFont()
+        list_label_font.setBold(True)
+        self.inpainter_list_label.setFont(list_label_font)
+        parent_layout.addWidget(self.inpainter_list_label)
+
+        # Container for tree and buttons
+        self.inpainter_tree_container = QWidget()
+        container_layout = QHBoxLayout(self.inpainter_tree_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Left side: Move buttons
+        self.inpainter_move_frame = QWidget()
+        move_layout = QVBoxLayout(self.inpainter_move_frame)
+        move_layout.setContentsMargins(0, 0, 5, 0)
+
+        order_label = QLabel("Reorder")
+        order_font = QFont()
+        order_font.setBold(True)
+        order_label.setFont(order_font)
+        move_layout.addWidget(order_label)
+
+        top_btn = QPushButton("↑ ↑")
+        top_btn.setFixedSize(55, 32)
+        top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
+        top_btn.clicked.connect(lambda: self._move_inpainter_key('top'))
+        move_layout.addWidget(top_btn)
+
+        up_btn = QPushButton("↑")
+        up_btn.setFixedSize(55, 32)
+        up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
+        up_btn.clicked.connect(lambda: self._move_inpainter_key('up'))
+        move_layout.addWidget(up_btn)
+
+        down_btn = QPushButton("↓")
+        down_btn.setFixedSize(55, 32)
+        down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
+        down_btn.clicked.connect(lambda: self._move_inpainter_key('down'))
+        move_layout.addWidget(down_btn)
+
+        bottom_btn = QPushButton("↓ ↓")
+        bottom_btn.setFixedSize(55, 32)
+        bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
+        bottom_btn.clicked.connect(lambda: self._move_inpainter_key('bottom'))
+        move_layout.addWidget(bottom_btn)
+
+        move_layout.addSpacing(10)
+
+        self.inpainter_position_label = QLabel()
+        self.inpainter_position_label.setStyleSheet("color: gray;")
+        move_layout.addWidget(self.inpainter_position_label)
+        move_layout.addStretch()
+        container_layout.addWidget(self.inpainter_move_frame)
+
+        # Right side: TreeWidget with drag and drop
+        self.inpainter_tree = QTreeWidget()
+        self.inpainter_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', 'Success', 'Errors', 'Times Used'])
+        self.inpainter_tree.setColumnWidth(0, 125)
+        self.inpainter_tree.setColumnWidth(1, 220)
+        self.inpainter_tree.setColumnWidth(2, 105)
+        self.inpainter_tree.setColumnWidth(3, 100)
+        self.inpainter_tree.setColumnWidth(4, 90)
+        self.inpainter_tree.setColumnWidth(5, 100)
+        self.inpainter_tree.setColumnWidth(6, 75)
+        self.inpainter_tree.setColumnWidth(7, 55)
+        self.inpainter_tree.setColumnWidth(8, 80)
+
+        qs_header = self.inpainter_tree.header()
+        qs_header_font = QFont()
+        qs_header_font.setBold(True)
+        qs_header_font.setPointSize(11)
+        qs_header.setFont(qs_header_font)
+
+        self.inpainter_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.inpainter_tree.customContextMenuRequested.connect(self._show_inpainter_context_menu)
+        self.inpainter_tree.setMinimumHeight(150)
+
+        self.inpainter_tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self.inpainter_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+
+        self.inpainter_tree.model().rowsMoved.connect(self._on_inpainter_rows_moved)
+        self.inpainter_tree.itemSelectionChanged.connect(self._on_inpainter_selection_change)
+        self.inpainter_tree.itemDoubleClicked.connect(self._on_inpainter_click)
+
+        container_layout.addWidget(self.inpainter_tree)
+        parent_layout.addWidget(self.inpainter_tree_container)
+
+        # Action buttons
+        self.inpainter_action_frame = QWidget()
+        inpainter_action_layout = QHBoxLayout(self.inpainter_action_frame)
+        inpainter_action_layout.setContentsMargins(0, 10, 0, 0)
+
+        test_selected_btn = QPushButton("Test Selected")
+        test_selected_btn.clicked.connect(self._test_selected_inpainter)
+        inpainter_action_layout.addWidget(test_selected_btn)
+
+        test_all_btn = QPushButton("Test All")
+        test_all_btn.clicked.connect(self._test_all_inpainter)
+        inpainter_action_layout.addWidget(test_all_btn)
+
+        enable_selected_btn = QPushButton("Enable Selected")
+        enable_selected_btn.clicked.connect(self._enable_selected_inpainter)
+        inpainter_action_layout.addWidget(enable_selected_btn)
+
+        disable_selected_btn = QPushButton("Disable Selected")
+        disable_selected_btn.clicked.connect(self._disable_selected_inpainter)
+        inpainter_action_layout.addWidget(disable_selected_btn)
+
+        remove_selected_btn = QPushButton("Remove Selected")
+        remove_selected_btn.clicked.connect(self._remove_selected_inpainter)
+        inpainter_action_layout.addWidget(remove_selected_btn)
+
+        clear_all_btn = QPushButton("Clear All")
+        clear_all_btn.clicked.connect(self._clear_all_inpainter)
+        inpainter_action_layout.addWidget(clear_all_btn)
+
+        inpainter_action_layout.addStretch()
+        self.inpainter_status_label = QLabel()
+        self.inpainter_status_label.setStyleSheet("color: gray;")
+        inpainter_action_layout.addWidget(self.inpainter_status_label)
+        parent_layout.addWidget(self.inpainter_action_frame)
+
+        # Load existing Inpainter keys
+        self._load_inpainter_keys()
+
+    def _load_inpainter_keys(self):
+        """Load Inpainter keys from config."""
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+
+        v_scroll = self.inpainter_tree.verticalScrollBar().value()
+        h_scroll = self.inpainter_tree.horizontalScrollBar().value()
+
+        selected_indices = []
+        for item in self.inpainter_tree.selectedItems():
+            selected_indices.append(self.inpainter_tree.indexOfTopLevelItem(item))
+
+        self.inpainter_tree.clear()
+
+        for key_data in inpainter_keys:
+            api_key = key_data.get('api_key', '')
+            model = key_data.get('model', '')
+            times_used = int(key_data.get('times_used', 0))
+
+            masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+
+            try:
+                raw_limit = key_data.get('individual_output_token_limit')
+                per_key_limit = int(raw_limit) if raw_limit not in (None, "") else None
+            except Exception:
+                per_key_limit = None
+            if per_key_limit and per_key_limit > 0:
+                output_limit_str = str(per_key_limit)
+            else:
+                output_limit_str = "global"
+
+            # Determine per-key temperature display value
+            try:
+                raw_temp = key_data.get('individual_key_temperature')
+                per_key_temp = float(raw_temp) if raw_temp not in (None, "") else None
+            except Exception:
+                per_key_temp = None
+            if per_key_temp is not None:
+                temp_str = str(per_key_temp)
+            else:
+                temp_str = "global"
+
+            enabled = key_data.get('enabled', True)
+            test_result = key_data.get('last_test_result')
+            if not enabled:
+                status = "Disabled"
+                color = Qt.gray
+            elif test_result == 'passed':
+                status = "✅ Passed"
+                color = Qt.darkGreen
+            elif test_result == 'failed':
+                status = "❌ Failed"
+                color = Qt.red
+            elif test_result == 'timeout':
+                status = "⏱️ Timed Out"
+                color = Qt.darkYellow
+            elif test_result == 'error':
+                status = "❌ Error"
+                color = Qt.darkRed
+            else:
+                status = "Enabled"
+                color = Qt.gray
+
+            # Determine per-key API call delay display value
+            try:
+                raw_delay = key_data.get('api_call_delay')
+                per_key_delay = float(raw_delay) if raw_delay not in (None, "") else 0.0
+            except Exception:
+                per_key_delay = 0.0
+            delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
+
+            success_count = int(key_data.get('success_count', 0))
+            error_count = int(key_data.get('error_count', 0))
+            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
+            for col in range(item.columnCount()):
+                item.setForeground(col, color)
+
+            # Tooltip for per-key settings
+            tooltip_parts = []
+            if per_key_limit and per_key_limit > 0:
+                tooltip_parts.append(f"Individual Output Token Limit: {per_key_limit}")
+            else:
+                tooltip_parts.append("Using global output token limit")
+            if per_key_temp is not None:
+                tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
+            else:
+                tooltip_parts.append("Using global temperature")
+            if per_key_delay > 0:
+                tooltip_parts.append(f"API Call Delay: {per_key_delay}s (overrides global SEND_INTERVAL_SECONDS)")
+            else:
+                tooltip_parts.append("Using global API call delay (SEND_INTERVAL_SECONDS)")
+            tooltip = "\n".join(tooltip_parts)
+            for col in range(item.columnCount()):
+                item.setToolTip(col, tooltip)
+
+            item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
+            self.inpainter_tree.addTopLevelItem(item)
+
+        for index in selected_indices:
+            if index < self.inpainter_tree.topLevelItemCount():
+                item = self.inpainter_tree.topLevelItem(index)
+                item.setSelected(True)
+
+        self.inpainter_tree.verticalScrollBar().setValue(v_scroll)
+        self.inpainter_tree.horizontalScrollBar().setValue(h_scroll)
+
+        # Auto-refresh the in-memory pool so changes take effect immediately
+        if not getattr(self, '_initializing', False):
+            self._refresh_inpainter_pool()
+
+    def _add_inpainter_key(self):
+        """Add a new Inpainter key"""
+        api_key = self.inpainter_key_entry.text().strip()
+        model = self.inpainter_model_combo.currentText().strip()
+        google_credentials = self.inpainter_google_creds_entry.text().strip() or None
+        google_region = self.inpainter_google_region_entry.text().strip() or None
+
+        use_individual_endpoint = self.inpainter_individual_endpoint_toggle.isChecked()
+        azure_endpoint = self.inpainter_azure_endpoint_entry.text().strip() if use_individual_endpoint else None
+        azure_api_version = self.inpainter_azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
+
+        if not model:
+            QMessageBox.critical(self, "Error", "Please enter a model name")
+            return
+
+
+
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+
+        individual_output_token_limit = None
+        individual_key_temperature = None
+
+        inpainter_keys.append({
+            'api_key': api_key,
+            'model': model,
+            'google_credentials': google_credentials,
+            'azure_endpoint': azure_endpoint,
+            'google_region': google_region,
+            'azure_api_version': azure_api_version,
+            'use_individual_endpoint': use_individual_endpoint,
+            'individual_output_token_limit': individual_output_token_limit,
+            'individual_key_temperature': individual_key_temperature,
+            'api_call_delay': 0.0,
+            'times_used': 0
+        })
+
+        self.translator_gui.config['inpainter_keys'] = inpainter_keys
+        self.translator_gui.save_config(show_message=False)
+
+        # Clear inputs
+        self.inpainter_key_entry.clear()
+        self.inpainter_model_combo.setCurrentText("")
+        self.inpainter_google_creds_entry.clear()
+        self.inpainter_azure_endpoint_entry.clear()
+        self.inpainter_google_region_entry.setText("us-east5")
+        self.inpainter_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+        self.inpainter_individual_endpoint_toggle.setChecked(False)
+
+        self._toggle_inpainter_individual_endpoint_fields()
+
+        self._load_inpainter_keys()
+
+        extras = []
+        if google_credentials:
+            extras.append(f"Google: {os.path.basename(google_credentials)}")
+        if azure_endpoint:
+            extras.append(f"Azure: {azure_endpoint[:30]}...")
+        extra_info = f" ({', '.join(extras)})" if extras else ""
+        self._show_inpainter_status(f"Added Inpainter key for model: {model}{extra_info}")
+
+        self._notify_authgpt_visibility()
+
+    def _move_inpainter_key(self, direction):
+        """Move selected Inpainter key up or down"""
+        selected = self.inpainter_tree.selectedItems()
+        if not selected:
+            return
+
+        item = selected[0]
+        index = self.inpainter_tree.indexOfTopLevelItem(item)
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+
+        if index >= len(inpainter_keys):
+            return
+
+        new_index = index
+        if direction == 'top' and index > 0:
+            new_index = 0
+        elif direction == 'up' and index > 0:
+            new_index = index - 1
+        elif direction == 'down' and index < len(inpainter_keys) - 1:
+            new_index = index + 1
+        elif direction == 'bottom' and index < len(inpainter_keys) - 1:
+            new_index = len(inpainter_keys) - 1
+
+        if new_index != index:
+            key = inpainter_keys.pop(index)
+            inpainter_keys.insert(new_index, key)
+
+            self.translator_gui.config['inpainter_keys'] = inpainter_keys
+            self.translator_gui.save_config(show_message=False)
+
+            self._load_inpainter_keys()
+
+            if new_index < self.inpainter_tree.topLevelItemCount():
+                item = self.inpainter_tree.topLevelItem(new_index)
+                if item:
+                    self.inpainter_tree.setCurrentItem(item)
+                    item.setSelected(True)
+
+    def _test_selected_inpainter(self):
+        """Test selected Inpainter key"""
+        selected = self.inpainter_tree.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "Warning", "Please select a Inpainter key to test")
+            return
+
+        index = self.inpainter_tree.indexOfTopLevelItem(selected[0])
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+
+        if index >= len(inpainter_keys):
+            return
+
+        if index < self.inpainter_tree.topLevelItemCount():
+            item = self.inpainter_tree.topLevelItem(index)
+            if item:
+                item.setText(3, "⏳ Testing...")
+
+        key_data = inpainter_keys[index]
+
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient._api_key_pool = self.key_pool
+        except Exception:
+            pass
+
+        QTimer.singleShot(100, lambda: self._test_single_inpainter_key(key_data, index))
+
+    def _test_all_inpainter(self):
+        """Test all Inpainter keys in parallel."""
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+
+        if not inpainter_keys:
+            QMessageBox.warning(self, "Warning", "No Inpainter keys to test")
+            return
+
+        for i in range(self.inpainter_tree.topLevelItemCount()):
+            item = self.inpainter_tree.topLevelItem(i)
+            if item:
+                item.setText(3, "⏳ Testing...")
+
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient._api_key_pool = self.key_pool
+        except Exception:
+            pass
+
+        for i, key_data in enumerate(inpainter_keys):
+            self._test_single_inpainter_key(key_data, i)
+
+    @Slot(int, bool) if HAS_GUI else lambda x: x
+    def _update_inpainter_test_result(self, index, success):
+        """Update Inpainter tree item with test result"""
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+        if index < len(inpainter_keys):
+            try:
+                inpainter_keys[index]['times_used'] = int(inpainter_keys[index].get('times_used', 0)) + 1
+                if success:
+                    inpainter_keys[index]['success_count'] = int(inpainter_keys[index].get('success_count', 0)) + 1
+                else:
+                    inpainter_keys[index]['error_count'] = int(inpainter_keys[index].get('error_count', 0)) + 1
+                self.translator_gui.config['inpainter_keys'] = inpainter_keys
+                self.translator_gui.save_config(show_message=False)
+            except Exception:
+                pass
+
+        if index < self.inpainter_tree.topLevelItemCount():
+            item = self.inpainter_tree.topLevelItem(index)
+            if item:
+                if success:
+                    item.setText(3, "✅ Passed")
+                    color = Qt.darkGreen
+                else:
+                    item.setText(3, "❌ Failed")
+                    color = Qt.red
+                for col in range(item.columnCount()):
+                    item.setForeground(col, color)
+                try:
+                    if success:
+                        current = int(item.text(4))
+                        item.setText(4, str(current + 1))
+                    else:
+                        current = int(item.text(5))
+                        item.setText(5, str(current + 1))
+                except Exception:
+                    pass
+                try:
+                    current_times = int(item.text(6))
+                    item.setText(6, str(current_times + 1))
+                except Exception:
+                    item.setText(6, "1")
+
+    @Slot(int) if HAS_GUI else lambda x: x
+    def _update_inpainter_timeout_status(self, index):
+        """Update Inpainter tree item with timeout status"""
+        if index < self.inpainter_tree.topLevelItemCount():
+            item = self.inpainter_tree.topLevelItem(index)
+            if item:
+                item.setText(3, "⏱️ Timed Out")
+                for col in range(item.columnCount()):
+                    item.setForeground(col, Qt.darkYellow)
+
+    def _test_single_inpainter_key(self, key_data, index):
+        """Test a single Inpainter key — REAL API TEST"""
+        api_key = key_data.get('api_key', '')
+        model = key_data.get('model', '')
+
+        print(f"[DEBUG] Starting REAL Inpainter key test for {model}")
+
+        from concurrent.futures import ThreadPoolExecutor
+        from unified_api_client import UnifiedClient
+
+        if hasattr(self.translator_gui, '_ensure_executor'):
+            self.translator_gui._ensure_executor()
+        executor = getattr(self.translator_gui, 'executor', None)
+
+        client_ref = [None]
+        timed_out = [False]
+
+        def run_api_test():
+            try:
+                client = UnifiedClient(
+                    api_key=api_key,
+                    model=model,
+                    output_dir=None
+                )
+                client_ref[0] = client
+
+                try:
+                    tls = client._get_thread_local_client()
+                    tls.max_retries_override = 1
+                except Exception:
+                    pass
+
+                google_credentials = key_data.get('google_credentials')
+                if google_credentials:
+                    client.current_key_google_creds = google_credentials
+                    client.google_creds_path = google_credentials
+
+                google_region = key_data.get('google_region')
+                if google_region:
+                    client.current_key_google_region = google_region
+
+                use_individual_endpoint = key_data.get('use_individual_endpoint', False)
+                if use_individual_endpoint:
+                    azure_endpoint = key_data.get('azure_endpoint')
+                    if azure_endpoint:
+                        client.current_key_azure_endpoint = azure_endpoint
+                        client.current_key_use_individual_endpoint = True
+                    azure_api_version = key_data.get('azure_api_version')
+                    if azure_api_version:
+                        client.current_key_azure_api_version = azure_api_version
+
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Say 'API test successful' and nothing else."}
+                ]
+
+                response = client.send(messages, temperature=0.7, max_tokens=1000, context='Inpainter')
+
+                if response and isinstance(response, tuple):
+                    content, _ = response
+                    if content and "test successful" in content.lower():
+                        print(f"[DEBUG] Inpainter key test completed for {model}: PASSED")
+                        if not timed_out[0]:
+                            if HAS_GUI:
+                                QMetaObject.invokeMethod(self, "_update_inpainter_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
+                            else:
+                                self._update_inpainter_test_result(index, True)
+                        return
+
+                print(f"[DEBUG] Inpainter key test completed for {model}: FAILED")
+                if not timed_out[0]:
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_inpainter_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
+                    else:
+                        self._update_inpainter_test_result(index, False)
+            except Exception as e:
+                print(f"[DEBUG] Inpainter key test error for {model}: {e}")
+                if not timed_out[0]:
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_inpainter_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
+                    else:
+                        self._update_inpainter_test_result(index, False)
+
+        def run_with_timeout():
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+            with ThreadPoolExecutor(max_workers=1) as timeout_pool:
+                future = timeout_pool.submit(run_api_test)
+                try:
+                    future.result(timeout=30)
+                except FuturesTimeout:
+                    timed_out[0] = True
+                    print(f"[DEBUG] Inpainter key test TIMED OUT for {model} (30s)")
+                    _client = client_ref[0]
+                    if _client:
+                        try:
+                            _client._cancelled = True
+                            oc = getattr(_client, 'openai_client', None)
+                            if oc and hasattr(oc, 'close'):
+                                oc.close()
+                            elif oc and hasattr(oc, '_client') and hasattr(oc._client, 'close'):
+                                oc._client.close()
+                        except Exception:
+                            pass
+                    try:
+                        from unified_api_client import _api_watchdog_reset
+                        _api_watchdog_reset()
+                    except Exception:
+                        pass
+                    if HAS_GUI:
+                        QMetaObject.invokeMethod(self, "_update_inpainter_timeout_status", Qt.QueuedConnection, Q_ARG(int, index))
+                    else:
+                        self._update_inpainter_timeout_status(index)
+                except Exception:
+                    pass
+
+        if executor:
+            executor.submit(run_with_timeout)
+        else:
+            thread = threading.Thread(target=run_with_timeout, daemon=True)
+            thread.start()
+
+    def _remove_selected_inpainter(self):
+        """Remove selected Inpainter keys."""
+        selected = self.inpainter_tree.selectedItems()
+        if not selected:
+            return
+
+        reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected Inpainter key(s)?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            indices = sorted([self.inpainter_tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
+
+            inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+
+            for index in indices:
+                if index < len(inpainter_keys):
+                    del inpainter_keys[index]
+
+            self.translator_gui.config['inpainter_keys'] = inpainter_keys
+            self.translator_gui.save_config(show_message=False)
+            self._load_inpainter_keys()
+            self._show_inpainter_status(f"Removed {len(selected)} Inpainter key(s)")
+            self._notify_authgpt_visibility()
+
+
+    def _enable_selected_inpainter(self):
+        """Enable selected Inpainter keys."""
+        selected = self.inpainter_tree.selectedItems()
+        if not selected:
+            return
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+        for item in selected:
+            index = self.inpainter_tree.indexOfTopLevelItem(item)
+            if index < len(inpainter_keys):
+                inpainter_keys[index]['enabled'] = True
+        self.translator_gui.config['inpainter_keys'] = inpainter_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_inpainter_keys()
+        self._show_inpainter_status(f"Enabled {len(selected)} Inpainter key(s)")
+        self._notify_authgpt_visibility()
+
+    def _disable_selected_inpainter(self):
+        """Disable selected Inpainter keys."""
+        selected = self.inpainter_tree.selectedItems()
+        if not selected:
+            return
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+        for item in selected:
+            index = self.inpainter_tree.indexOfTopLevelItem(item)
+            if index < len(inpainter_keys):
+                inpainter_keys[index]['enabled'] = False
+        self.translator_gui.config['inpainter_keys'] = inpainter_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_inpainter_keys()
+        self._show_inpainter_status(f"Disabled {len(selected)} Inpainter key(s)")
+        self._notify_authgpt_visibility()
+
+    def _clear_all_inpainter(self):
+        """Clear all Inpainter keys."""
+        if self.inpainter_tree.topLevelItemCount() == 0:
+            return
+
+        reply = QMessageBox.question(self, "Confirm", "Remove ALL Inpainter keys?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self.translator_gui.config['inpainter_keys'] = []
+            self.translator_gui.save_config(show_message=False)
+            self._load_inpainter_keys()
+            self._show_inpainter_status("Cleared all Inpainter keys")
+            self._notify_authgpt_visibility()
+
+    def _toggle_inpainter_section(self):
+        """Toggle Inpainter section visibility"""
+        enabled = self.use_inpainter_keys_checkbox.isChecked()
+
+        if hasattr(self, 'add_inpainter_frame'):
+            self.add_inpainter_frame.setVisible(enabled)
+        if hasattr(self, 'inpainter_list_label'):
+            self.inpainter_list_label.setVisible(enabled)
+        if hasattr(self, 'inpainter_tree_container'):
+            self.inpainter_tree_container.setVisible(enabled)
+        if hasattr(self, 'inpainter_action_frame'):
+            self.inpainter_action_frame.setVisible(enabled)
+        if hasattr(self, 'inpainter_tree') and not enabled:
+            self.inpainter_tree.clearSelection()
+
+        self._show_inpainter_status(f"Inpainter Keys {'enabled' if enabled else 'disabled'}")
+
+        # Update in-memory config immediately
+        self.translator_gui.config['use_inpainter_keys'] = enabled
+        if hasattr(self.translator_gui, 'use_inpainter_keys_var'):
+            self.translator_gui.use_inpainter_keys_var = enabled
+
+        if not getattr(self, '_initializing', False):
+            inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+            if enabled:
+                msg = f"🔑 Inpainter key pool: {len(inpainter_keys)} keys loaded"
+            else:
+                msg = f"🔑 Inpainter key pool: disabled"
+            if hasattr(self.translator_gui, 'append_log'):
+                try:
+                    self.translator_gui.append_log(msg)
+                except Exception:
+                    print(msg)
+            else:
+                print(msg)
+
+        try:
+            import os as _os
+            import json as _json
+            ik_list = self.translator_gui.config.get('inpainter_keys', []) or []
+            _os.environ['USE_INPAINTER_KEYS'] = '1' if enabled else '0'
+            _os.environ['INPAINTER_API_KEYS'] = _json.dumps(ik_list)
+        except Exception:
+            pass
+
+        if enabled:
+            try:
+                from unified_api_client import UnifiedClient
+                ik_list = self.translator_gui.config.get('inpainter_keys', []) or []
+                if ik_list:
+                    UnifiedClient.set_in_memory_inpainter_keys(ik_list)
+            except Exception:
+                pass
+        else:
+            try:
+                from unified_api_client import UnifiedClient
+                UnifiedClient.clear_in_memory_inpainter_keys()
+            except Exception:
+                pass
+
+        self._notify_authgpt_visibility()
+
+    def _refresh_inpainter_pool(self):
+        """Refresh the in-memory Inpainter key pool after any change."""
+        try:
+            use_inpainter = self.use_inpainter_keys_checkbox.isChecked() if hasattr(self, 'use_inpainter_keys_checkbox') else False
+            if not use_inpainter:
+                return
+            from unified_api_client import UnifiedClient
+            ik_list = self.translator_gui.config.get('inpainter_keys', []) or []
+            try:
+                import os as _os
+                import json as _json
+                _os.environ['INPAINTER_API_KEYS'] = _json.dumps(ik_list)
+            except Exception:
+                pass
+            if ik_list:
+                UnifiedClient.set_in_memory_inpainter_keys(ik_list)
+            else:
+                UnifiedClient.clear_in_memory_inpainter_keys()
+        except Exception:
+            pass
+
+    def _toggle_inpainter_visibility(self):
+        """Toggle Inpainter key field visibility"""
+        if self.inpainter_key_entry.echoMode() == QLineEdit.Password:
+            self.inpainter_key_entry.setEchoMode(QLineEdit.Normal)
+            self.show_inpainter_btn.setText('🔒')
+        else:
+            self.inpainter_key_entry.setEchoMode(QLineEdit.Password)
+            self.show_inpainter_btn.setText('👁')
+
+    def _toggle_inpainter_individual_endpoint_fields(self):
+        """Toggle visibility of Inpainter individual endpoint fields"""
+        enabled = self.inpainter_individual_endpoint_toggle.isChecked()
+
+        self.inpainter_individual_endpoint_label.setVisible(enabled)
+        self.inpainter_azure_endpoint_entry.setVisible(enabled)
+        self.inpainter_individual_api_version_label.setVisible(enabled)
+        self.inpainter_azure_api_version_combo.setVisible(enabled)
+
+        self.inpainter_azure_endpoint_entry.setEnabled(enabled)
+        self.inpainter_azure_api_version_combo.setEnabled(enabled)
+
+        if not enabled:
+            self.inpainter_azure_endpoint_entry.clear()
+            self.inpainter_azure_api_version_combo.setCurrentText('2025-01-01-preview')
+
+    def _show_inpainter_context_menu(self, position):
+        """Show context menu for Inpainter keys."""
+        item = self.inpainter_tree.itemAt(position)
+        if not item:
+            return
+
+        if item not in self.inpainter_tree.selectedItems():
+            self.inpainter_tree.setCurrentItem(item)
+
+        menu = QMenu(self)
+
+        index = self.inpainter_tree.indexOfTopLevelItem(item)
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+        total = len(inpainter_keys)
+
+        # Reorder submenu
+        if total > 1:
+            reorder_menu = menu.addMenu("Reorder")
+            if index > 0:
+                up_action = reorder_menu.addAction("Move Up")
+                up_action.triggered.connect(lambda: self._move_inpainter_key('up'))
+            if index < total - 1:
+                down_action = reorder_menu.addAction("Move Down")
+                down_action.triggered.connect(lambda: self._move_inpainter_key('down'))
+            menu.addSeparator()
+
+        # Change Model
+        selected_count = len(self.inpainter_tree.selectedItems())
+        if selected_count > 1:
+            change_model_action = menu.addAction(f"Change Model ({selected_count} selected)")
+        else:
+            change_model_action = menu.addAction("Change Model")
+        change_model_action.triggered.connect(self._change_inpainter_model_for_selected)
+
+        menu.addSeparator()
+
+        # Individual Endpoint options
+        if index < len(inpainter_keys):
+            key_data = inpainter_keys[index]
+            endpoint_enabled = key_data.get('use_individual_endpoint', False)
+            endpoint_url = key_data.get('azure_endpoint', '')
+
+            if endpoint_enabled and endpoint_url:
+                config_action = menu.addAction("✅ Individual Endpoint")
+                config_action.triggered.connect(lambda: self._configure_inpainter_individual_endpoint(index))
+                disable_action = menu.addAction("Disable Individual Endpoint")
+                disable_action.triggered.connect(lambda: self._toggle_inpainter_individual_endpoint(index, False))
+            else:
+                config_action = menu.addAction("🔧 Configure Individual Endpoint")
+                config_action.triggered.connect(lambda: self._configure_inpainter_individual_endpoint(index))
+
+        menu.addSeparator()
+
+        # Per-key output token limit options
+        selected_items = self.inpainter_tree.selectedItems()
+        selected_count = len(selected_items)
+        if selected_count > 1:
+            set_limit_action = menu.addAction(f"Set Output Token Limit ({selected_count} selected)")
+        else:
+            set_limit_action = menu.addAction("Set Output Token Limit")
+        set_limit_action.triggered.connect(self._set_inpainter_output_token_limit_for_selected)
+        clear_limit_action = menu.addAction("Clear Output Token Limit")
+        clear_limit_action.triggered.connect(self._clear_inpainter_output_token_limit_for_selected)
+
+        # Per-key temperature options
+        if selected_count > 1:
+            set_temp_action = menu.addAction(f"Set Key Temperature ({selected_count} selected)")
+        else:
+            set_temp_action = menu.addAction("Set Key Temperature")
+        set_temp_action.triggered.connect(self._set_inpainter_key_temperature_for_selected)
+        clear_temp_action = menu.addAction("Clear Key Temperature")
+        clear_temp_action.triggered.connect(self._clear_inpainter_key_temperature_for_selected)
+
+        # Per-key API call delay options for Inpainter keys
+        if selected_count > 1:
+            set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
+        else:
+            set_delay_action = menu.addAction("Set API Call Delay")
+        set_delay_action.triggered.connect(self._set_inpainter_api_call_delay_for_selected)
+        clear_delay_action = menu.addAction("Clear API Call Delay")
+        clear_delay_action.triggered.connect(self._clear_inpainter_api_call_delay_for_selected)
+
+        menu.addSeparator()
+
+        test_action = menu.addAction("Test")
+        test_action.triggered.connect(self._test_selected_inpainter)
+        enable_action = menu.addAction("Enable")
+        enable_action.triggered.connect(self._enable_selected_inpainter)
+        disable_action = menu.addAction("Disable")
+        disable_action.triggered.connect(self._disable_selected_inpainter)
+        menu.addSeparator()
+        remove_action = menu.addAction("Remove")
+        remove_action.triggered.connect(self._remove_selected_inpainter)
+
+        if total > 1:
+            clear_action = menu.addAction("Clear All")
+            clear_action.triggered.connect(self._clear_all_inpainter)
+
+        menu.exec_(self.inpainter_tree.viewport().mapToGlobal(position))
+
+    def _change_inpainter_model_for_selected(self):
+        """Change model name for selected Inpainter keys."""
+        selected = self.inpainter_tree.selectedItems()
+        if not selected:
+            return
+
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Change Model for {len(selected)} Inpainter Keys")
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.21)
+        height = int(screen.height() * 0.13)
+        dialog.resize(width, height)
+        self._set_icon(dialog)
+
+        main_layout = QVBoxLayout(dialog)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+
+        label = QLabel("Enter new model name (press Enter to apply):")
+        main_layout.addWidget(label)
+
+        all_models = get_model_options()
+        model_combo = QComboBox()
+        model_combo.addItems(all_models)
+        model_combo.setEditable(True)
+        main_layout.addWidget(model_combo)
+
+        selected_indices = [self.inpainter_tree.indexOfTopLevelItem(item) for item in selected]
+        if selected_indices and selected_indices[0] < len(inpainter_keys):
+            current_model = inpainter_keys[selected_indices[0]].get('model', '')
+            model_combo.setCurrentText(current_model)
+            model_combo.lineEdit().selectAll()
+
+        def apply_change():
+            new_model = model_combo.currentText().strip()
+            if new_model:
+                for item in selected:
+                    idx = self.inpainter_tree.indexOfTopLevelItem(item)
+                    if idx < len(inpainter_keys):
+                        inpainter_keys[idx]['model'] = new_model
+                self.translator_gui.config['inpainter_keys'] = inpainter_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_inpainter_keys()
+                self._show_inpainter_status(f"Changed model to '{new_model}' for {len(selected)} Inpainter keys")
+                dialog.accept()
+
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        apply_btn = QPushButton("Apply")
+        apply_btn.clicked.connect(apply_change)
+        apply_btn.setDefault(True)
+        button_layout.addWidget(apply_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+        main_layout.addLayout(button_layout)
+
+        model_combo.setFocus()
+        dialog.exec_()
+
+    def _on_inpainter_rows_moved(self):
+        """Sync inpainter_keys config with tree order after drag-drop"""
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+
+        new_order = []
+        for i in range(self.inpainter_tree.topLevelItemCount()):
+            item = self.inpainter_tree.topLevelItem(i)
+            if item:
+                masked_key = item.text(0)
+                model = item.text(1)
+                for key_data in inpainter_keys:
+                    api_key = key_data.get('api_key', '')
+                    key_masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+                    if key_masked == masked_key and key_data.get('model', '') == model and key_data not in new_order:
+                        new_order.append(key_data)
+                        break
+
+        if len(new_order) == len(inpainter_keys):
+            self.translator_gui.config['inpainter_keys'] = new_order
+            self.translator_gui.save_config(show_message=False)
+            self._show_inpainter_status("Reordered Inpainter keys")
+
+    def _on_inpainter_selection_change(self):
+        """Update position label when Inpainter selection changes"""
+        selected = self.inpainter_tree.selectedItems()
+        if selected:
+            index = self.inpainter_tree.indexOfTopLevelItem(selected[0])
+            total = self.inpainter_tree.topLevelItemCount()
+            self.inpainter_position_label.setText(f"#{index + 1}/{total}")
+        else:
+            self.inpainter_position_label.setText("")
+
+    def _on_inpainter_click(self, item, column):
+        """Handle double-click on Inpainter tree item for inline editing"""
+        if not item:
+            return
+
+        index = self.inpainter_tree.indexOfTopLevelItem(item)
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+        if index >= len(inpainter_keys):
+            return
+
+        if column == 1:
+            old_value = item.text(1)
+            new_value, ok = self._show_model_edit_dialog(old_value)
+            if ok and new_value and new_value != old_value:
+                inpainter_keys[index]['model'] = new_value
+                self.translator_gui.config['inpainter_keys'] = inpainter_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_inpainter_keys()
+                self._show_inpainter_status(f"Updated model to: {new_value}")
+        elif column == 2:
+            from PySide6.QtWidgets import QInputDialog
+            current = inpainter_keys[index].get('individual_output_token_limit') or 0
+            try:
+                current = int(current)
+            except (ValueError, TypeError):
+                current = 0
+            value, ok = QInputDialog.getInt(
+                self, "Edit Output Token Limit",
+                "Output token limit (0 = use global):",
+                current, 0, 1000000, 100
+            )
+            if ok:
+                inpainter_keys[index]['individual_output_token_limit'] = value if value > 0 else None
+                self.translator_gui.config['inpainter_keys'] = inpainter_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_inpainter_keys()
+                self._show_inpainter_status(f"Updated output limit to: {value if value > 0 else 'global'}")
+        elif column == 3:
+            from PySide6.QtWidgets import QInputDialog
+            current = inpainter_keys[index].get('individual_key_temperature')
+            default = float(current) if current not in (None, "") else -1.0
+            value, ok = QInputDialog.getDouble(
+                self, "Edit Key Temperature",
+                "Temperature (-1 = use global, 0.0 - 1.0):",
+                default, -1.0, 1.0, 2
+            )
+            if ok:
+                if value < 0:
+                    if 'individual_key_temperature' in inpainter_keys[index]:
+                        del inpainter_keys[index]['individual_key_temperature']
+                else:
+                    inpainter_keys[index]['individual_key_temperature'] = value
+                self.translator_gui.config['inpainter_keys'] = inpainter_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_inpainter_keys()
+                self._show_inpainter_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
+        elif column == 4:  # API Delay column
+            from PySide6.QtWidgets import QInputDialog
+            current = inpainter_keys[index].get('api_call_delay') or 0.0
+            try:
+                current = float(current)
+            except (ValueError, TypeError):
+                current = 0.0
+            value, ok = QInputDialog.getDouble(
+                self, "Edit API Call Delay",
+                "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+                current, 0.0, 3600.0, 1
+            )
+            if ok:
+                inpainter_keys[index]['api_call_delay'] = value if value > 0 else 0.0
+                self.translator_gui.config['inpainter_keys'] = inpainter_keys
+                self.translator_gui.save_config(show_message=False)
+                self._load_inpainter_keys()
+                self._show_inpainter_status(f"Updated API delay to: {value if value > 0 else 'global'}")
+
+
+    def _show_inpainter_status(self, message: str):
+        """Show status message in the Inpainter section."""
+        if hasattr(self, 'inpainter_status_label'):
+            self.inpainter_status_label.setText(message)
+
+    def _configure_inpainter_individual_endpoint(self, inpainter_index):
+        """Configure individual endpoint for a Inpainter key"""
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+        if inpainter_index >= len(inpainter_keys):
+            return
+
+        key_data = inpainter_keys[inpainter_index]
+
+        temp_key = APIKeyEntry(
+            api_key=key_data.get('api_key', ''),
+            model=key_data.get('model', ''),
+            cooldown=60,
+            enabled=True,
+            google_credentials=key_data.get('google_credentials'),
+            azure_endpoint=key_data.get('azure_endpoint'),
+            google_region=key_data.get('google_region'),
+            azure_api_version=key_data.get('azure_api_version'),
+            use_individual_endpoint=key_data.get('use_individual_endpoint', False)
+        )
+
+        def on_endpoint_configured():
+            inpainter_keys[inpainter_index]['azure_endpoint'] = temp_key.azure_endpoint
+            inpainter_keys[inpainter_index]['azure_api_version'] = temp_key.azure_api_version
+            inpainter_keys[inpainter_index]['use_individual_endpoint'] = temp_key.use_individual_endpoint
+            self.translator_gui.config['inpainter_keys'] = inpainter_keys
+            self.translator_gui.save_config(show_message=False)
+            self._load_inpainter_keys()
+            status = "configured" if temp_key.use_individual_endpoint else "disabled"
+            self._show_inpainter_status(f"Individual endpoint {status} for Inpainter key")
+
+        if IndividualEndpointDialog is None:
+            QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
+            return
+        dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_inpainter_status)
+        dialog.exec_()
+
+    def _set_inpainter_output_token_limit_for_selected(self):
+        """Set per-key output token limit for selected Inpainter keys."""
+        from PySide6.QtWidgets import QInputDialog
+        selected = self.inpainter_tree.selectedItems()
+        if not selected:
+            return
+
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+        selected_indices = [self.inpainter_tree.indexOfTopLevelItem(item) for item in selected]
+        if not selected_indices:
+            return
+
+        default_val = None
+        first_idx = selected_indices[0]
+        if 0 <= first_idx < len(inpainter_keys):
+            try:
+                raw = inpainter_keys[first_idx].get('individual_output_token_limit')
+                if raw not in (None, ""):
+                    iv = int(raw)
+                    if iv > 0:
+                        default_val = iv
+            except Exception:
+                default_val = None
+        if default_val is None:
+            try:
+                default_val = int(getattr(self.translator_gui, 'max_output_tokens', 8192))
+            except Exception:
+                default_val = 8192
+
+        value, ok = QInputDialog.getInt(
+            self, "Set Inpainter Key Output Token Limit",
+            "Max output tokens for selected Inpainter key(s):",
+            default_val, 1, 2000000, 512,
+        )
+        if not ok or value <= 0:
+            return
+
+        for idx in selected_indices:
+            if 0 <= idx < len(inpainter_keys):
+                inpainter_keys[idx]['individual_output_token_limit'] = int(value)
+        self.translator_gui.config['inpainter_keys'] = inpainter_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_inpainter_keys()
+        self._show_inpainter_status(f"Set Inpainter key output token limit to {value} for {len(selected_indices)} key(s)")
+
+    def _clear_inpainter_output_token_limit_for_selected(self):
+        """Clear per-key output token limit for selected Inpainter keys."""
+        selected = self.inpainter_tree.selectedItems()
+        if not selected:
+            return
+
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+        selected_indices = [self.inpainter_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(inpainter_keys):
+                if 'individual_output_token_limit' in inpainter_keys[idx]:
+                    del inpainter_keys[idx]['individual_output_token_limit']
+        self.translator_gui.config['inpainter_keys'] = inpainter_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_inpainter_keys()
+        self._show_inpainter_status(f"Cleared Inpainter key output token limit for {len(selected_indices)} key(s)")
+
+    def _set_inpainter_key_temperature_for_selected(self):
+        """Set per-key temperature for selected Inpainter keys."""
+        from PySide6.QtWidgets import QInputDialog
+        selected = self.inpainter_tree.selectedItems()
+        if not selected:
+            return
+
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+        selected_indices = [self.inpainter_tree.indexOfTopLevelItem(item) for item in selected]
+        if not selected_indices:
+            return
+
+        default_val = 0.7
+        first_idx = selected_indices[0]
+        if 0 <= first_idx < len(inpainter_keys):
+            try:
+                raw = inpainter_keys[first_idx].get('individual_key_temperature')
+                if raw not in (None, ""):
+                    default_val = float(raw)
+            except Exception:
+                pass
+
+        value, ok = QInputDialog.getDouble(
+            self,
+            "Set Inpainter Key Temperature",
+            "Temperature for selected Inpainter key(s) (0.0 - 1.0):",
+            default_val,
+            0.0,
+            1.0,
+            2,
+        )
+        if not ok:
+            return
+
+        for idx in selected_indices:
+            if 0 <= idx < len(inpainter_keys):
+                inpainter_keys[idx]['individual_key_temperature'] = value
+        self.translator_gui.config['inpainter_keys'] = inpainter_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_inpainter_keys()
+        self._show_inpainter_status(f"Set Inpainter key temperature to {value} for {len(selected_indices)} key(s)")
+
+    def _clear_inpainter_key_temperature_for_selected(self):
+        """Clear per-key temperature for selected Inpainter keys."""
+        selected = self.inpainter_tree.selectedItems()
+        if not selected:
+            return
+
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+        selected_indices = [self.inpainter_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(inpainter_keys):
+                if 'individual_key_temperature' in inpainter_keys[idx]:
+                    del inpainter_keys[idx]['individual_key_temperature']
+        self.translator_gui.config['inpainter_keys'] = inpainter_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_inpainter_keys()
+        self._show_inpainter_status(f"Cleared Inpainter key temperature for {len(selected_indices)} key(s)")
+
+    def _set_inpainter_api_call_delay_for_selected(self):
+        """Set per-key API call delay for selected Inpainter keys."""
+        from PySide6.QtWidgets import QInputDialog
+        selected = self.inpainter_tree.selectedItems()
+        if not selected:
+            return
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+        selected_indices = [self.inpainter_tree.indexOfTopLevelItem(item) for item in selected]
+        default_val = 0.0
+        for idx in selected_indices:
+            if 0 <= idx < len(inpainter_keys):
+                v = inpainter_keys[idx].get('api_call_delay', 0.0) or 0.0
+                if v > 0:
+                    default_val = float(v)
+                    break
+        value, ok = QInputDialog.getDouble(
+            self, "Set API Call Delay",
+            "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+            default_val, 0.0, 3600.0, 1
+        )
+        if ok:
+            for idx in selected_indices:
+                if 0 <= idx < len(inpainter_keys):
+                    inpainter_keys[idx]['api_call_delay'] = value if value > 0 else 0.0
+            self.translator_gui.config['inpainter_keys'] = inpainter_keys
+            self.translator_gui.save_config(show_message=False)
+            self._load_inpainter_keys()
+            self._show_inpainter_status(f"Set API call delay to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
+
+    def _clear_inpainter_api_call_delay_for_selected(self):
+        """Clear per-key API call delay for selected Inpainter keys."""
+        selected = self.inpainter_tree.selectedItems()
+        if not selected:
+            return
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+        selected_indices = [self.inpainter_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(inpainter_keys):
+                inpainter_keys[idx]['api_call_delay'] = 0.0
+        self.translator_gui.config['inpainter_keys'] = inpainter_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_inpainter_keys()
+        self._show_inpainter_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
+
+    def _toggle_inpainter_individual_endpoint(self, inpainter_index, enabled):
+        """Quick toggle individual endpoint on/off for Inpainter key"""
+        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
+        if inpainter_index >= len(inpainter_keys):
+            return
+
+        inpainter_keys[inpainter_index]['use_individual_endpoint'] = enabled
+        self.translator_gui.config['inpainter_keys'] = inpainter_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_inpainter_keys()
+
+        status = "enabled" if enabled else "disabled"
+        model = inpainter_keys[inpainter_index].get('model', 'unknown')
+        self._show_inpainter_status(f"Individual endpoint {status} for Inpainter key ({model})")
+
+    def _browse_inpainter_google_credentials(self):
+        """Browse for Google Cloud credentials JSON file for Inpainter keys."""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Google Cloud Credentials JSON for Inpainter",
+            "",
+            "JSON files (*.json);;All files (*.*)"
+        )
+
+        if filename:
+            try:
+                with open(filename, 'r') as f:
+                    creds_data = json.load(f)
+                    if 'type' in creds_data and 'project_id' in creds_data:
+                        self.inpainter_google_creds_entry.setText(filename)
+                        self._show_inpainter_status(f"Selected Inpainter key Google credentials: {os.path.basename(filename)}")
+                    else:
+                        QMessageBox.critical(
+                            self,
+                            "Error",
+                            "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
+                        )
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
+
+    # ===================================================================
+    # END INPAINTER KEYS SECTION
     # ===================================================================
 
     def _manage_refusal_patterns(self):
@@ -7599,15 +9043,15 @@ class MultiAPIKeyDialog(QDialog):
                 self._refusal_patterns_dialog._reload_from_config()
             except Exception:
                 pass
-        
+
         # Show and raise the dialog
         self._refusal_patterns_dialog.show()
         self._refusal_patterns_dialog.raise_()
         self._refusal_patterns_dialog.activateWindow()
-    
+
     def _attach_model_autofill(self, combo: QComboBox, on_change=None):
         """Attach gentle autofill/autocomplete behavior to a QComboBox.
-        
+
         PySide6 version using QCompleter with similar behavior to the tkinter version:
         - Shows suggestions as user types
         - Prefix-based matching with fallback to contains matching
@@ -7619,24 +9063,24 @@ class MultiAPIKeyDialog(QDialog):
         completer.setCompletionMode(QCompleter.PopupCompletion)
         completer.setFilterMode(Qt.MatchContains)  # Match anywhere in string
         combo.setCompleter(completer)
-        
+
         # Store callback for changes
         if on_change:
             combo.currentTextChanged.connect(lambda: on_change())
             combo.editTextChanged.connect(lambda: on_change())
-        
+
         # Enable completion while typing
         if combo.lineEdit():
             line_edit = combo.lineEdit()
-            
+
             # Connect to text changed signal for gentle autofill
             def on_text_edited(text):
                 if not text:
                     return
-                
+
                 # Find first match (prefix first, then contains)
                 all_items = [combo.itemText(i) for i in range(combo.count())]
-                
+
                 # Try prefix match first
                 prefix_matches = [item for item in all_items if item.lower().startswith(text.lower())]
                 if prefix_matches:
@@ -7645,7 +9089,7 @@ class MultiAPIKeyDialog(QDialog):
                     # Try contains match
                     contains_matches = [item for item in all_items if text.lower() in item.lower()]
                     first_match = contains_matches[0] if contains_matches else None
-                
+
                 # Gentle autofill: only if cursor is at end and we found a match
                 if first_match and line_edit.cursorPosition() == len(text):
                     # Check if text is growing (not backspacing)
@@ -7658,10 +9102,10 @@ class MultiAPIKeyDialog(QDialog):
                             line_edit.setText(first_match)
                             # Select the auto-filled part
                             line_edit.setSelection(cursor_pos, len(first_match) - cursor_pos)
-                
+
                 # Store current text for next comparison
                 line_edit._prev_text = text
-            
+
             line_edit.textEdited.connect(on_text_edited)
             line_edit._prev_text = ""
 
@@ -7687,16 +9131,16 @@ class MultiAPIKeyDialog(QDialog):
         else:
             self.api_key_entry.setEchoMode(QLineEdit.Password)
             self.show_key_btn.setText('👁')
-    
+
     def _toggle_multi_key_mode(self):
         """Toggle multi-key mode - simply hide/show sections"""
         enabled = self.enabled_checkbox.isChecked()
         self.translator_gui.config['use_multi_api_keys'] = enabled
         self.enabled_var = enabled
-        
+
         # Save the config immediately
         self.translator_gui.save_config(show_message=False)
-        
+
         # Sync environment variables and UnifiedClient pool immediately (skip during init)
         if not getattr(self, '_initializing', False):
             try:
@@ -7740,7 +9184,7 @@ class MultiAPIKeyDialog(QDialog):
                         print(msg)
             except Exception as _env_err:
                 print(f"[MULTI_KEY_TOGGLE] Failed to sync env/pool: {_env_err}")
-        
+
         # === Rotation Settings Frame ===
         if hasattr(self, 'rotation_frame'):
             if enabled:
@@ -7749,7 +9193,7 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 self.rotation_frame.hide()
                 self.rotation_frame.setMaximumHeight(0)
-        
+
         # === Add Key Section ===
         if hasattr(self, 'add_key_frame'):
             if enabled:
@@ -7758,7 +9202,7 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 self.add_key_frame.hide()
                 self.add_key_frame.setMaximumHeight(0)
-        
+
         # === Separator ===
         if hasattr(self, 'multikey_separator'):
             if enabled:
@@ -7767,7 +9211,7 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 self.multikey_separator.hide()
                 self.multikey_separator.setMaximumHeight(0)
-        
+
         # === Key List Section ===
         if hasattr(self, 'key_list_frame'):
             if enabled:
@@ -7776,11 +9220,11 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 self.key_list_frame.hide()
                 self.key_list_frame.setMaximumHeight(0)
-        
+
         # === Check if fallback is also disabled ===
         fallback_enabled = self.use_fallback_checkbox.isChecked() if hasattr(self, 'use_fallback_checkbox') else False
         both_disabled = not enabled and not fallback_enabled
-        
+
         # === Adjust fallback container spacing ===
         # When both toggles are disabled, eliminate all top spacing
         if hasattr(self, 'fallback_container'):
@@ -7790,11 +9234,11 @@ class MultiAPIKeyDialog(QDialog):
                     layout.setContentsMargins(0, 0, 0, 0)  # No top margin when both are off
                 else:
                     layout.setContentsMargins(0, 5, 0, 0)  # Normal spacing otherwise
-        
+
         # === Hide fallback separator when both are off ===
         if hasattr(self, 'fallback_separator'):
             self.fallback_separator.setVisible(not both_disabled)
-        
+
         # === Adjust layout spacing ===
         # Reduce spacing between widgets when both toggles are off
         if hasattr(self, 'scrollable_layout'):
@@ -7802,11 +9246,11 @@ class MultiAPIKeyDialog(QDialog):
                 self.scrollable_layout.setSpacing(0)  # No spacing when both disabled
             else:
                 self.scrollable_layout.setSpacing(10)  # Normal spacing otherwise
-        
+
         # Show status message
         status = "enabled" if enabled else "disabled"
         self._show_status(f"Multi-Key Mode {status}")
-        
+
         # Update multi-key status labels in other settings and manga integration
         if hasattr(self.translator_gui, '_update_multi_key_status_label'):
             try:
@@ -7828,10 +9272,10 @@ class MultiAPIKeyDialog(QDialog):
                         mw.multi_key_label.setStyleSheet("color: gray;")
             except Exception:
                 pass
-        
+
         # Re-evaluate AuthGPT login button visibility
         self._notify_authgpt_visibility()
-    
+
     def _copy_current_settings(self):
         """Copy current API key and model from main GUI"""
         # Get current API key and model from translator GUI
@@ -7839,12 +9283,12 @@ class MultiAPIKeyDialog(QDialog):
             api_key = self.translator_gui.api_key_entry.text()
             if api_key:
                 self.api_key_entry.setText(api_key)
-        
+
         if hasattr(self.translator_gui, 'model_combo'):
             model = self.translator_gui.model_combo.currentText()
             if model:
                 self.model_combo.setCurrentText(model)
-    
+
     def _add_key(self):
         """Add a new API key with optional Google credentials and individual endpoint"""
         api_key = self.api_key_entry.text().strip()
@@ -7852,23 +9296,23 @@ class MultiAPIKeyDialog(QDialog):
         cooldown = self.cooldown_spinbox.value()
         google_credentials = self.google_creds_entry.text().strip() or None
         google_region = self.google_region_entry.text().strip() or None
-        
+
         # Only use individual endpoint if toggle is enabled
         use_individual_endpoint = self.individual_endpoint_toggle.isChecked()
         azure_endpoint = self.azure_endpoint_entry.text().strip() if use_individual_endpoint else None
         azure_api_version = self.azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
-        
+
         if not model:
             QMessageBox.critical(self, "Error", "Please enter a model name")
             return
-        
 
-        
+
+
         # Per-key output token limit and temperature default to None (global)
         # Users can set these later via the right-click context menu
         individual_output_token_limit = None
         individual_key_temperature = None
-        
+
         # Add to pool with new fields
         key_entry = APIKeyEntry(
             api_key,
@@ -7884,7 +9328,7 @@ class MultiAPIKeyDialog(QDialog):
             individual_key_temperature=individual_key_temperature,
         )
         self.key_pool.add_key(key_entry)
-        
+
         # Clear inputs
         self.api_key_entry.clear()
         self.model_combo.setCurrentText("")
@@ -7897,40 +9341,40 @@ class MultiAPIKeyDialog(QDialog):
 
         # Update the UI to hide endpoint fields
         self._toggle_individual_endpoint_fields()
-        
+
         # Refresh list
         self._refresh_key_list()
-        
+
         # Show success
         extras = []
         if google_credentials:
             extras.append(f"Google: {os.path.basename(google_credentials)}")
         if azure_endpoint:
             extras.append(f"Azure: {azure_endpoint[:30]}...")
-        
+
         extra_info = f" ({', '.join(extras)})" if extras else ""
         self._show_status(f"Added key for model: {model}{extra_info}")
-        
+
         # Re-evaluate AuthGPT login button visibility
         self._notify_authgpt_visibility()
-    
+
     # Note: _refresh_key_list is defined earlier in the file (PySide6 version)
-    
+
     def _test_selected(self):
         """Test selected API keys with inline progress"""
         # Guard against re-entrant clicks while tests are running
         if getattr(self, '_tests_in_flight', False):
             print("[DEBUG] Tests already in progress, ignoring click")
             return
-        
+
         selected = self.tree.selectedItems()
         if not selected:
             QMessageBox.warning(self, "Warning", "Please select keys to test")
             return
-        
+
         # Get selected indices
         indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
-        
+
         # Mark keys as testing BEFORE starting thread (in main thread)
         for index in indices:
             if index < len(self.key_pool.keys):
@@ -7938,21 +9382,21 @@ class MultiAPIKeyDialog(QDialog):
                 key.last_test_result = None
                 key._testing = True
                 print(f"[DEBUG] Pre-marked key {index} as testing")
-        
+
         # Refresh UI immediately to show testing status
         self._refresh_key_list()
         QApplication.processEvents()  # Force UI update
-        
+
         # NOTE: Do NOT set UnifiedClient._api_key_pool here — it contaminates
         # the class-level pool reference even when multi-key mode is disabled.
         # Individual key tests create their own UnifiedClient instances.
-        
+
         # Run all tests in parallel using executor
         self._test_results = []
         self._total_tests = len(indices)
         self._completed_tests = 0
         self._tests_in_flight = True
-        
+
         # Submit all tests to executor at once
         for index in indices:
             self._submit_single_test(index)
@@ -7963,18 +9407,18 @@ class MultiAPIKeyDialog(QDialog):
         if getattr(self, '_tests_in_flight', False):
             print("[DEBUG] Tests already in progress, ignoring click")
             return
-        
+
         if not self.key_pool.keys:
             QMessageBox.warning(self, "Warning", "No keys to test")
             return
-        
+
         # Only test enabled keys
         indices = [i for i, key in enumerate(self.key_pool.keys) if key.enabled]
-        
+
         if not indices:
             QMessageBox.warning(self, "Warning", "No enabled keys to test")
             return
-        
+
         # Mark keys as testing BEFORE starting thread (in main thread)
         for index in indices:
             if index < len(self.key_pool.keys):
@@ -7982,21 +9426,21 @@ class MultiAPIKeyDialog(QDialog):
                 key.last_test_result = None
                 key._testing = True
                 print(f"[DEBUG] Pre-marked key {index} as testing")
-        
+
         # Refresh UI immediately to show testing status
         self._refresh_key_list()
         QApplication.processEvents()  # Force UI update
-        
+
         # NOTE: Do NOT set UnifiedClient._api_key_pool here — it contaminates
         # the class-level pool reference even when multi-key mode is disabled.
         # Individual key tests create their own UnifiedClient instances.
-        
+
         # Run all tests in parallel using executor
         self._test_results = []
         self._total_tests = len(indices)
         self._completed_tests = 0
         self._tests_in_flight = True
-        
+
         # Submit all tests to executor at once
         for index in indices:
             self._submit_single_test(index)
@@ -8005,23 +9449,23 @@ class MultiAPIKeyDialog(QDialog):
         """Submit a single test to executor for parallel execution"""
         if index >= len(self.key_pool.keys):
             return
-        
+
         key = self.key_pool.keys[index]
         print(f"[DEBUG] Submitting test for key {index}: {key.model}")
-        
+
         # Run REAL API test using executor like translation does
         from concurrent.futures import ThreadPoolExecutor
         from unified_api_client import UnifiedClient
-        
+
         # Use shared executor from main GUI
         if hasattr(self.translator_gui, '_ensure_executor'):
             self.translator_gui._ensure_executor()
         executor = getattr(self.translator_gui, 'executor', None)
-        
+
         # Shared refs so timeout wrapper can hard-cancel and suppress stale results
         client_ref = [None]
         timed_out = [False]
-        
+
         def run_api_test():
             try:
                 client = UnifiedClient(
@@ -8030,7 +9474,7 @@ class MultiAPIKeyDialog(QDialog):
                     output_dir=None
                 )
                 client_ref[0] = client  # expose to timeout wrapper
-                
+
                 # Force 1 retries for testing to speed up failure detection
                 try:
                     tls = client._get_thread_local_client()
@@ -8038,39 +9482,39 @@ class MultiAPIKeyDialog(QDialog):
                     print(f"[DEBUG] Set max_retries_override=1 for key test")
                 except Exception:
                     pass
-                
-                
+
+
                 # Set Google credentials and other key-specific settings
                 if hasattr(key, 'google_credentials') and key.google_credentials:
                     client.current_key_google_creds = key.google_credentials
                     client.google_creds_path = key.google_credentials
                     print(f"[DEBUG] Set Google credentials for test: {os.path.basename(key.google_credentials)}")
-                
+
                 if hasattr(key, 'google_region') and key.google_region:
                     client.current_key_google_region = key.google_region
                     print(f"[DEBUG] Set Google region for test: {key.google_region}")
-                
+
                 # Set Azure endpoint settings if configured
                 if hasattr(key, 'use_individual_endpoint') and key.use_individual_endpoint:
                     if hasattr(key, 'azure_endpoint') and key.azure_endpoint:
                         client.current_key_azure_endpoint = key.azure_endpoint
                         client.current_key_use_individual_endpoint = True
                         print(f"[DEBUG] Set Azure endpoint for test: {key.azure_endpoint[:50]}...")
-                    
+
                     if hasattr(key, 'azure_api_version') and key.azure_api_version:
                         client.current_key_azure_api_version = key.azure_api_version
-                
+
                 messages = [
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": "Say 'API test successful' and nothing else."}
                 ]
-                
+
                 response = client.send(
                     messages,
                     temperature=0.7,
                     max_tokens=1000
                 )
-                
+
                 if response and isinstance(response, tuple):
                     content, _ = response
                     if content and "test successful" in content.lower():
@@ -8081,7 +9525,7 @@ class MultiAPIKeyDialog(QDialog):
                             else:
                                 self._handle_test_result(index, True, "Test passed")
                         return
-                
+
                 # Failed - update via signal/slot
                 if not timed_out[0]:
                     if HAS_GUI:
@@ -8095,7 +9539,7 @@ class MultiAPIKeyDialog(QDialog):
                         QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False), Q_ARG(str, f"Error: {error_msg}"))
                     else:
                         self._handle_test_result(index, False, f"Error: {error_msg}")
-        
+
         # Submit to shared executor with 30-second timeout
         def run_with_timeout():
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
@@ -8132,13 +9576,13 @@ class MultiAPIKeyDialog(QDialog):
                         self._handle_test_result(index, False, "Timed out (30s)")
                 except Exception:
                     pass  # Already handled inside run_api_test
-        
+
         if executor:
             executor.submit(run_with_timeout)
         else:
             thread = threading.Thread(target=run_with_timeout, daemon=True)
             thread.start()
-    
+
     # Decorate _handle_test_result as a slot
     @Slot(int, bool, str) if HAS_GUI else lambda x: x
     def _handle_test_result(self, index, success, message):
@@ -8150,7 +9594,7 @@ class MultiAPIKeyDialog(QDialog):
             self._completed_tests = 0
         if not hasattr(self, '_total_tests'):
             self._total_tests = 0
-        
+
         if index < len(self.key_pool.keys):
             key = self.key_pool.keys[index]
             if success:
@@ -8162,78 +9606,78 @@ class MultiAPIKeyDialog(QDialog):
                     key.set_test_result('timeout', message)
                 else:
                     key.set_test_result('failed', message)
-            
+
             self._test_results.append((index, success, message))
             print(f"[DEBUG] Key {index} test completed - {'PASSED' if success else 'FAILED'}: {message}")
-            
+
             # Update UI
             self._refresh_key_list()
-        
+
         # Track completion
         self._completed_tests += 1
         print(f"[DEBUG] Completed {self._completed_tests}/{self._total_tests} tests")
-        
+
         # If all tests done, finalize
         if self._total_tests > 0 and self._completed_tests >= self._total_tests:
             self._finalize_tests()
-    
+
     def _finalize_tests(self):
         """Finalize after all tests complete"""
         # Clear re-entrancy guard
         self._tests_in_flight = False
-        
+
         # Clear testing flags
         for i, key in enumerate(self.key_pool.keys):
             if hasattr(key, '_testing'):
                 delattr(key, '_testing')
-        
+
         # Calculate summary
         success_count = sum(1 for _, success, _ in getattr(self, '_test_results', []) if success)
         total_count = len(getattr(self, '_test_results', []))
-        
+
         # Final UI update
         self._refresh_key_list()
         self.stats_label.setText(f"Test complete: {success_count}/{total_count} passed")
-        
+
         # Auto-save to persist test results
         self._save_keys_to_config()
         print(f"[DEBUG] All tests completed and saved: {success_count}/{total_count} passed")
-    
+
     def _run_inline_tests(self, indices: List[int]):
         """Run API tests with persistent inline results"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import os
-        
+
         print(f"[DEBUG] Starting tests for {len(indices)} keys")
-        
+
         # Keys are already marked as testing in the main thread before this function is called
         # Just verify they're still marked
         for index in indices:
             if index < len(self.key_pool.keys):
                 key = self.key_pool.keys[index]
                 print(f"[DEBUG] Key {index} testing state: _testing={hasattr(key, '_testing')}, last_test_result={key.last_test_result}")
-        
+
         # Create thread pool for parallel testing
         max_workers = min(10, len(indices))
-        
+
         def test_single_key(index):
             """Test a single API key directly"""
             print(f"[DEBUG] Testing key at index {index}")
-            
+
             if index >= len(self.key_pool.keys):
                 return None
-                
+
             key = self.key_pool.keys[index]
-            
+
             try:
                 # Simple test - just check if we can import the libraries
                 # This is a minimal test to see if the function completes
                 print(f"[DEBUG] Testing {key.model} with key {key.api_key[:8]}...")
-                
+
                 # Simulate a test
                 import time
                 time.sleep(1)  # Simulate API call
-                
+
                 # For now, just mark as passed to test the flow
                 key.mark_success()
                 key.set_test_result('passed', 'Test successful')
@@ -8241,13 +9685,13 @@ class MultiAPIKeyDialog(QDialog):
                 time.sleep(0.5)  # Brief pause to improve retry responsiveness
                 logger.debug("💤 Pausing briefly to improve retry responsiveness after test completion")
                 return (index, True, "Test passed")
-                
+
             except Exception as e:
                 print(f"[DEBUG] Key {index} test failed: {e}")
                 key.mark_error()
                 key.set_test_result('error', str(e)[:30])
                 return (index, False, f"Error: {str(e)[:50]}...")
-        
+
         # Run tests sequentially to avoid threading issues
         results = []
         for index in indices:
@@ -8259,13 +9703,13 @@ class MultiAPIKeyDialog(QDialog):
                 # Schedule UI update on main thread (NOT from background thread)
                 if HAS_GUI:
                     QMetaObject.invokeMethod(self, "_refresh_key_list", Qt.QueuedConnection)
-        
+
         print(f"[DEBUG] All tests complete. Results: {len(results)}")
-        
+
         # Calculate summary
         success_count = sum(1 for _, success, _ in results if success)
         total_count = len(results)
-        
+
         # Clear testing flags
         for index in indices:
             if index < len(self.key_pool.keys):
@@ -8273,7 +9717,7 @@ class MultiAPIKeyDialog(QDialog):
                 if hasattr(key, '_testing'):
                     delattr(key, '_testing')
                     print(f"[DEBUG] Cleared testing flag for key {index}")
-        
+
         # Schedule final UI update on main thread
         def _final_update():
             try:
@@ -8282,13 +9726,13 @@ class MultiAPIKeyDialog(QDialog):
                 self._save_keys_to_config()
             except Exception as e:
                 print(f"[WARN] Final update error: {e}")
-        
+
         if HAS_GUI:
             QTimer.singleShot(0, _final_update)
         else:
             _final_update()
         print(f"[DEBUG] UI refresh and save completed")
-        
+
 
 
     def _update_tree_item(self, index: int):
@@ -8297,13 +9741,13 @@ class MultiAPIKeyDialog(QDialog):
             # Find the tree item for this index
             if index >= self.tree.topLevelItemCount() or index >= len(self.key_pool.keys):
                 return
-            
+
             item = self.tree.topLevelItem(index)
             if not item:
                 return
-            
+
             key = self.key_pool.keys[index]
-            
+
             # Determine status
             if key.last_test_result is None:
                 status = "⏳ Testing..."
@@ -8329,27 +9773,27 @@ class MultiAPIKeyDialog(QDialog):
                 status = f"Cooling ({remaining}s)"
             else:
                 status = "Active"
-            
+
             # Update status column (column 3)
             item.setText(3, status)
-            
+
             # Update success/error counts
             item.setText(4, str(key.success_count))
             item.setText(5, str(key.error_count))
-            
+
             # Update times used
             times_used = getattr(key, 'times_used', key.success_count + key.error_count)
             item.setText(6, str(times_used))
-        
+
         # Run in main thread
         QTimer.singleShot(0, update)
 
     # Note: Another duplicate _refresh_key_list removed - using PySide6 version defined earlier
-    
+
     def _create_progress_dialog(self):
         """Create simple progress dialog at mouse cursor position"""
         from PySide6.QtGui import QCursor
-        
+
         self.progress_dialog = QDialog(self)
         self.progress_dialog.setWindowTitle("Testing API Keys")
         # Use screen ratios for sizing
@@ -8357,14 +9801,14 @@ class MultiAPIKeyDialog(QDialog):
         width = int(screen.width() * 0.26)  # 26% of screen width
         height = int(screen.height() * 0.39)  # 39% of screen height
         self.progress_dialog.resize(width, height)
-        
+
         # Get mouse position and move dialog there
         cursor_pos = QCursor.pos()
         self.progress_dialog.move(cursor_pos.x() - 50, cursor_pos.y() - 30)
-        
+
         # Layout
         layout = QVBoxLayout(self.progress_dialog)
-        
+
         # Add label
         label = QLabel("Testing in progress...")
         label_font = QFont()
@@ -8372,20 +9816,20 @@ class MultiAPIKeyDialog(QDialog):
         label_font.setBold(True)
         label.setFont(label_font)
         layout.addWidget(label)
-        
+
         # Add text widget for results
         self.progress_text = QTextEdit()
         self.progress_text.setReadOnly(True)
         self.progress_text.setMinimumWidth(500)
         self.progress_text.setMinimumHeight(300)
         layout.addWidget(self.progress_text)
-        
+
         # Add close button (initially disabled)
         self.close_button = QPushButton("Close")
         self.close_button.clicked.connect(self.progress_dialog.close)
         self.close_button.setEnabled(False)
         layout.addWidget(self.close_button)
-        
+
         # Show dialog
         self.progress_dialog.show()
 
@@ -8394,56 +9838,56 @@ class MultiAPIKeyDialog(QDialog):
         from unified_api_client import UnifiedClient
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import os
-        
+
         # Get Gemini endpoint settings (auto-detects gRPC vs OpenAI from URL)
         use_gemini_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
         gemini_endpoint = os.getenv("GEMINI_OPENAI_ENDPOINT", "")
-        
+
         # Create thread pool for parallel testing
         max_workers = min(10, len(indices))  # Limit to 10 concurrent tests
-        
+
         def test_single_key(index):
             """Test a single API key"""
             if index >= len(self.key_pool.keys):
                 return None
-                
+
             key = self.key_pool.keys[index]
-            
+
             # Create a key identifier
             key_preview = f"{key.api_key[:8]}...{key.api_key[-4:]}" if len(key.api_key) > 12 else key.api_key
             test_label = f"{key.model} [{key_preview}]"
-            
+
             # Update UI to show test started
             QTimer.singleShot(0, lambda label=test_label: self.progress_text.append(f"Testing {label}... "))
             QTimer.singleShot(0, lambda: self.progress_text.moveCursor(self.progress_text.textCursor().End))
-            
+
             try:
                 # Count this usage for times used in testing as well
                 try:
                     key.times_used += 1
                 except Exception:
                     pass
-                
+
                 # Check if this is a Gemini model with custom endpoint
                 is_gemini_model = key.model.lower().startswith('gemini')
                 # Auto-detect: bare hostname = gRPC (skip OpenAI test), URL with http/openai = REST
                 _ep_lower = gemini_endpoint.strip().lower() if gemini_endpoint else ""
                 _is_openai_rest = _ep_lower.startswith("http") or "/openai" in _ep_lower
-                
+
                 if is_gemini_model and use_gemini_endpoint and gemini_endpoint and _is_openai_rest:
                     # Test Gemini with OpenAI-compatible endpoint
                     import openai
-                    
+
                     endpoint_url = gemini_endpoint
                     if not endpoint_url.endswith('/openai/'):
                         endpoint_url = endpoint_url.rstrip('/') + '/openai/'
-                    
+
                     client = openai.OpenAI(
                         api_key=key.api_key,
                         base_url=endpoint_url,
                         timeout=10.0
                     )
-                    
+
                     response = client.chat.completions.create(
                         model=key.model.replace('gemini/', ''),
                         messages=[
@@ -8453,7 +9897,7 @@ class MultiAPIKeyDialog(QDialog):
                         max_tokens=1000,
                         temperature=0.7
                     )
-                    
+
                     content = response.choices[0].message.content
                     if content and "test successful" in content.lower():
                         QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, True))
@@ -8472,35 +9916,35 @@ class MultiAPIKeyDialog(QDialog):
                         model=key.model,
                         output_dir=None
                     )
-                    
+
                     # Set Google credentials and other key-specific settings
                     if hasattr(key, 'google_credentials') and key.google_credentials:
                         client.current_key_google_creds = key.google_credentials
                         client.google_creds_path = key.google_credentials
-                    
+
                     if hasattr(key, 'google_region') and key.google_region:
                         client.current_key_google_region = key.google_region
-                    
+
                     # Set Azure endpoint settings if configured
                     if hasattr(key, 'use_individual_endpoint') and key.use_individual_endpoint:
                         if hasattr(key, 'azure_endpoint') and key.azure_endpoint:
                             client.current_key_azure_endpoint = key.azure_endpoint
                             client.current_key_use_individual_endpoint = True
-                        
+
                         if hasattr(key, 'azure_api_version') and key.azure_api_version:
                             client.current_key_azure_api_version = key.azure_api_version
-                    
+
                     messages = [
                         {"role": "system", "content": "You are a helpful assistant."},
                         {"role": "user", "content": "Say 'API test successful' and nothing else."}
                     ]
-                    
+
                     response = client.send(
                         messages,
                         temperature=0.7,
                         max_tokens=1000
                     )
-                    
+
                     if response and isinstance(response, tuple):
                         content, finish_reason = response
                         if content and "test successful" in content.lower():
@@ -8518,35 +9962,35 @@ class MultiAPIKeyDialog(QDialog):
                         key.mark_error()
                         key.set_test_result('failed', 'No response')
                         return (index, False, "No response")
-                        
+
             except Exception as e:
                 error_msg = str(e)
                 error_code = None
-                
+
                 if "429" in error_msg or "rate limit" in error_msg.lower():
                     error_code = 429
                     key.set_test_result('rate_limited', error_msg[:30])
                 else:
                     key.set_test_result('error', error_msg[:30])
-                    
+
                 QTimer.singleShot(0, lambda label=test_label: self._update_test_result(label, False, error=True))
                 key.mark_error(error_code)
                 return (index, False, f"Error: {error_msg}")
-        
+
         # Run tests in parallel
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all test tasks
             future_to_index = {executor.submit(test_single_key, i): i for i in indices}
-            
+
             # Process results as they complete
             for future in as_completed(future_to_index):
                 result = future.result()
                 if result:
                     self.test_results.put(result)
-        
+
         # Show completion and close button
         QTimer.singleShot(0, self._show_completion)
-        
+
         # Process final results
         QTimer.singleShot(0, self._process_test_results)
 
@@ -8555,7 +9999,7 @@ class MultiAPIKeyDialog(QDialog):
         # Find the line with this test label
         content = self.progress_text.toPlainText()
         lines = content.split('\n')
-        
+
         for i, line in enumerate(lines):
             if test_label in line and not any(status in line for status in ["✅", "❌"]):
                 # This is our line, update it
@@ -8565,13 +10009,13 @@ class MultiAPIKeyDialog(QDialog):
                     result_text = "✅ PASSED"
                 else:
                     result_text = "❌ FAILED"
-                
+
                 # Update the line
                 lines[i] = line + result_text
-                
+
                 # Set updated text
                 self.progress_text.setPlainText('\n'.join(lines))
-                
+
                 # Scroll to end
                 cursor = self.progress_text.textCursor()
                 cursor.movePosition(cursor.End)
@@ -8585,23 +10029,23 @@ class MultiAPIKeyDialog(QDialog):
         cursor.movePosition(cursor.End)
         self.progress_text.setTextCursor(cursor)
         self.close_button.setEnabled(True)
-        
+
     def _process_test_results(self):
         """Process test results and show in the same dialog"""
         results = []
-        
+
         # Get all results
         while not self.test_results.empty():
             try:
                 results.append(self.test_results.get_nowait())
             except Exception:
                 break
-        
+
         if results:
             # Build result message
             success_count = sum(1 for _, success, _ in results if success)
             total_count = len(results)
-            
+
             # Update everything at once after all tests complete
             def final_update():
                 # Get indices from results
@@ -8612,38 +10056,38 @@ class MultiAPIKeyDialog(QDialog):
                         key = self.key_pool.keys[index]
                         if hasattr(key, '_testing'):
                             delattr(key, '_testing')
-                
+
                 self._refresh_key_list()
                 self.stats_label.setText(f"Test complete: {success_count}/{total_count} passed")
 
             # Use QTimer to update in main thread
             QTimer.singleShot(0, lambda: final_update())
-            
+
             # Add summary to the same dialog
             self.progress_text.append(f"\nSummary: {success_count}/{total_count} passed\n")
             self.progress_text.append("-" * 50 + "\n\n")
-            
+
             for i, success, msg in results:
                 key = self.key_pool.keys[i]
                 # Show key identifier in results too
                 key_preview = f"{key.api_key[:8]}...{key.api_key[-4:]}" if len(key.api_key) > 12 else key.api_key
                 status = "✅" if success else "❌"
                 self.progress_text.append(f"{status} {key.model} [{key_preview}]: {msg}\n")
-            
+
             # Scroll to end
             cursor = self.progress_text.textCursor()
             cursor.movePosition(cursor.End)
             self.progress_text.setTextCursor(cursor)
-            
+
             # Enable close button now that testing is complete
             self.close_button.setEnabled(True)
-            
+
             # Update the dialog title
             self.progress_dialog.setWindowTitle(f"API Test Results - {success_count}/{total_count} passed")
-            
+
             # Refresh list
             self._refresh_key_list()
-    
+
     def _enable_selected(self):
         """Enable selected keys"""
         selected = self.tree.selectedItems()
@@ -8651,11 +10095,11 @@ class MultiAPIKeyDialog(QDialog):
             index = self.tree.indexOfTopLevelItem(item)
             if index < len(self.key_pool.keys):
                 self.key_pool.keys[index].enabled = True
-        
+
         self._refresh_key_list()
         self._show_status(f"Enabled {len(selected)} key(s)")
         self._notify_authgpt_visibility()
-    
+
     def _disable_selected(self):
         """Disable selected keys"""
         selected = self.tree.selectedItems()
@@ -8663,57 +10107,57 @@ class MultiAPIKeyDialog(QDialog):
             index = self.tree.indexOfTopLevelItem(item)
             if index < len(self.key_pool.keys):
                 self.key_pool.keys[index].enabled = False
-        
+
         self._refresh_key_list()
         self._show_status(f"Disabled {len(selected)} key(s)")
         self._notify_authgpt_visibility()
-    
+
     def _remove_selected(self):
         """Remove selected keys"""
         selected = self.tree.selectedItems()
         if not selected:
             return
-        
+
         reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected key(s)?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             # Get indices in reverse order to avoid index shifting
             indices = sorted([self.tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
-            
+
             for index in indices:
                 self.key_pool.remove_key(index)
-            
+
             self._refresh_key_list()
             self._show_status(f"Removed {len(selected)} key(s)")
-            
+
             # Re-evaluate AuthGPT login button visibility
             self._notify_authgpt_visibility()
-    
+
     def _edit_cooldown(self):
         """Edit cooldown for selected key"""
         selected = self.tree.selectedItems()
         if not selected or len(selected) != 1:
             QMessageBox.warning(self, "Warning", "Please select exactly one key")
             return
-        
+
         index = self.tree.indexOfTopLevelItem(selected[0])
         if index >= len(self.key_pool.keys):
             return
-        
+
         key = self.key_pool.keys[index]
-        
+
         # Use QInputDialog for simplicity
         from PySide6.QtWidgets import QInputDialog
         value, ok = QInputDialog.getInt(
             self, "Edit Cooldown", f"Cooldown for {key.model} (seconds):",
             key.cooldown, 10, 3600, 10
         )
-        
+
         if ok:
             key.cooldown = value
             self._refresh_key_list()
             self._show_status(f"Updated cooldown to {value}s")
-    
+
     def _import_keys(self):
         """Import keys from JSON file"""
         filename, _ = QFileDialog.getOpenFileName(
@@ -8722,12 +10166,12 @@ class MultiAPIKeyDialog(QDialog):
             "",
             "JSON files (*.json);;All files (*.*)"
         )
-        
+
         if filename:
             try:
                 with open(filename, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                
+
                 if isinstance(data, list):
                     # Load keys
                     imported_count = 0
@@ -8735,47 +10179,47 @@ class MultiAPIKeyDialog(QDialog):
                         if isinstance(key_data, dict) and 'api_key' in key_data and 'model' in key_data:
                             self.key_pool.add_key(APIKeyEntry.from_dict(key_data))
                             imported_count += 1
-                    
+
                     self._refresh_key_list()
                     self._notify_authgpt_visibility()
                     QMessageBox.information(self, "Success", f"Imported {imported_count} API keys")
                 else:
                     QMessageBox.critical(self, "Error", "Invalid file format")
-                    
+
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to import: {str(e)}")
-    
+
     def _export_keys(self):
         """Export keys to JSON file"""
         if not self.key_pool.keys:
             QMessageBox.warning(self, "Warning", "No keys to export")
             return
-        
+
         filename, _ = QFileDialog.getSaveFileName(
             self,
             "Export API Keys",
             "",
             "JSON files (*.json);;All files (*.*)"
         )
-        
+
         if filename:
             try:
                 # Convert keys to list of dicts
                 key_list = [key.to_dict() for key in self.key_pool.get_all_keys()]
-                
+
                 with open(filename, 'w', encoding='utf-8') as f:
                     json.dump(key_list, f, indent=2, ensure_ascii=False)
-                
+
                 QMessageBox.information(self, "Success", f"Exported {len(key_list)} API keys")
-                
+
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to export: {str(e)}")
-    
+
     def _show_status(self, message: str):
         """Show status message"""
         if hasattr(self, 'stats_label'):
             self.stats_label.setText(message)
-    
+
     def _save_and_close(self):
         """Save configuration"""
         self._save_keys_to_config()
@@ -8816,7 +10260,7 @@ class MultiAPIKeyDialog(QDialog):
             winsound.MessageBeep(winsound.MB_OK)
         except Exception:
             pass
-    
+
     def _on_close(self):
         """Handle dialog close"""
         self.reject()

@@ -1839,6 +1839,10 @@ class UnifiedClient:
     # QA scan-dedicated key pool (separate from main and glossary pools)
     _qa_scan_key_pool: Optional[APIKeyPool] = None
     _qa_scan_pool_lock = threading.Lock()
+
+    # Inpainter-dedicated key pool (exclusive to manga custom-image-edit calls)
+    _inpainter_key_pool: Optional[APIKeyPool] = None
+    _inpainter_pool_lock = threading.Lock()
     
     # Request tracking
     _global_request_counter = 0
@@ -2406,6 +2410,82 @@ class UnifiedClient:
                     print(f"🔑 Vision key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
                 else:
                     print(f"🔑 Vision key pool: {len(validated_keys)} keys loaded")
+
+            return True
+
+    # In-memory Inpainter-key configuration.
+    _in_memory_inpainter_keys = None
+    _in_memory_inpainter_keys_lock = RLock()
+
+    @classmethod
+    def set_in_memory_inpainter_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
+        """Configure Inpainter-key mode without storing the full key list in environment variables."""
+        try:
+            with cls._in_memory_inpainter_keys_lock:
+                cls._in_memory_inpainter_keys = keys_list
+        except Exception:
+            pass
+        try:
+            cls.setup_inpainter_key_pool(keys_list, force_rotation=force_rotation, rotation_frequency=rotation_frequency)
+        except Exception:
+            return False
+        return True
+
+    @classmethod
+    def clear_in_memory_inpainter_keys(cls):
+        """Clear in-memory Inpainter-key configuration."""
+        with cls._in_memory_inpainter_keys_lock:
+            cls._in_memory_inpainter_keys = None
+        with cls._inpainter_pool_lock:
+            cls._inpainter_key_pool = None
+
+    @classmethod
+    def setup_inpainter_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
+        """Setup the shared Inpainter API key pool (mirrors setup_glossary_key_pool)."""
+        with cls._inpainter_pool_lock:
+            if cls._inpainter_key_pool is None:
+                cls._inpainter_key_pool = APIKeyPool()
+            cls._inpainter_pool_logged = False
+
+            if cls._rate_limit_cache is None:
+                cls._rate_limit_cache = RateLimitCache()
+
+            validated_keys = []
+            encrypted_keys_fixed = 0
+
+            for key_data in keys_list:
+                if not isinstance(key_data, dict):
+                    continue
+                api_key = key_data.get('api_key', '')
+                model = key_data.get('model', '')
+                if not api_key and cls._model_needs_api_key(model):
+                    continue
+                if api_key and api_key.startswith('ENC:'):
+                    try:
+                        from api_key_encryption import get_handler
+                        handler = get_handler()
+                        decrypted_key = handler.decrypt_value(api_key)
+                        if decrypted_key != api_key and not decrypted_key.startswith('ENC:'):
+                            fixed_key_data = key_data.copy()
+                            fixed_key_data['api_key'] = decrypted_key
+                            validated_keys.append(fixed_key_data)
+                            encrypted_keys_fixed += 1
+                    except Exception:
+                        continue
+                else:
+                    validated_keys.append(key_data)
+
+            if not validated_keys:
+                return False
+
+            cls._inpainter_key_pool.load_from_list(validated_keys)
+
+            existing_count = len(getattr(cls._inpainter_key_pool, 'keys', [])) if cls._inpainter_key_pool else 0
+            if existing_count != len(validated_keys):
+                if encrypted_keys_fixed > 0:
+                    print(f"🔑 Inpainter key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
+                else:
+                    print(f"🔑 Inpainter key pool: {len(validated_keys)} keys loaded")
 
             return True
     
@@ -4793,6 +4873,117 @@ class UnifiedClient:
         if not result or not isinstance(result, tuple):
             raise UnifiedClientError("Invalid result from perform()", error_type="unexpected")
         return result
+
+    def _apply_dedicated_key_pool_override(self, pool, key_data_list, label: str, key_prefix: str):
+        """Temporarily route this request through a dedicated APIKeyPool."""
+        if not pool or not getattr(pool, 'keys', []):
+            return None
+        if not any(getattr(k, 'enabled', True) for k in pool.keys):
+            return None
+
+        state = {
+            'api_key': self.api_key,
+            'model': self.model,
+            'multi_key_mode': self._multi_key_mode,
+            'had_instance_pool': '_api_key_pool' in self.__dict__,
+            'instance_pool': self.__dict__.get('_api_key_pool', None),
+        }
+
+        self._multi_key_mode = True
+        self._api_key_pool = pool
+        try:
+            pool.release_thread_assignment()
+        except Exception:
+            pass
+
+        try:
+            key_info = self._get_next_available_key()
+            if not key_info:
+                if state['had_instance_pool']:
+                    self._api_key_pool = state['instance_pool']
+                elif '_api_key_pool' in self.__dict__:
+                    del self._api_key_pool
+                self._multi_key_mode = state['multi_key_mode']
+                return None
+            key_entry, key_idx = key_info
+            self.api_key = key_entry.api_key
+            self.model = key_entry.model
+            self.current_key_index = key_idx
+            self.key_identifier = f"{key_prefix}#{key_idx + 1} ({key_entry.model})"
+
+            key_data = None
+            try:
+                if key_idx < len(key_data_list or []):
+                    key_data = key_data_list[key_idx]
+            except Exception:
+                key_data = None
+
+            if key_data:
+                google_creds = key_data.get('google_credentials')
+                if google_creds:
+                    self.current_key_google_creds = google_creds
+                    self.google_creds_path = google_creds
+                google_region = key_data.get('google_region')
+                if google_region:
+                    self.current_key_google_region = google_region
+                if key_data.get('use_individual_endpoint'):
+                    endpoint = key_data.get('azure_endpoint')
+                    if endpoint:
+                        self.current_key_azure_endpoint = endpoint
+                        self.current_key_use_individual_endpoint = True
+                    api_version = key_data.get('azure_api_version')
+                    if api_version:
+                        self.current_key_azure_api_version = api_version
+                output_limit = key_data.get('individual_output_token_limit')
+                if output_limit and int(output_limit) > 0:
+                    try:
+                        tls = self._get_thread_local_client()
+                        tls.per_key_max_output_tokens = int(output_limit)
+                    except Exception:
+                        pass
+                key_temp = key_data.get('individual_key_temperature')
+                if key_temp not in (None, ""):
+                    try:
+                        tls = self._get_thread_local_client()
+                        tls.individual_key_temperature = float(key_temp)
+                    except Exception:
+                        pass
+                try:
+                    raw_delay = key_data.get('api_call_delay', 0.0)
+                    delay = float(raw_delay) if raw_delay not in (None, '') else 0.0
+                    self._per_key_api_delay = delay if delay > 0 else None
+                except Exception:
+                    self._per_key_api_delay = None
+
+            self._setup_client()
+            self._skip_next_ensure_thread = True
+            try:
+                tls = self._get_thread_local_client()
+                tls.api_key = key_entry.api_key
+                tls.model = key_entry.model
+                tls.key_index = key_idx
+                tls.key_identifier = self.key_identifier
+                tls.google_credentials = getattr(self, 'current_key_google_creds', None)
+                tls.azure_endpoint = getattr(self, 'current_key_azure_endpoint', None)
+                tls.azure_api_version = getattr(self, 'current_key_azure_api_version', None)
+                tls.google_region = getattr(self, 'current_key_google_region', None)
+                tls.use_individual_endpoint = getattr(self, 'current_key_use_individual_endpoint', False)
+                tls.api_call_delay = getattr(key_entry, 'api_call_delay', 0.0)
+                tls.initialized = True
+                tls.last_rotation = time.time()
+                tls.request_count = 0
+            except Exception:
+                pass
+            return state
+        except Exception as exc:
+            print(f"[{label.upper()} KEYS] Failed to get {label} key from pool: {exc}")
+            if state['had_instance_pool']:
+                self._api_key_pool = state['instance_pool']
+            elif '_api_key_pool' in self.__dict__:
+                del self._api_key_pool
+            self._multi_key_mode = state['multi_key_mode']
+            return None
+
     def _send_core(self,
                    messages,
                    temperature: Optional[float] = None,
@@ -4810,6 +5001,8 @@ class UnifiedClient:
         # can always reference them (even if an exception fires early).
         _glossary_overridden = False
         _qa_scan_overridden = False
+        _inpainter_overridden = False
+        _dedicated_pool_state = None
         _original_api_key = None
         _original_model = None
         _original_multi_key_mode = None
@@ -5022,9 +5215,48 @@ class UnifiedClient:
                 except Exception as e:
                     print(f"[VISION KEYS] ⚠️ Failed to apply Vision key override: {e}")
             
+            # INPAINTER KEY OVERRIDE: exclusive pool for manga custom-image-edit requests.
+            _is_inpainter_context = str(context or '').lower() == 'inpainter'
+            if not _qa_scan_overridden and _is_inpainter_context:
+                try:
+                    use_inpainter_keys = os.getenv('USE_INPAINTER_KEYS', '0') == '1'
+                    if use_inpainter_keys:
+                        inpainter_pool = self.__class__._inpainter_key_pool
+                        if not inpainter_pool or not getattr(inpainter_pool, 'keys', []):
+                            inpainter_keys_json = os.getenv('INPAINTER_API_KEYS', '[]')
+                            if inpainter_keys_json != '[]':
+                                try:
+                                    inpainter_keys_list = json.loads(inpainter_keys_json)
+                                    if inpainter_keys_list:
+                                        self.__class__.setup_inpainter_key_pool(inpainter_keys_list)
+                                        inpainter_pool = self.__class__._inpainter_key_pool
+                                except Exception:
+                                    pass
+
+                        with self.__class__._in_memory_inpainter_keys_lock:
+                            ik_list = self.__class__._in_memory_inpainter_keys or []
+                        _dedicated_pool_state = self._apply_dedicated_key_pool_override(
+                            inpainter_pool,
+                            ik_list,
+                            'Inpainter',
+                            'InpainterKey',
+                        )
+                        if _dedicated_pool_state:
+                            _inpainter_overridden = True
+                            _original_api_key = _dedicated_pool_state['api_key']
+                            _original_model = _dedicated_pool_state['model']
+                            _original_multi_key_mode = _dedicated_pool_state['multi_key_mode']
+                            _had_instance_pool = _dedicated_pool_state['had_instance_pool']
+                            _original_instance_pool = _dedicated_pool_state['instance_pool']
+                            if not getattr(self.__class__, '_inpainter_pool_logged', False):
+                                print(f"[INPAINTER KEYS] Using Inpainter key pool ({len(inpainter_pool.keys)} keys)")
+                                self.__class__._inpainter_pool_logged = True
+                except Exception as e:
+                    print(f"[INPAINTER KEYS] Failed to apply Inpainter key override: {e}")
+
             # GLOSSARY KEY OVERRIDE: When context is 'glossary' and glossary keys are enabled,
             # use the glossary key pool for full multi-key rotation (mirrors main multi-key mode).
-            if not _qa_scan_overridden and (context == 'glossary' or (not context and 'Glossary' in threading.current_thread().name)):
+            if not _qa_scan_overridden and not _inpainter_overridden and (context == 'glossary' or (not context and 'Glossary' in threading.current_thread().name)):
                 try:
                     use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
                     if use_glossary_keys:
@@ -5258,8 +5490,8 @@ class UnifiedClient:
                 else:
                     return self._send_image_internal(messages, image_data, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
         finally:
-            # Restore original key/model and pool if we overrode them for glossary or QA scan context
-            if _glossary_overridden or _qa_scan_overridden:
+            # Restore original key/model and pool if we overrode them for a dedicated context
+            if _glossary_overridden or _qa_scan_overridden or _inpainter_overridden:
                 if _original_api_key is not None:
                     self.api_key = _original_api_key
                     self.model = _original_model

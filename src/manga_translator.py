@@ -9721,7 +9721,7 @@ class MangaTranslator:
         if str(local_method or '').lower() == 'custom-image-edit':
             endpoint_enabled = True
             if hasattr(self, 'main_gui') and getattr(self.main_gui, 'config', None):
-                endpoint_enabled = bool(self.main_gui.config.get('use_custom_image_edit_endpoint', True))
+                endpoint_enabled = bool(self.main_gui.config.get('use_custom_image_edit_endpoint', False))
             if False and not endpoint_enabled:
                 self._log("âš ï¸ Custom Image Edit Endpoint is disabled", "warning")
                 return None

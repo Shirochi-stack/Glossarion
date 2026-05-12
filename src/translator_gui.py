@@ -1945,7 +1945,7 @@ Text to analyze:
         self.custom_image_edit_prompt_var = self.custom_image_edit_system_prompt_var
         self.use_custom_image_edit_endpoint_var = self.config.get(
             'use_custom_image_edit_endpoint',
-            bool(self.custom_image_edit_endpoint_var)
+            False
         )
         self.openai_tts_endpoint_var = self.config.get('openai_tts_endpoint', '')
         self.tts_voice_var = self.config.get('tts_voice', '')
@@ -13997,12 +13997,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['USE_GLOSSARY_KEYS'] = '1' if self.config.get('use_glossary_keys', False) else '0'
                 vision_keys_enabled = self.config.get('use_qa_scan_keys', False)
                 vision_keys = self.config.get('qa_scan_keys', [])
+                inpainter_keys_enabled = self.config.get('use_inpainter_keys', False)
+                inpainter_keys = self.config.get('inpainter_keys', [])
                 os.environ['USE_VISION_KEYS'] = '1' if vision_keys_enabled else '0'
                 os.environ['USE_QA_SCAN_KEYS'] = os.environ['USE_VISION_KEYS']
+                os.environ['USE_INPAINTER_KEYS'] = '1' if inpainter_keys_enabled else '0'
                 os.environ['FALLBACK_KEYS'] = json.dumps(self.config.get('fallback_keys', []))
                 os.environ['GLOSSARY_API_KEYS'] = json.dumps(self.config.get('glossary_keys', []))
                 os.environ['VISION_API_KEYS'] = json.dumps(vision_keys)
                 os.environ['QA_SCAN_API_KEYS'] = os.environ['VISION_API_KEYS']
+                os.environ['INPAINTER_API_KEYS'] = json.dumps(inpainter_keys)
 
                 # In-memory key pools
                 if self.config.get('use_multi_api_keys', False) and self.config.get('multi_api_keys', []):
@@ -14029,6 +14033,17 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 else:
                     if vision_keys_enabled:
                         self.append_log("[GTool] Vision Keys enabled but no keys configured")
+                if inpainter_keys_enabled and inpainter_keys:
+                    ok = UnifiedClient.set_in_memory_inpainter_keys(
+                        inpainter_keys,
+                        force_rotation=self.config.get('force_key_rotation', True),
+                        rotation_frequency=self.config.get('rotation_frequency', 1),
+                    )
+                    pool = getattr(UnifiedClient, '_inpainter_key_pool', None)
+                    pool_count = len(getattr(pool, 'keys', [])) if pool else 0
+                    self.append_log(f"[GTool] Inpainter key pool: {pool_count} keys loaded (setup={'OK' if ok else 'FAILED'})")
+                elif inpainter_keys_enabled:
+                    self.append_log("[GTool] Inpainter Keys enabled but no keys configured")
             except Exception as e:
                 self.append_log(f"[GTool] ⚠️ Key pool init error: {e}")
 
@@ -14689,6 +14704,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 )
             else:
                 UnifiedClient.clear_in_memory_vision_keys()
+
+            # Configure Inpainter key pool for manga custom-image-edit requests.
+            if self.config.get('use_inpainter_keys', False) and self.config.get('inpainter_keys', []):
+                UnifiedClient.set_in_memory_inpainter_keys(
+                    self.config.get('inpainter_keys', []),
+                    force_rotation=self.config.get('force_key_rotation', True),
+                    rotation_frequency=self.config.get('rotation_frequency', 1),
+                )
+            else:
+                UnifiedClient.clear_in_memory_inpainter_keys()
         except Exception:
             pass
 
@@ -15046,11 +15071,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                                    '.cognitiveservices' in self.openai_base_url_var)) else '0',
             'AZURE_API_VERSION': str(self.config.get('azure_api_version', '2024-08-01-preview')),
             
-           # Multi API Key support
+            # Multi API Key support
             # NOTE: Do NOT put the full multi-key JSON into MULTI_API_KEYS env var (Windows 32767-char limit).
             'USE_MULTI_API_KEYS': "1" if self.config.get('use_multi_api_keys', False) else "0",
             'FORCE_KEY_ROTATION': '1' if self.config.get('force_key_rotation', True) else '0',
             'ROTATION_FREQUENCY': str(self.config.get('rotation_frequency', 1)),
+            'USE_INPAINTER_KEYS': "1" if self.config.get('use_inpainter_keys', False) else "0",
+            'INPAINTER_API_KEYS': json.dumps(self.config.get('inpainter_keys', []) or []),
            
             # Glossary-specific overrides
             'GLOSSARY_COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', self.compression_factor_var)),
@@ -22638,6 +22665,7 @@ Important rules:
                 ('vision_ocr_source_prepass', ['vision_ocr_source_prepass_var'], 'auto', str),
                 ('use_custom_openai_endpoint', ['use_custom_openai_endpoint_var'], False, bool),
                 ('use_custom_image_edit_endpoint', ['use_custom_image_edit_endpoint_var'], False, bool),
+                ('use_inpainter_keys', ['use_inpainter_keys_var'], False, bool),
                 ('disable_chapter_merging', ['disable_chapter_merging_var'], False, bool),
                 # Request merging settings
                 ('request_merging_enabled', ['request_merging_enabled_var'], False, bool),
@@ -22679,6 +22707,7 @@ Important rules:
                 ('custom_image_edit_endpoint', ['custom_image_edit_endpoint_var'], '', str),
                 ('custom_image_edit_system_prompt', ['custom_image_edit_system_prompt_var'], '', str),
                 ('custom_image_edit_user_prompt', ['custom_image_edit_user_prompt_var'], '', str),
+                ('inpainter_keys', ['inpainter_keys_var'], [], list),
                 ('openai_tts_endpoint', ['openai_tts_endpoint_var'], '', str),
                 ('tts_voice', ['tts_voice_var'], '', str),
                 ('groq_base_url', ['groq_base_url_var'], '', str),

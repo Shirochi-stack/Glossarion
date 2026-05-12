@@ -4711,7 +4711,7 @@ class MangaTranslationTab(QObject):
 
         self.use_custom_image_edit_endpoint_value = self.main_gui.config.get(
             'use_custom_image_edit_endpoint',
-            bool(self.main_gui.config.get('custom_image_edit_endpoint', ''))
+            False
         )
         self.custom_image_edit_endpoint_value = self.main_gui.config.get('custom_image_edit_endpoint', '')
         self.custom_image_edit_system_prompt_value = self.main_gui.config.get(
@@ -10207,7 +10207,7 @@ class MangaTranslationTab(QObject):
             self.custom_image_edit_endpoint_value = self.main_gui.config.get('custom_image_edit_endpoint', '')
             self.use_custom_image_edit_endpoint_value = self.main_gui.config.get(
                 'use_custom_image_edit_endpoint',
-                bool(self.custom_image_edit_endpoint_value)
+                False
             )
             self._sync_custom_image_edit_controls(
                 url=self.custom_image_edit_endpoint_value,
@@ -10312,7 +10312,7 @@ class MangaTranslationTab(QObject):
         from PySide6.QtWidgets import QApplication
         if str(method or '').lower() == 'custom-image-edit':
             endpoint = str(model_path or getattr(self, 'custom_image_edit_endpoint_value', '') or self.main_gui.config.get('custom_image_edit_endpoint', '') or '').strip()
-            self._sync_custom_image_edit_controls(endpoint, getattr(self, 'use_custom_image_edit_endpoint_value', True), source='manga')
+            self._sync_custom_image_edit_controls(endpoint, getattr(self, 'use_custom_image_edit_endpoint_value', False), source='manga')
             try:
                 from local_inpainter import LocalInpainter
                 inp = LocalInpainter(enable_worker_process=False)
@@ -13899,6 +13899,26 @@ class MangaTranslationTab(QObject):
                         # Explicitly disable if not configured
                         os.environ['USE_MULTI_API_KEYS'] = '0'
                         os.environ['USE_MULTI_KEYS'] = '0'
+
+                    # Dedicated Inpainter pool for manga custom-image-edit requests.
+                    inpainter_keys = self.main_gui.config.get('inpainter_keys', []) or []
+                    use_inpainter_keys = bool(self.main_gui.config.get('use_inpainter_keys', False))
+                    os.environ['USE_INPAINTER_KEYS'] = '1' if use_inpainter_keys else '0'
+                    os.environ['INPAINTER_API_KEYS'] = json.dumps(inpainter_keys)
+                    try:
+                        from unified_api_client import UnifiedClient
+                        if use_inpainter_keys and inpainter_keys:
+                            UnifiedClient.set_in_memory_inpainter_keys(
+                                inpainter_keys,
+                                force_rotation=self.main_gui.config.get('force_key_rotation', True),
+                                rotation_frequency=self.main_gui.config.get('rotation_frequency', 1),
+                            )
+                            self._log(f"Inpainter key pool ENABLED for manga custom-image-edit ({len(inpainter_keys)} keys)", "info")
+                        else:
+                            UnifiedClient.clear_in_memory_inpainter_keys()
+                    except Exception:
+                        pass
+
                     # Fallback keys (optional)
                     if self.main_gui.config.get('use_fallback_keys', False):
                         os.environ['USE_FALLBACK_KEYS'] = '1'

@@ -2738,6 +2738,7 @@ class LocalInpainter:
                         messages,
                         temperature=float(self.config.get('temperature', 0.3) or 0.3),
                         max_tokens=int(self.config.get('max_output_tokens', self.config.get('max_tokens', 4096)) or 4096),
+                        context='Inpainter',
                     )
                 finally:
                     for key, value in old_env.items():
