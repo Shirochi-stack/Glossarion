@@ -2960,7 +2960,13 @@ def _run_detection_sync(self, image_path: str, detection_config: dict) -> list:
         except Exception as e:
             print(f"[DETECT_SYNC] Failed to return detector to pool: {e}")
 
-def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
+def _run_inpainting_sync(
+    self,
+    image_path: str,
+    regions: list,
+    save_as: str = 'cleaned',
+    custom_image_edit_system_prompt: str = None,
+) -> str:
     """Run inpainting synchronously (for Translate button) and return cleaned image path
     
     Args:
@@ -2968,7 +2974,7 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
         regions: List of region dictionaries with 'bbox' keys
         
     Returns:
-        str: Path to cleaned image, or None if inpainting failed
+        str: Path to cleaned/translated image, or None if inpainting failed
     """
     temp_translator = None  # Track temporary translator for pool cleanup
     try:
@@ -3207,9 +3213,36 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
                 print(f"[INPAINT_SYNC] Force-cancelled before inpainting")
                 return None
             
-            # Run inpainting
+            old_custom_image_edit_prompts = None
+            if is_custom_image_edit and custom_image_edit_system_prompt:
+                old_custom_image_edit_prompts = (
+                    inpainter.config.get('custom_image_edit_system_prompt'),
+                    inpainter.config.get('custom_image_edit_prompt'),
+                    inpainter.config.get('custom_image_edit_user_prompt'),
+                )
+                inpainter.config['custom_image_edit_system_prompt'] = custom_image_edit_system_prompt
+                inpainter.config['custom_image_edit_prompt'] = custom_image_edit_system_prompt
+                inpainter.config['custom_image_edit_user_prompt'] = ''
+
+            # Run inpainting/image editing
             print(f"[INPAINT_SYNC] Running local inpainting...")
-            cleaned_image = inpainter.inpaint(image, mask)
+            try:
+                cleaned_image = inpainter.inpaint(image, mask)
+            finally:
+                if old_custom_image_edit_prompts is not None:
+                    old_system, old_prompt, old_user = old_custom_image_edit_prompts
+                    if old_system is None:
+                        inpainter.config.pop('custom_image_edit_system_prompt', None)
+                    else:
+                        inpainter.config['custom_image_edit_system_prompt'] = old_system
+                    if old_prompt is None:
+                        inpainter.config.pop('custom_image_edit_prompt', None)
+                    else:
+                        inpainter.config['custom_image_edit_prompt'] = old_prompt
+                    if old_user is None:
+                        inpainter.config.pop('custom_image_edit_user_prompt', None)
+                    else:
+                        inpainter.config['custom_image_edit_user_prompt'] = old_user
             
             # Return inpainter to pool AFTER inpainting completes
             try:
@@ -3278,10 +3311,16 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
                 output_dir = os.path.join(parent_dir, f"{base}_translated")
             
             os.makedirs(output_dir, exist_ok=True)
-            cleaned_path = os.path.join(output_dir, f"{base}_cleaned{ext}")
+            if save_as == 'translated':
+                cleaned_path = os.path.join(output_dir, filename)
+            else:
+                cleaned_path = os.path.join(output_dir, f"{base}_cleaned{ext}")
 
             cv2.imwrite(cleaned_path, cleaned_image)
-            print(f"[INPAINT_SYNC] Saved cleaned image to: {cleaned_path}")
+            if save_as == 'translated':
+                print(f"[INPAINT_SYNC] Saved translated image to: {cleaned_path}")
+            else:
+                print(f"[INPAINT_SYNC] Saved cleaned image to: {cleaned_path}")
             return cleaned_path
         else:
             print(f"[INPAINT_SYNC] Inpainting returned None")
@@ -4496,7 +4535,7 @@ def _run_custom_image_edit_translate_clicked(self):
 
         _disable_workflow_buttons(self, exclude=None)
         if hasattr(self.image_preview_widget, 'translate_btn'):
-            self.image_preview_widget.translate_btn.setText("Editing...")
+            self.image_preview_widget.translate_btn.setText("Translating...")
         if hasattr(self.image_preview_widget, 'thumbnail_list'):
             self.image_preview_widget.thumbnail_list.setEnabled(False)
             print("[TRANSLATE] Disabled thumbnail list during custom image edit")
@@ -4524,23 +4563,38 @@ def _run_custom_image_edit_translate_background(self, image_path: str):
             self._log("âš ï¸ No regions found for custom image edit", "warning")
             return
 
-        cleaned_path = _run_inpainting_sync(self, image_path, regions)
-        if not cleaned_path or not os.path.exists(cleaned_path):
+        system_prompt = _get_system_prompt_from_gui(self)
+        if not system_prompt:
+            self._log("No system prompt configured in translator GUI profile - custom image edit translation cannot proceed", "warning")
+            return
+
+        translated_path = _run_inpainting_sync(
+            self,
+            image_path,
+            regions,
+            save_as='translated',
+            custom_image_edit_system_prompt=system_prompt,
+        )
+        if not translated_path or not os.path.exists(translated_path):
             self._log("âš ï¸ Custom image edit did not produce an edited image", "warning")
             return
 
         try:
-            self._cleaned_image_path = cleaned_path
+            if not hasattr(self, '_rendered_images_map'):
+                self._rendered_images_map = {}
+            self._rendered_images_map[image_path] = translated_path
+            if hasattr(self.image_preview_widget, 'current_translated_path'):
+                self.image_preview_widget.current_translated_path = translated_path
             if hasattr(self, 'image_state_manager'):
                 self.image_state_manager.update_state(image_path, {
-                    'cleaned_image_path': cleaned_path,
+                    'rendered_image_path': translated_path,
                     'step': 'translated'
                 })
         except Exception:
             pass
 
         self.update_queue.put(('preview_update', {
-            'translated_path': cleaned_path,
+            'translated_path': translated_path,
             'source_path': image_path
         }))
         self.update_queue.put(('switch_to_translated_mode', {
@@ -10964,7 +11018,7 @@ def _run_custom_image_edit_translate_all_clicked(self, image_paths: list):
         total_images = len(image_paths)
         _disable_workflow_buttons(self, exclude=None)
         if hasattr(self.image_preview_widget, 'translate_all_btn'):
-            self.image_preview_widget.translate_all_btn.setText(f"Editing... (0/{total_images})")
+            self.image_preview_widget.translate_all_btn.setText(f"Translating... (0/{total_images})")
         if hasattr(self.image_preview_widget, 'thumbnail_list'):
             self.image_preview_widget.thumbnail_list.setEnabled(False)
             print("[TRANSLATE_ALL] Disabled thumbnail list during custom image edit batch")
@@ -11015,23 +11069,40 @@ def _run_custom_image_edit_translate_all_background(self, image_paths: list):
                 failed_count += 1
                 continue
 
-            cleaned_path = _run_inpainting_sync(self, image_path, regions)
-            if not cleaned_path or not os.path.exists(cleaned_path):
+            system_prompt = _get_system_prompt_from_gui(self)
+            if not system_prompt:
+                self._log(f"[{idx}/{total}] No system prompt configured in translator GUI profile", "warning")
+                failed_count += 1
+                continue
+
+            translated_path = _run_inpainting_sync(
+                self,
+                image_path,
+                regions,
+                save_as='translated',
+                custom_image_edit_system_prompt=system_prompt,
+            )
+            if not translated_path or not os.path.exists(translated_path):
                 self._log(f"âš ï¸ [{idx}/{total}] Custom image edit failed", "warning")
                 failed_count += 1
                 continue
 
             try:
+                if not hasattr(self, '_rendered_images_map'):
+                    self._rendered_images_map = {}
+                self._rendered_images_map[image_path] = translated_path
+                if hasattr(self.image_preview_widget, 'current_translated_path'):
+                    self.image_preview_widget.current_translated_path = translated_path
                 if hasattr(self, 'image_state_manager'):
                     self.image_state_manager.update_state(image_path, {
-                        'cleaned_image_path': cleaned_path,
+                        'rendered_image_path': translated_path,
                         'step': 'translated'
                     })
             except Exception:
                 pass
 
             self.update_queue.put(('preview_update', {
-                'translated_path': cleaned_path,
+                'translated_path': translated_path,
                 'source_path': image_path
             }))
             self.update_queue.put(('switch_to_translated_mode', {

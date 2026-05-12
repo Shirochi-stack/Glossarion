@@ -2788,6 +2788,7 @@ class UnifiedClient:
         
         # Image payload directory caching
         self._image_thread_dir_cache = {}  # {thread_id: directory_path}
+        self._payload_context_thread_dir_cache = {}  # {(folder, thread_id): directory_path}
         
         # Track last saved payload per thread so we can enrich it with usage after response
         self._thread_last_payload_paths = {}  # {thread_id: filepath}
@@ -4273,6 +4274,31 @@ class UnifiedClient:
         except (PermissionError, OSError):
             pass
         return thread_dir
+
+    def _is_inpainter_context(self, context: Any = None) -> bool:
+        """Return True for manga custom-image-edit inpainter requests."""
+        value = context if context is not None else getattr(self, 'context', None)
+        return str(value or '').strip().lower() == 'inpainter'
+
+    def _get_payload_context_thread_directory(self, folder: str) -> str:
+        """Get a unique per-thread payload directory for image-like context folders."""
+        thread_id = threading.current_thread().ident
+        cache = getattr(self, '_payload_context_thread_dir_cache', None)
+        if cache is None:
+            cache = {}
+            self._payload_context_thread_dir_cache = cache
+        key = (str(folder), thread_id)
+        if key not in cache:
+            thread_name = threading.current_thread().name
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:20]
+            unique_id = f"{thread_name}_{thread_id}_{self.session_id}_{timestamp}"
+            thread_dir = os.path.join(_payloads_dir(), str(folder), unique_id)
+            try:
+                os.makedirs(thread_dir, exist_ok=True)
+            except (PermissionError, OSError):
+                pass
+            cache[key] = thread_dir
+        return cache[key]
 
     def _get_request_hash(self, messages) -> str:
         """Generate a STABLE hash for request deduplication - THREAD-SAFE VERSION
@@ -6736,6 +6762,7 @@ class UnifiedClient:
         # Use appropriate context default
         if context is None:
             context = 'image_translation' if is_image_request else 'translation'
+        self.context = context or 'translation'
 
         # Ensure request_id is always set so watchdog/payload metadata stays consistent,
         # even if _send_internal is called directly (not via _send_core).
@@ -6887,7 +6914,6 @@ class UnifiedClient:
         if context != self.current_session_context:
             self.reset_conversation_for_new_context(context)
         
-        self.context = context or 'translation'
         self.conversation_message_count += 1
         
         # Internal retry logic for 500 errors - now optionally disabled (centralized retry handles it)
@@ -9205,12 +9231,14 @@ class UnifiedClient:
         if _PAYLOADS_DISABLED:
             return
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Route image-context failures to Payloads/image/failed_requests/
+        # Route context-specific failures to their matching payload bucket.
         try:
             is_image = self._is_image_request(messages, context)
         except Exception:
             is_image = False
-        if is_image:
+        if self._is_inpainter_context(context):
+            failed_dir = os.path.join(_payloads_dir(), "inpainter", "failed_requests")
+        elif is_image:
             failed_dir = os.path.join(_payloads_dir(), "image", "failed_requests")
         else:
             failed_dir = os.path.join(_payloads_dir(), "failed_requests")
@@ -9962,8 +9990,12 @@ class UnifiedClient:
         # Payloads/translation/ next to actual translation dumps.
         has_images = self._is_image_request(messages)
         
-        # Determine base directory based on content
-        if has_images:
+        # Determine base directory based on content/context.
+        # Inpainter requests carry images, but they belong in their own bucket
+        # so manga image-edit payloads don't mix with normal image output.
+        if self._is_inpainter_context():
+            thread_dir = self._get_payload_context_thread_directory("inpainter")
+        elif has_images:
             # Image payloads go to Payloads/image/thread_id/ (skip context folder)
             # Use cached directory for this thread to ensure payload and safety config go to same folder
             thread_id = threading.current_thread().ident
@@ -15342,8 +15374,11 @@ class UnifiedClient:
         # where the caller didn't tag the config type).
         has_images = "IMAGE" in config_data.get('type', '') or self._is_image_request([])
         
-        # Use image directory if it's an image request, otherwise use normal thread directory
-        if has_images:
+        # Use inpainter directory for custom-image-edit context, otherwise image
+        # directory if it's an image request, otherwise normal thread directory.
+        if self._is_inpainter_context():
+            thread_dir = self._get_payload_context_thread_directory("inpainter")
+        elif has_images:
             # Image payloads go to Payloads/image/thread_id/
             # Use cached directory for this thread to ensure payload and safety config go to same folder
             thread_id = threading.current_thread().ident

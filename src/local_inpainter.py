@@ -2541,6 +2541,81 @@ class LocalInpainter:
             self.model_loaded = False
             return False
 
+    def _bool_config_value(self, value, default=False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in ('1', 'true', 'yes', 'on', 'enabled'):
+            return True
+        if text in ('0', 'false', 'no', 'off', 'disabled'):
+            return False
+        return default
+
+    def _load_app_config_for_inpainter_keys(self) -> dict:
+        """Best-effort fallback for sessions where the key manager dialog was never opened."""
+        try:
+            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+            if not os.path.exists(config_path):
+                return {}
+            with open(config_path, 'r', encoding='utf-8') as f:
+                cfg = json.load(f) or {}
+            try:
+                from api_key_encryption import decrypt_config
+                cfg = decrypt_config(cfg)
+            except Exception:
+                pass
+            return cfg if isinstance(cfg, dict) else {}
+        except Exception:
+            return {}
+
+    def _sync_inpainter_key_pool_from_config(self):
+        """Ensure context=Inpainter keys are available without opening Multi API Key Manager."""
+        try:
+            cfg = self.config if isinstance(getattr(self, 'config', None), dict) else {}
+            disk_cfg = {}
+            use_value = cfg.get('use_inpainter_keys', None)
+            keys = cfg.get('inpainter_keys', None)
+            if use_value is None or keys is None:
+                disk_cfg = self._load_app_config_for_inpainter_keys()
+                use_value = disk_cfg.get('use_inpainter_keys', use_value)
+                keys = disk_cfg.get('inpainter_keys', keys)
+
+            enabled = self._bool_config_value(use_value, False)
+            keys = keys if isinstance(keys, list) else []
+            os.environ['USE_INPAINTER_KEYS'] = '1' if enabled else '0'
+            os.environ['INPAINTER_API_KEYS'] = json.dumps(keys)
+
+            if not enabled:
+                return
+            if not keys:
+                if not getattr(self, '_logged_missing_inpainter_keys', False):
+                    logger.warning("Inpainter keys enabled but no inpainter_keys are configured")
+                    self._logged_missing_inpainter_keys = True
+                return
+
+            force_rotation = cfg.get('force_key_rotation', disk_cfg.get('force_key_rotation', True))
+            rotation_frequency = cfg.get('rotation_frequency', disk_cfg.get('rotation_frequency', 1))
+            try:
+                rotation_frequency = int(rotation_frequency or 1)
+            except Exception:
+                rotation_frequency = 1
+
+            from unified_api_client import UnifiedClient
+            UnifiedClient.set_in_memory_inpainter_keys(
+                keys,
+                force_rotation=self._bool_config_value(force_rotation, True),
+                rotation_frequency=rotation_frequency,
+            )
+            if not getattr(self, '_logged_inpainter_key_sync', False):
+                logger.info(f"Synced {len(keys)} Inpainter key(s) from config for custom-image-edit")
+                self._logged_inpainter_key_sync = True
+        except Exception as e:
+            logger.warning(f"Failed to sync Inpainter key pool from config: {e}")
+
     def _custom_image_edit_inpaint(self, image, mask, iterations=None):
         """Inpaint through an OpenAI-compatible /images/edits endpoint."""
         try:
@@ -2681,6 +2756,7 @@ class LocalInpainter:
                 f"proc={proc_bgr.shape[1]}x{proc_bgr.shape[0]}, mask={mask_pct:.1f}%)",
                 "info"
             )
+            self._sync_inpainter_key_pool_from_config()
 
             def _current_provider_image_value():
                 """Use the active main UnifiedClient provider/model for blank URL mode."""

@@ -9627,6 +9627,10 @@ class MangaTranslator:
             if isinstance(cfg, dict):
                 system_prompt = cfg.get('custom_image_edit_system_prompt', '') or cfg.get('custom_image_edit_prompt', '')
                 user_prompt = cfg.get('custom_image_edit_user_prompt', '')
+                inpainter.config['use_inpainter_keys'] = bool(cfg.get('use_inpainter_keys', False))
+                inpainter.config['inpainter_keys'] = cfg.get('inpainter_keys', []) or []
+                inpainter.config['force_key_rotation'] = cfg.get('force_key_rotation', True)
+                inpainter.config['rotation_frequency'] = cfg.get('rotation_frequency', 1)
             if not system_prompt and hasattr(self, 'main_gui'):
                 system_prompt = (
                     getattr(self.main_gui, 'custom_image_edit_system_prompt_var', '')
