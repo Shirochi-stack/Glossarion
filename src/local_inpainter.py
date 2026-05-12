@@ -3030,6 +3030,12 @@ class LocalInpainter:
                     return image.copy()
                 raise RuntimeError("Custom image edit endpoint returned no image")
 
+            if isinstance(image_value, str):
+                image_value = image_value.strip()
+                generated_match = re.search(r'\[GENERATED_IMAGE:(.*?)\]', image_value)
+                if generated_match:
+                    image_value = generated_match.group(1).strip()
+
             if isinstance(image_value, str) and image_value.startswith('data:'):
                 _, image_b64 = image_value.split(',', 1)
                 out_bytes = base64.b64decode(image_b64)
@@ -3037,6 +3043,9 @@ class LocalInpainter:
                 out_resp = requests.get(image_value, timeout=timeout)
                 out_resp.raise_for_status()
                 out_bytes = out_resp.content
+            elif isinstance(image_value, str) and os.path.exists(image_value):
+                with open(image_value, 'rb') as f:
+                    out_bytes = f.read()
             else:
                 out_bytes = base64.b64decode(str(image_value))
 
