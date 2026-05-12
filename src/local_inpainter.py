@@ -2719,6 +2719,17 @@ class LocalInpainter:
             prompt = system_prompt
             if user_prompt:
                 prompt = f"{system_prompt}\n\nUser prompt:\n{user_prompt}"
+            try:
+                import hashlib as _hashlib
+                prompt_hash = _hashlib.sha256(str(system_prompt).encode('utf-8', errors='replace')).hexdigest()[:10]
+                user_hash = _hashlib.sha256(str(user_prompt).encode('utf-8', errors='replace')).hexdigest()[:10] if user_prompt else 'empty'
+                self._log(
+                    f"Custom image edit prompt active: system={len(str(system_prompt))} chars/{prompt_hash}, "
+                    f"user={len(str(user_prompt))} chars/{user_hash}",
+                    "info"
+                )
+            except Exception:
+                pass
 
             ok_img, img_buf = cv2.imencode('.png', proc_bgr)
             if not ok_img:
@@ -2995,6 +3006,26 @@ class LocalInpainter:
                 out_bgr = cv2.resize(out_bgr, (proc_bgr.shape[1], proc_bgr.shape[0]), interpolation=cv2.INTER_LANCZOS4)
             if out_bgr.shape[:2] != crop_bgr.shape[:2]:
                 out_bgr = cv2.resize(out_bgr, (crop_bgr.shape[1], crop_bgr.shape[0]), interpolation=cv2.INTER_LANCZOS4)
+
+            # Endpoint-backed image edit models can optionally own the whole
+            # returned page. Keep the conservative mask-limited blend by
+            # default, and only trust the full page when the manga setting is on.
+            use_full_page_output = str(
+                self.config.get('custom_image_edit_full_page_output', False)
+                or os.environ.get('CUSTOM_IMAGE_EDIT_FULL_PAGE_OUTPUT', '')
+            ).lower() in ('1', 'true', 'yes', 'on')
+            if (
+                use_full_page_output
+                and left == 0
+                and top == 0
+                and right == orig_w
+                and bottom == orig_h
+                and out_bgr.shape[:2] == image.shape[:2]
+            ):
+                self._log_inpaint_diag('custom-image-edit', out_bgr, mask_gray)
+                self._log("Custom image edit full-page output applied", "info")
+                logger.info("Custom image edit inpainting completed")
+                return out_bgr
 
             mask_for_blend = crop_mask
             if mask_for_blend.shape[:2] != crop_bgr.shape[:2]:

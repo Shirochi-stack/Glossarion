@@ -1945,6 +1945,7 @@ Text to analyze:
             self.config['custom_image_edit_system_prompt'] = self.custom_image_edit_system_prompt_var
         self.custom_image_edit_user_prompt_var = self.config.get('custom_image_edit_user_prompt', '')
         self.custom_image_edit_prompt_var = self.custom_image_edit_system_prompt_var
+        self.custom_image_edit_full_page_output_var = bool(self.config.get('custom_image_edit_full_page_output', False))
         self.use_custom_image_edit_endpoint_var = self.config.get(
             'use_custom_image_edit_endpoint',
             False
@@ -22667,6 +22668,7 @@ Important rules:
                 ('vision_ocr_source_prepass', ['vision_ocr_source_prepass_var'], 'auto', str),
                 ('use_custom_openai_endpoint', ['use_custom_openai_endpoint_var'], False, bool),
                 ('use_custom_image_edit_endpoint', ['use_custom_image_edit_endpoint_var'], False, bool),
+                ('custom_image_edit_full_page_output', ['custom_image_edit_full_page_output_var'], False, bool),
                 ('use_inpainter_keys', ['use_inpainter_keys_var'], False, bool),
                 ('disable_chapter_merging', ['disable_chapter_merging_var'], False, bool),
                 # Request merging settings

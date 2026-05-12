@@ -4722,6 +4722,7 @@ class MangaTranslationTab(QObject):
             self.custom_image_edit_system_prompt_value = self._default_custom_image_edit_system_prompt()
             self.main_gui.config['custom_image_edit_system_prompt'] = self.custom_image_edit_system_prompt_value
         self.custom_image_edit_user_prompt_value = self.main_gui.config.get('custom_image_edit_user_prompt', '')
+        self.custom_image_edit_full_page_output_value = bool(self.main_gui.config.get('custom_image_edit_full_page_output', False))
         custom_image_edit_cb = self._create_styled_checkbox("Enable Custom Image Edit Endpoint")
         custom_image_edit_cb.setToolTip(
             "Uses the Custom Image Edit Endpoint only for manga custom-image-edit inpainting. "
@@ -4742,6 +4743,18 @@ class MangaTranslationTab(QObject):
         )
         custom_image_edit_prompt_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
         self.custom_image_edit_prompt_btn = custom_image_edit_prompt_btn
+
+        custom_image_edit_full_page_cb = self._create_styled_checkbox("Use Full-Page Edit Output")
+        custom_image_edit_full_page_cb.setToolTip(
+            "Off: apply the image edit result only inside detected text masks. "
+            "On: use the full page returned by the custom-image-edit model."
+        )
+        try:
+            custom_image_edit_full_page_cb.setChecked(bool(self.custom_image_edit_full_page_output_value))
+        except Exception:
+            pass
+        custom_image_edit_full_page_cb.toggled.connect(self._on_custom_image_edit_full_page_output_toggle)
+        self.custom_image_edit_full_page_output_checkbox = custom_image_edit_full_page_cb
 
         # Model descriptions
         model_desc = {
@@ -4777,6 +4790,18 @@ class MangaTranslationTab(QObject):
         custom_image_edit_controls_layout.addStretch()
         local_inpaint_layout.addWidget(custom_image_edit_controls_frame)
         self.custom_image_edit_controls_frame = custom_image_edit_controls_frame
+
+        custom_image_edit_output_frame = QWidget()
+        custom_image_edit_output_layout = QHBoxLayout(custom_image_edit_output_frame)
+        custom_image_edit_output_layout.setContentsMargins(0, 0, 0, 0)
+        custom_image_edit_output_layout.setSpacing(10)
+        custom_output_spacer = QLabel("")
+        custom_output_spacer.setMinimumWidth(95)
+        custom_image_edit_output_layout.addWidget(custom_output_spacer)
+        custom_image_edit_output_layout.addWidget(custom_image_edit_full_page_cb)
+        custom_image_edit_output_layout.addStretch()
+        local_inpaint_layout.addWidget(custom_image_edit_output_frame)
+        self.custom_image_edit_output_frame = custom_image_edit_output_frame
 
         # Model file selection
         model_path_frame = QWidget()
@@ -6828,6 +6853,9 @@ class MangaTranslationTab(QObject):
             if hasattr(self, 'custom_image_edit_user_prompt_value'):
                 self.main_gui.config['custom_image_edit_user_prompt'] = self.custom_image_edit_user_prompt_value or ''
                 self.main_gui.custom_image_edit_user_prompt_var = self.main_gui.config['custom_image_edit_user_prompt']
+            if hasattr(self, 'custom_image_edit_full_page_output_value'):
+                self.main_gui.config['custom_image_edit_full_page_output'] = bool(self.custom_image_edit_full_page_output_value)
+                self.main_gui.custom_image_edit_full_page_output_var = bool(self.custom_image_edit_full_page_output_value)
             
             # Add new inpainting settings
             if hasattr(self, 'inpaint_method_value'):
@@ -9930,6 +9958,9 @@ class MangaTranslationTab(QObject):
             os.environ['USE_CUSTOM_IMAGE_EDIT_ENDPOINT'] = '1' if enabled else '0'
             os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = url if enabled else ''
             os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = url if enabled else ''
+            os.environ['CUSTOM_IMAGE_EDIT_FULL_PAGE_OUTPUT'] = (
+                '1' if bool(getattr(self, 'custom_image_edit_full_page_output_value', False)) else '0'
+            )
         except Exception:
             pass
 
@@ -10118,6 +10149,13 @@ class MangaTranslationTab(QObject):
         )
         self._apply_custom_image_edit_ui_state()
 
+    def _on_custom_image_edit_full_page_output_toggle(self, checked):
+        self.custom_image_edit_full_page_output_value = bool(checked)
+        self.main_gui.custom_image_edit_full_page_output_var = bool(checked)
+        self.main_gui.config['custom_image_edit_full_page_output'] = bool(checked)
+        if not (hasattr(self, '_initializing') and self._initializing):
+            self._save_rendering_settings()
+
     def _on_local_model_entry_text_changed(self, text):
         if not self._is_custom_image_edit_selected():
             return
@@ -10136,6 +10174,10 @@ class MangaTranslationTab(QObject):
             self.custom_image_edit_endpoint_checkbox.setVisible(custom_selected)
         if hasattr(self, 'custom_image_edit_prompt_btn'):
             self.custom_image_edit_prompt_btn.setVisible(custom_selected)
+        if hasattr(self, 'custom_image_edit_output_frame'):
+            self.custom_image_edit_output_frame.setVisible(custom_selected)
+        if hasattr(self, 'custom_image_edit_full_page_output_checkbox'):
+            self.custom_image_edit_full_page_output_checkbox.setVisible(custom_selected)
         if hasattr(self, 'model_file_label'):
             self.model_file_label.setText("Image Edit URL:" if custom_selected else "Model File:")
         if hasattr(self, 'local_model_entry'):

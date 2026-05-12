@@ -3241,6 +3241,27 @@ def _run_inpainting_sync(
                         inpainter.config['model'] = model_name
                         inpainter.config['custom_image_edit_model'] = model_name
                         inpainter._custom_image_edit_model_ref = model_name
+                    image_edit_system_prompt = (
+                        getattr(self.main_gui, 'custom_image_edit_system_prompt_var', '')
+                        or getattr(self.main_gui, 'custom_image_edit_prompt_var', '')
+                        or (cfg.get('custom_image_edit_system_prompt', '') if isinstance(cfg, dict) else '')
+                        or (cfg.get('custom_image_edit_prompt', '') if isinstance(cfg, dict) else '')
+                    )
+                    image_edit_user_prompt = (
+                        getattr(self.main_gui, 'custom_image_edit_user_prompt_var', '')
+                        or (cfg.get('custom_image_edit_user_prompt', '') if isinstance(cfg, dict) else '')
+                    )
+                    if image_edit_system_prompt:
+                        inpainter.config['custom_image_edit_system_prompt'] = image_edit_system_prompt
+                        inpainter.config['custom_image_edit_prompt'] = image_edit_system_prompt
+                    inpainter.config['custom_image_edit_user_prompt'] = image_edit_user_prompt or ''
+                    full_page_output = bool(
+                        getattr(self.main_gui, 'custom_image_edit_full_page_output_var', False)
+                        or (cfg.get('custom_image_edit_full_page_output', False) if isinstance(cfg, dict) else False)
+                    )
+                    inpainter.config['custom_image_edit_full_page_output'] = full_page_output
+                    if not custom_image_edit_system_prompt and hasattr(inpainter, '_custom_image_edit_request_system_prompt'):
+                        delattr(inpainter, '_custom_image_edit_request_system_prompt')
                     if not endpoint:
                         print("[INPAINT_SYNC] Custom image edit URL is blank; using current provider/model")
                 except Exception as e:

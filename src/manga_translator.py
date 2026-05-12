@@ -9642,6 +9642,16 @@ class MangaTranslator:
                 inpainter.config['custom_image_edit_system_prompt'] = system_prompt
                 inpainter.config['custom_image_edit_prompt'] = system_prompt
             inpainter.config['custom_image_edit_user_prompt'] = user_prompt or ''
+            if isinstance(cfg, dict):
+                inpainter.config['custom_image_edit_full_page_output'] = bool(cfg.get('custom_image_edit_full_page_output', False))
+            if hasattr(self, 'main_gui'):
+                inpainter.config['custom_image_edit_full_page_output'] = bool(
+                    getattr(
+                        self.main_gui,
+                        'custom_image_edit_full_page_output_var',
+                        inpainter.config.get('custom_image_edit_full_page_output', False)
+                    )
+                )
             if hasattr(self, 'main_gui'):
                 endpoint = ''
                 use_custom_openai = False
