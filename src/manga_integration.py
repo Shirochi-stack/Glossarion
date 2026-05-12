@@ -11565,12 +11565,18 @@ class MangaTranslationTab(QObject):
                 removed_paths.add(self.selected_files[row])
                 del self.selected_files[row]
         
-        # If the current image was removed or list is now empty, clear both viewers
-        if (current_path and current_path in removed_paths) or self.file_listbox.count() == 0:
+        # If the current image was removed or list is now empty, clear the active preview state.
+        if self.file_listbox.count() == 0:
             if hasattr(self, 'image_preview_widget'):
-                self.image_preview_widget.clear()
+                self.image_preview_widget.clear(clear_image_list=True)
                 self.image_preview_widget.set_image_list([])
             self._current_image_path = None
+        elif current_path and current_path in removed_paths:
+            self._current_image_path = None
+            if hasattr(self, 'image_preview_widget'):
+                self.image_preview_widget.clear()
+            self.file_listbox.setCurrentRow(0)
+            self._update_manga_preview_image_list_for_range()
         
         # Persist the file list
         self._persist_selected_files()
@@ -11590,10 +11596,35 @@ class MangaTranslationTab(QObject):
         self.selected_files.clear()
         if hasattr(self, 'manga_selected_folder_roots'):
             self.manga_selected_folder_roots.clear()
+        self._current_image_path = None
+        for attr in (
+            '_original_image_path',
+            '_cleaned_image_path',
+            '_current_regions',
+            '_recognized_texts',
+            '_translated_texts',
+            '_recognition_data',
+            '_translation_data',
+        ):
+            if hasattr(self, attr):
+                try:
+                    if attr in ('_current_regions', '_recognized_texts', '_translated_texts'):
+                        setattr(self, attr, [])
+                    elif attr in ('_recognition_data', '_translation_data'):
+                        setattr(self, attr, {})
+                    else:
+                        setattr(self, attr, None)
+                except Exception:
+                    pass
+        try:
+            ImageRenderer._remove_processing_overlay(self, clear_all=True)
+            ImageRenderer._clear_cross_image_state(self)
+        except Exception:
+            pass
         self._update_manga_image_range_display()
         # Clear image preview when list is cleared
         if hasattr(self, 'image_preview_widget'):
-            self.image_preview_widget.clear()
+            self.image_preview_widget.clear(clear_image_list=True)
             self.image_preview_widget.set_image_list([])
         
         # Persist the empty file list

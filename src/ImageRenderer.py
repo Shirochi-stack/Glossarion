@@ -984,6 +984,14 @@ def _clear_cross_image_state(self):
             self._current_regions = []
             if old_count > 0:
                 print(f"[STATE_ISOLATION] Cleared {old_count} detection regions")
+
+        # Clear original image tracking used by clean/preview workflows. This
+        # must not survive Clear All or file-list replacement.
+        if hasattr(self, '_original_image_path'):
+            old_original = getattr(self, '_original_image_path', None)
+            self._original_image_path = None
+            if old_original:
+                print(f"[STATE_ISOLATION] Cleared original image path (was: {os.path.basename(old_original)})")
         
         print(f"[STATE_ISOLATION] Cross-image state isolation completed")
         
@@ -2133,8 +2141,10 @@ def _on_clean_image_clicked(self):
             self.image_preview_widget.clean_btn.setEnabled(False)
             self.image_preview_widget.clean_btn.setText("Cleaning...")
 
-        # Determine base image path
-        image_path = self._original_image_path if hasattr(self, '_original_image_path') and self._original_image_path else self.image_preview_widget.current_image_path
+        # Determine base image path from the preview's current image. Do not
+        # reuse _original_image_path here because it may belong to a previously
+        # cleared or removed manga image.
+        image_path = self.image_preview_widget.current_image_path
         
         # Track which image we're cleaning for overlay removal
         self._original_image_path = image_path
@@ -2394,7 +2404,7 @@ def _run_clean_background(self, image_path: str, regions: list):
                     resolved_model_path = None
             
             # Use shared inpainter from pool - track the temporary translator for cleanup
-            if resolved_model_path and os.path.exists(resolved_model_path):
+            if is_custom_image_edit or (resolved_model_path and os.path.exists(resolved_model_path)):
                 self._log(f"🎨 Using shared inpainter from pool: {os.path.basename(resolved_model_path)}", "info")
                 # Create translator for pool access and track it for cleanup
                 try:
@@ -2415,7 +2425,7 @@ def _run_clean_background(self, image_path: str, regions: list):
                     start_time = time.time()
                     
                     while time.time() - start_time < poll_timeout:
-                        inpainter = temp_translator._get_or_init_shared_local_inpainter(local_model, resolved_model_path, force_reload=False)
+                        inpainter = temp_translator._get_or_init_shared_local_inpainter(local_model, resolved_model_path or '', force_reload=False)
                         if inpainter:
                             break
                         
@@ -3079,20 +3089,24 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
             
             # Use shared inpainter via pool - check out from class-level pool
             # IMPORTANT: Wait/poll for preloaded inpainter instead of creating new instance
-            if resolved_model_path and os.path.exists(resolved_model_path):
+            if is_custom_image_edit or (resolved_model_path and os.path.exists(resolved_model_path)):
                 try:
                     from manga_translator import MangaTranslator
                     from local_inpainter import LocalInpainter
                     import time
                     
-                    # Normalize model path to match pool key
-                    resolved_model_path = os.path.abspath(os.path.normpath(resolved_model_path))
-                    key = (local_model, resolved_model_path)
+                    # Normalize model path to match pool key. Custom image edit is
+                    # endpoint-backed, so a blank path means the default image endpoint.
+                    if is_custom_image_edit:
+                        key = (local_model, resolved_model_path or '__default_image_edit_endpoint__')
+                    else:
+                        resolved_model_path = os.path.abspath(os.path.normpath(resolved_model_path))
+                        key = (local_model, resolved_model_path)
                     
                     # Poll for inpainter from pool with timeout
                     # This waits for preloading to complete instead of creating a new instance
                     inpainter = None
-                    poll_timeout = 60  # Wait up to 60 seconds for preloading
+                    poll_timeout = 0 if is_custom_image_edit else 60  # Endpoint-backed edit can fake-load immediately
                     poll_interval = 0.5  # Check every 500ms
                     start_time = time.time()
                     attempt = 0
@@ -3136,6 +3150,21 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
                         print(f"[INPAINT_SYNC] Timeout waiting for pool, creating new inpainter...")
                         self._log(f"⚠️ Inpainter pool not ready, loading new instance...", "warning")
                         new_inpainter = LocalInpainter()
+                        try:
+                            if is_custom_image_edit and hasattr(self, 'main_gui') and getattr(self.main_gui, 'config', None):
+                                new_inpainter.config.update(self.main_gui.config)
+                                default_endpoint = ''
+                                if self.main_gui.config.get('use_custom_openai_endpoint'):
+                                    default_endpoint = self.main_gui.config.get('openai_base_url', '')
+                                default_endpoint = default_endpoint or getattr(self.main_gui, 'openai_base_url_var', '') or ''
+                                new_inpainter.config['custom_image_edit_default_endpoint'] = default_endpoint
+                                new_inpainter.config['openai_base_url'] = default_endpoint
+                                new_inpainter.config['use_custom_openai_endpoint'] = bool(
+                                    getattr(self.main_gui, 'use_custom_openai_endpoint_var', False)
+                                    or self.main_gui.config.get('use_custom_openai_endpoint', False)
+                                )
+                        except Exception:
+                            pass
                         if new_inpainter.load_model(local_model, resolved_model_path):
                             with MangaTranslator._inpaint_pool_lock:
                                 rec = MangaTranslator._inpaint_pool.get(key)
@@ -6294,8 +6323,9 @@ def _get_or_create_shared_inpainter(self, method: str, model_path: str):
     """
     try:
         import os
-        # Normalize model_path to match pool keys used by MangaTranslator
-        if model_path:
+        # Normalize model_path to match pool keys used by MangaTranslator.
+        # Custom image edit is endpoint-backed, so blank/default is a valid path.
+        if model_path and str(method or '').lower() != 'custom-image-edit':
             try:
                 model_path = os.path.abspath(os.path.normpath(model_path))
             except Exception:
@@ -6553,7 +6583,7 @@ def _run_inpainting_on_region(self, image, mask, region_index, custom_iterations
                     print(f"[INPAINT_REGION] Model download failed: {e}")
                     resolved_model_path = None
             
-            if not resolved_model_path or not os.path.exists(resolved_model_path):
+            if (not is_custom_image_edit) and (not resolved_model_path or not os.path.exists(resolved_model_path)):
                 print(f"[INPAINT_REGION] No valid model path for {local_model}")
                 return None
             

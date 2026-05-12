@@ -1521,6 +1521,7 @@ class MangaImagePreviewWidget(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         
         self._build_ui()
+        self._thumbnail_generation = 0
     
     def _build_ui(self):
         """Build the compact UI"""
@@ -2748,7 +2749,8 @@ class MangaImagePreviewWidget(QWidget):
     
     def set_image_list(self, image_paths: list):
         """Set the list of images and populate thumbnails"""
-        self.image_paths = image_paths
+        self._thumbnail_generation = getattr(self, '_thumbnail_generation', 0) + 1
+        self.image_paths = list(image_paths or [])
         self._populate_thumbnails()
         
         # Always keep thumbnails visible when the preview has an image list.
@@ -2763,7 +2765,8 @@ class MangaImagePreviewWidget(QWidget):
         import threading
         
         # Add items with loading placeholders first
-        for i, path in enumerate(self.image_paths):
+        paths_snapshot = list(self.image_paths)
+        for i, path in enumerate(paths_snapshot):
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, path)  # Store path
             item.setText(os.path.basename(path))
@@ -2787,7 +2790,9 @@ class MangaImagePreviewWidget(QWidget):
                 print(f"Failed to load thumbnail: {e}")
         
         def load_all_thumbs():
-            for path in self.image_paths:
+            for path in paths_snapshot:
+                if path not in self.image_paths:
+                    continue
                 load_thumb(path)
         
         thread = threading.Thread(target=load_all_thumbs, daemon=True)
@@ -3130,7 +3135,7 @@ class MangaImagePreviewWidget(QWidget):
         self._preserve_text_overlays_after_load = False
         
     
-    def clear(self):
+    def clear(self, clear_image_list: bool = False):
         """Clear the preview"""
         # Clear source viewer
         try:
@@ -3158,6 +3163,16 @@ class MangaImagePreviewWidget(QWidget):
             pass
         self.viewer.clear_scene()
         self.current_image_path = None
+        self.current_translated_path = None
+        self.translated_folder_path = None
+        if clear_image_list:
+            self._thumbnail_generation = getattr(self, '_thumbnail_generation', 0) + 1
+            self.image_paths = []
+            try:
+                self.thumbnail_list.clear()
+                self.thumbnail_list.setVisible(False)
+            except Exception:
+                pass
         self.file_label.setText("No image loaded")
         self._update_box_count()
         self._show_placeholder_icon()
