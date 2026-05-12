@@ -4335,6 +4335,10 @@ def _on_translate_text_clicked(self):
             self._log("⚠️ No image loaded for translation", "warning")
             return
         
+        if _is_custom_image_edit_workflow(self):
+            _run_custom_image_edit_translate_clicked(self)
+            return
+
         # STEP 1: Check if we have rectangles (detection done)
         has_rectangles = (hasattr(self.image_preview_widget, 'viewer') and 
                         self.image_preview_widget.viewer.rectangles and 
@@ -4437,6 +4441,119 @@ def _on_translate_text_clicked(self):
         self._log(f"❌ Translate setup failed: {str(e)}", "error")
         print(f"Translate setup error traceback: {traceback.format_exc()}")
         _restore_translate_button(self, )
+
+def _is_custom_image_edit_workflow(self) -> bool:
+    try:
+        cfg = getattr(getattr(self, 'main_gui', None), 'config', {}) or {}
+        return (
+            str(cfg.get('manga_inpaint_method', 'local') or '').lower() == 'local'
+            and str(cfg.get('manga_local_inpaint_model', '') or '').lower() == 'custom-image-edit'
+            and not bool(cfg.get('manga_skip_inpainting', False))
+        )
+    except Exception:
+        return False
+
+def _regions_for_custom_image_edit(self, image_path: str, use_current_rectangles: bool = True):
+    """Return existing preview regions or run detection for custom-image-edit workflows."""
+    try:
+        has_rectangles = (
+            use_current_rectangles
+            and hasattr(self, 'image_preview_widget')
+            and hasattr(self.image_preview_widget, 'viewer')
+            and getattr(self.image_preview_widget.viewer, 'rectangles', None)
+            and len(self.image_preview_widget.viewer.rectangles) > 0
+        )
+        if has_rectangles:
+            return _extract_regions_from_preview(self)
+
+        detection_config = _get_detection_config(self) or {}
+        if detection_config.get('detect_empty_bubbles', True):
+            detection_config['detect_empty_bubbles'] = False
+        regions = _run_detection_sync(self, image_path, detection_config)
+        if regions:
+            try:
+                self.update_queue.put(('detect_results', {
+                    'image_path': image_path,
+                    'regions': regions
+                }))
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'image_state_manager'):
+                    self.image_state_manager.update_state(image_path, {'detection_regions': regions})
+            except Exception:
+                pass
+        return regions or []
+    except Exception as e:
+        print(f"[CUSTOM_IMAGE_EDIT] Failed to resolve regions: {e}")
+        return []
+
+def _run_custom_image_edit_translate_clicked(self):
+    """Use custom-image-edit as the Translate button workflow without OCR/text rendering."""
+    try:
+        image_path = self.image_preview_widget.current_image_path
+        self._translating_image_path = image_path
+
+        _disable_workflow_buttons(self, exclude=None)
+        if hasattr(self.image_preview_widget, 'translate_btn'):
+            self.image_preview_widget.translate_btn.setText("Editing...")
+        if hasattr(self.image_preview_widget, 'thumbnail_list'):
+            self.image_preview_widget.thumbnail_list.setEnabled(False)
+            print("[TRANSLATE] Disabled thumbnail list during custom image edit")
+        _add_processing_overlay(self)
+
+        import threading
+        thread = threading.Thread(
+            target=_run_custom_image_edit_translate_background,
+            args=(self, image_path),
+            daemon=True,
+        )
+        thread.start()
+    except Exception as e:
+        import traceback
+        self._log(f"âŒ Custom image edit setup failed: {str(e)}", "error")
+        print(f"[CUSTOM_IMAGE_EDIT] Setup traceback: {traceback.format_exc()}")
+        _restore_translate_button(self)
+
+def _run_custom_image_edit_translate_background(self, image_path: str):
+    _reset_cancellation_flags(self)
+    try:
+        self._log("ðŸ§½ Custom image edit mode: editing image without OCR...", "info")
+        regions = _regions_for_custom_image_edit(self, image_path, use_current_rectangles=True)
+        if not regions:
+            self._log("âš ï¸ No regions found for custom image edit", "warning")
+            return
+
+        cleaned_path = _run_inpainting_sync(self, image_path, regions)
+        if not cleaned_path or not os.path.exists(cleaned_path):
+            self._log("âš ï¸ Custom image edit did not produce an edited image", "warning")
+            return
+
+        try:
+            self._cleaned_image_path = cleaned_path
+            if hasattr(self, 'image_state_manager'):
+                self.image_state_manager.update_state(image_path, {
+                    'cleaned_image_path': cleaned_path,
+                    'step': 'translated'
+                })
+        except Exception:
+            pass
+
+        self.update_queue.put(('preview_update', {
+            'translated_path': cleaned_path,
+            'source_path': image_path
+        }))
+        self.update_queue.put(('switch_to_translated_mode', {
+            'image_path': image_path
+        }))
+        self._log(f"âœ… Custom image edit complete: {os.path.basename(image_path)}", "success")
+    except Exception as e:
+        import traceback
+        self._log(f"âŒ Custom image edit failed: {str(e)}", "error")
+        print(f"[CUSTOM_IMAGE_EDIT] Background traceback: {traceback.format_exc()}")
+    finally:
+        self.update_queue.put(('remove_processing_overlay', None))
+        self.update_queue.put(('translate_button_restore', None))
 
 def _run_full_translate_pipeline(self, image_path: str, regions: list):
     """Run full translation pipeline: detect (if needed) -> recognize -> translate
@@ -10813,6 +10930,10 @@ def _on_translate_all_clicked(self):
         # Disable ALL workflow buttons to prevent concurrent operations
         _disable_workflow_buttons(self, exclude=None)
         
+        if _is_custom_image_edit_workflow(self):
+            _run_custom_image_edit_translate_all_clicked(self, image_paths)
+            return
+
         # Update translate all button text to show progress
         if hasattr(self.image_preview_widget, 'translate_all_btn'):
             self.image_preview_widget.translate_all_btn.setText(f"Translating... (0/{total_images})")
@@ -10836,6 +10957,104 @@ def _on_translate_all_clicked(self):
         self._log(f"❌ Translate all setup failed: {str(e)}", "error")
         print(f"Translate all error traceback: {traceback.format_exc()}")
         _restore_translate_all_button(self, )
+
+def _run_custom_image_edit_translate_all_clicked(self, image_paths: list):
+    """Use custom-image-edit as the Translate All workflow without OCR/text rendering."""
+    try:
+        total_images = len(image_paths)
+        _disable_workflow_buttons(self, exclude=None)
+        if hasattr(self.image_preview_widget, 'translate_all_btn'):
+            self.image_preview_widget.translate_all_btn.setText(f"Editing... (0/{total_images})")
+        if hasattr(self.image_preview_widget, 'thumbnail_list'):
+            self.image_preview_widget.thumbnail_list.setEnabled(False)
+            print("[TRANSLATE_ALL] Disabled thumbnail list during custom image edit batch")
+        _add_processing_overlay(self)
+
+        import threading
+        thread = threading.Thread(
+            target=_run_custom_image_edit_translate_all_background,
+            args=(self, list(image_paths)),
+            daemon=True,
+        )
+        thread.start()
+    except Exception as e:
+        import traceback
+        self._log(f"âŒ Custom image edit batch setup failed: {str(e)}", "error")
+        print(f"[CUSTOM_IMAGE_EDIT_ALL] Setup traceback: {traceback.format_exc()}")
+        _restore_translate_all_button(self)
+
+def _run_custom_image_edit_translate_all_background(self, image_paths: list):
+    _reset_cancellation_flags(self)
+    try:
+        total = len(image_paths)
+        success_count = 0
+        failed_count = 0
+        self._log(f"ðŸ§½ Starting custom image edit batch: {total} images", "info")
+
+        for idx, image_path in enumerate(image_paths, 1):
+            if _is_translation_cancelled(self):
+                self._log(f"â¹ Custom image edit batch cancelled at image {idx}/{total}", "warning")
+                break
+
+            self.update_queue.put(('load_preview_image', {
+                'path': image_path,
+                'preserve_rectangles': False,
+                'preserve_overlays': False
+            }))
+            self.update_queue.put(('sync_file_selection', {'image_path': image_path}))
+            self.update_queue.put(('translate_all_progress', {
+                'current': idx,
+                'total': total
+            }))
+            self.update_queue.put(('add_processing_overlay', None))
+            self._log(f"ðŸ“„ [{idx}/{total}] Custom image editing: {os.path.basename(image_path)}", "info")
+
+            regions = _regions_for_custom_image_edit(self, image_path, use_current_rectangles=False)
+            if not regions:
+                self._log(f"âš ï¸ [{idx}/{total}] No regions found", "warning")
+                failed_count += 1
+                continue
+
+            cleaned_path = _run_inpainting_sync(self, image_path, regions)
+            if not cleaned_path or not os.path.exists(cleaned_path):
+                self._log(f"âš ï¸ [{idx}/{total}] Custom image edit failed", "warning")
+                failed_count += 1
+                continue
+
+            try:
+                if hasattr(self, 'image_state_manager'):
+                    self.image_state_manager.update_state(image_path, {
+                        'cleaned_image_path': cleaned_path,
+                        'step': 'translated'
+                    })
+            except Exception:
+                pass
+
+            self.update_queue.put(('preview_update', {
+                'translated_path': cleaned_path,
+                'source_path': image_path
+            }))
+            self.update_queue.put(('switch_to_translated_mode', {
+                'image_path': image_path
+            }))
+            success_count += 1
+
+        self._log("Custom image edit batch complete", "success")
+        self._log(f"   Successful: {success_count}/{total}", "success")
+        if failed_count:
+            self._log(f"   Failed: {failed_count}/{total}", "warning")
+        self.update_queue.put(('update_preview_to_rendered', None))
+    except Exception as e:
+        import traceback
+        self._log(f"âŒ Custom image edit batch failed: {str(e)}", "error")
+        print(f"[CUSTOM_IMAGE_EDIT_ALL] Background traceback: {traceback.format_exc()}")
+    finally:
+        self.update_queue.put(('remove_processing_overlay', None))
+        self.update_queue.put(('translate_all_button_restore', None))
+        try:
+            self._batch_mode_active = False
+        except Exception:
+            pass
 
 def _run_translate_all_background(self, image_paths: list):
     """Run translation for all images in background"""

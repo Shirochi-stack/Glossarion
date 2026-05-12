@@ -2593,13 +2593,11 @@ class LocalInpainter:
             elif (not use_current_provider) and not url.endswith('/images/edits'):
                 url = f"{url}/images/edits"
 
-            x, y, w, h = cv2.boundingRect(mask_gray)
-            margin = int(os.environ.get('CUSTOM_IMAGE_EDIT_CROP_MARGIN', os.environ.get('QWEN_IMAGE_EDIT_CROP_MARGIN', '64')))
             orig_h, orig_w = image.shape[:2]
-            left = max(0, x - margin)
-            top = max(0, y - margin)
-            right = min(orig_w, x + w + margin)
-            bottom = min(orig_h, y + h + margin)
+            left = 0
+            top = 0
+            right = orig_w
+            bottom = orig_h
 
             crop_bgr = image[top:bottom, left:right].copy()
             crop_mask = mask_gray[top:bottom, left:right].copy()
