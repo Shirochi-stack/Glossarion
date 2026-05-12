@@ -2755,7 +2755,7 @@ class LocalInpainter:
                 """Encode NanoGPT edit input small enough for request body limits."""
                 max_chars = int(os.environ.get('NANOGPT_MAX_INPUT_IMAGE_CHARS', '3000000') or '3000000')
                 max_dim = int(os.environ.get('NANOGPT_MAX_INPUT_IMAGE_DIM', '1536') or '1536')
-                qualities = [85, 80, 75, 70, 65, 60, 55, 50]
+                qualities = [90, 85, 80, 75, 70, 65, 60, 55, 50]
                 dims = []
                 cur_dim = max(512, max_dim)
                 while cur_dim >= 768:
@@ -2776,10 +2776,10 @@ class LocalInpainter:
                             interpolation=cv2.INTER_AREA,
                         )
                     for quality in qualities:
-                        ok_jpg, jpg_buf = cv2.imencode('.jpg', work, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
-                        if not ok_jpg:
+                        ok_webp, webp_buf = cv2.imencode('.webp', work, [int(cv2.IMWRITE_WEBP_QUALITY), int(quality)])
+                        if not ok_webp:
                             continue
-                        data_url = 'data:image/jpeg;base64,' + base64.b64encode(jpg_buf.tobytes()).decode('ascii')
+                        data_url = 'data:image/webp;base64,' + base64.b64encode(webp_buf.tobytes()).decode('ascii')
                         best_data_url = data_url
                         if len(data_url) <= max_chars:
                             self._log(

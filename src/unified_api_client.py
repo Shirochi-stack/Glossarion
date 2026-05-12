@@ -21560,7 +21560,7 @@ class UnifiedClient:
 
             original_size = img.size
             max_dim = int(os.getenv('NANOGPT_MAX_INPUT_IMAGE_DIM', '1536') or '1536')
-            qualities = [85, 80, 75, 70, 65, 60, 55, 50]
+            qualities = [90, 85, 80, 75, 70, 65, 60, 55, 50]
             dims = []
             cur_dim = max(512, max_dim)
             while cur_dim >= 768:
@@ -21578,8 +21578,8 @@ class UnifiedClient:
                     work = work.resize(new_size, _Image.Resampling.LANCZOS)
                 for quality in qualities:
                     buf = _io.BytesIO()
-                    work.save(buf, format='JPEG', quality=quality, optimize=True)
-                    candidate = 'data:image/jpeg;base64,' + _b64.b64encode(buf.getvalue()).decode('ascii')
+                    work.save(buf, format='WEBP', quality=quality, method=6)
+                    candidate = 'data:image/webp;base64,' + _b64.b64encode(buf.getvalue()).decode('ascii')
                     best = candidate
                     if len(candidate) <= max_chars:
                         if not self._is_stop_requested():
