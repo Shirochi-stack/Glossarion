@@ -3639,7 +3639,7 @@ class MangaTranslationTab(QObject):
         grouping_layout.addWidget(grouping_label)
 
         self.manga_split_first_level_subfolders_checkbox = self._create_styled_checkbox(
-            "Generate one glossary per volume folder"
+            "Process subfolders separately"
         )
         self.manga_split_first_level_subfolders_checkbox.setChecked(
             bool(getattr(
