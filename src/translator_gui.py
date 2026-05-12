@@ -1926,11 +1926,21 @@ Text to analyze:
             'custom_image_edit_system_prompt',
             self.config.get(
                 'custom_image_edit_prompt',
-                "This is an image editing task. Edit this image by replacing all foreign-language text with its {target_lang} translation. "
-                "Do NOT return plain text or OCR — you MUST return the generated edited image. "
-                "If the image has no translatable text, reply exactly: No"
+                "This is an image editing task. Edit this image by simply removing all text. "
+                "Do NOT return plain text or OCR — you MUST return the generated edited image."
             )
         )
+        _old_custom_image_edit_prompt = (
+            "replacing all foreign-language text" in str(self.custom_image_edit_system_prompt_var or '').lower()
+            and "{target_lang}" in str(self.custom_image_edit_system_prompt_var or '')
+            and "if the image has no translatable text" in str(self.custom_image_edit_system_prompt_var or '').lower()
+        )
+        if _old_custom_image_edit_prompt:
+            self.custom_image_edit_system_prompt_var = (
+                "This is an image editing task. Edit this image by simply removing all text. "
+                "Do NOT return plain text or OCR — you MUST return the generated edited image."
+            )
+            self.config['custom_image_edit_system_prompt'] = self.custom_image_edit_system_prompt_var
         self.custom_image_edit_user_prompt_var = self.config.get('custom_image_edit_user_prompt', '')
         self.custom_image_edit_prompt_var = self.custom_image_edit_system_prompt_var
         self.use_custom_image_edit_endpoint_var = self.config.get(
@@ -3054,6 +3064,9 @@ Text to analyze:
             if self.config.get('manga_local_inpaint_model') == 'custom-image-edit' and endpoint:
                 self.config['manga_custom-image-edit_model_path'] = endpoint
                 self.config['manga_custom_image_edit_model_path'] = endpoint
+            elif self.config.get('manga_local_inpaint_model') == 'custom-image-edit' and not endpoint:
+                self.config['manga_custom-image-edit_model_path'] = ''
+                self.config['manga_custom_image_edit_model_path'] = ''
             os.environ['USE_CUSTOM_IMAGE_EDIT_ENDPOINT'] = '1' if enabled else '0'
             os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = endpoint if enabled else ''
             os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = endpoint if enabled else ''

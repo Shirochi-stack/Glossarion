@@ -1184,6 +1184,10 @@ class MangaTranslationTab(QObject):
 
             preload_running = init_running or toggle_running
             local_inpainting = self._is_local_inpainting_enabled()
+            custom_image_edit_inpainting = (
+                local_inpainting
+                and str(self.main_gui.config.get('manga_local_inpaint_model', '') or '').lower() == 'custom-image-edit'
+            )
             should_wait = preload_running and local_inpainting
 
             if should_wait:
@@ -1191,6 +1195,9 @@ class MangaTranslationTab(QObject):
                 self._set_translation_buttons_waiting(True)
                 # Check again in 500ms
                 QTimer.singleShot(500, self._check_preload_status)
+            elif custom_image_edit_inpainting:
+                self._clear_inpainter_preload_failure()
+                self._set_translation_buttons_waiting(False)
             elif local_inpainting and bool(getattr(self, '_inpainter_preload_failed', False)):
                 self._set_translation_buttons_model_failed()
             else:
@@ -1620,6 +1627,24 @@ class MangaTranslationTab(QObject):
                             # Note: During preload we always disable workers to save RAM
                             # since workers would load duplicate model copies
                             inp = LocalInpainter(enable_worker_process=False)
+
+                            if str(model_key or '').lower() == 'custom-image-edit':
+                                success = inp.load_model('custom-image-edit', model_path or '', force_reload=False)
+                                if success and getattr(inp, 'model_loaded', False):
+                                    pool_key = (model_key, model_path or '__default_image_edit_endpoint__')
+                                    with MangaTranslator._inpaint_pool_lock:
+                                        rec = MangaTranslator._inpaint_pool.get(pool_key)
+                                        if not rec:
+                                            rec = {'spares': [], 'checked_out': [], 'loaded': True}
+                                            MangaTranslator._inpaint_pool[pool_key] = rec
+                                        if 'checked_out' not in rec:
+                                            rec['checked_out'] = []
+                                        rec['spares'].append(inp)
+                                    print(f"  OK {model_name} endpoint ready")
+                                    loaded_count += 1
+                                else:
+                                    print(f"  Failed to configure {model_name}")
+                                continue
                             
                             # Ensure model file exists or download it
                             resolved_path = model_path
@@ -4693,6 +4718,9 @@ class MangaTranslationTab(QObject):
             'custom_image_edit_system_prompt',
             self.main_gui.config.get('custom_image_edit_prompt', self._default_custom_image_edit_system_prompt())
         )
+        if self._is_old_custom_image_edit_default_prompt(self.custom_image_edit_system_prompt_value):
+            self.custom_image_edit_system_prompt_value = self._default_custom_image_edit_system_prompt()
+            self.main_gui.config['custom_image_edit_system_prompt'] = self.custom_image_edit_system_prompt_value
         self.custom_image_edit_user_prompt_value = self.main_gui.config.get('custom_image_edit_user_prompt', '')
         custom_image_edit_cb = self._create_styled_checkbox("Enable Custom Image Edit Endpoint")
         custom_image_edit_cb.setToolTip(
@@ -4704,7 +4732,6 @@ class MangaTranslationTab(QObject):
         except Exception:
             pass
         custom_image_edit_cb.toggled.connect(self._on_custom_image_edit_endpoint_toggle)
-        local_model_layout.addWidget(custom_image_edit_cb)
         self.custom_image_edit_endpoint_checkbox = custom_image_edit_cb
 
         custom_image_edit_prompt_btn = QPushButton("Edit Prompt")
@@ -4714,7 +4741,6 @@ class MangaTranslationTab(QObject):
             "It does not change the Translator GUI image prompt."
         )
         custom_image_edit_prompt_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
-        local_model_layout.addWidget(custom_image_edit_prompt_btn)
         self.custom_image_edit_prompt_btn = custom_image_edit_prompt_btn
 
         # Model descriptions
@@ -4738,6 +4764,19 @@ class MangaTranslationTab(QObject):
         local_model_layout.addStretch()
         
         local_inpaint_layout.addWidget(local_model_frame)
+
+        custom_image_edit_controls_frame = QWidget()
+        custom_image_edit_controls_layout = QHBoxLayout(custom_image_edit_controls_frame)
+        custom_image_edit_controls_layout.setContentsMargins(0, 0, 0, 0)
+        custom_image_edit_controls_layout.setSpacing(10)
+        custom_controls_spacer = QLabel("")
+        custom_controls_spacer.setMinimumWidth(95)
+        custom_image_edit_controls_layout.addWidget(custom_controls_spacer)
+        custom_image_edit_controls_layout.addWidget(custom_image_edit_cb)
+        custom_image_edit_controls_layout.addWidget(custom_image_edit_prompt_btn)
+        custom_image_edit_controls_layout.addStretch()
+        local_inpaint_layout.addWidget(custom_image_edit_controls_frame)
+        self.custom_image_edit_controls_frame = custom_image_edit_controls_frame
 
         # Model file selection
         model_path_frame = QWidget()
@@ -9872,9 +9911,16 @@ class MangaTranslationTab(QObject):
 
     def _default_custom_image_edit_system_prompt(self):
         return (
-            "This is an image editing task. Edit this image by replacing all foreign-language text with its {target_lang} translation. "
-            "Do NOT return plain text or OCR — you MUST return the generated edited image. "
-            "If the image has no translatable text, reply exactly: No"
+            "This is an image editing task. Edit this image by simply removing all text. "
+            "Do NOT return plain text or OCR — you MUST return the generated edited image."
+        )
+
+    def _is_old_custom_image_edit_default_prompt(self, prompt):
+        text = " ".join(str(prompt or '').split()).lower()
+        return (
+            "replacing all foreign-language text" in text
+            and "{target_lang}" in text
+            and "if the image has no translatable text" in text
         )
 
     def _set_custom_image_edit_env(self):
@@ -9887,6 +9933,16 @@ class MangaTranslationTab(QObject):
         except Exception:
             pass
 
+    def _default_image_edit_endpoint_url(self):
+        try:
+            if getattr(self.main_gui, 'use_custom_openai_endpoint_var', False):
+                url = str(getattr(self.main_gui, 'openai_base_url_var', '') or self.main_gui.config.get('openai_base_url', '') or '').strip()
+                if url:
+                    return url
+            return 'https://api.openai.com/v1'
+        except Exception:
+            return 'https://api.openai.com/v1'
+
     def _sync_custom_image_edit_prompt(self, system_prompt=None, user_prompt=None, source='manga'):
         """Persist custom-image-edit prompts without touching Translator GUI prompts."""
         try:
@@ -9894,6 +9950,8 @@ class MangaTranslationTab(QObject):
                 system_prompt if system_prompt is not None else getattr(self, 'custom_image_edit_system_prompt_value', '') or ''
             ).strip()
             if not system_prompt:
+                system_prompt = self._default_custom_image_edit_system_prompt()
+            elif self._is_old_custom_image_edit_default_prompt(system_prompt):
                 system_prompt = self._default_custom_image_edit_system_prompt()
             user_prompt = str(
                 user_prompt if user_prompt is not None else getattr(self, 'custom_image_edit_user_prompt_value', '') or ''
@@ -9944,6 +10002,14 @@ class MangaTranslationTab(QObject):
                             checkbox.blockSignals(False)
                         except Exception:
                             pass
+                    try:
+                        updater = getattr(checkbox, '_update_checkmark', None)
+                        if callable(updater):
+                            updater()
+                        else:
+                            checkbox.update()
+                    except Exception:
+                        pass
 
             for entry in (
                 getattr(self.main_gui, 'custom_image_edit_endpoint_entry', None),
@@ -10016,6 +10082,15 @@ class MangaTranslationTab(QObject):
             dialog.accept()
 
         def reset_prompt():
+            reply = QMessageBox.question(
+                dialog,
+                "Reset Custom Image Edit Prompts",
+                "Reset the custom image edit system prompt to the default and clear the optional user prompt?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
             system_prompt_editor.setPlainText(self._default_custom_image_edit_system_prompt())
             user_prompt_editor.clear()
 
@@ -10055,6 +10130,8 @@ class MangaTranslationTab(QObject):
 
     def _apply_custom_image_edit_ui_state(self, update_entry=True):
         custom_selected = self._is_custom_image_edit_selected()
+        if hasattr(self, 'custom_image_edit_controls_frame'):
+            self.custom_image_edit_controls_frame.setVisible(custom_selected)
         if hasattr(self, 'custom_image_edit_endpoint_checkbox'):
             self.custom_image_edit_endpoint_checkbox.setVisible(custom_selected)
         if hasattr(self, 'custom_image_edit_prompt_btn'):
@@ -10063,7 +10140,7 @@ class MangaTranslationTab(QObject):
             self.model_file_label.setText("Image Edit URL:" if custom_selected else "Model File:")
         if hasattr(self, 'local_model_entry'):
             self.local_model_entry.setReadOnly(not custom_selected)
-            self.local_model_entry.setPlaceholderText("http://localhost:8888/v1" if custom_selected else "")
+            self.local_model_entry.setPlaceholderText("blank = default image endpoint" if custom_selected else "")
             if custom_selected and update_entry:
                 url = str(getattr(self, 'custom_image_edit_endpoint_value', '') or self.main_gui.config.get('custom_image_edit_endpoint', '') or '')
                 if self.local_model_entry.text() != url:
@@ -10088,13 +10165,13 @@ class MangaTranslationTab(QObject):
             enabled = bool(getattr(self, 'use_custom_image_edit_endpoint_value', False))
             url = str(getattr(self, 'custom_image_edit_endpoint_value', '') or '').strip()
             if not enabled:
-                self.local_model_status_label.setText("Custom Image Edit Endpoint disabled")
+                self.local_model_status_label.setText("Using default image edit endpoint")
                 self.local_model_status_label.setStyleSheet("color: gray;")
             elif not url:
-                self.local_model_status_label.setText("Enter a Custom Image Edit Endpoint URL")
-                self.local_model_status_label.setStyleSheet("color: orange;")
+                self.local_model_status_label.setText("Using default image edit endpoint")
+                self.local_model_status_label.setStyleSheet("color: #5dade2;")
             else:
-                self.local_model_status_label.setText("Custom Image Edit Endpoint configured")
+                self.local_model_status_label.setText("Custom Image Edit Endpoint override configured")
                 self.local_model_status_label.setStyleSheet("color: #5dade2;")
 
     def _on_local_model_change(self, new_model_type=None):
@@ -10568,31 +10645,27 @@ class MangaTranslationTab(QObject):
             url = str(getattr(self, 'custom_image_edit_endpoint_value', '') or '').strip()
             enabled = bool(getattr(self, 'use_custom_image_edit_endpoint_value', False))
             if not enabled:
-                self.local_model_status_label.setText("Custom Image Edit Endpoint disabled")
+                self.local_model_status_label.setText("Testing default image edit endpoint...")
                 self.local_model_status_label.setStyleSheet("color: orange;")
-                QMessageBox.information(self.dialog, "Custom Image Edit Endpoint", "Enable the Custom Image Edit Endpoint toggle first.")
-                return
             if not url:
-                self.local_model_status_label.setText("Enter a Custom Image Edit Endpoint URL")
-                self.local_model_status_label.setStyleSheet("color: orange;")
-                QMessageBox.information(self.dialog, "Custom Image Edit Endpoint", "Enter an endpoint URL first.")
-                return
+                url = self._default_image_edit_endpoint_url()
             if not url.startswith(('http://', 'https://')):
                 lower = url.lower()
                 url = ('http://' if lower.startswith(('localhost', '127.', '0.0.0.0', '[')) else 'https://') + url
             url = url.rstrip('/')
-            self._sync_custom_image_edit_controls(url=url, enabled=True, source='manga')
+            if str(getattr(self, 'custom_image_edit_endpoint_value', '') or '').strip():
+                self._sync_custom_image_edit_controls(url=url, enabled=True, source='manga')
 
-            self.local_model_status_label.setText("Testing Custom Image Edit Endpoint...")
+            self.local_model_status_label.setText("Testing image edit endpoint...")
             self.local_model_status_label.setStyleSheet("color: orange;")
             headers = {
                 'Authorization': f"Bearer {os.environ.get('CUSTOM_IMAGE_EDIT_API_KEY') or os.environ.get('OPENAI_API_KEY') or self.main_gui.config.get('api_key', '') or 'sk-local'}"
             }
             resp = requests.get(f"{url}/models", headers=headers, timeout=10)
             if resp.status_code in (200, 201):
-                self.local_model_status_label.setText("Custom Image Edit Endpoint reachable")
+                self.local_model_status_label.setText("Image edit endpoint reachable")
                 self.local_model_status_label.setStyleSheet("color: green;")
-                QMessageBox.information(self.dialog, "Custom Image Edit Endpoint", "Endpoint is reachable.")
+                QMessageBox.information(self.dialog, "Image Edit Endpoint", f"Endpoint is reachable:\n{url}")
             elif resp.status_code in (401, 403):
                 self.local_model_status_label.setText("Endpoint reached, but authentication failed")
                 self.local_model_status_label.setStyleSheet("color: orange;")

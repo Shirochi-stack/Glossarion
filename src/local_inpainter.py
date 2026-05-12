@@ -2436,49 +2436,60 @@ class LocalInpainter:
             endpoint = prefix + endpoint
         return endpoint.rstrip('/')
 
+    def _resolve_custom_image_edit_endpoint(self, model_path: str = ''):
+        model_path_str = str(model_path or '').strip()
+        model_path_is_url = model_path_str.startswith(('http://', 'https://')) or (
+            model_path_str
+            and not os.path.exists(model_path_str)
+            and any(marker in model_path_str.lower() for marker in ('localhost', '127.', '0.0.0.0', '/v1'))
+        )
+        explicit_endpoint = (
+            os.environ.get('CUSTOM_IMAGE_EDIT_BASE_URL', '')
+            or os.environ.get('OPENAI_IMAGE_EDIT_BASE_URL', '')
+            or (model_path_str if model_path_is_url else '')
+            or (
+                self.config.get('custom_image_edit_endpoint', '')
+                if str(self.config.get('use_custom_image_edit_endpoint', '')).lower() in ('1', 'true', 'yes', 'on')
+                else ''
+            )
+        )
+        fallback_endpoint = (
+            self.config.get('custom_image_edit_default_endpoint', '')
+            or (
+                self.config.get('openai_base_url', '')
+                if str(self.config.get('use_custom_openai_endpoint', '')).lower() in ('1', 'true', 'yes', 'on')
+                else ''
+            )
+            or os.environ.get('OPENAI_CUSTOM_BASE_URL', '')
+            or os.environ.get('OPENAI_API_BASE', '')
+            or os.environ.get('OPENAI_BASE_URL', '')
+            or 'https://api.openai.com/v1'
+        )
+        endpoint = self._normalize_custom_image_edit_endpoint(explicit_endpoint or fallback_endpoint)
+        return endpoint, bool(str(explicit_endpoint or '').strip()), model_path_is_url
+
     def _load_custom_image_edit_model(self, model_path: str, force_reload: bool = False) -> bool:
         """Use an OpenAI-compatible image edit endpoint as the local inpainter."""
         try:
             model_path_str = str(model_path or '').strip()
-            model_path_is_url = model_path_str.startswith(('http://', 'https://')) or (
-                model_path_str
-                and not os.path.exists(model_path_str)
-                and any(marker in model_path_str.lower() for marker in ('localhost', '127.', '0.0.0.0', '/v1'))
-            )
+            endpoint, has_explicit_endpoint, model_path_is_url = self._resolve_custom_image_edit_endpoint(model_path_str)
             model_path_is_stale_qwen = (
                 model_path_str
                 and not model_path_is_url
                 and not os.path.exists(model_path_str)
                 and 'qwen-image-edit' in model_path_str.lower()
             )
-            endpoint = self._normalize_custom_image_edit_endpoint(
-                os.environ.get('CUSTOM_IMAGE_EDIT_BASE_URL')
-                or os.environ.get('OPENAI_IMAGE_EDIT_BASE_URL')
-                or (model_path_str if model_path_is_url else '')
-                or self.config.get('custom_image_edit_endpoint', '')
-            )
             if not endpoint:
-                logger.error(
-                    "Custom Image Edit Endpoint is not configured. "
-                    "Set it in Other Settings before loading custom-image-edit."
-                )
-                self.model_loaded = False
-                return False
-            endpoint_enabled = (
-                os.environ.get('USE_CUSTOM_IMAGE_EDIT_ENDPOINT', '')
-                or str(self.config.get('use_custom_image_edit_endpoint', '1' if endpoint else '0'))
-            )
-            if str(endpoint_enabled).lower() in ('0', 'false', 'no', 'off'):
-                logger.error("Custom Image Edit Endpoint is disabled")
+                logger.error("No default image edit endpoint could be resolved")
                 self.model_loaded = False
                 return False
 
             model_ref = (
                 os.environ.get('CUSTOM_IMAGE_EDIT_MODEL')
+                or self.config.get('custom_image_edit_model', '')
+                or self.config.get('model', '')
                 or ('' if (model_path_is_url or model_path_is_stale_qwen) else model_path)
-                or self.config.get('manga_custom-image-edit_model_path', '')
-                or self.config.get('manga_custom_image_edit_model_path', '')
-                or 'custom-image-edit'
+                or 'gpt-image-1'
             )
             model_ref_str = str(model_ref or '').strip()
             if model_ref_str.startswith(('http://', 'https://')) or (
@@ -2487,6 +2498,8 @@ class LocalInpainter:
                 and any(marker in model_ref_str.lower() for marker in ('localhost', '127.', '0.0.0.0', '/v1', 'qwen-image-edit'))
             ):
                 model_ref = os.environ.get('CUSTOM_IMAGE_EDIT_MODEL') or 'custom-image-edit'
+            if str(model_ref or '').lower().startswith(('nan/', 'nanogpt/')) and not has_explicit_endpoint:
+                endpoint = self._normalize_custom_image_edit_endpoint(os.environ.get('NANOGPT_API_URL', 'https://nano-gpt.com'))
 
             current = getattr(self, '_custom_image_edit_model_ref', None)
             if (
@@ -2505,12 +2518,10 @@ class LocalInpainter:
             self.is_jit_model = False
             self._custom_image_edit_endpoint = endpoint
             self._custom_image_edit_model_ref = model_ref
-            self.config['custom_image_edit_endpoint'] = endpoint
-            self.config['use_custom_image_edit_endpoint'] = True
-            self.config['manga_custom-image-edit_model_path'] = model_ref
-            self.config['manga_custom_image_edit_model_path'] = model_ref
-            self._save_config()
-            logger.info(f"Custom image edit endpoint configured: {endpoint} | model={model_ref}")
+            logger.info(
+                f"Custom image edit endpoint configured: {endpoint} | model={model_ref}"
+                + (" | override URL" if has_explicit_endpoint else " | default endpoint")
+            )
             return True
         except Exception as e:
             logger.error(f"Failed to configure custom image edit endpoint: {e}")
@@ -2536,24 +2547,35 @@ class LocalInpainter:
                 getattr(self, '_custom_image_edit_endpoint', '')
                 or os.environ.get('CUSTOM_IMAGE_EDIT_BASE_URL')
                 or os.environ.get('OPENAI_IMAGE_EDIT_BASE_URL')
-                or self.config.get('custom_image_edit_endpoint', '')
-                or self.config.get('manga_custom-image-edit_model_path', '')
+                or (
+                    self.config.get('custom_image_edit_endpoint', '')
+                    if str(self.config.get('use_custom_image_edit_endpoint', '')).lower() in ('1', 'true', 'yes', 'on')
+                    else ''
+                )
             )
             if not endpoint:
-                logger.error("Custom Image Edit Endpoint is not configured")
+                endpoint, _, _ = self._resolve_custom_image_edit_endpoint('')
+            if not endpoint:
+                logger.error("No default image edit endpoint could be resolved")
                 return image
-
-            url = endpoint.rstrip('/')
-            if not url.endswith('/images/edits'):
-                url = f"{url}/images/edits"
 
             model_ref = (
                 os.environ.get('CUSTOM_IMAGE_EDIT_MODEL')
                 or getattr(self, '_custom_image_edit_model_ref', '')
-                or self.config.get('manga_custom-image-edit_model_path', '')
-                or self.config.get('manga_custom_image_edit_model_path', '')
-                or 'custom-image-edit'
+                or self.config.get('custom_image_edit_model', '')
+                or self.config.get('model', '')
+                or 'gpt-image-1'
             )
+            model_ref_lower = str(model_ref or '').lower()
+            is_nanogpt_image = model_ref_lower.startswith(('nan/', 'nanogpt/')) or 'nano-gpt.com' in str(endpoint).lower()
+            url = endpoint.rstrip('/')
+            if is_nanogpt_image:
+                if not model_ref_lower.startswith(('nan/', 'nanogpt/')) and model_ref == 'gpt-image-1':
+                    model_ref = 'nan/gemini-2.5-flash-image-preview'
+                url = os.environ.get('NANOGPT_API_URL', url if 'nano-gpt.com' in url.lower() else 'https://nano-gpt.com').rstrip('/')
+                url = f"{url}/api/v1/images/generations"
+            elif not url.endswith('/images/edits'):
+                url = f"{url}/images/edits"
 
             x, y, w, h = cv2.boundingRect(mask_gray)
             margin = int(os.environ.get('CUSTOM_IMAGE_EDIT_CROP_MARGIN', os.environ.get('QWEN_IMAGE_EDIT_CROP_MARGIN', '64')))
@@ -2580,9 +2602,8 @@ class LocalInpainter:
                 or self.config.get('custom_image_edit_prompt')
                 or os.environ.get('QWEN_IMAGE_EDIT_INPAINT_PROMPT')
                 or (
-                    "This is an image editing task. Edit this image by replacing all foreign-language text with its {target_lang} translation. "
-                    "Do NOT return plain text or OCR — you MUST return the generated edited image. "
-                    "If the image has no translatable text, reply exactly: No"
+                    "This is an image editing task. Edit this image by simply removing all text. "
+                    "Do NOT return plain text or OCR — you MUST return the generated edited image."
                 )
             )
             user_prompt_template = self.config.get('custom_image_edit_user_prompt', '')
@@ -2658,7 +2679,23 @@ class LocalInpainter:
                 'image': ('input.png', img_buf.tobytes(), 'image/png'),
                 'mask': ('mask.png', mask_buf.tobytes(), 'image/png'),
             }
-            resp = requests.post(url, headers=headers, data=form_data, files=files, timeout=timeout)
+            if is_nanogpt_image:
+                image_b64 = base64.b64encode(img_buf.tobytes()).decode('ascii')
+                effective_model = str(model_ref or '').split('/', 1)[1] if '/' in str(model_ref or '') else str(model_ref or '')
+                headers = {
+                    'Authorization': f"Bearer {os.environ.get('NANOGPT_API_KEY') or api_key}",
+                    'Content-Type': 'application/json',
+                }
+                payload = {
+                    'model': effective_model,
+                    'prompt': prompt,
+                    'size': os.environ.get('NANOGPT_IMAGE_SIZE', os.environ.get('CUSTOM_IMAGE_EDIT_SIZE', '1024x1024')),
+                    'response_format': 'url',
+                    'imageDataUrl': f"data:image/png;base64,{image_b64}",
+                }
+                resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            else:
+                resp = requests.post(url, headers=headers, data=form_data, files=files, timeout=timeout)
             if resp.status_code not in (200, 201):
                 raise RuntimeError(f"Custom image edit endpoint error ({resp.status_code}): {resp.text[:500]}")
 

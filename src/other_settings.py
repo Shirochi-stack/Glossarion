@@ -480,11 +480,20 @@ def _create_styled_checkbox(self, text):
                 if checkbox.isChecked():
                     position_checkmark()
                     checkmark.show()
+                    checkmark.raise_()
+                    checkmark.update()
                 else:
                     checkmark.hide()
         except RuntimeError:
             # Widget was already deleted
             pass
+
+    try:
+        checkbox._checkmark_label = checkmark
+        checkbox._position_checkmark = position_checkmark
+        checkbox._update_checkmark = update_checkmark
+    except Exception:
+        pass
     
     checkbox.stateChanged.connect(update_checkmark)
     
@@ -10728,7 +10737,7 @@ def _create_custom_api_endpoints_section(self, parent_frame):
 
     self.use_custom_image_edit_endpoint_var = self.config.get(
         'use_custom_image_edit_endpoint',
-        bool(self.config.get('custom_image_edit_endpoint', ''))
+        False
     )
     image_edit_enable_cb = self._create_styled_checkbox("Enable Custom Image Edit Endpoint")
     self.use_custom_image_edit_endpoint_checkbox = image_edit_enable_cb
@@ -10737,8 +10746,8 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     except Exception:
         pass
     image_edit_enable_cb.setToolTip(
-        "Use a separate OpenAI-compatible endpoint for image/video output and manga custom-image-edit inpainting. "
-        "Text requests keep using the normal endpoint/provider."
+        "Use the URL below as an override for image/video output and manga custom-image-edit inpainting. "
+        "Leave the URL blank to use the normal image endpoint/model already configured in the main GUI."
     )
     def _on_enable_custom_image_edit_endpoint(checked):
         try:
@@ -10761,17 +10770,17 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     image_edit_h.setContentsMargins(0, 0, 0, 5)
     image_edit_label = QLabel("Custom Image Edit Endpoint:")
     image_edit_label.setToolTip(
-        "OpenAI-compatible endpoint used only for image/video output requests and the manga custom-image-edit inpainter. "
-        "Normal text requests continue to use the main endpoint/provider."
+        "Optional OpenAI-compatible endpoint used only for image/video output requests and the manga custom-image-edit inpainter. "
+        "Blank means use the default image endpoint/model from the main GUI."
     )
     image_edit_h.addWidget(image_edit_label)
 
     self.custom_image_edit_endpoint_var = self.config.get('custom_image_edit_endpoint', '')
     self.custom_image_edit_endpoint_entry = QLineEdit()
-    self.custom_image_edit_endpoint_entry.setPlaceholderText("http://localhost:8888/v1  (used for /images/edits)")
+    self.custom_image_edit_endpoint_entry.setPlaceholderText("blank = default image endpoint; optional override like http://localhost:8888/v1")
     self.custom_image_edit_endpoint_entry.setToolTip(
-        "Use this for a local OpenAI-compatible image edit server, such as a GGUF image-edit runtime. "
-        "The manga custom-image-edit inpainter will post to [endpoint]/images/edits."
+        "Optional override for a local OpenAI-compatible image edit server, such as a GGUF image-edit runtime. "
+        "Blank uses the default image endpoint/model from the main GUI."
     )
     try:
         self.custom_image_edit_endpoint_entry.setText(str(self.custom_image_edit_endpoint_var))
