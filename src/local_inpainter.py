@@ -3078,27 +3078,32 @@ class LocalInpainter:
             out_bgr = cv2.imdecode(out_arr, cv2.IMREAD_COLOR)
             if out_bgr is None:
                 raise RuntimeError("Custom image edit endpoint returned unreadable image bytes")
-            if out_bgr.shape[:2] != proc_bgr.shape[:2]:
+            target_h, target_w = crop_bgr.shape[:2]
+            if out_bgr.shape[:2] != (target_h, target_w):
                 resize_info = getattr(self, '_nanogpt_last_input_resize_info', None) if is_nanogpt_image else None
                 if resize_info:
                     sent_w, sent_h = resize_info.get('sent_size', (out_bgr.shape[1], out_bgr.shape[0]))
-                    src_w, src_h = resize_info.get('source_size', (proc_bgr.shape[1], proc_bgr.shape[0]))
+                    src_w, src_h = resize_info.get('source_size', (target_w, target_h))
                     if resize_info.get('dimensions_reduced'):
                         self._log(
                             f"NanoGPT output resized back to original dimensions: "
-                            f"{out_bgr.shape[1]}x{out_bgr.shape[0]} -> {proc_bgr.shape[1]}x{proc_bgr.shape[0]} "
+                            f"{out_bgr.shape[1]}x{out_bgr.shape[0]} -> {target_w}x{target_h} "
                             f"(sent input {sent_w}x{sent_h}, original {src_w}x{src_h})",
                             "info",
                         )
                     else:
                         self._log(
-                            f"Custom image edit output dimensions differ from input; resizing: "
-                            f"{out_bgr.shape[1]}x{out_bgr.shape[0]} -> {proc_bgr.shape[1]}x{proc_bgr.shape[0]}",
+                            f"Custom image edit output dimensions differ from input; forcing original resolution: "
+                            f"{out_bgr.shape[1]}x{out_bgr.shape[0]} -> {target_w}x{target_h}",
                             "info",
                         )
-                out_bgr = cv2.resize(out_bgr, (proc_bgr.shape[1], proc_bgr.shape[0]), interpolation=cv2.INTER_LANCZOS4)
-            if out_bgr.shape[:2] != crop_bgr.shape[:2]:
-                out_bgr = cv2.resize(out_bgr, (crop_bgr.shape[1], crop_bgr.shape[0]), interpolation=cv2.INTER_LANCZOS4)
+                else:
+                    self._log(
+                        f"Custom image edit output dimensions differ from input; forcing original resolution: "
+                        f"{out_bgr.shape[1]}x{out_bgr.shape[0]} -> {target_w}x{target_h}",
+                        "info",
+                    )
+                out_bgr = cv2.resize(out_bgr, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
 
             # Endpoint-backed image edit models can optionally own the whole
             # returned page. Keep the conservative mask-limited blend by
