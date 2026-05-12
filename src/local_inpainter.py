@@ -2445,6 +2445,12 @@ class LocalInpainter:
                 and not os.path.exists(model_path_str)
                 and any(marker in model_path_str.lower() for marker in ('localhost', '127.', '0.0.0.0', '/v1'))
             )
+            model_path_is_stale_qwen = (
+                model_path_str
+                and not model_path_is_url
+                and not os.path.exists(model_path_str)
+                and 'qwen-image-edit' in model_path_str.lower()
+            )
             endpoint = self._normalize_custom_image_edit_endpoint(
                 os.environ.get('CUSTOM_IMAGE_EDIT_BASE_URL')
                 or os.environ.get('OPENAI_IMAGE_EDIT_BASE_URL')
@@ -2469,7 +2475,7 @@ class LocalInpainter:
 
             model_ref = (
                 os.environ.get('CUSTOM_IMAGE_EDIT_MODEL')
-                or ('' if model_path_is_url else model_path)
+                or ('' if (model_path_is_url or model_path_is_stale_qwen) else model_path)
                 or self.config.get('manga_custom-image-edit_model_path', '')
                 or self.config.get('manga_custom_image_edit_model_path', '')
                 or 'custom-image-edit'
@@ -2478,7 +2484,7 @@ class LocalInpainter:
             if model_ref_str.startswith(('http://', 'https://')) or (
                 model_ref_str
                 and not os.path.exists(model_ref_str)
-                and any(marker in model_ref_str.lower() for marker in ('localhost', '127.', '0.0.0.0', '/v1'))
+                and any(marker in model_ref_str.lower() for marker in ('localhost', '127.', '0.0.0.0', '/v1', 'qwen-image-edit'))
             ):
                 model_ref = os.environ.get('CUSTOM_IMAGE_EDIT_MODEL') or 'custom-image-edit'
 
@@ -2569,15 +2575,37 @@ class LocalInpainter:
                 proc_bgr = cv2.resize(proc_bgr, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
                 proc_mask = cv2.resize(proc_mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
-            prompt = os.environ.get(
-                'CUSTOM_IMAGE_EDIT_INPAINT_PROMPT',
-                os.environ.get(
-                    'QWEN_IMAGE_EDIT_INPAINT_PROMPT',
-                    "Remove all visible manga text, SFX lettering, and OCR artifacts only inside the masked area. "
-                    "Reconstruct the underlying manga line art, screentone, shading, and speech bubble background. "
-                    "Preserve the original style. Do not add any text. Keep everything outside the mask unchanged."
+            system_prompt_template = (
+                self.config.get('custom_image_edit_system_prompt')
+                or self.config.get('custom_image_edit_prompt')
+                or os.environ.get('QWEN_IMAGE_EDIT_INPAINT_PROMPT')
+                or (
+                    "This is an image editing task. Edit this image by replacing all foreign-language text with its {target_lang} translation. "
+                    "Do NOT return plain text or OCR — you MUST return the generated edited image. "
+                    "If the image has no translatable text, reply exactly: No"
                 )
             )
+            user_prompt_template = self.config.get('custom_image_edit_user_prompt', '')
+            target_lang = (
+                os.environ.get('GLOSSARY_TARGET_LANGUAGE')
+                or os.environ.get('OUTPUT_LANGUAGE')
+                or os.environ.get('TARGET_LANGUAGE')
+                or os.environ.get('TARGET_LANG')
+                or self.config.get('output_language')
+                or self.config.get('glossary_target_language')
+                or 'English'
+            )
+            try:
+                system_prompt = system_prompt_template.format(target_lang=target_lang)
+            except Exception:
+                system_prompt = str(system_prompt_template).replace('{target_lang}', str(target_lang))
+            try:
+                user_prompt = str(user_prompt_template or '').format(target_lang=target_lang).strip()
+            except Exception:
+                user_prompt = str(user_prompt_template or '').replace('{target_lang}', str(target_lang)).strip()
+            prompt = system_prompt
+            if user_prompt:
+                prompt = f"{system_prompt}\n\nUser prompt:\n{user_prompt}"
 
             ok_img, img_buf = cv2.imencode('.png', proc_bgr)
             if not ok_img:
@@ -2650,6 +2678,19 @@ class LocalInpainter:
             if isinstance(image_value, dict):
                 image_value = image_value.get('url') or image_value.get('data') or image_value.get('base64')
             if not image_value:
+                text_value = (
+                    first.get('text')
+                    or first.get('content')
+                    or first.get('message')
+                    or first.get('response')
+                    or data.get('text')
+                    or data.get('content')
+                    or data.get('message')
+                    or data.get('response')
+                )
+                if isinstance(text_value, str) and text_value.strip().lower() == 'no':
+                    self._log("Custom image edit endpoint reported no translatable text; keeping original crop", "info")
+                    return image.copy()
                 raise RuntimeError("Custom image edit endpoint returned no image")
 
             if isinstance(image_value, str) and image_value.startswith('data:'):
@@ -2996,6 +3037,12 @@ class LocalInpainter:
             # Offload to worker process if enabled
             if getattr(self, '_mp_enabled', False):
                 return self._mp_load_model(method, model_path, force_reload=force_reload)
+
+            # custom-image-edit is endpoint-backed. It has no local model file to
+            # find or download, and it should work even in lightweight builds.
+            if self._is_custom_image_edit_method(method):
+                return self._load_custom_image_edit_model(model_path, force_reload=force_reload)
+
             if not TORCH_AVAILABLE:
                 logger.warning("PyTorch not available in this build")
                 logger.info("Inpainting features will be disabled - this is normal for lightweight builds")
@@ -3037,9 +3084,6 @@ class LocalInpainter:
                     logger.info("Inpainting will be unavailable for this session")
                     return False
             
-            if self._is_custom_image_edit_method(method):
-                return self._load_custom_image_edit_model(model_path, force_reload=force_reload)
-
             if self._is_qwen_image_edit_method(method):
                 return self._load_qwen_image_edit_model(model_path, force_reload=force_reload)
 

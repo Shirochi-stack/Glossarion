@@ -1922,6 +1922,17 @@ Text to analyze:
         # Initialize custom API endpoint variables
         self.openai_base_url_var = self.config.get('openai_base_url', '')
         self.custom_image_edit_endpoint_var = self.config.get('custom_image_edit_endpoint', '')
+        self.custom_image_edit_system_prompt_var = self.config.get(
+            'custom_image_edit_system_prompt',
+            self.config.get(
+                'custom_image_edit_prompt',
+                "This is an image editing task. Edit this image by replacing all foreign-language text with its {target_lang} translation. "
+                "Do NOT return plain text or OCR — you MUST return the generated edited image. "
+                "If the image has no translatable text, reply exactly: No"
+            )
+        )
+        self.custom_image_edit_user_prompt_var = self.config.get('custom_image_edit_user_prompt', '')
+        self.custom_image_edit_prompt_var = self.custom_image_edit_system_prompt_var
         self.use_custom_image_edit_endpoint_var = self.config.get(
             'use_custom_image_edit_endpoint',
             bool(self.custom_image_edit_endpoint_var)
@@ -3034,6 +3045,20 @@ Text to analyze:
         if not MANGA_SUPPORT:
             QMessageBox.warning(self, "Not Available", "Manga translation modules not found.")
             return
+
+        try:
+            enabled = bool(getattr(self, 'use_custom_image_edit_endpoint_var', False))
+            endpoint = str(getattr(self, 'custom_image_edit_endpoint_var', '') or self.config.get('custom_image_edit_endpoint', '') or '').strip()
+            self.config['custom_image_edit_endpoint'] = endpoint
+            self.config['use_custom_image_edit_endpoint'] = enabled
+            if self.config.get('manga_local_inpaint_model') == 'custom-image-edit' and endpoint:
+                self.config['manga_custom-image-edit_model_path'] = endpoint
+                self.config['manga_custom_image_edit_model_path'] = endpoint
+            os.environ['USE_CUSTOM_IMAGE_EDIT_ENDPOINT'] = '1' if enabled else '0'
+            os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = endpoint if enabled else ''
+            os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = endpoint if enabled else ''
+        except Exception:
+            pass
         
         # Always open directly - model preloading will be handled inside the manga tab
         self._open_manga_translator_direct()
@@ -22639,6 +22664,8 @@ Important rules:
                 ('vertex_ai_location', ['vertex_location_entry', 'vertex_location_var'], 'global', str),
                 ('openai_base_url', ['openai_base_url_var'], '', str),
                 ('custom_image_edit_endpoint', ['custom_image_edit_endpoint_var'], '', str),
+                ('custom_image_edit_system_prompt', ['custom_image_edit_system_prompt_var'], '', str),
+                ('custom_image_edit_user_prompt', ['custom_image_edit_user_prompt_var'], '', str),
                 ('openai_tts_endpoint', ['openai_tts_endpoint_var'], '', str),
                 ('tts_voice', ['tts_voice_var'], '', str),
                 ('groq_base_url', ['groq_base_url_var'], '', str),

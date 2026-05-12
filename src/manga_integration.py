@@ -4669,7 +4669,9 @@ class MangaTranslationTab(QObject):
                 self.main_gui.config.get('manga_qwen_image_edit_model_path')
                 and not self.main_gui.config.get('manga_custom-image-edit_model_path')
             ):
-                self.main_gui.config['manga_custom-image-edit_model_path'] = self.main_gui.config.get('manga_qwen_image_edit_model_path')
+                endpoint = self.main_gui.config.get('custom_image_edit_endpoint', '')
+                if endpoint:
+                    self.main_gui.config['manga_custom-image-edit_model_path'] = endpoint
         local_model_combo = QComboBox()
         local_model_combo.addItems(['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'custom-image-edit', 'mat', 'ollama', 'sd_local'])
         local_model_combo.setCurrentText(self.local_model_type_value)
@@ -4687,6 +4689,11 @@ class MangaTranslationTab(QObject):
             bool(self.main_gui.config.get('custom_image_edit_endpoint', ''))
         )
         self.custom_image_edit_endpoint_value = self.main_gui.config.get('custom_image_edit_endpoint', '')
+        self.custom_image_edit_system_prompt_value = self.main_gui.config.get(
+            'custom_image_edit_system_prompt',
+            self.main_gui.config.get('custom_image_edit_prompt', self._default_custom_image_edit_system_prompt())
+        )
+        self.custom_image_edit_user_prompt_value = self.main_gui.config.get('custom_image_edit_user_prompt', '')
         custom_image_edit_cb = self._create_styled_checkbox("Enable Custom Image Edit Endpoint")
         custom_image_edit_cb.setToolTip(
             "Uses the Custom Image Edit Endpoint only for manga custom-image-edit inpainting. "
@@ -4699,6 +4706,16 @@ class MangaTranslationTab(QObject):
         custom_image_edit_cb.toggled.connect(self._on_custom_image_edit_endpoint_toggle)
         local_model_layout.addWidget(custom_image_edit_cb)
         self.custom_image_edit_endpoint_checkbox = custom_image_edit_cb
+
+        custom_image_edit_prompt_btn = QPushButton("Edit Prompt")
+        custom_image_edit_prompt_btn.clicked.connect(self._edit_custom_image_edit_prompt)
+        custom_image_edit_prompt_btn.setToolTip(
+            "Edit the prompt sent only to the custom-image-edit endpoint. "
+            "It does not change the Translator GUI image prompt."
+        )
+        custom_image_edit_prompt_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
+        local_model_layout.addWidget(custom_image_edit_prompt_btn)
+        self.custom_image_edit_prompt_btn = custom_image_edit_prompt_btn
 
         # Model descriptions
         model_desc = {
@@ -6764,6 +6781,14 @@ class MangaTranslationTab(QObject):
             if hasattr(self, 'use_custom_image_edit_endpoint_value'):
                 self.main_gui.config['use_custom_image_edit_endpoint'] = bool(self.use_custom_image_edit_endpoint_value)
                 self._set_custom_image_edit_env()
+            if hasattr(self, 'custom_image_edit_system_prompt_value'):
+                self.main_gui.config['custom_image_edit_system_prompt'] = (
+                    self.custom_image_edit_system_prompt_value or self._default_custom_image_edit_system_prompt()
+                )
+                self.main_gui.custom_image_edit_system_prompt_var = self.main_gui.config['custom_image_edit_system_prompt']
+            if hasattr(self, 'custom_image_edit_user_prompt_value'):
+                self.main_gui.config['custom_image_edit_user_prompt'] = self.custom_image_edit_user_prompt_value or ''
+                self.main_gui.custom_image_edit_user_prompt_var = self.main_gui.config['custom_image_edit_user_prompt']
             
             # Add new inpainting settings
             if hasattr(self, 'inpaint_method_value'):
@@ -9845,6 +9870,13 @@ class MangaTranslationTab(QObject):
     def _is_custom_image_edit_selected(self):
         return str(getattr(self, 'local_model_type_value', '') or '').lower() == 'custom-image-edit'
 
+    def _default_custom_image_edit_system_prompt(self):
+        return (
+            "This is an image editing task. Edit this image by replacing all foreign-language text with its {target_lang} translation. "
+            "Do NOT return plain text or OCR — you MUST return the generated edited image. "
+            "If the image has no translatable text, reply exactly: No"
+        )
+
     def _set_custom_image_edit_env(self):
         try:
             enabled = bool(getattr(self, 'use_custom_image_edit_endpoint_value', False))
@@ -9852,6 +9884,31 @@ class MangaTranslationTab(QObject):
             os.environ['USE_CUSTOM_IMAGE_EDIT_ENDPOINT'] = '1' if enabled else '0'
             os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = url if enabled else ''
             os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = url if enabled else ''
+        except Exception:
+            pass
+
+    def _sync_custom_image_edit_prompt(self, system_prompt=None, user_prompt=None, source='manga'):
+        """Persist custom-image-edit prompts without touching Translator GUI prompts."""
+        try:
+            system_prompt = str(
+                system_prompt if system_prompt is not None else getattr(self, 'custom_image_edit_system_prompt_value', '') or ''
+            ).strip()
+            if not system_prompt:
+                system_prompt = self._default_custom_image_edit_system_prompt()
+            user_prompt = str(
+                user_prompt if user_prompt is not None else getattr(self, 'custom_image_edit_user_prompt_value', '') or ''
+            ).strip()
+            self.custom_image_edit_system_prompt_value = system_prompt
+            self.custom_image_edit_user_prompt_value = user_prompt
+            self.main_gui.custom_image_edit_system_prompt_var = system_prompt
+            self.main_gui.custom_image_edit_user_prompt_var = user_prompt
+            self.main_gui.config['custom_image_edit_system_prompt'] = system_prompt
+            self.main_gui.config['custom_image_edit_user_prompt'] = user_prompt
+            if hasattr(self.main_gui, 'save_config') and source != 'save':
+                try:
+                    self.main_gui.save_config(show_message=False)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -9912,6 +9969,72 @@ class MangaTranslationTab(QObject):
         except Exception:
             pass
 
+    def _edit_custom_image_edit_prompt(self):
+        """Open dialog to edit the prompt used by manga custom-image-edit inpainting."""
+        dialog = QDialog(self.dialog)
+        dialog.setWindowTitle("Custom Image Edit Prompt")
+        screen = QApplication.primaryScreen().geometry()
+        dialog.setMinimumSize(int(screen.width() * 0.42), int(screen.height() * 0.45))
+
+        layout = QVBoxLayout(dialog)
+        instructions = QLabel(
+            "Edit prompts sent only to the custom-image-edit inpainter request. "
+            "Use {target_lang} where the selected target language should be inserted."
+        )
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+
+        system_label = QLabel("System Prompt:")
+        layout.addWidget(system_label)
+        system_prompt_editor = QTextEdit()
+        system_prompt_editor.setPlainText(
+            getattr(self, 'custom_image_edit_system_prompt_value', '')
+            or self.main_gui.config.get('custom_image_edit_system_prompt', '')
+            or self.main_gui.config.get('custom_image_edit_prompt', '')
+            or self._default_custom_image_edit_system_prompt()
+        )
+        layout.addWidget(system_prompt_editor)
+
+        user_label = QLabel("User Prompt (optional):")
+        layout.addWidget(user_label)
+        user_prompt_editor = QTextEdit()
+        user_prompt_editor.setPlaceholderText("Optional extra instruction for this image edit request")
+        user_prompt_editor.setPlainText(
+            getattr(self, 'custom_image_edit_user_prompt_value', '')
+            or self.main_gui.config.get('custom_image_edit_user_prompt', '')
+        )
+        layout.addWidget(user_prompt_editor)
+
+        button_layout = QHBoxLayout()
+
+        def save_prompt():
+            system_prompt = system_prompt_editor.toPlainText().strip() or self._default_custom_image_edit_system_prompt()
+            user_prompt = user_prompt_editor.toPlainText().strip()
+            self._sync_custom_image_edit_prompt(system_prompt=system_prompt, user_prompt=user_prompt, source='manga')
+            self._save_rendering_settings()
+            self._log("Updated custom image edit prompts", "success")
+            dialog.accept()
+
+        def reset_prompt():
+            system_prompt_editor.setPlainText(self._default_custom_image_edit_system_prompt())
+            user_prompt_editor.clear()
+
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(save_prompt)
+        button_layout.addWidget(save_btn)
+
+        reset_btn = QPushButton("Reset to Default")
+        reset_btn.clicked.connect(reset_prompt)
+        button_layout.addWidget(reset_btn)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+        button_layout.addStretch()
+
+        layout.addLayout(button_layout)
+        dialog.exec()
+
     def _on_custom_image_edit_endpoint_toggle(self, checked):
         self._sync_custom_image_edit_controls(
             url=getattr(self, 'custom_image_edit_endpoint_value', ''),
@@ -9934,6 +10057,8 @@ class MangaTranslationTab(QObject):
         custom_selected = self._is_custom_image_edit_selected()
         if hasattr(self, 'custom_image_edit_endpoint_checkbox'):
             self.custom_image_edit_endpoint_checkbox.setVisible(custom_selected)
+        if hasattr(self, 'custom_image_edit_prompt_btn'):
+            self.custom_image_edit_prompt_btn.setVisible(custom_selected)
         if hasattr(self, 'model_file_label'):
             self.model_file_label.setText("Image Edit URL:" if custom_selected else "Model File:")
         if hasattr(self, 'local_model_entry'):
@@ -15563,6 +15688,13 @@ class MangaTranslationTab(QObject):
                     model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
                     if not model_path:
                         model_path = self.main_gui.config.get(f'{local_method}_model_path', '')
+                    if str(local_method or '').lower() == 'custom-image-edit':
+                        endpoint = (
+                            str(getattr(self.main_gui, 'custom_image_edit_endpoint_var', '') or '').strip()
+                            or str(self.main_gui.config.get('custom_image_edit_endpoint', '') or '').strip()
+                        )
+                        if endpoint:
+                            model_path = endpoint
                     
                     # Preload one shared instance plus spares for parallel panel processing
                     # Constrain to actual number of files (no need for more workers than files)

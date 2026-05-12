@@ -9615,7 +9615,49 @@ class MangaTranslator:
         self._log(f"📊 Final mask coverage: {coverage_percent:.1f}% of image", "info")
         
         return mask
-    
+
+    def _apply_custom_image_edit_request_config(self, inpainter):
+        """Scope custom-image-edit prompt/language to the manga inpainter request object."""
+        try:
+            if inpainter is None or not hasattr(inpainter, 'config') or not isinstance(inpainter.config, dict):
+                return
+            cfg = getattr(self.main_gui, 'config', {}) if hasattr(self, 'main_gui') else {}
+            system_prompt = ''
+            user_prompt = ''
+            if isinstance(cfg, dict):
+                system_prompt = cfg.get('custom_image_edit_system_prompt', '') or cfg.get('custom_image_edit_prompt', '')
+                user_prompt = cfg.get('custom_image_edit_user_prompt', '')
+            if not system_prompt and hasattr(self, 'main_gui'):
+                system_prompt = (
+                    getattr(self.main_gui, 'custom_image_edit_system_prompt_var', '')
+                    or getattr(self.main_gui, 'custom_image_edit_prompt_var', '')
+                )
+            if not user_prompt and hasattr(self, 'main_gui'):
+                user_prompt = getattr(self.main_gui, 'custom_image_edit_user_prompt_var', '')
+            if system_prompt:
+                inpainter.config['custom_image_edit_system_prompt'] = system_prompt
+                inpainter.config['custom_image_edit_prompt'] = system_prompt
+            inpainter.config['custom_image_edit_user_prompt'] = user_prompt or ''
+            target_lang = 'English'
+            if isinstance(cfg, dict):
+                target_lang = cfg.get('output_language') or cfg.get('glossary_target_language') or target_lang
+            target_lang = os.environ.get('OUTPUT_LANGUAGE') or os.environ.get('GLOSSARY_TARGET_LANGUAGE') or target_lang
+            inpainter.config['output_language'] = target_lang
+            inpainter.config['glossary_target_language'] = cfg.get('glossary_target_language', target_lang) if isinstance(cfg, dict) else target_lang
+        except Exception:
+            pass
+
+    def _custom_image_edit_endpoint_from_gui(self):
+        try:
+            endpoint = ''
+            if hasattr(self, 'main_gui'):
+                endpoint = str(getattr(self.main_gui, 'custom_image_edit_endpoint_var', '') or '').strip()
+                if not endpoint and getattr(self.main_gui, 'config', None):
+                    endpoint = str(self.main_gui.config.get('custom_image_edit_endpoint', '') or '').strip()
+            return endpoint
+        except Exception:
+            return ''
+
     def _get_or_init_shared_local_inpainter(self, local_method: str, model_path: str, force_reload: bool = False):
         """Return a shared LocalInpainter for (local_method, model_path) with minimal locking.
         If another thread is loading the same model, wait on its event instead of competing.
@@ -9628,9 +9670,8 @@ class MangaTranslator:
         
         # Normalize model path to avoid cache misses due to path differences
         # (e.g., ~/.cache/inpainting/anime-manga-big-lama.pt vs models/anime-manga-big-lama.pt)
-        if str(local_method or '').lower() == 'custom-image-edit' and not model_path:
-            model_path = getattr(self.main_gui, 'custom_image_edit_endpoint_var', '') if hasattr(self, 'main_gui') else ''
-            model_path = model_path or (self.main_gui.config.get('custom_image_edit_endpoint', '') if hasattr(self, 'main_gui') else '')
+        if str(local_method or '').lower() == 'custom-image-edit':
+            model_path = self._custom_image_edit_endpoint_from_gui() or model_path
         if model_path and str(local_method or '').lower() != 'custom-image-edit':
             try:
                 # Resolve to absolute path and normalize
@@ -9659,12 +9700,14 @@ class MangaTranslator:
                 checked_out = rec.setdefault('checked_out', [])
                 for spare in spares:
                     if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
+                        self._apply_custom_image_edit_request_config(spare)
                         checked_out.append(spare)
                         self._checked_out_inpainter = spare
                         self._inpainter_pool_key = key
                         self._log("âœ… Checked out custom image edit endpoint inpainter", "info")
                         return spare
                 inp = LocalInpainter(enable_worker_process=False)
+                self._apply_custom_image_edit_request_config(inp)
                 inp.load_model('custom-image-edit', model_path, force_reload=force_reload)
                 if not getattr(inp, 'model_loaded', False):
                     self._log("âš ï¸ Custom image edit endpoint fake load failed", "warning")
@@ -9824,7 +9867,7 @@ class MangaTranslator:
             except Exception:
                 pass
         if is_custom_image_edit:
-            model_path = model_path or getattr(self.main_gui, 'custom_image_edit_endpoint_var', '') or self.main_gui.config.get('custom_image_edit_endpoint', '')
+            model_path = self._custom_image_edit_endpoint_from_gui() or model_path
             key = (local_method, model_path or '')
             with MangaTranslator._inpaint_pool_lock:
                 rec = MangaTranslator._inpaint_pool.get(key)
@@ -9834,6 +9877,7 @@ class MangaTranslator:
                 spares = rec.setdefault('spares', [])
                 while len(spares) < max(1, int(count)):
                     inp = LocalInpainter(enable_worker_process=False)
+                    self._apply_custom_image_edit_request_config(inp)
                     if inp.load_model('custom-image-edit', model_path, force_reload=False) and getattr(inp, 'model_loaded', False):
                         spares.append(inp)
                     else:
@@ -10062,7 +10106,7 @@ class MangaTranslator:
             except Exception:
                 pass
         if is_custom_image_edit:
-            model_path = model_path or getattr(self.main_gui, 'custom_image_edit_endpoint_var', '') or self.main_gui.config.get('custom_image_edit_endpoint', '')
+            model_path = self._custom_image_edit_endpoint_from_gui() or model_path
             key = (local_method or 'custom-image-edit', model_path or '')
             with MangaTranslator._inpaint_pool_lock:
                 rec = MangaTranslator._inpaint_pool.get(key)
@@ -10073,6 +10117,7 @@ class MangaTranslator:
                 target_count = max(1, int(count))
                 while len(spares) < target_count:
                     inp = LocalInpainter(enable_worker_process=False)
+                    self._apply_custom_image_edit_request_config(inp)
                     if inp.load_model('custom-image-edit', model_path, force_reload=False) and getattr(inp, 'model_loaded', False):
                         spares.append(inp)
                     else:
@@ -10509,7 +10554,9 @@ class MangaTranslator:
                     self.main_gui.config.get('manga_qwen_image_edit_model_path')
                     and not self.main_gui.config.get('manga_custom-image-edit_model_path')
                 ):
-                    self.main_gui.config['manga_custom-image-edit_model_path'] = self.main_gui.config.get('manga_qwen_image_edit_model_path')
+                    endpoint = self.main_gui.config.get('custom_image_edit_endpoint', '')
+                    if endpoint:
+                        self.main_gui.config['manga_custom-image-edit_model_path'] = endpoint
             saved_inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'cloud')
             
             # MIGRATION: Ensure manga_ prefixed model path keys exist for ONNX methods
@@ -10546,11 +10593,7 @@ class MangaTranslator:
                     model_path = self.main_gui.config.get(f'{local_method}_model_path', '')
                 is_custom_image_edit = str(local_method or '').lower() == 'custom-image-edit'
                 if is_custom_image_edit:
-                    model_path = (
-                        model_path
-                        or getattr(self.main_gui, 'custom_image_edit_endpoint_var', '')
-                        or self.main_gui.config.get('custom_image_edit_endpoint', '')
-                    )
+                    model_path = self._custom_image_edit_endpoint_from_gui() or model_path
                 
                 self._log(f"Using local method: {local_method} (loaded from config)", "info")
                 if is_custom_image_edit:
@@ -14053,9 +14096,8 @@ class MangaTranslator:
         
         # Normalize the model path to ensure key consistency
         original_path = model_path
-        if str(local_method or '').lower() == 'custom-image-edit' and not model_path:
-            model_path = getattr(self.main_gui, 'custom_image_edit_endpoint_var', '') if hasattr(self, 'main_gui') else ''
-            model_path = model_path or (self.main_gui.config.get('custom_image_edit_endpoint', '') if hasattr(self, 'main_gui') else '')
+        if str(local_method or '').lower() == 'custom-image-edit':
+            model_path = self._custom_image_edit_endpoint_from_gui() or model_path
         if model_path and str(local_method or '').lower() != 'custom-image-edit':
             try:
                 model_path = os.path.abspath(os.path.normpath(model_path))
@@ -14087,6 +14129,8 @@ class MangaTranslator:
         # Check thread-local cache first
         if key in tl.local_inpainters and tl.local_inpainters[key] is not None:
             # Already cached in this thread - return it
+            if str(local_method or '').lower() == 'custom-image-edit':
+                self._apply_custom_image_edit_request_config(tl.local_inpainters[key])
             return tl.local_inpainters[key]
         
         # Not cached - try to check out from pool with polling
@@ -14139,6 +14183,8 @@ class MangaTranslator:
                                 
                                 for spare in spares:
                                     if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
+                                        if str(local_method or '').lower() == 'custom-image-edit':
+                                            self._apply_custom_image_edit_request_config(spare)
                                         # Mark as checked out (don't remove from spares!)
                                         checked_out.append(spare)
                                         tl.local_inpainters[key] = spare
