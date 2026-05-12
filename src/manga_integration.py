@@ -7633,6 +7633,7 @@ class MangaTranslationTab(QObject):
                 self.file_listbox.setCurrentRow(self.selected_files.index(first_path))
             except Exception:
                 pass
+        self._update_manga_preview_image_list_for_range()
         self._update_manga_loaded_directory_label()
 
     def _warn_manga_source_mismatch(self, message: str) -> None:
@@ -7817,6 +7818,11 @@ class MangaTranslationTab(QObject):
         files, error = self._manga_range_filtered_files()
         if error:
             files = list(getattr(self, 'selected_files', []) or [])
+        groups = self._manga_current_process_groups()
+        if len(groups) > 1:
+            index = self._manga_selected_process_group_index()
+            group_files = set(groups[index].get('files', []) or [])
+            files = [path for path in files if path in group_files]
 
         current_path = getattr(self.image_preview_widget, 'current_image_path', None)
         self.image_preview_widget.set_image_list(files)
@@ -7845,6 +7851,40 @@ class MangaTranslationTab(QObject):
                 self.image_preview_widget.load_image(first_path)
         except Exception as exc:
             print(f"[IMAGE_RANGE_PREVIEW] Failed to sync preview: {exc}")
+
+    def _sync_manga_process_group_for_image(self, image_path: str) -> None:
+        """Keep the process-group dropdown aligned with a clicked file-list row."""
+        if not image_path:
+            return
+        groups = self._manga_current_process_groups()
+        if len(groups) <= 1:
+            return
+        current_index = self._manga_selected_process_group_index()
+        target_index = current_index
+        for index, group in enumerate(groups):
+            if image_path in (group.get('files', []) or []):
+                target_index = index
+                break
+        if target_index == current_index:
+            return
+
+        self.manga_process_group_index = target_index
+        combo = getattr(self, 'manga_process_combo', None)
+        if combo:
+            combo.blockSignals(True)
+            try:
+                if 0 <= target_index < combo.count():
+                    combo.setCurrentIndex(target_index)
+            finally:
+                combo.blockSignals(False)
+
+        if hasattr(self, 'manga_process_counter_label'):
+            self.manga_process_counter_label.setText(f"{target_index + 1} / {len(groups)}")
+        if hasattr(self, 'manga_process_prev_btn'):
+            self.manga_process_prev_btn.setEnabled(target_index > 0)
+        if hasattr(self, 'manga_process_next_btn'):
+            self.manga_process_next_btn.setEnabled(target_index < len(groups) - 1)
+        self._update_manga_loaded_directory_label()
 
     def _on_manga_image_range_changed(self, text: str = "") -> None:
         self.manga_image_range_value = str(text or '').strip()
@@ -11211,6 +11251,8 @@ class MangaTranslationTab(QObject):
                 image_path = self.selected_files[row]
 
             if image_path:
+                self._sync_manga_process_group_for_image(image_path)
+                self._update_manga_preview_image_list_for_range()
                 
                 # Update current image path for state tracking
                 self._current_image_path = image_path
