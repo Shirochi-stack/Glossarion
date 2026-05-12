@@ -1526,6 +1526,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                 pass
         
         self.logo_img = None
+        self.config_file_path = CONFIG_FILE
         
         # Load config
         try:

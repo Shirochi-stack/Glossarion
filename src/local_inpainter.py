@@ -2603,13 +2603,6 @@ class LocalInpainter:
             crop_mask = mask_gray[top:bottom, left:right].copy()
             proc_bgr = crop_bgr
             proc_mask = crop_mask
-            max_side = int(os.environ.get('CUSTOM_IMAGE_EDIT_MAX_SIDE', os.environ.get('QWEN_IMAGE_EDIT_MAX_SIDE', '768')))
-            if max_side > 0 and max(proc_bgr.shape[:2]) > max_side:
-                scale = float(max_side) / float(max(proc_bgr.shape[:2]))
-                new_w = max(1, int(proc_bgr.shape[1] * scale + 0.5))
-                new_h = max(1, int(proc_bgr.shape[0] * scale + 0.5))
-                proc_bgr = cv2.resize(proc_bgr, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
-                proc_mask = cv2.resize(proc_mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
             system_prompt_template = (
                 self.config.get('custom_image_edit_system_prompt')
@@ -4062,6 +4055,14 @@ class LocalInpainter:
         try:
             # Store original dimensions
             orig_h, orig_w = image.shape[:2]
+
+            # Endpoint-backed image editing must see the full source image.
+            # Bypass HD resize/crop preprocessing, which is only meant for local
+            # inpainting models and can otherwise turn one page into a region crop.
+            if self._is_custom_image_edit_method(self.current_method):
+                if len(mask.shape) == 3:
+                    mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                return self._custom_image_edit_inpaint(image, mask, iterations=iterations)
             
             # HD strategy (mirror of comic-translate): optional RESIZE or CROP before core inpainting
             if not _skip_hd:
@@ -4115,9 +4116,6 @@ class LocalInpainter:
             if self.current_method == 'anime':
                 kernel = np.ones((7, 7), np.uint8)
                 mask = cv2.dilate(mask, kernel, iterations=1)
-
-            if self._is_custom_image_edit_method(self.current_method):
-                return self._custom_image_edit_inpaint(image, mask, iterations=iterations)
 
             if self._is_qwen_image_edit_method(self.current_method):
                 return self._qwen_image_edit_inpaint(image, mask, iterations=iterations)

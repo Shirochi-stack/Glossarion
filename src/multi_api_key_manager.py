@@ -1514,6 +1514,37 @@ class MultiAPIKeyDialog(QDialog):
             multi_api_keys = self.translator_gui.config.get('multi_api_keys', [])
             self.key_pool.load_from_list(multi_api_keys)
 
+    def _coerce_bool_config_value(self, value, default=False):
+        """Coerce persisted config values without treating non-empty strings as True."""
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in ('1', 'true', 'yes', 'on', 'enabled'):
+            return True
+        if text in ('0', 'false', 'no', 'off', 'disabled'):
+            return False
+        return default
+
+    def _read_persisted_bool(self, key, default=False):
+        """Read a boolean from the live config, refreshed from the persisted config file when possible."""
+        value = self.translator_gui.config.get(key, default) if hasattr(self.translator_gui, 'config') else default
+        config_path = getattr(self.translator_gui, 'config_file_path', None)
+        if config_path and os.path.exists(config_path):
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    disk_config = json.load(f)
+                if key in disk_config:
+                    value = disk_config.get(key, default)
+                    if hasattr(self.translator_gui, 'config'):
+                        self.translator_gui.config[key] = self._coerce_bool_config_value(value, default)
+            except Exception:
+                pass
+        return self._coerce_bool_config_value(value, default)
+
     def _update_rotation_display(self, *args):
         """Update the rotation description based on settings"""
         # Read current state from widgets
@@ -1537,7 +1568,11 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui.config['multi_api_keys'] = key_list
 
             # Save fallback settings - read from checkbox
-            use_fallback = self.use_fallback_checkbox.isChecked() if hasattr(self, 'use_fallback_checkbox') else False
+            use_fallback = (
+                self.use_fallback_checkbox.isChecked()
+                if hasattr(self, 'use_fallback_checkbox')
+                else bool(self.translator_gui.config.get('use_fallback_keys', False))
+            )
             self.translator_gui.config['use_fallback_keys'] = use_fallback
             # Save main-key-fallback toggle (persist in config)
             if hasattr(self, 'use_main_key_fallback_checkbox'):
@@ -1554,25 +1589,49 @@ class MultiAPIKeyDialog(QDialog):
             # Fallback keys are already saved when added/removed
 
             # Use the current state of the toggle - read from checkbox
-            enabled = self.enabled_checkbox.isChecked() if hasattr(self, 'enabled_checkbox') else False
+            enabled = (
+                self.enabled_checkbox.isChecked()
+                if hasattr(self, 'enabled_checkbox')
+                else bool(self.translator_gui.config.get('use_multi_api_keys', False))
+            )
             self.translator_gui.config['use_multi_api_keys'] = enabled
 
             # Save rotation settings - read from widgets
-            force_rotation = self.force_rotation_checkbox.isChecked() if hasattr(self, 'force_rotation_checkbox') else True
-            rotation_freq = self.frequency_spinbox.value() if hasattr(self, 'frequency_spinbox') else 1
+            force_rotation = (
+                self.force_rotation_checkbox.isChecked()
+                if hasattr(self, 'force_rotation_checkbox')
+                else bool(self.translator_gui.config.get('force_key_rotation', True))
+            )
+            rotation_freq = (
+                self.frequency_spinbox.value()
+                if hasattr(self, 'frequency_spinbox')
+                else int(self.translator_gui.config.get('rotation_frequency', 1) or 1)
+            )
             self.translator_gui.config['force_key_rotation'] = force_rotation
             self.translator_gui.config['rotation_frequency'] = rotation_freq
 
             # Save glossary keys toggle
-            use_glossary = self.use_glossary_keys_checkbox.isChecked() if hasattr(self, 'use_glossary_keys_checkbox') else False
+            use_glossary = (
+                self.use_glossary_keys_checkbox.isChecked()
+                if hasattr(self, 'use_glossary_keys_checkbox')
+                else bool(self.translator_gui.config.get('use_glossary_keys', False))
+            )
             self.translator_gui.config['use_glossary_keys'] = use_glossary
 
             # Save Vision keys toggle (stored under the legacy qa_scan config key)
-            use_qa_scan = self.use_qa_scan_keys_checkbox.isChecked() if hasattr(self, 'use_qa_scan_keys_checkbox') else False
+            use_qa_scan = (
+                self.use_qa_scan_keys_checkbox.isChecked()
+                if hasattr(self, 'use_qa_scan_keys_checkbox')
+                else bool(self.translator_gui.config.get('use_qa_scan_keys', False))
+            )
             self.translator_gui.config['use_qa_scan_keys'] = use_qa_scan
 
             # Save Inpainter keys toggle
-            use_inpainter = self.use_inpainter_keys_checkbox.isChecked() if hasattr(self, 'use_inpainter_keys_checkbox') else False
+            use_inpainter = (
+                self.use_inpainter_keys_checkbox.isChecked()
+                if hasattr(self, 'use_inpainter_keys_checkbox')
+                else bool(self.translator_gui.config.get('use_inpainter_keys', False))
+            )
             self.translator_gui.config['use_inpainter_keys'] = use_inpainter
             self.translator_gui.use_inpainter_keys_var = use_inpainter
 
@@ -7633,7 +7692,7 @@ class MultiAPIKeyDialog(QDialog):
         inpainter_checkbox_layout.setContentsMargins(0, 0, 0, 0)
         inpainter_checkbox_layout.setSpacing(8)
 
-        self.use_inpainter_keys_var = self.translator_gui.config.get('use_inpainter_keys', False)
+        self.use_inpainter_keys_var = self._read_persisted_bool('use_inpainter_keys', False)
         self.use_inpainter_keys_checkbox = self._create_styled_checkbox("Enable Inpainter Keys")
         self.use_inpainter_keys_checkbox.setChecked(self.use_inpainter_keys_var)
         self.use_inpainter_keys_checkbox.toggled.connect(self._toggle_inpainter_section)
@@ -8465,7 +8524,8 @@ class MultiAPIKeyDialog(QDialog):
             except Exception:
                 pass
 
-        self._notify_authgpt_visibility()
+        if not getattr(self, '_initializing', False):
+            self._notify_authgpt_visibility()
 
     def _refresh_inpainter_pool(self):
         """Refresh the in-memory Inpainter key pool after any change."""
