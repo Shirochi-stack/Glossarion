@@ -2751,11 +2751,8 @@ class MangaImagePreviewWidget(QWidget):
         self.image_paths = image_paths
         self._populate_thumbnails()
         
-        # Show/hide thumbnail list based on image count
-        if len(image_paths) <= 1:
-            self.thumbnail_list.setVisible(False)
-        else:
-            self.thumbnail_list.setVisible(True)
+        # Always keep thumbnails visible when the preview has an image list.
+        self.thumbnail_list.setVisible(len(image_paths) > 0)
     
     def _populate_thumbnails(self):
         """Populate thumbnail list with images"""
@@ -3433,31 +3430,15 @@ class MangaImagePreviewWidget(QWidget):
             # Get the source directory from selected files
             if not hasattr(self.manga_integration, 'selected_files') or not self.manga_integration.selected_files:
                 return
-            
-            # Get parent directory of the first selected file
-            first_file = self.manga_integration.selected_files[0]
-            
-            # Check for OUTPUT_DIRECTORY override (prefer config over env var)
-            override_dir = None
-            if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
-                override_dir = self.main_gui.config.get('output_directory', '')
-            if not override_dir:
-                override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
-            
-            if override_dir:
-                parent_dir = override_dir
-            else:
-                parent_dir = os.path.dirname(first_file)
-            
-            # Find all *_translated folders in the parent directory
-            translated_folders = []
-            if os.path.exists(parent_dir):
-                for item in os.listdir(parent_dir):
-                    item_path = os.path.join(parent_dir, item)
-                    if os.path.isdir(item_path) and item.endswith('_translated'):
-                        translated_folders.append(item_path)
-            
-            if not translated_folders:
+
+            groups = self._preview_process_groups()
+            group_sources = []
+            for group in groups:
+                translated_folders = self._translated_folders_for_preview_group(group)
+                if translated_folders:
+                    group_sources.append((group, translated_folders))
+
+            if not group_sources:
                 if not silent:
                     QMessageBox.warning(
                         self,
@@ -3465,44 +3446,64 @@ class MangaImagePreviewWidget(QWidget):
                         "No translated images found. Please translate some images first."
                     )
                 return
-            
-            
-            # Create consolidated "translated" folder in parent directory
-            consolidated_folder = os.path.join(parent_dir, 'translated')
-            os.makedirs(consolidated_folder, exist_ok=True)
-            
-            # Copy all images from isolated folders to consolidated folder
+
             image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
             copied_count = 0
-            
-            for folder in translated_folders:
-                for filename in os.listdir(folder):
-                    if filename.lower().endswith(image_extensions):
-                        # Skip cleaned images (intermediate files)
+            consolidated_folders = []
+            override_dir = self._get_output_directory_override()
+
+            for group, translated_folders in group_sources:
+                group_root = override_dir or group.get('root') or os.path.dirname(translated_folders[0][0])
+                consolidated_folder = os.path.join(group_root, 'translated')
+                os.makedirs(consolidated_folder, exist_ok=True)
+                consolidated_folders.append(consolidated_folder)
+                multi_root_group = len(group.get('source_roots', []) or []) > 1
+
+                for source_path, folder in translated_folders:
+                    source_parent = os.path.dirname(source_path)
+                    relative_parent = ''
+                    if multi_root_group and not override_dir:
+                        try:
+                            relative_parent = os.path.relpath(source_parent, group_root)
+                            if relative_parent == '.':
+                                relative_parent = ''
+                        except Exception:
+                            relative_parent = ''
+
+                    for filename in os.listdir(folder):
+                        if not filename.lower().endswith(image_extensions):
+                            continue
                         if '_cleaned' in filename.lower():
                             continue
-                        
+
                         src_path = os.path.join(folder, filename)
-                        dest_path = os.path.join(consolidated_folder, filename)
-                        
-                        # Handle potential filename conflicts
+                        dest_dir = os.path.join(consolidated_folder, relative_parent) if relative_parent else consolidated_folder
+                        os.makedirs(dest_dir, exist_ok=True)
+                        dest_path = os.path.join(dest_dir, filename)
+
                         if os.path.exists(dest_path):
                             base, ext = os.path.splitext(filename)
                             counter = 1
                             while os.path.exists(dest_path):
-                                dest_path = os.path.join(consolidated_folder, f"{base}_{counter}{ext}")
+                                dest_path = os.path.join(dest_dir, f"{base}_{counter}{ext}")
                                 counter += 1
-                        
+
                         shutil.copy2(src_path, dest_path)
                         copied_count += 1
-            
-            
+
             # Show success message (unless silent)
             if not silent:
+                target_text = consolidated_folders[0]
+                unique_targets = []
+                for folder in consolidated_folders:
+                    if folder not in unique_targets:
+                        unique_targets.append(folder)
+                if len(unique_targets) > 1:
+                    target_text = "\n".join(unique_targets)
                 QMessageBox.information(
                     self,
                     "Download Complete",
-                    f"Successfully consolidated {copied_count} translated images into:\n{consolidated_folder}\n\n"
+                    f"Successfully consolidated {copied_count} translated images into:\n{target_text}\n\n"
                     f"All images from separate folders have been combined into a single 'translated' folder."
                 )
             
@@ -3655,15 +3656,87 @@ class MangaImagePreviewWidget(QWidget):
                     ImageRenderer._save_position_async(self.manga_integration, moved_index)
         except Exception as e:
             print(f"[DEBUG] Error in _on_rectangle_moved: {e}")
+
+    def _get_output_directory_override(self) -> str:
+        """Return the configured manga output override, if one is active."""
+        override_dir = ''
+        try:
+            if hasattr(self, 'main_gui') and self.main_gui and hasattr(self.main_gui, 'config'):
+                override_dir = self.main_gui.config.get('output_directory', '') or ''
+            if not override_dir:
+                override_dir = os.environ.get('OUTPUT_DIRECTORY', '') or ''
+        except Exception:
+            override_dir = ''
+        return override_dir if override_dir and os.path.isdir(override_dir) else ''
+
+    def _preview_process_groups(self):
+        """Return the manga tab's current process groups for preview operations."""
+        mi = getattr(self, 'manga_integration', None)
+        files = list(getattr(mi, 'selected_files', []) or [])
+        if not files:
+            return []
+        try:
+            if hasattr(mi, '_manga_process_groups_for_paths'):
+                return mi._manga_process_groups_for_paths(files)
+        except Exception:
+            pass
+
+        groups = []
+        seen = {}
+        for path in files:
+            root = os.path.dirname(path)
+            key = os.path.normcase(os.path.abspath(root))
+            if key not in seen:
+                seen[key] = {
+                    'root': root,
+                    'name': os.path.basename(os.path.normpath(root)) or root,
+                    'files': [],
+                    'source_roots': [root],
+                }
+                groups.append(seen[key])
+            seen[key]['files'].append(path)
+        return groups
+
+    def _translated_folders_for_preview_group(self, group):
+        """Return existing isolated translated folders for one preview process group."""
+        override_dir = self._get_output_directory_override()
+        folders = []
+        seen = set()
+        image_files = list((group or {}).get('files', []) or [])
+        for source_path in image_files:
+            source_name = os.path.splitext(os.path.basename(source_path))[0]
+            parent_dir = override_dir or os.path.dirname(source_path)
+            translated_folder = os.path.join(parent_dir, f"{source_name}_translated")
+            norm = os.path.normcase(os.path.abspath(translated_folder))
+            if norm in seen or not os.path.isdir(translated_folder):
+                continue
+            seen.add(norm)
+            folders.append((source_path, translated_folder))
+        return folders
+
+    def _has_preview_translated_images(self) -> bool:
+        image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+        for group in self._preview_process_groups():
+            for _source_path, folder in self._translated_folders_for_preview_group(group):
+                try:
+                    if any(
+                        filename.lower().endswith(image_extensions)
+                        and '_cleaned' not in filename.lower()
+                        for filename in os.listdir(folder)
+                    ):
+                        return True
+                except Exception:
+                    continue
+        return False
     
     def set_translated_folder(self, folder_path: str):
         """Set the translated folder path and enable download button"""
         self.translated_folder_path = folder_path
         
         # Check for isolated *_translated folders in parent directory
-        has_translated_images = False
+        has_translated_images = self._has_preview_translated_images()
         
-        if folder_path and os.path.exists(folder_path):
+        if not has_translated_images and folder_path and os.path.exists(folder_path):
             parent_dir = os.path.dirname(folder_path) if os.path.isfile(folder_path) else folder_path
             
             # Look for isolated *_translated folders
