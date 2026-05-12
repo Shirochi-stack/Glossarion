@@ -1791,17 +1791,21 @@ class MangaTranslationTab(QObject):
         
         def check_download_status():
             # If there's still a download in progress (button disabled), check again in 500ms
-            if self.download_model_btn.isEnabled() == False:
+            download_btn = getattr(self, 'ocr_download_model_btn', None)
+            if download_btn and download_btn.isEnabled() == False:
                 QTimer.singleShot(500, check_download_status)
                 return
             
             # Re-enable Download Model button once inpainter shows up as loaded
-            self.download_model_btn.setEnabled(True)
+            if download_btn:
+                download_btn.setEnabled(True)
             self._check_provider_status()
         
         try:
             # Disable the button during download
-            self.download_model_btn.setEnabled(False)
+            download_btn = getattr(self, 'ocr_download_model_btn', None)
+            if download_btn:
+                download_btn.setEnabled(False)
             # Schedule status check
             QTimer.singleShot(500, check_download_status)
             
@@ -1827,7 +1831,9 @@ class MangaTranslationTab(QObject):
             # ... rest of your original download dialog code ...
         except Exception as e:
             self._log(f"Failed to initialize download: {e}", "error")
-            self.download_model_btn.setEnabled(True)
+            download_btn = getattr(self, 'ocr_download_model_btn', None)
+            if download_btn:
+                download_btn.setEnabled(True)
         """Download HuggingFace models with progress tracking - PySide6 version"""
         from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                                         QRadioButton, QButtonGroup, QLineEdit, QPushButton,
@@ -2565,8 +2571,8 @@ class MangaTranslationTab(QObject):
         # Hide ALL buttons first
         if hasattr(self, 'provider_setup_btn'):
             self.provider_setup_btn.setVisible(False)
-        if hasattr(self, 'download_model_btn'):
-            self.download_model_btn.setVisible(False)
+        if hasattr(self, 'ocr_download_model_btn'):
+            self.ocr_download_model_btn.setVisible(False)
         
         if provider == 'google':
             # Google - check for credentials file
@@ -2692,8 +2698,8 @@ class MangaTranslationTab(QObject):
                 self.provider_setup_btn.setVisible(True)
                 
                 # Also show Download button
-                self.download_model_btn.setText("📥 Download Model")
-                self.download_model_btn.setVisible(True)
+                self.ocr_download_model_btn.setText("Download Model")
+                self.ocr_download_model_btn.setVisible(True)
                 
             else:
                 # Not installed
@@ -2704,8 +2710,8 @@ class MangaTranslationTab(QObject):
                 self.provider_setup_btn.setText("Load Model")
                 self.provider_setup_btn.setVisible(True)
                 
-                self.download_model_btn.setText("📥 Download Qwen2-VL")
-                self.download_model_btn.setVisible(True)
+                self.ocr_download_model_btn.setText("Download Qwen2-VL")
+                self.ocr_download_model_btn.setVisible(True)
             
             # Additional GPU status check for Qwen2-VL
             if not status['loaded']:
@@ -2760,7 +2766,7 @@ class MangaTranslationTab(QObject):
                 self.provider_status_label.setText("📥 Downloading...")
                 self.provider_status_label.setStyleSheet("color: blue;")
                 self.provider_setup_btn.setEnabled(False)
-                self.download_model_btn.setEnabled(False)
+                self.ocr_download_model_btn.setEnabled(False)
             elif status['installed']:
                 # Dependencies installed but model not loaded
                 self.provider_status_label.setText("📦 Dependencies ready")
@@ -2768,8 +2774,8 @@ class MangaTranslationTab(QObject):
                 self.provider_setup_btn.setText("Load Model")
                 self.provider_setup_btn.setVisible(True)
                 if provider in ['Qwen2-VL', 'manga-ocr']:
-                    self.download_model_btn.setText("📥 Download Model")
-                    self.download_model_btn.setVisible(True)
+                    self.ocr_download_model_btn.setText("Download Model")
+                    self.ocr_download_model_btn.setVisible(True)
             else:
                 # Not installed
                 self.provider_status_label.setText("❌ Not installed")
@@ -2785,10 +2791,10 @@ class MangaTranslationTab(QObject):
                     
                     # Download button
                     if provider == 'rapidocr':
-                        self.download_model_btn.setText("📥 Install RapidOCR")
+                        self.ocr_download_model_btn.setText("Install RapidOCR")
                     else:
-                        self.download_model_btn.setText(f"📥 Download {provider}")
-                    self.download_model_btn.setVisible(True)
+                        self.ocr_download_model_btn.setText(f"Download {provider}")
+                    self.ocr_download_model_btn.setVisible(True)
 
                 elif provider in pip_providers:
                     # Check if running as .exe
@@ -3950,12 +3956,12 @@ class MangaTranslationTab(QObject):
         ocr_provider_layout.addWidget(self.provider_setup_btn)
 
         # Add explicit download button for Hugging Face models
-        self.download_model_btn = QPushButton("📥 Download")
-        self.download_model_btn.clicked.connect(self._download_hf_model)
-        self.download_model_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; }")
-        self.download_model_btn.setMinimumWidth(150)
-        self.download_model_btn.setVisible(False)  # Hidden by default
-        ocr_provider_layout.addWidget(self.download_model_btn)
+        self.ocr_download_model_btn = QPushButton("Download")
+        self.ocr_download_model_btn.clicked.connect(self._download_hf_model)
+        self.ocr_download_model_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; }")
+        self.ocr_download_model_btn.setMinimumWidth(150)
+        self.ocr_download_model_btn.setVisible(False)  # Hidden by default
+        ocr_provider_layout.addWidget(self.ocr_download_model_btn)
         
         ocr_provider_layout.addStretch()
         settings_frame_layout.addWidget(self.ocr_provider_frame)
@@ -4851,15 +4857,39 @@ class MangaTranslationTab(QObject):
         self.local_model_status_label.setFont(status_font)
         local_inpaint_layout.addWidget(self.local_model_status_label)
 
+        disable_performance_frame = QWidget()
+        disable_performance_layout = QHBoxLayout(disable_performance_frame)
+        disable_performance_layout.setContentsMargins(0, 0, 0, 0)
+        disable_performance_layout.setSpacing(10)
+        disable_performance_spacer = QLabel("")
+        disable_performance_spacer.setMinimumWidth(95)
+        disable_performance_layout.addWidget(disable_performance_spacer)
+        disable_performance_cb = self._create_styled_checkbox("Disable Performance Mode")
+        disable_performance_cb.setToolTip(
+            "Off: use faster resize/crop/tiling optimizations for local inpainters. "
+            "On: process the full image in the local inpainter path when possible. This can be slower and use more memory."
+        )
+        try:
+            disable_performance_cb.setChecked(bool(self.disable_inpaint_performance_mode_value))
+        except Exception:
+            pass
+        disable_performance_cb.toggled.connect(self._on_disable_inpaint_performance_mode_toggle)
+        disable_performance_layout.addWidget(disable_performance_cb)
+        disable_performance_layout.addStretch()
+        local_inpaint_layout.addWidget(disable_performance_frame)
+        self.disable_inpaint_performance_mode_checkbox = disable_performance_cb
+        self.disable_inpaint_performance_mode_frame = disable_performance_frame
+
         # Download model button
-        download_model_btn = QPushButton("📥 Download Model")
+        download_model_btn = QPushButton("Download Model")
         download_model_btn.clicked.connect(self._download_model)
         download_model_btn.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
         local_inpaint_layout.addWidget(download_model_btn)
+        self.local_download_model_btn = download_model_btn
         self.download_model_btn = download_model_btn
 
         # Model info button
-        model_info_btn = QPushButton("ℹ️ Model Info")
+        model_info_btn = QPushButton("Model Info")
         model_info_btn.clicked.connect(self._show_model_info)
         model_info_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }")
         local_inpaint_layout.addWidget(model_info_btn)
@@ -6631,6 +6661,7 @@ class MangaTranslationTab(QObject):
         self.inpaint_quality_value = config.get('manga_inpaint_quality', 'high')
         self.inpaint_dilation_value = config.get('manga_inpaint_dilation', 15)
         self.inpaint_passes_value = config.get('manga_inpaint_passes', 2)
+        self.disable_inpaint_performance_mode_value = bool(config.get('manga_disable_inpaint_performance_mode', False))
         
         self.font_size_mode_value = config.get('manga_font_size_mode', 'fixed')
         self.font_size_multiplier_value = config.get('manga_font_size_multiplier', 1.0)
@@ -6845,6 +6876,10 @@ class MangaTranslationTab(QObject):
             if hasattr(self, 'use_custom_image_edit_endpoint_value'):
                 self.main_gui.config['use_custom_image_edit_endpoint'] = bool(self.use_custom_image_edit_endpoint_value)
                 self._set_custom_image_edit_env()
+            if hasattr(self, 'disable_inpaint_performance_mode_value'):
+                self.main_gui.config['manga_disable_inpaint_performance_mode'] = bool(self.disable_inpaint_performance_mode_value)
+                self.main_gui.manga_disable_inpaint_performance_mode_var = bool(self.disable_inpaint_performance_mode_value)
+                inpaint['disable_performance_mode'] = bool(self.disable_inpaint_performance_mode_value)
             if hasattr(self, 'custom_image_edit_system_prompt_value'):
                 self.main_gui.config['custom_image_edit_system_prompt'] = (
                     self.custom_image_edit_system_prompt_value or self._default_custom_image_edit_system_prompt()
@@ -10156,6 +10191,13 @@ class MangaTranslationTab(QObject):
         if not (hasattr(self, '_initializing') and self._initializing):
             self._save_rendering_settings()
 
+    def _on_disable_inpaint_performance_mode_toggle(self, checked):
+        self.disable_inpaint_performance_mode_value = bool(checked)
+        self.main_gui.manga_disable_inpaint_performance_mode_var = bool(checked)
+        self.main_gui.config['manga_disable_inpaint_performance_mode'] = bool(checked)
+        if not (hasattr(self, '_initializing') and self._initializing):
+            self._save_rendering_settings()
+
     def _on_local_model_entry_text_changed(self, text):
         if not self._is_custom_image_edit_selected():
             return
@@ -10178,6 +10220,8 @@ class MangaTranslationTab(QObject):
             self.custom_image_edit_output_frame.setVisible(custom_selected)
         if hasattr(self, 'custom_image_edit_full_page_output_checkbox'):
             self.custom_image_edit_full_page_output_checkbox.setVisible(custom_selected)
+        if hasattr(self, 'disable_inpaint_performance_mode_frame'):
+            self.disable_inpaint_performance_mode_frame.setVisible(not custom_selected)
         if hasattr(self, 'model_file_label'):
             self.model_file_label.setText("Image Edit URL:" if custom_selected else "Model File:")
         if hasattr(self, 'local_model_entry'):
@@ -10201,8 +10245,10 @@ class MangaTranslationTab(QObject):
             )
         if hasattr(self, 'load_model_btn'):
             self.load_model_btn.setVisible(not custom_selected)
-        if hasattr(self, 'download_model_btn'):
-            self.download_model_btn.setText("Test" if custom_selected else "ðŸ“¥ Download Model")
+        local_download_btn = getattr(self, 'local_download_model_btn', getattr(self, 'download_model_btn', None))
+        if local_download_btn:
+            local_download_btn.setVisible(True)
+            local_download_btn.setText("Test" if custom_selected else "Download Model")
         if custom_selected and hasattr(self, 'local_model_status_label'):
             enabled = bool(getattr(self, 'use_custom_image_edit_endpoint_value', False))
             url = str(getattr(self, 'custom_image_edit_endpoint_value', '') or '').strip()

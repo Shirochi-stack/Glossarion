@@ -10993,36 +10993,51 @@ class MangaTranslator:
         
         # Get iterations setting (from auto_iterations logic or config)
         iterations = getattr(self, '_current_inpainter_iterations', 1)
+        disable_performance_mode = bool(
+            getattr(getattr(self, 'main_gui', None), 'manga_disable_inpaint_performance_mode_var', False)
+            or getattr(getattr(self, 'main_gui', None), 'config', {}).get('manga_disable_inpaint_performance_mode', False)
+            or self.manga_settings.get('inpainting', {}).get('disable_performance_mode', False)
+        )
+        inpaint_kwargs = {'iterations': iterations}
+        if disable_performance_mode:
+            inpaint_kwargs.update({'_skip_hd': True, '_skip_tiling': True})
+
+        def _mark_disable_performance(inp_obj):
+            try:
+                if inp_obj is not None and hasattr(inp_obj, 'config') and isinstance(inp_obj.config, dict):
+                    inp_obj.config['manga_disable_inpaint_performance_mode'] = disable_performance_mode
+            except Exception:
+                pass
+            return inp_obj
         
         # Use provided inpainter if available, otherwise get from thread-local pool
         if inpainter is not None:
-            inp = inpainter
+            inp = _mark_disable_performance(inpainter)
             self._log("   🎨 Using pre-checked-out inpainter instance (avoiding pool contention)", "info")
         else:
-            inp = self._get_thread_local_inpainter(local_method, model_path)
+            inp = _mark_disable_performance(self._get_thread_local_inpainter(local_method, model_path))
         if inp and getattr(inp, 'model_loaded', False):
             self._log("   🧽 Using local inpainting", "info")
             # Only use lock if enabled (singleton mode or non-parallel translation)
             lock = getattr(self, '_inpaint_lock', None)
             if lock:
                 with lock:
-                    return inp.inpaint(image, mask, iterations=iterations)
+                    return inp.inpaint(image, mask, **inpaint_kwargs)
             else:
-                return inp.inpaint(image, mask, iterations=iterations)
+                return inp.inpaint(image, mask, **inpaint_kwargs)
         else:
             # Conservative fallback: try shared instance only; do not attempt risky reloads that can corrupt output
             try:
-                shared_inp = self._get_or_init_shared_local_inpainter(local_method, model_path)
+                shared_inp = _mark_disable_performance(self._get_or_init_shared_local_inpainter(local_method, model_path))
                 if shared_inp and getattr(shared_inp, 'model_loaded', False):
                     self._log("   ✅ Using shared inpainting instance", "info")
                     # Always use lock for shared instances to prevent RAM spikes
                     lock = getattr(self, '_inpaint_lock', None)
-                    iterations = getattr(self, '_current_inpainter_iterations', 1)
                     if lock:
                         with lock:
-                            return shared_inp.inpaint(image, mask, iterations=iterations)
+                            return shared_inp.inpaint(image, mask, **inpaint_kwargs)
                     else:
-                        return shared_inp.inpaint(image, mask, iterations=iterations)
+                        return shared_inp.inpaint(image, mask, **inpaint_kwargs)
             except Exception:
                 pass
             
@@ -11042,18 +11057,17 @@ class MangaTranslator:
                         break
                     
                     # Try to get an instance from the pool (with internal polling)
-                    retry_inp = self._get_thread_local_inpainter(local_method, model_path)
+                    retry_inp = _mark_disable_performance(self._get_thread_local_inpainter(local_method, model_path))
                     
                     if retry_inp and getattr(retry_inp, 'model_loaded', False):
                         elapsed = time.time() - poll_start
                         self._log(f"   ✅ Inpainter became available after {elapsed:.1f}s polling", "info")
                         lock = getattr(self, '_inpaint_lock', None)
-                        iterations = getattr(self, '_current_inpainter_iterations', 1)
                         if lock:
                             with lock:
-                                return retry_inp.inpaint(image, mask, iterations=iterations)
+                                return retry_inp.inpaint(image, mask, **inpaint_kwargs)
                         else:
-                            return retry_inp.inpaint(image, mask, iterations=iterations)
+                            return retry_inp.inpaint(image, mask, **inpaint_kwargs)
                     
                     # Log progress periodically
                     elapsed = time.time() - poll_start
@@ -15110,6 +15124,11 @@ class MangaTranslator:
                         offload = self.manga_settings.get('advanced', {}).get('inpaint_in_subprocess', True)
                     except Exception:
                         offload = True
+                    if bool(
+                        getattr(getattr(self, 'main_gui', None), 'manga_disable_inpaint_performance_mode_var', False)
+                        or getattr(getattr(self, 'main_gui', None), 'config', {}).get('manga_disable_inpaint_performance_mode', False)
+                    ):
+                        offload = False
                     if offload and hasattr(self, '_inpaint_proc_pool') and self._inpaint_proc_pool is not None:
                         try:
                             from local_inpainter import proc_inpaint

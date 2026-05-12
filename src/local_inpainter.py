@@ -4159,8 +4159,22 @@ class LocalInpainter:
             _skip_hd: Skip HD processing
             _skip_tiling: Skip tiling
         """
-        # If worker process is enabled, delegate to it (handles stop flag internally)
-        if getattr(self, '_mp_enabled', False):
+        disable_performance_mode = bool(
+            _skip_hd
+            or _skip_tiling
+            or self.config.get('manga_disable_inpaint_performance_mode', False)
+            or self.config.get('disable_performance_mode', False)
+        )
+        if disable_performance_mode:
+            _skip_hd = True
+            _skip_tiling = True
+
+        # If worker process is enabled, delegate to it (handles stop flag internally).
+        # Some local models are loaded only inside the worker; in that case
+        # model_loaded=True but self.model is None in the GUI process.
+        if getattr(self, '_mp_enabled', False) and (not disable_performance_mode or not callable(getattr(self, 'model', None))):
+            if disable_performance_mode and not callable(getattr(self, 'model', None)):
+                logger.info("Disable Performance Mode requested, but model is worker-loaded; using worker path instead")
             return self._mp_inpaint(image, mask, refinement=refinement, iterations=iterations)
         
         # Check for stop at start
@@ -4170,6 +4184,9 @@ class LocalInpainter:
         
         if not self.model_loaded:
             self._log("No model loaded", "error")
+            return image
+        if not self._is_custom_image_edit_method(self.current_method) and not callable(getattr(self, 'model', None)):
+            self._log("Model object is not available in this process", "error")
             return image
         
         try:

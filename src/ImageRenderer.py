@@ -2477,10 +2477,23 @@ def _run_clean_background(self, image_path: str, regions: list):
                 # For now, use the first custom iteration value found
                 # TODO: Implement per-region inpainting with different iterations
                 first_iteration_value = next(iter(custom_iterations.values()))
-                cleaned_image = inpainter.inpaint(image, mask, iterations=first_iteration_value)
+                disable_performance_mode = bool(self.main_gui.config.get('manga_disable_inpaint_performance_mode', False))
+                cleaned_image = inpainter.inpaint(
+                    image,
+                    mask,
+                    iterations=first_iteration_value,
+                    _skip_hd=disable_performance_mode,
+                    _skip_tiling=disable_performance_mode,
+                )
             else:
                 self._log("🧽 Running local inpainting with auto iterations", "info")
-                cleaned_image = inpainter.inpaint(image, mask)
+                disable_performance_mode = bool(self.main_gui.config.get('manga_disable_inpaint_performance_mode', False))
+                cleaned_image = inpainter.inpaint(
+                    image,
+                    mask,
+                    _skip_hd=disable_performance_mode,
+                    _skip_tiling=disable_performance_mode,
+                )
             
         else:
             # For cloud/hybrid methods, would need more complex setup
@@ -3213,6 +3226,18 @@ def _run_inpainting_sync(
                 print(f"[INPAINT_SYNC] Force-cancelled before inpainting")
                 return None
             
+            if inpainter is not None:
+                try:
+                    cfg = getattr(self.main_gui, 'config', {}) if hasattr(self, 'main_gui') else {}
+                    disable_performance_mode = bool(
+                        getattr(self.main_gui, 'manga_disable_inpaint_performance_mode_var', False)
+                        or (cfg.get('manga_disable_inpaint_performance_mode', False) if isinstance(cfg, dict) else False)
+                    )
+                    if hasattr(inpainter, 'config') and isinstance(inpainter.config, dict):
+                        inpainter.config['manga_disable_inpaint_performance_mode'] = disable_performance_mode
+                except Exception:
+                    pass
+
             if is_custom_image_edit and inpainter is not None:
                 try:
                     cfg = getattr(self.main_gui, 'config', {}) if hasattr(self, 'main_gui') else {}
@@ -3241,6 +3266,11 @@ def _run_inpainting_sync(
                         inpainter.config['model'] = model_name
                         inpainter.config['custom_image_edit_model'] = model_name
                         inpainter._custom_image_edit_model_ref = model_name
+                    disable_performance_mode = bool(
+                        getattr(self.main_gui, 'manga_disable_inpaint_performance_mode_var', False)
+                        or (cfg.get('manga_disable_inpaint_performance_mode', False) if isinstance(cfg, dict) else False)
+                    )
+                    inpainter.config['manga_disable_inpaint_performance_mode'] = disable_performance_mode
                     image_edit_system_prompt = (
                         getattr(self.main_gui, 'custom_image_edit_system_prompt_var', '')
                         or getattr(self.main_gui, 'custom_image_edit_prompt_var', '')
@@ -3299,7 +3329,16 @@ def _run_inpainting_sync(
             # Run inpainting/image editing
             print(f"[INPAINT_SYNC] Running local inpainting...")
             try:
-                cleaned_image = inpainter.inpaint(image, mask)
+                disable_performance_mode = bool(
+                    getattr(inpainter, 'config', {}).get('manga_disable_inpaint_performance_mode', False)
+                    if hasattr(inpainter, 'config') else False
+                )
+                cleaned_image = inpainter.inpaint(
+                    image,
+                    mask,
+                    _skip_hd=disable_performance_mode,
+                    _skip_tiling=disable_performance_mode,
+                )
             finally:
                 if old_mp_enabled is not None:
                     try:
@@ -6880,10 +6919,23 @@ def _run_inpainting_on_region(self, image, mask, region_index, custom_iterations
             # Run inpainting with custom iterations if available
             if custom_iterations is not None:
                 print(f"[INPAINT_REGION] Using custom iterations: {custom_iterations}")
-                cleaned_image = inpainter.inpaint(image, mask, iterations=custom_iterations)
+                disable_performance_mode = bool(self.main_gui.config.get('manga_disable_inpaint_performance_mode', False))
+                cleaned_image = inpainter.inpaint(
+                    image,
+                    mask,
+                    iterations=custom_iterations,
+                    _skip_hd=disable_performance_mode,
+                    _skip_tiling=disable_performance_mode,
+                )
             else:
                 print(f"[INPAINT_REGION] Using auto iterations")
-                cleaned_image = inpainter.inpaint(image, mask)
+                disable_performance_mode = bool(self.main_gui.config.get('manga_disable_inpaint_performance_mode', False))
+                cleaned_image = inpainter.inpaint(
+                    image,
+                    mask,
+                    _skip_hd=disable_performance_mode,
+                    _skip_tiling=disable_performance_mode,
+                )
             
             print(f"[INPAINT_REGION] Local inpainting completed for region {region_index}")
             return cleaned_image
