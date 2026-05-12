@@ -2439,9 +2439,16 @@ class LocalInpainter:
     def _load_custom_image_edit_model(self, model_path: str, force_reload: bool = False) -> bool:
         """Use an OpenAI-compatible image edit endpoint as the local inpainter."""
         try:
+            model_path_str = str(model_path or '').strip()
+            model_path_is_url = model_path_str.startswith(('http://', 'https://')) or (
+                model_path_str
+                and not os.path.exists(model_path_str)
+                and any(marker in model_path_str.lower() for marker in ('localhost', '127.', '0.0.0.0', '/v1'))
+            )
             endpoint = self._normalize_custom_image_edit_endpoint(
                 os.environ.get('CUSTOM_IMAGE_EDIT_BASE_URL')
                 or os.environ.get('OPENAI_IMAGE_EDIT_BASE_URL')
+                or (model_path_str if model_path_is_url else '')
                 or self.config.get('custom_image_edit_endpoint', '')
             )
             if not endpoint:
@@ -2451,14 +2458,29 @@ class LocalInpainter:
                 )
                 self.model_loaded = False
                 return False
+            endpoint_enabled = (
+                os.environ.get('USE_CUSTOM_IMAGE_EDIT_ENDPOINT', '')
+                or str(self.config.get('use_custom_image_edit_endpoint', '1' if endpoint else '0'))
+            )
+            if str(endpoint_enabled).lower() in ('0', 'false', 'no', 'off'):
+                logger.error("Custom Image Edit Endpoint is disabled")
+                self.model_loaded = False
+                return False
 
             model_ref = (
-                model_path
-                or os.environ.get('CUSTOM_IMAGE_EDIT_MODEL')
+                os.environ.get('CUSTOM_IMAGE_EDIT_MODEL')
+                or ('' if model_path_is_url else model_path)
                 or self.config.get('manga_custom-image-edit_model_path', '')
                 or self.config.get('manga_custom_image_edit_model_path', '')
                 or 'custom-image-edit'
             )
+            model_ref_str = str(model_ref or '').strip()
+            if model_ref_str.startswith(('http://', 'https://')) or (
+                model_ref_str
+                and not os.path.exists(model_ref_str)
+                and any(marker in model_ref_str.lower() for marker in ('localhost', '127.', '0.0.0.0', '/v1'))
+            ):
+                model_ref = os.environ.get('CUSTOM_IMAGE_EDIT_MODEL') or 'custom-image-edit'
 
             current = getattr(self, '_custom_image_edit_model_ref', None)
             if (
@@ -2478,6 +2500,7 @@ class LocalInpainter:
             self._custom_image_edit_endpoint = endpoint
             self._custom_image_edit_model_ref = model_ref
             self.config['custom_image_edit_endpoint'] = endpoint
+            self.config['use_custom_image_edit_endpoint'] = True
             self.config['manga_custom-image-edit_model_path'] = model_ref
             self.config['manga_custom_image_edit_model_path'] = model_ref
             self._save_config()
@@ -2508,6 +2531,7 @@ class LocalInpainter:
                 or os.environ.get('CUSTOM_IMAGE_EDIT_BASE_URL')
                 or os.environ.get('OPENAI_IMAGE_EDIT_BASE_URL')
                 or self.config.get('custom_image_edit_endpoint', '')
+                or self.config.get('manga_custom-image-edit_model_path', '')
             )
             if not endpoint:
                 logger.error("Custom Image Edit Endpoint is not configured")

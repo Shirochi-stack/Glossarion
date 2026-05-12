@@ -17494,13 +17494,14 @@ class UnifiedClient:
                 os.getenv('CUSTOM_IMAGE_EDIT_BASE_URL', '')
                 or os.getenv('OPENAI_IMAGE_EDIT_BASE_URL', '')
             ).strip()
+            image_edit_enabled = os.getenv('USE_CUSTOM_IMAGE_EDIT_ENDPOINT', '1' if image_edit_base_url else '0') == '1'
             output_mode_needs_image_endpoint = (
                 os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
                 or os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
                 or self._is_image_gen_model(effective_model)
                 or self._is_video_gen_model(effective_model)
             )
-            if image_edit_base_url and output_mode_needs_image_endpoint and not getattr(threading.current_thread(), '_force_vision_mode', False):
+            if image_edit_enabled and image_edit_base_url and output_mode_needs_image_endpoint and not getattr(threading.current_thread(), '_force_vision_mode', False):
                 if not image_edit_base_url.startswith(('http://', 'https://')):
                     lower_base = image_edit_base_url.lower()
                     scheme = 'http://' if (
@@ -19841,7 +19842,8 @@ class UnifiedClient:
                 os.getenv('CUSTOM_IMAGE_EDIT_BASE_URL', '')
                 or os.getenv('OPENAI_IMAGE_EDIT_BASE_URL', '')
             ).strip()
-            if image_base_url:
+            image_endpoint_enabled = os.getenv('USE_CUSTOM_IMAGE_EDIT_ENDPOINT', '1' if image_base_url else '0') == '1'
+            if image_endpoint_enabled and image_base_url:
                 base_url = image_base_url
             if not self._is_stop_requested():
                 reason = 'model name' if _image_in_name else 'ENABLE_IMAGE_OUTPUT_MODE flag'

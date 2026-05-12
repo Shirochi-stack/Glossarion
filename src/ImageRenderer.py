@@ -2372,6 +2372,9 @@ def _run_clean_background(self, image_path: str, regions: list):
             
             # Get model path from config (same way as manga_translator)
             model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
+            is_custom_image_edit = str(local_model or '').lower() == 'custom-image-edit'
+            if is_custom_image_edit and not model_path:
+                model_path = getattr(self.main_gui, 'custom_image_edit_endpoint_var', '') or self.main_gui.config.get('custom_image_edit_endpoint', '')
             try:
                 if isinstance(model_path, str) and model_path.lower().endswith('.json'):
                     model_path = ''
@@ -2380,7 +2383,7 @@ def _run_clean_background(self, image_path: str, regions: list):
             
             # Ensure we have a model path (download if needed)
             resolved_model_path = model_path
-            if not resolved_model_path or not os.path.exists(resolved_model_path):
+            if (not is_custom_image_edit) and (not resolved_model_path or not os.path.exists(resolved_model_path)):
                 try:
                     from local_inpainter import LocalInpainter
                     self._log(f"📥 Downloading {local_model} model...", "info")
@@ -3058,10 +3061,13 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
             
             # Get model path from config (same way as manga_translator)
             model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
+            is_custom_image_edit = str(local_model or '').lower() == 'custom-image-edit'
+            if is_custom_image_edit and not model_path:
+                model_path = getattr(self.main_gui, 'custom_image_edit_endpoint_var', '') or self.main_gui.config.get('custom_image_edit_endpoint', '')
             
             # Ensure we have a model path (download if needed)
             resolved_model_path = model_path
-            if not resolved_model_path or not os.path.exists(resolved_model_path):
+            if (not is_custom_image_edit) and (not resolved_model_path or not os.path.exists(resolved_model_path)):
                 try:
                     from local_inpainter import LocalInpainter
                     print(f"[INPAINT_SYNC] Downloading {local_model} model...")
@@ -6417,6 +6423,9 @@ def _preload_shared_inpainter(self):
         
         # Get model path
         model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
+        is_custom_image_edit = str(local_model or '').lower() == 'custom-image-edit'
+        if is_custom_image_edit and not model_path:
+            model_path = getattr(self.main_gui, 'custom_image_edit_endpoint_var', '') or self.main_gui.config.get('custom_image_edit_endpoint', '')
         try:
             if isinstance(model_path, str) and model_path.lower().endswith('.json'):
                 model_path = ''
@@ -6424,7 +6433,7 @@ def _preload_shared_inpainter(self):
             pass
         
         # Normalize path
-        if model_path:
+        if model_path and not is_custom_image_edit:
             try:
                 model_path = os.path.abspath(os.path.normpath(model_path))
             except Exception:
@@ -6440,7 +6449,7 @@ def _preload_shared_inpainter(self):
                 return True
         
         # Try to download if path not found
-        if not model_path or not os.path.exists(model_path):
+        if (not is_custom_image_edit) and (not model_path or not os.path.exists(model_path)):
             try:
                 print(f"[PRELOAD_INPAINTER] Downloading {local_model} model for preloading...")
                 from local_inpainter import LocalInpainter
@@ -6453,8 +6462,11 @@ def _preload_shared_inpainter(self):
             except Exception as e:
                 print(f"[PRELOAD_INPAINTER] Failed to download {local_model}: {e}")
                 return False
+        if is_custom_image_edit and not model_path:
+            print("[PRELOAD_INPAINTER] Custom image edit endpoint missing; skipping fake preload")
+            return False
         
-        if model_path and os.path.exists(model_path):
+        if model_path and (is_custom_image_edit or os.path.exists(model_path)):
             print(f"[PRELOAD_INPAINTER] Preloading {local_model} inpainter into pool...")
             
             # Create a temporary translator to use preload_local_inpainters
@@ -6520,6 +6532,9 @@ def _run_inpainting_on_region(self, image, mask, region_index, custom_iterations
         if inpaint_method == 'local':
             # Get model path from config (same way as _run_clean_background)
             model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
+            is_custom_image_edit = str(local_model or '').lower() == 'custom-image-edit'
+            if is_custom_image_edit and not model_path:
+                model_path = getattr(self.main_gui, 'custom_image_edit_endpoint_var', '') or self.main_gui.config.get('custom_image_edit_endpoint', '')
             try:
                 if isinstance(model_path, str) and model_path.lower().endswith('.json'):
                     model_path = ''
@@ -6528,7 +6543,7 @@ def _run_inpainting_on_region(self, image, mask, region_index, custom_iterations
             
             # Ensure we have a model path (download if needed)
             resolved_model_path = model_path
-            if not resolved_model_path or not os.path.exists(resolved_model_path):
+            if (not is_custom_image_edit) and (not resolved_model_path or not os.path.exists(resolved_model_path)):
                 try:
                     print(f"[INPAINT_REGION] Model path not found, downloading {local_model} model...")
                     from local_inpainter import LocalInpainter

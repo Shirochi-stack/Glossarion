@@ -1922,6 +1922,10 @@ Text to analyze:
         # Initialize custom API endpoint variables
         self.openai_base_url_var = self.config.get('openai_base_url', '')
         self.custom_image_edit_endpoint_var = self.config.get('custom_image_edit_endpoint', '')
+        self.use_custom_image_edit_endpoint_var = self.config.get(
+            'use_custom_image_edit_endpoint',
+            bool(self.custom_image_edit_endpoint_var)
+        )
         self.openai_tts_endpoint_var = self.config.get('openai_tts_endpoint', '')
         self.tts_voice_var = self.config.get('tts_voice', '')
         self.groq_base_url_var = self.config.get('groq_base_url', '')
@@ -14916,8 +14920,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'OPENROUTER_PREFERRED_PROVIDER': self.config.get('openrouter_preferred_provider', 'Auto'),
             # Custom API endpoints
             'OPENAI_CUSTOM_BASE_URL': self.openai_base_url_var if self.openai_base_url_var else '',
-            'CUSTOM_IMAGE_EDIT_BASE_URL': getattr(self, 'custom_image_edit_endpoint_var', '') or '',
-            'OPENAI_IMAGE_EDIT_BASE_URL': getattr(self, 'custom_image_edit_endpoint_var', '') or '',
+            'USE_CUSTOM_IMAGE_EDIT_ENDPOINT': '1' if getattr(self, 'use_custom_image_edit_endpoint_var', False) else '0',
+            'CUSTOM_IMAGE_EDIT_BASE_URL': getattr(self, 'custom_image_edit_endpoint_var', '') if getattr(self, 'use_custom_image_edit_endpoint_var', False) else '',
+            'OPENAI_IMAGE_EDIT_BASE_URL': getattr(self, 'custom_image_edit_endpoint_var', '') if getattr(self, 'use_custom_image_edit_endpoint_var', False) else '',
             'CUSTOM_OPENAI_PREFIX_ROUTES': self._custom_prefix_routes_env_json(),
             'OPENAI_TTS_ENDPOINT': getattr(self, 'openai_tts_endpoint_var', '') or (self.openai_base_url_var if str(self.openai_base_url_var).rstrip('/').endswith('/audio/speech') else ''),
             'TTS_VOICE': getattr(self, 'tts_voice_var', '') or '',
@@ -15416,8 +15421,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT'] = '1' if getattr(self, 'override_gemma_for_custom_endpoint_var', True) else '0'
                 os.environ['USE_CUSTOM_OPENAI_ENDPOINT'] = '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0'
                 os.environ['OPENAI_CUSTOM_BASE_URL'] = getattr(self, 'openai_base_url_var', '') or ''
-                os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = getattr(self, 'custom_image_edit_endpoint_var', '') or ''
-                os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = getattr(self, 'custom_image_edit_endpoint_var', '') or ''
+                _use_img_edit = bool(getattr(self, 'use_custom_image_edit_endpoint_var', False))
+                os.environ['USE_CUSTOM_IMAGE_EDIT_ENDPOINT'] = '1' if _use_img_edit else '0'
+                os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = (getattr(self, 'custom_image_edit_endpoint_var', '') or '') if _use_img_edit else ''
+                os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = (getattr(self, 'custom_image_edit_endpoint_var', '') or '') if _use_img_edit else ''
                 os.environ['CUSTOM_OPENAI_PREFIX_ROUTES'] = self._custom_prefix_routes_env_json()
                 os.environ['OPENAI_TTS_ENDPOINT'] = getattr(self, 'openai_tts_endpoint_var', '') or (getattr(self, 'openai_base_url_var', '') if str(getattr(self, 'openai_base_url_var', '')).rstrip('/').endswith('/audio/speech') else '')
                 os.environ['GROQ_API_URL'] = getattr(self, 'groq_base_url_var', '') or ''
@@ -16328,8 +16335,9 @@ Important rules:
                     'OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT': '1' if getattr(self, 'override_gemma_for_custom_endpoint_var', True) else '0',
                     'USE_CUSTOM_OPENAI_ENDPOINT': '1' if getattr(self, 'use_custom_openai_endpoint_var', False) else '0',
                     'OPENAI_CUSTOM_BASE_URL': getattr(self, 'openai_base_url_var', '') or '',
-                    'CUSTOM_IMAGE_EDIT_BASE_URL': getattr(self, 'custom_image_edit_endpoint_var', '') or '',
-                    'OPENAI_IMAGE_EDIT_BASE_URL': getattr(self, 'custom_image_edit_endpoint_var', '') or '',
+                    'USE_CUSTOM_IMAGE_EDIT_ENDPOINT': '1' if getattr(self, 'use_custom_image_edit_endpoint_var', False) else '0',
+                    'CUSTOM_IMAGE_EDIT_BASE_URL': (getattr(self, 'custom_image_edit_endpoint_var', '') or '') if getattr(self, 'use_custom_image_edit_endpoint_var', False) else '',
+                    'OPENAI_IMAGE_EDIT_BASE_URL': (getattr(self, 'custom_image_edit_endpoint_var', '') or '') if getattr(self, 'use_custom_image_edit_endpoint_var', False) else '',
                     'CUSTOM_OPENAI_PREFIX_ROUTES': self._custom_prefix_routes_env_json(),
                     'OPENAI_TTS_ENDPOINT': getattr(self, 'openai_tts_endpoint_var', '') or (getattr(self, 'openai_base_url_var', '') if str(getattr(self, 'openai_base_url_var', '')).rstrip('/').endswith('/audio/speech') else ''),
                     'GROQ_API_URL': getattr(self, 'groq_base_url_var', '') or '',
@@ -22591,6 +22599,7 @@ Important rules:
                 ('vision_ocr_keep_images', ['vision_ocr_keep_images_var'], False, bool),
                 ('vision_ocr_source_prepass', ['vision_ocr_source_prepass_var'], 'auto', str),
                 ('use_custom_openai_endpoint', ['use_custom_openai_endpoint_var'], False, bool),
+                ('use_custom_image_edit_endpoint', ['use_custom_image_edit_endpoint_var'], False, bool),
                 ('disable_chapter_merging', ['disable_chapter_merging_var'], False, bool),
                 # Request merging settings
                 ('request_merging_enabled', ['request_merging_enabled_var'], False, bool),
@@ -23263,6 +23272,7 @@ Important rules:
             
             # API Endpoints
             'OPENAI_CUSTOM_BASE_URL': 'Custom OpenAI API base URL',
+            'USE_CUSTOM_IMAGE_EDIT_ENDPOINT': 'Use custom image/video output and manga image edit endpoint',
             'CUSTOM_IMAGE_EDIT_BASE_URL': 'Custom image/video output and manga image edit base URL',
             'OPENAI_IMAGE_EDIT_BASE_URL': 'Alias for custom image edit base URL',
             'CUSTOM_OPENAI_PREFIX_ROUTES': 'Custom OpenAI-compatible prefix routes',
@@ -23801,8 +23811,9 @@ Important rules:
 
                 # Custom API endpoints
                 ('OPENAI_CUSTOM_BASE_URL', getattr(self, 'openai_base_url_var', '')),
-                ('CUSTOM_IMAGE_EDIT_BASE_URL', getattr(self, 'custom_image_edit_endpoint_var', '')),
-                ('OPENAI_IMAGE_EDIT_BASE_URL', getattr(self, 'custom_image_edit_endpoint_var', '')),
+                ('USE_CUSTOM_IMAGE_EDIT_ENDPOINT', '1' if getattr(self, 'use_custom_image_edit_endpoint_var', False) else '0'),
+                ('CUSTOM_IMAGE_EDIT_BASE_URL', getattr(self, 'custom_image_edit_endpoint_var', '') if getattr(self, 'use_custom_image_edit_endpoint_var', False) else ''),
+                ('OPENAI_IMAGE_EDIT_BASE_URL', getattr(self, 'custom_image_edit_endpoint_var', '') if getattr(self, 'use_custom_image_edit_endpoint_var', False) else ''),
                 ('CUSTOM_OPENAI_PREFIX_ROUTES', self._custom_prefix_routes_env_json()),
                 ('OPENAI_TTS_ENDPOINT', getattr(self, 'openai_tts_endpoint_var', '') or (getattr(self, 'openai_base_url_var', '') if str(getattr(self, 'openai_base_url_var', '')).rstrip('/').endswith('/audio/speech') else '')),
                 ('TTS_VOICE', getattr(self, 'tts_voice_var', '') or ''),

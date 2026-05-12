@@ -10726,6 +10726,36 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     openai_h.addWidget(self.openai_clear_button)
     section_v.addWidget(openai_row)
 
+    self.use_custom_image_edit_endpoint_var = self.config.get(
+        'use_custom_image_edit_endpoint',
+        bool(self.config.get('custom_image_edit_endpoint', ''))
+    )
+    image_edit_enable_cb = self._create_styled_checkbox("Enable Custom Image Edit Endpoint")
+    self.use_custom_image_edit_endpoint_checkbox = image_edit_enable_cb
+    try:
+        image_edit_enable_cb.setChecked(bool(self.use_custom_image_edit_endpoint_var))
+    except Exception:
+        pass
+    image_edit_enable_cb.setToolTip(
+        "Use a separate OpenAI-compatible endpoint for image/video output and manga custom-image-edit inpainting. "
+        "Text requests keep using the normal endpoint/provider."
+    )
+    def _on_enable_custom_image_edit_endpoint(checked):
+        try:
+            self.use_custom_image_edit_endpoint_var = bool(checked)
+            self.config['use_custom_image_edit_endpoint'] = bool(checked)
+            url = str(getattr(self, 'custom_image_edit_endpoint_var', '') or '').strip()
+            os.environ['USE_CUSTOM_IMAGE_EDIT_ENDPOINT'] = '1' if checked else '0'
+            os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = url if checked else ''
+            os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = url if checked else ''
+            mt = getattr(self, 'manga_translator', None)
+            if mt and hasattr(mt, '_sync_custom_image_edit_controls'):
+                mt._sync_custom_image_edit_controls(url=url, enabled=bool(checked), source='other')
+        except Exception:
+            pass
+    image_edit_enable_cb.toggled.connect(_on_enable_custom_image_edit_endpoint)
+    section_v.addWidget(image_edit_enable_cb)
+
     image_edit_row = QWidget()
     image_edit_h = QHBoxLayout(image_edit_row)
     image_edit_h.setContentsMargins(0, 0, 0, 5)
@@ -10750,8 +10780,14 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     def _on_custom_image_edit_url_changed(text):
         try:
             self.custom_image_edit_endpoint_var = text
-            os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = str(text or '').strip()
-            os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = str(text or '').strip()
+            self.config['custom_image_edit_endpoint'] = text
+            enabled = bool(getattr(self, 'use_custom_image_edit_endpoint_var', False))
+            os.environ['USE_CUSTOM_IMAGE_EDIT_ENDPOINT'] = '1' if enabled else '0'
+            os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = str(text or '').strip() if enabled else ''
+            os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = str(text or '').strip() if enabled else ''
+            mt = getattr(self, 'manga_translator', None)
+            if mt and hasattr(mt, '_sync_custom_image_edit_controls'):
+                mt._sync_custom_image_edit_controls(url=text, enabled=enabled, source='other')
         except Exception:
             pass
     self.custom_image_edit_endpoint_entry.textChanged.connect(_on_custom_image_edit_url_changed)
@@ -10761,9 +10797,13 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     self.custom_image_edit_clear_button.setFixedWidth(80)
     def _clear_custom_image_edit_url():
         self.custom_image_edit_endpoint_var = ""
+        self.config['custom_image_edit_endpoint'] = ""
         self.custom_image_edit_endpoint_entry.setText("")
         os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = ''
         os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = ''
+        mt = getattr(self, 'manga_translator', None)
+        if mt and hasattr(mt, '_sync_custom_image_edit_controls'):
+            mt._sync_custom_image_edit_controls(url="", enabled=getattr(self, 'use_custom_image_edit_endpoint_var', False), source='other')
     self.custom_image_edit_clear_button.clicked.connect(_clear_custom_image_edit_url)
     image_edit_h.addWidget(self.custom_image_edit_clear_button)
     section_v.addWidget(image_edit_row)

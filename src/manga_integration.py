@@ -4682,6 +4682,24 @@ class MangaTranslationTab(QObject):
         local_model_layout.addWidget(local_model_combo)
         self.local_model_combo = local_model_combo
 
+        self.use_custom_image_edit_endpoint_value = self.main_gui.config.get(
+            'use_custom_image_edit_endpoint',
+            bool(self.main_gui.config.get('custom_image_edit_endpoint', ''))
+        )
+        self.custom_image_edit_endpoint_value = self.main_gui.config.get('custom_image_edit_endpoint', '')
+        custom_image_edit_cb = self._create_styled_checkbox("Enable Custom Image Edit Endpoint")
+        custom_image_edit_cb.setToolTip(
+            "Uses the Custom Image Edit Endpoint only for manga custom-image-edit inpainting. "
+            "Text translation keeps using the normal LLM endpoint/provider."
+        )
+        try:
+            custom_image_edit_cb.setChecked(bool(self.use_custom_image_edit_endpoint_value))
+        except Exception:
+            pass
+        custom_image_edit_cb.toggled.connect(self._on_custom_image_edit_endpoint_toggle)
+        local_model_layout.addWidget(custom_image_edit_cb)
+        self.custom_image_edit_endpoint_checkbox = custom_image_edit_cb
+
         # Model descriptions
         model_desc = {
             'lama': 'LaMa (Best quality)',
@@ -4721,6 +4739,7 @@ class MangaTranslationTab(QObject):
         self.local_model_path_value = self.main_gui.config.get(f'manga_{self.local_model_type_value}_model_path', '')
         self.local_model_entry = QLineEdit(self.local_model_path_value)
         self.local_model_entry.setReadOnly(True)
+        self.local_model_entry.textChanged.connect(self._on_local_model_entry_text_changed)
         self.local_model_entry.setMinimumWidth(250)  # Increased width for better path visibility
         self.local_model_entry.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.local_model_entry.setStyleSheet(
@@ -4740,6 +4759,7 @@ class MangaTranslationTab(QObject):
         load_model_btn.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; }")
         model_path_layout.addWidget(load_model_btn)
         self.load_model_btn = load_model_btn
+        self.load_local_model_button = load_model_btn
         model_path_layout.addStretch()
         
         local_inpaint_layout.addWidget(model_path_frame)
@@ -4755,6 +4775,7 @@ class MangaTranslationTab(QObject):
         download_model_btn.clicked.connect(self._download_model)
         download_model_btn.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
         local_inpaint_layout.addWidget(download_model_btn)
+        self.download_model_btn = download_model_btn
 
         # Model info button
         model_info_btn = QPushButton("ℹ️ Model Info")
@@ -4786,6 +4807,8 @@ class MangaTranslationTab(QObject):
         else:
             self.local_model_status_label.setText("No model loaded")
             self.local_model_status_label.setStyleSheet("color: gray;")
+
+        self._apply_custom_image_edit_ui_state()
 
         # Initialize visibility based on current settings
         self._toggle_inpaint_visibility()
@@ -6735,6 +6758,12 @@ class MangaTranslationTab(QObject):
                 model_type = self.local_model_type_value
                 if hasattr(self, 'local_model_path_value'):
                     inpaint[f'{model_type}_model_path'] = self.local_model_path_value
+            if hasattr(self, 'custom_image_edit_endpoint_value'):
+                self.main_gui.config['custom_image_edit_endpoint'] = self.custom_image_edit_endpoint_value
+                self.main_gui.config['manga_custom-image-edit_model_path'] = self.custom_image_edit_endpoint_value
+            if hasattr(self, 'use_custom_image_edit_endpoint_value'):
+                self.main_gui.config['use_custom_image_edit_endpoint'] = bool(self.use_custom_image_edit_endpoint_value)
+                self._set_custom_image_edit_env()
             
             # Add new inpainting settings
             if hasattr(self, 'inpaint_method_value'):
@@ -9813,6 +9842,136 @@ class MangaTranslationTab(QObject):
         if not (hasattr(self, '_initializing') and self._initializing):
             self._save_rendering_settings()
 
+    def _is_custom_image_edit_selected(self):
+        return str(getattr(self, 'local_model_type_value', '') or '').lower() == 'custom-image-edit'
+
+    def _set_custom_image_edit_env(self):
+        try:
+            enabled = bool(getattr(self, 'use_custom_image_edit_endpoint_value', False))
+            url = str(getattr(self, 'custom_image_edit_endpoint_value', '') or '').strip()
+            os.environ['USE_CUSTOM_IMAGE_EDIT_ENDPOINT'] = '1' if enabled else '0'
+            os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = url if enabled else ''
+            os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = url if enabled else ''
+        except Exception:
+            pass
+
+    def _sync_custom_image_edit_controls(self, url=None, enabled=None, source='manga'):
+        """Keep manga and Other Settings custom image edit controls in lockstep."""
+        try:
+            if url is None:
+                url = getattr(self, 'custom_image_edit_endpoint_value', '')
+            if enabled is None:
+                enabled = getattr(self, 'use_custom_image_edit_endpoint_value', False)
+            url = str(url or '').strip()
+            enabled = bool(enabled)
+
+            self.custom_image_edit_endpoint_value = url
+            self.use_custom_image_edit_endpoint_value = enabled
+            self.main_gui.custom_image_edit_endpoint_var = url
+            self.main_gui.use_custom_image_edit_endpoint_var = enabled
+            self.main_gui.config['custom_image_edit_endpoint'] = url
+            self.main_gui.config['use_custom_image_edit_endpoint'] = enabled
+            self.main_gui.config['manga_custom-image-edit_model_path'] = url
+            self._set_custom_image_edit_env()
+
+            for checkbox in (
+                getattr(self, 'custom_image_edit_endpoint_checkbox', None),
+                getattr(self.main_gui, 'use_custom_image_edit_endpoint_checkbox', None),
+            ):
+                if checkbox is not None:
+                    try:
+                        checkbox.blockSignals(True)
+                        checkbox.setChecked(enabled)
+                    finally:
+                        try:
+                            checkbox.blockSignals(False)
+                        except Exception:
+                            pass
+
+            for entry in (
+                getattr(self.main_gui, 'custom_image_edit_endpoint_entry', None),
+                getattr(self, 'local_model_entry', None) if self._is_custom_image_edit_selected() else None,
+            ):
+                if entry is not None and entry.text() != url:
+                    try:
+                        entry.blockSignals(True)
+                        entry.setText(url)
+                    finally:
+                        try:
+                            entry.blockSignals(False)
+                        except Exception:
+                            pass
+
+            if self._is_custom_image_edit_selected():
+                self.local_model_path_value = url
+            if hasattr(self.main_gui, 'save_config') and source != 'save':
+                try:
+                    self.main_gui.save_config(show_message=False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _on_custom_image_edit_endpoint_toggle(self, checked):
+        self._sync_custom_image_edit_controls(
+            url=getattr(self, 'custom_image_edit_endpoint_value', ''),
+            enabled=bool(checked),
+            source='manga'
+        )
+        self._apply_custom_image_edit_ui_state()
+
+    def _on_local_model_entry_text_changed(self, text):
+        if not self._is_custom_image_edit_selected():
+            return
+        self._sync_custom_image_edit_controls(
+            url=text,
+            enabled=getattr(self, 'use_custom_image_edit_endpoint_value', False),
+            source='manga'
+        )
+        self._apply_custom_image_edit_ui_state(update_entry=False)
+
+    def _apply_custom_image_edit_ui_state(self, update_entry=True):
+        custom_selected = self._is_custom_image_edit_selected()
+        if hasattr(self, 'custom_image_edit_endpoint_checkbox'):
+            self.custom_image_edit_endpoint_checkbox.setVisible(custom_selected)
+        if hasattr(self, 'model_file_label'):
+            self.model_file_label.setText("Image Edit URL:" if custom_selected else "Model File:")
+        if hasattr(self, 'local_model_entry'):
+            self.local_model_entry.setReadOnly(not custom_selected)
+            self.local_model_entry.setPlaceholderText("http://localhost:8888/v1" if custom_selected else "")
+            if custom_selected and update_entry:
+                url = str(getattr(self, 'custom_image_edit_endpoint_value', '') or self.main_gui.config.get('custom_image_edit_endpoint', '') or '')
+                if self.local_model_entry.text() != url:
+                    try:
+                        self.local_model_entry.blockSignals(True)
+                        self.local_model_entry.setText(url)
+                    finally:
+                        self.local_model_entry.blockSignals(False)
+                self.local_model_path_value = url
+        if hasattr(self, 'browse_model_btn'):
+            self.browse_model_btn.setText("Clear" if custom_selected else "Browse")
+            self.browse_model_btn.setStyleSheet(
+                "QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; }"
+                if custom_selected else
+                "QPushButton { background-color: #007bff; color: white; padding: 5px 15px; }"
+            )
+        if hasattr(self, 'load_model_btn'):
+            self.load_model_btn.setVisible(not custom_selected)
+        if hasattr(self, 'download_model_btn'):
+            self.download_model_btn.setText("Test" if custom_selected else "ðŸ“¥ Download Model")
+        if custom_selected and hasattr(self, 'local_model_status_label'):
+            enabled = bool(getattr(self, 'use_custom_image_edit_endpoint_value', False))
+            url = str(getattr(self, 'custom_image_edit_endpoint_value', '') or '').strip()
+            if not enabled:
+                self.local_model_status_label.setText("Custom Image Edit Endpoint disabled")
+                self.local_model_status_label.setStyleSheet("color: gray;")
+            elif not url:
+                self.local_model_status_label.setText("Enter a Custom Image Edit Endpoint URL")
+                self.local_model_status_label.setStyleSheet("color: orange;")
+            else:
+                self.local_model_status_label.setText("Custom Image Edit Endpoint configured")
+                self.local_model_status_label.setStyleSheet("color: #5dade2;")
+
     def _on_local_model_change(self, new_model_type=None):
         """Handle model type change and auto-load if model exists"""
         # Don't trigger if already loading a model
@@ -9841,6 +10000,21 @@ class MangaTranslationTab(QObject):
             'custom-image-edit': 'Custom OpenAI-compatible image edit endpoint (.gguf)',
         }
         self.model_desc_label.setText(model_desc.get(model_type, ''))
+
+        if model_type == 'custom-image-edit':
+            self.custom_image_edit_endpoint_value = self.main_gui.config.get('custom_image_edit_endpoint', '')
+            self.use_custom_image_edit_endpoint_value = self.main_gui.config.get(
+                'use_custom_image_edit_endpoint',
+                bool(self.custom_image_edit_endpoint_value)
+            )
+            self._sync_custom_image_edit_controls(
+                url=self.custom_image_edit_endpoint_value,
+                enabled=self.use_custom_image_edit_endpoint_value,
+                source='manga'
+            )
+            self._apply_custom_image_edit_ui_state()
+            self._save_rendering_settings()
+            return
         
         # Check for saved path for this model type
         saved_path = self.main_gui.config.get(f'manga_{model_type}_model_path', '')
@@ -9861,6 +10035,8 @@ class MangaTranslationTab(QObject):
             self.local_model_path_value = ""
             self.local_model_status_label.setText("No model loaded")
             self.local_model_status_label.setStyleSheet("color: gray;")
+
+        self._apply_custom_image_edit_ui_state()
         
         self._save_rendering_settings()
 
@@ -9872,20 +10048,10 @@ class MangaTranslationTab(QObject):
         model_type = self.local_model_type_value
 
         if model_type == 'custom-image-edit':
-            path, _ = QFileDialog.getOpenFileName(
-                self.dialog,
-                "Select Custom Image Edit GGUF Model",
-                "",
-                "GGUF model files (*.gguf);;All files (*.*)"
-            )
-            if path:
-                self.local_model_entry.setText(path)
-                self.local_model_path_value = path
-                self.main_gui.config[f'manga_{model_type}_model_path'] = path
-                self._save_rendering_settings()
-                QTimer.singleShot(100, lambda: self._try_load_model(model_type, path))
+            self._sync_custom_image_edit_controls(url="", enabled=getattr(self, 'use_custom_image_edit_endpoint_value', False), source='manga')
+            self._apply_custom_image_edit_ui_state()
             return
-        
+
         if model_type == 'sd_local':
             filter_str = "Model files (*.safetensors *.pt *.pth *.ckpt *.onnx);;SafeTensors (*.safetensors);;Checkpoint files (*.ckpt);;PyTorch models (*.pt *.pth);;ONNX models (*.onnx);;All files (*.*)"
         else:
@@ -9927,6 +10093,9 @@ class MangaTranslationTab(QObject):
             if not model_type:
                 QMessageBox.information(self.dialog, "Load Model", "Please select a model type first.")
                 return
+            if model_type == 'custom-image-edit':
+                self._test_custom_image_edit_endpoint()
+                return
             if not path:
                 QMessageBox.information(self.dialog, "Load Model", "Please select a model file first using the Browse button.")
                 return
@@ -9939,6 +10108,18 @@ class MangaTranslationTab(QObject):
         """Try to load a model in background thread with proper GUI updates."""
         import threading
         from PySide6.QtWidgets import QApplication
+        if str(method or '').lower() == 'custom-image-edit':
+            endpoint = str(model_path or getattr(self, 'custom_image_edit_endpoint_value', '') or self.main_gui.config.get('custom_image_edit_endpoint', '') or '').strip()
+            self._sync_custom_image_edit_controls(endpoint, getattr(self, 'use_custom_image_edit_endpoint_value', True), source='manga')
+            try:
+                from local_inpainter import LocalInpainter
+                inp = LocalInpainter(enable_worker_process=False)
+                ok = inp.load_model('custom-image-edit', endpoint, force_reload=True)
+                self._handle_model_load_complete(method, bool(ok), None if ok else "Custom Image Edit Endpoint is not configured", show_completion_dialog, endpoint)
+                return bool(ok)
+            except Exception as e:
+                self._handle_model_load_complete(method, False, str(e), show_completion_dialog, endpoint)
+                return False
         
         # Check if already loading
         if getattr(self, '_model_loading_in_progress', False):
@@ -10086,9 +10267,14 @@ class MangaTranslationTab(QObject):
             if model_path:
                 try:
                     import os
-                    resolved_path = os.path.abspath(os.path.normpath(model_path))
+                    if str(method or '').lower() == 'custom-image-edit':
+                        resolved_path = str(model_path or '').strip()
+                    else:
+                        resolved_path = os.path.abspath(os.path.normpath(model_path))
                     self.local_model_path_value = resolved_path
                     self.main_gui.config[f'manga_{method}_model_path'] = resolved_path
+                    if str(method or '').lower() == 'custom-image-edit':
+                        self._sync_custom_image_edit_controls(resolved_path, True, source='manga')
                     if method == getattr(self, 'local_model_type_value', method) and hasattr(self, 'local_model_entry'):
                         self.local_model_entry.setText(resolved_path)
                     self._save_rendering_settings()
@@ -10214,6 +10400,9 @@ class MangaTranslationTab(QObject):
     
     def _update_local_model_status(self):
         """Update local model status display"""
+        if self._is_custom_image_edit_selected():
+            self._apply_custom_image_edit_ui_state()
+            return
         path = self.local_model_path_value if hasattr(self, 'local_model_path_value') else ''
         
         if not path:
@@ -10246,6 +10435,52 @@ class MangaTranslationTab(QObject):
             self.local_model_status_label.setText("✅ ONNX model ready")
             self.local_model_status_label.setStyleSheet("color: green;")
 
+    def _test_custom_image_edit_endpoint(self):
+        """Lightweight connectivity test for the custom image edit endpoint."""
+        from PySide6.QtWidgets import QMessageBox
+        try:
+            import requests
+            url = str(getattr(self, 'custom_image_edit_endpoint_value', '') or '').strip()
+            enabled = bool(getattr(self, 'use_custom_image_edit_endpoint_value', False))
+            if not enabled:
+                self.local_model_status_label.setText("Custom Image Edit Endpoint disabled")
+                self.local_model_status_label.setStyleSheet("color: orange;")
+                QMessageBox.information(self.dialog, "Custom Image Edit Endpoint", "Enable the Custom Image Edit Endpoint toggle first.")
+                return
+            if not url:
+                self.local_model_status_label.setText("Enter a Custom Image Edit Endpoint URL")
+                self.local_model_status_label.setStyleSheet("color: orange;")
+                QMessageBox.information(self.dialog, "Custom Image Edit Endpoint", "Enter an endpoint URL first.")
+                return
+            if not url.startswith(('http://', 'https://')):
+                lower = url.lower()
+                url = ('http://' if lower.startswith(('localhost', '127.', '0.0.0.0', '[')) else 'https://') + url
+            url = url.rstrip('/')
+            self._sync_custom_image_edit_controls(url=url, enabled=True, source='manga')
+
+            self.local_model_status_label.setText("Testing Custom Image Edit Endpoint...")
+            self.local_model_status_label.setStyleSheet("color: orange;")
+            headers = {
+                'Authorization': f"Bearer {os.environ.get('CUSTOM_IMAGE_EDIT_API_KEY') or os.environ.get('OPENAI_API_KEY') or self.main_gui.config.get('api_key', '') or 'sk-local'}"
+            }
+            resp = requests.get(f"{url}/models", headers=headers, timeout=10)
+            if resp.status_code in (200, 201):
+                self.local_model_status_label.setText("Custom Image Edit Endpoint reachable")
+                self.local_model_status_label.setStyleSheet("color: green;")
+                QMessageBox.information(self.dialog, "Custom Image Edit Endpoint", "Endpoint is reachable.")
+            elif resp.status_code in (401, 403):
+                self.local_model_status_label.setText("Endpoint reached, but authentication failed")
+                self.local_model_status_label.setStyleSheet("color: orange;")
+                QMessageBox.warning(self.dialog, "Custom Image Edit Endpoint", f"Endpoint responded with authentication error ({resp.status_code}).")
+            else:
+                self.local_model_status_label.setText(f"Endpoint responded: HTTP {resp.status_code}")
+                self.local_model_status_label.setStyleSheet("color: orange;")
+                QMessageBox.information(self.dialog, "Custom Image Edit Endpoint", f"Endpoint responded with HTTP {resp.status_code}.")
+        except Exception as e:
+            self.local_model_status_label.setText("Custom Image Edit Endpoint test failed")
+            self.local_model_status_label.setStyleSheet("color: red;")
+            QMessageBox.warning(self.dialog, "Custom Image Edit Endpoint", f"Test failed:\n{e}")
+
     def _download_model(self):
         """Actually download the model for the selected type.
         Checks cache first and auto-loads if present."""
@@ -10253,6 +10488,9 @@ class MangaTranslationTab(QObject):
         from PySide6.QtCore import QTimer
         
         model_type = self.local_model_type_value
+        if model_type == 'custom-image-edit':
+            self._test_custom_image_edit_endpoint()
+            return
         
         # Guard: if config has a .json path (e.g., credentials), clear it before downloading
         try:
