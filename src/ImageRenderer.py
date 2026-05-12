@@ -3154,15 +3154,16 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
                             if is_custom_image_edit and hasattr(self, 'main_gui') and getattr(self.main_gui, 'config', None):
                                 new_inpainter.config.update(self.main_gui.config)
                                 default_endpoint = ''
-                                if self.main_gui.config.get('use_custom_openai_endpoint'):
-                                    default_endpoint = self.main_gui.config.get('openai_base_url', '')
-                                default_endpoint = default_endpoint or getattr(self.main_gui, 'openai_base_url_var', '') or ''
-                                new_inpainter.config['custom_image_edit_default_endpoint'] = default_endpoint
-                                new_inpainter.config['openai_base_url'] = default_endpoint
-                                new_inpainter.config['use_custom_openai_endpoint'] = bool(
+                                use_custom_openai = bool(
                                     getattr(self.main_gui, 'use_custom_openai_endpoint_var', False)
                                     or self.main_gui.config.get('use_custom_openai_endpoint', False)
                                 )
+                                if use_custom_openai:
+                                    default_endpoint = self.main_gui.config.get('openai_base_url', '')
+                                    default_endpoint = default_endpoint or getattr(self.main_gui, 'openai_base_url_var', '') or ''
+                                new_inpainter.config['custom_image_edit_default_endpoint'] = default_endpoint
+                                new_inpainter.config['openai_base_url'] = default_endpoint
+                                new_inpainter.config['use_custom_openai_endpoint'] = use_custom_openai
                         except Exception:
                             pass
                         if new_inpainter.load_model(local_model, resolved_model_path):

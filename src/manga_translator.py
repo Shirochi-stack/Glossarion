@@ -9640,15 +9640,16 @@ class MangaTranslator:
             inpainter.config['custom_image_edit_user_prompt'] = user_prompt or ''
             if hasattr(self, 'main_gui'):
                 endpoint = ''
+                use_custom_openai = False
                 if isinstance(cfg, dict):
-                    endpoint = cfg.get('openai_base_url', '') if cfg.get('use_custom_openai_endpoint') else ''
-                endpoint = endpoint or getattr(self.main_gui, 'openai_base_url_var', '') or ''
+                    use_custom_openai = bool(cfg.get('use_custom_openai_endpoint', False))
+                    endpoint = cfg.get('openai_base_url', '') if use_custom_openai else ''
+                use_custom_openai = bool(getattr(self.main_gui, 'use_custom_openai_endpoint_var', use_custom_openai))
+                if use_custom_openai and not endpoint:
+                    endpoint = getattr(self.main_gui, 'openai_base_url_var', '') or ''
                 inpainter.config['custom_image_edit_default_endpoint'] = endpoint
                 inpainter.config['openai_base_url'] = endpoint
-                inpainter.config['use_custom_openai_endpoint'] = bool(
-                    getattr(self.main_gui, 'use_custom_openai_endpoint_var', False)
-                    or (isinstance(cfg, dict) and cfg.get('use_custom_openai_endpoint', False))
-                )
+                inpainter.config['use_custom_openai_endpoint'] = use_custom_openai
                 model_name = getattr(self.main_gui, 'model_var', '') or (cfg.get('model', '') if isinstance(cfg, dict) else '')
                 if model_name:
                     inpainter.config['custom_image_edit_model'] = model_name

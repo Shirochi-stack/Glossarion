@@ -2443,15 +2443,19 @@ class LocalInpainter:
             and not os.path.exists(model_path_str)
             and any(marker in model_path_str.lower() for marker in ('localhost', '127.', '0.0.0.0', '/v1'))
         )
-        explicit_endpoint = (
+        config_has_override_toggle = 'use_custom_image_edit_endpoint' in self.config
+        config_override_enabled = str(self.config.get('use_custom_image_edit_endpoint', '')).lower() in ('1', 'true', 'yes', 'on')
+        env_override_enabled = str(os.environ.get('USE_CUSTOM_IMAGE_EDIT_ENDPOINT', '')).lower() in ('1', 'true', 'yes', 'on')
+        override_enabled = config_override_enabled or (env_override_enabled and not config_has_override_toggle)
+        env_endpoint = (
             os.environ.get('CUSTOM_IMAGE_EDIT_BASE_URL', '')
             or os.environ.get('OPENAI_IMAGE_EDIT_BASE_URL', '')
+        ) if override_enabled else ''
+        config_endpoint = self.config.get('custom_image_edit_endpoint', '') if config_override_enabled else ''
+        explicit_endpoint = (
+            env_endpoint
             or (model_path_str if model_path_is_url else '')
-            or (
-                self.config.get('custom_image_edit_endpoint', '')
-                if str(self.config.get('use_custom_image_edit_endpoint', '')).lower() in ('1', 'true', 'yes', 'on')
-                else ''
-            )
+            or config_endpoint
         )
         fallback_endpoint = (
             self.config.get('custom_image_edit_default_endpoint', '')
@@ -2460,7 +2464,11 @@ class LocalInpainter:
                 if str(self.config.get('use_custom_openai_endpoint', '')).lower() in ('1', 'true', 'yes', 'on')
                 else ''
             )
-            or os.environ.get('OPENAI_CUSTOM_BASE_URL', '')
+            or (
+                os.environ.get('OPENAI_CUSTOM_BASE_URL', '')
+                if str(os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '')).lower() in ('1', 'true', 'yes', 'on')
+                else ''
+            )
             or os.environ.get('OPENAI_API_BASE', '')
             or os.environ.get('OPENAI_BASE_URL', '')
             or 'https://api.openai.com/v1'
@@ -2473,16 +2481,19 @@ class LocalInpainter:
         try:
             model_path_str = str(model_path or '').strip()
             endpoint, has_explicit_endpoint, model_path_is_url = self._resolve_custom_image_edit_endpoint(model_path_str)
+            use_current_provider = not has_explicit_endpoint
             model_path_is_stale_qwen = (
                 model_path_str
                 and not model_path_is_url
                 and not os.path.exists(model_path_str)
                 and 'qwen-image-edit' in model_path_str.lower()
             )
-            if not endpoint:
+            if not endpoint and not use_current_provider:
                 logger.error("No default image edit endpoint could be resolved")
                 self.model_loaded = False
                 return False
+            if use_current_provider:
+                endpoint = 'current-provider'
 
             model_ref = (
                 os.environ.get('CUSTOM_IMAGE_EDIT_MODEL')
@@ -2518,9 +2529,10 @@ class LocalInpainter:
             self.is_jit_model = False
             self._custom_image_edit_endpoint = endpoint
             self._custom_image_edit_model_ref = model_ref
+            self._custom_image_edit_use_current_provider = use_current_provider
             logger.info(
                 f"Custom image edit endpoint configured: {endpoint} | model={model_ref}"
-                + (" | override URL" if has_explicit_endpoint else " | default endpoint")
+                + (" | override URL" if has_explicit_endpoint else " | current provider")
             )
             return True
         except Exception as e:
@@ -2543,19 +2555,23 @@ class LocalInpainter:
             if np.count_nonzero(mask_gray) == 0:
                 return image.copy()
 
-            endpoint = self._normalize_custom_image_edit_endpoint(
-                getattr(self, '_custom_image_edit_endpoint', '')
-                or os.environ.get('CUSTOM_IMAGE_EDIT_BASE_URL')
-                or os.environ.get('OPENAI_IMAGE_EDIT_BASE_URL')
-                or (
-                    self.config.get('custom_image_edit_endpoint', '')
-                    if str(self.config.get('use_custom_image_edit_endpoint', '')).lower() in ('1', 'true', 'yes', 'on')
-                    else ''
+            use_current_provider = bool(getattr(self, '_custom_image_edit_use_current_provider', False))
+            if use_current_provider:
+                endpoint = ''
+            else:
+                endpoint = self._normalize_custom_image_edit_endpoint(
+                    getattr(self, '_custom_image_edit_endpoint', '')
+                    or os.environ.get('CUSTOM_IMAGE_EDIT_BASE_URL')
+                    or os.environ.get('OPENAI_IMAGE_EDIT_BASE_URL')
+                    or (
+                        self.config.get('custom_image_edit_endpoint', '')
+                        if str(self.config.get('use_custom_image_edit_endpoint', '')).lower() in ('1', 'true', 'yes', 'on')
+                        else ''
+                    )
                 )
-            )
-            if not endpoint:
+            if not endpoint and not use_current_provider:
                 endpoint, _, _ = self._resolve_custom_image_edit_endpoint('')
-            if not endpoint:
+            if not endpoint and not use_current_provider:
                 logger.error("No default image edit endpoint could be resolved")
                 return image
 
@@ -2567,14 +2583,14 @@ class LocalInpainter:
                 or 'gpt-image-1'
             )
             model_ref_lower = str(model_ref or '').lower()
-            is_nanogpt_image = model_ref_lower.startswith(('nan/', 'nanogpt/')) or 'nano-gpt.com' in str(endpoint).lower()
-            url = endpoint.rstrip('/')
+            is_nanogpt_image = (not use_current_provider) and (model_ref_lower.startswith(('nan/', 'nanogpt/')) or 'nano-gpt.com' in str(endpoint).lower())
+            url = endpoint.rstrip('/') if not use_current_provider else ''
             if is_nanogpt_image:
                 if not model_ref_lower.startswith(('nan/', 'nanogpt/')) and model_ref == 'gpt-image-1':
                     model_ref = 'nan/gemini-2.5-flash-image-preview'
                 url = os.environ.get('NANOGPT_API_URL', url if 'nano-gpt.com' in url.lower() else 'https://nano-gpt.com').rstrip('/')
                 url = f"{url}/api/v1/images/generations"
-            elif not url.endswith('/images/edits'):
+            elif (not use_current_provider) and not url.endswith('/images/edits'):
                 url = f"{url}/images/edits"
 
             x, y, w, h = cv2.boundingRect(mask_gray)
@@ -2675,51 +2691,215 @@ class LocalInpainter:
                 "info"
             )
 
-            files = {
-                'image': ('input.png', img_buf.tobytes(), 'image/png'),
-                'mask': ('mask.png', mask_buf.tobytes(), 'image/png'),
-            }
-            if is_nanogpt_image:
-                image_b64 = base64.b64encode(img_buf.tobytes()).decode('ascii')
-                effective_model = str(model_ref or '').split('/', 1)[1] if '/' in str(model_ref or '') else str(model_ref or '')
-                headers = {
-                    'Authorization': f"Bearer {os.environ.get('NANOGPT_API_KEY') or api_key}",
-                    'Content-Type': 'application/json',
-                }
-                payload = {
-                    'model': effective_model,
-                    'prompt': prompt,
-                    'size': os.environ.get('NANOGPT_IMAGE_SIZE', os.environ.get('CUSTOM_IMAGE_EDIT_SIZE', '1024x1024')),
-                    'response_format': 'url',
-                    'imageDataUrl': f"data:image/png;base64,{image_b64}",
-                }
-                resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-            else:
-                resp = requests.post(url, headers=headers, data=form_data, files=files, timeout=timeout)
-            if resp.status_code not in (200, 201):
-                raise RuntimeError(f"Custom image edit endpoint error ({resp.status_code}): {resp.text[:500]}")
+            def _current_provider_image_value():
+                """Use the active main UnifiedClient provider/model for blank URL mode."""
+                import re
+                import tempfile
+                from unified_api_client import UnifiedClient
 
-            data = resp.json()
+                image_b64 = base64.b64encode(img_buf.tobytes()).decode('ascii')
+                output_dir = tempfile.gettempdir()
+                client = UnifiedClient(model=str(model_ref or self.config.get('model') or ''), api_key=api_key, output_dir=output_dir)
+                messages = [
+                    {'role': 'system', 'content': system_prompt},
+                    {
+                        'role': 'user',
+                        'content': [
+                            {
+                                'type': 'text',
+                                'text': user_prompt or (
+                                    "Edit the attached image according to the system instruction. "
+                                    "Return the generated edited image, not OCR or plain text."
+                                ),
+                            },
+                            {
+                                'type': 'image_url',
+                                'image_url': {'url': f"data:image/png;base64,{image_b64}"},
+                            },
+                        ],
+                    },
+                ]
+                old_env = {k: os.environ.get(k) for k in (
+                    'ENABLE_IMAGE_OUTPUT_MODE',
+                    'IMAGE_OUTPUT_RESOLUTION',
+                    'CUSTOM_IMAGE_EDIT_BASE_URL',
+                    'OPENAI_IMAGE_EDIT_BASE_URL',
+                    'USE_CUSTOM_IMAGE_EDIT_ENDPOINT',
+                )}
+                try:
+                    os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = '1'
+                    os.environ['IMAGE_OUTPUT_RESOLUTION'] = os.environ.get('IMAGE_OUTPUT_RESOLUTION') or os.environ.get('CUSTOM_IMAGE_EDIT_RESOLUTION', '1K')
+                    # Blank URL means current provider. Prevent UnifiedClient from
+                    # recursively routing image output back into a stale image-edit URL.
+                    os.environ.pop('CUSTOM_IMAGE_EDIT_BASE_URL', None)
+                    os.environ.pop('OPENAI_IMAGE_EDIT_BASE_URL', None)
+                    os.environ['USE_CUSTOM_IMAGE_EDIT_ENDPOINT'] = '0'
+                    content, _finish_reason = client.send(
+                        messages,
+                        temperature=float(self.config.get('temperature', 0.3) or 0.3),
+                        max_tokens=int(self.config.get('max_output_tokens', self.config.get('max_tokens', 4096)) or 4096),
+                    )
+                finally:
+                    for key, value in old_env.items():
+                        if value is None:
+                            os.environ.pop(key, None)
+                        else:
+                            os.environ[key] = value
+
+                try:
+                    tls = client._get_thread_local_client()
+                    image_bytes = getattr(tls, '_last_generated_image_bytes', None)
+                    if image_bytes:
+                        return 'data:image/png;base64,' + base64.b64encode(image_bytes).decode('ascii')
+                    image_path = getattr(tls, '_last_generated_image_path', None)
+                    if image_path and os.path.exists(image_path):
+                        return image_path
+                except Exception:
+                    pass
+
+                content = str(content or '').strip()
+                if content.lower() == 'no':
+                    return 'No'
+                if content.startswith('data:image/'):
+                    return content
+                match = re.search(r'\[GENERATED_IMAGE:(.*?)\]', content)
+                if match:
+                    image_path = match.group(1).strip()
+                    if image_path and os.path.exists(image_path):
+                        return image_path
+                if content and os.path.exists(content):
+                    return content
+                raise RuntimeError("Current provider returned no edited image")
+
+            def _json_image_edit_request():
+                image_b64 = base64.b64encode(img_buf.tobytes()).decode('ascii')
+                json_url = endpoint.rstrip('/')
+                if json_url.endswith('/images/edits'):
+                    json_url = json_url[:-len('/images/edits')]
+                if not json_url.endswith('/chat/completions'):
+                    json_url = f"{json_url}/chat/completions"
+
+                json_headers = {
+                    'Authorization': f'Bearer {api_key}',
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                }
+                image_resolution = os.environ.get('IMAGE_OUTPUT_RESOLUTION', os.environ.get('CUSTOM_IMAGE_EDIT_RESOLUTION', '1K')).upper()
+                if image_resolution not in ('1K', '2K', '4K'):
+                    image_resolution = '1K'
+                user_text = user_prompt or (
+                    "Edit the attached image according to the system instruction. "
+                    "Return the generated edited image, not OCR or plain text."
+                )
+                payload = {
+                    'model': str(model_ref),
+                    'messages': [
+                        {'role': 'system', 'content': system_prompt},
+                        {
+                            'role': 'user',
+                            'content': [
+                                {'type': 'text', 'text': user_text},
+                                {
+                                    'type': 'image_url',
+                                    'image_url': {'url': f"data:image/png;base64,{image_b64}"},
+                                },
+                            ],
+                        },
+                    ],
+                    'response_modalities': ['IMAGE', 'TEXT'],
+                    'image_generation_config': {'image_size': image_resolution},
+                }
+                return requests.post(json_url, headers=json_headers, json=payload, timeout=timeout)
+
+            if getattr(self, '_custom_image_edit_use_current_provider', False):
+                self._log("Custom image edit using current main provider/model (blank endpoint URL)", "info")
+                data = {'data': [{'url': _current_provider_image_value()}]}
+            else:
+                files = {
+                    'image': ('input.png', img_buf.tobytes(), 'image/png'),
+                    'mask': ('mask.png', mask_buf.tobytes(), 'image/png'),
+                }
+                if is_nanogpt_image:
+                    image_b64 = base64.b64encode(img_buf.tobytes()).decode('ascii')
+                    effective_model = str(model_ref or '').split('/', 1)[1] if '/' in str(model_ref or '') else str(model_ref or '')
+                    headers = {
+                        'Authorization': f"Bearer {os.environ.get('NANOGPT_API_KEY') or api_key}",
+                        'Content-Type': 'application/json',
+                    }
+                    payload = {
+                        'model': effective_model,
+                        'prompt': prompt,
+                        'size': os.environ.get('NANOGPT_IMAGE_SIZE', os.environ.get('CUSTOM_IMAGE_EDIT_SIZE', '1024x1024')),
+                        'response_format': 'url',
+                        'imageDataUrl': f"data:image/png;base64,{image_b64}",
+                    }
+                    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+                else:
+                    resp = requests.post(url, headers=headers, data=form_data, files=files, timeout=timeout)
+                    if resp.status_code == 415 and 'application/json' in str(resp.text).lower():
+                        self._log("Custom image edit endpoint expects JSON; retrying via chat image-output request", "info")
+                        resp = _json_image_edit_request()
+                if resp.status_code not in (200, 201):
+                    raise RuntimeError(f"Custom image edit endpoint error ({resp.status_code}): {resp.text[:500]}")
+
+                data = resp.json()
+            def _extract_image_value(obj):
+                if not isinstance(obj, dict):
+                    return None
+                for key in ('b64_json', 'base64', 'data', 'url', 'image_url'):
+                    val = obj.get(key)
+                    if isinstance(val, dict):
+                        val = val.get('url') or val.get('data') or val.get('base64')
+                    if isinstance(val, str) and val:
+                        return val
+                inline = obj.get('inline_data') or obj.get('inlineData')
+                if isinstance(inline, dict):
+                    val = inline.get('data')
+                    if val:
+                        mime = inline.get('mime_type') or inline.get('mimeType') or 'image/png'
+                        return f"data:{mime};base64,{val}"
+                return None
+
+            image_value = None
             items = data.get('data') or data.get('images') or []
             first = items[0] if isinstance(items, list) and items else data
-            if not isinstance(first, dict):
-                raise RuntimeError("Custom image edit endpoint returned an unsupported response")
-
-            image_value = (
-                first.get('b64_json')
-                or first.get('base64')
-                or first.get('data')
-                or first.get('url')
-                or first.get('image_url')
-            )
-            if isinstance(image_value, dict):
-                image_value = image_value.get('url') or image_value.get('data') or image_value.get('base64')
+            image_value = _extract_image_value(first) if isinstance(first, dict) else None
             if not image_value:
+                choices = data.get('choices') or []
+                if choices and isinstance(choices[0], dict):
+                    message = choices[0].get('message') or {}
+                    content = message.get('content') if isinstance(message, dict) else None
+                    image_value = _extract_image_value(message)
+                    if not image_value and isinstance(content, list):
+                        text_parts = []
+                        for part in content:
+                            if not isinstance(part, dict):
+                                continue
+                            part_image = _extract_image_value(part)
+                            if part_image:
+                                image_value = part_image
+                                break
+                            if part.get('type') == 'text' and part.get('text'):
+                                text_parts.append(str(part.get('text')))
+                        if not image_value and text_parts:
+                            first = {'text': '\n'.join(text_parts)}
+                    elif isinstance(content, str):
+                        if content.strip().startswith('data:image/'):
+                            image_value = content.strip()
+                        elif content.strip():
+                            first = {'text': content}
+            if not image_value:
+                first_text = ''
+                if isinstance(first, dict):
+                    first_text = (
+                        first.get('text')
+                        or first.get('content')
+                        or first.get('message')
+                        or first.get('response')
+                        or ''
+                    )
                 text_value = (
-                    first.get('text')
-                    or first.get('content')
-                    or first.get('message')
-                    or first.get('response')
+                    first_text
                     or data.get('text')
                     or data.get('content')
                     or data.get('message')
@@ -2767,7 +2947,7 @@ class LocalInpainter:
         except Exception as e:
             logger.error(f"Custom image edit inpainting failed: {e}")
             logger.error(traceback.format_exc())
-            return image
+            return None
 
     def _load_qwen_image_edit_model(self, model_path: str, force_reload: bool = False) -> bool:
         """Load Qwen-Image-Edit as a diffusers pipeline."""
@@ -3914,6 +4094,8 @@ class LocalInpainter:
                     mask_small = mask if len(mask.shape) == 2 else cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
                     mask_small = cv2.resize(mask_small, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
                     result_small = self.inpaint(image_small, mask_small, refinement, 0, _skip_hd=True, _skip_tiling=True)
+                    if result_small is None:
+                        return None
                     result_full = cv2.resize(result_small, (W, H), interpolation=cv2.INTER_LANCZOS4)
                     # Paste only masked area
                     mask_gray = mask_small  # already gray but at small size
@@ -4562,6 +4744,9 @@ class LocalInpainter:
             logger.error(traceback.format_exc())
             
             # Return original image on failure
+            if self._is_custom_image_edit_method(self.current_method):
+                logger.warning("Returning no cleaned image due to custom image edit failure")
+                return None
             logger.warning("Returning original image due to error")
             return image
     
