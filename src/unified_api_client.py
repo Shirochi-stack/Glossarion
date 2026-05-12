@@ -17487,6 +17487,38 @@ class UnifiedClient:
                 is_local_endpoint = True
                 actual_api_key = "dummy-key-for-local-llm"
 
+        # Route image/video output mode through the dedicated image edit endpoint
+        # without changing where normal text requests go.
+        try:
+            image_edit_base_url = (
+                os.getenv('CUSTOM_IMAGE_EDIT_BASE_URL', '')
+                or os.getenv('OPENAI_IMAGE_EDIT_BASE_URL', '')
+            ).strip()
+            output_mode_needs_image_endpoint = (
+                os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
+                or os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
+                or self._is_image_gen_model(effective_model)
+                or self._is_video_gen_model(effective_model)
+            )
+            if image_edit_base_url and output_mode_needs_image_endpoint and not getattr(threading.current_thread(), '_force_vision_mode', False):
+                if not image_edit_base_url.startswith(('http://', 'https://')):
+                    lower_base = image_edit_base_url.lower()
+                    scheme = 'http://' if (
+                        lower_base.startswith('localhost')
+                        or lower_base.startswith('127.')
+                        or lower_base.startswith('0.0.0.0')
+                        or lower_base.startswith('[')
+                    ) else 'https://'
+                    image_edit_base_url = scheme + image_edit_base_url
+                base_url = image_edit_base_url.rstrip('/')
+                if self._is_local_openai_base_url(base_url):
+                    is_local_endpoint = True
+                    actual_api_key = "dummy-key-for-local-llm"
+                if not self._is_stop_requested():
+                    print(f"🖼️ Image/video output using Custom Image Edit Endpoint: {base_url}")
+        except Exception:
+            pass
+
         # For all other providers, use the actual API key
         # Remove the special case for gemini-openai - it needs the real API key
         if not is_local_endpoint:
@@ -19805,6 +19837,12 @@ class UnifiedClient:
         if _image_in_name and _force_vision:
             _image_in_name = False
         if _image_in_name or _image_flag:
+            image_base_url = (
+                os.getenv('CUSTOM_IMAGE_EDIT_BASE_URL', '')
+                or os.getenv('OPENAI_IMAGE_EDIT_BASE_URL', '')
+            ).strip()
+            if image_base_url:
+                base_url = image_base_url
             if not self._is_stop_requested():
                 reason = 'model name' if _image_in_name else 'ENABLE_IMAGE_OUTPUT_MODE flag'
                 print(f"\U0001f5bc\ufe0f [OpenAI] Image generation detected ({reason}) \u2013 routing to images API")
@@ -19838,6 +19876,16 @@ class UnifiedClient:
         import io as _io
 
         model_lower = (self.model or '').lower()
+        base_url = str(base_url or '').strip()
+        if base_url and not base_url.startswith(('http://', 'https://')):
+            lower_base = base_url.lower()
+            scheme = 'http://' if (
+                lower_base.startswith('localhost')
+                or lower_base.startswith('127.')
+                or lower_base.startswith('0.0.0.0')
+                or lower_base.startswith('[')
+            ) else 'https://'
+            base_url = scheme + base_url
 
         # Strip any routing prefix (nan/, eh/, etc.) – keep bare model name
         effective_model = self.model or 'gpt-image-1'

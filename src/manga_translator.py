@@ -10416,11 +10416,19 @@ class MangaTranslator:
             # LOAD THE SETTINGS FROM CONFIG FIRST
             # The dialog saves it as 'manga_local_inpaint_model' at root level
             saved_local_method = self.main_gui.config.get('manga_local_inpaint_model', 'anime')
+            if saved_local_method == 'qwen_image_edit':
+                saved_local_method = 'custom-image-edit'
+                self.main_gui.config['manga_local_inpaint_model'] = saved_local_method
+                if (
+                    self.main_gui.config.get('manga_qwen_image_edit_model_path')
+                    and not self.main_gui.config.get('manga_custom-image-edit_model_path')
+                ):
+                    self.main_gui.config['manga_custom-image-edit_model_path'] = self.main_gui.config.get('manga_qwen_image_edit_model_path')
             saved_inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'cloud')
             
             # MIGRATION: Ensure manga_ prefixed model path keys exist for ONNX methods
             # This fixes compatibility where model paths were saved without manga_ prefix
-            for method_variant in ['anime', 'anime_onnx', 'lama', 'lama_onnx', 'aot', 'aot_onnx', 'qwen_image_edit']:
+            for method_variant in ['anime', 'anime_onnx', 'lama', 'lama_onnx', 'aot', 'aot_onnx', 'custom-image-edit']:
                 non_prefixed_key = f'{method_variant}_model_path'
                 prefixed_key = f'manga_{method_variant}_model_path'
                 # If we have the non-prefixed but not the prefixed, migrate it

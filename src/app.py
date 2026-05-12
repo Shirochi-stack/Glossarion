@@ -4536,10 +4536,14 @@ class GlossarionWeb:
                         )
                         
                         gr.Markdown("#### Inpainting")
+
+                        current_local_inpaint_method = self.get_config_value('manga_settings', {}).get('inpainting', {}).get('local_method', 'anime_onnx')
+                        if current_local_inpaint_method == 'qwen_image_edit':
+                            current_local_inpaint_method = 'custom-image-edit'
                         
                         local_inpaint_method = gr.Radio(
-                            choices=["anime_onnx", "anime", "qwen_image_edit", "lama", "lama_onnx", "aot", "aot_onnx"],
-                            value=self.get_config_value('manga_settings', {}).get('inpainting', {}).get('local_method', 'anime_onnx'),
+                            choices=["anime_onnx", "anime", "custom-image-edit", "lama", "lama_onnx", "aot", "aot_onnx"],
+                            value=current_local_inpaint_method,
                             label="Local Inpainting Model",
                             interactive=True
                         )
@@ -4893,7 +4897,7 @@ class GlossarionWeb:
                                         'lama_onnx': 'lama_onnx',
                                         'aot': 'aot',
                                         'aot_onnx': 'aot_onnx',
-                                        'qwen_image_edit': 'qwen_image_edit'
+                                        'custom-image-edit': 'custom-image-edit'
                                     }
                                     
                                     method_key = method_map.get(inpaint_method_val)
@@ -4964,7 +4968,7 @@ class GlossarionWeb:
                                         'lama_onnx': 'lama_onnx',
                                         'aot': 'aot',
                                         'aot_onnx': 'aot_onnx',
-                                        'qwen_image_edit': 'qwen_image_edit'
+                                        'custom-image-edit': 'custom-image-edit'
                                     }
                                     
                                     method_key = method_map.get(inpaint_method_val)

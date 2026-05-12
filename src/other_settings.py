@@ -10726,6 +10726,48 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     openai_h.addWidget(self.openai_clear_button)
     section_v.addWidget(openai_row)
 
+    image_edit_row = QWidget()
+    image_edit_h = QHBoxLayout(image_edit_row)
+    image_edit_h.setContentsMargins(0, 0, 0, 5)
+    image_edit_label = QLabel("Custom Image Edit Endpoint:")
+    image_edit_label.setToolTip(
+        "OpenAI-compatible endpoint used only for image/video output requests and the manga custom-image-edit inpainter. "
+        "Normal text requests continue to use the main endpoint/provider."
+    )
+    image_edit_h.addWidget(image_edit_label)
+
+    self.custom_image_edit_endpoint_var = self.config.get('custom_image_edit_endpoint', '')
+    self.custom_image_edit_endpoint_entry = QLineEdit()
+    self.custom_image_edit_endpoint_entry.setPlaceholderText("http://localhost:8888/v1  (used for /images/edits)")
+    self.custom_image_edit_endpoint_entry.setToolTip(
+        "Use this for a local OpenAI-compatible image edit server, such as a GGUF image-edit runtime. "
+        "The manga custom-image-edit inpainter will post to [endpoint]/images/edits."
+    )
+    try:
+        self.custom_image_edit_endpoint_entry.setText(str(self.custom_image_edit_endpoint_var))
+    except Exception:
+        pass
+    def _on_custom_image_edit_url_changed(text):
+        try:
+            self.custom_image_edit_endpoint_var = text
+            os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = str(text or '').strip()
+            os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = str(text or '').strip()
+        except Exception:
+            pass
+    self.custom_image_edit_endpoint_entry.textChanged.connect(_on_custom_image_edit_url_changed)
+    image_edit_h.addWidget(self.custom_image_edit_endpoint_entry)
+
+    self.custom_image_edit_clear_button = QPushButton("Clear")
+    self.custom_image_edit_clear_button.setFixedWidth(80)
+    def _clear_custom_image_edit_url():
+        self.custom_image_edit_endpoint_var = ""
+        self.custom_image_edit_endpoint_entry.setText("")
+        os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = ''
+        os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = ''
+    self.custom_image_edit_clear_button.clicked.connect(_clear_custom_image_edit_url)
+    image_edit_h.addWidget(self.custom_image_edit_clear_button)
+    section_v.addWidget(image_edit_row)
+
     tts_voice_row = QWidget()
     tts_voice_h = QHBoxLayout(tts_voice_row)
     tts_voice_h.setContentsMargins(0, 0, 0, 5)

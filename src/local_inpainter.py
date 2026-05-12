@@ -160,16 +160,11 @@ LAMA_JIT_MODELS = {
         'md5': 'de31ffa5ba26916b8ea35319f6c12151ff9654d4261bccf0583a69bb095315f9',
         'name': 'Anime/Manga ONNX (Dynamic)',
         'is_onnx': True  # Flag to indicate this is ONNX
-    },
-    'qwen_image_edit': {
-        'repo_id': 'Qwen/Qwen-Image-Edit-2511',
-        'name': 'Qwen-Image-Edit 2511',
-        'is_diffusers': True,
-        'local_dir_name': 'qwen-image-edit-2511'
     }
 }
 
 QWEN_IMAGE_EDIT_METHODS = {'qwen_image_edit'}
+CUSTOM_IMAGE_EDIT_METHODS = {'custom-image-edit', 'custom_image_edit'}
 
 
 def norm_img(img: np.ndarray) -> np.ndarray:
@@ -637,7 +632,7 @@ class LocalInpainter:
         'anime': ('Anime/Manga Inpainting', FFCInpaintModel),
         'anime_onnx': ('Anime ONNX (Fast)', FFCInpaintModel),
         'lama_official': ('Official LaMa', FFCInpaintModel),
-        'qwen_image_edit': ('Qwen-Image-Edit 2511', FFCInpaintModel),
+        'custom-image-edit': ('Custom Image Edit Endpoint', FFCInpaintModel),
     }
     
     def __init__(self, config_path="config.json", enable_worker_process=None):
@@ -1035,6 +1030,7 @@ class LocalInpainter:
         
         qwen_unbounded_load_timeout = (
             self._is_qwen_image_edit_method(method)
+            or self._is_custom_image_edit_method(method)
             or 'qwen-image-edit' in str(model_path or '').lower()
             or 'qwen_image_edit' in str(model_path or '').lower()
         )
@@ -1043,7 +1039,7 @@ class LocalInpainter:
         max_retries = 0 if qwen_unbounded_load_timeout else 2
         timeout_values = [None] if qwen_unbounded_load_timeout else [180.0, 180.0, 180.0]
         if qwen_unbounded_load_timeout:
-            logger.info("Qwen-Image-Edit worker load timeout disabled; use Stop to cancel a long load")
+            logger.info("Image edit worker load timeout disabled; use Stop to cancel a long load")
         
         for attempt in range(max_retries + 1):
             # Check stop flag at start of each retry
@@ -1173,6 +1169,8 @@ class LocalInpainter:
         qwen_unbounded_timeout = (
             self._is_qwen_image_edit_method(getattr(self, 'current_method', None))
             or self._is_qwen_image_edit_method(getattr(self, '_last_model_method', None))
+            or self._is_custom_image_edit_method(getattr(self, 'current_method', None))
+            or self._is_custom_image_edit_method(getattr(self, '_last_model_method', None))
             or 'qwen-image-edit' in last_model_path
             or 'qwen_image_edit' in last_model_path
         )
@@ -1180,7 +1178,7 @@ class LocalInpainter:
         # Retry with conservative timeouts: only restart if worker is actually dead
         max_retries = 0 if qwen_unbounded_timeout else 2
         if qwen_unbounded_timeout:
-            logger.info("Qwen-Image-Edit worker inpaint timeout disabled; use Stop to cancel a long run")
+            logger.info("Image edit worker inpaint timeout disabled; use Stop to cancel a long run")
         
         for attempt in range(max_retries + 1):
             # CRITICAL: Check stop flag at start of each retry iteration
@@ -2414,6 +2412,9 @@ class LocalInpainter:
     def _is_qwen_image_edit_method(self, method: str) -> bool:
         return str(method or '').lower() in QWEN_IMAGE_EDIT_METHODS
 
+    def _is_custom_image_edit_method(self, method: str) -> bool:
+        return str(method or '').lower() in CUSTOM_IMAGE_EDIT_METHODS
+
     def _get_qwen_torch_dtype(self):
         dtype_name = os.environ.get('QWEN_IMAGE_EDIT_DTYPE', 'bf16' if self.use_gpu else 'fp32').lower()
         if dtype_name in ('fp16', 'float16', 'half'):
@@ -2422,13 +2423,257 @@ class LocalInpainter:
             return torch.bfloat16
         return torch.float32
 
+    def _normalize_custom_image_edit_endpoint(self, endpoint: str) -> str:
+        endpoint = str(endpoint or '').strip()
+        if endpoint and not endpoint.startswith(('http://', 'https://')):
+            lower = endpoint.lower()
+            prefix = 'http://' if (
+                lower.startswith('localhost')
+                or lower.startswith('127.')
+                or lower.startswith('0.0.0.0')
+                or lower.startswith('[')
+            ) else 'https://'
+            endpoint = prefix + endpoint
+        return endpoint.rstrip('/')
+
+    def _load_custom_image_edit_model(self, model_path: str, force_reload: bool = False) -> bool:
+        """Use an OpenAI-compatible image edit endpoint as the local inpainter."""
+        try:
+            endpoint = self._normalize_custom_image_edit_endpoint(
+                os.environ.get('CUSTOM_IMAGE_EDIT_BASE_URL')
+                or os.environ.get('OPENAI_IMAGE_EDIT_BASE_URL')
+                or self.config.get('custom_image_edit_endpoint', '')
+            )
+            if not endpoint:
+                logger.error(
+                    "Custom Image Edit Endpoint is not configured. "
+                    "Set it in Other Settings before loading custom-image-edit."
+                )
+                self.model_loaded = False
+                return False
+
+            model_ref = (
+                model_path
+                or os.environ.get('CUSTOM_IMAGE_EDIT_MODEL')
+                or self.config.get('manga_custom-image-edit_model_path', '')
+                or self.config.get('manga_custom_image_edit_model_path', '')
+                or 'custom-image-edit'
+            )
+
+            current = getattr(self, '_custom_image_edit_model_ref', None)
+            if (
+                self.model_loaded
+                and self._is_custom_image_edit_method(self.current_method)
+                and not force_reload
+                and current == model_ref
+            ):
+                return True
+
+            self.model = {'endpoint': endpoint, 'model': model_ref}
+            self.model_loaded = True
+            self.current_method = 'custom-image-edit'
+            self.use_onnx = False
+            self.use_onnx_cpp = False
+            self.is_jit_model = False
+            self._custom_image_edit_endpoint = endpoint
+            self._custom_image_edit_model_ref = model_ref
+            self.config['custom_image_edit_endpoint'] = endpoint
+            self.config['manga_custom-image-edit_model_path'] = model_ref
+            self.config['manga_custom_image_edit_model_path'] = model_ref
+            self._save_config()
+            logger.info(f"Custom image edit endpoint configured: {endpoint} | model={model_ref}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to configure custom image edit endpoint: {e}")
+            logger.error(traceback.format_exc())
+            self.model_loaded = False
+            return False
+
+    def _custom_image_edit_inpaint(self, image, mask, iterations=None):
+        """Inpaint through an OpenAI-compatible /images/edits endpoint."""
+        try:
+            import base64
+            import requests
+
+            if len(mask.shape) == 3:
+                mask_gray = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+            else:
+                mask_gray = mask.copy()
+            _, mask_gray = cv2.threshold(mask_gray, 0, 255, cv2.THRESH_BINARY)
+            if np.count_nonzero(mask_gray) == 0:
+                return image.copy()
+
+            endpoint = self._normalize_custom_image_edit_endpoint(
+                getattr(self, '_custom_image_edit_endpoint', '')
+                or os.environ.get('CUSTOM_IMAGE_EDIT_BASE_URL')
+                or os.environ.get('OPENAI_IMAGE_EDIT_BASE_URL')
+                or self.config.get('custom_image_edit_endpoint', '')
+            )
+            if not endpoint:
+                logger.error("Custom Image Edit Endpoint is not configured")
+                return image
+
+            url = endpoint.rstrip('/')
+            if not url.endswith('/images/edits'):
+                url = f"{url}/images/edits"
+
+            model_ref = (
+                os.environ.get('CUSTOM_IMAGE_EDIT_MODEL')
+                or getattr(self, '_custom_image_edit_model_ref', '')
+                or self.config.get('manga_custom-image-edit_model_path', '')
+                or self.config.get('manga_custom_image_edit_model_path', '')
+                or 'custom-image-edit'
+            )
+
+            x, y, w, h = cv2.boundingRect(mask_gray)
+            margin = int(os.environ.get('CUSTOM_IMAGE_EDIT_CROP_MARGIN', os.environ.get('QWEN_IMAGE_EDIT_CROP_MARGIN', '64')))
+            orig_h, orig_w = image.shape[:2]
+            left = max(0, x - margin)
+            top = max(0, y - margin)
+            right = min(orig_w, x + w + margin)
+            bottom = min(orig_h, y + h + margin)
+
+            crop_bgr = image[top:bottom, left:right].copy()
+            crop_mask = mask_gray[top:bottom, left:right].copy()
+            proc_bgr = crop_bgr
+            proc_mask = crop_mask
+            max_side = int(os.environ.get('CUSTOM_IMAGE_EDIT_MAX_SIDE', os.environ.get('QWEN_IMAGE_EDIT_MAX_SIDE', '768')))
+            if max_side > 0 and max(proc_bgr.shape[:2]) > max_side:
+                scale = float(max_side) / float(max(proc_bgr.shape[:2]))
+                new_w = max(1, int(proc_bgr.shape[1] * scale + 0.5))
+                new_h = max(1, int(proc_bgr.shape[0] * scale + 0.5))
+                proc_bgr = cv2.resize(proc_bgr, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+                proc_mask = cv2.resize(proc_mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+
+            prompt = os.environ.get(
+                'CUSTOM_IMAGE_EDIT_INPAINT_PROMPT',
+                os.environ.get(
+                    'QWEN_IMAGE_EDIT_INPAINT_PROMPT',
+                    "Remove all visible manga text, SFX lettering, and OCR artifacts only inside the masked area. "
+                    "Reconstruct the underlying manga line art, screentone, shading, and speech bubble background. "
+                    "Preserve the original style. Do not add any text. Keep everything outside the mask unchanged."
+                )
+            )
+
+            ok_img, img_buf = cv2.imencode('.png', proc_bgr)
+            if not ok_img:
+                raise RuntimeError("Failed to encode image crop for custom image edit endpoint")
+
+            mask_mode = os.environ.get('CUSTOM_IMAGE_EDIT_MASK_MODE', 'alpha').strip().lower()
+            if mask_mode in ('white', 'grayscale', 'gray'):
+                ok_mask, mask_buf = cv2.imencode('.png', proc_mask)
+            else:
+                alpha = np.full(proc_mask.shape, 255, dtype=np.uint8)
+                alpha[proc_mask > 0] = 0
+                mask_rgba = np.dstack([
+                    np.full(proc_mask.shape, 255, dtype=np.uint8),
+                    np.full(proc_mask.shape, 255, dtype=np.uint8),
+                    np.full(proc_mask.shape, 255, dtype=np.uint8),
+                    alpha,
+                ])
+                ok_mask, mask_buf = cv2.imencode('.png', mask_rgba)
+            if not ok_mask:
+                raise RuntimeError("Failed to encode mask for custom image edit endpoint")
+
+            api_key = (
+                os.environ.get('CUSTOM_IMAGE_EDIT_API_KEY')
+                or os.environ.get('OPENAI_API_KEY')
+                or self.config.get('api_key', '')
+                or 'sk-local'
+            )
+            headers = {'Authorization': f'Bearer {api_key}'}
+            form_data = {
+                'model': str(model_ref),
+                'prompt': prompt,
+                'n': '1',
+            }
+            image_size = os.environ.get('CUSTOM_IMAGE_EDIT_SIZE', '').strip()
+            if image_size:
+                form_data['size'] = image_size
+            image_quality = os.environ.get('CUSTOM_IMAGE_EDIT_QUALITY', '').strip()
+            if image_quality:
+                form_data['quality'] = image_quality
+
+            timeout = float(os.environ.get('CUSTOM_IMAGE_EDIT_TIMEOUT', '300'))
+            mask_pct = (float(np.count_nonzero(proc_mask)) / float(proc_mask.size)) * 100.0
+            self._log(
+                f"Custom image edit request starting (crop={crop_bgr.shape[1]}x{crop_bgr.shape[0]}, "
+                f"proc={proc_bgr.shape[1]}x{proc_bgr.shape[0]}, mask={mask_pct:.1f}%)",
+                "info"
+            )
+
+            files = {
+                'image': ('input.png', img_buf.tobytes(), 'image/png'),
+                'mask': ('mask.png', mask_buf.tobytes(), 'image/png'),
+            }
+            resp = requests.post(url, headers=headers, data=form_data, files=files, timeout=timeout)
+            if resp.status_code not in (200, 201):
+                raise RuntimeError(f"Custom image edit endpoint error ({resp.status_code}): {resp.text[:500]}")
+
+            data = resp.json()
+            items = data.get('data') or data.get('images') or []
+            first = items[0] if isinstance(items, list) and items else data
+            if not isinstance(first, dict):
+                raise RuntimeError("Custom image edit endpoint returned an unsupported response")
+
+            image_value = (
+                first.get('b64_json')
+                or first.get('base64')
+                or first.get('data')
+                or first.get('url')
+                or first.get('image_url')
+            )
+            if isinstance(image_value, dict):
+                image_value = image_value.get('url') or image_value.get('data') or image_value.get('base64')
+            if not image_value:
+                raise RuntimeError("Custom image edit endpoint returned no image")
+
+            if isinstance(image_value, str) and image_value.startswith('data:'):
+                _, image_b64 = image_value.split(',', 1)
+                out_bytes = base64.b64decode(image_b64)
+            elif isinstance(image_value, str) and image_value.startswith(('http://', 'https://')):
+                out_resp = requests.get(image_value, timeout=timeout)
+                out_resp.raise_for_status()
+                out_bytes = out_resp.content
+            else:
+                out_bytes = base64.b64decode(str(image_value))
+
+            out_arr = np.frombuffer(out_bytes, dtype=np.uint8)
+            out_bgr = cv2.imdecode(out_arr, cv2.IMREAD_COLOR)
+            if out_bgr is None:
+                raise RuntimeError("Custom image edit endpoint returned unreadable image bytes")
+            if out_bgr.shape[:2] != proc_bgr.shape[:2]:
+                out_bgr = cv2.resize(out_bgr, (proc_bgr.shape[1], proc_bgr.shape[0]), interpolation=cv2.INTER_LANCZOS4)
+            if out_bgr.shape[:2] != crop_bgr.shape[:2]:
+                out_bgr = cv2.resize(out_bgr, (crop_bgr.shape[1], crop_bgr.shape[0]), interpolation=cv2.INTER_LANCZOS4)
+
+            mask_for_blend = crop_mask
+            if mask_for_blend.shape[:2] != crop_bgr.shape[:2]:
+                mask_for_blend = cv2.resize(mask_for_blend, (crop_bgr.shape[1], crop_bgr.shape[0]), interpolation=cv2.INTER_NEAREST)
+            mask_float = mask_for_blend.astype(np.float32) / 255.0
+            mask_float = cv2.GaussianBlur(mask_float, (21, 21), 5)
+            mask_float = np.clip(mask_float, 0.0, 1.0)[:, :, np.newaxis]
+            blended_crop = (out_bgr.astype(np.float32) * mask_float + crop_bgr.astype(np.float32) * (1.0 - mask_float))
+            blended_crop = np.clip(blended_crop, 0, 255).astype(np.uint8)
+
+            result = image.copy()
+            result[top:bottom, left:right] = blended_crop
+            self._log_inpaint_diag('custom-image-edit', result, mask_gray)
+            self._log("Custom image edit inpainting complete", "info")
+            logger.info("Custom image edit inpainting completed")
+            return result
+        except Exception as e:
+            logger.error(f"Custom image edit inpainting failed: {e}")
+            logger.error(traceback.format_exc())
+            return image
+
     def _load_qwen_image_edit_model(self, model_path: str, force_reload: bool = False) -> bool:
         """Load Qwen-Image-Edit as a diffusers pipeline."""
         try:
             model_ref = (
                 model_path
                 or os.environ.get('QWEN_IMAGE_EDIT_MODEL')
-                or LAMA_JIT_MODELS['qwen_image_edit']['repo_id']
+                or 'Qwen/Qwen-Image-Edit-2511'
             )
             current_ref = getattr(self, '_qwen_image_edit_model_ref', None) or self.config.get('qwen_image_edit_model_path')
             if (
@@ -2768,6 +3013,9 @@ class LocalInpainter:
                     logger.info("Inpainting will be unavailable for this session")
                     return False
             
+            if self._is_custom_image_edit_method(method):
+                return self._load_custom_image_edit_model(model_path, force_reload=force_reload)
+
             if self._is_qwen_image_edit_method(method):
                 return self._load_qwen_image_edit_model(model_path, force_reload=force_reload)
 
@@ -3595,6 +3843,9 @@ class LocalInpainter:
             if self.current_method == 'anime':
                 kernel = np.ones((7, 7), np.uint8)
                 mask = cv2.dilate(mask, kernel, iterations=1)
+
+            if self._is_custom_image_edit_method(self.current_method):
+                return self._custom_image_edit_inpaint(image, mask, iterations=iterations)
 
             if self._is_qwen_image_edit_method(self.current_method):
                 return self._qwen_image_edit_inpaint(image, mask, iterations=iterations)
