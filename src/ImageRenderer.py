@@ -3213,6 +3213,39 @@ def _run_inpainting_sync(
                 print(f"[INPAINT_SYNC] Force-cancelled before inpainting")
                 return None
             
+            if is_custom_image_edit and inpainter is not None:
+                try:
+                    cfg = getattr(self.main_gui, 'config', {}) if hasattr(self, 'main_gui') else {}
+                    if isinstance(cfg, dict):
+                        inpainter.config.update(cfg)
+                    override_enabled = bool(
+                        getattr(self.main_gui, 'use_custom_image_edit_endpoint_var', False)
+                        or (cfg.get('use_custom_image_edit_endpoint', False) if isinstance(cfg, dict) else False)
+                    )
+                    endpoint = ''
+                    if override_enabled:
+                        endpoint = str(
+                            getattr(self.main_gui, 'custom_image_edit_endpoint_var', '')
+                            or (cfg.get('custom_image_edit_endpoint', '') if isinstance(cfg, dict) else '')
+                            or ''
+                        ).strip()
+                    inpainter.config['use_custom_image_edit_endpoint'] = bool(override_enabled)
+                    inpainter.config['custom_image_edit_endpoint'] = endpoint
+                    inpainter._custom_image_edit_use_current_provider = not bool(endpoint)
+                    inpainter._custom_image_edit_endpoint = endpoint if endpoint else 'current-provider'
+                    model_name = (
+                        getattr(self.main_gui, 'model_var', '')
+                        or (cfg.get('model', '') if isinstance(cfg, dict) else '')
+                    )
+                    if model_name:
+                        inpainter.config['model'] = model_name
+                        inpainter.config['custom_image_edit_model'] = model_name
+                        inpainter._custom_image_edit_model_ref = model_name
+                    if not endpoint:
+                        print("[INPAINT_SYNC] Custom image edit URL is blank; using current provider/model")
+                except Exception as e:
+                    print(f"[INPAINT_SYNC] Failed to refresh custom image edit endpoint mode: {e}")
+
             old_custom_image_edit_prompts = None
             old_custom_image_edit_request_prompt = None
             had_custom_image_edit_request_prompt = False
@@ -4405,10 +4438,6 @@ def _on_translate_text_clicked(self):
             self._log("⚠️ No image loaded for translation", "warning")
             return
         
-        if _is_custom_image_edit_workflow(self):
-            _run_custom_image_edit_translate_clicked(self)
-            return
-
         # STEP 1: Check if we have rectangles (detection done)
         has_rectangles = (hasattr(self.image_preview_widget, 'viewer') and 
                         self.image_preview_widget.viewer.rectangles and 
@@ -4594,17 +4623,11 @@ def _run_custom_image_edit_translate_background(self, image_path: str):
             self._log("âš ï¸ No regions found for custom image edit", "warning")
             return
 
-        system_prompt = _get_system_prompt_from_gui(self)
-        if not system_prompt:
-            self._log("No system prompt configured in translator GUI profile - custom image edit translation cannot proceed", "warning")
-            return
-
         translated_path = _run_inpainting_sync(
             self,
             image_path,
             regions,
             save_as='translated',
-            custom_image_edit_system_prompt=system_prompt,
         )
         if not translated_path or not os.path.exists(translated_path):
             self._log("âš ï¸ Custom image edit did not produce an edited image", "warning")
@@ -5424,8 +5447,26 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
         } for text_data in recognized_texts]
 
 def _get_system_prompt_from_gui(self) -> str:
-    """Get system prompt from GUI profile (same as regular pipeline) - fails if no prompt found"""
+    """Get the currently visible system prompt from translator_gui.py."""
     try:
+        # First use the live prompt editor. This is the field the user is
+        # actually looking at/editing, and it may differ from the saved profile
+        # dict until autosave runs.
+        try:
+            prompt_widget = getattr(self.main_gui, 'prompt_text', None)
+            if prompt_widget is not None and hasattr(prompt_widget, 'toPlainText'):
+                live_prompt = prompt_widget.toPlainText().strip()
+                if live_prompt:
+                    print("[DEBUG] Using live system prompt from translator GUI")
+                    return live_prompt
+        except Exception:
+            pass
+
+        config_prompt = str(getattr(self.main_gui, 'config', {}).get('system_prompt', '') or '').strip()
+        if config_prompt:
+            print("[DEBUG] Using system prompt from translator GUI config")
+            return config_prompt
+
         # Get profile name from GUI (support both Tkinter and PySide6)
         profile_name = 'Default'
         try:
@@ -5437,10 +5478,14 @@ def _get_system_prompt_from_gui(self) -> str:
         except Exception:
             profile_name = 'Default'
         
-        # Get the prompt from prompt_profiles dictionary - NO FALLBACKS
+        # Last resort: saved active profile content.
         system_prompt = ''
         if hasattr(self.main_gui, 'prompt_profiles') and profile_name in self.main_gui.prompt_profiles:
-            system_prompt = self.main_gui.prompt_profiles[profile_name]
+            profile_data = self.main_gui.prompt_profiles[profile_name]
+            if isinstance(profile_data, dict):
+                system_prompt = profile_data.get('prompt', '')
+            else:
+                system_prompt = profile_data
             if system_prompt.strip():  # Only accept non-empty prompts
                 print(f"[DEBUG] Using system prompt from profile: {profile_name}")
                 return system_prompt.strip()
@@ -11015,10 +11060,6 @@ def _on_translate_all_clicked(self):
         # Disable ALL workflow buttons to prevent concurrent operations
         _disable_workflow_buttons(self, exclude=None)
         
-        if _is_custom_image_edit_workflow(self):
-            _run_custom_image_edit_translate_all_clicked(self, image_paths)
-            return
-
         # Update translate all button text to show progress
         if hasattr(self.image_preview_widget, 'translate_all_btn'):
             self.image_preview_widget.translate_all_btn.setText(f"Translating... (0/{total_images})")
@@ -11100,18 +11141,11 @@ def _run_custom_image_edit_translate_all_background(self, image_paths: list):
                 failed_count += 1
                 continue
 
-            system_prompt = _get_system_prompt_from_gui(self)
-            if not system_prompt:
-                self._log(f"[{idx}/{total}] No system prompt configured in translator GUI profile", "warning")
-                failed_count += 1
-                continue
-
             translated_path = _run_inpainting_sync(
                 self,
                 image_path,
                 regions,
                 save_as='translated',
-                custom_image_edit_system_prompt=system_prompt,
             )
             if not translated_path or not os.path.exists(translated_path):
                 self._log(f"âš ï¸ [{idx}/{total}] Custom image edit failed", "warning")

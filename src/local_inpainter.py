@@ -2630,22 +2630,31 @@ class LocalInpainter:
             if np.count_nonzero(mask_gray) == 0:
                 return image.copy()
 
-            use_current_provider = bool(getattr(self, '_custom_image_edit_use_current_provider', False))
-            if use_current_provider:
-                endpoint = ''
+            use_current_provider_attr = getattr(self, '_custom_image_edit_use_current_provider', None)
+            if use_current_provider_attr is None:
+                resolved_endpoint, has_explicit_endpoint, _ = self._resolve_custom_image_edit_endpoint('')
+                use_current_provider = not has_explicit_endpoint
+                endpoint = '' if use_current_provider else resolved_endpoint
             else:
-                endpoint = self._normalize_custom_image_edit_endpoint(
-                    getattr(self, '_custom_image_edit_endpoint', '')
-                    or os.environ.get('CUSTOM_IMAGE_EDIT_BASE_URL')
-                    or os.environ.get('OPENAI_IMAGE_EDIT_BASE_URL')
-                    or (
-                        self.config.get('custom_image_edit_endpoint', '')
-                        if str(self.config.get('use_custom_image_edit_endpoint', '')).lower() in ('1', 'true', 'yes', 'on')
-                        else ''
+                use_current_provider = bool(use_current_provider_attr)
+                if use_current_provider:
+                    endpoint = ''
+                else:
+                    endpoint = self._normalize_custom_image_edit_endpoint(
+                        getattr(self, '_custom_image_edit_endpoint', '')
+                        or os.environ.get('CUSTOM_IMAGE_EDIT_BASE_URL')
+                        or os.environ.get('OPENAI_IMAGE_EDIT_BASE_URL')
+                        or (
+                            self.config.get('custom_image_edit_endpoint', '')
+                            if str(self.config.get('use_custom_image_edit_endpoint', '')).lower() in ('1', 'true', 'yes', 'on')
+                            else ''
+                        )
                     )
-                )
-            if not endpoint and not use_current_provider:
-                endpoint, _, _ = self._resolve_custom_image_edit_endpoint('')
+                    if not endpoint:
+                        endpoint, has_explicit_endpoint, _ = self._resolve_custom_image_edit_endpoint('')
+                        use_current_provider = not has_explicit_endpoint
+                        if use_current_provider:
+                            endpoint = ''
             if not endpoint and not use_current_provider:
                 logger.error("No default image edit endpoint could be resolved")
                 return image
@@ -2767,7 +2776,10 @@ class LocalInpainter:
 
                 image_b64 = base64.b64encode(img_buf.tobytes()).decode('ascii')
                 output_dir = tempfile.gettempdir()
-                client = UnifiedClient(model=str(model_ref or self.config.get('model') or ''), api_key=api_key, output_dir=output_dir)
+                client_model = str(model_ref or self.config.get('model') or '')
+                if client_model.lower() in ('custom-image-edit', 'gpt-image-1') and self.config.get('model'):
+                    client_model = str(self.config.get('model') or client_model)
+                client = UnifiedClient(model=client_model, api_key=api_key, output_dir=output_dir)
                 user_content = []
                 if user_prompt:
                     user_content.append({'type': 'text', 'text': user_prompt})
