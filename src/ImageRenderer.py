@@ -4847,7 +4847,21 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
         # Even if stop was requested, we wait for inpainting since discarding a
         # completed clean is equally wasteful.
         if inpaint_thread is not None:
-            inpaint_thread.join(timeout=30)  # Wait up to 30 seconds for inpainting
+            inpaint_wait_timeout = 30
+            try:
+                cfg = getattr(getattr(self, 'main_gui', None), 'config', {}) or {}
+                if (
+                    str(cfg.get('manga_inpaint_method', 'local') or '').lower() == 'local'
+                    and str(cfg.get('manga_local_inpaint_model', '') or '').lower() == 'custom-image-edit'
+                ):
+                    inpaint_wait_timeout = None
+            except Exception:
+                pass
+            if inpaint_wait_timeout is None:
+                print("[TRANSLATE_CONCURRENT] Waiting for custom-image-edit inpainting before rendering")
+                inpaint_thread.join()
+            else:
+                inpaint_thread.join(timeout=inpaint_wait_timeout)
 
         with inpaint_lock:
             cleaned_image_path = inpaint_result.get('cleaned_path')
