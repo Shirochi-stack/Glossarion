@@ -2751,6 +2751,49 @@ class LocalInpainter:
             if not ok_mask:
                 raise RuntimeError("Failed to encode mask for custom image edit endpoint")
 
+            def _nanogpt_image_data_url_from_bgr(bgr_img):
+                """Encode NanoGPT edit input small enough for request body limits."""
+                max_chars = int(os.environ.get('NANOGPT_MAX_INPUT_IMAGE_CHARS', '3000000') or '3000000')
+                max_dim = int(os.environ.get('NANOGPT_MAX_INPUT_IMAGE_DIM', '1536') or '1536')
+                qualities = [85, 80, 75, 70, 65, 60, 55, 50]
+                dims = []
+                cur_dim = max(512, max_dim)
+                while cur_dim >= 768:
+                    dims.append(cur_dim)
+                    cur_dim = int(cur_dim * 0.85)
+                if 768 not in dims:
+                    dims.append(768)
+
+                h0, w0 = bgr_img.shape[:2]
+                best_data_url = None
+                for dim in dims:
+                    work = bgr_img
+                    scale = min(1.0, float(dim) / float(max(h0, w0)))
+                    if scale < 1.0:
+                        work = cv2.resize(
+                            bgr_img,
+                            (max(1, int(w0 * scale)), max(1, int(h0 * scale))),
+                            interpolation=cv2.INTER_AREA,
+                        )
+                    for quality in qualities:
+                        ok_jpg, jpg_buf = cv2.imencode('.jpg', work, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
+                        if not ok_jpg:
+                            continue
+                        data_url = 'data:image/jpeg;base64,' + base64.b64encode(jpg_buf.tobytes()).decode('ascii')
+                        best_data_url = data_url
+                        if len(data_url) <= max_chars:
+                            self._log(
+                                f"NanoGPT input image shrunk for payload limit: {w0}x{h0} -> "
+                                f"{work.shape[1]}x{work.shape[0]}, q={quality}, chars={len(data_url)}",
+                                "info",
+                            )
+                            return data_url
+                if best_data_url:
+                    self._log(f"NanoGPT input image still large after shrinking: chars={len(best_data_url)}", "warning")
+                    return best_data_url
+                image_b64_fallback = base64.b64encode(img_buf.tobytes()).decode('ascii')
+                return f"data:image/png;base64,{image_b64_fallback}"
+
             api_key = (
                 os.environ.get('CUSTOM_IMAGE_EDIT_API_KEY')
                 or os.environ.get('OPENAI_API_KEY')
@@ -2898,7 +2941,6 @@ class LocalInpainter:
                     'mask': ('mask.png', mask_buf.tobytes(), 'image/png'),
                 }
                 if is_nanogpt_image:
-                    image_b64 = base64.b64encode(img_buf.tobytes()).decode('ascii')
                     effective_model = str(model_ref or '').split('/', 1)[1] if '/' in str(model_ref or '') else str(model_ref or '')
                     headers = {
                         'Authorization': f"Bearer {os.environ.get('NANOGPT_API_KEY') or api_key}",
@@ -2909,7 +2951,7 @@ class LocalInpainter:
                         'prompt': prompt,
                         'size': os.environ.get('NANOGPT_IMAGE_SIZE', os.environ.get('CUSTOM_IMAGE_EDIT_SIZE', '1024x1024')),
                         'response_format': 'url',
-                        'imageDataUrl': f"data:image/png;base64,{image_b64}",
+                        'imageDataUrl': _nanogpt_image_data_url_from_bgr(proc_bgr),
                     }
                     resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
                 else:

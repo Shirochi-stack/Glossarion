@@ -21531,6 +21531,73 @@ class UnifiedClient:
                 model_override=effective_model,
             )
 
+    def _shrink_nanogpt_image_data_url(self, data_url: str) -> str:
+        """Keep NanoGPT edit payloads below serverless request-size limits."""
+        try:
+            import base64 as _b64
+            import io as _io
+            from PIL import Image as _Image
+
+            if not isinstance(data_url, str) or not data_url.startswith('data:image/') or ',' not in data_url:
+                return data_url
+
+            max_chars = int(os.getenv('NANOGPT_MAX_INPUT_IMAGE_CHARS', '3000000') or '3000000')
+            if max_chars <= 0 or len(data_url) <= max_chars:
+                return data_url
+
+            header, b64_data = data_url.split(',', 1)
+            raw = _b64.b64decode(b64_data)
+            img = _Image.open(_io.BytesIO(raw))
+            if img.mode not in ('RGB', 'L'):
+                bg = _Image.new('RGB', img.size, (255, 255, 255))
+                if 'A' in img.getbands():
+                    bg.paste(img.convert('RGBA'), mask=img.convert('RGBA').split()[-1])
+                    img = bg
+                else:
+                    img = img.convert('RGB')
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+
+            original_size = img.size
+            max_dim = int(os.getenv('NANOGPT_MAX_INPUT_IMAGE_DIM', '1536') or '1536')
+            qualities = [85, 80, 75, 70, 65, 60, 55, 50]
+            dims = []
+            cur_dim = max(512, max_dim)
+            while cur_dim >= 768:
+                dims.append(cur_dim)
+                cur_dim = int(cur_dim * 0.85)
+            if 768 not in dims:
+                dims.append(768)
+
+            best = data_url
+            for dim in dims:
+                work = img.copy()
+                scale = min(1.0, float(dim) / float(max(work.size)))
+                if scale < 1.0:
+                    new_size = (max(1, int(work.size[0] * scale)), max(1, int(work.size[1] * scale)))
+                    work = work.resize(new_size, _Image.Resampling.LANCZOS)
+                for quality in qualities:
+                    buf = _io.BytesIO()
+                    work.save(buf, format='JPEG', quality=quality, optimize=True)
+                    candidate = 'data:image/jpeg;base64,' + _b64.b64encode(buf.getvalue()).decode('ascii')
+                    best = candidate
+                    if len(candidate) <= max_chars:
+                        if not self._is_stop_requested():
+                            print(
+                                f"[NanoGPT] Shrunk input image for payload limit: "
+                                f"{original_size[0]}x{original_size[1]} -> {work.size[0]}x{work.size[1]}, "
+                                f"q={quality}, chars={len(candidate)}"
+                            )
+                        return candidate
+
+            if not self._is_stop_requested():
+                print(f"[NanoGPT] Input image still large after shrinking: chars={len(best)}")
+            return best
+        except Exception as exc:
+            if not self._is_stop_requested():
+                print(f"[NanoGPT] Could not shrink input image: {exc}")
+            return data_url
+
     def _send_nanogpt_image(self, messages, model, base_url, api_key, response_name) -> UnifiedResponse:
         """POST /api/v1/images/generations on nano-gpt.com.
 
@@ -21565,7 +21632,7 @@ class UnifiedClient:
                             else:
                                 img_url = str(url_obj)
                             if img_url:
-                                image_data_urls.append(img_url)
+                                image_data_urls.append(self._shrink_nanogpt_image_data_url(img_url))
                 # Only use the last user message
                 break
 
