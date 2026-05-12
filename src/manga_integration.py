@@ -10732,11 +10732,15 @@ class MangaTranslationTab(QObject):
             import requests
             url = str(getattr(self, 'custom_image_edit_endpoint_value', '') or '').strip()
             enabled = bool(getattr(self, 'use_custom_image_edit_endpoint_value', False))
-            if not enabled:
-                self.local_model_status_label.setText("Testing default image edit endpoint...")
-                self.local_model_status_label.setStyleSheet("color: orange;")
-            if not url:
-                url = self._default_image_edit_endpoint_url()
+            if not enabled or not url:
+                self.local_model_status_label.setText("Using current image provider/model")
+                self.local_model_status_label.setStyleSheet("color: #5dade2;")
+                QMessageBox.information(
+                    self.dialog,
+                    "Custom Image Edit Endpoint",
+                    "Blank URL uses the current main image provider/model. There is no separate custom endpoint URL to test."
+                )
+                return
             if not url.startswith(('http://', 'https://')):
                 lower = url.lower()
                 url = ('http://' if lower.startswith(('localhost', '127.', '0.0.0.0', '[')) else 'https://') + url
