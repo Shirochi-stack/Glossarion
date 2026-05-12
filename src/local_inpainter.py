@@ -2698,24 +2698,16 @@ class LocalInpainter:
                 image_b64 = base64.b64encode(img_buf.tobytes()).decode('ascii')
                 output_dir = tempfile.gettempdir()
                 client = UnifiedClient(model=str(model_ref or self.config.get('model') or ''), api_key=api_key, output_dir=output_dir)
+                user_content = []
+                if user_prompt:
+                    user_content.append({'type': 'text', 'text': user_prompt})
+                user_content.append({
+                    'type': 'image_url',
+                    'image_url': {'url': f"data:image/png;base64,{image_b64}"},
+                })
                 messages = [
                     {'role': 'system', 'content': system_prompt},
-                    {
-                        'role': 'user',
-                        'content': [
-                            {
-                                'type': 'text',
-                                'text': user_prompt or (
-                                    "Edit the attached image according to the system instruction. "
-                                    "Return the generated edited image, not OCR or plain text."
-                                ),
-                            },
-                            {
-                                'type': 'image_url',
-                                'image_url': {'url': f"data:image/png;base64,{image_b64}"},
-                            },
-                        ],
-                    },
+                    {'role': 'user', 'content': user_content},
                 ]
                 old_env = {k: os.environ.get(k) for k in (
                     'ENABLE_IMAGE_OUTPUT_MODE',
@@ -2786,24 +2778,18 @@ class LocalInpainter:
                 image_resolution = os.environ.get('IMAGE_OUTPUT_RESOLUTION', os.environ.get('CUSTOM_IMAGE_EDIT_RESOLUTION', '1K')).upper()
                 if image_resolution not in ('1K', '2K', '4K'):
                     image_resolution = '1K'
-                user_text = user_prompt or (
-                    "Edit the attached image according to the system instruction. "
-                    "Return the generated edited image, not OCR or plain text."
-                )
+                user_content = []
+                if user_prompt:
+                    user_content.append({'type': 'text', 'text': user_prompt})
+                user_content.append({
+                    'type': 'image_url',
+                    'image_url': {'url': f"data:image/png;base64,{image_b64}"},
+                })
                 payload = {
                     'model': str(model_ref),
                     'messages': [
                         {'role': 'system', 'content': system_prompt},
-                        {
-                            'role': 'user',
-                            'content': [
-                                {'type': 'text', 'text': user_text},
-                                {
-                                    'type': 'image_url',
-                                    'image_url': {'url': f"data:image/png;base64,{image_b64}"},
-                                },
-                            ],
-                        },
+                        {'role': 'user', 'content': user_content},
                     ],
                     'response_modalities': ['IMAGE', 'TEXT'],
                     'image_generation_config': {'image_size': image_resolution},

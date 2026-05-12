@@ -1694,6 +1694,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.use_fallback_keys_var = self.config.get('use_fallback_keys', False)
         self.use_glossary_keys_var = self.config.get('use_glossary_keys', False)
         self.use_qa_scan_keys_var = self.config.get('use_qa_scan_keys', False)
+        self.use_inpainter_keys_var = self.config.get('use_inpainter_keys', False)
 
         # Initialize fuzzy threshold variable
         if not hasattr(self, 'fuzzy_threshold_var'):

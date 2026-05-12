@@ -1574,6 +1574,7 @@ class MultiAPIKeyDialog(QDialog):
             # Save Inpainter keys toggle
             use_inpainter = self.use_inpainter_keys_checkbox.isChecked() if hasattr(self, 'use_inpainter_keys_checkbox') else False
             self.translator_gui.config['use_inpainter_keys'] = use_inpainter
+            self.translator_gui.use_inpainter_keys_var = use_inpainter
 
             # Save config
             self.translator_gui.save_config(show_message=False)
@@ -8424,8 +8425,7 @@ class MultiAPIKeyDialog(QDialog):
 
         # Update in-memory config immediately
         self.translator_gui.config['use_inpainter_keys'] = enabled
-        if hasattr(self.translator_gui, 'use_inpainter_keys_var'):
-            self.translator_gui.use_inpainter_keys_var = enabled
+        self.translator_gui.use_inpainter_keys_var = enabled
 
         if not getattr(self, '_initializing', False):
             inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
