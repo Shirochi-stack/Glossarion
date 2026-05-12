@@ -3214,21 +3214,52 @@ def _run_inpainting_sync(
                 return None
             
             old_custom_image_edit_prompts = None
+            old_custom_image_edit_request_prompt = None
+            had_custom_image_edit_request_prompt = False
+            old_mp_enabled = None
             if is_custom_image_edit and custom_image_edit_system_prompt:
                 old_custom_image_edit_prompts = (
                     inpainter.config.get('custom_image_edit_system_prompt'),
                     inpainter.config.get('custom_image_edit_prompt'),
                     inpainter.config.get('custom_image_edit_user_prompt'),
                 )
+                had_custom_image_edit_request_prompt = hasattr(inpainter, '_custom_image_edit_request_system_prompt')
+                old_custom_image_edit_request_prompt = getattr(inpainter, '_custom_image_edit_request_system_prompt', None)
                 inpainter.config['custom_image_edit_system_prompt'] = custom_image_edit_system_prompt
                 inpainter.config['custom_image_edit_prompt'] = custom_image_edit_system_prompt
                 inpainter.config['custom_image_edit_user_prompt'] = ''
+                inpainter._custom_image_edit_request_system_prompt = custom_image_edit_system_prompt
+
+                # The image-edit worker owns its own config snapshot. For per-click
+                # Translate prompts, run endpoint-backed editing in-process so the
+                # prompt from translator_gui.py is the one actually sent.
+                old_mp_enabled = getattr(inpainter, '_mp_enabled', None)
+                if old_mp_enabled is not None:
+                    inpainter._mp_enabled = False
+                try:
+                    prompt_preview = " ".join(str(custom_image_edit_system_prompt).split())[:160]
+                    print(f"[INPAINT_SYNC] Custom image edit translate prompt active ({len(str(custom_image_edit_system_prompt))} chars): {prompt_preview}")
+                except Exception:
+                    pass
 
             # Run inpainting/image editing
             print(f"[INPAINT_SYNC] Running local inpainting...")
             try:
                 cleaned_image = inpainter.inpaint(image, mask)
             finally:
+                if old_mp_enabled is not None:
+                    try:
+                        inpainter._mp_enabled = old_mp_enabled
+                    except Exception:
+                        pass
+                if old_custom_image_edit_prompts is not None:
+                    if had_custom_image_edit_request_prompt:
+                        inpainter._custom_image_edit_request_system_prompt = old_custom_image_edit_request_prompt
+                    else:
+                        try:
+                            delattr(inpainter, '_custom_image_edit_request_system_prompt')
+                        except Exception:
+                            pass
                 if old_custom_image_edit_prompts is not None:
                     old_system, old_prompt, old_user = old_custom_image_edit_prompts
                     if old_system is None:

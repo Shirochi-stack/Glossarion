@@ -2680,7 +2680,8 @@ class LocalInpainter:
             proc_mask = crop_mask
 
             system_prompt_template = (
-                self.config.get('custom_image_edit_system_prompt')
+                getattr(self, '_custom_image_edit_request_system_prompt', None)
+                or self.config.get('custom_image_edit_system_prompt')
                 or self.config.get('custom_image_edit_prompt')
                 or os.environ.get('QWEN_IMAGE_EDIT_INPAINT_PROMPT')
                 or (
