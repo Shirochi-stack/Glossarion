@@ -3630,6 +3630,38 @@ class MangaTranslationTab(QObject):
         self.manga_loaded_directory_label.setWordWrap(True)
         file_frame_layout.addWidget(self.manga_loaded_directory_label)
 
+        grouping_frame = QWidget()
+        grouping_layout = QHBoxLayout(grouping_frame)
+        grouping_layout.setContentsMargins(0, 0, 0, 0)
+        grouping_layout.setSpacing(8)
+        grouping_label = QLabel("Process Grouping:")
+        grouping_label.setStyleSheet("color: #e0e0e0; font-weight: bold;")
+        grouping_layout.addWidget(grouping_label)
+
+        self.manga_split_first_level_subfolders_checkbox = self._create_styled_checkbox(
+            "Generate one glossary per volume folder"
+        )
+        self.manga_split_first_level_subfolders_checkbox.setChecked(
+            bool(getattr(
+                self,
+                'manga_split_first_level_subfolders_value',
+                self.main_gui.config.get('manga_split_first_level_subfolders', False)
+            ))
+        )
+        self.manga_split_first_level_subfolders_checkbox.setToolTip(
+            "OFF: Folders under the same manga directory are treated as one manga. "
+            "One glossary is generated from OCR across all of those subfolders.\n\n"
+            "ON: Each immediate volume/subfolder under a selected manga directory is treated separately. "
+            "Each gets its own OCR pass and its own glossary.\n\n"
+            "Nested folders inside a volume/subfolder still stay together with that volume."
+        )
+        self.manga_split_first_level_subfolders_checkbox.stateChanged.connect(
+            self._on_manga_split_first_level_subfolders_toggle
+        )
+        grouping_layout.addWidget(self.manga_split_first_level_subfolders_checkbox)
+        grouping_layout.addStretch()
+        file_frame_layout.addWidget(grouping_frame)
+
         # File listbox (QListWidget handles scrolling automatically)
         self.file_listbox = QListWidget()
         self.file_listbox.setSelectionMode(QListWidget.ExtendedSelection)
@@ -6598,6 +6630,7 @@ class MangaTranslationTab(QObject):
         self.manga_generated_glossary_path = config.get('manga_generated_glossary_path', '')
         self.manga_glossary_auto_load_suppressed = config.get('manga_glossary_auto_load_suppressed', False)
         self.manga_glossary_auto_load_suppressed_root = config.get('manga_glossary_auto_load_suppressed_root', '')
+        self.manga_split_first_level_subfolders_value = config.get('manga_split_first_level_subfolders', False)
         self.compress_glossary_prompt_value = self._get_compress_glossary_prompt_value()
         self.manga_loaded_glossary_text = ''
         self.manga_generated_glossary_text = ''
@@ -6854,6 +6887,8 @@ class MangaTranslationTab(QObject):
                 self.main_gui.config['manga_glossary_auto_load_suppressed_root'] = self.manga_glossary_auto_load_suppressed_root
             if hasattr(self, 'compress_glossary_prompt_value'):
                 self._sync_compress_glossary_prompt_setting(self.compress_glossary_prompt_value)
+            if hasattr(self, 'manga_split_first_level_subfolders_value'):
+                self.main_gui.config['manga_split_first_level_subfolders'] = bool(self.manga_split_first_level_subfolders_value)
             
             # Persist visual context setting alongside other toggles
             if hasattr(self, 'visual_context_enabled_value'):
@@ -7478,6 +7513,30 @@ class MangaTranslationTab(QObject):
                 roots.append(root)
         return roots
 
+    def _manga_split_first_level_subfolders_enabled(self) -> bool:
+        try:
+            if hasattr(self, 'manga_split_first_level_subfolders_checkbox'):
+                return bool(self.manga_split_first_level_subfolders_checkbox.isChecked())
+        except Exception:
+            pass
+        return bool(getattr(
+            self,
+            'manga_split_first_level_subfolders_value',
+            self.main_gui.config.get('manga_split_first_level_subfolders', False)
+        ))
+
+    def _on_manga_split_first_level_subfolders_toggle(self, state=None) -> None:
+        try:
+            enabled = bool(self.manga_split_first_level_subfolders_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        self.manga_split_first_level_subfolders_value = enabled
+        self.main_gui.config['manga_split_first_level_subfolders'] = enabled
+        self.manga_process_group_index = 0
+        self._refresh_manga_selection_status(allow_autoload=True)
+        self._update_manga_preview_image_list_for_range()
+        self._save_rendering_settings()
+
     def _same_manga_source_root(self, left: str, right: str) -> bool:
         try:
             return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
@@ -7487,6 +7546,135 @@ class MangaTranslationTab(QObject):
     def _manga_process_groups_for_paths(self, paths: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """Group selected images into manga runs."""
         paths = list(paths if paths is not None else (getattr(self, 'selected_files', []) or []))
+        folder_hints = [
+            os.path.abspath(folder)
+            for folder in getattr(self, 'manga_selected_folder_roots', []) or []
+            if folder and os.path.isdir(folder)
+        ]
+        if folder_hints:
+            folder_hints.sort(key=lambda value: len(os.path.abspath(value)), reverse=True)
+            hint_order: List[str] = []
+            hint_lookup: Dict[str, str] = {}
+            hint_to_files: Dict[str, List[str]] = {}
+            leftovers: List[str] = []
+
+            for path in paths:
+                abs_path = os.path.abspath(path)
+                matched_hint = ""
+                for hint in folder_hints:
+                    try:
+                        if os.path.commonpath([hint, abs_path]) == hint:
+                            matched_hint = hint
+                            break
+                    except Exception:
+                        continue
+                if not matched_hint:
+                    leftovers.append(path)
+                    continue
+                hint_key = os.path.normcase(matched_hint)
+                if hint_key not in hint_to_files:
+                    hint_to_files[hint_key] = []
+                    hint_lookup[hint_key] = matched_hint
+                    hint_order.append(hint_key)
+                hint_to_files[hint_key].append(path)
+
+            groups: List[Dict[str, Any]] = []
+            split_first_level = self._manga_split_first_level_subfolders_enabled()
+            if split_first_level:
+                for hint_key in hint_order:
+                    hint_root = hint_lookup[hint_key]
+                    child_order: List[str] = []
+                    child_to_files: Dict[str, List[str]] = {}
+                    child_lookup: Dict[str, str] = {}
+                    for path in hint_to_files[hint_key]:
+                        abs_path = os.path.abspath(path)
+                        try:
+                            rel = os.path.relpath(abs_path, hint_root)
+                            parts = [part for part in rel.split(os.sep) if part and part != '.']
+                        except Exception:
+                            parts = []
+                        child_root = hint_root
+                        if len(parts) > 1:
+                            child_root = os.path.join(hint_root, parts[0])
+                        child_key = os.path.normcase(os.path.abspath(child_root))
+                        if child_key not in child_to_files:
+                            child_to_files[child_key] = []
+                            child_lookup[child_key] = os.path.abspath(child_root)
+                            child_order.append(child_key)
+                        child_to_files[child_key].append(path)
+
+                    for child_key in child_order:
+                        root = child_lookup[child_key]
+                        groups.append({
+                            'root': root,
+                            'name': os.path.basename(os.path.normpath(root)) or root,
+                            'files': child_to_files[child_key],
+                            'source_roots': [root],
+                        })
+            else:
+                same_parent = False
+                if len(hint_order) > 1:
+                    try:
+                        parents = {
+                            os.path.normcase(os.path.abspath(os.path.dirname(os.path.normpath(hint_lookup[key]))))
+                            for key in hint_order
+                        }
+                        same_parent = len(parents) == 1
+                    except Exception:
+                        same_parent = False
+
+                all_hints_are_leaf_page_folders = bool(hint_order)
+                for hint_key in hint_order:
+                    hint_root = hint_lookup[hint_key]
+                    for path in hint_to_files[hint_key]:
+                        try:
+                            rel = os.path.relpath(os.path.abspath(path), hint_root)
+                            parts = [part for part in rel.split(os.sep) if part and part != '.']
+                        except Exception:
+                            parts = []
+                        if len(parts) > 1:
+                            all_hints_are_leaf_page_folders = False
+                            break
+                    if not all_hints_are_leaf_page_folders:
+                        break
+
+                if len(hint_order) > 1 and same_parent and all_hints_are_leaf_page_folders:
+                    parent_root = os.path.abspath(os.path.dirname(os.path.normpath(hint_lookup[hint_order[0]])))
+                    files = []
+                    for hint_key in hint_order:
+                        files.extend(hint_to_files[hint_key])
+                    groups.append({
+                        'root': parent_root,
+                        'name': os.path.basename(os.path.normpath(parent_root)) or parent_root,
+                        'files': files,
+                        'source_roots': [hint_lookup[key] for key in hint_order],
+                    })
+                else:
+                    for hint_key in hint_order:
+                        root = hint_lookup[hint_key]
+                        groups.append({
+                            'root': root,
+                            'name': os.path.basename(os.path.normpath(root)) or root,
+                            'files': hint_to_files[hint_key],
+                            'source_roots': [root],
+                        })
+
+            if leftovers:
+                leftover_groups: Dict[str, Dict[str, Any]] = {}
+                for path in leftovers:
+                    root = os.path.dirname(os.path.abspath(path))
+                    key = os.path.normcase(root)
+                    if key not in leftover_groups:
+                        leftover_groups[key] = {
+                            'root': root,
+                            'name': os.path.basename(os.path.normpath(root)) or root,
+                            'files': [],
+                            'source_roots': [root],
+                        }
+                    leftover_groups[key]['files'].append(path)
+                groups.extend(leftover_groups.values())
+            return groups
+
         root_order: List[str] = []
         root_to_files: Dict[str, List[str]] = {}
         root_lookup: Dict[str, str] = {}
