@@ -4641,10 +4641,9 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
     log(f"🔧 Updated {updated_count} chapters in new format")
 
     # --- RESOLVED CHAPTERS: clear qa_failed back to completed ---
-    # Note: We do NOT clear qa_failed for chapters with SPLIT_FAILED issues
-    # because SPLIT_FAILED indicates the chapter merge markers were lost and
-    # the chapter needs retranslation, not just QA re-scanning
-    PROTECTED_ISSUES = {"SPLIT_FAILED"}  # Issues that should not be auto-cleared
+    # Note: We do NOT clear qa_failed for protected issues because they
+    # require retranslation, not just QA re-scanning
+    PROTECTED_ISSUES = {"SPLIT_FAILED", "TRUNCATED", "PROHIBITED CONTENT", "EMPTY_OUTPUT"}
     
     resolved_count = 0
     skipped_count = 0
@@ -4725,7 +4724,7 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
     if resolved_count:
         log(f"🔧 Cleared qa_failed status for {resolved_count} chapter(s)")
     if skipped_count:
-        log(f"⚠️ Kept qa_failed status for {skipped_count} chapter(s) with protected issues (SPLIT_FAILED)")
+        log(f"⚠️ Kept qa_failed status for {skipped_count} chapter(s) with protected issues")
 
     return updated_nums_for_log, resolved_nums_for_log
 
