@@ -3572,6 +3572,56 @@ class MangaTranslationTab(QObject):
         self.manga_image_range_status_label = QLabel("All images")
         self.manga_image_range_status_label.setStyleSheet("color: #9fb7d5; font-size: 8pt;")
         range_layout.addWidget(self.manga_image_range_status_label)
+
+        self.manga_process_nav_widget = QWidget()
+        process_nav_layout = QHBoxLayout(self.manga_process_nav_widget)
+        process_nav_layout.setContentsMargins(8, 0, 0, 0)
+        process_nav_layout.setSpacing(6)
+
+        self.manga_process_prev_btn = QPushButton("◀")
+        self.manga_process_prev_btn.setFixedWidth(36)
+        self.manga_process_prev_btn.setToolTip("Previous manga process group")
+        self.manga_process_prev_btn.setStyleSheet(
+            "QPushButton { background-color:#3a3a3a; color:white; font-weight:bold; "
+            "font-size:13pt; border:1px solid #5a9fd4; border-radius:4px; padding:4px; }"
+            "QPushButton:hover { background-color:#4a8fc4; }"
+            "QPushButton:disabled { color:#666; background-color:#2a2a2a; }"
+        )
+        process_nav_layout.addWidget(self.manga_process_prev_btn)
+
+        self.manga_process_combo = QComboBox()
+        self.manga_process_combo.setMinimumWidth(240)
+        self.manga_process_combo.setToolTip("Separate manga process groups")
+        self.manga_process_combo.setStyleSheet(
+            "QComboBox { background-color:#3a3a3a; color:white; font-weight:bold; "
+            "font-size:10pt; padding:4px 8px; border:1px solid #5a9fd4; border-radius:4px; }"
+            "QComboBox::drop-down { border:none; }"
+            "QComboBox QAbstractItemView { background-color:#2d2d2d; color:white; "
+            "selection-background-color:#5a9fd4; }"
+        )
+        self.manga_process_combo.currentIndexChanged.connect(self._on_manga_process_group_changed)
+        process_nav_layout.addWidget(self.manga_process_combo, stretch=1)
+
+        self.manga_process_counter_label = QLabel("1 / 1")
+        self.manga_process_counter_label.setStyleSheet("color:#94a3b8; font-size:9pt; font-weight:bold;")
+        self.manga_process_counter_label.setFixedWidth(52)
+        self.manga_process_counter_label.setAlignment(Qt.AlignCenter)
+        process_nav_layout.addWidget(self.manga_process_counter_label)
+
+        self.manga_process_next_btn = QPushButton("▶")
+        self.manga_process_next_btn.setFixedWidth(36)
+        self.manga_process_next_btn.setToolTip("Next manga process group")
+        self.manga_process_next_btn.setStyleSheet(self.manga_process_prev_btn.styleSheet())
+        process_nav_layout.addWidget(self.manga_process_next_btn)
+
+        self.manga_process_prev_btn.clicked.connect(
+            lambda: self.manga_process_combo.setCurrentIndex(self.manga_process_combo.currentIndex() - 1)
+        )
+        self.manga_process_next_btn.clicked.connect(
+            lambda: self.manga_process_combo.setCurrentIndex(self.manga_process_combo.currentIndex() + 1)
+        )
+        self.manga_process_nav_widget.setVisible(False)
+        range_layout.addWidget(self.manga_process_nav_widget, stretch=1)
         range_layout.addStretch()
         file_frame_layout.addWidget(range_frame)
 
@@ -7385,6 +7435,15 @@ class MangaTranslationTab(QObject):
             abs_path = os.path.abspath(path)
             if os.path.isdir(abs_path):
                 return abs_path
+            folder_hints = list(getattr(self, 'manga_selected_folder_roots', []) or [])
+            folder_hints.sort(key=lambda value: len(os.path.abspath(value)), reverse=True)
+            for folder in folder_hints:
+                try:
+                    folder_abs = os.path.abspath(folder)
+                    if os.path.commonpath([folder_abs, abs_path]) == folder_abs:
+                        return folder_abs
+                except Exception:
+                    continue
             return os.path.dirname(abs_path)
         except Exception:
             return ""
@@ -7425,6 +7484,157 @@ class MangaTranslationTab(QObject):
         except Exception:
             return False
 
+    def _manga_process_groups_for_paths(self, paths: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Group selected images into manga runs."""
+        paths = list(paths if paths is not None else (getattr(self, 'selected_files', []) or []))
+        root_order: List[str] = []
+        root_to_files: Dict[str, List[str]] = {}
+        root_lookup: Dict[str, str] = {}
+
+        for path in paths:
+            if not path:
+                continue
+            root = self._manga_source_root_for_path(path)
+            if not root:
+                continue
+            try:
+                root = os.path.abspath(root)
+                root_key = os.path.normcase(root)
+            except Exception:
+                continue
+            if root_key not in root_to_files:
+                root_to_files[root_key] = []
+                root_lookup[root_key] = root
+                root_order.append(root_key)
+            root_to_files[root_key].append(path)
+
+        if not root_order:
+            return []
+        if len(root_order) == 1:
+            root = root_lookup[root_order[0]]
+            return [{
+                'root': root,
+                'name': os.path.basename(os.path.normpath(root)) or root,
+                'files': root_to_files[root_order[0]],
+                'source_roots': [root],
+            }]
+
+        ancestor_key = None
+        for candidate_key in root_order:
+            candidate = root_lookup[candidate_key]
+            try:
+                candidate_abs = os.path.abspath(candidate)
+                if all(os.path.commonpath([candidate_abs, root_lookup[key]]) == candidate_abs for key in root_order):
+                    ancestor_key = candidate_key
+                    break
+            except Exception:
+                ancestor_key = None
+        if ancestor_key:
+            root = root_lookup[ancestor_key]
+            files = []
+            for key in root_order:
+                files.extend(root_to_files[key])
+            return [{
+                'root': root,
+                'name': os.path.basename(os.path.normpath(root)) or root,
+                'files': files,
+                'source_roots': [root_lookup[key] for key in root_order],
+            }]
+
+        parent_order: List[str] = []
+        parent_to_roots: Dict[str, List[str]] = {}
+        parent_lookup: Dict[str, str] = {}
+        for root_key in root_order:
+            root = root_lookup[root_key]
+            parent = os.path.dirname(os.path.normpath(root)) or root
+            parent_key = os.path.normcase(os.path.abspath(parent))
+            if parent_key not in parent_to_roots:
+                parent_to_roots[parent_key] = []
+                parent_lookup[parent_key] = os.path.abspath(parent)
+                parent_order.append(parent_key)
+            parent_to_roots[parent_key].append(root_key)
+
+        groups: List[Dict[str, Any]] = []
+        for parent_key in parent_order:
+            child_root_keys = parent_to_roots[parent_key]
+            if len(child_root_keys) > 1:
+                group_root = parent_lookup[parent_key]
+            else:
+                group_root = root_lookup[child_root_keys[0]]
+            group_files: List[str] = []
+            for root_key in child_root_keys:
+                group_files.extend(root_to_files[root_key])
+            groups.append({
+                'root': group_root,
+                'name': os.path.basename(os.path.normpath(group_root)) or group_root,
+                'files': group_files,
+                'source_roots': [root_lookup[key] for key in child_root_keys],
+            })
+        return groups
+
+    def _manga_current_process_groups(self) -> List[Dict[str, Any]]:
+        return self._manga_process_groups_for_paths(getattr(self, 'selected_files', []) or [])
+
+    def _manga_selected_process_group_index(self) -> int:
+        groups = self._manga_current_process_groups()
+        if not groups:
+            return 0
+        index = int(getattr(self, 'manga_process_group_index', 0) or 0)
+        return max(0, min(index, len(groups) - 1))
+
+    def _update_manga_process_group_nav(self) -> None:
+        widget = getattr(self, 'manga_process_nav_widget', None)
+        combo = getattr(self, 'manga_process_combo', None)
+        if not widget or not combo:
+            return
+        groups = self._manga_current_process_groups()
+        show_nav = len(groups) > 1
+        widget.setVisible(show_nav)
+        index = self._manga_selected_process_group_index()
+
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            for group in groups:
+                count = len(group.get('files', []) or [])
+                combo.addItem(f"{group.get('name') or 'Manga'} ({count})", group.get('root', ''))
+            if groups:
+                combo.setCurrentIndex(index)
+        finally:
+            combo.blockSignals(False)
+
+        counter = getattr(self, 'manga_process_counter_label', None)
+        if counter:
+            counter.setText(f"{index + 1} / {len(groups)}" if groups else "0 / 0")
+        if hasattr(self, 'manga_process_prev_btn'):
+            self.manga_process_prev_btn.setEnabled(show_nav and index > 0)
+        if hasattr(self, 'manga_process_next_btn'):
+            self.manga_process_next_btn.setEnabled(show_nav and index < len(groups) - 1)
+        combo.setToolTip("\n".join(group.get('root', '') for group in groups[:25]))
+
+    def _on_manga_process_group_changed(self, index: int) -> None:
+        groups = self._manga_current_process_groups()
+        if not groups:
+            self.manga_process_group_index = 0
+            return
+        index = max(0, min(int(index), len(groups) - 1))
+        self.manga_process_group_index = index
+        group = groups[index]
+        if hasattr(self, 'manga_process_counter_label'):
+            self.manga_process_counter_label.setText(f"{index + 1} / {len(groups)}")
+        if hasattr(self, 'manga_process_prev_btn'):
+            self.manga_process_prev_btn.setEnabled(index > 0)
+        if hasattr(self, 'manga_process_next_btn'):
+            self.manga_process_next_btn.setEnabled(index < len(groups) - 1)
+
+        first_path = next((path for path in group.get('files', []) if path in self.selected_files), None)
+        if first_path and hasattr(self, 'file_listbox') and self.file_listbox:
+            try:
+                self.file_listbox.setCurrentRow(self.selected_files.index(first_path))
+            except Exception:
+                pass
+        self._update_manga_loaded_directory_label()
+
     def _warn_manga_source_mismatch(self, message: str) -> None:
         self._log(f"⚠️ {message}", "warning")
         try:
@@ -7433,23 +7643,7 @@ class MangaTranslationTab(QObject):
             pass
 
     def _can_add_manga_paths_from_single_source(self, paths: List[str]) -> bool:
-        """Block adding images from more than one manga folder."""
-        new_roots = self._manga_source_roots_for_paths(paths)
-        if not new_roots:
-            return True
-        if len(new_roots) > 1:
-            self._warn_manga_source_mismatch(
-                "Please load manga images from one folder at a time. The selected files span multiple directories."
-            )
-            return False
-
-        current_roots = self._manga_selected_source_roots()
-        if len(current_roots) > 1:
-            self._clear_manga_selection_for_source_switch()
-            return True
-        if current_roots and not self._same_manga_source_root(current_roots[0], new_roots[0]):
-            self._clear_manga_selection_for_source_switch()
-            return True
+        """Compatibility shim: multi-folder manga selections are supported."""
         return True
 
     def _clear_manga_selection_for_source_switch(self) -> None:
@@ -7470,31 +7664,18 @@ class MangaTranslationTab(QObject):
         self._log("📂 Cleared previous manga folder; loading new selection", "info")
 
     def _filter_manga_paths_to_single_source(self, paths: List[str]) -> List[str]:
-        """Keep only the first source folder from a restored mixed file list."""
-        kept = []
-        root = ""
-        skipped = 0
-        for path in paths or []:
-            path_root = self._manga_source_root_for_path(path)
-            if not path_root:
-                continue
-            if not root:
-                root = path_root
-            elif not self._same_manga_source_root(root, path_root):
-                skipped += 1
-                continue
-            kept.append(path)
-        if skipped:
-            self._log(f"⚠️ Skipped {skipped} restored manga file(s) from other folders", "warning")
-        return kept
+        """Return restored paths unchanged; mixed manga roots are valid now."""
+        return list(paths or [])
 
     def _current_manga_source_dir(self) -> str:
-        """Return the single source directory represented by the file list."""
-        roots = self._manga_selected_source_roots()
-        if len(roots) == 1:
-            return roots[0]
-        if roots:
-            return roots[0]
+        """Return the active manga process root."""
+        active_group = getattr(self, '_manga_active_process_group', None)
+        if isinstance(active_group, dict) and active_group.get('root'):
+            return active_group.get('root', '')
+        groups = self._manga_current_process_groups()
+        if groups:
+            index = self._manga_selected_process_group_index()
+            return groups[index].get('root', '')
         return ""
 
     def _update_manga_loaded_directory_label(self) -> None:
@@ -7502,22 +7683,23 @@ class MangaTranslationTab(QObject):
         label = getattr(self, 'manga_loaded_directory_label', None)
         if not label:
             return
-        roots = self._manga_selected_source_roots()
-        if not roots:
+        groups = self._manga_current_process_groups()
+        if not groups:
             label.setText("Loaded directory: none")
             label.setToolTip("")
             return
 
-        if len(roots) > 1:
-            label.setText(f"Loaded directories: {len(roots)} folders (unsupported)")
-            label.setToolTip("\n".join(roots[:25]))
-        else:
-            source_dir = roots[0]
-            label.setText(f"Loaded directory: {source_dir}")
-            label.setToolTip(source_dir)
+        index = self._manga_selected_process_group_index()
+        source_dir = groups[index].get('root', '')
+        prefix = "Loaded directory"
+        if len(groups) > 1:
+            prefix = f"Loaded directory ({index + 1}/{len(groups)})"
+        label.setText(f"{prefix}: {source_dir}")
+        label.setToolTip("\n".join(group.get('root', '') for group in groups[:25]))
 
     def _refresh_manga_selection_status(self, *, allow_autoload: bool = True) -> None:
         """Refresh folder and glossary labels after the selected manga files change."""
+        self._update_manga_process_group_nav()
         self._update_manga_loaded_directory_label()
         self._update_manga_image_range_display()
         if allow_autoload:
@@ -7722,7 +7904,7 @@ class MangaTranslationTab(QObject):
         if not getattr(self, 'selected_files', None):
             self._clear_auto_loaded_manga_glossary_cache()
             return
-        if len(self._manga_selected_source_roots()) != 1:
+        if len(self._manga_current_process_groups()) != 1:
             self._clear_auto_loaded_manga_glossary_cache()
             return
         previous_path = getattr(self, 'manga_generated_glossary_path', '')
@@ -10468,6 +10650,81 @@ class MangaTranslationTab(QObject):
         # Note: Clear button management would need to be handled differently in PySide6
         # For now, we'll skip automatic button removal
             
+    def _select_manga_folders(self) -> List[str]:
+        """Open a folder picker that supports multi-select when Qt allows it."""
+        folders: List[str] = []
+        try:
+            from PySide6.QtWidgets import QFileDialog, QAbstractItemView, QListView, QTreeView
+            dialog = QFileDialog(self.dialog, "Select Manga Folder(s)")
+            dialog.setFileMode(QFileDialog.FileMode.Directory)
+            dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+            dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+            for view in dialog.findChildren((QListView, QTreeView)):
+                view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+            if dialog.exec():
+                folders = [path for path in dialog.selectedFiles() if os.path.isdir(path)]
+        except Exception:
+            folders = []
+
+        if not folders:
+            try:
+                from PySide6.QtWidgets import QFileDialog
+                folder = QFileDialog.getExistingDirectory(
+                    self.dialog,
+                    "Select Folder with Manga Images or CBZ"
+                )
+                if folder:
+                    folders = [folder]
+            except Exception:
+                folders = []
+        return folders
+
+    def _ensure_cbz_temp_root(self) -> Optional[str]:
+        cbz_temp_root = getattr(self, 'cbz_temp_root', None)
+        if cbz_temp_root is None:
+            try:
+                import tempfile
+                cbz_temp_root = tempfile.mkdtemp(prefix='glossarion_cbz_')
+                self.cbz_temp_root = cbz_temp_root
+            except Exception:
+                cbz_temp_root = None
+        return cbz_temp_root
+
+    def _add_cbz_archive_images(self, path: str, image_extensions: set) -> int:
+        """Extract a CBZ and append its images to the current selection."""
+        try:
+            import zipfile
+            cbz_temp_root = self._ensure_cbz_temp_root()
+            base = os.path.splitext(os.path.basename(path))[0]
+            extract_dir = os.path.join(cbz_temp_root or os.path.dirname(path), base)
+            os.makedirs(extract_dir, exist_ok=True)
+            with zipfile.ZipFile(path, 'r') as zf:
+                zf.extractall(extract_dir)
+            if not hasattr(self, 'cbz_jobs'):
+                self.cbz_jobs = {}
+            if not hasattr(self, 'cbz_image_to_job'):
+                self.cbz_image_to_job = {}
+            out_dir = os.path.join(os.path.dirname(path), f"{base}_translated")
+            self.cbz_jobs[path] = {
+                'extract_dir': extract_dir,
+                'out_dir': out_dir,
+            }
+            added = 0
+            for root, _, files_in_dir in os.walk(extract_dir):
+                for fn in sorted(files_in_dir, key=_natural_sort_key):
+                    if os.path.splitext(fn)[1].lower() in image_extensions:
+                        target_path = os.path.join(root, fn)
+                        if target_path not in self.selected_files:
+                            self.selected_files.append(target_path)
+                            self._add_manga_file_item(target_path)
+                            added += 1
+                        self.cbz_image_to_job[target_path] = path
+            self._log(f"📦 Added {added} images from CBZ: {os.path.basename(path)}", "info")
+            return added
+        except Exception as e:
+            self._log(f"❌ Failed to read CBZ {os.path.basename(path)}: {e}", "error")
+            return 0
+
     def _add_files(self):
         """Add image files (and CBZ archives) to the list"""
         from PySide6.QtWidgets import QFileDialog
@@ -10551,80 +10808,52 @@ class MangaTranslationTab(QObject):
         self._persist_selected_files()
     
     def _add_folder(self):
-        """Add all images (and CBZ archives) from a folder"""
-        from PySide6.QtWidgets import QFileDialog
-        
-        folder = QFileDialog.getExistingDirectory(
-            self.dialog,
-            "Select Folder with Manga Images or CBZ"
-        )
-        if not folder:
+        """Add all images (and CBZ archives) from one or more folders."""
+        folders = self._select_manga_folders()
+        if not folders:
             return
 
-        if not self._can_add_manga_paths_from_single_source([folder]):
+        if not self._can_add_manga_paths_from_single_source(folders):
             return
-        
-        # Extensions
+
         image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
         cbz_ext = '.cbz'
-        
-        # Ensure temp root for CBZ extraction lives for the session
-        cbz_temp_root = getattr(self, 'cbz_temp_root', None)
-        if cbz_temp_root is None:
-            try:
-                import tempfile
-                cbz_temp_root = tempfile.mkdtemp(prefix='glossarion_cbz_')
-                self.cbz_temp_root = cbz_temp_root
-            except Exception:
-                cbz_temp_root = None
-        
-        for filename in sorted(os.listdir(folder), key=_natural_sort_key):
-            filepath = os.path.join(folder, filename)
-            if not os.path.isfile(filepath):
-                continue
-            lower = filename.lower()
-            if any(lower.endswith(ext) for ext in image_extensions):
-                if filepath not in self.selected_files:
-                    self.selected_files.append(filepath)
-                    self._add_manga_file_item(filepath)
-                    # Auto-select first image to trigger preview
-                    if len(self.selected_files) == 1:
-                        self.file_listbox.setCurrentRow(0)
-            elif lower.endswith(cbz_ext):
-                # Extract images from CBZ archive
-                try:
-                    import zipfile, shutil
-                    base = os.path.splitext(os.path.basename(filepath))[0]
-                    extract_dir = os.path.join(self.cbz_temp_root or folder, base)
-                    os.makedirs(extract_dir, exist_ok=True)
-                    with zipfile.ZipFile(filepath, 'r') as zf:
-                        zf.extractall(extract_dir)
-                    # Initialize CBZ job tracking
-                    if not hasattr(self, 'cbz_jobs'):
-                        self.cbz_jobs = {}
-                    if not hasattr(self, 'cbz_image_to_job'):
-                        self.cbz_image_to_job = {}
-                    # Prepare output dir next to source CBZ
-                    out_dir = os.path.join(os.path.dirname(filepath), f"{base}_translated")
-                    self.cbz_jobs[filepath] = {
-                        'extract_dir': extract_dir,
-                        'out_dir': out_dir,
-                    }
-                    # Collect all images recursively
-                    added = 0
-                    for root, _, files_in_dir in os.walk(extract_dir):
-                        for fn in sorted(files_in_dir, key=_natural_sort_key):
-                            if fn.lower().endswith(tuple(image_extensions)):
-                                target_path = os.path.join(root, fn)
-                                if target_path not in self.selected_files:
-                                    self.selected_files.append(target_path)
-                                    self._add_manga_file_item(target_path)
-                                    added += 1
-                                # Map extracted image to its CBZ job
-                                self.cbz_image_to_job[target_path] = filepath
-                    self._log(f"📦 Added {added} images from CBZ: {filename}", "info")
-                except Exception as e:
-                    self._log(f"❌ Failed to read CBZ {filename}: {e}", "error")
+        added_images = 0
+        if not hasattr(self, 'manga_selected_folder_roots'):
+            self.manga_selected_folder_roots = []
+        for folder in folders:
+            folder_abs = os.path.abspath(folder)
+            if folder_abs not in self.manga_selected_folder_roots:
+                self.manga_selected_folder_roots.append(folder_abs)
+
+        for folder in folders:
+            for root, dirnames, filenames in os.walk(folder):
+                dirnames[:] = [
+                    dirname for dirname in dirnames
+                    if not dirname.lower().endswith('_translated')
+                    and dirname.lower() not in {'glossary', 'mangaglossary_backup', '__macosx'}
+                ]
+                dirnames.sort(key=_natural_sort_key)
+                for filename in sorted(filenames, key=_natural_sort_key):
+                    filepath = os.path.join(root, filename)
+                    if not os.path.isfile(filepath):
+                        continue
+                    ext = os.path.splitext(filename)[1].lower()
+                    if ext in image_extensions:
+                        if filepath not in self.selected_files:
+                            self.selected_files.append(filepath)
+                            self._add_manga_file_item(filepath)
+                            added_images += 1
+                            if len(self.selected_files) == 1:
+                                self.file_listbox.setCurrentRow(0)
+                    elif ext == cbz_ext:
+                        added_images += self._add_cbz_archive_images(filepath, image_extensions)
+
+        if added_images:
+            if len(folders) > 1:
+                self._log(f"📂 Added {added_images} manga images from {len(folders)} folders", "info")
+            else:
+                self._log(f"📂 Added {added_images} manga images from folder: {os.path.basename(folders[0])}", "info")
         
         # Update thumbnail preview list
         if hasattr(self, 'image_preview_widget'):
@@ -10686,6 +10915,8 @@ class MangaTranslationTab(QObject):
         
         self.file_listbox.clear()
         self.selected_files.clear()
+        if hasattr(self, 'manga_selected_folder_roots'):
+            self.manga_selected_folder_roots.clear()
         self._update_manga_image_range_display()
         # Clear image preview when list is cleared
         if hasattr(self, 'image_preview_widget'):
@@ -10836,6 +11067,11 @@ class MangaTranslationTab(QObject):
             # Only save files that still exist
             valid_files = [f for f in self.selected_files if os.path.exists(f)]
             self.main_gui.config['manga_selected_files'] = valid_files
+            folder_roots = [
+                folder for folder in getattr(self, 'manga_selected_folder_roots', []) or []
+                if folder and os.path.isdir(folder)
+            ]
+            self.main_gui.config['manga_selected_folder_roots'] = folder_roots
             self._refresh_manga_selection_status()
             if hasattr(self.main_gui, 'save_config'):
                 self.main_gui.save_config(show_message=False)
@@ -10857,6 +11093,13 @@ class MangaTranslationTab(QObject):
             valid_files = self._filter_manga_paths_to_single_source(valid_files)
             if not valid_files:
                 return
+            saved_folder_roots = self.main_gui.config.get('manga_selected_folder_roots', [])
+            if isinstance(saved_folder_roots, list):
+                self.manga_selected_folder_roots = [
+                    os.path.abspath(folder)
+                    for folder in saved_folder_roots
+                    if folder and os.path.isdir(folder)
+                ]
             
             print(f"[FILE_PERSIST] Loading {len(valid_files)} persisted files")
             
@@ -14528,6 +14771,57 @@ class MangaTranslationTab(QObject):
                 self._log(f"❌ Translation error for {filename}: {e}", "error")
                 self._log(traceback.format_exc(), "debug")
 
+    def _run_manga_glossary_workflow(self, glossary_only_run: bool = False) -> None:
+        """Run manga glossary workflow once per computed process group."""
+        all_files = self._current_manga_processing_files()
+        groups = self._manga_process_groups_for_paths(all_files)
+        if not groups:
+            self._log("No manga files selected for glossary workflow", "warning")
+            return
+
+        original_processing_files = getattr(self, '_manga_processing_files', None)
+        original_active_group = getattr(self, '_manga_active_process_group', None)
+        custom_glossary_path = getattr(self, 'manga_custom_glossary_path', '') or self.main_gui.config.get('manga_custom_glossary_path', '')
+
+        try:
+            for group_index, group in enumerate(groups):
+                if self.stop_flag.is_set() or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+                    break
+
+                group_files = list(group.get('files', []) or [])
+                if not group_files:
+                    continue
+
+                self._manga_active_process_group = group
+                self._manga_processing_files = group_files
+                self.total_files = len(group_files)
+                self.current_file_index = 0
+
+                if len(groups) > 1:
+                    self._log(
+                        f"📚 Manga process {group_index + 1}/{len(groups)}: {group.get('root', '')} ({len(group_files)} images)",
+                        "info",
+                    )
+
+                if not custom_glossary_path:
+                    self.manga_loaded_glossary_text = ''
+                    self.manga_generated_glossary_text = ''
+                    setattr(self.main_gui, 'manga_generated_glossary_text', '')
+                    if getattr(self, 'translator', None):
+                        self.translator.manga_generated_glossary_text = ''
+                        self.translator._manga_glossary_prompt_logged = False
+
+                loaded_glossary_text = "" if glossary_only_run else self._get_loaded_manga_glossary_text()
+                if loaded_glossary_text:
+                    self._run_manga_loaded_glossary_translation(loaded_glossary_text)
+                else:
+                    self._run_manga_glossary_batch(glossary_only=glossary_only_run)
+        finally:
+            self._manga_processing_files = original_processing_files
+            self._manga_active_process_group = original_active_group
+            self.total_files = len(all_files)
+            self._update_manga_glossary_status_label()
+
     def _run_manga_glossary_batch(self, glossary_only: bool = False) -> None:
         """Run OCR for all pages, generate one glossary, then optionally translate."""
         self._log("📚 Manga glossary workflow enabled", "info")
@@ -14553,7 +14847,7 @@ class MangaTranslationTab(QObject):
                 return
 
             if glossary_only:
-                self.completed_files = len(ocr_pages)
+                self.completed_files += len(ocr_pages)
                 self._update_progress(total, total, f"Glossary generated from {len(ocr_pages)} pages")
                 return
 
@@ -14635,7 +14929,7 @@ class MangaTranslationTab(QObject):
             return
 
         if glossary_only:
-            self.completed_files = len(ocr_pages)
+            self.completed_files += len(ocr_pages)
             self._update_progress(total, total, f"Glossary generated from {len(ocr_pages)} pages")
             return
 
@@ -14821,11 +15115,7 @@ class MangaTranslationTab(QObject):
             glossary_only_run = bool(getattr(self, '_manga_glossary_only_run', False))
 
             if self._manga_glossary_workflow_enabled():
-                loaded_glossary_text = "" if glossary_only_run else self._get_loaded_manga_glossary_text()
-                if loaded_glossary_text:
-                    self._run_manga_loaded_glossary_translation(loaded_glossary_text)
-                else:
-                    self._run_manga_glossary_batch(glossary_only=glossary_only_run)
+                self._run_manga_glossary_workflow(glossary_only_run=glossary_only_run)
 
             elif panel_parallel and len(run_files) > 1 and effective_workers > 1:
                 self._log(f"🚀 Parallel PANEL translation ENABLED ({effective_workers} workers)", "info")
