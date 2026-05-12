@@ -2673,7 +2673,7 @@ class LocalInpainter:
                 if not model_ref_lower.startswith(('nan/', 'nanogpt/')) and model_ref == 'gpt-image-1':
                     model_ref = 'nan/gemini-2.5-flash-image-preview'
                 url = os.environ.get('NANOGPT_API_URL', url if 'nano-gpt.com' in url.lower() else 'https://nano-gpt.com').rstrip('/')
-                url = f"{url}/api/v1/images/generations"
+                url = f"{url}/v1/images/generations"
             elif (not use_current_provider) and not url.endswith('/images/edits'):
                 url = f"{url}/images/edits"
 
@@ -2756,16 +2756,27 @@ class LocalInpainter:
                 max_chars = int(os.environ.get('NANOGPT_MAX_INPUT_IMAGE_CHARS', '3000000') or '3000000')
                 max_dim = int(os.environ.get('NANOGPT_MAX_INPUT_IMAGE_DIM', '1536') or '1536')
                 qualities = [90, 85, 80, 75, 70, 65, 60, 55, 50]
-                dims = []
+                dims = [max(bgr_img.shape[:2])]
                 cur_dim = max(512, max_dim)
                 while cur_dim >= 768:
-                    dims.append(cur_dim)
+                    if cur_dim not in dims:
+                        dims.append(cur_dim)
                     cur_dim = int(cur_dim * 0.85)
                 if 768 not in dims:
                     dims.append(768)
 
                 h0, w0 = bgr_img.shape[:2]
+                info = {
+                    'shrunk': False,
+                    'source_size': (w0, h0),
+                    'sent_size': (w0, h0),
+                    'quality': None,
+                    'chars': None,
+                    'dimensions_reduced': False,
+                }
                 best_data_url = None
+                best_info = info.copy()
+                original_png_chars = len(f"data:image/png;base64,{base64.b64encode(img_buf.tobytes()).decode('ascii')}")
                 for dim in dims:
                     work = bgr_img
                     scale = min(1.0, float(dim) / float(max(h0, w0)))
@@ -2781,17 +2792,28 @@ class LocalInpainter:
                             continue
                         data_url = 'data:image/webp;base64,' + base64.b64encode(webp_buf.tobytes()).decode('ascii')
                         best_data_url = data_url
+                        best_info = {
+                            'shrunk': scale < 1.0 or len(data_url) < original_png_chars,
+                            'source_size': (w0, h0),
+                            'sent_size': (work.shape[1], work.shape[0]),
+                            'quality': quality,
+                            'chars': len(data_url),
+                            'dimensions_reduced': (work.shape[1], work.shape[0]) != (w0, h0),
+                        }
                         if len(data_url) <= max_chars:
+                            self._nanogpt_last_input_resize_info = best_info
                             self._log(
-                                f"NanoGPT input image shrunk for payload limit: {w0}x{h0} -> "
+                                f"NanoGPT input image compressed for payload limit: {w0}x{h0} -> "
                                 f"{work.shape[1]}x{work.shape[0]}, q={quality}, chars={len(data_url)}",
                                 "info",
                             )
                             return data_url
                 if best_data_url:
+                    self._nanogpt_last_input_resize_info = best_info
                     self._log(f"NanoGPT input image still large after shrinking: chars={len(best_data_url)}", "warning")
                     return best_data_url
                 image_b64_fallback = base64.b64encode(img_buf.tobytes()).decode('ascii')
+                self._nanogpt_last_input_resize_info = info
                 return f"data:image/png;base64,{image_b64_fallback}"
 
             api_key = (
@@ -2951,8 +2973,11 @@ class LocalInpainter:
                         'prompt': prompt,
                         'size': os.environ.get('NANOGPT_IMAGE_SIZE', os.environ.get('CUSTOM_IMAGE_EDIT_SIZE', '1024x1024')),
                         'response_format': 'url',
-                        'imageDataUrl': _nanogpt_image_data_url_from_bgr(proc_bgr),
                     }
+                    nanogpt_image_data_url = _nanogpt_image_data_url_from_bgr(proc_bgr)
+                    payload['imageDataUrl'] = nanogpt_image_data_url
+                    payload['imageDataUrls'] = [nanogpt_image_data_url]
+                    self._log(f"NanoGPT image edit payload includes imageDataUrl ({len(nanogpt_image_data_url)} chars)", "info")
                     resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
                 else:
                     resp = requests.post(url, headers=headers, data=form_data, files=files, timeout=timeout)
@@ -3054,6 +3079,23 @@ class LocalInpainter:
             if out_bgr is None:
                 raise RuntimeError("Custom image edit endpoint returned unreadable image bytes")
             if out_bgr.shape[:2] != proc_bgr.shape[:2]:
+                resize_info = getattr(self, '_nanogpt_last_input_resize_info', None) if is_nanogpt_image else None
+                if resize_info:
+                    sent_w, sent_h = resize_info.get('sent_size', (out_bgr.shape[1], out_bgr.shape[0]))
+                    src_w, src_h = resize_info.get('source_size', (proc_bgr.shape[1], proc_bgr.shape[0]))
+                    if resize_info.get('dimensions_reduced'):
+                        self._log(
+                            f"NanoGPT output resized back to original dimensions: "
+                            f"{out_bgr.shape[1]}x{out_bgr.shape[0]} -> {proc_bgr.shape[1]}x{proc_bgr.shape[0]} "
+                            f"(sent input {sent_w}x{sent_h}, original {src_w}x{src_h})",
+                            "info",
+                        )
+                    else:
+                        self._log(
+                            f"Custom image edit output dimensions differ from input; resizing: "
+                            f"{out_bgr.shape[1]}x{out_bgr.shape[0]} -> {proc_bgr.shape[1]}x{proc_bgr.shape[0]}",
+                            "info",
+                        )
                 out_bgr = cv2.resize(out_bgr, (proc_bgr.shape[1], proc_bgr.shape[0]), interpolation=cv2.INTER_LANCZOS4)
             if out_bgr.shape[:2] != crop_bgr.shape[:2]:
                 out_bgr = cv2.resize(out_bgr, (crop_bgr.shape[1], crop_bgr.shape[0]), interpolation=cv2.INTER_LANCZOS4)

@@ -7423,6 +7423,8 @@ class UnifiedClient:
                                             else:
                                                 raise  # re-raise on final attempt
                                         
+                                    self._resize_nanogpt_generated_output_if_needed(out_path)
+
                                     # Return sentinel for GUI to intercept and prevent HTML creation
                                     extracted_content = f'[GENERATED_IMAGE:{out_path}]'
                                         
@@ -7441,6 +7443,8 @@ class UnifiedClient:
                                     with open(out_path, 'wb') as f:
                                         f.write(base64.b64decode(b64data))
                                         
+                                    self._resize_nanogpt_generated_output_if_needed(out_path)
+
                                     # Return sentinel for GUI to intercept and prevent HTML creation
                                     extracted_content = f'[GENERATED_IMAGE:{out_path}]'
                                 print(f"✅ Media successfully intercepted and saved.")
@@ -21482,7 +21486,7 @@ class UnifiedClient:
         """Route a request to nano-gpt.com.
 
         * Default  → POST /api/v1/chat/completions  (OpenAI-compatible)
-        * ENABLE_IMAGE_OUTPUT_MODE=1 → POST /api/v1/images/generations
+        * ENABLE_IMAGE_OUTPUT_MODE=1 → POST /v1/images/generations
         * ENABLE_VIDEO_OUTPUT_MODE=1 → POST /api/generate-video  (async/poll)
         """
         base_url = (os.getenv("NANOGPT_API_URL", "https://nano-gpt.com")).rstrip("/")
@@ -21561,15 +21565,24 @@ class UnifiedClient:
             original_size = img.size
             max_dim = int(os.getenv('NANOGPT_MAX_INPUT_IMAGE_DIM', '1536') or '1536')
             qualities = [90, 85, 80, 75, 70, 65, 60, 55, 50]
-            dims = []
+            dims = [max(original_size)]
             cur_dim = max(512, max_dim)
             while cur_dim >= 768:
-                dims.append(cur_dim)
+                if cur_dim not in dims:
+                    dims.append(cur_dim)
                 cur_dim = int(cur_dim * 0.85)
             if 768 not in dims:
                 dims.append(768)
 
             best = data_url
+            best_info = {
+                'shrunk': False,
+                'source_size': original_size,
+                'sent_size': original_size,
+                'quality': None,
+                'chars': len(data_url),
+                'dimensions_reduced': False,
+            }
             for dim in dims:
                 work = img.copy()
                 scale = min(1.0, float(dim) / float(max(work.size)))
@@ -21581,10 +21594,19 @@ class UnifiedClient:
                     work.save(buf, format='WEBP', quality=quality, method=6)
                     candidate = 'data:image/webp;base64,' + _b64.b64encode(buf.getvalue()).decode('ascii')
                     best = candidate
+                    best_info = {
+                        'shrunk': scale < 1.0 or len(candidate) < len(data_url),
+                        'source_size': original_size,
+                        'sent_size': work.size,
+                        'quality': quality,
+                        'chars': len(candidate),
+                        'dimensions_reduced': work.size != original_size,
+                    }
                     if len(candidate) <= max_chars:
+                        self._nanogpt_last_input_resize_info = best_info
                         if not self._is_stop_requested():
                             print(
-                                f"[NanoGPT] Shrunk input image for payload limit: "
+                                f"[NanoGPT] Compressed input image for payload limit: "
                                 f"{original_size[0]}x{original_size[1]} -> {work.size[0]}x{work.size[1]}, "
                                 f"q={quality}, chars={len(candidate)}"
                             )
@@ -21592,14 +21614,46 @@ class UnifiedClient:
 
             if not self._is_stop_requested():
                 print(f"[NanoGPT] Input image still large after shrinking: chars={len(best)}")
+            self._nanogpt_last_input_resize_info = best_info
             return best
         except Exception as exc:
             if not self._is_stop_requested():
                 print(f"[NanoGPT] Could not shrink input image: {exc}")
             return data_url
 
+    def _resize_nanogpt_generated_output_if_needed(self, out_path: str) -> None:
+        """Restore NanoGPT image edit outputs to the pre-shrink input dimensions."""
+        try:
+            info = getattr(self, '_nanogpt_last_input_resize_info', None)
+            if not info or not info.get('dimensions_reduced') or not out_path or not os.path.exists(out_path):
+                return
+            source_size = info.get('source_size')
+            sent_size = info.get('sent_size')
+            if not source_size or len(source_size) != 2:
+                return
+            from PIL import Image as _Image
+            with _Image.open(out_path) as img:
+                if tuple(img.size) == tuple(source_size):
+                    return
+                resized = img.resize(tuple(source_size), _Image.Resampling.LANCZOS)
+                save_kwargs = {}
+                ext = os.path.splitext(out_path)[1].lower()
+                if ext in ('.jpg', '.jpeg'):
+                    save_kwargs.update({'quality': 95, 'optimize': True})
+                elif ext == '.webp':
+                    save_kwargs.update({'quality': 95, 'method': 6})
+                resized.save(out_path, **save_kwargs)
+                print(
+                    f"[NanoGPT] Resized generated output back to original dimensions: "
+                    f"{img.size[0]}x{img.size[1]} -> {source_size[0]}x{source_size[1]} "
+                    f"(sent input {sent_size[0]}x{sent_size[1]})"
+                )
+        except Exception as exc:
+            if not self._is_stop_requested():
+                print(f"[NanoGPT] Could not resize generated output back to source dimensions: {exc}")
+
     def _send_nanogpt_image(self, messages, model, base_url, api_key, response_name) -> UnifiedResponse:
-        """POST /api/v1/images/generations on nano-gpt.com.
+        """POST /v1/images/generations on nano-gpt.com.
 
         When the messages contain base64 image parts (from the vision /
         image-translation pipeline), those are forwarded as ``imageDataUrl``
@@ -21611,6 +21665,7 @@ class UnifiedClient:
         # ── Extract text prompt AND any embedded images from messages ──
         prompt = ""
         image_data_urls: list[str] = []
+        self._nanogpt_last_input_resize_info = None
 
         for msg in reversed(messages):
             if msg.get("role") == "user":
@@ -21648,7 +21703,7 @@ class UnifiedClient:
             prompt = "Generate an image"
 
         image_size = os.getenv("NANOGPT_IMAGE_SIZE", "1024x1024")
-        url = f"{base_url}/api/v1/images/generations"
+        url = f"{base_url}/v1/images/generations"
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -21664,6 +21719,7 @@ class UnifiedClient:
         if image_data_urls:
             if len(image_data_urls) == 1:
                 payload["imageDataUrl"] = image_data_urls[0]
+                payload["imageDataUrls"] = image_data_urls
                 if not self._is_stop_requested():
                     _preview = image_data_urls[0][:60]
                     print(f"🖼️ [NanoGPT] Attaching input image for edit ({_preview}…)")
