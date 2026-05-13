@@ -2202,7 +2202,7 @@ Text to analyze:
                 "- Keep original Korean quotation marks (\" \", ' ', 「」, 『』) as-is without converting to English quotes.\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, <ruby>, etc.\n"
-                "- Do not leave stray raw text like "ㅋ", They must be translated to an english equivalent. \n"
+                "- Do not leave stray raw text like \"ㅋ\", They must be translated to an english equivalent. \n"
                 "{split_marker_instruction}\n"
             ),
             "Japanese_BeautifulSoup": (
@@ -2252,7 +2252,7 @@ Text to analyze:
                 "- Use line breaks for proper formatting as expected of a novel.\n"
                 "- Preserve all Markdown present.\n"
                 "- Preserve any HTML image tags (<img>, <svg>, <picture>, <figure>) and furigana <ruby> tags exactly as they appear (e.g. <ruby>体力<rp>(</rp><rt>HP</rt><rp>)</rp></ruby>). Do not add or preserve any other HTML tags.\n"
-                "- Do not leave stray raw text like "ㅋ", They must be translated to an english equivalent.\n"
+                "- Do not leave stray raw text like \"ㅋ\", They must be translated to an english equivalent.\n"
                 "{split_marker_instruction}\n"
             ),
             "Japanese_html2text": (
