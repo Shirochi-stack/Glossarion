@@ -8977,6 +8977,39 @@ class UnifiedClient:
             messages, temperature, max_tokens, max_completion_tokens,
             context or 'image_translation', retry_reason, request_id, image_data=image_data
         )
+
+    def _coerce_nanogpt_input_image_to_webp(self, raw: Optional[bytes], mime: str) -> Tuple[Optional[bytes], str]:
+        if not raw or not str(getattr(self, 'model', '') or '').strip().lower().startswith('nan/'):
+            return raw, mime
+        if not str(mime or '').startswith('image/') or str(mime).lower() == 'image/webp':
+            return raw, mime
+        try:
+            import io as _io
+            from PIL import Image as _Image
+
+            img = _Image.open(_io.BytesIO(raw))
+            if img.mode not in ('RGB', 'L'):
+                bg = _Image.new('RGB', img.size, (255, 255, 255))
+                if 'A' in img.getbands():
+                    rgba = img.convert('RGBA')
+                    bg.paste(rgba, mask=rgba.split()[-1])
+                    img = bg
+                else:
+                    img = img.convert('RGB')
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+
+            quality = max(1, min(100, int(os.getenv('WEBP_QUALITY', '85') or '85')))
+            buf = _io.BytesIO()
+            img.save(buf, format='WEBP', quality=quality, method=6)
+            converted = buf.getvalue()
+            if not self._is_stop_requested():
+                print(f"[NanoGPT] Converted input image to WEBP for nan/ request ({len(raw)/1024:.0f}KB -> {len(converted)/1024:.0f}KB)")
+            return converted, 'image/webp'
+        except Exception as exc:
+            if not self._is_stop_requested():
+                print(f"[NanoGPT] Could not convert input image to WEBP: {exc}")
+            return raw, mime
         
     def _prepare_image_messages(self, messages: List[Dict[str, Any]], image_data: Any) -> List[Dict[str, Any]]:
         """
@@ -8998,17 +9031,29 @@ class UnifiedClient:
 
         embedded_messages = []
         # Prepare base64 string
+        raw = image_data if isinstance(image_data, (bytes, bytearray)) else None
         try:
             if isinstance(image_data, (bytes, bytearray)):
                 b64 = base64.b64encode(image_data).decode('ascii')
             else:
-                b64 = str(image_data)
+                text_data = str(image_data).strip()
+                if text_data.startswith('data:image/') and ',' in text_data:
+                    try:
+                        raw = base64.b64decode(text_data.split(',', 1)[1])
+                    except Exception:
+                        raw = None
+                    b64 = text_data.split(',', 1)[1]
+                else:
+                    b64 = text_data
+                    try:
+                        raw = base64.b64decode(text_data, validate=True)
+                    except Exception:
+                        raw = None
         except Exception:
             b64 = str(image_data)
         
         # Detect MIME type from magic bytes (raw data only)
         mime = "image/jpeg"  # default fallback
-        raw = image_data if isinstance(image_data, (bytes, bytearray)) else None
         if raw:
             if raw[:4] == b'\x00\x00\x00\x18' or raw[:4] == b'\x00\x00\x00\x1c' or raw[4:8] == b'ftyp':
                 mime = "video/mp4"
@@ -9022,6 +9067,10 @@ class UnifiedClient:
                 mime = "image/gif"
             elif raw[:4] == b'RIFF' and raw[8:12] == b'WEBP':
                 mime = "image/webp"
+
+        raw, mime = self._coerce_nanogpt_input_image_to_webp(raw, mime)
+        if raw:
+            b64 = base64.b64encode(raw).decode('ascii')
         
         image_part = {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
         

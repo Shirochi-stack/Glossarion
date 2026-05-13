@@ -2489,6 +2489,30 @@ class MangaTranslator:
         else:
             self._log("📝 BATCH MODE DISABLED")
 
+    def _get_custom_api_ocr_batch_size(self) -> int:
+        """Use the main Batch Size value for custom-api OCR API concurrency."""
+        candidates = []
+        try:
+            candidates.append(getattr(self.main_gui, 'batch_size_var', None))
+        except Exception:
+            pass
+        try:
+            candidates.append((getattr(self.main_gui, 'config', {}) or {}).get('batch_size'))
+        except Exception:
+            pass
+        candidates.extend([getattr(self, 'batch_size', None), os.getenv('BATCH_SIZE')])
+
+        for value in candidates:
+            try:
+                if hasattr(value, 'get'):
+                    value = value.get()
+                size = int(value)
+                if size > 0:
+                    return size
+            except Exception:
+                continue
+        return 1
+
     def _ensure_bubble_detector_ready(self, ocr_settings):
         """Ensure a usable BubbleDetector for current thread, auto-reloading models after cleanup."""
         try:
@@ -5055,7 +5079,8 @@ class MangaTranslator:
                             
                             # Decide parallelization for custom-api:
                             # Use API batch mode OR local parallel toggle so that API calls can run in parallel
-                            if (getattr(self, 'batch_mode', False) or self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True)) and len(all_regions) > 1:
+                            custom_api_ocr_batch_size = self._get_custom_api_ocr_batch_size()
+                            if (custom_api_ocr_batch_size > 1 or getattr(self, 'batch_mode', False) or self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True)) and len(all_regions) > 1:
                                 self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions (custom-api; API batch mode honored)")
                                 ocr_results = self._parallel_ocr_regions(image, all_regions, 'custom-api', confidence_threshold)
                             else:
@@ -6106,8 +6131,7 @@ class MangaTranslator:
         # For cloud OCR providers (custom-api, azure-document-intelligence), use OCR-specific concurrency settings
         try:
             if provider == 'custom-api':
-                # prefer MangaTranslator.batch_size (from env BATCH_SIZE)
-                bs = int(getattr(self, 'batch_size', 0) or int(os.getenv('BATCH_SIZE', '0')))
+                bs = self._get_custom_api_ocr_batch_size()
                 if bs and bs > 0:
                     max_workers = bs
             elif provider == 'azure-document-intelligence':
@@ -6120,6 +6144,28 @@ class MangaTranslator:
         
         # Never spawn more workers than regions
         max_workers = max(1, min(max_workers, len(regions)))
+        original_ocr_parallel_env = None
+        if provider == 'custom-api' and max_workers > 1:
+            keys = (
+                'BATCH_TRANSLATION',
+                'BATCH_SIZE',
+                'MANGA_OCR_THINKING_OVERRIDE_ACTIVE',
+                'ENABLE_ANTHROPIC_THINKING',
+                'ENABLE_GEMINI_THINKING',
+                'ENABLE_DEEPSEEK_THINKING',
+                'GEMINI_THINKING_LEVEL',
+                'THINKING_BUDGET',
+            )
+            original_ocr_parallel_env = {key: os.environ.get(key) for key in keys}
+            os.environ['BATCH_TRANSLATION'] = '1'
+            os.environ['BATCH_SIZE'] = str(max_workers)
+            if str(os.environ.get('MANGA_OCR_DISABLE_THINKING', '1')).strip().lower() in ('1', 'true', 'yes', 'on'):
+                os.environ['MANGA_OCR_THINKING_OVERRIDE_ACTIVE'] = '1'
+                os.environ['ENABLE_ANTHROPIC_THINKING'] = '0'
+                os.environ['ENABLE_GEMINI_THINKING'] = '0'
+                os.environ['ENABLE_DEEPSEEK_THINKING'] = '0'
+                os.environ['GEMINI_THINKING_LEVEL'] = 'minimal'
+                os.environ.pop('THINKING_BUDGET', None)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             future_to_index = {}
@@ -6146,6 +6192,12 @@ class MangaTranslator:
                     ocr_results.append(results_dict[i])
         
         self._log(f"📊 Parallel OCR complete: {len(ocr_results)}/{len(regions)} regions extracted")
+        if original_ocr_parallel_env is not None:
+            for key, value in original_ocr_parallel_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
         return ocr_results
     
     def _pregroup_azure_lines(self, lines: List[TextRegion], base_threshold: int) -> List[TextRegion]:

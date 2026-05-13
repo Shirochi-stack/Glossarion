@@ -246,6 +246,26 @@ class CustomAPIProvider(OCRProvider):
         self.retry_backoff = float(os.environ.get('CUSTOM_OCR_RETRY_BACKOFF', '1.8'))
         self.retry_jitter = float(os.environ.get('CUSTOM_OCR_RETRY_JITTER', '0.4'))
         self.retry_on_empty = os.environ.get('CUSTOM_OCR_RETRY_ON_EMPTY', '1') == '1'
+
+    def _uses_nanogpt_model(self) -> bool:
+        for value in (
+            getattr(getattr(self, 'client', None), 'model', None),
+            getattr(self, 'model_name', None),
+            os.environ.get('MODEL', ''),
+        ):
+            if str(value or '').strip().lower().startswith('nan/'):
+                return True
+        return False
+
+    def _get_request_image_format(self) -> str:
+        if self._uses_nanogpt_model():
+            return 'webp'
+        fmt = str(os.environ.get('IMAGE_COMPRESSION_FORMAT', 'auto') or 'auto').strip().lower()
+        if fmt == 'png':
+            return 'png'
+        if fmt == 'webp':
+            return 'webp'
+        return 'jpeg'
         
     def check_installation(self) -> bool:
         """Always installed - uses UnifiedClient"""
@@ -346,8 +366,12 @@ class CustomAPIProvider(OCRProvider):
         
         # Save to bytes buffer
         buffer = io.BytesIO()
-        if self.image_format.lower() == 'png':
+        image_format = self._get_request_image_format()
+        if image_format == 'png':
             pil_image.save(buffer, format='PNG')
+        elif image_format == 'webp':
+            quality = max(1, min(100, int(os.environ.get('WEBP_QUALITY', os.environ.get('JPEG_QUALITY', '85')) or '85')))
+            pil_image.save(buffer, format='WEBP', quality=quality, method=6)
         else:
             pil_image.save(buffer, format='JPEG', quality=self.image_quality)
         
@@ -379,6 +403,8 @@ class CustomAPIProvider(OCRProvider):
         """Temporarily match the QA scanner's skip-thinking override for manga OCR."""
         if str(os.environ.get('MANGA_OCR_DISABLE_THINKING', '1')).strip().lower() not in ('1', 'true', 'yes', 'on'):
             return None
+        if os.environ.get('MANGA_OCR_THINKING_OVERRIDE_ACTIVE') == '1':
+            return None
 
         keys = (
             'ENABLE_ANTHROPIC_THINKING',
@@ -406,6 +432,7 @@ class CustomAPIProvider(OCRProvider):
     
     def _prepare_request_payload(self, image_base64: str) -> dict:
         """Prepare request payload based on API format"""
+        image_format = self._get_request_image_format()
         if self.api_format == 'openai':
             return {
                 "model": self.model_name,
@@ -417,7 +444,7 @@ class CustomAPIProvider(OCRProvider):
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                    "url": f"data:image/{self.image_format};base64,{image_base64}"
+                                    "url": f"data:image/{image_format};base64,{image_base64}"
                                 }
                             }
                         ]
@@ -444,7 +471,7 @@ class CustomAPIProvider(OCRProvider):
                                 "type": "image",
                                 "source": {
                                     "type": "base64",
-                                    "media_type": f"image/{self.image_format}",
+                                    "media_type": f"image/{image_format}",
                                     "data": image_base64
                                 }
                             }
@@ -554,9 +581,12 @@ class CustomAPIProvider(OCRProvider):
             # Convert PIL Image to base64 string
             buffer = io.BytesIO()
             
-            # Use the image format from settings
-            if self.image_format.lower() == 'png':
+            image_format = self._get_request_image_format()
+            if image_format == 'png':
                 pil_image.save(buffer, format='PNG')
+            elif image_format == 'webp':
+                quality = max(1, min(100, int(os.environ.get('WEBP_QUALITY', os.environ.get('JPEG_QUALITY', '85')) or '85')))
+                pil_image.save(buffer, format='WEBP', quality=quality, method=6)
             else:
                 pil_image.save(buffer, format='JPEG', quality=self.image_quality)
             
@@ -581,7 +611,7 @@ class CustomAPIProvider(OCRProvider):
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/jpeg;base64,{image_base64}"
+                                "url": f"data:image/{image_format};base64,{image_base64}"
                             }
                         }
                     ]

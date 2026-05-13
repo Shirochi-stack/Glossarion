@@ -3644,6 +3644,95 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                         self._log(f"❌ Failed to load {provider}", "error")
                         return []
                 
+                def _custom_api_ocr_batch_size():
+                    for value in (
+                        getattr(self.main_gui, 'batch_size_var', None) if hasattr(self, 'main_gui') else None,
+                        (self.main_gui.config.get('batch_size') if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config') else None),
+                        os.environ.get('BATCH_SIZE'),
+                    ):
+                        try:
+                            if hasattr(value, 'get'):
+                                value = value.get()
+                            size = int(value)
+                            if size > 0:
+                                return size
+                        except Exception:
+                            continue
+                    return 1
+
+                if provider == 'custom-api' and len(regions) > 1:
+                    ocr_workers = min(_custom_api_ocr_batch_size(), len(regions))
+                    if ocr_workers > 1:
+                        self._log(f"Using PARALLEL OCR for {len(regions)} regions (custom-api; workers={ocr_workers})", "info")
+                        keys = (
+                            'BATCH_TRANSLATION',
+                            'BATCH_SIZE',
+                            'MANGA_OCR_THINKING_OVERRIDE_ACTIVE',
+                            'ENABLE_ANTHROPIC_THINKING',
+                            'ENABLE_GEMINI_THINKING',
+                            'ENABLE_DEEPSEEK_THINKING',
+                            'GEMINI_THINKING_LEVEL',
+                            'THINKING_BUDGET',
+                        )
+                        original_env = {key: os.environ.get(key) for key in keys}
+                        os.environ['BATCH_TRANSLATION'] = '1'
+                        os.environ['BATCH_SIZE'] = str(ocr_workers)
+                        if str(os.environ.get('MANGA_OCR_DISABLE_THINKING', '1')).strip().lower() in ('1', 'true', 'yes', 'on'):
+                            os.environ['MANGA_OCR_THINKING_OVERRIDE_ACTIVE'] = '1'
+                            os.environ['ENABLE_ANTHROPIC_THINKING'] = '0'
+                            os.environ['ENABLE_GEMINI_THINKING'] = '0'
+                            os.environ['ENABLE_DEEPSEEK_THINKING'] = '0'
+                            os.environ['GEMINI_THINKING_LEVEL'] = 'minimal'
+                            os.environ.pop('THINKING_BUDGET', None)
+
+                        def _process_custom_api_region(item):
+                            i, region = item
+                            if _is_translation_cancelled(self):
+                                return None
+                            bbox = region.get('bbox', [])
+                            if len(bbox) < 4:
+                                return None
+                            region_x, region_y, region_w, region_h = bbox
+                            cropped_region = image[region_y:region_y+region_h, region_x:region_x+region_w]
+                            ocr_results = self.ocr_manager.detect_text(cropped_region, provider, confidence=0.5)
+                            if not ocr_results:
+                                return None
+                            region_text = " ".join([ocr.text.strip() for ocr in ocr_results if ocr.text.strip()])
+                            if not region_text:
+                                return None
+                            return {
+                                'region_index': i,
+                                'bbox': bbox,
+                                'text': region_text.strip(),
+                                'confidence': region.get('confidence', 1.0),
+                                'bubble_type': region.get('bubble_type'),
+                                'region_type': region.get('region_type'),
+                                'bubble_bounds': region.get('bubble_bounds', bbox)
+                            }
+
+                        try:
+                            with concurrent.futures.ThreadPoolExecutor(max_workers=ocr_workers) as executor:
+                                future_map = {
+                                    executor.submit(_process_custom_api_region, item): item[0]
+                                    for item in enumerate(regions)
+                                }
+                                parallel_results = []
+                                for future in concurrent.futures.as_completed(future_map):
+                                    result = future.result()
+                                    if result:
+                                        parallel_results.append(result)
+                                        print(f"[OCR_REGIONS] Region {result['region_index']+1}: '{result['text']}'")
+                                recognized_texts.extend(sorted(parallel_results, key=lambda r: r.get('region_index', 0)))
+                        finally:
+                            for key, value in original_env.items():
+                                if value is None:
+                                    os.environ.pop(key, None)
+                                else:
+                                    os.environ[key] = value
+
+                        print(f"[OCR_REGIONS] custom-api recognized text in {len(recognized_texts)}/{len(regions)} regions")
+                        return recognized_texts
+
                 # Process each region individually (cropped)
                 for i, region in enumerate(regions):
                     # ===== CANCELLATION CHECK: In OCR loop =====
