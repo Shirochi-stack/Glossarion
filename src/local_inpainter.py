@@ -4283,7 +4283,9 @@ class LocalInpainter:
         if not self.model_loaded:
             self._log("No model loaded", "error")
             return image
-        if not self._is_custom_image_edit_method(self.current_method) and not callable(getattr(self, 'model', None)):
+        has_torch_model = callable(getattr(self, 'model', None))
+        has_onnx_session = bool(getattr(self, 'use_onnx', False) and getattr(self, 'onnx_session', None) is not None)
+        if not self._is_custom_image_edit_method(self.current_method) and not has_torch_model and not has_onnx_session:
             self._log("Model object is not available in this process", "error")
             return image
         
