@@ -7363,7 +7363,48 @@ def main(log_callback=None, stop_callback=None):
     
     # Print failed chapters summary
     if failed:
-        print(f"\n⚠️ {len(failed)} chapter(s) failed and will be retried on next run: {[i+1 for i in sorted(failed)]}")
+        issue_map = _normalize_glossary_qa_issues(_GLOSSARY_QA_ISSUES_FOUND)
+        print(f"\n⚠️ {len(failed)} chapter(s) failed and will be retried on next run:")
+        issue_set = set()
+        for idx in sorted(failed):
+            issues = issue_map.get(idx) or ["UNKNOWN"]
+            issue_set.update(issues)
+            try:
+                chapter_num = _glossary_chapter_actual_num(idx, context=progress_context)
+            except Exception:
+                chapter_num = idx + 1
+            try:
+                chapter_file = _glossary_chapter_output_file(idx, context=progress_context)
+            except Exception:
+                chapter_file = ""
+            file_note = f" ({chapter_file})" if chapter_file else ""
+            print(f"   • Chapter {chapter_num}{file_note}: {', '.join(issues)}")
+
+        print("\n   What these QA issues mean:")
+        if "TRUNCATED" in issue_set:
+            print(
+                "   • TRUNCATED: the provider/server ended the response early. "
+                "Reduce the glossary compression factor or output token limit, use a different model, "
+                "or increase the auto-retry truncated value."
+            )
+        if "PROHIBITED_CONTENT" in issue_set or "PROHIBITED CONTENT" in issue_set:
+            print(
+                "   • PROHIBITED_CONTENT: the model/provider likely blocked the request because of safety or censorship. "
+                "Use a different model/provider for that chapter."
+            )
+        if "SPLIT_FAILED" in issue_set:
+            print(
+                "   • SPLIT_FAILED: the AI ignored or mishandled the split-marker instructions, so the output could not "
+                "be safely mapped back to the original split chapters."
+            )
+
+        known_issues = {"TRUNCATED", "PROHIBITED_CONTENT", "PROHIBITED CONTENT", "SPLIT_FAILED"}
+        other_issues = sorted(issue for issue in issue_set if issue not in known_issues)
+        if other_issues:
+            print(
+                f"   • Other issue(s) ({', '.join(other_issues)}): the exact cause is not known from the saved marker. "
+                "Retry the chapter, check the surrounding logs, or switch model/provider if it repeats."
+            )
         save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
     
     print(f"\nDone. Glossary saved to {args.output}")

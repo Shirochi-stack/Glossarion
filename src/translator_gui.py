@@ -15110,6 +15110,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SKIP_BOOK_TITLE_THINKING': "1" if getattr(self, 'skip_book_title_thinking_var', True) else "0",
             'SKIP_METADATA_THINKING': "1" if getattr(self, 'skip_metadata_thinking_var', True) else "0",
             'SKIP_TOC_THINKING': "1" if getattr(self, 'skip_toc_thinking_var', False) else "0",
+            'MANGA_OCR_DISABLE_THINKING': "1" if _bool_setting(((self.config.get('manga_settings') or {}).get('ocr') or {}).get('manga_ocr_disable_thinking', True), True) else "0",
             'LIGHTWEIGHT_THINKING_LEVEL': str(getattr(self, 'lightweight_thinking_level_var', 1)),
             'OPENROUTER_EXCLUDE': '1',
             'OPENROUTER_PREFERRED_PROVIDER': self.config.get('openrouter_preferred_provider', 'Auto'),

@@ -374,6 +374,35 @@ class CustomAPIProvider(OCRProvider):
         headers.update(self.api_headers)
         
         return headers
+
+    def _apply_manga_ocr_thinking_override(self) -> Optional[Dict[str, Optional[str]]]:
+        """Temporarily match the QA scanner's skip-thinking override for manga OCR."""
+        if str(os.environ.get('MANGA_OCR_DISABLE_THINKING', '1')).strip().lower() not in ('1', 'true', 'yes', 'on'):
+            return None
+
+        keys = (
+            'ENABLE_ANTHROPIC_THINKING',
+            'ENABLE_GEMINI_THINKING',
+            'ENABLE_DEEPSEEK_THINKING',
+            'GEMINI_THINKING_LEVEL',
+            'THINKING_BUDGET',
+        )
+        original = {key: os.environ.get(key) for key in keys}
+        os.environ['ENABLE_ANTHROPIC_THINKING'] = '0'
+        os.environ['ENABLE_GEMINI_THINKING'] = '0'
+        os.environ['ENABLE_DEEPSEEK_THINKING'] = '0'
+        os.environ['GEMINI_THINKING_LEVEL'] = 'minimal'
+        os.environ.pop('THINKING_BUDGET', None)
+        return original
+
+    def _restore_thinking_override(self, original: Optional[Dict[str, Optional[str]]]) -> None:
+        if original is None:
+            return
+        for key, value in original.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
     
     def _prepare_request_payload(self, image_base64: str) -> dict:
         """Prepare request payload based on API format"""
@@ -605,12 +634,16 @@ class CustomAPIProvider(OCRProvider):
                     return results
                 
                 try:
-                    response = self.client.send(
-                        messages=messages,
-                        temperature=self.temperature,
-                        max_tokens=max_tokens,
-                        context='manga_ocr'
-                    )
+                    original_thinking_env = self._apply_manga_ocr_thinking_override()
+                    try:
+                        response = self.client.send(
+                            messages=messages,
+                            temperature=self.temperature,
+                            max_tokens=max_tokens,
+                            context='manga_ocr'
+                        )
+                    finally:
+                        self._restore_thinking_override(original_thinking_env)
 
                     # Extract content from response object
                     content, finish_reason = response

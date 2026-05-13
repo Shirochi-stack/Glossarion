@@ -11750,6 +11750,11 @@ def _get_ocr_config(self) -> dict:
         else:
             print(f"[DEBUG] Azure credentials not complete")
     elif config['provider'] == 'custom-api':
+        manga_ocr_disable_thinking = bool(
+            ((self.main_gui.config.get('manga_settings', {}) or {}).get('ocr', {}) or {}).get('manga_ocr_disable_thinking', True)
+        )
+        config['manga_ocr_disable_thinking'] = manga_ocr_disable_thinking
+        os.environ['MANGA_OCR_DISABLE_THINKING'] = '1' if manga_ocr_disable_thinking else '0'
         # For custom-api provider, we need to ensure the API key is available
         api_key = os.environ.get('API_KEY', '') or os.environ.get('OPENAI_API_KEY', '')
         # Also check the main GUI config for API key

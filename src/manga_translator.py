@@ -1859,6 +1859,13 @@ class MangaTranslator:
                 # Safety settings
                 disable_gemini_safety = config.get('disable_gemini_safety', False)
                 os.environ['DISABLE_GEMINI_SAFETY'] = '1' if disable_gemini_safety else '0'
+
+            try:
+                config = self.main_gui.config if hasattr(self.main_gui, 'config') else {}
+                ocr_settings = ((config.get('manga_settings') or {}).get('ocr') or {})
+                os.environ['MANGA_OCR_DISABLE_THINKING'] = '1' if ocr_settings.get('manga_ocr_disable_thinking', True) else '0'
+            except Exception:
+                os.environ.setdefault('MANGA_OCR_DISABLE_THINKING', '1')
                 
         except Exception as e:
             self._log(f"⚠️ Failed to sync environment variables: {e}", "warning")
