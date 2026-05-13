@@ -9068,6 +9068,26 @@ class UnifiedClient:
                 print(f"[ImageInput] Could not convert input image to WEBP: {exc}")
             return raw, mime
 
+    def _convert_image_data_url_to_webp_lossless(self, data_url: str) -> str:
+        """Convert a data:image URL to lossless WebP without resizing or quality compression."""
+        try:
+            import base64 as _b64
+
+            if not isinstance(data_url, str) or not data_url.startswith('data:image/') or ',' not in data_url:
+                return data_url
+            header, b64_data = data_url.split(',', 1)
+            if header.lower().startswith('data:image/webp'):
+                return data_url
+            raw = _b64.b64decode(b64_data)
+            converted, mime = self._coerce_nanogpt_input_image_to_webp(raw, header[5:] if header.startswith('data:') else 'image/jpeg')
+            if not converted or mime != 'image/webp':
+                return data_url
+            return 'data:image/webp;base64,' + _b64.b64encode(converted).decode('ascii')
+        except Exception as exc:
+            if not self._is_stop_requested():
+                print(f"[ImageInput] Could not convert image data URL to lossless WEBP: {exc}")
+            return data_url
+
     def _normalize_nanogpt_image_message_payloads(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Convert embedded data:image payloads to WebP before provider-specific request building."""
 
@@ -9093,7 +9113,7 @@ class UnifiedClient:
                 image_url = part.get('image_url')
                 url = image_url.get('url') if isinstance(image_url, dict) else image_url
                 if isinstance(url, str) and url.startswith('data:image/') and ',' in url:
-                    new_url = self._shrink_nanogpt_image_data_url(url, force_webp=True)
+                    new_url = self._convert_image_data_url_to_webp_lossless(url)
                     if new_url != url:
                         changed = True
                         msg_changed = True
