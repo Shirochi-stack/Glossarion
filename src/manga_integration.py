@@ -14125,7 +14125,7 @@ class MangaTranslationTab(QObject):
                         os.environ['USE_MULTI_API_KEYS'] = '0'
                         os.environ['USE_MULTI_KEYS'] = '0'
 
-                    # Dedicated Inpainter pool for manga custom-image-edit requests.
+                    # Dedicated Image gen/edit pool for manga custom-image-edit and image output requests.
                     inpainter_keys = self.main_gui.config.get('inpainter_keys', []) or []
                     use_inpainter_keys = bool(self.main_gui.config.get('use_inpainter_keys', False))
                     os.environ['USE_INPAINTER_KEYS'] = '1' if use_inpainter_keys else '0'
@@ -14138,7 +14138,7 @@ class MangaTranslationTab(QObject):
                                 force_rotation=self.main_gui.config.get('force_key_rotation', True),
                                 rotation_frequency=self.main_gui.config.get('rotation_frequency', 1),
                             )
-                            self._log(f"Inpainter key pool ENABLED for manga custom-image-edit ({len(inpainter_keys)} keys)", "info")
+                            self._log(f"Image gen/edit key pool ENABLED ({len(inpainter_keys)} keys)", "info")
                         else:
                             UnifiedClient.clear_in_memory_inpainter_keys()
                     except Exception:

@@ -14189,9 +14189,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     )
                     pool = getattr(UnifiedClient, '_inpainter_key_pool', None)
                     pool_count = len(getattr(pool, 'keys', [])) if pool else 0
-                    self.append_log(f"[GTool] Inpainter key pool: {pool_count} keys loaded (setup={'OK' if ok else 'FAILED'})")
+                    self.append_log(f"[GTool] Image gen/edit key pool: {pool_count} keys loaded (setup={'OK' if ok else 'FAILED'})")
                 elif inpainter_keys_enabled:
-                    self.append_log("[GTool] Inpainter Keys enabled but no keys configured")
+                    self.append_log("[GTool] Image Gen / Edit Keys enabled but no keys configured")
             except Exception as e:
                 self.append_log(f"[GTool] ⚠️ Key pool init error: {e}")
 
@@ -14853,7 +14853,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             else:
                 UnifiedClient.clear_in_memory_vision_keys()
 
-            # Configure Inpainter key pool for manga custom-image-edit requests.
+            # Configure Image gen/edit key pool for image output and manga custom-image-edit requests.
             if self.config.get('use_inpainter_keys', False) and self.config.get('inpainter_keys', []):
                 UnifiedClient.set_in_memory_inpainter_keys(
                     self.config.get('inpainter_keys', []),

@@ -1840,7 +1840,7 @@ class UnifiedClient:
     _qa_scan_key_pool: Optional[APIKeyPool] = None
     _qa_scan_pool_lock = threading.Lock()
 
-    # Inpainter-dedicated key pool (exclusive to manga custom-image-edit calls)
+    # Image gen/edit-dedicated key pool (manga custom-image-edit + image output requests)
     _inpainter_key_pool: Optional[APIKeyPool] = None
     _inpainter_pool_lock = threading.Lock()
     
@@ -2413,13 +2413,13 @@ class UnifiedClient:
 
             return True
 
-    # In-memory Inpainter-key configuration.
+    # In-memory Image gen/edit-key configuration.
     _in_memory_inpainter_keys = None
     _in_memory_inpainter_keys_lock = RLock()
 
     @classmethod
     def set_in_memory_inpainter_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
-        """Configure Inpainter-key mode without storing the full key list in environment variables."""
+        """Configure Image gen/edit-key mode without storing the full key list in environment variables."""
         try:
             with cls._in_memory_inpainter_keys_lock:
                 cls._in_memory_inpainter_keys = keys_list
@@ -2433,7 +2433,7 @@ class UnifiedClient:
 
     @classmethod
     def clear_in_memory_inpainter_keys(cls):
-        """Clear in-memory Inpainter-key configuration."""
+        """Clear in-memory Image gen/edit-key configuration."""
         with cls._in_memory_inpainter_keys_lock:
             cls._in_memory_inpainter_keys = None
         with cls._inpainter_pool_lock:
@@ -2441,7 +2441,7 @@ class UnifiedClient:
 
     @classmethod
     def setup_inpainter_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
-        """Setup the shared Inpainter API key pool (mirrors setup_glossary_key_pool)."""
+        """Setup the shared Image gen/edit API key pool (mirrors setup_glossary_key_pool)."""
         with cls._inpainter_pool_lock:
             if cls._inpainter_key_pool is None:
                 cls._inpainter_key_pool = APIKeyPool()
@@ -2483,9 +2483,9 @@ class UnifiedClient:
             existing_count = len(getattr(cls._inpainter_key_pool, 'keys', [])) if cls._inpainter_key_pool else 0
             if existing_count != len(validated_keys):
                 if encrypted_keys_fixed > 0:
-                    print(f"🔑 Inpainter key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
+                    print(f"🔑 Image gen/edit key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
                 else:
-                    print(f"🔑 Inpainter key pool: {len(validated_keys)} keys loaded")
+                    print(f"🔑 Image gen/edit key pool: {len(validated_keys)} keys loaded")
 
             return True
     
@@ -4280,6 +4280,17 @@ class UnifiedClient:
         value = context if context is not None else getattr(self, 'context', None)
         return str(value or '').strip().lower() == 'inpainter'
 
+    def _uses_image_gen_edit_key_context(self, context: Any = None) -> bool:
+        """Return True for requests that should use the image gen/edit key pool."""
+        value = str(context if context is not None else getattr(self, 'context', None) or '').strip().lower()
+        if value == 'inpainter':
+            return True
+        if value in ('image_generation', 'imagegen'):
+            return True
+        if value in ('image', 'image_translation'):
+            return os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
+        return False
+
     def _is_manga_ocr_context(self, context: Any = None) -> bool:
         """Return True for manga OCR requests."""
         value = context if context is not None else getattr(self, 'context', None)
@@ -5258,9 +5269,9 @@ class UnifiedClient:
                 except Exception as e:
                     print(f"[VISION KEYS] ⚠️ Failed to apply Vision key override: {e}")
             
-            # INPAINTER KEY OVERRIDE: exclusive pool for manga custom-image-edit requests.
-            _is_inpainter_context = str(context or '').lower() == 'inpainter'
-            if not _qa_scan_overridden and _is_inpainter_context:
+            # IMAGE GEN / EDIT KEY OVERRIDE: dedicated pool for image output and manga custom-image-edit requests.
+            _uses_image_gen_edit_keys = self._uses_image_gen_edit_key_context(context)
+            if not _qa_scan_overridden and _uses_image_gen_edit_keys:
                 try:
                     use_inpainter_keys = os.getenv('USE_INPAINTER_KEYS', '0') == '1'
                     if use_inpainter_keys:
@@ -5281,8 +5292,8 @@ class UnifiedClient:
                         _dedicated_pool_state = self._apply_dedicated_key_pool_override(
                             inpainter_pool,
                             ik_list,
-                            'Inpainter',
-                            'InpainterKey',
+                            'ImageGenEdit',
+                            'ImageGenEditKey',
                         )
                         if _dedicated_pool_state:
                             _inpainter_overridden = True
@@ -5292,10 +5303,10 @@ class UnifiedClient:
                             _had_instance_pool = _dedicated_pool_state['had_instance_pool']
                             _original_instance_pool = _dedicated_pool_state['instance_pool']
                             if not getattr(self.__class__, '_inpainter_pool_logged', False):
-                                print(f"[INPAINTER KEYS] Using Inpainter key pool ({len(inpainter_pool.keys)} keys)")
+                                print(f"[IMAGE GEN/EDIT KEYS] Using image gen/edit key pool ({len(inpainter_pool.keys)} keys)")
                                 self.__class__._inpainter_pool_logged = True
                 except Exception as e:
-                    print(f"[INPAINTER KEYS] Failed to apply Inpainter key override: {e}")
+                    print(f"[IMAGE GEN/EDIT KEYS] Failed to apply image gen/edit key override: {e}")
 
             # GLOSSARY KEY OVERRIDE: When context is 'glossary' and glossary keys are enabled,
             # use the glossary key pool for full multi-key rotation (mirrors main multi-key mode).

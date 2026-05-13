@@ -1626,7 +1626,7 @@ class MultiAPIKeyDialog(QDialog):
             )
             self.translator_gui.config['use_qa_scan_keys'] = use_qa_scan
 
-            # Save Inpainter keys toggle
+            # Save Image gen/edit keys toggle
             use_inpainter = (
                 self.use_inpainter_keys_checkbox.isChecked()
                 if hasattr(self, 'use_inpainter_keys_checkbox')
@@ -1953,7 +1953,7 @@ class MultiAPIKeyDialog(QDialog):
         # Create Vision keys container (hidden by default)
         self._create_qa_scan_section(scrollable_layout)
 
-        # Create Inpainter keys container (hidden by default)
+        # Create Image gen/edit keys container (hidden by default)
         self._create_inpainter_section(scrollable_layout)
 
         # Add stretch to fill remaining space in scroll area
@@ -7656,11 +7656,11 @@ class MultiAPIKeyDialog(QDialog):
     # ===================================================================
 
     # ===================================================================
-    # INPAINTER KEYS SECTION
+    # IMAGE GEN / EDIT KEYS SECTION
     # ===================================================================
 
     def _create_inpainter_section(self, parent_layout):
-        """Create the Inpainter keys section below glossary."""
+        """Create the Image gen / edit keys section below glossary."""
         # Container that can be hidden
         self.inpainter_container = QWidget()
         inpainter_container_layout = QVBoxLayout(self.inpainter_container)
@@ -7672,16 +7672,16 @@ class MultiAPIKeyDialog(QDialog):
         self.inpainter_separator.setFrameShadow(QFrame.Sunken)
         inpainter_container_layout.addWidget(self.inpainter_separator)
 
-        # Main Inpainter keys frame
-        inpainter_frame = QGroupBox("Inpainter Keys")
+        # Main Image gen / edit keys frame
+        inpainter_frame = QGroupBox("Image Gen / Edit Keys")
         inpainter_frame_layout = QVBoxLayout(inpainter_frame)
         inpainter_frame_layout.setContentsMargins(15, 15, 15, 15)
 
         # Description
         desc_label = QLabel(
-                "Configure dedicated keys for manga custom-image-edit inpainting calls.\n"
-                "Requests sent with context=Inpainter use this pool exclusively.\n"
-                "If no Inpainter keys are configured or the pool is disabled, the main key pool/current provider is used instead.")
+                "Configure dedicated keys for image generation/edit calls.\n"
+                "Used by image output mode requests and manga custom-image-edit requests.\n"
+                "If no Image gen / edit keys are configured or the pool is disabled, the main key pool/current provider is used instead.")
         desc_label.setStyleSheet("color: gray;")
         desc_label.setWordWrap(True)
         inpainter_frame_layout.addWidget(desc_label)
@@ -7693,7 +7693,7 @@ class MultiAPIKeyDialog(QDialog):
         inpainter_checkbox_layout.setSpacing(8)
 
         self.use_inpainter_keys_var = self._read_persisted_bool('use_inpainter_keys', False)
-        self.use_inpainter_keys_checkbox = self._create_styled_checkbox("Enable Inpainter Keys")
+        self.use_inpainter_keys_checkbox = self._create_styled_checkbox("Enable Image Gen / Edit Keys")
         self.use_inpainter_keys_checkbox.setChecked(self.use_inpainter_keys_var)
         self.use_inpainter_keys_checkbox.toggled.connect(self._toggle_inpainter_section)
 
@@ -7731,13 +7731,13 @@ class MultiAPIKeyDialog(QDialog):
 
         inpainter_frame_layout.addWidget(inpainter_checkbox_container)
 
-        # Add Inpainter key section
+        # Add Image gen / edit key section
         self.add_inpainter_frame = QWidget()
         add_inpainter_grid = QGridLayout(self.add_inpainter_frame)
         add_inpainter_grid.setContentsMargins(0, 0, 0, 10)
 
         # Row 0: API Key and Model
-        add_inpainter_grid.addWidget(QLabel("Inpainter API Key:"), 0, 0, Qt.AlignLeft)
+        add_inpainter_grid.addWidget(QLabel("Image Gen/Edit API Key:"), 0, 0, Qt.AlignLeft)
         self.inpainter_key_entry = QLineEdit()
         self.inpainter_key_entry.setEchoMode(QLineEdit.Password)
         add_inpainter_grid.addWidget(self.inpainter_key_entry, 0, 1)
@@ -7758,7 +7758,7 @@ class MultiAPIKeyDialog(QDialog):
         add_inpainter_grid.addWidget(self.inpainter_model_combo, 0, 4)
 
         # Add button
-        add_inpainter_btn = QPushButton("Add Inpainter Key")
+        add_inpainter_btn = QPushButton("Add Image Gen/Edit Key")
         add_inpainter_btn.clicked.connect(self._add_inpainter_key)
         add_inpainter_grid.addWidget(add_inpainter_btn, 0, 5, Qt.AlignRight)
 
@@ -7826,7 +7826,7 @@ class MultiAPIKeyDialog(QDialog):
         # Initially hide endpoint fields
         self._toggle_inpainter_individual_endpoint_fields()
 
-        # Inpainter keys list
+        # Image gen / edit keys list
         self._create_inpainter_list(inpainter_frame_layout)
 
         # Add container to parent
@@ -7837,8 +7837,8 @@ class MultiAPIKeyDialog(QDialog):
         self._toggle_inpainter_section()
 
     def _create_inpainter_list(self, parent_layout):
-        """Create the Inpainter keys list."""
-        self.inpainter_list_label = QLabel("Inpainter Keys (tried in order):")
+        """Create the Image gen / edit keys list."""
+        self.inpainter_list_label = QLabel("Image Gen / Edit Keys (tried in order):")
         list_label_font = QFont()
         list_label_font.setBold(True)
         self.inpainter_list_label.setFont(list_label_font)
@@ -7960,11 +7960,11 @@ class MultiAPIKeyDialog(QDialog):
         inpainter_action_layout.addWidget(self.inpainter_status_label)
         parent_layout.addWidget(self.inpainter_action_frame)
 
-        # Load existing Inpainter keys
+        # Load existing Image gen/edit keys
         self._load_inpainter_keys()
 
     def _load_inpainter_keys(self):
-        """Load Inpainter keys from config."""
+        """Load Image gen/edit keys from config."""
         inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
 
         v_scroll = self.inpainter_tree.verticalScrollBar().value()
@@ -8073,7 +8073,7 @@ class MultiAPIKeyDialog(QDialog):
             self._refresh_inpainter_pool()
 
     def _add_inpainter_key(self):
-        """Add a new Inpainter key"""
+        """Add a new Image gen/edit key"""
         api_key = self.inpainter_key_entry.text().strip()
         model = self.inpainter_model_combo.currentText().strip()
         google_credentials = self.inpainter_google_creds_entry.text().strip() or None
@@ -8130,12 +8130,12 @@ class MultiAPIKeyDialog(QDialog):
         if azure_endpoint:
             extras.append(f"Azure: {azure_endpoint[:30]}...")
         extra_info = f" ({', '.join(extras)})" if extras else ""
-        self._show_inpainter_status(f"Added Inpainter key for model: {model}{extra_info}")
+        self._show_inpainter_status(f"Added Image gen/edit key for model: {model}{extra_info}")
 
         self._notify_authgpt_visibility()
 
     def _move_inpainter_key(self, direction):
-        """Move selected Inpainter key up or down"""
+        """Move selected Image gen/edit key up or down"""
         selected = self.inpainter_tree.selectedItems()
         if not selected:
             return
@@ -8173,10 +8173,10 @@ class MultiAPIKeyDialog(QDialog):
                     item.setSelected(True)
 
     def _test_selected_inpainter(self):
-        """Test selected Inpainter key"""
+        """Test selected Image gen/edit key"""
         selected = self.inpainter_tree.selectedItems()
         if not selected:
-            QMessageBox.warning(self, "Warning", "Please select a Inpainter key to test")
+            QMessageBox.warning(self, "Warning", "Please select an Image gen/edit key to test")
             return
 
         index = self.inpainter_tree.indexOfTopLevelItem(selected[0])
@@ -8201,11 +8201,11 @@ class MultiAPIKeyDialog(QDialog):
         QTimer.singleShot(100, lambda: self._test_single_inpainter_key(key_data, index))
 
     def _test_all_inpainter(self):
-        """Test all Inpainter keys in parallel."""
+        """Test all Image gen/edit keys in parallel."""
         inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
 
         if not inpainter_keys:
-            QMessageBox.warning(self, "Warning", "No Inpainter keys to test")
+            QMessageBox.warning(self, "Warning", "No Image gen/edit keys to test")
             return
 
         for i in range(self.inpainter_tree.topLevelItemCount()):
@@ -8275,11 +8275,11 @@ class MultiAPIKeyDialog(QDialog):
                     item.setForeground(col, Qt.darkYellow)
 
     def _test_single_inpainter_key(self, key_data, index):
-        """Test a single Inpainter key — REAL API TEST"""
+        """Test a single Image gen/edit key — REAL API TEST"""
         api_key = key_data.get('api_key', '')
         model = key_data.get('model', '')
 
-        print(f"[DEBUG] Starting REAL Inpainter key test for {model}")
+        print(f"[DEBUG] Starting REAL Image gen/edit key test for {model}")
 
         from concurrent.futures import ThreadPoolExecutor
         from unified_api_client import UnifiedClient
@@ -8335,7 +8335,7 @@ class MultiAPIKeyDialog(QDialog):
                 if response and isinstance(response, tuple):
                     content, _ = response
                     if content and "test successful" in content.lower():
-                        print(f"[DEBUG] Inpainter key test completed for {model}: PASSED")
+                        print(f"[DEBUG] Image gen/edit key test completed for {model}: PASSED")
                         if not timed_out[0]:
                             if HAS_GUI:
                                 QMetaObject.invokeMethod(self, "_update_inpainter_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
@@ -8343,14 +8343,14 @@ class MultiAPIKeyDialog(QDialog):
                                 self._update_inpainter_test_result(index, True)
                         return
 
-                print(f"[DEBUG] Inpainter key test completed for {model}: FAILED")
+                print(f"[DEBUG] Image gen/edit key test completed for {model}: FAILED")
                 if not timed_out[0]:
                     if HAS_GUI:
                         QMetaObject.invokeMethod(self, "_update_inpainter_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
                     else:
                         self._update_inpainter_test_result(index, False)
             except Exception as e:
-                print(f"[DEBUG] Inpainter key test error for {model}: {e}")
+                print(f"[DEBUG] Image gen/edit key test error for {model}: {e}")
                 if not timed_out[0]:
                     if HAS_GUI:
                         QMetaObject.invokeMethod(self, "_update_inpainter_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
@@ -8365,7 +8365,7 @@ class MultiAPIKeyDialog(QDialog):
                     future.result(timeout=30)
                 except FuturesTimeout:
                     timed_out[0] = True
-                    print(f"[DEBUG] Inpainter key test TIMED OUT for {model} (30s)")
+                    print(f"[DEBUG] Image gen/edit key test TIMED OUT for {model} (30s)")
                     _client = client_ref[0]
                     if _client:
                         try:
@@ -8396,12 +8396,12 @@ class MultiAPIKeyDialog(QDialog):
             thread.start()
 
     def _remove_selected_inpainter(self):
-        """Remove selected Inpainter keys."""
+        """Remove selected Image gen/edit keys."""
         selected = self.inpainter_tree.selectedItems()
         if not selected:
             return
 
-        reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected Inpainter key(s)?",
+        reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected Image gen/edit key(s)?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             indices = sorted([self.inpainter_tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
@@ -8415,12 +8415,12 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui.config['inpainter_keys'] = inpainter_keys
             self.translator_gui.save_config(show_message=False)
             self._load_inpainter_keys()
-            self._show_inpainter_status(f"Removed {len(selected)} Inpainter key(s)")
+            self._show_inpainter_status(f"Removed {len(selected)} Image gen/edit key(s)")
             self._notify_authgpt_visibility()
 
 
     def _enable_selected_inpainter(self):
-        """Enable selected Inpainter keys."""
+        """Enable selected Image gen/edit keys."""
         selected = self.inpainter_tree.selectedItems()
         if not selected:
             return
@@ -8432,11 +8432,11 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['inpainter_keys'] = inpainter_keys
         self.translator_gui.save_config(show_message=False)
         self._load_inpainter_keys()
-        self._show_inpainter_status(f"Enabled {len(selected)} Inpainter key(s)")
+        self._show_inpainter_status(f"Enabled {len(selected)} Image gen/edit key(s)")
         self._notify_authgpt_visibility()
 
     def _disable_selected_inpainter(self):
-        """Disable selected Inpainter keys."""
+        """Disable selected Image gen/edit keys."""
         selected = self.inpainter_tree.selectedItems()
         if not selected:
             return
@@ -8448,21 +8448,21 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['inpainter_keys'] = inpainter_keys
         self.translator_gui.save_config(show_message=False)
         self._load_inpainter_keys()
-        self._show_inpainter_status(f"Disabled {len(selected)} Inpainter key(s)")
+        self._show_inpainter_status(f"Disabled {len(selected)} Image gen/edit key(s)")
         self._notify_authgpt_visibility()
 
     def _clear_all_inpainter(self):
-        """Clear all Inpainter keys."""
+        """Clear all Image gen/edit keys."""
         if self.inpainter_tree.topLevelItemCount() == 0:
             return
 
-        reply = QMessageBox.question(self, "Confirm", "Remove ALL Inpainter keys?",
+        reply = QMessageBox.question(self, "Confirm", "Remove ALL Image gen/edit keys?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             self.translator_gui.config['inpainter_keys'] = []
             self.translator_gui.save_config(show_message=False)
             self._load_inpainter_keys()
-            self._show_inpainter_status("Cleared all Inpainter keys")
+            self._show_inpainter_status("Cleared all Image gen/edit keys")
             self._notify_authgpt_visibility()
 
     def _toggle_inpainter_section(self):
@@ -8480,7 +8480,7 @@ class MultiAPIKeyDialog(QDialog):
         if hasattr(self, 'inpainter_tree') and not enabled:
             self.inpainter_tree.clearSelection()
 
-        self._show_inpainter_status(f"Inpainter Keys {'enabled' if enabled else 'disabled'}")
+        self._show_inpainter_status(f"Image Gen / Edit Keys {'enabled' if enabled else 'disabled'}")
 
         # Update in-memory config immediately
         self.translator_gui.config['use_inpainter_keys'] = enabled
@@ -8489,9 +8489,9 @@ class MultiAPIKeyDialog(QDialog):
         if not getattr(self, '_initializing', False):
             inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
             if enabled:
-                msg = f"🔑 Inpainter key pool: {len(inpainter_keys)} keys loaded"
+                msg = f"🔑 Image gen/edit key pool: {len(inpainter_keys)} keys loaded"
             else:
-                msg = f"🔑 Inpainter key pool: disabled"
+                msg = f"🔑 Image gen/edit key pool: disabled"
             if hasattr(self.translator_gui, 'append_log'):
                 try:
                     self.translator_gui.append_log(msg)
@@ -8528,7 +8528,7 @@ class MultiAPIKeyDialog(QDialog):
             self._notify_authgpt_visibility()
 
     def _refresh_inpainter_pool(self):
-        """Refresh the in-memory Inpainter key pool after any change."""
+        """Refresh the in-memory Image gen/edit key pool after any change."""
         try:
             use_inpainter = self.use_inpainter_keys_checkbox.isChecked() if hasattr(self, 'use_inpainter_keys_checkbox') else False
             if not use_inpainter:
@@ -8549,7 +8549,7 @@ class MultiAPIKeyDialog(QDialog):
             pass
 
     def _toggle_inpainter_visibility(self):
-        """Toggle Inpainter key field visibility"""
+        """Toggle Image gen/edit key field visibility"""
         if self.inpainter_key_entry.echoMode() == QLineEdit.Password:
             self.inpainter_key_entry.setEchoMode(QLineEdit.Normal)
             self.show_inpainter_btn.setText('🔒')
@@ -8558,7 +8558,7 @@ class MultiAPIKeyDialog(QDialog):
             self.show_inpainter_btn.setText('👁')
 
     def _toggle_inpainter_individual_endpoint_fields(self):
-        """Toggle visibility of Inpainter individual endpoint fields"""
+        """Toggle visibility of Image gen/edit individual endpoint fields"""
         enabled = self.inpainter_individual_endpoint_toggle.isChecked()
 
         self.inpainter_individual_endpoint_label.setVisible(enabled)
@@ -8574,7 +8574,7 @@ class MultiAPIKeyDialog(QDialog):
             self.inpainter_azure_api_version_combo.setCurrentText('2025-01-01-preview')
 
     def _show_inpainter_context_menu(self, position):
-        """Show context menu for Inpainter keys."""
+        """Show context menu for Image gen/edit keys."""
         item = self.inpainter_tree.itemAt(position)
         if not item:
             return
@@ -8646,7 +8646,7 @@ class MultiAPIKeyDialog(QDialog):
         clear_temp_action = menu.addAction("Clear Key Temperature")
         clear_temp_action.triggered.connect(self._clear_inpainter_key_temperature_for_selected)
 
-        # Per-key API call delay options for Inpainter keys
+        # Per-key API call delay options for Image gen/edit keys
         if selected_count > 1:
             set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
         else:
@@ -8674,7 +8674,7 @@ class MultiAPIKeyDialog(QDialog):
         menu.exec_(self.inpainter_tree.viewport().mapToGlobal(position))
 
     def _change_inpainter_model_for_selected(self):
-        """Change model name for selected Inpainter keys."""
+        """Change model name for selected Image gen/edit keys."""
         selected = self.inpainter_tree.selectedItems()
         if not selected:
             return
@@ -8682,7 +8682,7 @@ class MultiAPIKeyDialog(QDialog):
         inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
 
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"Change Model for {len(selected)} Inpainter Keys")
+        dialog.setWindowTitle(f"Change Model for {len(selected)} Image Gen/Edit Keys")
         screen = QApplication.primaryScreen().geometry()
         width = int(screen.width() * 0.21)
         height = int(screen.height() * 0.13)
@@ -8717,7 +8717,7 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.config['inpainter_keys'] = inpainter_keys
                 self.translator_gui.save_config(show_message=False)
                 self._load_inpainter_keys()
-                self._show_inpainter_status(f"Changed model to '{new_model}' for {len(selected)} Inpainter keys")
+                self._show_inpainter_status(f"Changed model to '{new_model}' for {len(selected)} Image gen/edit keys")
                 dialog.accept()
 
         button_layout = QHBoxLayout()
@@ -8754,10 +8754,10 @@ class MultiAPIKeyDialog(QDialog):
         if len(new_order) == len(inpainter_keys):
             self.translator_gui.config['inpainter_keys'] = new_order
             self.translator_gui.save_config(show_message=False)
-            self._show_inpainter_status("Reordered Inpainter keys")
+            self._show_inpainter_status("Reordered Image gen/edit keys")
 
     def _on_inpainter_selection_change(self):
-        """Update position label when Inpainter selection changes"""
+        """Update position label when Image gen/edit selection changes"""
         selected = self.inpainter_tree.selectedItems()
         if selected:
             index = self.inpainter_tree.indexOfTopLevelItem(selected[0])
@@ -8767,7 +8767,7 @@ class MultiAPIKeyDialog(QDialog):
             self.inpainter_position_label.setText("")
 
     def _on_inpainter_click(self, item, column):
-        """Handle double-click on Inpainter tree item for inline editing"""
+        """Handle double-click on Image gen/edit tree item for inline editing"""
         if not item:
             return
 
@@ -8843,12 +8843,12 @@ class MultiAPIKeyDialog(QDialog):
 
 
     def _show_inpainter_status(self, message: str):
-        """Show status message in the Inpainter section."""
+        """Show status message in the Image gen/edit section."""
         if hasattr(self, 'inpainter_status_label'):
             self.inpainter_status_label.setText(message)
 
     def _configure_inpainter_individual_endpoint(self, inpainter_index):
-        """Configure individual endpoint for a Inpainter key"""
+        """Configure individual endpoint for an Image gen/edit key"""
         inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
         if inpainter_index >= len(inpainter_keys):
             return
@@ -8875,7 +8875,7 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui.save_config(show_message=False)
             self._load_inpainter_keys()
             status = "configured" if temp_key.use_individual_endpoint else "disabled"
-            self._show_inpainter_status(f"Individual endpoint {status} for Inpainter key")
+            self._show_inpainter_status(f"Individual endpoint {status} for Image gen/edit key")
 
         if IndividualEndpointDialog is None:
             QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
@@ -8884,7 +8884,7 @@ class MultiAPIKeyDialog(QDialog):
         dialog.exec_()
 
     def _set_inpainter_output_token_limit_for_selected(self):
-        """Set per-key output token limit for selected Inpainter keys."""
+        """Set per-key output token limit for selected Image gen/edit keys."""
         from PySide6.QtWidgets import QInputDialog
         selected = self.inpainter_tree.selectedItems()
         if not selected:
@@ -8913,8 +8913,8 @@ class MultiAPIKeyDialog(QDialog):
                 default_val = 8192
 
         value, ok = QInputDialog.getInt(
-            self, "Set Inpainter Key Output Token Limit",
-            "Max output tokens for selected Inpainter key(s):",
+            self, "Set Image Gen/Edit Key Output Token Limit",
+            "Max output tokens for selected Image gen/edit key(s):",
             default_val, 1, 2000000, 512,
         )
         if not ok or value <= 0:
@@ -8926,10 +8926,10 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['inpainter_keys'] = inpainter_keys
         self.translator_gui.save_config(show_message=False)
         self._load_inpainter_keys()
-        self._show_inpainter_status(f"Set Inpainter key output token limit to {value} for {len(selected_indices)} key(s)")
+        self._show_inpainter_status(f"Set Image gen/edit key output token limit to {value} for {len(selected_indices)} key(s)")
 
     def _clear_inpainter_output_token_limit_for_selected(self):
-        """Clear per-key output token limit for selected Inpainter keys."""
+        """Clear per-key output token limit for selected Image gen/edit keys."""
         selected = self.inpainter_tree.selectedItems()
         if not selected:
             return
@@ -8943,10 +8943,10 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['inpainter_keys'] = inpainter_keys
         self.translator_gui.save_config(show_message=False)
         self._load_inpainter_keys()
-        self._show_inpainter_status(f"Cleared Inpainter key output token limit for {len(selected_indices)} key(s)")
+        self._show_inpainter_status(f"Cleared Image gen/edit key output token limit for {len(selected_indices)} key(s)")
 
     def _set_inpainter_key_temperature_for_selected(self):
-        """Set per-key temperature for selected Inpainter keys."""
+        """Set per-key temperature for selected Image gen/edit keys."""
         from PySide6.QtWidgets import QInputDialog
         selected = self.inpainter_tree.selectedItems()
         if not selected:
@@ -8969,8 +8969,8 @@ class MultiAPIKeyDialog(QDialog):
 
         value, ok = QInputDialog.getDouble(
             self,
-            "Set Inpainter Key Temperature",
-            "Temperature for selected Inpainter key(s) (0.0 - 1.0):",
+            "Set Image Gen/Edit Key Temperature",
+            "Temperature for selected Image gen/edit key(s) (0.0 - 1.0):",
             default_val,
             0.0,
             1.0,
@@ -8985,10 +8985,10 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['inpainter_keys'] = inpainter_keys
         self.translator_gui.save_config(show_message=False)
         self._load_inpainter_keys()
-        self._show_inpainter_status(f"Set Inpainter key temperature to {value} for {len(selected_indices)} key(s)")
+        self._show_inpainter_status(f"Set Image gen/edit key temperature to {value} for {len(selected_indices)} key(s)")
 
     def _clear_inpainter_key_temperature_for_selected(self):
-        """Clear per-key temperature for selected Inpainter keys."""
+        """Clear per-key temperature for selected Image gen/edit keys."""
         selected = self.inpainter_tree.selectedItems()
         if not selected:
             return
@@ -9002,10 +9002,10 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['inpainter_keys'] = inpainter_keys
         self.translator_gui.save_config(show_message=False)
         self._load_inpainter_keys()
-        self._show_inpainter_status(f"Cleared Inpainter key temperature for {len(selected_indices)} key(s)")
+        self._show_inpainter_status(f"Cleared Image gen/edit key temperature for {len(selected_indices)} key(s)")
 
     def _set_inpainter_api_call_delay_for_selected(self):
-        """Set per-key API call delay for selected Inpainter keys."""
+        """Set per-key API call delay for selected Image gen/edit keys."""
         from PySide6.QtWidgets import QInputDialog
         selected = self.inpainter_tree.selectedItems()
         if not selected:
@@ -9034,7 +9034,7 @@ class MultiAPIKeyDialog(QDialog):
             self._show_inpainter_status(f"Set API call delay to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
 
     def _clear_inpainter_api_call_delay_for_selected(self):
-        """Clear per-key API call delay for selected Inpainter keys."""
+        """Clear per-key API call delay for selected Image gen/edit keys."""
         selected = self.inpainter_tree.selectedItems()
         if not selected:
             return
@@ -9049,7 +9049,7 @@ class MultiAPIKeyDialog(QDialog):
         self._show_inpainter_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
 
     def _toggle_inpainter_individual_endpoint(self, inpainter_index, enabled):
-        """Quick toggle individual endpoint on/off for Inpainter key"""
+        """Quick toggle individual endpoint on/off for Image gen/edit key"""
         inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
         if inpainter_index >= len(inpainter_keys):
             return
@@ -9061,13 +9061,13 @@ class MultiAPIKeyDialog(QDialog):
 
         status = "enabled" if enabled else "disabled"
         model = inpainter_keys[inpainter_index].get('model', 'unknown')
-        self._show_inpainter_status(f"Individual endpoint {status} for Inpainter key ({model})")
+        self._show_inpainter_status(f"Individual endpoint {status} for Image gen/edit key ({model})")
 
     def _browse_inpainter_google_credentials(self):
-        """Browse for Google Cloud credentials JSON file for Inpainter keys."""
+        """Browse for Google Cloud credentials JSON file for Image gen/edit keys."""
         filename, _ = QFileDialog.getOpenFileName(
             self,
-            "Select Google Cloud Credentials JSON for Inpainter",
+            "Select Google Cloud Credentials JSON for Image Gen/Edit",
             "",
             "JSON files (*.json);;All files (*.*)"
         )
@@ -9078,7 +9078,7 @@ class MultiAPIKeyDialog(QDialog):
                     creds_data = json.load(f)
                     if 'type' in creds_data and 'project_id' in creds_data:
                         self.inpainter_google_creds_entry.setText(filename)
-                        self._show_inpainter_status(f"Selected Inpainter key Google credentials: {os.path.basename(filename)}")
+                        self._show_inpainter_status(f"Selected Image gen/edit key Google credentials: {os.path.basename(filename)}")
                     else:
                         QMessageBox.critical(
                             self,
@@ -9089,7 +9089,7 @@ class MultiAPIKeyDialog(QDialog):
                 QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
 
     # ===================================================================
-    # END INPAINTER KEYS SECTION
+    # END IMAGE GEN / EDIT KEYS SECTION
     # ===================================================================
 
     def _manage_refusal_patterns(self):

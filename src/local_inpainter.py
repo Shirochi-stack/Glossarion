@@ -2573,7 +2573,7 @@ class LocalInpainter:
             return {}
 
     def _sync_inpainter_key_pool_from_config(self):
-        """Ensure context=Inpainter keys are available without opening Multi API Key Manager."""
+        """Ensure image gen/edit keys are available without opening Multi API Key Manager."""
         try:
             cfg = self.config if isinstance(getattr(self, 'config', None), dict) else {}
             disk_cfg = {}
@@ -2593,7 +2593,7 @@ class LocalInpainter:
                 return
             if not keys:
                 if not getattr(self, '_logged_missing_inpainter_keys', False):
-                    logger.warning("Inpainter keys enabled but no inpainter_keys are configured")
+                    logger.warning("Image gen/edit keys enabled but no inpainter_keys are configured")
                     self._logged_missing_inpainter_keys = True
                 return
 
@@ -2611,10 +2611,10 @@ class LocalInpainter:
                 rotation_frequency=rotation_frequency,
             )
             if not getattr(self, '_logged_inpainter_key_sync', False):
-                logger.info(f"Synced {len(keys)} Inpainter key(s) from config for custom-image-edit")
+                logger.info(f"Synced {len(keys)} image gen/edit key(s) from config")
                 self._logged_inpainter_key_sync = True
         except Exception as e:
-            logger.warning(f"Failed to sync Inpainter key pool from config: {e}")
+            logger.warning(f"Failed to sync image gen/edit key pool from config: {e}")
 
     def _custom_image_edit_inpaint(self, image, mask, iterations=None):
         """Inpaint through an OpenAI-compatible /images/edits endpoint."""
