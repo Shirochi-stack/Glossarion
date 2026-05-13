@@ -6638,8 +6638,35 @@ class BatchTranslationProcessor:
                 # Use the same output filename so we can track failed chapters properly
                 fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                 # Check if it's a timeout failure
-                if "[TIMEOUT]" in error_msg or (hasattr(e, 'error_type') and e.error_type == 'timeout'):
-                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="qa_failed", qa_issues_found=["TIMEOUT"], chapter_obj=chapter)
+                error_lower = (error_msg or "").lower()
+                error_type = getattr(e, 'error_type', None)
+                if "[TIMEOUT]" in error_msg or error_type == 'timeout':
+                    self.update_progress_fn(
+                        idx, actual_num, content_hash, fname,
+                        status="qa_failed", qa_issues_found=["TIMEOUT"], chapter_obj=chapter
+                    )
+                elif (
+                    "finish_reason='length'" in error_msg
+                    or 'finish_reason="length"' in error_msg
+                    or "finish_reason=max_tokens" in error_lower
+                    or "finish_reason='max_tokens'" in error_msg
+                    or "response was truncated" in error_lower
+                    or "max_tokens" in error_lower
+                ):
+                    self.update_progress_fn(
+                        idx, actual_num, content_hash, fname,
+                        status="qa_failed", qa_issues_found=["TRUNCATED"], chapter_obj=chapter
+                    )
+                elif error_type == 'prohibited_content' or 'prohibited_content' in error_lower or 'content_filter' in error_lower:
+                    self.update_progress_fn(
+                        idx, actual_num, content_hash, fname,
+                        status="qa_failed", qa_issues_found=["PROHIBITED_CONTENT"], chapter_obj=chapter
+                    )
+                elif error_type in ('api_error', 'validation') or 'api_error' in error_lower or 'invalid_argument' in error_lower:
+                    self.update_progress_fn(
+                        idx, actual_num, content_hash, fname,
+                        status="qa_failed", qa_issues_found=["API_ERROR"], chapter_obj=chapter
+                    )
                 else:
                     self.update_progress_fn(idx, actual_num, content_hash, fname, status="failed")
                 self.save_progress_fn()
