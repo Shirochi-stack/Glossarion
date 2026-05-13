@@ -2921,7 +2921,11 @@ class MangaImagePreviewWidget(QWidget):
 
                     if source_path == self.current_image_path:
                         self._last_source_display_path = new_display_path
-                        self.viewer.load_image(new_display_path)
+                        self.load_image(
+                            source_path,
+                            preserve_rectangles=True,
+                            preserve_text_overlays=True
+                        )
                 else:
                     self._refresh_thumbnail_for_path(source_path)
         except Exception as e:
@@ -3278,6 +3282,12 @@ class MangaImagePreviewWidget(QWidget):
         if clear_image_list:
             self._thumbnail_generation = getattr(self, '_thumbnail_generation', 0) + 1
             self.image_paths = []
+            self._thumbnail_folder_mtimes = {}
+            self._thumbnail_display_paths = {}
+            try:
+                self._thumbnail_folder_poll_timer.stop()
+            except Exception:
+                pass
             try:
                 self.thumbnail_list.clear()
                 self.thumbnail_list.setVisible(False)
