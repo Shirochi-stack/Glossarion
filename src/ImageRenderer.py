@@ -3486,6 +3486,7 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
             return []
         
         import cv2
+        import concurrent.futures
         
         # Load image
         image = cv2.imread(image_path)
@@ -3645,20 +3646,12 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                         return []
                 
                 def _custom_api_ocr_batch_size():
-                    for value in (
-                        getattr(self.main_gui, 'batch_size_var', None) if hasattr(self, 'main_gui') else None,
-                        (self.main_gui.config.get('batch_size') if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config') else None),
-                        os.environ.get('BATCH_SIZE'),
-                    ):
-                        try:
-                            if hasattr(value, 'get'):
-                                value = value.get()
-                            size = int(value)
-                            if size > 0:
-                                return size
-                        except Exception:
-                            continue
-                    return 1
+                    try:
+                        if not bool(ocr_config.get('custom_api_ocr_batch_enabled', True)):
+                            return 1
+                        return max(1, int(ocr_config.get('custom_api_ocr_batch_size', 5)))
+                    except Exception:
+                        return 1
 
                 if provider == 'custom-api' and len(regions) > 1:
                     ocr_workers = min(_custom_api_ocr_batch_size(), len(regions))
@@ -11810,6 +11803,13 @@ def _get_ocr_config(self) -> dict:
         provider = 'azure-document-intelligence'
     print(f"[DEBUG] Building OCR config for provider: {provider}")
     config = {'provider': provider}
+    try:
+        cfg = self.main_gui.config if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config') else {}
+        config['custom_api_ocr_batch_enabled'] = bool(cfg.get('manga_custom_api_ocr_batch_enabled', True))
+        config['custom_api_ocr_batch_size'] = max(1, int(cfg.get('manga_custom_api_ocr_batch_size', 5)))
+    except Exception:
+        config['custom_api_ocr_batch_enabled'] = True
+        config['custom_api_ocr_batch_size'] = 5
     
     if config['provider'] == 'google':
         google_creds = self.main_gui.config.get('google_vision_credentials', '') or \

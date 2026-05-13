@@ -2490,28 +2490,14 @@ class MangaTranslator:
             self._log("📝 BATCH MODE DISABLED")
 
     def _get_custom_api_ocr_batch_size(self) -> int:
-        """Use the main Batch Size value for custom-api OCR API concurrency."""
-        candidates = []
+        """Use custom-api OCR's separate batch toggle and size."""
         try:
-            candidates.append(getattr(self.main_gui, 'batch_size_var', None))
+            cfg = getattr(self.main_gui, 'config', {}) or {}
+            if not bool(cfg.get('manga_custom_api_ocr_batch_enabled', True)):
+                return 1
+            return max(1, int(cfg.get('manga_custom_api_ocr_batch_size', 5)))
         except Exception:
-            pass
-        try:
-            candidates.append((getattr(self.main_gui, 'config', {}) or {}).get('batch_size'))
-        except Exception:
-            pass
-        candidates.extend([getattr(self, 'batch_size', None), os.getenv('BATCH_SIZE')])
-
-        for value in candidates:
-            try:
-                if hasattr(value, 'get'):
-                    value = value.get()
-                size = int(value)
-                if size > 0:
-                    return size
-            except Exception:
-                continue
-        return 1
+            return 1
 
     def _ensure_bubble_detector_ready(self, ocr_settings):
         """Ensure a usable BubbleDetector for current thread, auto-reloading models after cleanup."""
@@ -5077,11 +5063,9 @@ class MangaTranslator:
                             self._current_rtdetr_detections = rtdetr_detections
                             self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
                             
-                            # Decide parallelization for custom-api:
-                            # Use API batch mode OR local parallel toggle so that API calls can run in parallel
                             custom_api_ocr_batch_size = self._get_custom_api_ocr_batch_size()
-                            if (custom_api_ocr_batch_size > 1 or getattr(self, 'batch_mode', False) or self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True)) and len(all_regions) > 1:
-                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions (custom-api; API batch mode honored)")
+                            if custom_api_ocr_batch_size > 1 and len(all_regions) > 1:
+                                self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions (custom-api; workers={min(custom_api_ocr_batch_size, len(all_regions))})")
                                 ocr_results = self._parallel_ocr_regions(image, all_regions, 'custom-api', confidence_threshold)
                             else:
                                 # Original sequential processing

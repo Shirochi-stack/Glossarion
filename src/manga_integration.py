@@ -3194,6 +3194,8 @@ class MangaTranslationTab(QObject):
             self.azure_frame.setVisible(False)
         if hasattr(self, 'azure_doc_intel_frame'):
             self.azure_doc_intel_frame.setVisible(False)
+        if hasattr(self, 'custom_api_ocr_batch_frame'):
+            self.custom_api_ocr_batch_frame.setVisible(provider == 'custom-api')
         
         # Show only the relevant settings frame for the selected provider
         if provider == 'google':
@@ -3239,6 +3241,15 @@ class MangaTranslationTab(QObject):
         # Save the selection (write BOTH keys to keep UIs in sync)
         self.main_gui.config['manga_ocr_provider'] = provider
         self.main_gui.config['ocr_provider'] = provider
+        if hasattr(self, 'manga_ocr_disable_thinking_checkbox'):
+            ms = self.main_gui.config.setdefault('manga_settings', {})
+            ocr_set = ms.setdefault('ocr', {})
+            ocr_set['manga_ocr_disable_thinking'] = bool(self.manga_ocr_disable_thinking_checkbox.isChecked())
+            os.environ['MANGA_OCR_DISABLE_THINKING'] = '1' if self.manga_ocr_disable_thinking_checkbox.isChecked() else '0'
+        if hasattr(self, 'custom_api_ocr_batch_checkbox'):
+            self.main_gui.config['manga_custom_api_ocr_batch_enabled'] = bool(self.custom_api_ocr_batch_checkbox.isChecked())
+        if hasattr(self, 'custom_api_ocr_batch_size_spinbox'):
+            self.main_gui.config['manga_custom_api_ocr_batch_size'] = int(self.custom_api_ocr_batch_size_spinbox.value())
         if hasattr(self.main_gui, 'save_config'):
             self.main_gui.save_config(show_message=False)
         
@@ -3965,6 +3976,56 @@ class MangaTranslationTab(QObject):
         
         ocr_provider_layout.addStretch()
         settings_frame_layout.addWidget(self.ocr_provider_frame)
+
+        self.custom_api_ocr_batch_frame = QWidget()
+        custom_api_batch_layout = QHBoxLayout(self.custom_api_ocr_batch_frame)
+        custom_api_batch_layout.setContentsMargins(0, 0, 0, 10)
+        custom_api_batch_layout.setSpacing(10)
+
+        batch_label = QLabel("Custom API OCR:")
+        batch_label.setMinimumWidth(150)
+        batch_label.setAlignment(Qt.AlignLeft)
+        custom_api_batch_layout.addWidget(batch_label)
+
+        self.manga_ocr_disable_thinking_checkbox = self._create_styled_checkbox("Disable all thinking")
+        self.manga_ocr_disable_thinking_checkbox.setChecked(bool(getattr(self, 'manga_ocr_disable_thinking_value', True)))
+        self.manga_ocr_disable_thinking_checkbox.setToolTip("Applies only to custom-api manga OCR requests. Removes thinking params for faster OCR.")
+        self.manga_ocr_disable_thinking_checkbox.stateChanged.connect(
+            lambda: (
+                setattr(self, 'manga_ocr_disable_thinking_value', self.manga_ocr_disable_thinking_checkbox.isChecked()),
+                self._save_rendering_settings()
+            )
+        )
+        custom_api_batch_layout.addWidget(self.manga_ocr_disable_thinking_checkbox)
+
+        self.custom_api_ocr_batch_checkbox = self._create_styled_checkbox("Batch OCR requests")
+        self.custom_api_ocr_batch_checkbox.setChecked(bool(getattr(self, 'custom_api_ocr_batch_enabled_value', True)))
+        self.custom_api_ocr_batch_checkbox.setToolTip("Run custom-api OCR region requests in parallel. This is separate from translation batch mode.")
+        self.custom_api_ocr_batch_checkbox.stateChanged.connect(
+            lambda: (
+                setattr(self, 'custom_api_ocr_batch_enabled_value', self.custom_api_ocr_batch_checkbox.isChecked()),
+                self._save_rendering_settings()
+            )
+        )
+        custom_api_batch_layout.addWidget(self.custom_api_ocr_batch_checkbox)
+
+        size_label = QLabel("Batch Size:")
+        custom_api_batch_layout.addWidget(size_label)
+
+        self.custom_api_ocr_batch_size_spinbox = QSpinBox()
+        self.custom_api_ocr_batch_size_spinbox.setRange(1, 32)
+        self.custom_api_ocr_batch_size_spinbox.setValue(int(getattr(self, 'custom_api_ocr_batch_size_value', 5)))
+        self.custom_api_ocr_batch_size_spinbox.setToolTip("Maximum concurrent custom-api OCR requests.")
+        self.custom_api_ocr_batch_size_spinbox.valueChanged.connect(
+            lambda value: (
+                setattr(self, 'custom_api_ocr_batch_size_value', int(value)),
+                self._save_rendering_settings()
+            )
+        )
+        self._disable_combobox_mousewheel(self.custom_api_ocr_batch_size_spinbox)
+        custom_api_batch_layout.addWidget(self.custom_api_ocr_batch_size_spinbox)
+        custom_api_batch_layout.addStretch()
+        settings_frame_layout.addWidget(self.custom_api_ocr_batch_frame)
 
         # Initialize OCR manager
         from ocr_manager import OCRManager
@@ -6825,6 +6886,14 @@ class MangaTranslationTab(QObject):
         self.rapidocr_use_recognition_value = self.main_gui.config.get('rapidocr_use_recognition', True)
         self.rapidocr_language_value = self.main_gui.config.get('rapidocr_language', 'auto')
         self.rapidocr_detection_mode_value = self.main_gui.config.get('rapidocr_detection_mode', 'document')
+        self.custom_api_ocr_batch_enabled_value = bool(config.get('manga_custom_api_ocr_batch_enabled', True))
+        try:
+            self.custom_api_ocr_batch_size_value = max(1, int(config.get('manga_custom_api_ocr_batch_size', 5)))
+        except Exception:
+            self.custom_api_ocr_batch_size_value = 5
+        self.manga_ocr_disable_thinking_value = bool(
+            ((config.get('manga_settings') or {}).get('ocr') or {}).get('manga_ocr_disable_thinking', True)
+        )
 
         # Output settings
         self.create_cbz_at_end_value = config.get('manga_create_cbz_at_end', True)
@@ -6846,6 +6915,12 @@ class MangaTranslationTab(QObject):
                 self.compress_glossary_prompt_value = bool(self.manga_compress_glossary_checkbox.isChecked())
             if hasattr(self, 'visual_context_checkbox'):
                 self.visual_context_enabled_value = bool(self.visual_context_checkbox.isChecked())
+            if hasattr(self, 'manga_ocr_disable_thinking_checkbox'):
+                self.manga_ocr_disable_thinking_value = bool(self.manga_ocr_disable_thinking_checkbox.isChecked())
+            if hasattr(self, 'custom_api_ocr_batch_checkbox'):
+                self.custom_api_ocr_batch_enabled_value = bool(self.custom_api_ocr_batch_checkbox.isChecked())
+            if hasattr(self, 'custom_api_ocr_batch_size_spinbox'):
+                self.custom_api_ocr_batch_size_value = int(self.custom_api_ocr_batch_size_spinbox.value())
             if hasattr(self, 'create_cbz_checkbox'):
                 self.create_cbz_at_end_value = bool(self.create_cbz_checkbox.isChecked())
             if hasattr(self, 'auto_consolidate_checkbox'):
@@ -7057,6 +7132,15 @@ class MangaTranslationTab(QObject):
             # Persist visual context setting alongside other toggles
             if hasattr(self, 'visual_context_enabled_value'):
                 self.main_gui.config['manga_visual_context_enabled'] = self.visual_context_enabled_value
+            if hasattr(self, 'manga_ocr_disable_thinking_value'):
+                ms = self.main_gui.config.setdefault('manga_settings', {})
+                ocr_set = ms.setdefault('ocr', {})
+                ocr_set['manga_ocr_disable_thinking'] = bool(self.manga_ocr_disable_thinking_value)
+                os.environ['MANGA_OCR_DISABLE_THINKING'] = '1' if self.manga_ocr_disable_thinking_value else '0'
+            if hasattr(self, 'custom_api_ocr_batch_enabled_value'):
+                self.main_gui.config['manga_custom_api_ocr_batch_enabled'] = bool(self.custom_api_ocr_batch_enabled_value)
+            if hasattr(self, 'custom_api_ocr_batch_size_value'):
+                self.main_gui.config['manga_custom_api_ocr_batch_size'] = int(self.custom_api_ocr_batch_size_value)
             
             # OCR prompt
             if hasattr(self, 'ocr_prompt'):
