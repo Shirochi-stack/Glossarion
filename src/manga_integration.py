@@ -3427,8 +3427,8 @@ class MangaTranslationTab(QObject):
         combo_arrow_style = f"""
             QComboBox::down-arrow {{
                 image: url("{combo_arrow_path}");
-                width: 14px;
-                height: 14px;
+                width: 11px;
+                height: 11px;
             }}
             QComboBox::down-arrow:on {{
                 top: 1px;
@@ -4816,8 +4816,8 @@ class MangaTranslationTab(QObject):
         local_model_combo = QComboBox()
         local_model_combo.addItems(['aot', 'aot_onnx', 'lama', 'lama_onnx', 'anime', 'anime_onnx', 'custom-image-edit', 'mat', 'ollama', 'sd_local'])
         local_model_combo.setCurrentText(self.local_model_type_value)
-        local_model_combo.setMinimumWidth(120)
-        local_model_combo.setMaximumWidth(120)
+        local_model_combo.setMinimumWidth(150)
+        local_model_combo.setMaximumWidth(150)
         local_combo_font = QFont('Arial', 9)
         local_model_combo.setFont(local_combo_font)
         local_model_combo.currentTextChanged.connect(self._on_local_model_change)
