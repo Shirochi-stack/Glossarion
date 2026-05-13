@@ -4643,7 +4643,7 @@ def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, fo
     # --- RESOLVED CHAPTERS: clear qa_failed back to completed ---
     # Note: We do NOT clear qa_failed for protected issues because they
     # require retranslation, not just QA re-scanning
-    PROTECTED_ISSUES = {"SPLIT_FAILED", "TRUNCATED", "PROHIBITED_CONTENT", "EMPTY_OUTPUT"}
+    PROTECTED_ISSUES = {"SPLIT_FAILED", "TRUNCATED", "PROHIBITED_CONTENT", "EMPTY_OUTPUT", "API_ERROR"}
     
     resolved_count = 0
     skipped_count = 0

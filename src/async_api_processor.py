@@ -3343,7 +3343,7 @@ class AsyncProcessingDialog:
         env_vars['MAX_RETRY_TOKENS'] = str(_resolved_retry_tokens)
 
         # Truncation and silent-truncation retries
-        env_vars['TRUNCATION_RETRY_ATTEMPTS'] = str(_val(getattr(self.gui, 'truncation_retry_attempts_var', '1'), '1'))
+        env_vars['TRUNCATION_RETRY_ATTEMPTS'] = str(_val(getattr(self.gui, 'truncation_retry_attempts_var', '3'), '3'))
         env_vars['CHAR_RATIO_TRUNCATION_ENABLED'] = "1" if _val(getattr(self.gui, 'char_ratio_truncation_var', True), True) else "0"
         env_vars['CHAR_RATIO_TRUNCATION_PERCENT'] = str(_val(getattr(self.gui, 'char_ratio_truncation_percent_var', '50'), '50'))
         env_vars['CHAR_RATIO_TRUNCATION_ATTEMPTS'] = str(_val(getattr(self.gui, 'char_ratio_truncation_attempts_var', '1'), '1'))

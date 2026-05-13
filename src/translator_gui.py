@@ -3524,7 +3524,7 @@ Recent translations to summarize:
             ('rolling_summary_max_tokens_var', 'rolling_summary_max_tokens', '-1'),
 
             ('max_retry_tokens_var', 'max_retry_tokens', '-1'),
-            ('truncation_retry_attempts_var', 'truncation_retry_attempts', '1'),
+            ('truncation_retry_attempts_var', 'truncation_retry_attempts', '3'),
             # Char-ratio truncation (silent truncation detector)
             ('char_ratio_truncation_percent_var', 'char_ratio_truncation_percent', '50'),
             ('char_ratio_truncation_attempts_var', 'char_ratio_truncation_attempts', '1'),
@@ -8594,6 +8594,15 @@ Recent translations to summarize:
 
         return failures
 
+    def _format_chapter_list(self, chapters):
+        def _sort_key(value):
+            text = str(value)
+            try:
+                return (0, int(text))
+            except Exception:
+                return (1, text)
+        return ", ".join(str(chapter) for chapter in sorted(chapters, key=_sort_key))
+
     def _log_translation_qa_failure_summary(self, phase="current"):
         failures = self._collect_translation_qa_failures()
         if not failures:
@@ -8606,13 +8615,15 @@ Recent translations to summarize:
         else:
             self.append_log("   Failed chapters found at the end of this translation run:")
 
+        grouped = {}
         for failure in failures:
-            output_file = f" ({failure['output_file']})" if failure.get("output_file") else ""
-            self.append_log(
-                f"   • {failure['source']} — Chapter {failure['chapter']}{output_file}: "
-                f"{', '.join(failure['issues'])}"
-            )
+            source = failure["source"]
+            for issue in failure["issues"]:
+                grouped.setdefault((source, issue), []).append(failure["chapter"])
 
+        for (source, issue), chapters in grouped.items():
+            chapter_label = "Chapters" if len(chapters) != 1 else "Chapter"
+            self.append_log(f"   - {source} - {chapter_label} {self._format_chapter_list(chapters)}: {issue}")
         issue_set = {issue for failure in failures for issue in failure["issues"]}
         self.append_log("")
         self.append_log("   What these QA issues mean:")
@@ -8632,7 +8643,13 @@ Recent translations to summarize:
                 "be safely mapped back to the original split chapters."
             )
 
-        known = {"TRUNCATED", "PROHIBITED_CONTENT", "PROHIBITED CONTENT", "SPLIT_FAILED"}
+        if "API_ERROR" in issue_set:
+            self.append_log(
+                "   - API_ERROR: the provider/API request failed before a usable response was returned. "
+                "Retry the chapter, check the API/provider logs, or switch model/provider if it repeats."
+            )
+
+        known = {"TRUNCATED", "PROHIBITED_CONTENT", "PROHIBITED CONTENT", "SPLIT_FAILED", "API_ERROR"}
         unknown = sorted(issue for issue in issue_set if issue not in known)
         if unknown:
             self.append_log(
@@ -12945,10 +12962,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Check stop before final summary
             if self.stop_requested:
                 self.append_log(f"\n⏹️ Translation stopped - processed {successful} of {total_files} files")
-                try:
-                    self._log_translation_qa_failure_summary(phase="end")
-                except Exception as e:
-                    self.append_log(f"⚠️ Could not read final QA failure summary: {e}")
                 # Reset progress bar when stopped
                 try:
                     if hasattr(self, 'progress_bar') and self.progress_bar:
@@ -23005,7 +23018,7 @@ Important rules:
                 ('char_ratio_min_output_chars', ['char_ratio_min_output_chars_var'], 100, lambda v: safe_int(v, 100)),
                 ('retry_split_failed', ['retry_split_failed_var'], True, bool),
                 ('max_retry_tokens', ['max_retry_tokens_var'], -1, lambda v: safe_int(v, -1)),
-                ('truncation_retry_attempts', ['truncation_retry_attempts_var'], 1, lambda v: safe_int(v, 1)),
+                ('truncation_retry_attempts', ['truncation_retry_attempts_var'], 3, lambda v: safe_int(v, 3)),
                 ('split_failed_retry_attempts', ['split_failed_retry_attempts_var'], 1, lambda v: safe_int(v, 1)),
                 ('retry_timeout', ['retry_timeout_var'], False, bool),
                 ('timeout_retry_attempts', ['timeout_retry_attempts_var'], 2, lambda v: safe_int(v, 2)),
@@ -23882,7 +23895,7 @@ Important rules:
                 ('SAVE_PROHIBITED_RESULTS', '1' if getattr(self, 'save_prohibited_results_var', False) else '0'),
                 ('DISABLE_EMPTY_SAFETY_HEURISTIC', '1' if getattr(self, 'disable_empty_safety_heuristic_var', False) else '0'),
                 ('MAX_RETRY_TOKENS', str(resolved_max_retry_tokens)),
-                ('TRUNCATION_RETRY_ATTEMPTS', str(getattr(self, 'truncation_retry_attempts_var', '1'))),
+                ('TRUNCATION_RETRY_ATTEMPTS', str(getattr(self, 'truncation_retry_attempts_var', '3'))),
                 # Char-ratio truncation (silent truncation detector)
                 ('CHAR_RATIO_TRUNCATION_ENABLED', '1' if getattr(self, 'char_ratio_truncation_var', False) else '0'),
                 ('CHAR_RATIO_TRUNCATION_PERCENT', str(getattr(self, 'char_ratio_truncation_percent_var', '50'))),

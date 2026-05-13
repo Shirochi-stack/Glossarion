@@ -3789,7 +3789,7 @@ def _create_response_handling_section(self, parent):
 
     # Retry Truncated
     if not hasattr(self, 'truncation_retry_attempts_var'):
-        self.truncation_retry_attempts_var = str(self.config.get('truncation_retry_attempts', '1'))
+        self.truncation_retry_attempts_var = str(self.config.get('truncation_retry_attempts', '3'))
 
     # Char-ratio truncation (silent truncation detector)
     if not hasattr(self, 'char_ratio_truncation_var'):
@@ -3832,7 +3832,7 @@ def _create_response_handling_section(self, parent):
     try:
         retry_attempts_edit.setText(str(self.truncation_retry_attempts_var))
     except Exception:
-        retry_attempts_edit.setText("1")
+        retry_attempts_edit.setText("3")
     def _on_retry_attempts_changed(text):
         try:
             self.truncation_retry_attempts_var = text

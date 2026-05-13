@@ -5356,7 +5356,7 @@ def main(log_callback=None, stop_callback=None):
     if os.getenv("RETRY_TRUNCATED") is None:
         os.environ["RETRY_TRUNCATED"] = "1" if config.get("retry_truncated", True) else "0"
     if os.getenv("TRUNCATION_RETRY_ATTEMPTS") is None:
-        os.environ["TRUNCATION_RETRY_ATTEMPTS"] = str(config.get("truncation_retry_attempts", 1))
+        os.environ["TRUNCATION_RETRY_ATTEMPTS"] = str(config.get("truncation_retry_attempts", 3))
     if os.getenv("MAX_RETRY_TOKENS") is None:
         os.environ["MAX_RETRY_TOKENS"] = str(config.get("max_retry_tokens", -1))
 
@@ -7398,7 +7398,13 @@ def main(log_callback=None, stop_callback=None):
                 "be safely mapped back to the original split chapters."
             )
 
-        known_issues = {"TRUNCATED", "PROHIBITED_CONTENT", "PROHIBITED CONTENT", "SPLIT_FAILED"}
+        if "API_ERROR" in issue_set:
+            print(
+                "   - API_ERROR: the provider/API request failed before a usable response was returned. "
+                "Retry the chapter, check the API/provider logs, or switch model/provider if it repeats."
+            )
+
+        known_issues = {"TRUNCATED", "PROHIBITED_CONTENT", "PROHIBITED CONTENT", "SPLIT_FAILED", "API_ERROR"}
         other_issues = sorted(issue for issue in issue_set if issue not in known_issues)
         if other_issues:
             print(
