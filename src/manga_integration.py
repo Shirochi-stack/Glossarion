@@ -769,6 +769,8 @@ class MangaTranslationTab(QObject):
         self.main_gui = main_gui
         self.dialog = dialog
         self.scroll_area = scroll_area
+        self._translator_gui_stylesheet = self._get_translator_gui_stylesheet()
+        self._apply_translator_gui_stylesheet()
         
         # Initialize worker thread variables for save position
         self.worker_thread = None
@@ -980,6 +982,35 @@ class MangaTranslationTab(QObject):
         # Connect dialog close event to cleanup
         if self.dialog:
             self.dialog.finished.connect(self.cleanup)
+
+    def _get_translator_gui_stylesheet(self) -> str:
+        """Return the parent TranslatorGUI stylesheet, with QApplication as fallback."""
+        try:
+            if self.main_gui is not None and hasattr(self.main_gui, 'styleSheet'):
+                style = self.main_gui.styleSheet()
+                if style:
+                    return style
+        except Exception:
+            pass
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                return app.styleSheet() or ""
+        except Exception:
+            pass
+        return ""
+
+    def _apply_translator_gui_stylesheet(self):
+        """Apply parent GUI styling to this top-level manga dialog and containers."""
+        style = getattr(self, '_translator_gui_stylesheet', '') or ''
+        if not style:
+            return
+        for widget in (self.dialog, self.scroll_area):
+            try:
+                if widget is not None and not widget.styleSheet():
+                    widget.setStyleSheet(style)
+            except Exception:
+                pass
     
     def _is_stop_requested(self) -> bool:
         """Check if stop has been requested using multiple sources"""
@@ -3387,7 +3418,25 @@ class MangaTranslationTab(QObject):
                 color: #666666;
             }
         """
-        self.parent_widget.setStyleSheet(checkbox_radio_style)
+        parent_style = getattr(self, '_translator_gui_stylesheet', '') or ''
+        try:
+            icon_base = getattr(self.main_gui, 'base_dir', '') or os.path.dirname(os.path.abspath(__file__))
+            combo_arrow_path = os.path.join(icon_base, 'Halgakos.ico').replace('\\', '/')
+        except Exception:
+            combo_arrow_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico').replace('\\', '/')
+        combo_arrow_style = f"""
+            QComboBox::down-arrow {{
+                image: url("{combo_arrow_path}");
+                width: 14px;
+                height: 14px;
+            }}
+            QComboBox::down-arrow:on {{
+                top: 1px;
+            }}
+        """
+        self.parent_widget.setStyleSheet(
+            f"{parent_style}\n{checkbox_radio_style}\n{combo_arrow_style}" if parent_style else f"{checkbox_radio_style}\n{combo_arrow_style}"
+        )
         
         # Title (at the very top)
         title_frame = QWidget()

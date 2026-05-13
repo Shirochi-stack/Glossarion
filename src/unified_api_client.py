@@ -4285,6 +4285,18 @@ class UnifiedClient:
         value = context if context is not None else getattr(self, 'context', None)
         return str(value or '').strip().lower() == 'manga_ocr'
 
+    def _is_vision_input_only_context(self, context: Any = None) -> bool:
+        """Return True for vision/OCR requests that must never request image output."""
+        value = context if context is not None else getattr(self, 'context', None)
+        return str(value or '').strip().lower() in {
+            'manga_ocr',
+            'image_ocr',
+            'vision_ocr',
+            'image_scan',
+            'qa_truncation',
+            'truncation',
+        }
+
     def _get_payload_context_thread_directory(self, folder: str) -> str:
         """Get a unique per-thread payload directory for image-like context folders."""
         thread_id = threading.current_thread().ident
@@ -11339,7 +11351,7 @@ class UnifiedClient:
                 # Force enable for any model whose name indicates image generation
                 # but NOT if this thread is in vision-only scan mode
                 _force_vision = getattr(threading.current_thread(), '_force_vision_mode', False)
-                if _force_vision:
+                if _force_vision or self._is_vision_input_only_context():
                     enable_image_output = False
                 elif self._is_image_gen_model(self.model):
                     enable_image_output = True
@@ -15662,7 +15674,7 @@ class UnifiedClient:
         # Force enable for any model whose name indicates image generation
         # but NOT if this thread is in vision-only scan mode
         _force_vision = getattr(threading.current_thread(), '_force_vision_mode', False)
-        if _force_vision:
+        if _force_vision or self._is_vision_input_only_context():
             enable_image_output = False
         elif self._is_image_gen_model(self.model):
             enable_image_output = True
@@ -22719,23 +22731,62 @@ class UnifiedClient:
             raise UnifiedClientError(f"HuggingFace error: {e}")
     
     def _send_vertex_model_garden_image(self, messages, image_base64, temperature, max_tokens, response_name):
-        """Send image request to Vertex AI Model Garden"""
-        # For now, we can just call the regular send method since Vertex AI 
-        # handles images in the message format
-        
-        # Convert image to message format that Vertex AI expects
-        image_message = {
+        """Send an image request to Vertex AI Model Garden.
+
+        Most callers already pass OpenAI-style ``image_url`` parts. Preserve
+        that payload exactly and let _send_vertex_model_garden convert it to
+        google-genai Content/Part objects; rebuilding it here can drop text
+        parts or guess the wrong media type.
+        """
+        try:
+            for msg in messages or []:
+                content = msg.get('content') if isinstance(msg, dict) else None
+                if isinstance(content, list) and any(
+                    isinstance(part, dict) and part.get('type') in ('image_url', 'image')
+                    for part in content
+                ):
+                    return self._send_vertex_model_garden(
+                        messages, temperature, max_tokens, response_name=response_name
+                    )
+        except Exception:
+            pass
+
+        def _infer_mime_from_base64(b64_text: str) -> str:
+            try:
+                import base64 as _base64
+                raw = _base64.b64decode(str(b64_text).split(',', 1)[-1], validate=False)
+                if raw[:8] == b'\x89PNG\r\n\x1a\n':
+                    return 'image/png'
+                if raw[:3] == b'\xff\xd8\xff':
+                    return 'image/jpeg'
+                if raw[:4] == b'RIFF' and raw[8:12] == b'WEBP':
+                    return 'image/webp'
+            except Exception:
+                pass
+            return 'image/jpeg'
+
+        prompt_text = ""
+        try:
+            last_content = messages[-1].get('content') if messages else ""
+            if isinstance(last_content, str):
+                prompt_text = last_content
+            elif isinstance(last_content, list):
+                prompt_text = "\n".join(
+                    str(part.get('text', ''))
+                    for part in last_content
+                    if isinstance(part, dict) and part.get('type') == 'text'
+                )
+        except Exception:
+            prompt_text = ""
+
+        mime_type = _infer_mime_from_base64(image_base64 or "")
+        messages_with_image = (messages[:-1] if messages else []) + [{
             "role": "user",
             "content": [
-                {"type": "text", "text": messages[-1]['content'] if messages else ""},
-                {"type": "image", "image": {"base64": image_base64}}
+                {"type": "text", "text": prompt_text or "Image:"},
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_base64 or ''}"}}
             ]
-        }
-        
-        # Replace last message with image message
-        messages_with_image = messages[:-1] + [image_message]
-        
-        # Use the regular Vertex AI send method
+        }]
         return self._send_vertex_model_garden(messages_with_image, temperature, max_tokens, response_name=response_name)
 
     def _is_o_series_model(self) -> bool:
