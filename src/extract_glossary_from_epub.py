@@ -1121,6 +1121,12 @@ def _mark_glossary_failed(failed, idx, issues=None):
             if issue_text and issue_text not in bucket:
                 bucket.append(issue_text)
 
+def _glossary_issue_from_finish_reason(finish_reason, default_issue="EMPTY_OUTPUT"):
+    finish_text = str(finish_reason or "").strip().lower()
+    if finish_text in ("length", "max_tokens") or "max_tokens" in finish_text:
+        return "TRUNCATED"
+    return default_issue
+
 def _glossary_restore_in_progress_entry(info):
     """Restore the pre-in-progress chapter entry, or return None for not completed."""
     if not isinstance(info, dict):
@@ -6219,13 +6225,14 @@ def main(log_callback=None, stop_callback=None):
                                     
                                     if _is_empty_failure:
                                         print(f"⚠️ Chapter {idx+1} returned empty/refused content — marking as failed for retry")
-                                        _mark_glossary_failed(failed, idx, "EMPTY_OUTPUT")
+                                        ch_finish = result.get('finish_reason', 'stop')
+                                        _mark_glossary_failed(failed, idx, _glossary_issue_from_finish_reason(ch_finish))
                                     else:
                                         completed.append(idx)
                                         
                                         # Mark truncated chapters as failed so they get retried
                                         ch_finish = result.get('finish_reason', 'stop')
-                                        if ch_finish in ('length', 'MAX_TOKENS', 'max_tokens'):
+                                        if _glossary_issue_from_finish_reason(ch_finish, None) == "TRUNCATED":
                                             print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
                                             _mark_glossary_failed(failed, idx, "TRUNCATED")
                                 
@@ -6289,13 +6296,14 @@ def main(log_callback=None, stop_callback=None):
                             
                             if _is_empty_failure:
                                 print(f"⚠️ Chapter {idx+1} returned empty/refused content — marking as failed for retry")
-                                _mark_glossary_failed(failed, idx, "EMPTY_OUTPUT")
+                                ch_finish = result.get('finish_reason', 'stop')
+                                _mark_glossary_failed(failed, idx, _glossary_issue_from_finish_reason(ch_finish))
                             else:
                                 completed.append(idx)
                                 
                                 # Mark truncated chapters as failed so they get retried
                                 ch_finish = result.get('finish_reason', 'stop')
-                                if ch_finish in ('length', 'MAX_TOKENS', 'max_tokens'):
+                                if _glossary_issue_from_finish_reason(ch_finish, None) == "TRUNCATED":
                                     print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
                                     _mark_glossary_failed(failed, idx, "TRUNCATED")
                             
@@ -6825,6 +6833,7 @@ def main(log_callback=None, stop_callback=None):
                     )
 
                 # Determine if we need to split based on output-limit budget
+                chapter_had_truncated_chunk = False
                 chapter_tokens = chapter_splitter.count_tokens(chapter_content)
                 if chapter_split_enabled and chapter_tokens > available_tokens:
                     print(f"⚠️ Chapter {idx+1} exceeds chunk budget: {chapter_tokens:,} > {available_tokens:,}")
@@ -6939,6 +6948,8 @@ def main(log_callback=None, stop_callback=None):
                                 merged_chapters=merged_chapter_nums,
                                 before_send_callback=_mark_current_glossary_progress_on_send,
                             )
+                            if _glossary_issue_from_finish_reason(chunk_finish_reason, None) == "TRUNCATED":
+                                chapter_had_truncated_chunk = True
                         except UnifiedClientError as e:
                             if "stopped by user" in str(e).lower():
                                 print(f"❌ Glossary extraction stopped during chunk {chunk_idx} API call")
@@ -7150,13 +7161,13 @@ def main(log_callback=None, stop_callback=None):
                     # NULL CHECK before checking if response is empty
                     if resp is None:
                         print(f"⚠️ Response is None for chapter {idx+1}, skipping...")
-                        _mark_glossary_failed(failed, idx, "EMPTY_OUTPUT")
+                        _mark_glossary_failed(failed, idx, _glossary_issue_from_finish_reason(finish_reason))
                         continue
 
                     # Check if response is empty
                     if not resp or resp.strip() == "":
                         print(f"⚠️ Empty response for chapter {idx+1}, skipping...")
-                        _mark_glossary_failed(failed, idx, "EMPTY_OUTPUT")
+                        _mark_glossary_failed(failed, idx, _glossary_issue_from_finish_reason(finish_reason))
                         continue
 
                     # Save the raw response with thread-safe location
@@ -7231,12 +7242,16 @@ def main(log_callback=None, stop_callback=None):
                 if _is_empty_failure:
                     # Empty/refused response — mark as failed so it gets retried
                     print(f"⚠️ Chapter {idx+1} returned empty/refused content — marking as failed for retry")
-                    _mark_glossary_failed(failed, idx, "EMPTY_OUTPUT")
+                    _fr = locals().get('finish_reason') or locals().get('chunk_finish_reason', 'stop')
+                    if chapter_had_truncated_chunk:
+                        _fr = 'length'
+                    empty_issue = _glossary_issue_from_finish_reason(_fr)
+                    _mark_glossary_failed(failed, idx, empty_issue)
                     # Also mark merged children as failed
                     if idx in merge_groups:
                         for g_idx, _ in merge_groups[idx]:
                             if g_idx != idx:
-                                _mark_glossary_failed(failed, g_idx, "EMPTY_OUTPUT")
+                                _mark_glossary_failed(failed, g_idx, empty_issue)
                             if g_idx != idx and g_idx not in merged_indices:
                                 merged_indices.append(g_idx)
                 else:
@@ -7268,7 +7283,9 @@ def main(log_callback=None, stop_callback=None):
                     # Mark truncated chapters as failed so they get retried
                     # finish_reason comes from single-chapter mode, chunk_finish_reason from chunked mode
                     _fr = locals().get('finish_reason') or locals().get('chunk_finish_reason', 'stop')
-                    if _fr in ('length', 'MAX_TOKENS', 'max_tokens'):
+                    if chapter_had_truncated_chunk:
+                        _fr = 'length'
+                    if _glossary_issue_from_finish_reason(_fr, None) == "TRUNCATED":
                         print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
                         _mark_glossary_failed(failed, idx, "TRUNCATED")
                     
