@@ -9004,7 +9004,7 @@ class UnifiedClient:
         )
 
     def _coerce_nanogpt_input_image_to_webp(self, raw: Optional[bytes], mime: str) -> Tuple[Optional[bytes], str]:
-        if not raw or not str(getattr(self, 'model', '') or '').strip().lower().startswith('nan/'):
+        if not raw:
             return raw, mime
         if not str(mime or '').startswith('image/') or str(mime).lower() == 'image/webp':
             return raw, mime
@@ -9029,17 +9029,15 @@ class UnifiedClient:
             img.save(buf, format='WEBP', quality=quality, method=6)
             converted = buf.getvalue()
             if not self._is_stop_requested():
-                print(f"[NanoGPT] Converted input image to WEBP for nan/ request ({len(raw)/1024:.0f}KB -> {len(converted)/1024:.0f}KB)")
+                print(f"[ImageInput] Converted input image to WEBP ({len(raw)/1024:.0f}KB -> {len(converted)/1024:.0f}KB)")
             return converted, 'image/webp'
         except Exception as exc:
             if not self._is_stop_requested():
-                print(f"[NanoGPT] Could not convert input image to WEBP: {exc}")
+                print(f"[ImageInput] Could not convert input image to WEBP: {exc}")
             return raw, mime
 
     def _normalize_nanogpt_image_message_payloads(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Convert embedded data:image payloads to WebP for NanoGPT chat/vision requests."""
-        if not str(getattr(self, 'model', '') or '').strip().lower().startswith('nan/'):
-            return messages
+        """Convert embedded data:image payloads to WebP before provider-specific request building."""
 
         changed = False
         normalized_messages = []
@@ -11343,6 +11341,7 @@ class UnifiedClient:
                                                 elif 'image/webp' in mime_and_data[0]:
                                                     mime_type = 'image/webp'
                                                 image_bytes = base64.b64decode(base64_data)
+                                                image_bytes, mime_type = self._coerce_nanogpt_input_image_to_webp(image_bytes, mime_type)
                                                 parts.append(types.Part(inline_data=types.Blob(mime_type=mime_type, data=image_bytes)))
                                                 if not self._is_stop_requested():
                                                     print(f"   ✅ Added image to request (mime: {mime_type}, size: {len(image_bytes)} bytes)")
@@ -12520,6 +12519,7 @@ class UnifiedClient:
                                                 
                                                 # Decode base64 to bytes
                                                 image_bytes = base64.b64decode(base64_data)
+                                                image_bytes, mime_type = self._coerce_nanogpt_input_image_to_webp(image_bytes, mime_type)
                                                 # Create image part
                                                 parts_list.append(Part.from_data(data=image_bytes, mime_type=mime_type))
                                         except Exception as e:
@@ -22791,6 +22791,13 @@ class UnifiedClient:
             prompt_text = ""
 
         mime_type = _infer_mime_from_base64(image_base64 or "")
+        try:
+            import base64 as _base64
+            image_bytes = _base64.b64decode(str(image_base64 or "").split(',', 1)[-1], validate=False)
+            image_bytes, mime_type = self._coerce_nanogpt_input_image_to_webp(image_bytes, mime_type)
+            image_base64 = _base64.b64encode(image_bytes).decode('ascii')
+        except Exception:
+            pass
         messages_with_image = (messages[:-1] if messages else []) + [{
             "role": "user",
             "content": [
@@ -22874,6 +22881,12 @@ class UnifiedClient:
                                     mime_type = "image/jpeg"
                                 elif 'webp' in image_data:
                                     mime_type = "image/webp"
+                                try:
+                                    image_bytes = base64.b64decode(base64_data)
+                                    image_bytes, mime_type = self._coerce_nanogpt_input_image_to_webp(image_bytes, mime_type)
+                                    base64_data = base64.b64encode(image_bytes).decode('ascii')
+                                except Exception:
+                                    pass
                                 
                                 parts.append({
                                     "inline_data": {
@@ -22896,6 +22909,13 @@ class UnifiedClient:
                     formatted_parts.append(f"User: {msg['content']}")
             
             text_prompt = "\n\n".join(formatted_parts)
+            mime_type = "image/jpeg"
+            try:
+                image_bytes = base64.b64decode(str(image_base64 or "").split(',', 1)[-1], validate=False)
+                image_bytes, mime_type = self._coerce_nanogpt_input_image_to_webp(image_bytes, mime_type)
+                image_base64 = base64.b64encode(image_bytes).decode('ascii')
+            except Exception:
+                pass
             
             contents = [
                 {
@@ -22903,7 +22923,7 @@ class UnifiedClient:
                     "parts": [
                         {"text": text_prompt},
                         {"inline_data": {
-                            "mime_type": "image/jpeg",
+                            "mime_type": mime_type,
                             "data": image_base64
                         }}
                     ]
@@ -22917,6 +22937,14 @@ class UnifiedClient:
     
     def _send_anthropic_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send image request to Anthropic API"""
+        mime_type = "image/jpeg"
+        try:
+            image_bytes = base64.b64decode(str(image_base64 or "").split(',', 1)[-1], validate=False)
+            image_bytes, mime_type = self._coerce_nanogpt_input_image_to_webp(image_bytes, mime_type)
+            image_base64 = base64.b64encode(image_bytes).decode('ascii')
+        except Exception:
+            pass
+
         headers = {
             "X-API-Key": self.api_key,
             "Content-Type": "application/json",
@@ -22943,7 +22971,7 @@ class UnifiedClient:
                             "type": "image",
                             "source": {
                                 "type": "base64",
-                                "media_type": "image/jpeg",
+                                "media_type": mime_type,
                                 "data": image_base64
                             }
                         }
