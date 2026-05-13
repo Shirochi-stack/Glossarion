@@ -6805,6 +6805,7 @@ class UnifiedClient:
             # For image requests, prepare messages with embedded image
             if image_data:
                 messages = self._prepare_image_messages(messages, image_data)
+            messages = self._normalize_nanogpt_image_message_payloads(messages)
             
             # Check if system prompt should be moved to user message (live check on every request)
             system_to_user = os.getenv('SYSTEM_PROMPT_TO_USER', '0') == '1'
@@ -6950,6 +6951,7 @@ class UnifiedClient:
                 # For image requests, prepare messages with embedded image BEFORE validation
                 if image_data:
                     messages = self._prepare_image_messages(messages, image_data)
+                messages = self._normalize_nanogpt_image_message_payloads(messages)
                 
                 # Check if system prompt should be moved to user message (live check on every request)
                 system_to_user = os.getenv('SYSTEM_PROMPT_TO_USER', '0') == '1'
@@ -9010,6 +9012,58 @@ class UnifiedClient:
             if not self._is_stop_requested():
                 print(f"[NanoGPT] Could not convert input image to WEBP: {exc}")
             return raw, mime
+
+    def _normalize_nanogpt_image_message_payloads(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert embedded data:image payloads to WebP for NanoGPT chat/vision requests."""
+        if not str(getattr(self, 'model', '') or '').strip().lower().startswith('nan/'):
+            return messages
+
+        changed = False
+        normalized_messages = []
+        for msg in messages or []:
+            if not isinstance(msg, dict):
+                normalized_messages.append(msg)
+                continue
+
+            content = msg.get('content')
+            if not isinstance(content, list):
+                normalized_messages.append(msg)
+                continue
+
+            new_content = []
+            msg_changed = False
+            for part in content:
+                if not isinstance(part, dict) or part.get('type') != 'image_url':
+                    new_content.append(part)
+                    continue
+
+                image_url = part.get('image_url')
+                url = image_url.get('url') if isinstance(image_url, dict) else image_url
+                if isinstance(url, str) and url.startswith('data:image/') and ',' in url:
+                    new_url = self._shrink_nanogpt_image_data_url(url, force_webp=True)
+                    if new_url != url:
+                        changed = True
+                        msg_changed = True
+                        new_part = dict(part)
+                        if isinstance(image_url, dict):
+                            new_image_url = dict(image_url)
+                            new_image_url['url'] = new_url
+                            new_part['image_url'] = new_image_url
+                        else:
+                            new_part['image_url'] = new_url
+                        new_content.append(new_part)
+                        continue
+
+                new_content.append(part)
+
+            if msg_changed:
+                new_msg = dict(msg)
+                new_msg['content'] = new_content
+                normalized_messages.append(new_msg)
+            else:
+                normalized_messages.append(msg)
+
+        return normalized_messages if changed else messages
         
     def _prepare_image_messages(self, messages: List[Dict[str, Any]], image_data: Any) -> List[Dict[str, Any]]:
         """
@@ -21597,7 +21651,7 @@ class UnifiedClient:
                 model_override=effective_model,
             )
 
-    def _shrink_nanogpt_image_data_url(self, data_url: str) -> str:
+    def _shrink_nanogpt_image_data_url(self, data_url: str, force_webp: bool = False) -> str:
         """Keep NanoGPT edit payloads below serverless request-size limits."""
         try:
             import base64 as _b64
@@ -21608,10 +21662,13 @@ class UnifiedClient:
                 return data_url
 
             max_chars = int(os.getenv('NANOGPT_MAX_INPUT_IMAGE_CHARS', '3000000') or '3000000')
-            if max_chars <= 0 or len(data_url) <= max_chars:
+            header, b64_data = data_url.split(',', 1)
+            is_webp = header.lower().startswith('data:image/webp')
+            if (max_chars <= 0 and (not force_webp or is_webp)) or (
+                max_chars > 0 and len(data_url) <= max_chars and (not force_webp or is_webp)
+            ):
                 return data_url
 
-            header, b64_data = data_url.split(',', 1)
             raw = _b64.b64decode(b64_data)
             img = _Image.open(_io.BytesIO(raw))
             if img.mode not in ('RGB', 'L'):
@@ -21664,7 +21721,7 @@ class UnifiedClient:
                         'chars': len(candidate),
                         'dimensions_reduced': work.size != original_size,
                     }
-                    if len(candidate) <= max_chars:
+                    if max_chars <= 0 or len(candidate) <= max_chars:
                         self._nanogpt_last_input_resize_info = best_info
                         if not self._is_stop_requested():
                             print(
