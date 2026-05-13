@@ -4288,8 +4288,41 @@ class UnifiedClient:
         if value in ('image_generation', 'imagegen'):
             return True
         if value in ('image', 'image_translation'):
-            return os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
+            return self._image_output_mode_enabled()
         return False
+
+    def _image_output_mode_enabled(self) -> bool:
+        """Return True when image output is enabled for this client/request."""
+        try:
+            if bool(getattr(self, '_force_image_output_mode', False)):
+                return True
+        except Exception:
+            pass
+        return os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
+
+    def _get_image_output_resolution(self, default: str = "1K") -> str:
+        try:
+            value = getattr(self, '_forced_image_output_resolution', None)
+            if value:
+                return str(value)
+        except Exception:
+            pass
+        return os.getenv("IMAGE_OUTPUT_RESOLUTION", default)
+
+    def _get_image_output_aspect_ratio(self, default: str = "auto") -> str:
+        try:
+            value = getattr(self, '_forced_image_output_aspect_ratio', None)
+            if value:
+                return str(value)
+        except Exception:
+            pass
+        return os.getenv("IMAGE_OUTPUT_ASPECT_RATIO", default)
+
+    def _suppress_custom_image_edit_endpoint(self) -> bool:
+        try:
+            return bool(getattr(self, '_suppress_custom_image_edit_endpoint', False))
+        except Exception:
+            return False
 
     def _is_manga_ocr_context(self, context: Any = None) -> bool:
         """Return True for manga OCR requests."""
@@ -7391,7 +7424,7 @@ class UnifiedClient:
                 # INTERCEPT GENERATIVE MEDIA (URL / Base64) AND DOWNLOAD LOCALLY
                 if extracted_content:
                     extracted_content_str = str(extracted_content).strip()
-                    is_image_mode = os.environ.get('ENABLE_IMAGE_OUTPUT_MODE') == '1'
+                    is_image_mode = self._image_output_mode_enabled()
                     is_video_mode = os.environ.get('ENABLE_VIDEO_OUTPUT_MODE') == '1'
                     # Fallback: auto-detect from model name when env vars aren't explicitly set
                     effective_model = getattr(self, 'model', '') or ''
@@ -10512,7 +10545,7 @@ class UnifiedClient:
         except Exception:
             pass
         try:
-            if os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1":
+            if self._image_output_mode_enabled():
                 return True
         except Exception:
             pass
@@ -11356,7 +11389,7 @@ class UnifiedClient:
                 disable_safety = disable_safety_env in ("1", "true", "True", "TRUE")
                 
                 # Check if image output mode is enabled
-                enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
+                enable_image_output = self._image_output_mode_enabled()
                 # Force enable for any model whose name indicates image generation
                 # but NOT if this thread is in vision-only scan mode
                 _force_vision = getattr(threading.current_thread(), '_force_vision_mode', False)
@@ -11409,8 +11442,8 @@ class UnifiedClient:
                     config_params["response_modalities"] = [types.Modality.IMAGE, types.Modality.TEXT]
                     
                     # Get image config parameters
-                    image_resolution = os.getenv("IMAGE_OUTPUT_RESOLUTION", "1K")
-                    aspect_ratio = os.getenv("IMAGE_OUTPUT_ASPECT_RATIO", "auto")
+                    image_resolution = self._get_image_output_resolution("1K")
+                    aspect_ratio = self._get_image_output_aspect_ratio("auto")
                     
                     if aspect_ratio != "auto":
                         config_params["image_config"] = types.ImageConfig(
@@ -15680,7 +15713,7 @@ class UnifiedClient:
                     self.__class__._gemini3_pro_minimal_alert_shown = True
         
         # Check if image output mode is enabled
-        enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
+        enable_image_output = self._image_output_mode_enabled()
         # Force enable for any model whose name indicates image generation
         # but NOT if this thread is in vision-only scan mode
         _force_vision = getattr(threading.current_thread(), '_force_vision_mode', False)
@@ -16284,13 +16317,13 @@ class UnifiedClient:
                         generation_config.response_modalities = ['IMAGE', 'TEXT']
                         
                         # Get resolution from environment variable
-                        image_resolution = os.getenv("IMAGE_OUTPUT_RESOLUTION", "1K")
+                        image_resolution = self._get_image_output_resolution("1K")
                         # Validate resolution (must be 1K, 2K, or 4K)
                         if image_resolution not in ["1K", "2K", "4K"]:
                             image_resolution = "1K"  # Fallback to default
                         
                         # Get aspect ratio from environment variable (optional)
-                        aspect_ratio = os.getenv("IMAGE_OUTPUT_ASPECT_RATIO", "auto")
+                        aspect_ratio = self._get_image_output_aspect_ratio("auto")
                         
                         # Create image config - only include aspect_ratio if explicitly set
                         if aspect_ratio != "auto":
@@ -17899,13 +17932,13 @@ class UnifiedClient:
         # Route image/video output mode through the dedicated image edit endpoint
         # without changing where normal text requests go.
         try:
-            image_edit_base_url = (
+            image_edit_base_url = '' if self._suppress_custom_image_edit_endpoint() else (
                 os.getenv('CUSTOM_IMAGE_EDIT_BASE_URL', '')
                 or os.getenv('OPENAI_IMAGE_EDIT_BASE_URL', '')
             ).strip()
-            image_edit_enabled = os.getenv('USE_CUSTOM_IMAGE_EDIT_ENDPOINT', '1' if image_edit_base_url else '0') == '1'
+            image_edit_enabled = (not self._suppress_custom_image_edit_endpoint()) and os.getenv('USE_CUSTOM_IMAGE_EDIT_ENDPOINT', '1' if image_edit_base_url else '0') == '1'
             output_mode_needs_image_endpoint = (
-                os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
+                self._image_output_mode_enabled()
                 or os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
                 or self._is_image_gen_model(effective_model)
                 or self._is_video_gen_model(effective_model)
@@ -18349,7 +18382,7 @@ class UnifiedClient:
                     #     logger.info(f"🔓 Safety settings note: {provider} doesn't support moderation parameter")
                     
                     # Check if image/video output mode is enabled
-                    enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
+                    enable_image_output = self._image_output_mode_enabled()
                     enable_video_output = os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
 
                     # Force enable for any model whose name indicates image generation
@@ -18381,13 +18414,13 @@ class UnifiedClient:
                     # Add image output config if enabled (for compatible models)
                     if enable_image_output:
                         # Get resolution from environment variable
-                        image_resolution = os.getenv("IMAGE_OUTPUT_RESOLUTION", "1K")
+                        image_resolution = self._get_image_output_resolution("1K")
                         # Validate resolution (must be 1K, 2K, or 4K)
                         if image_resolution not in ["1K", "2K", "4K"]:
                             image_resolution = "1K"  # Fallback to default
                         
                         # Get aspect ratio from environment variable (optional)
-                        aspect_ratio = os.getenv("IMAGE_OUTPUT_ASPECT_RATIO", "auto")
+                        aspect_ratio = self._get_image_output_aspect_ratio("auto")
                         
                         # Configure response modalities and image config
                         extra_body["response_modalities"] = ['IMAGE', 'TEXT']
@@ -20241,17 +20274,17 @@ class UnifiedClient:
 
         # Detect image-generation model by name OR by ENABLE_IMAGE_OUTPUT_MODE flag
         _image_in_name = self._is_image_gen_model(self.model or '')
-        _image_flag    = os.getenv('ENABLE_IMAGE_OUTPUT_MODE', '0') == '1'
+        _image_flag    = self._image_output_mode_enabled()
         # Don't auto-detect from name if this thread is in vision-only scan mode
         _force_vision = getattr(threading.current_thread(), '_force_vision_mode', False)
         if _image_in_name and _force_vision:
             _image_in_name = False
         if _image_in_name or _image_flag:
-            image_base_url = (
+            image_base_url = '' if self._suppress_custom_image_edit_endpoint() else (
                 os.getenv('CUSTOM_IMAGE_EDIT_BASE_URL', '')
                 or os.getenv('OPENAI_IMAGE_EDIT_BASE_URL', '')
             ).strip()
-            image_endpoint_enabled = os.getenv('USE_CUSTOM_IMAGE_EDIT_ENDPOINT', '1' if image_base_url else '0') == '1'
+            image_endpoint_enabled = (not self._suppress_custom_image_edit_endpoint()) and os.getenv('USE_CUSTOM_IMAGE_EDIT_ENDPOINT', '1' if image_base_url else '0') == '1'
             if image_endpoint_enabled and image_base_url:
                 base_url = image_base_url
             if not self._is_stop_requested():
@@ -21638,7 +21671,7 @@ class UnifiedClient:
         # Read the user's output mode selection (env vars are synced in real-time
         # by _set_output_mode whenever the radio button changes).
         enable_video_output = os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
-        enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
+        enable_image_output = self._image_output_mode_enabled()
 
         # Auto-detect generative models by name so routing is correct
         # even if the user forgot to switch the dropdown.

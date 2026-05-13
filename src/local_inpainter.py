@@ -2667,8 +2667,47 @@ class LocalInpainter:
                 logger.error("No default image edit endpoint could be resolved")
                 return image
 
+            self._sync_inpainter_key_pool_from_config()
+
+            def _peek_image_gen_edit_pool_key():
+                try:
+                    if os.environ.get('USE_INPAINTER_KEYS', '0') != '1':
+                        return None
+                    from unified_api_client import UnifiedClient
+                    pool = getattr(UnifiedClient, '_inpainter_key_pool', None)
+                    if not pool or not getattr(pool, 'keys', None):
+                        return None
+                    for entry in pool.keys:
+                        if getattr(entry, 'enabled', True) and getattr(entry, 'model', ''):
+                            return entry
+                except Exception:
+                    return None
+                return None
+
+            def _checkout_image_gen_edit_pool_key():
+                try:
+                    if os.environ.get('USE_INPAINTER_KEYS', '0') != '1':
+                        return None
+                    from unified_api_client import UnifiedClient
+                    pool = getattr(UnifiedClient, '_inpainter_key_pool', None)
+                    if not pool or not getattr(pool, 'keys', None):
+                        return None
+                    if hasattr(pool, 'get_key_for_thread'):
+                        key_info = pool.get_key_for_thread(force_rotation=True)
+                        if key_info:
+                            key_entry, key_idx, key_id = key_info
+                            return key_entry, key_idx, key_id, pool
+                    for idx, entry in enumerate(pool.keys):
+                        if getattr(entry, 'enabled', True) and getattr(entry, 'model', ''):
+                            return entry, idx, f"ImageGenEditKey#{idx + 1} ({entry.model})", pool
+                except Exception as exc:
+                    logger.warning(f"Failed to check out Image Gen/Edit key for custom image edit: {exc}")
+                return None
+
+            pool_key_hint = _peek_image_gen_edit_pool_key()
             model_ref = (
                 os.environ.get('CUSTOM_IMAGE_EDIT_MODEL')
+                or (getattr(pool_key_hint, 'model', '') if pool_key_hint is not None else '')
                 or getattr(self, '_custom_image_edit_model_ref', '')
                 or self.config.get('custom_image_edit_model', '')
                 or self.config.get('model', '')
@@ -2785,6 +2824,37 @@ class LocalInpainter:
                 best_data_url = None
                 best_info = info.copy()
                 original_png_chars = len(f"data:image/png;base64,{base64.b64encode(img_buf.tobytes()).decode('ascii')}")
+                try:
+                    import io as _io
+                    from PIL import Image as _Image
+                    rgb_img = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
+                    pil_img = _Image.fromarray(rgb_img)
+                    lossless_buf = _io.BytesIO()
+                    pil_img.save(lossless_buf, format='WEBP', lossless=True, method=6)
+                    lossless_data_url = 'data:image/webp;base64,' + base64.b64encode(lossless_buf.getvalue()).decode('ascii')
+                    lossless_info = {
+                        'shrunk': False,
+                        'source_size': (w0, h0),
+                        'sent_size': (w0, h0),
+                        'quality': None,
+                        'chars': len(lossless_data_url),
+                        'dimensions_reduced': False,
+                    }
+                    if len(lossless_data_url) <= max_chars:
+                        self._nanogpt_last_input_resize_info = lossless_info
+                        self._log(
+                            f"NanoGPT input image converted to WebP lossless: {w0}x{h0}, chars={len(lossless_data_url)}",
+                            "info",
+                        )
+                        return lossless_data_url
+                    best_data_url = lossless_data_url
+                    best_info = lossless_info
+                    self._log(
+                        f"NanoGPT lossless WebP exceeds payload limit ({len(lossless_data_url)} > {max_chars}); compressing fallback",
+                        "warning",
+                    )
+                except Exception as lossless_err:
+                    self._log(f"NanoGPT lossless WebP conversion failed, using compression fallback: {lossless_err}", "warning")
                 for dim in dims:
                     work = bgr_img
                     scale = min(1.0, float(dim) / float(max(h0, w0)))
@@ -2824,8 +2894,18 @@ class LocalInpainter:
                 self._nanogpt_last_input_resize_info = info
                 return f"data:image/png;base64,{image_b64_fallback}"
 
+            direct_pool_key_info = None if use_current_provider else _checkout_image_gen_edit_pool_key()
+            direct_pool_key = direct_pool_key_info[0] if direct_pool_key_info else None
+            if direct_pool_key is not None and getattr(direct_pool_key, 'model', None) and not os.environ.get('CUSTOM_IMAGE_EDIT_MODEL'):
+                model_ref = getattr(direct_pool_key, 'model')
+                model_ref_lower = str(model_ref or '').lower()
+                is_nanogpt_image = (not use_current_provider) and (model_ref_lower.startswith(('nan/', 'nanogpt/')) or 'nano-gpt.com' in str(endpoint).lower())
+                if is_nanogpt_image:
+                    url = os.environ.get('NANOGPT_API_URL', url if 'nano-gpt.com' in url.lower() else 'https://nano-gpt.com').rstrip('/')
+                    url = f"{url}/v1/images/generations"
             api_key = (
                 os.environ.get('CUSTOM_IMAGE_EDIT_API_KEY')
+                or (getattr(direct_pool_key, 'api_key', '') if direct_pool_key is not None else '')
                 or os.environ.get('OPENAI_API_KEY')
                 or self.config.get('api_key', '')
                 or 'sk-local'
@@ -2860,10 +2940,22 @@ class LocalInpainter:
 
                 image_b64 = base64.b64encode(img_buf.tobytes()).decode('ascii')
                 output_dir = tempfile.gettempdir()
-                client_model = str(model_ref or self.config.get('model') or '')
-                if client_model.lower() in ('custom-image-edit', 'gpt-image-1') and self.config.get('model'):
+                pool_hint = _peek_image_gen_edit_pool_key()
+                client_model = str(
+                    os.environ.get('CUSTOM_IMAGE_EDIT_MODEL')
+                    or (getattr(pool_hint, 'model', '') if pool_hint is not None else '')
+                    or model_ref
+                    or self.config.get('model')
+                    or ''
+                )
+                if pool_hint is None and client_model.lower() in ('custom-image-edit', 'gpt-image-1') and self.config.get('model'):
                     client_model = str(self.config.get('model') or client_model)
-                client = UnifiedClient(model=client_model, api_key=api_key, output_dir=output_dir)
+                client_api_key = (
+                    os.environ.get('CUSTOM_IMAGE_EDIT_API_KEY')
+                    or (getattr(pool_hint, 'api_key', '') if pool_hint is not None else '')
+                    or api_key
+                )
+                client = UnifiedClient(model=client_model, api_key=client_api_key, output_dir=output_dir)
                 user_content = []
                 if user_prompt:
                     user_content.append({'type': 'text', 'text': user_prompt})
@@ -2875,33 +2967,21 @@ class LocalInpainter:
                     {'role': 'system', 'content': system_prompt},
                     {'role': 'user', 'content': user_content},
                 ]
-                old_env = {k: os.environ.get(k) for k in (
-                    'ENABLE_IMAGE_OUTPUT_MODE',
-                    'IMAGE_OUTPUT_RESOLUTION',
-                    'CUSTOM_IMAGE_EDIT_BASE_URL',
-                    'OPENAI_IMAGE_EDIT_BASE_URL',
-                    'USE_CUSTOM_IMAGE_EDIT_ENDPOINT',
-                )}
-                try:
-                    os.environ['ENABLE_IMAGE_OUTPUT_MODE'] = '1'
-                    os.environ['IMAGE_OUTPUT_RESOLUTION'] = os.environ.get('IMAGE_OUTPUT_RESOLUTION') or os.environ.get('CUSTOM_IMAGE_EDIT_RESOLUTION', '1K')
-                    # Blank URL means current provider. Prevent UnifiedClient from
-                    # recursively routing image output back into a stale image-edit URL.
-                    os.environ.pop('CUSTOM_IMAGE_EDIT_BASE_URL', None)
-                    os.environ.pop('OPENAI_IMAGE_EDIT_BASE_URL', None)
-                    os.environ['USE_CUSTOM_IMAGE_EDIT_ENDPOINT'] = '0'
-                    content, _finish_reason = client.send(
-                        messages,
-                        temperature=float(self.config.get('temperature', 0.3) or 0.3),
-                        max_tokens=int(self.config.get('max_output_tokens', self.config.get('max_tokens', 4096)) or 4096),
-                        context='Inpainter',
-                    )
-                finally:
-                    for key, value in old_env.items():
-                        if value is None:
-                            os.environ.pop(key, None)
-                        else:
-                            os.environ[key] = value
+                # Keep image-output routing request-local. Do not set
+                # ENABLE_IMAGE_OUTPUT_MODE globally because OCR/translation may
+                # run concurrently in other threads.
+                client._force_image_output_mode = True
+                client._forced_image_output_resolution = os.environ.get('CUSTOM_IMAGE_EDIT_RESOLUTION', '1K')
+                # Blank URL means current provider. Prevent this temporary
+                # image-edit client from recursively routing through a stale
+                # image-edit endpoint without mutating process-wide env vars.
+                client._suppress_custom_image_edit_endpoint = True
+                content, _finish_reason = client.send(
+                    messages,
+                    temperature=float(self.config.get('temperature', 0.3) or 0.3),
+                    max_tokens=int(self.config.get('max_output_tokens', self.config.get('max_tokens', 4096)) or 4096),
+                    context='Inpainter',
+                )
 
                 try:
                     tls = client._get_thread_local_client()
@@ -2963,7 +3043,10 @@ class LocalInpainter:
                 return requests.post(json_url, headers=json_headers, json=payload, timeout=timeout)
 
             if getattr(self, '_custom_image_edit_use_current_provider', False):
-                self._log("Custom image edit using current main provider/model (blank endpoint URL)", "info")
+                if os.environ.get('USE_INPAINTER_KEYS', '0') == '1' and _peek_image_gen_edit_pool_key() is not None:
+                    self._log("Custom image edit using Image Gen/Edit key pool (blank endpoint URL)", "info")
+                else:
+                    self._log("Custom image edit using current main provider/model (blank endpoint URL)", "info")
                 data = {'data': [{'url': _current_provider_image_value()}]}
             else:
                 files = {
@@ -2972,8 +3055,14 @@ class LocalInpainter:
                 }
                 if is_nanogpt_image:
                     effective_model = str(model_ref or '').split('/', 1)[1] if '/' in str(model_ref or '') else str(model_ref or '')
+                    nanogpt_auth_key = (
+                        os.environ.get('CUSTOM_IMAGE_EDIT_API_KEY')
+                        or (getattr(direct_pool_key, 'api_key', '') if direct_pool_key is not None else '')
+                        or os.environ.get('NANOGPT_API_KEY')
+                        or api_key
+                    )
                     headers = {
-                        'Authorization': f"Bearer {os.environ.get('NANOGPT_API_KEY') or api_key}",
+                        'Authorization': f"Bearer {nanogpt_auth_key}",
                         'Content-Type': 'application/json',
                     }
                     payload = {
