@@ -1516,12 +1516,18 @@ class MangaImagePreviewWidget(QWidget):
         self.translated_folder_path = None  # Path to translated images folder
         self.source_display_mode = 'translated'  # Source tab display: 'translated', 'cleaned', or 'original'
         self.cleaned_images_enabled = True  # Deprecated: kept for compatibility, use source_display_mode instead
+        self._thumbnail_folder_mtimes = {}
+        self._thumbnail_display_paths = {}
+        self._last_source_display_path = None
         
         # Enable keyboard focus for arrow key navigation
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         
         self._build_ui()
         self._thumbnail_generation = 0
+        self._thumbnail_folder_poll_timer = QTimer(self)
+        self._thumbnail_folder_poll_timer.setInterval(2000)
+        self._thumbnail_folder_poll_timer.timeout.connect(self._poll_thumbnail_output_folders)
     
     def _build_ui(self):
         """Build the compact UI"""
@@ -2499,6 +2505,7 @@ class MangaImagePreviewWidget(QWidget):
         
         # Check for cleaned image and use it instead of original in src tab if available
         src_image_path = self._check_for_cleaned_image(image_path)
+        self._last_source_display_path = src_image_path
         
         # CRITICAL: Set current_image_path BEFORE starting async load
         # Otherwise _on_image_loaded_success will use the old/stale path
@@ -2751,10 +2758,19 @@ class MangaImagePreviewWidget(QWidget):
         """Set the list of images and populate thumbnails"""
         self._thumbnail_generation = getattr(self, '_thumbnail_generation', 0) + 1
         self.image_paths = list(image_paths or [])
+        self._thumbnail_folder_mtimes = {
+            path: self._thumbnail_output_folder_mtime(path)
+            for path in self.image_paths
+        }
+        self._thumbnail_display_paths = {}
         self._populate_thumbnails()
         
         # Always keep thumbnails visible when the preview has an image list.
         self.thumbnail_list.setVisible(len(image_paths) > 0)
+        if self.image_paths:
+            self._thumbnail_folder_poll_timer.start()
+        else:
+            self._thumbnail_folder_poll_timer.stop()
     
     def _populate_thumbnails(self):
         """Populate thumbnail list with images"""
@@ -2776,8 +2792,9 @@ class MangaImagePreviewWidget(QWidget):
         # Load thumbnails in background thread
         def load_thumb(path):
             try:
+                thumb_path = self._thumbnail_display_path(path)
                 # Use QImage in background thread (thread-safe), not QPixmap
-                image = QImage(path)
+                image = QImage(thumb_path)
                 if not image.isNull():
                     # Scale the QImage in background thread
                     scaled_image = image.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, 
@@ -2816,6 +2833,99 @@ class MangaImagePreviewWidget(QWidget):
                     break
         except Exception as e:
             print(f"Error updating thumbnail: {e}")
+
+    def _translated_folder_for_source(self, source_image_path: str) -> str:
+        source_name = os.path.splitext(os.path.basename(source_image_path))[0]
+        override_dir = None
+        if self.main_gui and hasattr(self.main_gui, 'config'):
+            override_dir = self.main_gui.config.get('output_directory', '')
+        if not override_dir:
+            override_dir = os.environ.get('OUTPUT_DIRECTORY', '')
+        if override_dir and os.path.isdir(override_dir):
+            return os.path.join(override_dir, f"{source_name}_translated")
+        return os.path.join(os.path.dirname(source_image_path), f"{source_name}_translated")
+
+    def _thumbnail_output_folder_mtime(self, source_image_path: str):
+        try:
+            folder = self._translated_folder_for_source(source_image_path)
+            if os.path.isdir(folder):
+                return os.path.getmtime(folder)
+        except Exception:
+            pass
+        return None
+
+    def _thumbnail_display_path(self, source_image_path: str) -> str:
+        try:
+            resolved = self._check_for_cleaned_image(source_image_path)
+            if resolved and os.path.exists(resolved):
+                self._thumbnail_display_paths[source_image_path] = resolved
+                return resolved
+        except Exception:
+            pass
+        self._thumbnail_display_paths[source_image_path] = source_image_path
+        return source_image_path
+
+    def _refresh_thumbnail_for_path(self, source_image_path: str):
+        try:
+            image = QImage(self._thumbnail_display_path(source_image_path))
+            if image.isNull():
+                image = QImage(source_image_path)
+            if image.isNull():
+                return
+            scaled = image.scaled(
+                100, 100,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self._on_thumbnail_loaded(source_image_path, QImage(scaled))
+        except Exception as e:
+            print(f"[THUMB_POLL] Failed to refresh thumbnail: {e}")
+
+    def _sync_deleted_output_state(self, source_image_path: str):
+        try:
+            mi = getattr(self, 'manga_integration', None)
+            if not mi or not hasattr(mi, 'image_state_manager') or not mi.image_state_manager:
+                return
+            state = mi.image_state_manager.get_state(source_image_path) or {}
+            changed = False
+            for key in ('cleaned_image_path', 'rendered_image_path', 'translated_image_path'):
+                value = state.get(key)
+                if value and not os.path.exists(value):
+                    state.pop(key, None)
+                    changed = True
+            if changed:
+                mi.image_state_manager.set_state(source_image_path, state, save=True)
+        except Exception:
+            pass
+
+    def _poll_thumbnail_output_folders(self):
+        """Watch each thumbnail's isolated output folder by mtime only."""
+        try:
+            if not self.image_paths:
+                self._thumbnail_folder_poll_timer.stop()
+                return
+
+            for source_path in list(self.image_paths):
+                current_mtime = self._thumbnail_output_folder_mtime(source_path)
+                previous_mtime = self._thumbnail_folder_mtimes.get(source_path)
+                if current_mtime == previous_mtime:
+                    continue
+
+                self._thumbnail_folder_mtimes[source_path] = current_mtime
+                old_display_path = self._thumbnail_display_paths.get(source_path)
+                self._sync_deleted_output_state(source_path)
+                new_display_path = self._thumbnail_display_path(source_path)
+
+                if old_display_path != new_display_path:
+                    self._refresh_thumbnail_for_path(source_path)
+
+                    if source_path == self.current_image_path:
+                        self._last_source_display_path = new_display_path
+                        self.viewer.load_image(new_display_path)
+                else:
+                    self._refresh_thumbnail_for_path(source_path)
+        except Exception as e:
+            print(f"[THUMB_POLL] Folder polling failed: {e}")
     
     
     def _update_thumbnail_selection(self, image_path: str):
