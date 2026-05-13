@@ -2195,13 +2195,14 @@ Text to analyze:
                 "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
                 "- Retain Korean familial address terms in romanized form rather than translating them (examples: oppa, eonni, hyung, noona, omma, appa, halabeoji, halmeoni), preserving their nuance and relationship context instead of converting them to English equivalents like brother, sister, mom, or dad.\n"
                 "- Always localize Korean terminology to proper English equivalents instead of literal translations (examples: 마왕 = Demon King; 마술 = magic).\n"
-                "- When translating Korean's pronoun-dropping style, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration while reflecting the Korean pronoun's nuance (나/내/저/우리/etc.) through speech patterns and formality level rather than the pronoun itself, and maintain natural English flow without overusing pronouns just because they're omitted in Korean.\n"
+                "- Strictly follow a Subject Tracking & Pronoun Resolution process, since the Korean language frequently omits subjects and pronouns. DO NOT default to 'he' or 'it' for omitted subjects. Instead, actively track the acting subject from preceding sentences. Deduce gender from context clues (titles, relationships, dialogue) and maintain absolute pronoun consistency for each character throughout the scene.\n"
                 "- All Korean profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Korean quotation marks (\" \", ' ', 「」, 『』) as-is without converting to English quotes.\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, <ruby>, etc.\n"
+                "- Do not leave stray raw text like "ㅋ", They must be translated to an english equivalent. \n"
                 "{split_marker_instruction}\n"
             ),
             "Japanese_BeautifulSoup": (
@@ -2242,7 +2243,7 @@ Text to analyze:
                 "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
                 "- Retain Korean familial address terms in romanized form rather than translating them (examples: oppa, eonni, hyung, noona, omma, appa, halabeoji, halmeoni), preserving their nuance and relationship context instead of converting them to English equivalents like brother, sister, mom, or dad.\n"
                 "- Always localize Korean terminology to proper English equivalents instead of literal translations (examples: 마왕 = Demon King; 마술 = magic).\n"
-                "- When translating Korean's pronoun-dropping style, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration while reflecting the Korean pronoun's nuance (나/내/저/우리/etc.) through speech patterns and formality level rather than the pronoun itself, and maintain natural English flow without overusing pronouns just because they're omitted in Korean.\n"
+                "- Strictly follow a Subject Tracking & Pronoun Resolution process, since the Korean language frequently omits subjects and pronouns. DO NOT default to 'he' or 'it' for omitted subjects. Instead, actively track the acting subject from preceding sentences. Deduce gender from context clues (titles, relationships, dialogue) and maintain absolute pronoun consistency for each character throughout the scene.\n"
                 "- All Korean profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
@@ -2251,6 +2252,7 @@ Text to analyze:
                 "- Use line breaks for proper formatting as expected of a novel.\n"
                 "- Preserve all Markdown present.\n"
                 "- Preserve any HTML image tags (<img>, <svg>, <picture>, <figure>) and furigana <ruby> tags exactly as they appear (e.g. <ruby>体力<rp>(</rp><rt>HP</rt><rp>)</rp></ruby>). Do not add or preserve any other HTML tags.\n"
+                "- Do not leave stray raw text like "ㅋ", They must be translated to an english equivalent.\n"
                 "{split_marker_instruction}\n"
             ),
             "Japanese_html2text": (
