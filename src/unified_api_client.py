@@ -4280,6 +4280,11 @@ class UnifiedClient:
         value = context if context is not None else getattr(self, 'context', None)
         return str(value or '').strip().lower() == 'inpainter'
 
+    def _is_manga_ocr_context(self, context: Any = None) -> bool:
+        """Return True for manga OCR requests."""
+        value = context if context is not None else getattr(self, 'context', None)
+        return str(value or '').strip().lower() == 'manga_ocr'
+
     def _get_payload_context_thread_directory(self, folder: str) -> str:
         """Get a unique per-thread payload directory for image-like context folders."""
         thread_id = threading.current_thread().ident
@@ -5099,7 +5104,7 @@ class UnifiedClient:
             # use that pool for full multi-key rotation (mirrors main multi-key mode).
             
             # VISION KEY OVERRIDE: shared pool for QA truncation checks and vision OCR/image scans.
-            _vision_key_contexts = ('Truncation', 'qa_truncation', 'image_scan', 'image_ocr', 'vision_ocr')
+            _vision_key_contexts = ('Truncation', 'qa_truncation', 'image_scan', 'image_ocr', 'vision_ocr', 'manga_ocr')
             _is_qa_scan_context = context in _vision_key_contexts or (not context and 'Truncation' in threading.current_thread().name)
             if _is_qa_scan_context:
                 try:
@@ -9242,6 +9247,8 @@ class UnifiedClient:
             is_image = False
         if self._is_inpainter_context(context):
             failed_dir = os.path.join(_payloads_dir(), "inpainter", "failed_requests")
+        elif self._is_manga_ocr_context(context):
+            failed_dir = os.path.join(_payloads_dir(), "Manga_OCR", "failed_requests")
         elif is_image:
             failed_dir = os.path.join(_payloads_dir(), "image", "failed_requests")
         else:
@@ -9999,6 +10006,8 @@ class UnifiedClient:
         # so manga image-edit payloads don't mix with normal image output.
         if self._is_inpainter_context():
             thread_dir = self._get_payload_context_thread_directory("inpainter")
+        elif self._is_manga_ocr_context():
+            thread_dir = self._get_payload_context_thread_directory("Manga_OCR")
         elif has_images:
             # Image payloads go to Payloads/image/thread_id/ (skip context folder)
             # Use cached directory for this thread to ensure payload and safety config go to same folder
@@ -10410,7 +10419,7 @@ class UnifiedClient:
             ctx = context if context is not None else getattr(self, "context", None)
             if isinstance(ctx, str) and ctx:
                 cl = ctx.lower()
-                if cl in ("image", "image_translation", "image_generation", "imagegen"):
+                if cl in ("image", "image_translation", "image_generation", "imagegen", "manga_ocr"):
                     return True
         except Exception:
             pass
@@ -15336,6 +15345,8 @@ class UnifiedClient:
         thread_name = threading.current_thread().name
         # Prefer the client's explicit context if available
         explicit = getattr(self, 'context', None)
+        if self._is_manga_ocr_context(explicit):
+            return self._get_payload_context_thread_directory("Manga_OCR")
         if explicit in ('translation', 'glossary', 'summary', 'review', 'metadata', 'book_title', 'qa_truncation', 'Truncation'):
             context = explicit
         else:
@@ -15382,6 +15393,8 @@ class UnifiedClient:
         # directory if it's an image request, otherwise normal thread directory.
         if self._is_inpainter_context():
             thread_dir = self._get_payload_context_thread_directory("inpainter")
+        elif self._is_manga_ocr_context():
+            thread_dir = self._get_payload_context_thread_directory("Manga_OCR")
         elif has_images:
             # Image payloads go to Payloads/image/thread_id/
             # Use cached directory for this thread to ensure payload and safety config go to same folder

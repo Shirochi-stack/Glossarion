@@ -608,7 +608,8 @@ class CustomAPIProvider(OCRProvider):
                     response = self.client.send(
                         messages=messages,
                         temperature=self.temperature,
-                        max_tokens=max_tokens
+                        max_tokens=max_tokens,
+                        context='manga_ocr'
                     )
 
                     # Extract content from response object

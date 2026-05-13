@@ -8525,6 +8525,121 @@ Recent translations to summarize:
                 return input_dir
         return script_dir
 
+    def _resolve_translation_output_dir(self, input_file: str) -> str:
+        """Return the expected translation output directory for one input file."""
+        base_name = os.path.splitext(os.path.basename(input_file))[0]
+        override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        if override_dir:
+            return os.path.join(os.path.abspath(override_dir), base_name)
+        relative_output = base_name
+        helper_output = os.path.join(self._get_output_base_dir(input_file), base_name)
+        if os.path.exists(relative_output) or not os.path.exists(helper_output):
+            return relative_output
+        return helper_output
+
+    def _collect_translation_qa_failures(self, files=None):
+        """Collect qa_failed chapters from translation_progress.json files."""
+        files = files or getattr(self, 'selected_files', []) or []
+        failures = []
+        seen = set()
+
+        for file_path in files:
+            if not file_path or file_path == "__generative_mode__":
+                continue
+            try:
+                progress_path = os.path.join(
+                    self._resolve_translation_output_dir(file_path),
+                    "translation_progress.json",
+                )
+                if not os.path.exists(progress_path):
+                    continue
+                with open(progress_path, "r", encoding="utf-8") as pf:
+                    progress = json.load(pf)
+            except Exception:
+                continue
+
+            chapters = progress.get("chapters", {})
+            if not isinstance(chapters, dict):
+                continue
+
+            for chapter_key, chapter_info in chapters.items():
+                if not isinstance(chapter_info, dict):
+                    continue
+                status = str(chapter_info.get("status", "")).lower()
+                issues = chapter_info.get("qa_issues_found") or []
+                if status not in {"qa_failed", "failed"} and not chapter_info.get("qa_issues"):
+                    continue
+                if isinstance(issues, str):
+                    issues = [issues]
+                elif not isinstance(issues, list):
+                    issues = []
+
+                chapter_num = (
+                    chapter_info.get("actual_num")
+                    or chapter_info.get("chapter_num")
+                    or chapter_info.get("raw_chapter_num")
+                    or chapter_key
+                )
+                output_file = chapter_info.get("output_file") or chapter_info.get("chapter_file") or ""
+                dedupe_key = (os.path.abspath(progress_path), str(chapter_num), output_file)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                failures.append({
+                    "source": os.path.basename(file_path),
+                    "chapter": chapter_num,
+                    "output_file": output_file,
+                    "issues": [str(issue).strip() for issue in issues if str(issue).strip()] or ["UNKNOWN"],
+                })
+
+        return failures
+
+    def _log_translation_qa_failure_summary(self, phase="current"):
+        failures = self._collect_translation_qa_failures()
+        if not failures:
+            return
+
+        self.append_log("")
+        self.append_log("⚠️ QA failure summary:")
+        if phase == "start":
+            self.append_log("   Existing failed chapters were found before this run starts:")
+        else:
+            self.append_log("   Failed chapters found at the end of this translation run:")
+
+        for failure in failures:
+            output_file = f" ({failure['output_file']})" if failure.get("output_file") else ""
+            self.append_log(
+                f"   • {failure['source']} — Chapter {failure['chapter']}{output_file}: "
+                f"{', '.join(failure['issues'])}"
+            )
+
+        issue_set = {issue for failure in failures for issue in failure["issues"]}
+        self.append_log("")
+        self.append_log("   What these QA issues mean:")
+        if "TRUNCATED" in issue_set:
+            self.append_log(
+                "   • TRUNCATED: the provider/server ended the response early. Try reducing the compression factor "
+                "or output token limit, using a different model, or increasing the auto-retry truncated value."
+            )
+        if "PROHIBITED_CONTENT" in issue_set or "PROHIBITED CONTENT" in issue_set:
+            self.append_log(
+                "   • PROHIBITED_CONTENT: the model/provider likely blocked the request because of safety or censorship. "
+                "Use a different model/provider for that chapter."
+            )
+        if "SPLIT_FAILED" in issue_set:
+            self.append_log(
+                "   • SPLIT_FAILED: the AI ignored or mishandled the split-marker instructions, so the output could not "
+                "be safely mapped back to the original split chapters."
+            )
+
+        known = {"TRUNCATED", "PROHIBITED_CONTENT", "PROHIBITED CONTENT", "SPLIT_FAILED"}
+        unknown = sorted(issue for issue in issue_set if issue not in known)
+        if unknown:
+            self.append_log(
+                f"   • Other issue(s) ({', '.join(unknown)}): the exact cause is not known from the saved QA marker. "
+                "Retry the chapter, check the surrounding logs, or switch model/provider if it repeats."
+            )
+
     def open_output_folder(self):
         """Open the output folder that is expected to be created"""
         import subprocess
@@ -12178,6 +12293,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             scrollbar.setValue(scrollbar.maximum())
         except Exception:
             pass
+        try:
+            self._log_translation_qa_failure_summary(phase="start")
+        except Exception as e:
+            self.append_log(f"⚠️ Could not read existing QA failure summary: {e}")
         # Reset stop notice dedupe flag at start of a run
         self._stop_notice_shown = False
         
@@ -12826,6 +12945,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Check stop before final summary
             if self.stop_requested:
                 self.append_log(f"\n⏹️ Translation stopped - processed {successful} of {total_files} files")
+                try:
+                    self._log_translation_qa_failure_summary(phase="end")
+                except Exception as e:
+                    self.append_log(f"⚠️ Could not read final QA failure summary: {e}")
                 # Reset progress bar when stopped
                 try:
                     if hasattr(self, 'progress_bar') and self.progress_bar:
@@ -12846,6 +12969,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 return False
                 
             # Final summary
+            try:
+                self._log_translation_qa_failure_summary(phase="end")
+            except Exception as e:
+                self.append_log(f"⚠️ Could not read final QA failure summary: {e}")
+
             if total_files > 1:
                 self.append_log(f"\n{'='*60}")
                 self.append_log(f"📊 Translation Summary:")
