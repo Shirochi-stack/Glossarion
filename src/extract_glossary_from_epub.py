@@ -7384,7 +7384,7 @@ def main(log_callback=None, stop_callback=None):
         if "TRUNCATED" in issue_set:
             print(
                 "   • TRUNCATED: the provider/server ended the response early. "
-                "Reduce the glossary compression factor or output token limit, use a different model, "
+                "Increase the glossary compression factor or reduce the output token limit, use a different model, "
                 "or increase the auto-retry truncated value."
             )
         if "PROHIBITED_CONTENT" in issue_set or "PROHIBITED CONTENT" in issue_set:

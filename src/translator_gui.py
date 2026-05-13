@@ -4037,7 +4037,8 @@ Recent translations to summarize:
         self.gcloud_status_label.setStyleSheet("color: #6c757d; font-size: 9pt;")
         self.gcloud_status_label.setWordWrap(True)  # Allow text wrapping
         self.gcloud_status_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.frame.addWidget(self.gcloud_status_label, 4, 4, Qt.AlignLeft)
+        self.gcloud_status_label.setMinimumWidth(260)
+        self.frame.addWidget(self.gcloud_status_label, 4, 4, 1, 2, Qt.AlignLeft)
         
         # Optional: Add checkbox for enhanced functionality
         options_frame = QWidget()
@@ -8631,8 +8632,8 @@ Recent translations to summarize:
         self.append_log("   What these QA issues mean:")
         if "TRUNCATED" in issue_set:
             self.append_log(
-                "   • TRUNCATED: the provider/server ended the response early. Try reducing the compression factor "
-                "or output token limit, using a different model, or increasing the auto-retry truncated value."
+                "   - TRUNCATED: the provider/server ended the response early. Increase the compression factor "
+                "or reduce the output token limit, use a different model, or increase the auto-retry truncated value."
             )
         if "PROHIBITED_CONTENT" in issue_set or "PROHIBITED CONTENT" in issue_set:
             self.append_log(
