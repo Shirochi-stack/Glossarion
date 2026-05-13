@@ -9780,10 +9780,10 @@ class MangaTranslator:
             if hasattr(self, 'main_gui') and getattr(self.main_gui, 'config', None):
                 endpoint_enabled = bool(self.main_gui.config.get('use_custom_image_edit_endpoint', False))
             if False and not endpoint_enabled:
-                self._log("âš ï¸ Custom Image Edit Endpoint is disabled", "warning")
+                self._log("⚠️ Custom Image Edit Endpoint is disabled", "warning")
                 return None
             if not model_path:
-                self._log("âš ï¸ Custom Image Edit Endpoint URL is missing", "warning")
+                self._log("⚠️ Custom Image Edit Endpoint URL is missing", "warning")
                 return None
             with MangaTranslator._inpaint_pool_lock:
                 rec = MangaTranslator._inpaint_pool.get(key)
@@ -10698,7 +10698,7 @@ class MangaTranslator:
                         self._last_local_model_path = model_path
                         self._log("OK Using custom image edit endpoint inpainter", "info")
                         return True
-                    self._log("âš ï¸ Custom image edit endpoint inpainter is not ready", "warning")
+                    self._log("⚠️ Custom image edit endpoint inpainter is not ready", "warning")
                     return False
                 
                 # CRITICAL FIX: Wait for any ongoing preload to complete
@@ -15083,6 +15083,50 @@ class MangaTranslator:
                     result['errors'].append(error_msg)
                     return False
             
+            def _save_cleaned_image_if_changed(cleaned_img, label: str):
+                try:
+                    if cleaned_img is None or not isinstance(cleaned_img, np.ndarray):
+                        return None
+                    if cleaned_img.shape == image.shape and np.array_equal(cleaned_img, image):
+                        self._log(f"WARNING: Inpainting returned the original image unchanged; not saving {label} cleaned image", "warning")
+                        if output_path:
+                            base, ext = os.path.splitext(output_path)
+                        else:
+                            base, ext = os.path.splitext(image_path)
+                        stale_path = f"{base}_cleaned{ext}"
+                        try:
+                            if os.path.exists(stale_path):
+                                os.remove(stale_path)
+                        except Exception:
+                            pass
+                        return None
+
+                    if output_path:
+                        base, ext = os.path.splitext(output_path)
+                    else:
+                        base, ext = os.path.splitext(image_path)
+                    cleaned_path = f"{base}_cleaned{ext}"
+
+                    cleaned_dir = os.path.dirname(cleaned_path)
+                    if cleaned_dir:
+                        os.makedirs(cleaned_dir, exist_ok=True)
+
+                    ext_lower = ext.lower()
+                    if ext_lower == '.png':
+                        cv2.imwrite(cleaned_path, cleaned_img, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+                    elif ext_lower in ['.jpg', '.jpeg']:
+                        cv2.imwrite(cleaned_path, cleaned_img, [cv2.IMWRITE_JPEG_QUALITY, 100])
+                    elif ext_lower == '.webp':
+                        cv2.imwrite(cleaned_path, cleaned_img, [cv2.IMWRITE_WEBP_QUALITY, 100])
+                    else:
+                        cv2.imwrite(cleaned_path, cleaned_img)
+
+                    self._log(f"Saved cleaned image ({label}): {os.path.basename(cleaned_path)}", "info")
+                    return cleaned_path
+                except Exception as e:
+                    self._log(f"WARNING: Failed to save {label} cleaned image: {e}", "warning")
+                    return None
+
             def _task_inpaint():
                 try:
                     # If force stop is active (not graceful), skip all inpainting work
@@ -15189,34 +15233,8 @@ class MangaTranslator:
                         except Exception:
                             pass
                     
-                    # OPTIMIZATION: Save cleaned image immediately after inpainting
-                    # Don't wait for translation to complete
-                    try:
-                        if output_path:
-                            base, ext = os.path.splitext(output_path)
-                        else:
-                            base, ext = os.path.splitext(image_path)
-                        cleaned_path = f"{base}_cleaned{ext}"
-                        
-                        # Ensure parent directory exists (respects OUTPUT_DIRECTORY)
-                        cleaned_dir = os.path.dirname(cleaned_path)
-                        if cleaned_dir:
-                            os.makedirs(cleaned_dir, exist_ok=True)
-                        
-                        # Fast save with no compression
-                        ext_lower = ext.lower()
-                        if ext_lower == '.png':
-                            cv2.imwrite(cleaned_path, inpainted_local, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-                        elif ext_lower in ['.jpg', '.jpeg']:
-                            cv2.imwrite(cleaned_path, inpainted_local, [cv2.IMWRITE_JPEG_QUALITY, 100])
-                        elif ext_lower == '.webp':
-                            cv2.imwrite(cleaned_path, inpainted_local, [cv2.IMWRITE_WEBP_QUALITY, 100])
-                        else:
-                            cv2.imwrite(cleaned_path, inpainted_local)
-                        
-                        self._log(f"💾 Saved cleaned image: {os.path.basename(cleaned_path)}", "info")
-                    except Exception as e:
-                        self._log(f"⚠️ Failed to save cleaned image in thread: {e}", "warning")
+                    # Save cleaned image immediately after inpainting, unless the backend returned a no-op.
+                    _save_cleaned_image_if_changed(inpainted_local, "thread")
                     
                     return inpainted_local
                 except Exception as ie:
@@ -15332,57 +15350,15 @@ class MangaTranslator:
                                 else:
                                     self._log(f"✅ Early inpainting completed (waited {inpaint_wait_time:.1f}s)", "info")
                             
-                            # CRITICAL: Save cleaned image after early inpainting completes
-                            # This was missing - early inpainting path skipped the file save
-                            try:
-                                if output_path:
-                                    base, ext = os.path.splitext(output_path)
-                                else:
-                                    base, ext = os.path.splitext(image_path)
-                                cleaned_path = f"{base}_cleaned{ext}"
-                                
-                                # Ensure parent directory exists (respects OUTPUT_DIRECTORY)
-                                cleaned_dir = os.path.dirname(cleaned_path)
-                                if cleaned_dir:
-                                    os.makedirs(cleaned_dir, exist_ok=True)
-                                
-                                # Fast save with no compression
-                                ext_lower = ext.lower()
-                                if ext_lower == '.png':
-                                    cv2.imwrite(cleaned_path, inpainted, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-                                elif ext_lower in ['.jpg', '.jpeg']:
-                                    cv2.imwrite(cleaned_path, inpainted, [cv2.IMWRITE_JPEG_QUALITY, 100])
-                                elif ext_lower == '.webp':
-                                    cv2.imwrite(cleaned_path, inpainted, [cv2.IMWRITE_WEBP_QUALITY, 100])
-                                else:
-                                    cv2.imwrite(cleaned_path, inpainted)
-                                
-                                self._log(f"💾 Saved cleaned image (early inpainting): {os.path.basename(cleaned_path)}", "info")
-                            except Exception as e:
-                                self._log(f"⚠️ Failed to save cleaned image after early inpainting: {e}", "warning")
+                            # Save cleaned image after early inpainting completes, unless the backend returned a no-op.
+                            _save_cleaned_image_if_changed(inpainted, "early inpainting")
                         elif isinstance(fut_inpaint_result, np.ndarray):
                             # It's the actual image array (early inpainting didn't run, but inpainting task finished)
                             self._log("✅ Inpainting completed (direct path)", "info")
                             inpainted = fut_inpaint_result
                             
-                            # CRITICAL: Save cleaned image for direct path too (to ensure consistency)
-                            try:
-                                if output_path:
-                                    base, ext = os.path.splitext(output_path)
-                                else:
-                                    base, ext = os.path.splitext(image_path)
-                                cleaned_path = f"{base}_cleaned{ext}"
-                                
-                                # Ensure parent directory exists (respects OUTPUT_DIRECTORY)
-                                cleaned_dir = os.path.dirname(cleaned_path)
-                                if cleaned_dir:
-                                    os.makedirs(cleaned_dir, exist_ok=True)
-                                
-                                cv2.imwrite(cleaned_path, inpainted)
-                                
-                                self._log(f"💾 Saved cleaned image (direct path): {os.path.basename(cleaned_path)}", "info")
-                            except Exception as e:
-                                self._log(f"⚠️ Failed to save cleaned image in direct path: {e}", "warning")
+                            # Save cleaned image for direct path too, unless the backend returned a no-op.
+                            _save_cleaned_image_if_changed(inpainted, "direct path")
                         else:
                             # Unexpected type
                             self._log(f"⚠️ Unexpected inpainting result type: {type(fut_inpaint_result)}", "warning")

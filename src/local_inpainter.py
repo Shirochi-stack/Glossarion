@@ -1471,26 +1471,34 @@ class LocalInpainter:
 
     def load_onnx_model(self, onnx_path: str) -> bool:
         """Load an ONNX model with C++ backend support for 2x performance"""
-        # Try C++ backend first (lazy import — DLL is loaded here, not at module import)
-        try:
-            from onnx_cpp_backend import ONNXCppBackend
-            logger.info("🚀 Loading ONNX model with C++ backend...")
-            self.onnx_cpp_backend = ONNXCppBackend()
-            if self.onnx_cpp_backend.load_model(onnx_path, use_gpu=self.use_gpu):
-                self.use_onnx = True
-                self.use_onnx_cpp = True
-                self.model_loaded = True
-                self.current_onnx_path = onnx_path
-                logger.info("✅ ONNX C++ backend loaded successfully (Python fallback disabled)")
-                return True
-            else:
-                logger.warning("C++ backend load failed, falling back to Python")
+        enable_cpp_backend = str(
+            self.config.get('enable_onnx_cpp_backend', os.getenv('ENABLE_ONNX_CPP_BACKEND', '0'))
+        ).strip().lower() in ('1', 'true', 'yes', 'on')
+        if enable_cpp_backend:
+            # Try C++ backend first (lazy import; DLL is loaded here, not at module import).
+            try:
+                from onnx_cpp_backend import ONNXCppBackend
+                logger.info("Loading ONNX model with C++ backend...")
+                self.onnx_cpp_backend = ONNXCppBackend()
+                if self.onnx_cpp_backend.load_model(onnx_path, use_gpu=self.use_gpu):
+                    self.use_onnx = True
+                    self.use_onnx_cpp = True
+                    self.model_loaded = True
+                    self.current_onnx_path = onnx_path
+                    logger.info("ONNX C++ backend loaded successfully")
+                    return True
+                else:
+                    logger.warning("C++ backend load failed, falling back to Python")
+                    self.onnx_cpp_backend = None
+                    self.use_onnx_cpp = False
+            except Exception as cpp_err:
+                logger.warning(f"C++ backend not available: {cpp_err}, using Python fallback")
                 self.onnx_cpp_backend = None
                 self.use_onnx_cpp = False
-        except Exception as cpp_err:
-            logger.warning(f"C++ backend not available: {cpp_err}, using Python fallback")
+        else:
             self.onnx_cpp_backend = None
             self.use_onnx_cpp = False
+            logger.debug("ONNX C++ backend disabled; using Python ONNX Runtime")
         
         # Load Python ONNX Runtime if C++ backend not available or failed
         if not ONNX_AVAILABLE:
