@@ -9024,12 +9024,11 @@ class UnifiedClient:
             elif img.mode != 'RGB':
                 img = img.convert('RGB')
 
-            quality = max(1, min(100, int(os.getenv('WEBP_QUALITY', '85') or '85')))
             buf = _io.BytesIO()
-            img.save(buf, format='WEBP', quality=quality, method=6)
+            img.save(buf, format='WEBP', lossless=True, method=6)
             converted = buf.getvalue()
             if not self._is_stop_requested():
-                print(f"[ImageInput] Converted input image to WEBP ({len(raw)/1024:.0f}KB -> {len(converted)/1024:.0f}KB)")
+                print(f"[ImageInput] Converted input image format to WEBP lossless ({len(raw)/1024:.0f}KB -> {len(converted)/1024:.0f}KB)")
             return converted, 'image/webp'
         except Exception as exc:
             if not self._is_stop_requested():
@@ -21705,6 +21704,29 @@ class UnifiedClient:
                 img = img.convert('RGB')
 
             original_size = img.size
+            if force_webp:
+                try:
+                    buf = _io.BytesIO()
+                    img.save(buf, format='WEBP', lossless=True, method=6)
+                    candidate = 'data:image/webp;base64,' + _b64.b64encode(buf.getvalue()).decode('ascii')
+                    if max_chars <= 0 or len(candidate) <= max_chars:
+                        self._nanogpt_last_input_resize_info = {
+                            'shrunk': False,
+                            'source_size': original_size,
+                            'sent_size': original_size,
+                            'quality': None,
+                            'chars': len(candidate),
+                            'dimensions_reduced': False,
+                        }
+                        if not self._is_stop_requested():
+                            print(
+                                f"[ImageInput] Converted input image format to WEBP lossless: "
+                                f"{original_size[0]}x{original_size[1]}, chars={len(candidate)}"
+                            )
+                        return candidate
+                except Exception:
+                    pass
+
             max_dim = int(os.getenv('NANOGPT_MAX_INPUT_IMAGE_DIM', '1536') or '1536')
             qualities = [90, 85, 80, 75, 70, 65, 60, 55, 50]
             dims = [max(original_size)]
