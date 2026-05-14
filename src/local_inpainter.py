@@ -2975,6 +2975,11 @@ class LocalInpainter:
                     or (getattr(pool_hint, 'api_key', '') if pool_hint is not None else '')
                     or api_key
                 )
+                if not UnifiedClient._is_image_gen_model(client_model):
+                    raise RuntimeError(
+                        f"Current provider model '{client_model}' is not an image edit/output model. "
+                        "Configure an Image Gen/Edit key, an image-capable model, or a custom image edit endpoint."
+                    )
                 client = UnifiedClient(model=client_model, api_key=client_api_key, output_dir=output_dir)
                 user_content = []
                 if user_prompt:
@@ -3092,9 +3097,15 @@ class LocalInpainter:
                         'response_format': 'url',
                     }
                     nanogpt_image_data_url = _nanogpt_image_data_url_from_bgr(proc_bgr)
+                    nanogpt_mask_data_url = 'data:image/png;base64,' + base64.b64encode(mask_buf.tobytes()).decode('ascii')
                     payload['imageDataUrl'] = nanogpt_image_data_url
                     payload['imageDataUrls'] = [nanogpt_image_data_url]
-                    self._log(f"NanoGPT image edit payload includes imageDataUrl ({len(nanogpt_image_data_url)} chars)", "info")
+                    payload['maskDataUrl'] = nanogpt_mask_data_url
+                    self._log(
+                        f"NanoGPT image edit payload includes imageDataUrl ({len(nanogpt_image_data_url)} chars) "
+                        f"and maskDataUrl ({len(nanogpt_mask_data_url)} chars)",
+                        "info",
+                    )
                     resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
                 else:
                     resp = requests.post(url, headers=headers, data=form_data, files=files, timeout=timeout)

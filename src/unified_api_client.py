@@ -7796,10 +7796,14 @@ class UnifiedClient:
                         # Allow normal retry budget to proceed
                         continue
                 
-                # Check for prohibited content — treat any HTTP 400 as prohibited to force fallback
+                # Check for prohibited content. Some providers use HTTP 400 for
+                # request/schema errors, so only safety-like 400s should get
+                # the prohibited-content label.
                 bad_request = getattr(e, 'http_status', None) == 400 or " 400 " in error_str
                 non_safety_bad_request_markers = (
                     "'url' field must be a base64 encoded image",
+                    "request contains an invalid argument",
+                    "invalid_argument",
                     "you didn't provide an api key",
                     "invalid_request_error",
                     "missing required",
@@ -11696,7 +11700,14 @@ class UnifiedClient:
                     if not self._is_stop_requested():
                         print(f"[ImageGen] Image output mode auto-enabled for {self.model}")
                 elif enable_image_output and not self._is_stop_requested():
-                    print(f"[ImageGen] Image output mode enabled for {model_name}")
+                    if bool(getattr(self, '_force_image_output_mode', False)):
+                        raise UnifiedClientError(
+                            f"Model {model_name} does not support Vertex image output. "
+                            "Use an image-capable model such as a *-image-preview model.",
+                            error_type="validation",
+                        )
+                    print(f"[ImageGen] Image output mode ignored for non-image model {model_name}")
+                    enable_image_output = False
                 
                 # Log configuration (consolidate all info in one log)
                 if not self._is_stop_requested():
@@ -22259,6 +22270,75 @@ class UnifiedClient:
             if not self._is_stop_requested():
                 print(f"[NanoGPT] Could not resize generated output back to source dimensions: {exc}")
 
+    def _get_nanogpt_image_model_capabilities(self, model: str, base_url: str, api_key: str) -> Optional[dict]:
+        """Fetch/cache NanoGPT image model capabilities for image-input validation."""
+        model_id = str(model or '').strip()
+        if not model_id:
+            return None
+        cls = self.__class__
+        now = time.time()
+        try:
+            cache = getattr(cls, '_nanogpt_image_model_capability_cache', None)
+            cache_time = float(getattr(cls, '_nanogpt_image_model_capability_cache_time', 0) or 0)
+            if isinstance(cache, dict) and now - cache_time < 3600:
+                return cache.get(model_id.lower())
+        except Exception:
+            pass
+
+        try:
+            import requests as _req
+            url = f"{str(base_url or 'https://nano-gpt.com').rstrip('/')}/api/v1/image-models?detailed=true"
+            headers = {}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            resp = _req.get(url, headers=headers, timeout=float(os.getenv("NANOGPT_MODEL_CAPABILITY_TIMEOUT", "8")))
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            model_map = {}
+            for item in data.get('data', []) if isinstance(data, dict) else []:
+                if not isinstance(item, dict):
+                    continue
+                item_id = str(item.get('id') or '').strip()
+                if item_id:
+                    model_map[item_id.lower()] = item
+            cls._nanogpt_image_model_capability_cache = model_map
+            cls._nanogpt_image_model_capability_cache_time = now
+            return model_map.get(model_id.lower())
+        except Exception as exc:
+            if os.getenv("NANOGPT_VERBOSE_CAPABILITY_CHECK", "0") == "1" and not self._is_stop_requested():
+                print(f"[NanoGPT] Could not fetch image model capabilities: {exc}")
+            return None
+
+    def _nanogpt_model_supports_image_input(self, model: str, base_url: str, api_key: str) -> Optional[bool]:
+        """Return True/False when known, None when capability lookup is unavailable."""
+        caps = self._get_nanogpt_image_model_capabilities(model, base_url, api_key)
+        if isinstance(caps, dict):
+            capabilities = caps.get('capabilities') if isinstance(caps.get('capabilities'), dict) else {}
+            architecture = caps.get('architecture') if isinstance(caps.get('architecture'), dict) else {}
+            inputs = architecture.get('input_modalities') or []
+            if isinstance(inputs, str):
+                inputs = [inputs]
+            supports = (
+                capabilities.get('image_to_image') is True
+                or capabilities.get('inpainting') is True
+                or any(str(v).lower() == 'image' for v in inputs)
+            )
+            return bool(supports)
+
+        model_l = str(model or '').lower()
+        known_image_input_markers = (
+            'kontext', 'edit', 'inpaint', 'image-to-image', 'img2img',
+            'gpt-image', 'gpt-4o-image', 'gemini-flash-edit',
+            'ghiblify', 'bagel', 'upscaler', 'sdxl-arlimix',
+        )
+        known_text_to_image_only_markers = ('qwen-image',)
+        if any(marker in model_l for marker in known_image_input_markers):
+            return True
+        if any(marker in model_l for marker in known_text_to_image_only_markers):
+            return False
+        return None
+
     def _send_nanogpt_image(self, messages, model, base_url, api_key, response_name) -> UnifiedResponse:
         """POST /v1/images/generations on nano-gpt.com.
 
@@ -22324,16 +22404,26 @@ class UnifiedClient:
 
         # ── Attach source image(s) for edits ──
         if image_data_urls:
+            supports_image_input = self._nanogpt_model_supports_image_input(model, base_url, api_key)
+            if supports_image_input is False:
+                raise UnifiedClientError(
+                    f"NanoGPT model '{model}' does not advertise image-to-image or inpainting support; "
+                    "the input image would be ignored. Use an edit/img2img model such as "
+                    "flux-kontext, gpt-image-1, gpt-4o-image, gemini-flash-edit, hidream-edit, or another model with image_to_image/inpainting capability.",
+                    error_type="validation",
+                )
+            if supports_image_input is None and not self._is_stop_requested():
+                print(f"⚠️ [NanoGPT] Could not verify whether model '{model}' supports image input; sending imageDataUrl anyway")
             if len(image_data_urls) == 1:
                 payload["imageDataUrl"] = image_data_urls[0]
                 payload["imageDataUrls"] = image_data_urls
                 if not self._is_stop_requested():
                     _preview = image_data_urls[0][:60]
-                    print(f"🖼️ [NanoGPT] Attaching input image for edit ({_preview}…)")
+                    print(f"[NanoGPT] Attaching input image for verified img2img/edit-capable model ({_preview}...) length={len(image_data_urls[0])}")
             else:
                 payload["imageDataUrls"] = image_data_urls
                 if not self._is_stop_requested():
-                    print(f"🖼️ [NanoGPT] Attaching {len(image_data_urls)} input images for edit")
+                    print(f"[NanoGPT] Attaching {len(image_data_urls)} input images for verified img2img/edit-capable model")
 
         max_retries = self._get_max_retries()
         for attempt in range(max_retries):
