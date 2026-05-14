@@ -396,14 +396,28 @@ class UpdateManager(QObject):
                 return 'SuperLite'
             elif 'turbolite' in exe_name:
                 return 'TurboLite'
-            elif 'lite' in exe_name:
-                return 'Lite'
             elif 'nocuda' in exe_name or 'no_cuda' in exe_name or exe_name.startswith('n_'):
                 return 'NoCuda'
+            elif 'lite' in exe_name:
+                return 'Lite'
             else:
                 return 'Standard'
         except Exception:
             return 'Lite'  # Safe default
+
+    @staticmethod
+    def _detect_arch() -> str:
+        """Detect current CPU architecture for choosing native macOS assets."""
+        try:
+            import platform
+            machine = (platform.machine() or '').lower()
+            if machine in ('arm64', 'aarch64'):
+                return 'arm64'
+            if machine in ('x86_64', 'amd64', 'i386', 'i686'):
+                return 'x64'
+        except Exception:
+            pass
+        return 'unknown'
 
     @staticmethod
     def _detect_platform() -> str:
@@ -438,6 +452,19 @@ class UpdateManager(QObject):
             return 'linux'
         if 'windows' in name_lower or 'win' in name_lower:
             return 'windows'
+        return 'unknown'
+
+    @staticmethod
+    def _asset_arch(asset_name: str) -> str:
+        """Determine architecture targeted by a release asset filename."""
+        name_lower = asset_name.lower()
+        if any(token in name_lower for token in ('intel', 'x86_64', 'x64', 'amd64')):
+            return 'x64'
+        if any(token in name_lower for token in ('arm64', 'aarch64', 'apple_silicon', 'apple-silicon')):
+            return 'arm64'
+        if name_lower.endswith('.dmg') and 'mac' in name_lower:
+            # Current mac naming uses *_MAC.dmg for Apple Silicon and *_MAC_Intel.dmg for Intel.
+            return 'arm64'
         return 'unknown'
     
     def _load_halgakos_pixmap(self, logical_size: int = 72):
@@ -1186,6 +1213,7 @@ class UpdateManager(QObject):
 
             # Partition into same-platform and cross-platform assets
             current_platform = self._detect_platform()
+            current_arch = self._detect_arch()
             native_assets = [a for a in all_installable
                              if self._asset_platform(a['name']) == current_platform]
             cross_assets  = [a for a in all_installable
@@ -1220,7 +1248,12 @@ class UpdateManager(QObject):
                         filename = asset['name']
                         size_mb = asset['size'] / (1024 * 1024)
                         asset_plat = self._asset_platform(filename)
+                        asset_arch = self._asset_arch(filename)
                         is_native = (asset_plat == current_platform)
+                        is_native_arch = (
+                            is_native and
+                            (current_arch == 'unknown' or asset_arch == 'unknown' or asset_arch == current_arch)
+                        )
                         
                         # Identify variant type from filename keywords
                         fname_lower = filename.lower()
@@ -1230,17 +1263,17 @@ class UpdateManager(QObject):
                             variant_type = "SuperLite"
                         elif 'turbolite' in fname_lower:
                             variant_type = "TurboLite"
-                        elif 'lite' in fname_lower and (fname_lower.startswith('l_') or fname_lower.endswith('.dmg')):
-                            variant_type = "Lite"
                         elif 'nocuda' in fname_lower or fname_lower.startswith('n_'):
                             variant_type = "NoCuda (Manga)"
+                        elif 'lite' in fname_lower and (fname_lower.startswith('l_') or fname_lower.endswith('.dmg')):
+                            variant_type = "Lite"
                         else:
                             first_letter = filename[0].upper() if filename else ''
                             variant_type = "Standard" if first_letter == 'G' else filename
 
                         # Mark if this matches current running build (variant + platform)
                         is_current = (
-                            is_native and
+                            is_native_arch and
                             variant_type.replace(' (Manga)', '').replace(' ', '') ==
                             self._build_variant.replace(' ', '')
                         )
@@ -1248,7 +1281,12 @@ class UpdateManager(QObject):
 
                         # Add platform indicator
                         if asset_plat == 'macos':
-                            platform_tag = " [macOS Intel]" if 'intel' in fname_lower else " [macOS]"
+                            if asset_arch == 'x64':
+                                platform_tag = " [macOS Intel]"
+                            elif asset_arch == 'arm64':
+                                platform_tag = " [macOS ARM]"
+                            else:
+                                platform_tag = " [macOS]"
                         elif asset_plat == 'linux':
                             platform_tag = " [Linux]"
                         elif asset_plat == 'windows' and current_platform != 'windows':
@@ -1267,13 +1305,16 @@ class UpdateManager(QObject):
                         if not is_native:
                             rb.setEnabled(False)
                             rb.setToolTip(f"This build is for {asset_plat.replace('macos','macOS').replace('windows','Windows').replace('linux','Linux')} — not your current platform")
+                        elif not is_native_arch:
+                            rb.setEnabled(False)
+                            rb.setToolTip(f"This build is for {asset_arch}; your current architecture is {current_arch}.")
                         
                         # Auto-select: exact variant match on current platform wins;
                         # otherwise first native asset is the default
                         if is_current:
                             rb.setChecked(True)
                             self.selected_asset = asset
-                        elif is_native and not first_native_set:
+                        elif is_native_arch and not first_native_set:
                             # Tentative default — may be overridden by an exact variant match
                             rb.setChecked(True)
                             self.selected_asset = asset
