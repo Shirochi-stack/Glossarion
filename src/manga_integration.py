@@ -1213,13 +1213,18 @@ class MangaTranslationTab(QObject):
             toggle_preload = getattr(self, '_toggle_preload_thread', None)
             toggle_running = bool(toggle_preload and toggle_preload.is_alive())
 
-            preload_running = init_running or toggle_running
+            # Manual local model loads started by the Local Model combo / Load button
+            # do not use the startup preload thread, but they still populate the
+            # same inpainter pool. Treat them as a preload wait state too.
+            manual_loading = bool(getattr(self, '_model_loading_in_progress', False))
+
+            preload_running = init_running or toggle_running or manual_loading
             local_inpainting = self._is_local_inpainting_enabled()
             custom_image_edit_inpainting = (
                 local_inpainting
                 and str(self.main_gui.config.get('manga_local_inpaint_model', '') or '').lower() == 'custom-image-edit'
             )
-            should_wait = preload_running and local_inpainting
+            should_wait = preload_running and local_inpainting and not custom_image_edit_inpainting
 
             if should_wait:
                 # Disable buttons and show "Waiting..." state
@@ -10825,6 +10830,14 @@ class MangaTranslationTab(QObject):
 
     def _apply_custom_image_edit_ui_state(self, update_entry=True):
         custom_selected = self._is_custom_image_edit_selected()
+        if custom_selected:
+            try:
+                self._local_model_load_generation = int(getattr(self, '_local_model_load_generation', 0) or 0) + 1
+                self._model_loading_in_progress = False
+                self._clear_inpainter_preload_failure()
+                self._set_translation_buttons_waiting(False)
+            except Exception:
+                pass
         if hasattr(self, 'custom_image_edit_controls_frame'):
             self.custom_image_edit_controls_frame.setVisible(custom_selected)
         if hasattr(self, 'custom_image_edit_endpoint_checkbox'):
@@ -10879,15 +10892,17 @@ class MangaTranslationTab(QObject):
 
     def _on_local_model_change(self, new_model_type=None):
         """Handle model type change and auto-load if model exists"""
-        # Don't trigger if already loading a model
-        if getattr(self, '_model_loading_in_progress', False):
-            return
-        
         # Get model type from combo box (PySide6)
         if new_model_type is None:
             model_type = self.local_model_combo.currentText()
         else:
             model_type = new_model_type
+
+        # Don't start another real local-model load while one is already running.
+        # custom-image-edit is endpoint-backed, so switching to it must still be
+        # allowed so it can clear the "Waiting for model" state.
+        if getattr(self, '_model_loading_in_progress', False) and model_type != 'custom-image-edit':
+            return
         
         # Update stored value
         self.local_model_type_value = model_type
@@ -10907,6 +10922,10 @@ class MangaTranslationTab(QObject):
         self.model_desc_label.setText(model_desc.get(model_type, ''))
 
         if model_type == 'custom-image-edit':
+            self._local_model_load_generation = int(getattr(self, '_local_model_load_generation', 0) or 0) + 1
+            self._model_loading_in_progress = False
+            self._clear_inpainter_preload_failure()
+            self._set_translation_buttons_waiting(False)
             self.custom_image_edit_endpoint_value = self.main_gui.config.get('custom_image_edit_endpoint', '')
             self.use_custom_image_edit_endpoint_value = self.main_gui.config.get(
                 'use_custom_image_edit_endpoint',
@@ -10931,6 +10950,12 @@ class MangaTranslationTab(QObject):
             self.local_model_status_label.setText("⏳ Loading saved model...")
             self.local_model_status_label.setStyleSheet("color: orange;")
             
+            try:
+                if self._is_local_inpainting_enabled():
+                    self._set_translation_buttons_waiting(True)
+            except Exception:
+                pass
+
             # Auto-load the model after a short delay using QTimer
             from PySide6.QtCore import QTimer
             QTimer.singleShot(100, lambda: self._try_load_model(model_type, saved_path))
@@ -11033,6 +11058,14 @@ class MangaTranslationTab(QObject):
         
         # Set loading flag
         self._model_loading_in_progress = True
+        self._local_model_load_generation = int(getattr(self, '_local_model_load_generation', 0) or 0) + 1
+        load_generation = self._local_model_load_generation
+        try:
+            self._clear_inpainter_preload_failure()
+            if self._is_local_inpainting_enabled():
+                self._set_translation_buttons_waiting(True)
+        except Exception:
+            pass
         
         # Disable load button while loading
         if hasattr(self, 'load_local_model_button'):
@@ -11143,6 +11176,10 @@ class MangaTranslationTab(QObject):
         def check_load_complete():
             if load_result['done']:
                 check_timer.stop()
+                if load_generation != int(getattr(self, '_local_model_load_generation', 0) or 0):
+                    return
+                if method != getattr(self, 'local_model_type_value', method):
+                    return
                 # Call completion handler on main thread
                 self._handle_model_load_complete(method, load_result['success'], load_result['error_msg'], show_completion_dialog, load_result.get('model_path'))
             else:
@@ -11161,6 +11198,11 @@ class MangaTranslationTab(QObject):
         
         # Clear loading flag
         self._model_loading_in_progress = False
+        try:
+            if success:
+                self._set_translation_buttons_waiting(False)
+        except Exception:
+            pass
         
         # Re-enable load button
         if hasattr(self, 'load_local_model_button'):
