@@ -120,6 +120,7 @@ class OCRProvider:
         self.model = None
         self.stop_flag = None
         self._stopped = False
+        self.last_error = None
         
     def _log(self, message: str, level: str = "info"):
         """Log message with stop suppression"""
@@ -816,6 +817,7 @@ class MangaOCRProvider(OCRProvider):
     def load_model(self, **kwargs) -> bool:
         """Load the manga-ocr model, preferring a local directory to avoid re-downloading"""
         print("\n>>> MangaOCRProvider.load_model() called")
+        self.last_error = None
         try:
             if not self.is_installed and not self.check_installation():
                 print("ERROR: Transformers not installed")
@@ -901,6 +903,7 @@ class MangaOCRProvider(OCRProvider):
             try:
                 self.tokenizer, self.processor, self.model = _load_components(model_source, local_only)
             except Exception as e_local:
+                self.last_error = str(e_local)
                 if local_only:
                     if model_source == "kha-white/manga-ocr-base":
                         self._log(f"   Manga-ocr is not available in the local Hugging Face cache: {e_local}", "error")
@@ -954,6 +957,7 @@ class MangaOCRProvider(OCRProvider):
             return True
 
         except Exception as e:
+            self.last_error = str(e)
             print(f"\nEXCEPTION in load_model: {e}")
             import traceback
             print(traceback.format_exc())
@@ -2395,8 +2399,19 @@ class OCRManager:
         provider = self.providers.get(name)
         if not provider:
             return False
-        
-        return provider.load_model(**kwargs)  # <-- Passes model_size and any other kwargs
+        try:
+            provider.last_error = None
+        except Exception:
+            pass
+        result = provider.load_model(**kwargs)  # <-- Passes model_size and any other kwargs
+        if not result and self.log_callback:
+            try:
+                last_error = getattr(provider, 'last_error', None)
+                if last_error:
+                    self.log_callback(f"DEBUG: {name} provider last_error={last_error}", "debug")
+            except Exception:
+                pass
+        return result
     
     def shutdown(self):
         """Release models/processors/tokenizers for all providers and clear caches."""

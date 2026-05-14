@@ -2536,8 +2536,32 @@ class MangaTranslationTab(QObject):
                                     progress_state['total'] = total_size
                                     progress_state['hf_rate'] = 0.0
                                     progress_state['file_started_at'] = time.time()
-                                if not self.ocr_manager.load_provider('manga-ocr'):
-                                    raise RuntimeError("Model downloaded, but manga-ocr failed to auto-load. Try clicking Load Model to see provider logs.")
+                                load_success = False
+                                last_load_error = ""
+                                for load_attempt in range(1, 4):
+                                    log_queue.put(f"Loading manga-ocr model (attempt {load_attempt}/3)...")
+                                    if load_attempt > 1:
+                                        time.sleep(3.0)
+                                        try:
+                                            from ocr_manager import MangaOCRProvider
+                                            self.ocr_manager.providers['manga-ocr'] = MangaOCRProvider(self.ocr_manager.log_callback)
+                                        except Exception:
+                                            pass
+                                    load_success = bool(self.ocr_manager.load_provider('manga-ocr'))
+                                    if load_success:
+                                        break
+                                    try:
+                                        provider_obj = self.ocr_manager.get_provider('manga-ocr')
+                                        last_load_error = str(getattr(provider_obj, 'last_error', '') or '')
+                                    except Exception:
+                                        last_load_error = ""
+                                    if last_load_error:
+                                        log_queue.put(f"manga-ocr load attempt {load_attempt}/3 failed: {last_load_error}")
+                                    else:
+                                        log_queue.put(f"manga-ocr load attempt {load_attempt}/3 failed without a provider error")
+                                if not load_success:
+                                    detail = f" Last provider error: {last_load_error}" if last_load_error else ""
+                                    raise RuntimeError(f"Model downloaded, but manga-ocr failed to auto-load after 3 attempts.{detail}")
                                 with progress_lock:
                                     progress_state['auto_loaded'] = True
                                 log_queue.put("manga-ocr model loaded successfully.")
