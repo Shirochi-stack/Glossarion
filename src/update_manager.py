@@ -403,7 +403,7 @@ class UpdateManager(QObject):
             else:
                 return 'Standard'
         except Exception:
-            return 'Lite'  # Safe default
+            return 'Standard'  # Safe default
 
     @staticmethod
     def _detect_arch() -> str:
@@ -1314,6 +1314,7 @@ class UpdateManager(QObject):
                         if is_current:
                             rb.setChecked(True)
                             self.selected_asset = asset
+                            first_native_set = True
                         elif is_native_arch and not first_native_set:
                             # Tentative default — may be overridden by an exact variant match
                             rb.setChecked(True)
