@@ -4073,6 +4073,7 @@ class MangaTranslationTab(QObject):
         )
         self._disable_combobox_mousewheel(self.custom_api_ocr_batch_size_spinbox)
         custom_api_batch_layout.addWidget(self.custom_api_ocr_batch_size_spinbox)
+
         custom_api_batch_layout.addStretch()
         settings_frame_layout.addWidget(self.custom_api_ocr_batch_frame)
 
@@ -4554,6 +4555,47 @@ class MangaTranslationTab(QObject):
         visual_toggle_layout.addStretch()
         
         visual_layout.addWidget(visual_toggle_frame)
+
+        image_quality_frame = QWidget()
+        image_quality_layout = QHBoxLayout(image_quality_frame)
+        image_quality_layout.setContentsMargins(20, 0, 0, 0)
+        image_quality_layout.setSpacing(10)
+
+        self.manga_image_request_quality_checkbox = self._create_styled_checkbox("Image request quality")
+        self.manga_image_request_quality_checkbox.setChecked(bool(getattr(self, 'manga_image_request_quality_enabled_value', False)))
+        self.manga_image_request_quality_checkbox.setToolTip(
+            "When off, manga image requests preserve original images where possible. "
+            "When on, the selected format and quality are applied to manga OCR, page-image translation, and image edit requests."
+        )
+        self.manga_image_request_quality_checkbox.stateChanged.connect(
+            lambda: self._on_manga_image_request_quality_toggled(
+                self.manga_image_request_quality_checkbox.isChecked()
+            )
+        )
+        image_quality_layout.addWidget(self.manga_image_request_quality_checkbox)
+
+        image_quality_layout.addWidget(QLabel("Format:"))
+        self.manga_image_request_format_combo = QComboBox()
+        self.manga_image_request_format_combo.addItems(["jpeg", "png", "webp"])
+        try:
+            comp_cfg = ((self.main_gui.config.get('manga_settings', {}) or {}).get('compression', {}) or {})
+            self.manga_image_request_format_combo.setCurrentText(str(comp_cfg.get('format', 'jpeg') or 'jpeg').lower())
+        except Exception:
+            self.manga_image_request_format_combo.setCurrentText("jpeg")
+        self.manga_image_request_format_combo.currentTextChanged.connect(self._on_manga_image_request_format_changed)
+        self._disable_combobox_mousewheel(self.manga_image_request_format_combo)
+        image_quality_layout.addWidget(self.manga_image_request_format_combo)
+
+        self.manga_image_request_quality_label = QLabel("Quality:")
+        image_quality_layout.addWidget(self.manga_image_request_quality_label)
+
+        self.manga_image_request_quality_spinbox = QSpinBox()
+        self.manga_image_request_quality_spinbox.valueChanged.connect(self._on_manga_image_request_quality_value_changed)
+        self._disable_combobox_mousewheel(self.manga_image_request_quality_spinbox)
+        image_quality_layout.addWidget(self.manga_image_request_quality_spinbox)
+        image_quality_layout.addStretch()
+        visual_layout.addWidget(image_quality_frame)
+        self._refresh_manga_image_request_quality_controls()
         
         # Output settings - moved here to be below visual context
         output_settings_frame = QWidget()
@@ -6321,6 +6363,10 @@ class MangaTranslationTab(QObject):
                 """Callback when settings are saved"""
                 # Update config with new settings
                 self.main_gui.config['manga_settings'] = settings
+                try:
+                    self._apply_manga_image_request_quality_from_settings(settings, save=False)
+                except Exception:
+                    pass
 
                 # Mirror critical font size values into nested settings (avoid legacy top-level min key)
                 try:
@@ -6943,10 +6989,193 @@ class MangaTranslationTab(QObject):
         self.manga_ocr_disable_thinking_value = bool(
             ((config.get('manga_settings') or {}).get('ocr') or {}).get('manga_ocr_disable_thinking', True)
         )
+        self.manga_image_request_quality_enabled_value = bool(
+            ((config.get('manga_settings') or {}).get('compression') or {}).get('enabled', False)
+        )
+        self._sync_manga_image_request_quality_env()
 
         # Output settings
         self.create_cbz_at_end_value = config.get('manga_create_cbz_at_end', True)
         self.auto_consolidate_images_value = config.get('manga_auto_consolidate_images', True)
+
+    def _sync_manga_image_request_quality_env(self):
+        """Mirror manga image request quality settings into process env for request builders."""
+        try:
+            ms = self.main_gui.config.setdefault('manga_settings', {})
+            comp = ms.setdefault('compression', {})
+            enabled = bool(comp.get('enabled', False))
+            fmt = str(comp.get('format', 'jpeg') or 'jpeg').strip().lower()
+            if fmt not in ('jpeg', 'jpg', 'png', 'webp'):
+                fmt = 'jpeg'
+            os.environ['MANGA_IMAGE_REQUEST_QUALITY_ENABLED'] = '1' if enabled else '0'
+            os.environ['MANGA_IMAGE_REQUEST_FORMAT'] = fmt
+            os.environ['MANGA_IMAGE_REQUEST_WEBP_QUALITY'] = str(int(comp.get('webp_quality', 85)))
+            os.environ['MANGA_IMAGE_REQUEST_JPEG_QUALITY'] = str(int(comp.get('jpeg_quality', 85)))
+            os.environ['MANGA_IMAGE_REQUEST_PNG_COMPRESSION'] = str(int(comp.get('png_compress_level', 6)))
+
+            # OCRManager reads the generic names, so keep those in sync for manga runs.
+            os.environ['ENABLE_IMAGE_COMPRESSION'] = '1' if enabled else '0'
+            os.environ['IMAGE_COMPRESSION_FORMAT'] = fmt if enabled else 'png'
+            os.environ['WEBP_QUALITY'] = os.environ['MANGA_IMAGE_REQUEST_WEBP_QUALITY']
+            os.environ['JPEG_QUALITY'] = os.environ['MANGA_IMAGE_REQUEST_JPEG_QUALITY']
+            os.environ['PNG_COMPRESSION'] = os.environ['MANGA_IMAGE_REQUEST_PNG_COMPRESSION']
+        except Exception as e:
+            try:
+                self._log(f"⚠️ Failed to sync manga image request quality env: {e}", "warning")
+            except Exception:
+                pass
+
+    def _on_manga_image_request_quality_toggled(self, enabled: bool):
+        if getattr(self, '_syncing_manga_image_request_quality_widgets', False):
+            self.manga_image_request_quality_enabled_value = bool(enabled)
+            return
+        try:
+            self.manga_image_request_quality_enabled_value = bool(enabled)
+            ms = self.main_gui.config.setdefault('manga_settings', {})
+            comp = ms.setdefault('compression', {})
+            comp['enabled'] = bool(enabled)
+            self._refresh_manga_image_request_quality_controls()
+            self._sync_manga_image_request_quality_env()
+            self._sync_manga_image_request_quality_dialog_widgets()
+            self._save_rendering_settings()
+        except Exception as e:
+            self._log(f"⚠️ Failed to update image request quality setting: {e}", "warning")
+
+    def _apply_manga_image_request_quality_from_settings(self, settings: Dict[str, Any], save: bool = True):
+        """Apply dialog-side image request quality changes to the manga panel immediately."""
+        try:
+            if not isinstance(settings, dict):
+                return
+            ms = self.main_gui.config.setdefault('manga_settings', {})
+            src_comp = (settings.get('compression', {}) or {})
+            comp = ms.setdefault('compression', {})
+            for key in ('enabled', 'format', 'jpeg_quality', 'png_compress_level', 'webp_quality'):
+                if key in src_comp:
+                    comp[key] = src_comp[key]
+
+            self.manga_image_request_quality_enabled_value = bool(comp.get('enabled', False))
+
+            self._syncing_manga_image_request_quality_widgets = True
+            try:
+                if hasattr(self, 'manga_image_request_quality_checkbox'):
+                    # Do not block signals here: the custom checkmark overlay relies on stateChanged.
+                    self.manga_image_request_quality_checkbox.setChecked(self.manga_image_request_quality_enabled_value)
+            finally:
+                self._syncing_manga_image_request_quality_widgets = False
+
+            self._refresh_manga_image_request_quality_controls()
+            self._sync_manga_image_request_quality_env()
+            self._sync_manga_image_request_quality_dialog_widgets()
+            if save and hasattr(self.main_gui, 'save_config'):
+                self.main_gui.save_config(show_message=False)
+        except Exception as e:
+            self._log(f"⚠️ Failed to apply live image request quality setting: {e}", "warning")
+
+    def _sync_manga_image_request_quality_dialog_widgets(self):
+        """Mirror manga-panel image request quality changes into the open settings dialog."""
+        try:
+            dialog = getattr(self.main_gui, 'manga_settings_dialog', None)
+            if not dialog:
+                return
+            comp = ((self.main_gui.config.get('manga_settings', {}) or {}).get('compression', {}) or {})
+            if not hasattr(dialog, 'compression_enabled'):
+                return
+
+            dialog._syncing_image_request_quality_widgets = True
+            try:
+                if hasattr(dialog, 'compression_enabled'):
+                    # Keep signals unblocked so the styled checkbox checkmark updates.
+                    dialog.compression_enabled.setChecked(bool(comp.get('enabled', False)))
+                if hasattr(dialog, 'compression_format_combo'):
+                    dialog.compression_format_combo.blockSignals(True)
+                    dialog.compression_format_combo.setCurrentText(str(comp.get('format', 'jpeg') or 'jpeg').lower())
+                    dialog.compression_format_combo.blockSignals(False)
+                if hasattr(dialog, 'jpeg_quality_spin'):
+                    dialog.jpeg_quality_spin.blockSignals(True)
+                    dialog.jpeg_quality_spin.setValue(int(comp.get('jpeg_quality', 85)))
+                    dialog.jpeg_quality_spin.blockSignals(False)
+                if hasattr(dialog, 'png_level_spin'):
+                    dialog.png_level_spin.blockSignals(True)
+                    dialog.png_level_spin.setValue(int(comp.get('png_compress_level', 6)))
+                    dialog.png_level_spin.blockSignals(False)
+                if hasattr(dialog, 'webp_quality_spin'):
+                    dialog.webp_quality_spin.blockSignals(True)
+                    dialog.webp_quality_spin.setValue(int(comp.get('webp_quality', 85)))
+                    dialog.webp_quality_spin.blockSignals(False)
+                if hasattr(dialog, '_toggle_compression_format'):
+                    dialog._toggle_compression_format()
+                if hasattr(dialog, '_toggle_compression_enabled'):
+                    dialog._toggle_compression_enabled()
+            finally:
+                dialog._syncing_image_request_quality_widgets = False
+        except Exception:
+            pass
+
+    def _refresh_manga_image_request_quality_controls(self):
+        try:
+            comp = ((self.main_gui.config.get('manga_settings', {}) or {}).get('compression', {}) or {})
+            fmt = str(comp.get('format', 'jpeg') or 'jpeg').strip().lower()
+            if fmt not in ('jpeg', 'png', 'webp'):
+                fmt = 'jpeg'
+            enabled = bool(comp.get('enabled', False))
+            if hasattr(self, 'manga_image_request_format_combo'):
+                self.manga_image_request_format_combo.blockSignals(True)
+                self.manga_image_request_format_combo.setCurrentText(fmt)
+                self.manga_image_request_format_combo.setEnabled(enabled)
+                self.manga_image_request_format_combo.blockSignals(False)
+            if hasattr(self, 'manga_image_request_quality_spinbox'):
+                self.manga_image_request_quality_spinbox.blockSignals(True)
+                if fmt == 'png':
+                    self.manga_image_request_quality_label.setText("PNG Level:")
+                    self.manga_image_request_quality_spinbox.setRange(0, 9)
+                    self.manga_image_request_quality_spinbox.setValue(int(comp.get('png_compress_level', 6)))
+                elif fmt == 'webp':
+                    self.manga_image_request_quality_label.setText("WEBP Quality:")
+                    self.manga_image_request_quality_spinbox.setRange(1, 100)
+                    self.manga_image_request_quality_spinbox.setValue(int(comp.get('webp_quality', 85)))
+                else:
+                    self.manga_image_request_quality_label.setText("JPEG Quality:")
+                    self.manga_image_request_quality_spinbox.setRange(1, 95)
+                    self.manga_image_request_quality_spinbox.setValue(int(comp.get('jpeg_quality', 85)))
+                self.manga_image_request_quality_spinbox.setEnabled(enabled)
+                self.manga_image_request_quality_spinbox.blockSignals(False)
+            if hasattr(self, 'manga_image_request_quality_label'):
+                self.manga_image_request_quality_label.setEnabled(enabled)
+        except Exception:
+            pass
+
+    def _on_manga_image_request_format_changed(self, fmt: str):
+        try:
+            ms = self.main_gui.config.setdefault('manga_settings', {})
+            comp = ms.setdefault('compression', {})
+            comp['format'] = str(fmt or 'jpeg').strip().lower()
+            if hasattr(self, 'manga_image_request_quality_checkbox'):
+                comp['enabled'] = bool(self.manga_image_request_quality_checkbox.isChecked())
+            self._refresh_manga_image_request_quality_controls()
+            self._sync_manga_image_request_quality_env()
+            self._sync_manga_image_request_quality_dialog_widgets()
+            self._save_rendering_settings()
+        except Exception as e:
+            self._log(f"⚠️ Failed to update image request format: {e}", "warning")
+
+    def _on_manga_image_request_quality_value_changed(self, value: int):
+        try:
+            ms = self.main_gui.config.setdefault('manga_settings', {})
+            comp = ms.setdefault('compression', {})
+            fmt = str(comp.get('format', 'jpeg') or 'jpeg').strip().lower()
+            if fmt == 'png':
+                comp['png_compress_level'] = int(value)
+            elif fmt == 'webp':
+                comp['webp_quality'] = int(value)
+            else:
+                comp['jpeg_quality'] = int(value)
+            if hasattr(self, 'manga_image_request_quality_checkbox'):
+                comp['enabled'] = bool(self.manga_image_request_quality_checkbox.isChecked())
+            self._sync_manga_image_request_quality_env()
+            self._sync_manga_image_request_quality_dialog_widgets()
+            self._save_rendering_settings()
+        except Exception as e:
+            self._log(f"⚠️ Failed to update image request quality: {e}", "warning")
     
     def _save_rendering_settings(self):
         """Save rendering settings with validation"""
@@ -6970,6 +7199,22 @@ class MangaTranslationTab(QObject):
                 self.custom_api_ocr_batch_enabled_value = bool(self.custom_api_ocr_batch_checkbox.isChecked())
             if hasattr(self, 'custom_api_ocr_batch_size_spinbox'):
                 self.custom_api_ocr_batch_size_value = int(self.custom_api_ocr_batch_size_spinbox.value())
+            if hasattr(self, 'manga_image_request_quality_checkbox'):
+                self.manga_image_request_quality_enabled_value = bool(self.manga_image_request_quality_checkbox.isChecked())
+            if hasattr(self, 'manga_image_request_format_combo'):
+                ms = self.main_gui.config.setdefault('manga_settings', {})
+                comp = ms.setdefault('compression', {})
+                comp['format'] = str(self.manga_image_request_format_combo.currentText() or 'jpeg').strip().lower()
+            if hasattr(self, 'manga_image_request_quality_spinbox'):
+                ms = self.main_gui.config.setdefault('manga_settings', {})
+                comp = ms.setdefault('compression', {})
+                fmt = str(comp.get('format', 'jpeg') or 'jpeg').strip().lower()
+                if fmt == 'png':
+                    comp['png_compress_level'] = int(self.manga_image_request_quality_spinbox.value())
+                elif fmt == 'webp':
+                    comp['webp_quality'] = int(self.manga_image_request_quality_spinbox.value())
+                else:
+                    comp['jpeg_quality'] = int(self.manga_image_request_quality_spinbox.value())
             if hasattr(self, 'create_cbz_checkbox'):
                 self.create_cbz_at_end_value = bool(self.create_cbz_checkbox.isChecked())
             if hasattr(self, 'auto_consolidate_checkbox'):
@@ -7190,6 +7435,11 @@ class MangaTranslationTab(QObject):
                 self.main_gui.config['manga_custom_api_ocr_batch_enabled'] = bool(self.custom_api_ocr_batch_enabled_value)
             if hasattr(self, 'custom_api_ocr_batch_size_value'):
                 self.main_gui.config['manga_custom_api_ocr_batch_size'] = int(self.custom_api_ocr_batch_size_value)
+            if hasattr(self, 'manga_image_request_quality_enabled_value'):
+                ms = self.main_gui.config.setdefault('manga_settings', {})
+                comp = ms.setdefault('compression', {})
+                comp['enabled'] = bool(self.manga_image_request_quality_enabled_value)
+                self._sync_manga_image_request_quality_env()
             
             # OCR prompt
             if hasattr(self, 'ocr_prompt'):
@@ -14191,6 +14441,7 @@ class MangaTranslationTab(QObject):
                         # DON'T SET THE TRANSLATION SYSTEM PROMPT FOR OCR
                         continue
                     large_env.set_env(key, str(value))
+                self._sync_manga_image_request_quality_env()
                 
                 # Use custom OCR prompt from GUI if available, otherwise use default
                 if hasattr(self, 'ocr_prompt') and self.ocr_prompt:

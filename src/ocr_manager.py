@@ -258,7 +258,8 @@ class CustomAPIProvider(OCRProvider):
         return False
 
     def _get_request_image_format(self) -> str:
-        if self._uses_nanogpt_model():
+        manga_quality_enabled = os.environ.get('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') == '1'
+        if self._uses_nanogpt_model() and manga_quality_enabled:
             return 'webp'
         fmt = str(os.environ.get('IMAGE_COMPRESSION_FORMAT', 'auto') or 'auto').strip().lower()
         if fmt == 'png':

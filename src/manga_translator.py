@@ -7149,6 +7149,47 @@ class MangaTranslator:
         # Default fallback – PNG is the safest assumption for unknown formats
         return 'image/png'
 
+    def _get_image_request_quality_config(self) -> Dict[str, Any]:
+        try:
+            comp = ((self.main_gui.config.get('manga_settings', {}) or {}).get('compression', {}) or {})
+        except Exception:
+            comp = {}
+        return {
+            'enabled': bool(comp.get('enabled', False)),
+            'format': str(comp.get('format', 'jpeg') or 'jpeg').strip().lower(),
+            'jpeg_quality': max(1, min(95, int(comp.get('jpeg_quality', 85)))),
+            'png_compress_level': max(0, min(9, int(comp.get('png_compress_level', 6)))),
+            'webp_quality': max(1, min(100, int(comp.get('webp_quality', 85)))),
+        }
+
+    def _prepare_manga_image_request_bytes(self, image_path: str, label: str = "image request") -> bytes:
+        """Read a manga image request, preserving original bytes unless the quality override is enabled."""
+        with open(image_path, 'rb') as img_file:
+            original_data = img_file.read()
+
+        comp = self._get_image_request_quality_config()
+        if not comp.get('enabled'):
+            return original_data
+
+        from io import BytesIO
+        pil_image = Image.open(image_path)
+        if pil_image.mode != 'RGB':
+            pil_image = pil_image.convert('RGB')
+        buf = BytesIO()
+        fmt = comp.get('format', 'jpeg')
+        if fmt in ('jpg', 'jpeg'):
+            pil_image.save(buf, format='JPEG', quality=comp['jpeg_quality'], optimize=True, progressive=True)
+            self._log(f"   Encoded {label} as JPEG (q={comp['jpeg_quality']})")
+        elif fmt == 'png':
+            pil_image.save(buf, format='PNG', optimize=True, compress_level=comp['png_compress_level'])
+            self._log(f"   Encoded {label} as PNG (level={comp['png_compress_level']})")
+        elif fmt == 'webp':
+            pil_image.save(buf, format='WEBP', quality=comp['webp_quality'])
+            self._log(f"   Encoded {label} as WEBP (q={comp['webp_quality']})")
+        else:
+            return original_data
+        return buf.getvalue()
+
     def _build_memory_image_part(self, image_path: str) -> Optional[Dict[str, Any]]:
         """Build an image_url content part for memory messages.
 
@@ -7166,8 +7207,7 @@ class MangaTranslator:
                 self._log(f"⚠️ Memory image not found: {image_path}", "warning")
                 return None
 
-            with open(image_path, "rb") as img_file:
-                img_data = img_file.read()
+            img_data = self._prepare_manga_image_request_bytes(image_path, "memory visual context")
 
             img_size_mb = len(img_data) / (1024 * 1024)
             if img_size_mb > 10:
@@ -7605,9 +7645,8 @@ class MangaTranslator:
                     
                     self._log(f"{prefix} 📷 Adding full page visual context for translation")
                     
-                    # Read and encode the full image
-                    with open(image_path, 'rb') as img_file:
-                        img_data = img_file.read()
+                    # Read and optionally encode the full image for manga requests
+                    img_data = self._prepare_manga_image_request_bytes(image_path, "single-region visual context")
                     
                     # Check image size
                     img_size_mb = len(img_data) / (1024 * 1024)
@@ -8205,9 +8244,8 @@ class MangaTranslator:
                     
                     self._log(f"📷 Adding full page visual context for translation")
                     
-                    # Read and encode the image
-                    with open(image_path, 'rb') as img_file:
-                        img_data = img_file.read()
+                    # Read and optionally encode the image for manga requests
+                    img_data = self._prepare_manga_image_request_bytes(image_path, "full-page visual context")
                     
                     # Check image size
                     img_size_mb = len(img_data) / (1024 * 1024)

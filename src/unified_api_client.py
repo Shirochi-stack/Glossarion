@@ -9039,7 +9039,11 @@ class UnifiedClient:
     def _coerce_nanogpt_input_image_to_webp(self, raw: Optional[bytes], mime: str) -> Tuple[Optional[bytes], str]:
         if not raw:
             return raw, mime
-        if not str(mime or '').startswith('image/') or str(mime).lower() == 'image/webp':
+        if not str(mime or '').startswith('image/'):
+            return raw, mime
+        force_lossless_webp = os.getenv('FORCE_IMAGE_REQUEST_WEBP_LOSSLESS', '0') == '1'
+        manga_quality_enabled = os.getenv('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') == '1'
+        if not force_lossless_webp and not manga_quality_enabled:
             return raw, mime
         try:
             import io as _io
@@ -9057,35 +9061,72 @@ class UnifiedClient:
             elif img.mode != 'RGB':
                 img = img.convert('RGB')
 
+            target_fmt = 'webp' if force_lossless_webp else str(os.getenv('MANGA_IMAGE_REQUEST_FORMAT', 'webp') or 'webp').strip().lower()
+            if target_fmt in ('jpg', 'jpeg'):
+                target_fmt = 'jpeg'
+                target_mime = 'image/jpeg'
+                save_kwargs = {
+                    'format': 'JPEG',
+                    'quality': max(1, min(95, int(os.getenv('MANGA_IMAGE_REQUEST_JPEG_QUALITY', os.getenv('JPEG_QUALITY', '85')) or '85'))),
+                    'optimize': True,
+                    'progressive': True,
+                }
+            elif target_fmt == 'png':
+                target_mime = 'image/png'
+                save_kwargs = {
+                    'format': 'PNG',
+                    'optimize': True,
+                    'compress_level': max(0, min(9, int(os.getenv('MANGA_IMAGE_REQUEST_PNG_COMPRESSION', os.getenv('PNG_COMPRESSION', '6')) or '6'))),
+                }
+            else:
+                target_fmt = 'webp'
+                target_mime = 'image/webp'
+                if force_lossless_webp:
+                    save_kwargs = {'format': 'WEBP', 'lossless': True, 'method': 6}
+                else:
+                    save_kwargs = {
+                        'format': 'WEBP',
+                        'quality': max(1, min(100, int(os.getenv('MANGA_IMAGE_REQUEST_WEBP_QUALITY', os.getenv('WEBP_QUALITY', '85')) or '85'))),
+                        'method': 6,
+                    }
+
             buf = _io.BytesIO()
-            img.save(buf, format='WEBP', lossless=True, method=6)
+            img.save(buf, **save_kwargs)
             converted = buf.getvalue()
             if not self._is_stop_requested():
-                print(f"[ImageInput] Converted input image format to WEBP lossless ({len(raw)/1024:.0f}KB -> {len(converted)/1024:.0f}KB)")
-            return converted, 'image/webp'
+                if force_lossless_webp:
+                    detail = "WEBP lossless"
+                elif target_fmt == 'webp':
+                    detail = f"WEBP q={save_kwargs.get('quality')}"
+                elif target_fmt == 'jpeg':
+                    detail = f"JPEG q={save_kwargs.get('quality')}"
+                else:
+                    detail = f"PNG level={save_kwargs.get('compress_level')}"
+                print(f"[ImageInput] Converted input image format to {detail} ({len(raw)/1024:.0f}KB -> {len(converted)/1024:.0f}KB)")
+            return converted, target_mime
         except Exception as exc:
             if not self._is_stop_requested():
-                print(f"[ImageInput] Could not convert input image to WEBP: {exc}")
+                print(f"[ImageInput] Could not convert input image format: {exc}")
             return raw, mime
 
     def _convert_image_data_url_to_webp_lossless(self, data_url: str) -> str:
-        """Convert a data:image URL to lossless WebP without resizing or quality compression."""
+        """Optionally convert a data:image URL using the manga image request quality setting."""
         try:
             import base64 as _b64
 
             if not isinstance(data_url, str) or not data_url.startswith('data:image/') or ',' not in data_url:
                 return data_url
-            header, b64_data = data_url.split(',', 1)
-            if header.lower().startswith('data:image/webp'):
+            if os.getenv('FORCE_IMAGE_REQUEST_WEBP_LOSSLESS', '0') != '1' and os.getenv('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') != '1':
                 return data_url
+            header, b64_data = data_url.split(',', 1)
             raw = _b64.b64decode(b64_data)
             converted, mime = self._coerce_nanogpt_input_image_to_webp(raw, header[5:] if header.startswith('data:') else 'image/jpeg')
-            if not converted or mime != 'image/webp':
+            if not converted or not str(mime or '').startswith('image/'):
                 return data_url
-            return 'data:image/webp;base64,' + _b64.b64encode(converted).decode('ascii')
+            return f'data:{mime};base64,' + _b64.b64encode(converted).decode('ascii')
         except Exception as exc:
             if not self._is_stop_requested():
-                print(f"[ImageInput] Could not convert image data URL to lossless WEBP: {exc}")
+                print(f"[ImageInput] Could not convert image data URL: {exc}")
             return data_url
 
     def _normalize_nanogpt_image_message_payloads(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -21739,8 +21780,12 @@ class UnifiedClient:
             max_chars = int(os.getenv('NANOGPT_MAX_INPUT_IMAGE_CHARS', '3000000') or '3000000')
             header, b64_data = data_url.split(',', 1)
             is_webp = header.lower().startswith('data:image/webp')
-            if (max_chars <= 0 and (not force_webp or is_webp)) or (
-                max_chars > 0 and len(data_url) <= max_chars and (not force_webp or is_webp)
+            quality_enabled = os.getenv('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') == '1'
+            if not force_webp and not quality_enabled:
+                return data_url
+            if not quality_enabled and (
+                (max_chars <= 0 and (not force_webp or is_webp)) or
+                (max_chars > 0 and len(data_url) <= max_chars and (not force_webp or is_webp))
             ):
                 return data_url
 
@@ -21757,6 +21802,57 @@ class UnifiedClient:
                 img = img.convert('RGB')
 
             original_size = img.size
+            if quality_enabled and not force_webp:
+                target_fmt = str(os.getenv('MANGA_IMAGE_REQUEST_FORMAT', 'webp') or 'webp').strip().lower()
+                try:
+                    buf = _io.BytesIO()
+                    if target_fmt in ('jpg', 'jpeg'):
+                        quality = max(1, min(95, int(os.getenv('MANGA_IMAGE_REQUEST_JPEG_QUALITY', os.getenv('JPEG_QUALITY', '85')) or '85')))
+                        img.save(buf, format='JPEG', quality=quality, optimize=True, progressive=True)
+                        candidate = 'data:image/jpeg;base64,' + _b64.b64encode(buf.getvalue()).decode('ascii')
+                        self._nanogpt_last_input_resize_info = {
+                            'shrunk': len(candidate) < len(data_url),
+                            'source_size': original_size,
+                            'sent_size': original_size,
+                            'quality': quality,
+                            'chars': len(candidate),
+                            'dimensions_reduced': False,
+                        }
+                        if not self._is_stop_requested():
+                            print(f"[ImageInput] Encoded NanoGPT input image as JPEG q={quality}: {original_size[0]}x{original_size[1]}, chars={len(candidate)}")
+                        return candidate
+                    if target_fmt == 'png':
+                        level = max(0, min(9, int(os.getenv('MANGA_IMAGE_REQUEST_PNG_COMPRESSION', os.getenv('PNG_COMPRESSION', '6')) or '6')))
+                        img.save(buf, format='PNG', optimize=True, compress_level=level)
+                        candidate = 'data:image/png;base64,' + _b64.b64encode(buf.getvalue()).decode('ascii')
+                        self._nanogpt_last_input_resize_info = {
+                            'shrunk': len(candidate) < len(data_url),
+                            'source_size': original_size,
+                            'sent_size': original_size,
+                            'quality': None,
+                            'chars': len(candidate),
+                            'dimensions_reduced': False,
+                        }
+                        if not self._is_stop_requested():
+                            print(f"[ImageInput] Encoded NanoGPT input image as PNG level={level}: {original_size[0]}x{original_size[1]}, chars={len(candidate)}")
+                        return candidate
+                    quality = max(1, min(100, int(os.getenv('MANGA_IMAGE_REQUEST_WEBP_QUALITY', os.getenv('WEBP_QUALITY', '85')) or '85')))
+                    img.save(buf, format='WEBP', quality=quality, method=6)
+                    candidate = 'data:image/webp;base64,' + _b64.b64encode(buf.getvalue()).decode('ascii')
+                    if max_chars <= 0 or len(candidate) <= max_chars:
+                        self._nanogpt_last_input_resize_info = {
+                            'shrunk': len(candidate) < len(data_url),
+                            'source_size': original_size,
+                            'sent_size': original_size,
+                            'quality': quality,
+                            'chars': len(candidate),
+                            'dimensions_reduced': False,
+                        }
+                        if not self._is_stop_requested():
+                            print(f"[ImageInput] Encoded NanoGPT input image as WEBP q={quality}: {original_size[0]}x{original_size[1]}, chars={len(candidate)}")
+                        return candidate
+                except Exception:
+                    pass
             if force_webp:
                 try:
                     buf = _io.BytesIO()
@@ -21782,6 +21878,9 @@ class UnifiedClient:
 
             max_dim = int(os.getenv('NANOGPT_MAX_INPUT_IMAGE_DIM', '1536') or '1536')
             qualities = [90, 85, 80, 75, 70, 65, 60, 55, 50]
+            if quality_enabled:
+                requested_quality = max(1, min(100, int(os.getenv('MANGA_IMAGE_REQUEST_WEBP_QUALITY', os.getenv('WEBP_QUALITY', '85')) or '85')))
+                qualities = [quality for quality in qualities if quality <= requested_quality] or [requested_quality]
             dims = [max(original_size)]
             cur_dim = max(512, max_dim)
             while cur_dim >= 768:

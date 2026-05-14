@@ -1165,18 +1165,23 @@ class MangaSettingsDialog(QDialog):
         pixels_layout.addWidget(QLabel("pixels"))
         pixels_layout.addStretch()
         
-        # Compression section
-        compression_group = QGroupBox("Image Compression (applies to OCR uploads)")
+        # Image request quality section
+        compression_group = QGroupBox("Image Request Quality")
         main_layout.addWidget(compression_group)
         compression_layout = QVBoxLayout(compression_group)
         compression_layout.setContentsMargins(8, 8, 8, 6)
         compression_layout.setSpacing(4)
         # Do NOT add compression controls to preprocessing_controls; keep independent of preprocessing toggle
         
-        # Enable compression toggle
-        self.compression_enabled = self._create_styled_checkbox("Enable compression for OCR uploads")
+        # Enable image request quality override
+        self.compression_enabled = self._create_styled_checkbox("Override manga image request format/quality")
         self.compression_enabled.setChecked(self.settings.get('compression', {}).get('enabled', False))
+        self.compression_enabled.setToolTip(
+            "When off, manga translation keeps request images in their original format whenever possible. "
+            "When on, this format and quality are applied to manga OCR, visual context, and image edit requests."
+        )
         self.compression_enabled.toggled.connect(self._toggle_compression_enabled)
+        self.compression_enabled.toggled.connect(lambda _checked: self._emit_image_request_quality_live_update())
         compression_layout.addWidget(self.compression_enabled)
         
         # Format selection
@@ -1193,6 +1198,7 @@ class MangaSettingsDialog(QDialog):
         self.compression_format_combo.addItems(['jpeg', 'png', 'webp'])
         self.compression_format_combo.setCurrentText(self.settings.get('compression', {}).get('format', 'jpeg'))
         self.compression_format_combo.currentTextChanged.connect(self._toggle_compression_format)
+        self.compression_format_combo.currentTextChanged.connect(lambda _text: self._emit_image_request_quality_live_update())
         format_layout.addWidget(self.compression_format_combo)
         format_layout.addStretch()
         
@@ -1209,6 +1215,7 @@ class MangaSettingsDialog(QDialog):
         self.jpeg_quality_spin = QSpinBox()
         self.jpeg_quality_spin.setRange(1, 95)
         self.jpeg_quality_spin.setValue(self.settings.get('compression', {}).get('jpeg_quality', 85))
+        self.jpeg_quality_spin.valueChanged.connect(lambda _value: self._emit_image_request_quality_live_update())
         jpeg_layout.addWidget(self.jpeg_quality_spin)
         
         self.jpeg_help = QLabel("(higher = better quality, larger size)")
@@ -1229,6 +1236,7 @@ class MangaSettingsDialog(QDialog):
         self.png_level_spin = QSpinBox()
         self.png_level_spin.setRange(0, 9)
         self.png_level_spin.setValue(self.settings.get('compression', {}).get('png_compress_level', 6))
+        self.png_level_spin.valueChanged.connect(lambda _value: self._emit_image_request_quality_live_update())
         png_layout.addWidget(self.png_level_spin)
         
         self.png_help = QLabel("(0 = fastest, 9 = smallest)")
@@ -1249,6 +1257,7 @@ class MangaSettingsDialog(QDialog):
         self.webp_quality_spin = QSpinBox()
         self.webp_quality_spin.setRange(1, 100)
         self.webp_quality_spin.setValue(self.settings.get('compression', {}).get('webp_quality', 85))
+        self.webp_quality_spin.valueChanged.connect(lambda _value: self._emit_image_request_quality_live_update())
         webp_layout.addWidget(self.webp_quality_spin)
         
         self.webp_help = QLabel("(higher = better quality, larger size)")
@@ -2449,6 +2458,38 @@ class MangaSettingsDialog(QDialog):
                     self.webp_frame.setVisible(True)
         except Exception:
             pass
+
+    def _emit_image_request_quality_live_update(self):
+        """Autosave/sync image request quality controls without waiting for the Save button."""
+        if getattr(self, '_initializing', False) or getattr(self, '_syncing_image_request_quality_widgets', False):
+            return
+        try:
+            comp = self.settings.setdefault('compression', {})
+            if hasattr(self, 'compression_enabled'):
+                comp['enabled'] = bool(self.compression_enabled.isChecked())
+            if hasattr(self, 'compression_format_combo'):
+                comp['format'] = str(self.compression_format_combo.currentText() or 'jpeg').strip().lower()
+            if hasattr(self, 'jpeg_quality_spin'):
+                comp['jpeg_quality'] = int(self.jpeg_quality_spin.value())
+            if hasattr(self, 'png_level_spin'):
+                comp['png_compress_level'] = int(self.png_level_spin.value())
+            if hasattr(self, 'webp_quality_spin'):
+                comp['webp_quality'] = int(self.webp_quality_spin.value())
+
+            self.config['manga_settings'] = self.settings
+            if hasattr(self.main_gui, 'config') and isinstance(self.main_gui.config, dict):
+                self.main_gui.config['manga_settings'] = self.settings
+
+            manga_tab = getattr(self.main_gui, 'manga_tab', None)
+            if manga_tab and hasattr(manga_tab, '_apply_manga_image_request_quality_from_settings'):
+                manga_tab._apply_manga_image_request_quality_from_settings(self.settings, save=True)
+            else:
+                if hasattr(self.main_gui, 'save_config'):
+                    self.main_gui.save_config(show_message=False)
+                elif hasattr(self.main_gui, 'save_configuration'):
+                    self.main_gui.save_configuration()
+        except Exception as e:
+            print(f"Error syncing image request quality setting: {e}")
     
     def _toggle_ocr_batching_controls(self):
         """Show/hide OCR batching rows based on enable toggle."""

@@ -2824,37 +2824,57 @@ class LocalInpainter:
                 best_data_url = None
                 best_info = info.copy()
                 original_png_chars = len(f"data:image/png;base64,{base64.b64encode(img_buf.tobytes()).decode('ascii')}")
-                try:
-                    import io as _io
-                    from PIL import Image as _Image
-                    rgb_img = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
-                    pil_img = _Image.fromarray(rgb_img)
-                    lossless_buf = _io.BytesIO()
-                    pil_img.save(lossless_buf, format='WEBP', lossless=True, method=6)
-                    lossless_data_url = 'data:image/webp;base64,' + base64.b64encode(lossless_buf.getvalue()).decode('ascii')
-                    lossless_info = {
-                        'shrunk': False,
-                        'source_size': (w0, h0),
-                        'sent_size': (w0, h0),
-                        'quality': None,
-                        'chars': len(lossless_data_url),
-                        'dimensions_reduced': False,
-                    }
-                    if len(lossless_data_url) <= max_chars:
-                        self._nanogpt_last_input_resize_info = lossless_info
+                manga_quality_enabled = os.environ.get('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') == '1'
+                if not manga_quality_enabled:
+                    image_b64 = base64.b64encode(img_buf.tobytes()).decode('ascii')
+                    info['chars'] = len(image_b64)
+                    self._nanogpt_last_input_resize_info = info
+                    return f"data:image/png;base64,{image_b64}"
+
+                requested_fmt = str(os.environ.get('MANGA_IMAGE_REQUEST_FORMAT', 'webp') or 'webp').strip().lower()
+                requested_webp_q = max(1, min(100, int(os.environ.get('MANGA_IMAGE_REQUEST_WEBP_QUALITY', os.environ.get('WEBP_QUALITY', '85')) or '85')))
+                qualities = [quality for quality in qualities if quality <= requested_webp_q] or [requested_webp_q]
+                if requested_fmt in ('jpg', 'jpeg'):
+                    q = max(1, min(95, int(os.environ.get('MANGA_IMAGE_REQUEST_JPEG_QUALITY', os.environ.get('JPEG_QUALITY', '85')) or '85')))
+                    ok_jpg, jpg_buf = cv2.imencode('.jpg', bgr_img, [int(cv2.IMWRITE_JPEG_QUALITY), int(q)])
+                    if ok_jpg:
+                        data_url = 'data:image/jpeg;base64,' + base64.b64encode(jpg_buf.tobytes()).decode('ascii')
+                        info.update({'quality': q, 'chars': len(data_url)})
+                        self._nanogpt_last_input_resize_info = info
+                        self._log(f"NanoGPT input image encoded as JPEG q={q}: {w0}x{h0}, chars={len(data_url)}", "info")
+                        return data_url
+                elif requested_fmt == 'png':
+                    level = max(0, min(9, int(os.environ.get('MANGA_IMAGE_REQUEST_PNG_COMPRESSION', os.environ.get('PNG_COMPRESSION', '6')) or '6')))
+                    ok_png, png_buf = cv2.imencode('.png', bgr_img, [int(cv2.IMWRITE_PNG_COMPRESSION), int(level)])
+                    if ok_png:
+                        data_url = 'data:image/png;base64,' + base64.b64encode(png_buf.tobytes()).decode('ascii')
+                        info.update({'quality': None, 'chars': len(data_url)})
+                        self._nanogpt_last_input_resize_info = info
+                        self._log(f"NanoGPT input image encoded as PNG level={level}: {w0}x{h0}, chars={len(data_url)}", "info")
+                        return data_url
+                else:
+                    q = requested_webp_q
+                    ok_webp, webp_buf = cv2.imencode('.webp', bgr_img, [int(cv2.IMWRITE_WEBP_QUALITY), int(q)])
+                    if ok_webp:
+                        data_url = 'data:image/webp;base64,' + base64.b64encode(webp_buf.tobytes()).decode('ascii')
+                        best_data_url = data_url
+                        best_info = {
+                            'shrunk': len(data_url) < original_png_chars,
+                            'source_size': (w0, h0),
+                            'sent_size': (w0, h0),
+                            'quality': q,
+                            'chars': len(data_url),
+                            'dimensions_reduced': False,
+                        }
+                        if len(data_url) <= max_chars:
+                            self._nanogpt_last_input_resize_info = best_info
+                            self._log(f"NanoGPT input image encoded as WebP q={q}: {w0}x{h0}, chars={len(data_url)}", "info")
+                            return data_url
                         self._log(
-                            f"NanoGPT input image converted to WebP lossless: {w0}x{h0}, chars={len(lossless_data_url)}",
-                            "info",
+                            f"NanoGPT WebP q={q} exceeds payload limit ({len(data_url)} > {max_chars}); compressing fallback",
+                            "warning",
                         )
-                        return lossless_data_url
-                    best_data_url = lossless_data_url
-                    best_info = lossless_info
-                    self._log(
-                        f"NanoGPT lossless WebP exceeds payload limit ({len(lossless_data_url)} > {max_chars}); compressing fallback",
-                        "warning",
-                    )
-                except Exception as lossless_err:
-                    self._log(f"NanoGPT lossless WebP conversion failed, using compression fallback: {lossless_err}", "warning")
+
                 for dim in dims:
                     work = bgr_img
                     scale = min(1.0, float(dim) / float(max(h0, w0)))
