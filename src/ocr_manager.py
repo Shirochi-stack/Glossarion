@@ -841,17 +841,15 @@ class MangaOCRProvider(OCRProvider):
                     local_only = True
                     break
 
-            # If no valid local dir, use Hub
+            # If no valid local dir exists, only try the local Hugging Face cache.
+            # The GUI Download Model button owns downloads so Load Model cannot freeze
+            # the interface by silently pulling a large model from the Hub.
             if not model_source:
                 model_source = "kha-white/manga-ocr-base"
-                # Make sure we are not forcing offline mode
-                if os.environ.get("HF_HUB_OFFLINE") == "1":
-                    try:
-                        del os.environ["HF_HUB_OFFLINE"]
-                    except Exception:
-                        pass
-                self._log("🔥 Loading manga-ocr model from Hugging Face Hub")
+                local_only = True
+                self._log("Loading manga-ocr model from local Hugging Face cache")
                 self._log(f"   Repo: {model_source}")
+                self._log("   If this fails, use the manga-ocr Download Model button first.", "warning")
             else:
                 # Only set offline when local dir is fully valid
                 os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -896,6 +894,13 @@ class MangaOCRProvider(OCRProvider):
                 self.tokenizer, self.processor, self.model = _load_components(model_source, local_only)
             except Exception as e_local:
                 if local_only:
+                    if model_source == "kha-white/manga-ocr-base":
+                        self._log(f"   Manga-ocr is not available in the local Hugging Face cache: {e_local}", "error")
+                        self._log("   Click Download Model, then Load Model again.", "warning")
+                        return False
+                    self._log(f"   Local manga-ocr model load failed: {e_local}", "error")
+                    self._log("   Use Download Model to repair the local model files, then Load Model again.", "warning")
+                    return False
                     # Fallback to Hub once if local fails
                     self._log(f"   ⚠️ Local model load failed: {e_local}", "warning")
                     try:

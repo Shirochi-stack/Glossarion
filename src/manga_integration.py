@@ -2248,6 +2248,31 @@ class MangaTranslationTab(QObject):
         def add_log(message):
             """Add message to log"""
             details_text.append(message)
+            try:
+                if provider == 'manga-ocr':
+                    transfer_match = re.search(r"Starting transfer:\s+(\d+)\s+files", str(message))
+                    if transfer_match:
+                        progress_bar.setValue(max(progress_bar.value(), 20))
+                        progress_label.setText("Starting transfer...")
+                        status_label.setText(f"0/{transfer_match.group(1)} files")
+
+                    file_match = re.search(r"Downloading \[(\d+)/(\d+)\]:\s+(.+)", str(message))
+                    if file_match:
+                        idx = int(file_match.group(1))
+                        count = max(1, int(file_match.group(2)))
+                        file_name = file_match.group(3)
+                        file_progress = max(0.0, (idx - 1) / count)
+                        progress = min(20 + file_progress * 75, 95)
+                        progress_bar.setValue(max(progress_bar.value(), int(progress)))
+                        progress_label.setText(f"Downloading: {progress_bar.value()}%")
+                        status_label.setText(f"[{idx}/{count}] {file_name} (connecting...)")
+                        speed_label.setText("Speed: waiting for first bytes")
+
+                    done_match = re.search(r"Already downloaded:\s+(.+)", str(message))
+                    if done_match:
+                        speed_label.setText("Speed: cached file")
+            except Exception:
+                pass
             # Scroll to bottom
             from PySide6.QtGui import QTextCursor
             cursor = details_text.textCursor()
@@ -2267,6 +2292,8 @@ class MangaTranslationTab(QObject):
             try:
                 for dirpath, dirnames, filenames in os.walk(path):
                     for filename in filenames:
+                        if filename.endswith(".part"):
+                            continue
                         filepath = os.path.join(dirpath, filename)
                         if os.path.exists(filepath):
                             total += os.path.getsize(filepath)
@@ -2289,32 +2316,60 @@ class MangaTranslationTab(QObject):
                     progress_bar.setValue(10)
                     
                     try:
+                        import queue
                         from huggingface_hub import snapshot_download
                         
                         # Download the model files directly without importing manga_ocr
                         model_repo = "kha-white/manga-ocr-base"
                         add_log(f"Repository: {model_repo}")
                         
-                        cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
-                        initial_size = get_dir_size(cache_dir) if os.path.exists(cache_dir) else 0
+                        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+                        local_model_dir = os.path.join(root_dir, 'models', 'manga-ocr-base')
+                        os.makedirs(local_model_dir, exist_ok=True)
                         start_time = time.time()
+                        initial_local_size = get_dir_size(local_model_dir)
                         
-                        add_log("Starting download...")
+                        add_log("Preparing Hugging Face file list...")
                         progress_bar.setValue(20)
                         
                         # Download with progress tracking
                         import threading
                         download_complete = threading.Event()
                         download_error = [None]
+                        progress_lock = threading.Lock()
+                        log_queue = queue.Queue()
+                        progress_state = {
+                            'downloaded': 0,
+                            'total': 0,
+                            'current_file': '',
+                            'file_index': 0,
+                            'file_count': 0,
+                            'file_downloaded': 0,
+                            'file_size': 0,
+                            'file_started_at': 0.0,
+                        }
                         
                         def download_model():
                             try:
+                                os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+                                os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+                                log_queue.put("Using Hugging Face snapshot downloader in the background...")
+                                with progress_lock:
+                                    progress_state['file_count'] = 0
+                                    progress_state['total'] = total_size
+                                    progress_state['current_file'] = "Hugging Face snapshot"
+                                    progress_state['file_started_at'] = time.time()
+                                log_queue.put("Starting transfer with resume support. Large files may pause while Hugging Face connects.")
                                 snapshot_download(
                                     repo_id=model_repo,
                                     repo_type="model",
+                                    local_dir=local_model_dir,
+                                    local_dir_use_symlinks=False,
                                     resume_download=True,
-                                    local_files_only=False
+                                    ignore_patterns=[".gitattributes"],
                                 )
+                                os.environ['MANGA_OCR_LOCAL_DIR'] = local_model_dir
+                                log_queue.put(f"Saved model to: {local_model_dir}")
                                 download_complete.set()
                             except Exception as e:
                                 download_error[0] = e
@@ -2323,6 +2378,26 @@ class MangaTranslationTab(QObject):
                         def check_progress():
                             """Recursively check progress using QTimer.singleShot"""
                             try:
+                                while True:
+                                    try:
+                                        add_log(log_queue.get_nowait())
+                                    except queue.Empty:
+                                        break
+
+                                with progress_lock:
+                                    downloaded = int(progress_state.get('downloaded', 0) or 0)
+                                    total = int(progress_state.get('total', 0) or 0)
+                                    current_file = str(progress_state.get('current_file', '') or '')
+                                    file_index = int(progress_state.get('file_index', 0) or 0)
+                                    file_count = int(progress_state.get('file_count', 0) or 0)
+                                    file_downloaded = int(progress_state.get('file_downloaded', 0) or 0)
+                                    file_size = int(progress_state.get('file_size', 0) or 0)
+                                    file_started_at = float(progress_state.get('file_started_at', 0.0) or 0.0)
+
+                                local_size = get_dir_size(local_model_dir)
+                                downloaded = max(downloaded, local_size)
+                                total = total or total_size
+
                                 if download_complete.is_set():
                                     # Handle completion
                                     if download_error[0]:
@@ -2347,37 +2422,57 @@ class MangaTranslationTab(QObject):
                                 if not download_active['value']:
                                     return
                                 
-                                # Update progress
-                                current_size = get_dir_size(cache_dir) if os.path.exists(cache_dir) else 0
-                                downloaded = current_size - initial_size
-                                
-                                if downloaded > 0:
-                                    progress = min(20 + (downloaded / total_size) * 70, 95)
+                                if file_count > 0:
+                                    completed_files = max(0, file_index - 1)
+                                    current_fraction = min(1.0, file_downloaded / file_size) if file_size > 0 else 0.0
+                                    file_progress = (completed_files + current_fraction) / max(1, file_count)
+                                    progress = min(20 + file_progress * 75, 95)
                                     progress_bar.setValue(int(progress))
-                                    
-                                    elapsed = time.time() - start_time
-                                    if elapsed > 1:
-                                        speed = downloaded / elapsed
-                                        speed_mb = speed / (1024 * 1024)
-                                        speed_label.setText(f"Speed: {speed_mb:.1f} MB/s")
-                                    
-                                    mb_downloaded = downloaded / (1024 * 1024)
+                                    mb_total = (total or total_size) / (1024 * 1024)
+                                elif total > 0:
+                                    progress = min(20 + (downloaded / total) * 75, 95)
+                                    progress_bar.setValue(int(progress))
+                                    mb_total = total / (1024 * 1024)
+                                else:
+                                    progress_bar.setValue(20)
                                     mb_total = total_size / (1024 * 1024)
-                                    size_label.setText(f"{mb_downloaded:.1f} MB / {mb_total:.1f} MB")
-                                    progress_label.setText(f"Downloading: {progress:.1f}%")
+
+                                elapsed = time.time() - start_time
+                                transferred = max(0, downloaded - initial_local_size)
+                                if elapsed > 1 and transferred > 0:
+                                    speed = transferred / elapsed
+                                    speed_mb = speed / (1024 * 1024)
+                                    speed_label.setText(f"Speed: {speed_mb:.1f} MB/s")
+                                elif current_file and file_started_at:
+                                    connect_elapsed = max(0.0, time.time() - file_started_at)
+                                    speed_label.setText(f"Waiting for Hugging Face file writes: {connect_elapsed:.0f}s")
+
+                                mb_downloaded = downloaded / (1024 * 1024)
+                                size_label.setText(f"{mb_downloaded:.1f} MB / {mb_total:.1f} MB")
+                                if current_file:
+                                    if file_size > 0:
+                                        status_label.setText(
+                                            f"[{file_index}/{file_count}] {current_file} "
+                                            f"({file_downloaded / (1024 * 1024):.1f}/{file_size / (1024 * 1024):.1f} MB)"
+                                        )
+                                    else:
+                                        status_label.setText(f"{current_file} ({mb_downloaded:.1f} MB on disk)")
+                                progress_label.setText(f"Downloading: {progress_bar.value()}%")
                                 
                                 # Schedule next check
-                                QTimer.singleShot(500, check_progress)
-                            except Exception:
-                                # Silently ignore errors to prevent crashes
-                                pass
+                                QTimer.singleShot(250, check_progress)
+                            except Exception as progress_error:
+                                try:
+                                    add_log(f"Progress updater error: {progress_error}")
+                                except Exception:
+                                    pass
                         
                         # Start download thread
                         download_thread = threading.Thread(target=download_model, daemon=True)
                         download_thread.start()
                         
                         # Start progress checking
-                        QTimer.singleShot(500, check_progress)
+                        QTimer.singleShot(250, check_progress)
                             
                     except ImportError:
                         progress_label.setText("❌ Missing huggingface_hub")
