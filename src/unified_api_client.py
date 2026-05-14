@@ -4384,8 +4384,8 @@ class UnifiedClient:
         value = context if context is not None else getattr(self, 'context', None)
         return str(value or '').strip().lower() == 'manga_ocr'
 
-    def _uses_local_individual_openai_endpoint(self) -> bool:
-        """Return True when this thread/request is routed to a local per-key endpoint."""
+    def _should_skip_image_request_reencode(self) -> bool:
+        """Return True when request-quality conversion would break the active endpoint."""
         if not self._is_manga_ocr_context():
             return False
         try:
@@ -4401,10 +4401,6 @@ class UnifiedClient:
             return bool(use_endpoint and endpoint and self._is_local_openai_base_url(str(endpoint)))
         except Exception:
             return False
-
-    def _should_send_bare_base64_image_url(self) -> bool:
-        """Some local OpenAI-compatible vision servers expect image_url.url as raw base64."""
-        return self._uses_local_individual_openai_endpoint()
 
     def _restore_thread_endpoint_state_if_needed(self) -> None:
         """Re-apply this thread's per-key endpoint before provider routing."""
@@ -9271,6 +9267,8 @@ class UnifiedClient:
         manga_quality_enabled = os.getenv('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') == '1'
         if not force_lossless_webp and not manga_quality_enabled:
             return raw, mime
+        if self._should_skip_image_request_reencode():
+            return raw, mime
         try:
             import io as _io
             from PIL import Image as _Image
@@ -9381,8 +9379,6 @@ class UnifiedClient:
                 url = image_url.get('url') if isinstance(image_url, dict) else image_url
                 if isinstance(url, str) and url.startswith('data:image/') and ',' in url:
                     new_url = self._convert_image_data_url_to_webp_lossless(url)
-                    if self._should_send_bare_base64_image_url() and ',' in new_url:
-                        new_url = new_url.split(',', 1)[1]
                     if new_url != url:
                         changed = True
                         msg_changed = True
@@ -9468,8 +9464,7 @@ class UnifiedClient:
         if raw:
             b64 = base64.b64encode(raw).decode('ascii')
         
-        image_url = b64 if self._should_send_bare_base64_image_url() else f"data:{mime};base64,{b64}"
-        image_part = {"type": "image_url", "image_url": {"url": image_url}}
+        image_part = {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
         
         for msg in messages:
             if msg.get('role') == 'user':
