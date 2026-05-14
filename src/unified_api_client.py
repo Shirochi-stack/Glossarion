@@ -4369,7 +4369,13 @@ class UnifiedClient:
 
     def _suppress_custom_image_edit_endpoint(self) -> bool:
         try:
-            return bool(getattr(self, '_suppress_custom_image_edit_endpoint', False))
+            return self._should_suppress_custom_image_edit_endpoint()
+        except Exception:
+            return False
+
+    def _should_suppress_custom_image_edit_endpoint(self) -> bool:
+        try:
+            return bool(self.__dict__.get('_suppress_custom_image_edit_endpoint', False))
         except Exception:
             return False
 
@@ -4377,6 +4383,62 @@ class UnifiedClient:
         """Return True for manga OCR requests."""
         value = context if context is not None else getattr(self, 'context', None)
         return str(value or '').strip().lower() == 'manga_ocr'
+
+    def _uses_local_individual_openai_endpoint(self) -> bool:
+        """Return True when this thread/request is routed to a local per-key endpoint."""
+        if not self._is_manga_ocr_context():
+            return False
+        try:
+            tls = self._get_thread_local_client()
+        except Exception:
+            tls = None
+        try:
+            use_endpoint = bool(getattr(tls, 'use_individual_endpoint', False)) if tls is not None else False
+            endpoint = getattr(tls, 'azure_endpoint', None) if tls is not None else None
+            if not endpoint:
+                use_endpoint = bool(getattr(self, 'current_key_use_individual_endpoint', False))
+                endpoint = getattr(self, 'current_key_azure_endpoint', None)
+            return bool(use_endpoint and endpoint and self._is_local_openai_base_url(str(endpoint)))
+        except Exception:
+            return False
+
+    def _should_send_bare_base64_image_url(self) -> bool:
+        """Some local OpenAI-compatible vision servers expect image_url.url as raw base64."""
+        return self._uses_local_individual_openai_endpoint()
+
+    def _restore_thread_endpoint_state_if_needed(self) -> None:
+        """Re-apply this thread's per-key endpoint before provider routing."""
+        try:
+            tls = self._get_thread_local_client()
+        except Exception:
+            return
+        endpoint = getattr(tls, 'azure_endpoint', None)
+        if not (getattr(tls, 'use_individual_endpoint', False) and endpoint):
+            return
+        try:
+            self.api_key = getattr(tls, 'api_key', self.api_key)
+            self.model = getattr(tls, 'model', self.model)
+            self.key_identifier = getattr(tls, 'key_identifier', getattr(self, 'key_identifier', None))
+            self.current_key_index = getattr(tls, 'key_index', getattr(self, 'current_key_index', None))
+            self.current_key_azure_endpoint = endpoint
+            self.current_key_azure_api_version = getattr(tls, 'azure_api_version', None)
+            self.current_key_google_creds = getattr(tls, 'google_credentials', None)
+            self.current_key_google_region = getattr(tls, 'google_region', None)
+            self.current_key_use_individual_endpoint = True
+            self._individual_endpoint_applied = True
+            self._skip_global_custom_endpoint = True
+            tls_client_type = getattr(tls, 'client_type', None)
+            tls_openai_client = getattr(tls, 'openai_client', None)
+            if tls_client_type:
+                self.client_type = tls_client_type
+            elif '.azure.com' in str(endpoint).lower() or '.cognitiveservices' in str(endpoint).lower():
+                self.client_type = 'azure'
+            else:
+                self.client_type = 'openai'
+            if tls_openai_client is not None:
+                self.openai_client = tls_openai_client
+        except Exception:
+            pass
 
     def _is_vision_input_only_context(self, context: Any = None) -> bool:
         """Return True for vision/OCR requests that must never request image output."""
@@ -7739,11 +7801,29 @@ class UnifiedClient:
                         continue
                 
                 # Check for prohibited content — treat any HTTP 400 as prohibited to force fallback
+                bad_request = getattr(e, 'http_status', None) == 400 or " 400 " in error_str
+                non_safety_bad_request_markers = (
+                    "'url' field must be a base64 encoded image",
+                    "you didn't provide an api key",
+                    "invalid_request_error",
+                    "missing required",
+                    "unknown parameter",
+                    "unsupported parameter",
+                    "invalid type",
+                    "bad request",
+                )
+                non_safety_bad_request = bad_request and any(marker in error_str for marker in non_safety_bad_request_markers)
+                safety_detected = self._detect_safety_filter(
+                    messages,
+                    extracted_content or "",
+                    finish_reason,
+                    None,
+                    getattr(self, 'client_type', 'unknown')
+                )
                 if (
                     e.error_type == "prohibited_content"
-                    or getattr(e, 'http_status', None) == 400
-                    or " 400 " in error_str
-                    or self._detect_safety_filter(messages, extracted_content or "", finish_reason, None, getattr(self, 'client_type', 'unknown'))
+                    or safety_detected
+                    or (bad_request and not non_safety_bad_request)
                 ):
                     try:
                         label = self._extract_chapter_label(messages)
@@ -9301,6 +9381,8 @@ class UnifiedClient:
                 url = image_url.get('url') if isinstance(image_url, dict) else image_url
                 if isinstance(url, str) and url.startswith('data:image/') and ',' in url:
                     new_url = self._convert_image_data_url_to_webp_lossless(url)
+                    if self._should_send_bare_base64_image_url() and ',' in new_url:
+                        new_url = new_url.split(',', 1)[1]
                     if new_url != url:
                         changed = True
                         msg_changed = True
@@ -9386,7 +9468,8 @@ class UnifiedClient:
         if raw:
             b64 = base64.b64encode(raw).decode('ascii')
         
-        image_part = {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+        image_url = b64 if self._should_send_bare_base64_image_url() else f"data:{mime};base64,{b64}"
+        image_part = {"type": "image_url", "image_url": {"url": image_url}}
         
         for msg in messages:
             if msg.get('role') == 'user':
@@ -14356,6 +14439,14 @@ class UnifiedClient:
         if openai is None:
             raise UnifiedClientError("OpenAI SDK not installed. Install with: pip install openai")
             
+        try:
+            tls = self._get_thread_local_client()
+            if (getattr(tls, 'use_individual_endpoint', False)
+                    and getattr(tls, 'openai_client', None) is not None):
+                return tls.openai_client
+        except Exception:
+            pass
+
         # CRITICAL: If individual endpoint is applied, use our existing client instead of creating new one
         if (hasattr(self, '_individual_endpoint_applied') and self._individual_endpoint_applied and 
             hasattr(self, 'openai_client') and self.openai_client):
@@ -14437,6 +14528,7 @@ class UnifiedClient:
         """
         # Bind current run id to this thread so transport logs can be suppressed for stale runs.
         _set_thread_run_id_from_env()
+        self._restore_thread_endpoint_state_if_needed()
 
         # Log NanoGPT thinking configuration BEFORE the stagger delay so it
         # appears in the console before the "API call in progress" line.
@@ -14690,6 +14782,19 @@ class UnifiedClient:
         This is used for proper routing and detection.
         """
         client_type = getattr(self, 'client_type', 'openai')
+        try:
+            tls = self._get_thread_local_client()
+            endpoint = getattr(tls, 'azure_endpoint', None)
+            if getattr(tls, 'use_individual_endpoint', False) and endpoint:
+                tls_client_type = getattr(tls, 'client_type', None)
+                if tls_client_type in ('openai', 'azure'):
+                    return tls_client_type
+                endpoint_l = str(endpoint).lower()
+                if '.azure.com' in endpoint_l or '.cognitiveservices' in endpoint_l or '/openai/deployments/' in endpoint_l:
+                    return 'azure'
+                return 'openai'
+        except Exception:
+            pass
         if getattr(self, "_individual_endpoint_applied", False) and getattr(self, "current_key_use_individual_endpoint", False):
             if client_type in ('openai', 'azure'):
                 return client_type
@@ -17970,6 +18075,15 @@ class UnifiedClient:
         # CUSTOM ENDPOINT OVERRIDE - Check if enabled and override base_url
         use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
         actual_api_key = self.api_key
+        try:
+            tls = self._get_thread_local_client()
+            if getattr(tls, 'use_individual_endpoint', False):
+                actual_api_key = getattr(tls, 'api_key', actual_api_key)
+                tls_endpoint = getattr(tls, 'azure_endpoint', None)
+                if tls_endpoint and self._is_local_openai_base_url(str(tls_endpoint)) and not actual_api_key:
+                    actual_api_key = "dummy-key-for-local-llm"
+        except Exception:
+            pass
         
         # Determine if this is a local endpoint that doesn't need a real API key
         is_local_endpoint = False
@@ -18146,11 +18260,11 @@ class UnifiedClient:
         # Route image/video output mode through the dedicated image edit endpoint
         # without changing where normal text requests go.
         try:
-            image_edit_base_url = '' if self._suppress_custom_image_edit_endpoint() else (
+            image_edit_base_url = '' if self._should_suppress_custom_image_edit_endpoint() else (
                 os.getenv('CUSTOM_IMAGE_EDIT_BASE_URL', '')
                 or os.getenv('OPENAI_IMAGE_EDIT_BASE_URL', '')
             ).strip()
-            image_edit_enabled = (not self._suppress_custom_image_edit_endpoint()) and os.getenv('USE_CUSTOM_IMAGE_EDIT_ENDPOINT', '1' if image_edit_base_url else '0') == '1'
+            image_edit_enabled = (not self._should_suppress_custom_image_edit_endpoint()) and os.getenv('USE_CUSTOM_IMAGE_EDIT_ENDPOINT', '1' if image_edit_base_url else '0') == '1'
             output_mode_needs_image_endpoint = (
                 self._image_output_mode_enabled()
                 or os.getenv("ENABLE_VIDEO_OUTPUT_MODE", "0") == "1"
@@ -20475,7 +20589,20 @@ class UnifiedClient:
         POST /v1/images/generations instead of /v1/chat/completions.
         """
         # CRITICAL: Check if individual endpoint is applied first
-        if (hasattr(self, '_individual_endpoint_applied') and self._individual_endpoint_applied and
+        tls_openai_client = None
+        try:
+            tls = self._get_thread_local_client()
+            if getattr(tls, 'use_individual_endpoint', False):
+                tls_openai_client = getattr(tls, 'openai_client', None)
+        except Exception:
+            tls_openai_client = None
+        if tls_openai_client is not None:
+            individual_base_url = getattr(tls_openai_client, 'base_url', None)
+            if individual_base_url:
+                base_url = str(individual_base_url).rstrip('/')
+            else:
+                base_url = str(getattr(tls, 'azure_endpoint', '') or '').rstrip('/') or 'https://api.openai.com/v1'
+        elif (hasattr(self, '_individual_endpoint_applied') and self._individual_endpoint_applied and
                 hasattr(self, 'openai_client') and self.openai_client):
             individual_base_url = getattr(self.openai_client, 'base_url', None)
             if individual_base_url:
@@ -20499,11 +20626,11 @@ class UnifiedClient:
         if _image_in_name and _force_vision:
             _image_in_name = False
         if _image_in_name or _image_flag:
-            image_base_url = '' if self._suppress_custom_image_edit_endpoint() else (
+            image_base_url = '' if self._should_suppress_custom_image_edit_endpoint() else (
                 os.getenv('CUSTOM_IMAGE_EDIT_BASE_URL', '')
                 or os.getenv('OPENAI_IMAGE_EDIT_BASE_URL', '')
             ).strip()
-            image_endpoint_enabled = (not self._suppress_custom_image_edit_endpoint()) and os.getenv('USE_CUSTOM_IMAGE_EDIT_ENDPOINT', '1' if image_base_url else '0') == '1'
+            image_endpoint_enabled = (not self._should_suppress_custom_image_edit_endpoint()) and os.getenv('USE_CUSTOM_IMAGE_EDIT_ENDPOINT', '1' if image_base_url else '0') == '1'
             if image_endpoint_enabled and image_base_url:
                 base_url = image_base_url
             if not self._is_stop_requested():
