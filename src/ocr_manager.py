@@ -808,11 +808,27 @@ class MangaOCRProvider(OCRProvider):
             )
             has_tokenizer = (
                 os.path.exists(os.path.join(path, 'tokenizer.json')) or
-                os.path.exists(os.path.join(path, 'tokenizer_config.json'))
+                (
+                    os.path.exists(os.path.join(path, 'tokenizer_config.json')) and
+                    os.path.exists(os.path.join(path, 'vocab.txt')) and
+                    os.path.getsize(os.path.join(path, 'vocab.txt')) > 0
+                )
             )
             return has_config and needed_any_weights and has_processor and has_tokenizer
         except Exception:
             return False
+
+    def _get_persistent_model_dir(self) -> str:
+        """Return an exe-safe persistent model directory for manga-ocr."""
+        if getattr(sys, 'frozen', False):
+            app_data_root = (
+                os.environ.get('LOCALAPPDATA')
+                or os.environ.get('APPDATA')
+                or os.path.expanduser('~')
+            )
+            return os.path.join(app_data_root, 'Glossarion', 'models', 'manga-ocr-base')
+        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        return os.path.join(root_dir, 'models', 'manga-ocr-base')
     
     def load_model(self, **kwargs) -> bool:
         """Load the manga-ocr model, preferring a local directory to avoid re-downloading"""
@@ -839,6 +855,9 @@ class MangaOCRProvider(OCRProvider):
 
             # Project root one level up from this file
             root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+            persistent_dir = self._get_persistent_model_dir()
+            if persistent_dir not in candidates:
+                candidates.append(persistent_dir)
             candidates.append(os.path.join(root_dir, 'models', 'manga-ocr-base'))
             candidates.append(os.path.join(root_dir, 'models', 'kha-white', 'manga-ocr-base'))
 
@@ -1915,6 +1934,42 @@ class DocTROCRProvider(OCRProvider):
 
 class RapidOCRProvider(OCRProvider):
     """RapidOCR provider for fast local OCR"""
+
+    @staticmethod
+    def _expected_package_model_files() -> List[str]:
+        return [
+            os.path.join('models', 'ch_PP-OCRv4_det_infer.onnx'),
+            os.path.join('models', 'ch_PP-OCRv4_rec_infer.onnx'),
+            os.path.join('models', 'ch_ppocr_mobile_v2.0_cls_infer.onnx'),
+            'config.yaml',
+        ]
+
+    def _prepare_packaged_runtime(self, package_dir: str) -> bool:
+        """Validate RapidOCR package data in frozen builds before creating the model."""
+        if not getattr(sys, 'frozen', False):
+            return True
+
+        missing = [
+            rel for rel in self._expected_package_model_files()
+            if not os.path.exists(os.path.join(package_dir, rel))
+        ]
+        if missing:
+            self.last_error = (
+                "RapidOCR package data is missing from the exe: "
+                f"{', '.join(missing)}. Rebuild with rapidocr_onnxruntime data files "
+                "and the CPU onnxruntime package included."
+            )
+            self._log(self.last_error, "error")
+            return False
+
+        # Some libraries use cache/config locations even when model files are bundled.
+        # In an exe, keep that path persistent instead of under PyInstaller's temp dir.
+        local_appdata = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
+        cache_root = os.path.join(local_appdata, 'Glossarion', 'rapidocr')
+        os.makedirs(cache_root, exist_ok=True)
+        os.environ.setdefault('RAPIDOCR_HOME', cache_root)
+        os.environ.setdefault('XDG_CACHE_HOME', cache_root)
+        return True
     
     def check_installation(self) -> bool:
         """Check if rapidocr is installed"""
@@ -1936,12 +1991,19 @@ class RapidOCRProvider(OCRProvider):
     def load_model(self, **kwargs) -> bool:
         """Load RapidOCR model"""
         try:
+            self.last_error = None
             if not self.is_installed and not self.check_installation():
-                self._log("RapidOCR not installed", "error")
+                self.last_error = "RapidOCR not installed"
+                self._log(self.last_error, "error")
                 return False
             
             self._log("Loading RapidOCR...")
             from rapidocr_onnxruntime import RapidOCR
+            import rapidocr_onnxruntime
+
+            package_dir = os.path.dirname(getattr(rapidocr_onnxruntime, '__file__', '') or '')
+            if package_dir and not self._prepare_packaged_runtime(package_dir):
+                return False
             
             self.model = RapidOCR()
             self.is_loaded = True
@@ -1950,7 +2012,9 @@ class RapidOCRProvider(OCRProvider):
             return True
             
         except Exception as e:
+            self.last_error = str(e)
             self._log(f"Failed to load RapidOCR: {str(e)}", "error")
+            self._log(traceback.format_exc(), "debug")
             return False
     
     def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:

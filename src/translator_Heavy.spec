@@ -96,7 +96,7 @@ if os.path.exists(msys2_bin):
     for dll in glob.glob(os.path.join(msys2_bin, '*.dll')):
         binaries.append((dll, '.'))
     print(f"  Added {len(glob.glob(os.path.join(msys2_bin, '*.dll')))} MSYS2 DLLs for WeasyPrint")
-for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
+for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer', 'rapidocr_onnxruntime', 'onnxruntime']:
     try:
         data, bins, hidden = collect_all(package)
         datas.extend(data)

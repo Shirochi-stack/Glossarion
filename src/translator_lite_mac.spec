@@ -44,7 +44,7 @@ hiddenimports = []
 binaries.extend([])
 
 # Collect data files from packages that need them
-for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
+for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer', 'rapidocr_onnxruntime', 'onnxruntime']:
     try:
         data, bins, hidden = collect_all(package)
         datas.extend(data)
@@ -1055,7 +1055,18 @@ excludes = [
 	# Force exclude ALL torch variants
 	'*torch*',
 	'torch*',
-	'_torch*',
+    '_torch*',
+]
+
+# RapidOCR is exposed in the manga OCR UI and needs CPU ONNX Runtime plus
+# rapidocr_onnxruntime's bundled model files inside packaged builds.
+excludes = [
+    package for package in excludes
+    if package not in {
+        'onnxruntime', 'onnxruntime.*', 'onnxruntime.capi', 'onnxruntime.capi.*',
+        'onnxruntime.tools', 'onnxruntime.transformers', 'onnxruntime.backend',
+        'onnxruntime.backend.*'
+    }
 ]
 
 # ============================================================================

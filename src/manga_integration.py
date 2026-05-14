@@ -2342,9 +2342,18 @@ class MangaTranslationTab(QObject):
                         model_repo = "kha-white/manga-ocr-base"
                         add_log(f"Repository: {model_repo}")
                         
-                        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-                        local_model_dir = os.path.join(root_dir, 'models', 'manga-ocr-base')
+                        if getattr(sys, 'frozen', False):
+                            app_data_root = (
+                                os.environ.get('LOCALAPPDATA')
+                                or os.environ.get('APPDATA')
+                                or os.path.expanduser('~')
+                            )
+                            local_model_dir = os.path.join(app_data_root, 'Glossarion', 'models', 'manga-ocr-base')
+                        else:
+                            root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+                            local_model_dir = os.path.join(root_dir, 'models', 'manga-ocr-base')
                         os.makedirs(local_model_dir, exist_ok=True)
+                        os.environ['MANGA_OCR_LOCAL_DIR'] = local_model_dir
                         start_time = time.time()
                         initial_local_size = get_dir_size(local_model_dir)
                         
