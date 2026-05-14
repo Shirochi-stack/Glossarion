@@ -44,6 +44,17 @@ jobs:
           name: Z_Glossarion-Lite-macOS-ARM
           path: src/dist/*.dmg
           if-no-files-found: error
+
+      - name: Build ARM NoCuda (Apple Silicon)
+        run: pyinstaller translator_lite_mac_NoCuda.spec --noconfirm
+        working-directory: src
+
+      - name: Upload NoCuda DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-NoCuda-macOS-ARM
+          path: src/dist/*NoCuda*MAC.dmg
+          if-no-files-found: error
       
       - name: Upload to Release (if tagged)
         if: startsWith(github.ref, 'refs/tags/')
@@ -89,6 +100,17 @@ jobs:
         with:
           name: Z_Glossarion-Lite-macOS-Intel
           path: src/dist/*.dmg
+          if-no-files-found: error
+
+      - name: Build Intel NoCuda (x86_64)
+        run: pyinstaller translator_lite_mac_intel_NoCuda.spec --noconfirm
+        working-directory: src
+
+      - name: Upload NoCuda DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-NoCuda-macOS-Intel
+          path: src/dist/*NoCuda*MAC_Intel.dmg
           if-no-files-found: error
       
       - name: Upload to Release (if tagged)

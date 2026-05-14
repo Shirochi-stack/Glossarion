@@ -19,7 +19,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = get_spec_app_name("translator_lite_mac.spec")
+APP_NAME = get_spec_app_name("translator_lite_mac_NoCuda.spec")
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -44,7 +44,7 @@ hiddenimports = []
 binaries.extend([])
 
 # Collect data files from packages that need them
-for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
+for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer', 'rapidocr_onnxruntime', 'onnxruntime']:
     try:
         data, bins, hidden = collect_all(package)
         datas.extend(data)
@@ -83,6 +83,7 @@ app_files = [
     ('TransateKRtoEN.py', '.'),
     ('unified_api_client.py', '.'),
     ('google_free_translate.py', '.'),
+    ('vision_ocr_source_epub.py', '.'),
     
     # File processors
     ('epub_converter.py', '.'),
@@ -112,6 +113,12 @@ app_files = [
     
     # AI Hunter Enhanced
     ('ai_hunter_enhanced.py', '.'),
+
+    # Manga Translation modules
+    ('manga_translator.py', '.'),
+    ('manga_integration.py', '.'),
+    ('manga_settings_dialog.py', '.'),
+    ('manga_image_preview.py', '.'),
     
     # Dialog animations
     ('dialog_animations.py', '.'),
@@ -144,8 +151,12 @@ app_files = [
 	
 	('multi_api_key_manager.py', '.'),
 	('individual_endpoint_dialog.py', '.'),
+    ('bubble_detector.py', '.'),
+    ('local_inpainter.py', '.'),
+    ('ocr_manager.py', '.'),
 	('model_options.py', '.'),
 	('hyphen_textwrap.py', '.'),
+    ('ImageRenderer.py', '.'),
 	
 	# Duplicate detection
 	('duplicate_detection_config.py', '.'),
@@ -1056,6 +1067,17 @@ excludes = [
 	'*torch*',
 	'torch*',
     '_torch*',
+]
+
+# RapidOCR is exposed in the manga OCR UI and needs CPU ONNX Runtime plus
+# rapidocr_onnxruntime's bundled model files inside packaged builds.
+excludes = [
+    package for package in excludes
+    if package not in {
+        'onnxruntime', 'onnxruntime.*', 'onnxruntime.capi', 'onnxruntime.capi.*',
+        'onnxruntime.tools', 'onnxruntime.transformers', 'onnxruntime.backend',
+        'onnxruntime.backend.*'
+    }
 ]
 
 # ============================================================================

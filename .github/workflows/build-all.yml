@@ -540,6 +540,24 @@ jobs:
           path: src/dist/*.app
           if-no-files-found: warn
 
+      - name: Build ARM NoCuda (Apple Silicon)
+        run: pyinstaller translator_lite_mac_NoCuda.spec --noconfirm
+        working-directory: src
+
+      - name: Upload macOS ARM NoCuda DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-NoCuda-macOS-ARM
+          path: src/dist/*NoCuda*MAC.dmg
+          if-no-files-found: warn
+
+      - name: Upload macOS ARM NoCuda app artifact (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-NoCuda-macOS-ARM-App
+          path: src/dist/*NoCuda*MAC.app
+          if-no-files-found: warn
+
   # ============================================================================
   # macOS Intel Build (x86_64 - for VMware, older Macs, Hackintosh)
   # ============================================================================
@@ -583,6 +601,24 @@ jobs:
         with:
           name: Z_Glossarion-Lite-macOS-Intel-App
           path: src/dist/*.app
+          if-no-files-found: warn
+
+      - name: Build Intel NoCuda (x86_64)
+        run: pyinstaller translator_lite_mac_intel_NoCuda.spec --noconfirm
+        working-directory: src
+
+      - name: Upload macOS Intel NoCuda DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-NoCuda-macOS-Intel
+          path: src/dist/*NoCuda*MAC_Intel.dmg
+          if-no-files-found: warn
+
+      - name: Upload macOS Intel NoCuda app artifact (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Z_Glossarion-NoCuda-macOS-Intel-App
+          path: src/dist/*NoCuda*MAC_Intel.app
           if-no-files-found: warn
 
   # ============================================================================

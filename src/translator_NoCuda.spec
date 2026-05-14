@@ -141,6 +141,7 @@ app_files = [
     ('TransateKRtoEN.py', '.'),
     ('unified_api_client.py', '.'),
     ('google_free_translate.py', '.'),
+    ('vision_ocr_source_epub.py', '.'),
     
     # File processors
     ('epub_converter.py', '.'),

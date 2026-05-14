@@ -17,6 +17,8 @@ SPEC_APP_NAMES = {
     "translator_lite_linux.spec": f"L_Glossarion_Lite_{VERSION_TAG}_Linux",
     "translator_lite_mac.spec": f"L_Glossarion_Lite_{VERSION_TAG}_MAC",
     "translator_lite_mac_intel.spec": f"L_Glossarion_Lite_{VERSION_TAG}_MAC_Intel",
+    "translator_lite_mac_NoCuda.spec": f"N_Glossarion_NoCuda_{VERSION_TAG}_MAC",
+    "translator_lite_mac_intel_NoCuda.spec": f"N_Glossarion_NoCuda_{VERSION_TAG}_MAC_Intel",
     "translator_NoCuda.spec": f"N_Glossarion_NoCuda {VERSION_TAG}",
     "translator_TurboLite.spec": f"L_Glossarion_TurboLite {VERSION_TAG}",
 }
