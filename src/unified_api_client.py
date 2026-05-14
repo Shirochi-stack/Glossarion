@@ -2148,6 +2148,18 @@ class UnifiedClient:
         return True
 
     @classmethod
+    def _key_data_needs_api_key(cls, key_data: dict, model: str) -> bool:
+        """Return whether this pool entry needs an API key to be admitted."""
+        try:
+            endpoint = str(key_data.get('azure_endpoint') or '').strip()
+        except Exception:
+            endpoint = ''
+        if key_data.get('use_individual_endpoint') and endpoint:
+            if cls._is_local_openai_base_url(endpoint):
+                return False
+        return cls._model_needs_api_key(model)
+
+    @classmethod
     def setup_multi_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Setup the shared API key pool"""
         with cls._pool_lock:
@@ -2171,7 +2183,7 @@ class UnifiedClient:
                 model = key_data.get('model', '')
                 
                 # Allow empty API key for models that don't need one
-                if not api_key and cls._model_needs_api_key(model):
+                if not api_key and cls._key_data_needs_api_key(key_data, model):
                     continue
                 
                 # Fix encrypted keys
@@ -2298,7 +2310,7 @@ class UnifiedClient:
                     continue
                 api_key = key_data.get('api_key', '')
                 model = key_data.get('model', '')
-                if not api_key and cls._model_needs_api_key(model):
+                if not api_key and cls._key_data_needs_api_key(key_data, model):
                     continue
                 # Fix encrypted keys
                 if api_key and api_key.startswith('ENC:'):
@@ -2391,7 +2403,7 @@ class UnifiedClient:
                     continue
                 api_key = key_data.get('api_key', '')
                 model = key_data.get('model', '')
-                if not api_key and cls._model_needs_api_key(model):
+                if not api_key and cls._key_data_needs_api_key(key_data, model):
                     continue
                 # Fix encrypted keys
                 if api_key and api_key.startswith('ENC:'):
@@ -2468,7 +2480,7 @@ class UnifiedClient:
                     continue
                 api_key = key_data.get('api_key', '')
                 model = key_data.get('model', '')
-                if not api_key and cls._model_needs_api_key(model):
+                if not api_key and cls._key_data_needs_api_key(key_data, model):
                     continue
                 if api_key and api_key.startswith('ENC:'):
                     try:
@@ -3868,11 +3880,14 @@ class UnifiedClient:
             
             try:
                 import openai
+                endpoint_api_key = self.api_key
+                if self._is_local_openai_base_url(individual_endpoint) and not endpoint_api_key:
+                    endpoint_api_key = "dummy-key-for-local-llm"
                 
                 # MICROSECOND LOCK: Create individual endpoint client with thread safety
                 with self._model_lock:
                     self.openai_client = openai.OpenAI(
-                        api_key=self.api_key,
+                        api_key=endpoint_api_key,
                         base_url=individual_endpoint
                     )
                 
@@ -18160,6 +18175,11 @@ class UnifiedClient:
                     print(f"🖼️ Image/video output using Custom Image Edit Endpoint: {base_url}")
         except Exception:
             pass
+
+        if self._is_local_openai_base_url(base_url):
+            is_local_endpoint = True
+            if not actual_api_key:
+                actual_api_key = "dummy-key-for-local-llm"
 
         # For all other providers, use the actual API key
         # Remove the special case for gemini-openai - it needs the real API key
