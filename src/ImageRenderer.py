@@ -3543,6 +3543,25 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                                 # DON'T SET THE TRANSLATION SYSTEM PROMPT FOR OCR
                                 continue
                             large_env.set_env(key, str(value))
+                        try:
+                            import json as _json
+                            from unified_api_client import UnifiedClient as _UnifiedClient
+                            vision_keys = self.main_gui.config.get('qa_scan_keys', []) or []
+                            use_vision_keys = bool(self.main_gui.config.get('use_qa_scan_keys', False))
+                            os.environ['USE_VISION_KEYS'] = '1' if use_vision_keys else '0'
+                            os.environ['USE_QA_SCAN_KEYS'] = os.environ['USE_VISION_KEYS']
+                            os.environ['VISION_API_KEYS'] = _json.dumps(vision_keys)
+                            os.environ['QA_SCAN_API_KEYS'] = os.environ['VISION_API_KEYS']
+                            if use_vision_keys and vision_keys:
+                                _UnifiedClient.set_in_memory_vision_keys(
+                                    vision_keys,
+                                    force_rotation=self.main_gui.config.get('force_key_rotation', True),
+                                    rotation_frequency=self.main_gui.config.get('rotation_frequency', 1),
+                                )
+                            else:
+                                _UnifiedClient.clear_in_memory_vision_keys()
+                        except Exception as vision_err:
+                            print(f"[OCR_REGIONS] Failed to sync Vision keys for custom-api OCR: {vision_err}")
                         self._log("✅ Set environment variables for custom-api OCR (excluded SYSTEM_PROMPT)", "info")
                     else:
                         print("[OCR_REGIONS] _get_environment_variables not available on main_gui")

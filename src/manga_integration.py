@@ -14696,6 +14696,34 @@ class MangaTranslationTab(QObject):
                     self._reset_ui_state()
                     return
             
+            # Vision keys are used by custom-api manga OCR (context=manga_ocr).
+            # Sync them on every manga run, even when the main UnifiedClient is
+            # reused, so OCR region threads don't silently fall back to the main
+            # GUI key/model.
+            try:
+                import os as _os
+                import json as _json
+                from unified_api_client import UnifiedClient as _UnifiedClient
+
+                vision_keys = self.main_gui.config.get('qa_scan_keys', []) or []
+                use_vision_keys = bool(self.main_gui.config.get('use_qa_scan_keys', False))
+                _os.environ['USE_VISION_KEYS'] = '1' if use_vision_keys else '0'
+                _os.environ['USE_QA_SCAN_KEYS'] = _os.environ['USE_VISION_KEYS']
+                _os.environ['VISION_API_KEYS'] = _json.dumps(vision_keys)
+                _os.environ['QA_SCAN_API_KEYS'] = _os.environ['VISION_API_KEYS']
+
+                if use_vision_keys and vision_keys:
+                    _UnifiedClient.set_in_memory_vision_keys(
+                        vision_keys,
+                        force_rotation=self.main_gui.config.get('force_key_rotation', True),
+                        rotation_frequency=self.main_gui.config.get('rotation_frequency', 1),
+                    )
+                    self._log(f"Vision key pool ENABLED for manga OCR ({len(vision_keys)} keys)", "info")
+                else:
+                    _UnifiedClient.clear_in_memory_vision_keys()
+            except Exception as vision_err:
+                self._log(f"⚠️ Failed to sync Vision keys for manga OCR: {vision_err}", "warning")
+
             # Reset the translator's history manager for new batch
             if hasattr(self, 'translator') and self.translator and hasattr(self.translator, 'reset_history_manager'):
                 self.translator.reset_history_manager()

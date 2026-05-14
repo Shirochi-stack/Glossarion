@@ -1299,6 +1299,16 @@ class UnifiedClient:
     def _get_send_interval(self) -> float:
         # Per-key delay wins over the global GUI setting when explicitly set
         try:
+            tls = self._get_thread_local_client()
+            thread_delay = getattr(tls, 'active_api_delay_override', None)
+            if thread_delay is not None:
+                return float(thread_delay)
+            thread_delay = getattr(tls, 'api_call_delay', 0.0) or 0.0
+            if thread_delay > 0:
+                return float(thread_delay)
+        except Exception:
+            pass
+        try:
             per_key = getattr(self, '_per_key_api_delay', None)
             if per_key is not None:
                 return float(per_key)
@@ -3165,6 +3175,11 @@ class UnifiedClient:
                     tls.output_token_limit = getattr(key, 'individual_output_token_limit', None)
                     tls.individual_key_temperature = getattr(key, 'individual_key_temperature', None)
                     tls.api_call_delay = getattr(key, 'api_call_delay', 0.0)
+                    try:
+                        _active_delay = float(tls.api_call_delay) if tls.api_call_delay not in (None, '') else 0.0
+                        tls.active_api_delay_override = _active_delay if _active_delay > 0 else None
+                    except Exception:
+                        tls.active_api_delay_override = None
                     tls.initialized = True
                     tls.last_rotation = time.time()
                     
@@ -3197,11 +3212,22 @@ class UnifiedClient:
                     if not _is_glossary_pool:
                         defer_batch_log(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
                     
-                    # Setup client with new key (might need lock if it modifies instance state)
-                    self._setup_client()
-                    
-                    # CRITICAL FIX: Apply individual key's Azure endpoint like single-key mode does
-                    self._apply_individual_key_endpoint_if_needed()
+                    # Setup client with new key. For per-key endpoints, apply the
+                    # endpoint before provider validation so arbitrary local model
+                    # names like "test" do not hit the supported-prefix gate.
+                    for _attr in ('_original_client_type', '_custom_prefix_route'):
+                        if hasattr(self, _attr):
+                            try:
+                                delattr(self, _attr)
+                            except Exception:
+                                pass
+                    self._individual_endpoint_applied = False
+                    self._skip_global_custom_endpoint = False
+                    if getattr(self, 'current_key_use_individual_endpoint', False) and getattr(self, 'current_key_azure_endpoint', None):
+                        self.client_type = 'openai'
+                        self._apply_individual_key_endpoint_if_needed()
+                    else:
+                        self._setup_client()
                     return
                 else:
                     # No pool keys available (all disabled/cooldown) — fall back to main GUI key
@@ -3217,6 +3243,7 @@ class UnifiedClient:
                         tls.google_region = None
                         tls.use_individual_endpoint = False
                         tls.api_call_delay = 0.0
+                        tls.active_api_delay_override = None
                         tls.initialized = True
                         tls.last_rotation = time.time()
                         with self._model_lock:
@@ -3257,6 +3284,7 @@ class UnifiedClient:
             tls.initialized = True
             tls.request_count = 0
             tls.output_token_limit = None
+            tls.active_api_delay_override = None
             
             # MICROSECOND LOCK: When setting instance variables
             with self._model_lock:
@@ -3721,7 +3749,9 @@ class UnifiedClient:
         try:
             if not model:
                 return False
-            if not model.lower().startswith('gemma'):
+            model_lower = model.lower().strip()
+            model_name = model_lower.split('/', 1)[1] if '/' in model_lower else model_lower
+            if not model_name.startswith('gemma'):
                 return False
             if os.getenv('OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT', '1') != '1':
                 return False
@@ -3811,6 +3841,8 @@ class UnifiedClient:
                 with self._model_lock:
                     # Switch this instance to Azure mode for correct routing
                     self.client_type = 'azure'
+                    if hasattr(self, '_original_client_type'):
+                        del self._original_client_type
                     self.azure_endpoint = azure_base
                     # Prefer per-key Azure API version if available
                     self.azure_api_version = getattr(self, 'current_key_azure_api_version', None) or os.getenv('AZURE_API_VERSION', '2024-02-01')
@@ -3831,6 +3863,8 @@ class UnifiedClient:
             # Non-Azure: Override to use OpenAI-compatible client against the provided base URL
             original_client_type = self.client_type
             self.client_type = 'openai'
+            if hasattr(self, '_original_client_type'):
+                del self._original_client_type
             
             try:
                 import openai
@@ -4993,10 +5027,23 @@ class UnifiedClient:
                 self._multi_key_mode = state['multi_key_mode']
                 return None
             key_entry, key_idx = key_info
+            for _attr in ('_original_client_type', '_custom_prefix_route'):
+                if hasattr(self, _attr):
+                    try:
+                        delattr(self, _attr)
+                    except Exception:
+                        pass
+            self._individual_endpoint_applied = False
+            self._skip_global_custom_endpoint = False
             self.api_key = key_entry.api_key
             self.model = key_entry.model
             self.current_key_index = key_idx
             self.key_identifier = f"{key_prefix}#{key_idx + 1} ({key_entry.model})"
+            self.current_key_google_creds = getattr(key_entry, 'google_credentials', None)
+            self.current_key_google_region = getattr(key_entry, 'google_region', None)
+            self.current_key_azure_endpoint = getattr(key_entry, 'azure_endpoint', None)
+            self.current_key_azure_api_version = getattr(key_entry, 'azure_api_version', None)
+            self.current_key_use_individual_endpoint = bool(getattr(key_entry, 'use_individual_endpoint', False))
 
             key_data = None
             try:
@@ -5042,7 +5089,11 @@ class UnifiedClient:
                 except Exception:
                     self._per_key_api_delay = None
 
-            self._setup_client()
+            if getattr(self, 'current_key_use_individual_endpoint', False) and getattr(self, 'current_key_azure_endpoint', None):
+                self.client_type = 'openai'
+                self._apply_individual_key_endpoint_if_needed()
+            else:
+                self._setup_client()
             self._skip_next_ensure_thread = True
             try:
                 tls = self._get_thread_local_client()
@@ -5055,7 +5106,17 @@ class UnifiedClient:
                 tls.azure_api_version = getattr(self, 'current_key_azure_api_version', None)
                 tls.google_region = getattr(self, 'current_key_google_region', None)
                 tls.use_individual_endpoint = getattr(self, 'current_key_use_individual_endpoint', False)
+                tls.client_type = getattr(self, 'client_type', None)
+                tls.openai_client = getattr(self, 'openai_client', None)
                 tls.api_call_delay = getattr(key_entry, 'api_call_delay', 0.0)
+                try:
+                    _active_delay = getattr(self, '_per_key_api_delay', None)
+                    if _active_delay is None:
+                        _raw_delay = getattr(key_entry, 'api_call_delay', 0.0)
+                        _active_delay = float(_raw_delay) if _raw_delay not in (None, '') else 0.0
+                    tls.active_api_delay_override = float(_active_delay) if float(_active_delay) > 0 else None
+                except Exception:
+                    tls.active_api_delay_override = None
                 tls.initialized = True
                 tls.last_rotation = time.time()
                 tls.request_count = 0
@@ -5216,10 +5277,27 @@ class UnifiedClient:
                                 key_info = self._get_next_available_key()
                                 if key_info:
                                     key_entry, key_idx = key_info
+                                    # This UnifiedClient may have been initialized for the
+                                    # main GUI model before the Vision key override. Clear
+                                    # stale provider/transport state so the Vision key's
+                                    # endpoint and model own this request.
+                                    for _attr in ('_original_client_type', '_custom_prefix_route'):
+                                        if hasattr(self, _attr):
+                                            try:
+                                                delattr(self, _attr)
+                                            except Exception:
+                                                pass
+                                    self._individual_endpoint_applied = False
+                                    self._skip_global_custom_endpoint = False
                                     self.api_key = key_entry.api_key
                                     self.model = key_entry.model
                                     self.current_key_index = key_idx
                                     self.key_identifier = f"VisionKey#{key_idx+1} ({key_entry.model})"
+                                    self.current_key_google_creds = getattr(key_entry, 'google_credentials', None)
+                                    self.current_key_google_region = getattr(key_entry, 'google_region', None)
+                                    self.current_key_azure_endpoint = getattr(key_entry, 'azure_endpoint', None)
+                                    self.current_key_azure_api_version = getattr(key_entry, 'azure_api_version', None)
+                                    self.current_key_use_individual_endpoint = bool(getattr(key_entry, 'use_individual_endpoint', False))
                                     # Apply per-key settings
                                     qk_data = None
                                     try:
@@ -5266,7 +5344,11 @@ class UnifiedClient:
                                             self._per_key_api_delay = qk_delay if qk_delay > 0 else None
                                         except Exception:
                                             self._per_key_api_delay = None
-                                    self._setup_client()
+                                    if getattr(self, 'current_key_use_individual_endpoint', False) and getattr(self, 'current_key_azure_endpoint', None):
+                                        self.client_type = 'openai'
+                                        self._apply_individual_key_endpoint_if_needed()
+                                    else:
+                                        self._setup_client()
                                     _qa_scan_overridden = True
                                     # Tell _send_internal to skip _ensure_thread_client
                                     # (we already selected the key — re-rotating would overwrite it)
@@ -5282,7 +5364,17 @@ class UnifiedClient:
                                         tls.azure_api_version = getattr(self, 'current_key_azure_api_version', None)
                                         tls.google_region = getattr(self, 'current_key_google_region', None)
                                         tls.use_individual_endpoint = getattr(self, 'current_key_use_individual_endpoint', False)
+                                        tls.client_type = getattr(self, 'client_type', None)
+                                        tls.openai_client = getattr(self, 'openai_client', None)
                                         tls.api_call_delay = getattr(key_entry, 'api_call_delay', 0.0)
+                                        try:
+                                            _active_delay = getattr(self, '_per_key_api_delay', None)
+                                            if _active_delay is None:
+                                                _raw_delay = getattr(key_entry, 'api_call_delay', 0.0)
+                                                _active_delay = float(_raw_delay) if _raw_delay not in (None, '') else 0.0
+                                            tls.active_api_delay_override = float(_active_delay) if float(_active_delay) > 0 else None
+                                        except Exception:
+                                            tls.active_api_delay_override = None
                                         tls.initialized = True
                                         tls.last_rotation = time.time()
                                         tls.request_count = 0
@@ -5468,6 +5560,14 @@ class UnifiedClient:
                                         tls.google_region = getattr(self, 'current_key_google_region', None)
                                         tls.use_individual_endpoint = getattr(self, 'current_key_use_individual_endpoint', False)
                                         tls.api_call_delay = getattr(key_entry, 'api_call_delay', 0.0)
+                                        try:
+                                            _active_delay = getattr(self, '_per_key_api_delay', None)
+                                            if _active_delay is None:
+                                                _raw_delay = getattr(key_entry, 'api_call_delay', 0.0)
+                                                _active_delay = float(_raw_delay) if _raw_delay not in (None, '') else 0.0
+                                            tls.active_api_delay_override = float(_active_delay) if float(_active_delay) > 0 else None
+                                        except Exception:
+                                            tls.active_api_delay_override = None
                                         tls.initialized = True
                                         tls.last_rotation = time.time()
                                         tls.request_count = 0
@@ -5592,6 +5692,25 @@ class UnifiedClient:
                 # Clear per-key delay so it doesn't leak into subsequent non-pool calls
                 self._per_key_api_delay = None
                 self._skip_next_ensure_thread = False
+                self._individual_endpoint_applied = False
+                self._skip_global_custom_endpoint = False
+                for _attr in ('_original_client_type', '_custom_prefix_route'):
+                    if hasattr(self, _attr):
+                        try:
+                            delattr(self, _attr)
+                        except Exception:
+                            pass
+                self.current_key_azure_endpoint = None
+                self.current_key_azure_api_version = None
+                self.current_key_use_individual_endpoint = False
+                self.current_key_google_creds = None
+                self.current_key_google_region = None
+                try:
+                    tls = self._get_thread_local_client()
+                    tls.active_api_delay_override = None
+                    tls.api_call_delay = 0.0
+                except Exception:
+                    pass
                 self._setup_client()
             if watchdog_started:
                 _api_watchdog_finished(watchdog_context, model=getattr(self, 'model', None), request_id=request_id if 'request_id' in locals() else None)
@@ -5710,7 +5829,8 @@ class UnifiedClient:
         
         # CRITICAL: Skip global custom endpoint if this key has an individual endpoint enabled
         has_individual_endpoint = (hasattr(self, 'current_key_use_individual_endpoint') and 
-                                  self.current_key_use_individual_endpoint)
+                                  self.current_key_use_individual_endpoint and
+                                  bool(getattr(self, 'current_key_azure_endpoint', None)))
         
         # Debug: Show individual endpoint status
         if self._multi_key_mode:
@@ -5718,6 +5838,12 @@ class UnifiedClient:
             #print(f"[DEBUG] _setup_client: has_individual_endpoint={has_individual_endpoint}, "
             #      f"current_key_use_individual_endpoint={getattr(self, 'current_key_use_individual_endpoint', 'NOT SET')}")
         
+        # Per-key endpoint override: any model name is valid because the target
+        # OpenAI-compatible/Azure endpoint owns the model namespace.
+        if has_individual_endpoint and not self.client_type:
+            self.client_type = 'openai'
+            logger.info(f"Using individual endpoint for unmatched model: {model_snapshot}")
+
         # Apply custom endpoint logic when enabled - override any model type (except Gemini which has its own toggle)
         # BUT: Skip if this key has its own individual endpoint configured
         if custom_base_url and custom_base_url != 'https://api.openai.com/v1' and use_custom_endpoint and not has_individual_endpoint:
@@ -12805,8 +12931,11 @@ class UnifiedClient:
             per_key = None
             try:
                 tls = self._get_thread_local_client()
+                _tls_override = getattr(tls, 'active_api_delay_override', None)
+                if _tls_override is not None:
+                    per_key = float(_tls_override)
                 _tls_delay = getattr(tls, 'api_call_delay', 0.0) or 0.0
-                if _tls_delay > 0:
+                if per_key is None and _tls_delay > 0:
                     per_key = _tls_delay
             except Exception:
                 pass
@@ -12824,6 +12953,7 @@ class UnifiedClient:
         # Initialize class-level tracking if needed
         if not hasattr(self.__class__, '_last_api_call_start'):
             self.__class__._last_api_call_start = 0
+        if not hasattr(self.__class__, '_api_stagger_lock'):
             self.__class__._api_stagger_lock = threading.Lock()
         
         # Calculate wait time and reserve slot inside the lock, then sleep OUTSIDE
@@ -14540,6 +14670,9 @@ class UnifiedClient:
         This is used for proper routing and detection.
         """
         client_type = getattr(self, 'client_type', 'openai')
+        if getattr(self, "_individual_endpoint_applied", False) and getattr(self, "current_key_use_individual_endpoint", False):
+            if client_type in ('openai', 'azure'):
+                return client_type
 
         # _original_client_type is only valid while the active client is an
         # OpenAI-compatible transport. Vision/glossary key overrides can swap
