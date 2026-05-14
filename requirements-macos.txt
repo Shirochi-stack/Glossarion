@@ -14,14 +14,14 @@ langdetect
 PySide6==6.9.3
 
 # AI/API Clients
-openai==2.17.0
+openai
 anthropic
-#mistralai - temporarily removed
+mistralai
 cohere
 tiktoken
 poe-api-wrapper
 google-genai
-google-cloud-aiplatform==1.136.0
+google-cloud-aiplatform
 deepl
 vertexai
 

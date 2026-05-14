@@ -17,7 +17,7 @@ PySide6==6.9.3
 # AI/API Clients
 openai
 anthropic
-#mistralai - temporarily removed
+mistralai
 cohere
 tiktoken
 #poe-api-wrapper
