@@ -5276,6 +5276,11 @@ class BatchTranslationProcessor:
 
             def _mark_batch_chapter_progress_on_send():
                 with self.progress_lock:
+                    try:
+                        if chapter_truncated_event.is_set():
+                            return
+                    except NameError:
+                        pass
                     self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=chapter)
                     self.save_progress_fn()
             
@@ -5419,6 +5424,7 @@ class BatchTranslationProcessor:
             # Initialize shared structures for chunk processing (works for 1 or many chunks)
             translated_chunks = [None] * total_chunks  # Pre-allocate to maintain order
             chunks_lock = threading.Lock()
+            chapter_truncated_event = threading.Event()
 
             if total_chunks > 1:
                 print(f"✂️ Chapter {actual_num} requires {total_chunks} chunks - processing in parallel")
@@ -5992,6 +5998,19 @@ class BatchTranslationProcessor:
                     print(f"    ⚠️ Chunk {chunk_idx}/{total_chunks} response was TRUNCATED!")
                     # Track truncation status
                     is_truncated = True
+                    chapter_truncated_event.set()
+                    try:
+                        fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                        with self.progress_lock:
+                            self.update_progress_fn(
+                                chapter_progress_idx, actual_num, content_hash, fname,
+                                status="qa_failed",
+                                qa_issues_found=["TRUNCATED"],
+                                chapter_obj=chapter,
+                            )
+                            self.save_progress_fn()
+                    except Exception:
+                        pass
                 else:
                     is_truncated = False
                 
@@ -6541,13 +6560,13 @@ class BatchTranslationProcessor:
             # Truncation / partial-result gate — check BEFORE writing to disk.
             # When "Save interrupted chapters" is OFF we must NOT create a file.
             # ------------------------------------------------------------------
-            if chapter_truncated or is_partial_result:
+            if chapter_truncated or chapter_truncated_event.is_set() or is_partial_result:
                 save_partial_results = (
                     os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1'
                     or bool(getattr(self.config, 'save_partial_results', False))
                 )
-                qa_issue = ["TRUNCATED"] if chapter_truncated else ["PARTIAL"]
-                qa_label = "truncated" if chapter_truncated else "partial (graceful stop)"
+                qa_issue = ["TRUNCATED"] if (chapter_truncated or chapter_truncated_event.is_set()) else ["PARTIAL"]
+                qa_label = "truncated" if (chapter_truncated or chapter_truncated_event.is_set()) else "partial (graceful stop)"
 
                 if save_partial_results:
                     # User opted-in: write the truncated/partial output to disk
@@ -6641,7 +6660,7 @@ class BatchTranslationProcessor:
                 try:
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                     with self.progress_lock:
-                        if chapter_truncated:
+                        if chapter_truncated or chapter_truncated_event.is_set():
                             self.update_progress_fn(
                                 chapter_progress_idx, actual_num, content_hash, fname,
                                 status="qa_failed",
