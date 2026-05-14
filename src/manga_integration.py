@@ -2080,7 +2080,7 @@ class MangaTranslationTab(QObject):
         
         # Create download dialog using PySide6
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox, QApplication
-        from PySide6.QtCore import Qt
+        from PySide6.QtCore import Qt, QObject, Signal
         from PySide6.QtGui import QFont
             
         # Create status update function for model download
@@ -2107,6 +2107,12 @@ class MangaTranslationTab(QObject):
         download_dialog.setModal(False)
         download_dialog.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint)
         download_dialog.setAttribute(Qt.WA_ShowWithoutActivating, False)  # Allow activation
+
+        class DownloadDialogBridge(QObject):
+            update = Signal(object)
+
+        download_dialog_bridge = DownloadDialogBridge(download_dialog)
+        download_dialog_bridge.update.connect(lambda func: func())
         
         # Apply dark theme styling
         download_dialog.setStyleSheet("""
@@ -2278,6 +2284,13 @@ class MangaTranslationTab(QObject):
             cursor = details_text.textCursor()
             cursor.movePosition(QTextCursor.End)
             details_text.setTextCursor(cursor)
+
+        def post_dialog_update(func):
+            """Run a small UI update on the download dialog's Qt thread."""
+            try:
+                download_dialog_bridge.update.emit(func)
+            except Exception:
+                pass
         
         # Buttons frame
         button_layout = QHBoxLayout()
@@ -2318,6 +2331,7 @@ class MangaTranslationTab(QObject):
                     try:
                         import queue
                         from huggingface_hub import snapshot_download
+                        from tqdm.auto import tqdm as hf_tqdm
                         
                         # Download the model files directly without importing manga_ocr
                         model_repo = "kha-white/manga-ocr-base"
@@ -2347,11 +2361,80 @@ class MangaTranslationTab(QObject):
                             'file_downloaded': 0,
                             'file_size': 0,
                             'file_started_at': 0.0,
+                            'hf_rate': 0.0,
+                            'auto_loaded': False,
                         }
+
+                        class MangaOcrDownloadTqdm(hf_tqdm):
+                            """Bridge Hugging Face tqdm progress into the PySide dialog."""
+                            def __init__(self, *args, **kwargs):
+                                self._glossarion_unit = kwargs.get('unit') or ''
+                                super().__init__(*args, **kwargs)
+                                self._publish_progress()
+
+                            def update(self, n=1):
+                                result = super().update(n)
+                                self._publish_progress()
+                                return result
+
+                            def close(self):
+                                self._publish_progress()
+                                return super().close()
+
+                            def _publish_progress(self):
+                                try:
+                                    desc = (getattr(self, 'desc', '') or '').strip()
+                                    total = int(getattr(self, 'total', 0) or 0)
+                                    current = int(getattr(self, 'n', 0) or 0)
+                                    rate = 0.0
+                                    try:
+                                        rate = float((getattr(self, 'format_dict', {}) or {}).get('rate') or 0.0)
+                                    except Exception:
+                                        rate = 0.0
+
+                                    with progress_lock:
+                                        progress_state['current_file'] = desc or "Hugging Face transfer"
+                                        progress_state['hf_rate'] = rate
+                                        progress_state['file_started_at'] = progress_state.get('file_started_at') or time.time()
+                                        if self._glossarion_unit == 'B' or total > 1024 * 1024:
+                                            progress_state['file_downloaded'] = current
+                                            progress_state['file_size'] = total
+                                            progress_state['downloaded'] = max(int(progress_state.get('downloaded', 0) or 0), current)
+                                            if total:
+                                                progress_state['total'] = max(int(progress_state.get('total', 0) or 0), total)
+                                        else:
+                                            progress_state['file_index'] = current
+                                            progress_state['file_count'] = total
+                                            progress_state['file_downloaded'] = 0
+                                            progress_state['file_size'] = 0
+                                            progress_state['total'] = total_size
+                                    def apply_hf_progress():
+                                        try:
+                                            if total:
+                                                pct = int(min(95, 20 + (current / max(1, total)) * 75))
+                                                progress_bar.setValue(pct)
+                                                progress_label.setText(f"Downloading: {pct}%")
+                                                if self._glossarion_unit == 'B' or total > 1024 * 1024:
+                                                    status_label.setText(
+                                                        f"{desc or 'Downloading file'}: "
+                                                        f"{current / (1024 * 1024):.1f}/{total / (1024 * 1024):.1f} MB"
+                                                    )
+                                                    if rate > 0:
+                                                        speed_label.setText(f"Speed: {rate / (1024 * 1024):.1f} MB/s")
+                                                else:
+                                                    status_label.setText(f"{desc or 'Fetching files'}: {current}/{total} files")
+                                                    if rate > 0:
+                                                        speed_label.setText(f"Speed: {rate:.1f} files/s")
+                                        except Exception:
+                                            pass
+                                    post_dialog_update(apply_hf_progress)
+                                except Exception:
+                                    pass
                         
                         def download_model():
                             try:
-                                os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+                                if os.environ.get("HF_HUB_DISABLE_PROGRESS_BARS") == "1":
+                                    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
                                 os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
                                 log_queue.put("Using Hugging Face snapshot downloader in the background...")
                                 with progress_lock:
@@ -2367,12 +2450,53 @@ class MangaTranslationTab(QObject):
                                     local_dir_use_symlinks=False,
                                     resume_download=True,
                                     ignore_patterns=[".gitattributes"],
+                                    tqdm_class=MangaOcrDownloadTqdm,
                                 )
                                 os.environ['MANGA_OCR_LOCAL_DIR'] = local_model_dir
                                 log_queue.put(f"Saved model to: {local_model_dir}")
+                                log_queue.put("Download complete. Loading manga-ocr model now...")
+                                post_dialog_update(lambda: (
+                                    add_log(f"Saved model to: {local_model_dir}"),
+                                    add_log("Download complete. Loading manga-ocr model now..."),
+                                    progress_bar.setValue(99),
+                                    progress_label.setText("Loading manga-ocr model..."),
+                                    status_label.setText("Initializing model on CPU...")
+                                ))
+                                with progress_lock:
+                                    progress_state['current_file'] = "Loading manga-ocr model"
+                                    progress_state['file_index'] = 0
+                                    progress_state['file_count'] = 0
+                                    progress_state['file_downloaded'] = 0
+                                    progress_state['file_size'] = 0
+                                    progress_state['downloaded'] = total_size
+                                    progress_state['total'] = total_size
+                                    progress_state['hf_rate'] = 0.0
+                                    progress_state['file_started_at'] = time.time()
+                                if not self.ocr_manager.load_provider('manga-ocr'):
+                                    raise RuntimeError("Model downloaded, but manga-ocr failed to auto-load. Try clicking Load Model to see provider logs.")
+                                with progress_lock:
+                                    progress_state['auto_loaded'] = True
+                                log_queue.put("manga-ocr model loaded successfully.")
+                                post_dialog_update(lambda: (
+                                    add_log("manga-ocr model loaded successfully."),
+                                    progress_bar.setValue(100),
+                                    progress_label.setText("✅ manga-ocr ready!"),
+                                    status_label.setText("Model downloaded and loaded"),
+                                    speed_label.setText("Ready"),
+                                    cancel_btn.setText("Close"),
+                                    self._check_provider_status()
+                                ))
                                 download_complete.set()
                             except Exception as e:
                                 download_error[0] = e
+                                err_text = str(e)
+                                post_dialog_update(lambda err_text=err_text: (
+                                    add_log(f"Download/load error: {err_text}"),
+                                    progress_label.setText("Download/load failed"),
+                                    status_label.setText("Error occurred"),
+                                    speed_label.setText(""),
+                                    cancel_btn.setText("Close")
+                                ))
                                 download_complete.set()
                         
                         def check_progress():
@@ -2393,6 +2517,8 @@ class MangaTranslationTab(QObject):
                                     file_downloaded = int(progress_state.get('file_downloaded', 0) or 0)
                                     file_size = int(progress_state.get('file_size', 0) or 0)
                                     file_started_at = float(progress_state.get('file_started_at', 0.0) or 0.0)
+                                    hf_rate = float(progress_state.get('hf_rate', 0.0) or 0.0)
+                                    auto_loaded = bool(progress_state.get('auto_loaded', False))
 
                                 local_size = get_dir_size(local_model_dir)
                                 downloaded = max(downloaded, local_size)
@@ -2407,12 +2533,13 @@ class MangaTranslationTab(QObject):
                                         QTimer.singleShot(0, lambda: add_log(f"❌ Download error: {str(download_error[0])}"))
                                     else:
                                         progress_bar.setValue(100)
-                                        progress_label.setText("✅ Download complete!")
-                                        status_label.setText("Model files downloaded")
+                                        progress_label.setText("✅ manga-ocr ready!")
+                                        status_label.setText("Model downloaded and loaded")
                                         # Defer log updates to avoid paint conflicts
                                         QTimer.singleShot(0, lambda: add_log("✅ Model files downloaded successfully"))
                                         QTimer.singleShot(10, lambda: add_log(""))
-                                        QTimer.singleShot(20, lambda: add_log("Next step: Click 'Load Model' to initialize manga-ocr"))
+                                        if auto_loaded:
+                                            QTimer.singleShot(20, lambda: add_log("manga-ocr is loaded and ready to use."))
                                         try:
                                             self.update_queue.put(('call_method', self._check_provider_status, ()))
                                         except:
@@ -2423,8 +2550,12 @@ class MangaTranslationTab(QObject):
                                     return
                                 
                                 if file_count > 0:
-                                    completed_files = max(0, file_index - 1)
-                                    current_fraction = min(1.0, file_downloaded / file_size) if file_size > 0 else 0.0
+                                    if file_size > 0:
+                                        completed_files = max(0, file_index - 1)
+                                        current_fraction = min(1.0, file_downloaded / file_size)
+                                    else:
+                                        completed_files = max(0, file_index)
+                                        current_fraction = 0.0
                                     file_progress = (completed_files + current_fraction) / max(1, file_count)
                                     progress = min(20 + file_progress * 75, 95)
                                     progress_bar.setValue(int(progress))
@@ -2439,7 +2570,11 @@ class MangaTranslationTab(QObject):
 
                                 elapsed = time.time() - start_time
                                 transferred = max(0, downloaded - initial_local_size)
-                                if elapsed > 1 and transferred > 0:
+                                if file_size > 0 and hf_rate > 0:
+                                    speed_label.setText(f"Speed: {hf_rate / (1024 * 1024):.1f} MB/s")
+                                elif file_count > 0 and hf_rate > 0:
+                                    speed_label.setText(f"Speed: {hf_rate:.1f} files/s")
+                                elif elapsed > 1 and transferred > 0:
                                     speed = transferred / elapsed
                                     speed_mb = speed / (1024 * 1024)
                                     speed_label.setText(f"Speed: {speed_mb:.1f} MB/s")
@@ -2455,6 +2590,8 @@ class MangaTranslationTab(QObject):
                                             f"[{file_index}/{file_count}] {current_file} "
                                             f"({file_downloaded / (1024 * 1024):.1f}/{file_size / (1024 * 1024):.1f} MB)"
                                         )
+                                    elif file_count > 0:
+                                        status_label.setText(f"{current_file}: {file_index}/{file_count} files")
                                     else:
                                         status_label.setText(f"{current_file} ({mb_downloaded:.1f} MB on disk)")
                                 progress_label.setText(f"Downloading: {progress_bar.value()}%")
