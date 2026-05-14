@@ -253,6 +253,48 @@ class CustomAPIProvider(OCRProvider):
         self.retry_jitter = float(os.environ.get('CUSTOM_OCR_RETRY_JITTER', '0.4'))
         self.retry_on_empty = os.environ.get('CUSTOM_OCR_RETRY_ON_EMPTY', '1') == '1'
 
+    def _get_vision_key_seed(self, unified_client_cls=None) -> Optional[Dict[str, Any]]:
+        """Return an enabled Vision-key entry to seed manga OCR clients.
+
+        The real request still uses UnifiedClient's context-specific Vision pool
+        rotation. This seed only prevents the OCR provider from initializing the
+        main GUI model before the manga_ocr override has a chance to run.
+        """
+        use_vision_keys = (
+            os.environ.get('USE_VISION_KEYS', '0') == '1'
+            or os.environ.get('USE_QA_SCAN_KEYS', '0') == '1'
+        )
+        if not use_vision_keys:
+            return None
+
+        try:
+            pool = getattr(unified_client_cls, '_qa_scan_key_pool', None) if unified_client_cls else None
+            for key_entry in list(getattr(pool, 'keys', []) or []):
+                if not getattr(key_entry, 'enabled', True):
+                    continue
+                return {
+                    'api_key': getattr(key_entry, 'api_key', '') or '',
+                    'model': getattr(key_entry, 'model', '') or '',
+                    'use_individual_endpoint': bool(getattr(key_entry, 'use_individual_endpoint', False)),
+                    'azure_endpoint': getattr(key_entry, 'azure_endpoint', '') or '',
+                }
+        except Exception:
+            pass
+
+        for env_name in ('VISION_API_KEYS', 'QA_SCAN_API_KEYS'):
+            raw_keys = os.environ.get(env_name, '')
+            if not raw_keys or raw_keys in ('[]', 'null', 'None'):
+                continue
+            try:
+                keys_list = json.loads(raw_keys)
+            except Exception:
+                continue
+            for key_data in keys_list:
+                if not isinstance(key_data, dict) or not key_data.get('enabled', True):
+                    continue
+                return key_data
+        return None
+
     def _uses_nanogpt_model(self) -> bool:
         for value in (
             getattr(getattr(self, 'client', None), 'model', None),
@@ -287,28 +329,50 @@ class CustomAPIProvider(OCRProvider):
         """Initialize UnifiedClient with current settings"""
         try:
             from unified_api_client import UnifiedClient
+            context = str(kwargs.get('context') or '').strip().lower()
+            vision_seed = self._get_vision_key_seed(UnifiedClient) if context == 'manga_ocr' else None
             
             # Support passing API key from GUI if available
-            if 'api_key' in kwargs:
+            if vision_seed is not None:
+                api_key = vision_seed.get('api_key', '') or ''
+            elif 'api_key' in kwargs:
                 api_key = kwargs['api_key']
             else:
                 api_key = os.environ.get('API_KEY', '') or os.environ.get('OPENAI_API_KEY', '')
             
-            if 'model' in kwargs:
+            if vision_seed is not None and vision_seed.get('model'):
+                model = vision_seed.get('model')
+            elif 'model' in kwargs:
                 model = kwargs['model']
             else:
                 model = os.environ.get('MODEL', 'gpt-4o-mini')
             
+            keyless_local_seed = False
+            if vision_seed is not None:
+                try:
+                    endpoint = str(vision_seed.get('azure_endpoint') or '').strip()
+                    keyless_local_seed = (
+                        bool(vision_seed.get('use_individual_endpoint'))
+                        and bool(endpoint)
+                        and UnifiedClient._is_local_openai_base_url(endpoint)
+                    )
+                except Exception:
+                    keyless_local_seed = False
+
             # Check if model uses own auth (no API key needed) — delegate to UnifiedClient
             if not UnifiedClient._model_needs_api_key(model):
                 if not api_key:
                     api_key = 'own-auth'  # placeholder — actual auth handled by provider/local endpoint
+            elif keyless_local_seed and not api_key:
+                api_key = 'local-endpoint'
             elif not api_key:
                 self._log("❌ No API key configured", "error")
                 return False
         
             # Create UnifiedClient just like translations do
             self.client = UnifiedClient(model=model, api_key=api_key)
+            if context:
+                self.client.context = context
             
             #self._log(f"✅ Using {model} for OCR via UnifiedClient")
             self.is_loaded = True

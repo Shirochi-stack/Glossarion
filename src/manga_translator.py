@@ -4803,7 +4803,7 @@ class MangaTranslator:
                         # Custom API needs to initialize UnifiedClient with credentials
                         self._log("📡 Loading custom-api provider...")
                         # Try to get API key and model from GUI if available
-                        load_kwargs = {}
+                        load_kwargs = {'context': 'manga_ocr'}
                         if hasattr(self, 'main_gui'):
                             # Get API key from GUI - Support both Tkinter and PySide6
                             if hasattr(self.main_gui, 'api_key_entry'):

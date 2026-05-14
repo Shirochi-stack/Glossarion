@@ -3652,6 +3652,7 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                     if api_key:
                         load_kwargs['api_key'] = api_key
                         print(f"[OCR_REGIONS] Got API key from GUI")
+                    load_kwargs['context'] = 'manga_ocr'
                     # Model from GUI
                     model = 'gpt-4o-mini'
                     if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'model_var'):
