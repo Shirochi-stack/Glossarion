@@ -4384,8 +4384,8 @@ class UnifiedClient:
         value = context if context is not None else getattr(self, 'context', None)
         return str(value or '').strip().lower() == 'manga_ocr'
 
-    def _should_skip_image_request_reencode(self) -> bool:
-        """Return True when request-quality conversion would break the active endpoint."""
+    def _uses_local_individual_openai_endpoint(self) -> bool:
+        """Return True when this thread/request is routed to a local per-key endpoint."""
         if not self._is_manga_ocr_context():
             return False
         try:
@@ -9267,8 +9267,6 @@ class UnifiedClient:
         manga_quality_enabled = os.getenv('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') == '1'
         if not force_lossless_webp and not manga_quality_enabled:
             return raw, mime
-        if self._should_skip_image_request_reencode():
-            return raw, mime
         try:
             import io as _io
             from PIL import Image as _Image
@@ -9286,12 +9284,23 @@ class UnifiedClient:
                 img = img.convert('RGB')
 
             target_fmt = 'webp' if force_lossless_webp else str(os.getenv('MANGA_IMAGE_REQUEST_FORMAT', 'webp') or 'webp').strip().lower()
+            local_endpoint_format_fallback = False
+            if self._uses_local_individual_openai_endpoint() and target_fmt not in ('jpg', 'jpeg', 'png'):
+                target_fmt = str(os.getenv('MANGA_LOCAL_ENDPOINT_IMAGE_REQUEST_FORMAT', 'jpeg') or 'jpeg').strip().lower()
+                if target_fmt not in ('jpg', 'jpeg', 'png'):
+                    target_fmt = 'jpeg'
+                local_endpoint_format_fallback = True
             if target_fmt in ('jpg', 'jpeg'):
                 target_fmt = 'jpeg'
                 target_mime = 'image/jpeg'
+                jpeg_quality = (
+                    os.getenv('MANGA_IMAGE_REQUEST_JPEG_QUALITY')
+                    or (os.getenv('MANGA_IMAGE_REQUEST_WEBP_QUALITY') if local_endpoint_format_fallback else None)
+                    or os.getenv('JPEG_QUALITY', '85')
+                )
                 save_kwargs = {
                     'format': 'JPEG',
-                    'quality': max(1, min(95, int(os.getenv('MANGA_IMAGE_REQUEST_JPEG_QUALITY', os.getenv('JPEG_QUALITY', '85')) or '85'))),
+                    'quality': max(1, min(95, int(jpeg_quality or '85'))),
                     'optimize': True,
                     'progressive': True,
                 }
@@ -9324,6 +9333,8 @@ class UnifiedClient:
                     detail = f"WEBP q={save_kwargs.get('quality')}"
                 elif target_fmt == 'jpeg':
                     detail = f"JPEG q={save_kwargs.get('quality')}"
+                    if local_endpoint_format_fallback:
+                        detail += " (local endpoint)"
                 else:
                     detail = f"PNG level={save_kwargs.get('compress_level')}"
                 print(f"[ImageInput] Converted input image format to {detail} ({len(raw)/1024:.0f}KB -> {len(converted)/1024:.0f}KB)")
