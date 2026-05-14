@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QFrame, QScrollArea, QWidget, QMessageBox
 )
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QFont, QPixmap, QTransform
+from PySide6.QtGui import QFont, QPixmap, QTransform, QGuiApplication
 from spinning import create_icon_label, animate_icon
 from typing import Callable
 
@@ -219,10 +219,67 @@ class IndividualEndpointDialog(QDialog):
         self.endpoint_entry = QLineEdit()
         self.endpoint_entry.setText(getattr(self.key, 'azure_endpoint', '') or '')
         form_layout.addWidget(self.endpoint_entry, 0, 1)
+
+        # Quick double-click shortcuts for common local OpenAI-compatible endpoints.
+        shortcuts_row = QWidget()
+        shortcuts_h = QHBoxLayout(shortcuts_row)
+        shortcuts_h.setContentsMargins(0, 0, 0, 4)
+        shortcuts_h.setSpacing(0)
+
+        def _make_endpoint_shortcut(label: str, url: str):
+            shortcut = QLabel(f"{label}: <a href='#'>{url}</a>")
+            shortcut.setStyleSheet("color: gray; font-size: 8pt;")
+            shortcut.setTextFormat(Qt.RichText)
+            shortcut.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+            shortcut.setOpenExternalLinks(False)
+            shortcut.setToolTip(f"Double-click to paste {label} URL into the endpoint field")
+            orig_style = shortcut.styleSheet()
+            orig_text = shortcut.text()
+
+            def _paste(event):
+                self.endpoint_entry.setText(url)
+                try:
+                    QGuiApplication.clipboard().setText(url)
+                except Exception:
+                    pass
+                try:
+                    shortcut.setStyleSheet(orig_style + " color: #00d084;")
+                    shortcut.setTextFormat(Qt.PlainText)
+                    shortcut.setText(f"✓ Pasted: {url}")
+                    QTimer.singleShot(900, lambda: (
+                        shortcut.setStyleSheet(orig_style),
+                        shortcut.setTextFormat(Qt.RichText),
+                        shortcut.setText(orig_text),
+                    ))
+                except Exception:
+                    pass
+
+            shortcut.mouseDoubleClickEvent = _paste
+            return shortcut
+
+        shortcuts_prefix = QLabel("Double-click: ")
+        shortcuts_prefix.setStyleSheet("color: gray; font-size: 8pt;")
+        shortcuts_h.addWidget(shortcuts_prefix)
+        shortcuts_h.addWidget(_make_endpoint_shortcut("Ollama", "http://localhost:11434/v1"))
+        for sep in ("  |  ",):
+            sep_lbl = QLabel(sep)
+            sep_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+            shortcuts_h.addWidget(sep_lbl)
+        shortcuts_h.addWidget(_make_endpoint_shortcut("LM Studio", "http://localhost:1234/v1"))
+        sep_lbl = QLabel("  |  ")
+        sep_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+        shortcuts_h.addWidget(sep_lbl)
+        shortcuts_h.addWidget(_make_endpoint_shortcut("TTS", "http://localhost:8000/audio/speech"))
+        sep_lbl = QLabel("  |  ")
+        sep_lbl.setStyleSheet("color: gray; font-size: 8pt;")
+        shortcuts_h.addWidget(sep_lbl)
+        shortcuts_h.addWidget(_make_endpoint_shortcut("TTS v1", "http://localhost:8000/v1/audio/speech"))
+        shortcuts_h.addStretch()
+        form_layout.addWidget(shortcuts_row, 1, 1, Qt.AlignLeft)
         
         # Azure API version
         self.api_version_label = QLabel("Azure API Version:")
-        form_layout.addWidget(self.api_version_label, 1, 0, Qt.AlignLeft)
+        form_layout.addWidget(self.api_version_label, 2, 0, Qt.AlignLeft)
         
         self.api_version_combo = QComboBox()
         self.api_version_combo.addItems([
@@ -238,7 +295,7 @@ class IndividualEndpointDialog(QDialog):
         index = self.api_version_combo.findText(current_version)
         if index >= 0:
             self.api_version_combo.setCurrentIndex(index)
-        form_layout.addWidget(self.api_version_combo, 1, 1)
+        form_layout.addWidget(self.api_version_combo, 2, 1)
         
         # Helper text
         hint = (
@@ -250,7 +307,7 @@ class IndividualEndpointDialog(QDialog):
         hint_label = QLabel(hint)
         hint_label.setStyleSheet("color: gray; font-size: 9pt;")
         hint_label.setWordWrap(True)
-        form_layout.addWidget(hint_label, 2, 0, 1, 2, Qt.AlignLeft)
+        form_layout.addWidget(hint_label, 3, 0, 1, 2, Qt.AlignLeft)
         
         # Make column 1 stretch
         form_layout.setColumnStretch(1, 1)

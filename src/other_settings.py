@@ -10992,7 +10992,9 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     help_h.addWidget(tts_v1_lbl)
 
     help_h.addStretch()
-    section_v.addWidget(help_row)
+    # Keep the double-click endpoint shortcuts directly under the primary
+    # Override API Endpoint field, before image-edit/TTS-specific controls.
+    section_v.insertWidget(2, help_row)
     
     # Azure version frame (initially hidden)
     self.azure_version_frame = QWidget()
