@@ -786,8 +786,16 @@ class MangaOCRProvider(OCRProvider):
         try:
             if not path or not os.path.isdir(path):
                 return False
+            incomplete_suffixes = ('.part', '.incomplete', '.tmp')
+            for dirpath, _, filenames in os.walk(path):
+                for filename in filenames:
+                    lower_name = filename.lower()
+                    if lower_name.endswith(incomplete_suffixes):
+                        self._log(f"   Local manga-ocr model has incomplete download file: {filename}", "warning")
+                        return False
             needed_any_weights = any(
-                os.path.exists(os.path.join(path, name)) for name in (
+                os.path.exists(os.path.join(path, name)) and os.path.getsize(os.path.join(path, name)) > 0
+                for name in (
                     'pytorch_model.bin',
                     'model.safetensors'
                 )

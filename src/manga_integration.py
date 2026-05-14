@@ -2435,6 +2435,56 @@ class MangaTranslationTab(QObject):
                                     post_dialog_update(apply_hf_progress)
                                 except Exception:
                                     pass
+
+                        def _manga_ocr_snapshot_complete_and_stable(path: str, timeout_s: float = 90.0) -> bool:
+                            """Wait until the local manga-ocr snapshot has required files and stable weights."""
+                            required_files = [
+                                'config.json',
+                                'preprocessor_config.json',
+                                'pytorch_model.bin',
+                            ]
+                            tokenizer_alternates = ('tokenizer.json', 'tokenizer_config.json')
+                            incomplete_suffixes = ('.part', '.incomplete', '.tmp')
+                            deadline = time.time() + timeout_s
+                            last_sizes = None
+                            stable_seen = 0
+
+                            def _snapshot_state():
+                                if not os.path.isdir(path):
+                                    return None, "model directory does not exist yet"
+                                for dirpath, _, filenames in os.walk(path):
+                                    for filename in filenames:
+                                        if filename.lower().endswith(incomplete_suffixes):
+                                            return None, f"still writing {filename}"
+                                missing = [name for name in required_files if not os.path.exists(os.path.join(path, name))]
+                                if not any(os.path.exists(os.path.join(path, name)) for name in tokenizer_alternates):
+                                    missing.append('tokenizer.json/tokenizer_config.json')
+                                if missing:
+                                    return None, f"missing {', '.join(missing)}"
+                                weight_paths = [
+                                    os.path.join(path, name)
+                                    for name in ('pytorch_model.bin', 'model.safetensors')
+                                    if os.path.exists(os.path.join(path, name))
+                                ]
+                                if not weight_paths:
+                                    return None, "missing model weights"
+                                sizes = tuple((p, os.path.getsize(p)) for p in weight_paths)
+                                if any(size <= 0 for _, size in sizes):
+                                    return None, "model weight file is empty"
+                                return sizes, "ready"
+
+                            while time.time() < deadline:
+                                sizes, reason = _snapshot_state()
+                                if sizes is not None and sizes == last_sizes:
+                                    stable_seen += 1
+                                    if stable_seen >= 3:
+                                        return True
+                                else:
+                                    stable_seen = 0
+                                    last_sizes = sizes
+                                log_queue.put(f"Waiting for manga-ocr files to finish: {reason}")
+                                time.sleep(1.0)
+                            return False
                         
                         def download_model():
                             try:
@@ -2459,6 +2509,15 @@ class MangaTranslationTab(QObject):
                                 )
                                 os.environ['MANGA_OCR_LOCAL_DIR'] = local_model_dir
                                 log_queue.put(f"Saved model to: {local_model_dir}")
+                                log_queue.put("Verifying manga-ocr files are complete before loading...")
+                                post_dialog_update(lambda: (
+                                    add_log("Verifying manga-ocr files are complete before loading..."),
+                                    progress_bar.setValue(97),
+                                    progress_label.setText("Verifying model files..."),
+                                    status_label.setText("Waiting for Hugging Face file writes to settle...")
+                                ))
+                                if not _manga_ocr_snapshot_complete_and_stable(local_model_dir):
+                                    raise RuntimeError("manga-ocr download did not settle into a complete local snapshot; wait for downloads to finish and retry.")
                                 log_queue.put("Download complete. Loading manga-ocr model now...")
                                 post_dialog_update(lambda: (
                                     add_log(f"Saved model to: {local_model_dir}"),
