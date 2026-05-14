@@ -137,7 +137,12 @@ class OCRProvider:
         if self.log_callback:
             self.log_callback(message, level)
         else:
-            print(f"[{level.upper()}] {message}")
+            try:
+                print(f"[{level.upper()}] {message}")
+            except UnicodeEncodeError:
+                encoding = getattr(sys.stdout, 'encoding', None) or 'utf-8'
+                safe_message = str(message).encode(encoding, errors='replace').decode(encoding, errors='replace')
+                print(f"[{level.upper()}] {safe_message}")
     
     def set_stop_flag(self, stop_flag):
         """Set the stop flag for checking interruptions"""
@@ -829,6 +834,37 @@ class MangaOCRProvider(OCRProvider):
             return os.path.join(app_data_root, 'Glossarion', 'models', 'manga-ocr-base')
         root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
         return os.path.join(root_dir, 'models', 'manga-ocr-base')
+
+    def _load_tokenizer(self, source: str, local_flag: bool):
+        """Load manga-ocr tokenizer with an exe-safe local vocab fallback."""
+        vocab_file = os.path.join(source, 'vocab.txt') if os.path.isdir(source) else None
+        if vocab_file and os.path.exists(vocab_file) and os.path.getsize(vocab_file) > 0:
+            self._log(f"   Loading tokenizer from local vocab.txt ({os.path.getsize(vocab_file)} bytes)")
+            try:
+                from transformers.models.bert_japanese import BertJapaneseTokenizer
+                # The OCR path only decodes model output IDs. Using the basic word
+                # tokenizer avoids packaged-exe failures when MeCab/unidic data is
+                # unavailable, while preserving the character vocabulary mapping.
+                return BertJapaneseTokenizer(
+                    vocab_file=vocab_file,
+                    do_lower_case=False,
+                    word_tokenizer_type='basic',
+                    subword_tokenizer_type='character',
+                    unk_token='[UNK]',
+                    sep_token='[SEP]',
+                    pad_token='[PAD]',
+                    cls_token='[CLS]',
+                    mask_token='[MASK]',
+                )
+            except Exception as direct_err:
+                self._log(f"   Direct local tokenizer load failed: {direct_err}", "warning")
+
+        from transformers import AutoTokenizer
+        return AutoTokenizer.from_pretrained(
+            source,
+            local_files_only=local_flag,
+            use_fast=False,
+        )
     
     def load_model(self, **kwargs) -> bool:
         """Load the manga-ocr model, preferring a local directory to avoid re-downloading"""
@@ -844,7 +880,7 @@ class MangaOCRProvider(OCRProvider):
             import os
             os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
-            from transformers import VisionEncoderDecoderModel, AutoTokenizer, AutoImageProcessor
+            from transformers import VisionEncoderDecoderModel, AutoImageProcessor
             import torch
 
             # Prefer a local model directory if present to avoid any Hub access
@@ -891,7 +927,7 @@ class MangaOCRProvider(OCRProvider):
             # Try loading components, falling back to Hub if local-only fails
             def _load_components(source: str, local_flag: bool):
                 self._log("   Loading tokenizer...")
-                tok = AutoTokenizer.from_pretrained(source, local_files_only=local_flag)
+                tok = self._load_tokenizer(source, local_flag)
 
                 self._log("   Loading image processor...")
                 try:
