@@ -222,9 +222,9 @@ class IndividualEndpointDialog(QDialog):
 
         # Quick double-click shortcuts for common local OpenAI-compatible endpoints.
         shortcuts_row = QWidget()
-        shortcuts_h = QHBoxLayout(shortcuts_row)
-        shortcuts_h.setContentsMargins(0, 0, 0, 4)
-        shortcuts_h.setSpacing(0)
+        shortcuts_v = QVBoxLayout(shortcuts_row)
+        shortcuts_v.setContentsMargins(0, 0, 0, 4)
+        shortcuts_v.setSpacing(6)
 
         def _make_endpoint_shortcut(label: str, url: str):
             shortcut = QLabel(f"{label}: <a href='#'>{url}</a>")
@@ -257,24 +257,29 @@ class IndividualEndpointDialog(QDialog):
             shortcut.mouseDoubleClickEvent = _paste
             return shortcut
 
-        shortcuts_prefix = QLabel("Double-click: ")
-        shortcuts_prefix.setStyleSheet("color: gray; font-size: 8pt;")
-        shortcuts_h.addWidget(shortcuts_prefix)
-        shortcuts_h.addWidget(_make_endpoint_shortcut("Ollama", "http://localhost:11434/v1"))
-        for sep in ("  |  ",):
-            sep_lbl = QLabel(sep)
-            sep_lbl.setStyleSheet("color: gray; font-size: 8pt;")
-            shortcuts_h.addWidget(sep_lbl)
-        shortcuts_h.addWidget(_make_endpoint_shortcut("LM Studio", "http://localhost:1234/v1"))
+        shortcut_row_one = QWidget()
+        shortcut_row_one_h = QHBoxLayout(shortcut_row_one)
+        shortcut_row_one_h.setContentsMargins(0, 0, 0, 0)
+        shortcut_row_one_h.setSpacing(0)
+        shortcut_row_one_h.addWidget(_make_endpoint_shortcut("Ollama", "http://localhost:11434/v1"))
         sep_lbl = QLabel("  |  ")
         sep_lbl.setStyleSheet("color: gray; font-size: 8pt;")
-        shortcuts_h.addWidget(sep_lbl)
-        shortcuts_h.addWidget(_make_endpoint_shortcut("TTS", "http://localhost:8000/audio/speech"))
+        shortcut_row_one_h.addWidget(sep_lbl)
+        shortcut_row_one_h.addWidget(_make_endpoint_shortcut("LM Studio", "http://localhost:1234/v1"))
+        shortcut_row_one_h.addStretch()
+        shortcuts_v.addWidget(shortcut_row_one)
+
+        shortcut_row_two = QWidget()
+        shortcut_row_two_h = QHBoxLayout(shortcut_row_two)
+        shortcut_row_two_h.setContentsMargins(0, 0, 0, 0)
+        shortcut_row_two_h.setSpacing(0)
+        shortcut_row_two_h.addWidget(_make_endpoint_shortcut("TTS", "http://localhost:8000/audio/speech"))
         sep_lbl = QLabel("  |  ")
         sep_lbl.setStyleSheet("color: gray; font-size: 8pt;")
-        shortcuts_h.addWidget(sep_lbl)
-        shortcuts_h.addWidget(_make_endpoint_shortcut("TTS v1", "http://localhost:8000/v1/audio/speech"))
-        shortcuts_h.addStretch()
+        shortcut_row_two_h.addWidget(sep_lbl)
+        shortcut_row_two_h.addWidget(_make_endpoint_shortcut("TTS v1", "http://localhost:8000/v1/audio/speech"))
+        shortcut_row_two_h.addStretch()
+        shortcuts_v.addWidget(shortcut_row_two)
         form_layout.addWidget(shortcuts_row, 1, 1, Qt.AlignLeft)
         
         # Azure API version
