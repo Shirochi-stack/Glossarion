@@ -4384,6 +4384,42 @@ class UnifiedClient:
         value = context if context is not None else getattr(self, 'context', None)
         return str(value or '').strip().lower() == 'manga_ocr'
 
+    def _is_payload_too_large_error(self, exc_or_text: Any) -> bool:
+        text = str(exc_or_text or '').lower()
+        return (
+            '413' in text
+            or 'request entity too large' in text
+            or 'payload too large' in text
+            or 'function_payload_too_large' in text
+        )
+
+    def _image_request_quality_enabled(self) -> bool:
+        if os.getenv('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') == '1':
+            return True
+        try:
+            tls = self._get_thread_local_client()
+            if bool(getattr(tls, 'force_image_request_quality_retry', False)):
+                return True
+        except Exception:
+            pass
+        return bool(getattr(self, '_force_image_request_quality_retry', False))
+
+    def _should_retry_with_image_request_quality(self, context: Any, error_text: Any) -> bool:
+        if not self._is_payload_too_large_error(error_text):
+            return False
+        context_l = str(context or getattr(self, 'context', '') or '').strip().lower()
+        if context_l not in ('manga_ocr', 'inpainter'):
+            return False
+        return not self._image_request_quality_enabled()
+
+    def _enable_image_request_quality_retry(self) -> None:
+        try:
+            tls = self._get_thread_local_client()
+            tls.force_image_request_quality_retry = True
+        except Exception:
+            pass
+        self._force_image_request_quality_retry = True
+
     def _uses_local_individual_openai_endpoint(self) -> bool:
         """Return True when this thread/request is routed to a local per-key endpoint."""
         if not self._is_manga_ocr_context():
@@ -7746,6 +7782,15 @@ class UnifiedClient:
                 if self._should_abort_retry():
                     self._cancelled = True
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+                if self._should_retry_with_image_request_quality(context, e) and attempt < internal_retries - 1:
+                    self._enable_image_request_quality_retry()
+                    self._last_retry_error_type = 'payload_too_large_image_quality'
+                    print(
+                        f"🔄 Payload too large for {context}; retrying with image request quality compression enabled "
+                        f"(attempt {attempt + 1}/{internal_retries})"
+                    )
+                    continue
                 
                 # Check if it's a rate limit error - handle according to mode
                 error_str = str(e).lower()
@@ -9264,7 +9309,7 @@ class UnifiedClient:
         if not str(mime or '').startswith('image/'):
             return raw, mime
         force_lossless_webp = os.getenv('FORCE_IMAGE_REQUEST_WEBP_LOSSLESS', '0') == '1'
-        manga_quality_enabled = os.getenv('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') == '1'
+        manga_quality_enabled = self._image_request_quality_enabled()
         if not force_lossless_webp and not manga_quality_enabled:
             return raw, mime
         try:
@@ -9351,7 +9396,7 @@ class UnifiedClient:
 
             if not isinstance(data_url, str) or not data_url.startswith('data:image/') or ',' not in data_url:
                 return data_url
-            if os.getenv('FORCE_IMAGE_REQUEST_WEBP_LOSSLESS', '0') != '1' and os.getenv('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') != '1':
+            if os.getenv('FORCE_IMAGE_REQUEST_WEBP_LOSSLESS', '0') != '1' and not self._image_request_quality_enabled():
                 return data_url
             header, b64_data = data_url.split(',', 1)
             raw = _b64.b64decode(b64_data)
@@ -22071,7 +22116,7 @@ class UnifiedClient:
             max_chars = int(os.getenv('NANOGPT_MAX_INPUT_IMAGE_CHARS', '3000000') or '3000000')
             header, b64_data = data_url.split(',', 1)
             is_webp = header.lower().startswith('data:image/webp')
-            quality_enabled = os.getenv('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') == '1'
+            quality_enabled = self._image_request_quality_enabled()
             if not force_webp and not quality_enabled:
                 return data_url
             if not quality_enabled and (
@@ -22271,6 +22316,7 @@ class UnifiedClient:
 
         # ── Extract text prompt AND any embedded images from messages ──
         prompt = ""
+        source_image_data_urls: list[str] = []
         image_data_urls: list[str] = []
         self._nanogpt_last_input_resize_info = None
 
@@ -22294,6 +22340,7 @@ class UnifiedClient:
                             else:
                                 img_url = str(url_obj)
                             if img_url:
+                                source_image_data_urls.append(img_url)
                                 image_data_urls.append(self._shrink_nanogpt_image_data_url(img_url))
                 # Only use the last user message
                 break
@@ -22349,6 +22396,21 @@ class UnifiedClient:
                         err = resp.json().get("error", {}).get("message", err)
                     except Exception:
                         pass
+                    if (resp.status_code == 413 or self._is_payload_too_large_error(err)) and source_image_data_urls and not self._image_request_quality_enabled():
+                        self._enable_image_request_quality_retry()
+                        image_data_urls = [
+                            self._shrink_nanogpt_image_data_url(img_url)
+                            for img_url in source_image_data_urls
+                        ]
+                        if len(image_data_urls) == 1:
+                            payload["imageDataUrl"] = image_data_urls[0]
+                            payload["imageDataUrls"] = image_data_urls
+                        else:
+                            payload["imageDataUrls"] = image_data_urls
+                            payload.pop("imageDataUrl", None)
+                        if not self._is_stop_requested():
+                            print("[NanoGPT] Payload too large; retrying with image request quality compression enabled")
+                        continue
                     if resp.status_code == 429:
                         wait = min(2 ** attempt + random.uniform(0, 1), 30)
                         print(f"⏳ [NanoGPT] Rate-limited, retrying in {wait:.1f}s…")
