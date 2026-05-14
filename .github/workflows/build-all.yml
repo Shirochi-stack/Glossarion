@@ -540,6 +540,33 @@ jobs:
           path: src/dist/*.app
           if-no-files-found: warn
 
+  # ============================================================================
+  # macOS ARM NoCuda Build (Apple Silicon)
+  # ============================================================================
+  build-macos-arm-nocuda:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install system dependencies
+        run: |
+          brew install create-dmg
+          brew install pango cairo libffi gdk-pixbuf gobject-introspection
+          brew install pkg-config cmake
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements-macos.txt
+
       - name: Build ARM NoCuda (Apple Silicon)
         run: pyinstaller translator_lite_mac_NoCuda.spec --noconfirm
         working-directory: src
@@ -602,6 +629,33 @@ jobs:
           name: Z_Glossarion-Lite-macOS-Intel-App
           path: src/dist/*.app
           if-no-files-found: warn
+
+  # ============================================================================
+  # macOS Intel NoCuda Build (x86_64 - for VMware, older Macs, Hackintosh)
+  # ============================================================================
+  build-macos-intel-nocuda:
+    runs-on: macos-15-intel
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install system dependencies
+        run: |
+          brew install create-dmg
+          brew install pango cairo libffi gdk-pixbuf gobject-introspection
+          brew install pkg-config cmake
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements-macos.txt
 
       - name: Build Intel NoCuda (x86_64)
         run: pyinstaller translator_lite_mac_intel_NoCuda.spec --noconfirm
