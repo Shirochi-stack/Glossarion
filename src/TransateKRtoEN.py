@@ -5178,6 +5178,9 @@ class BatchTranslationProcessor:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         
         idx, chapter = chapter_data
+        chapter_progress_idx = idx
+        chapter_truncated = False
+        graceful_stop_qa_issue = None
         chap_num = chapter["num"]
         
         # Use the pre-calculated actual_chapter_num from the main loop
@@ -5273,7 +5276,7 @@ class BatchTranslationProcessor:
 
             def _mark_batch_chapter_progress_on_send():
                 with self.progress_lock:
-                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=chapter)
+                    self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=chapter)
                     self.save_progress_fn()
             
             from bs4 import BeautifulSoup
@@ -5293,7 +5296,7 @@ class BatchTranslationProcessor:
                 chapter_image_translator = _chapter_image_translator_for_processing(
                     self.image_translator,
                     chapter,
-                    idx,
+                    chapter_progress_idx,
                     actual_num,
                 )
                 chapter_body, image_translations = process_chapter_images(
@@ -5302,7 +5305,7 @@ class BatchTranslationProcessor:
                     chapter_image_translator,
                     self.check_stop_fn,
                     chapter_obj=chapter,
-                    chapter_idx=idx,
+                    chapter_idx=chapter_progress_idx,
                 )
                 vision_finish_reason = getattr(chapter_image_translator, 'last_vision_translation_finish_reason', None)
                 vision_qa_issues = _vision_finish_reason_qa_issues(vision_finish_reason)
@@ -5315,7 +5318,7 @@ class BatchTranslationProcessor:
                             pass
                     with self.progress_lock:
                         self.update_progress_fn(
-                            idx, actual_num, content_hash, fname,
+                            chapter_progress_idx, actual_num, content_hash, fname,
                             status="qa_failed",
                             qa_issues_found=vision_qa_issues,
                             chapter_obj=chapter,
@@ -5331,7 +5334,7 @@ class BatchTranslationProcessor:
                     qa_issue = [str(vision_combined_failure or "EMPTY_OUTPUT").upper()]
                     with self.progress_lock:
                         self.update_progress_fn(
-                            idx, actual_num, content_hash, fname,
+                            chapter_progress_idx, actual_num, content_hash, fname,
                             status="qa_failed",
                             qa_issues_found=qa_issue,
                             chapter_obj=chapter,
@@ -5349,7 +5352,7 @@ class BatchTranslationProcessor:
                         with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                             f.write(chapter_body if isinstance(chapter_body, str) else "")
                         with self.progress_lock:
-                            self.update_progress_fn(idx, actual_num, content_hash, fname, status="completed", chapter_obj=chapter)
+                            self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname, status="completed", chapter_obj=chapter)
                             self.save_progress_fn()
                         return True, actual_num, fname, None, None
                     chapter["body"] = chapter_body
@@ -6119,13 +6122,14 @@ class BatchTranslationProcessor:
 
             last_chunk_raw_obj = None
             chapter_truncated = False  # Track if any chunk was truncated
+            graceful_stop_qa_issue = None  # Preserve QA status if graceful stop exits before the post-loop gate
 
             with ThreadPoolExecutor(max_workers=max_chunk_workers, thread_name_prefix=f"Ch{actual_num}Chunk") as chunk_executor:
                 # Submit chunks with staggered delay to prevent simultaneous starts
                 thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
                 future_to_chunk = {}
                 
-                for idx, chunk_data in enumerate(chunks):
+                for chunk_submit_idx, chunk_data in enumerate(chunks):
                     # Sleep BEFORE submitting (apply to all chunks when multiple chunks exist)
                     if thread_delay > 0 and total_chunks > 1:
                         chunk_num = chunk_data[1]  # Extract chunk number for logging
@@ -6201,26 +6205,28 @@ class BatchTranslationProcessor:
                                         pass
                                     with self.progress_lock:
                                         self.update_progress_fn(
-                                            idx, actual_num, content_hash, fname,
+                                            chapter_progress_idx, actual_num, content_hash, fname,
                                             status="qa_failed",
                                             qa_issues_found=["TRUNCATED"],
                                             chapter_obj=chapter
                                         )
+                                        graceful_stop_qa_issue = ["TRUNCATED"]
                                         self.save_progress_fn()
                                     print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — saved truncated output")
                                 else:
                                     with self.progress_lock:
                                         self.update_progress_fn(
-                                            idx, actual_num, content_hash, fname,
+                                            chapter_progress_idx, actual_num, content_hash, fname,
                                             status="qa_failed",
                                             qa_issues_found=["PARTIAL"],
                                             chapter_obj=chapter
                                         )
+                                        graceful_stop_qa_issue = ["PARTIAL"]
                                         self.save_progress_fn()
                                     print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
                             chunk_abort_event.set()
                             chunk_executor.shutdown(wait=False, cancel_futures=True)
-                            # Let the outer handler mark the chapter as pending/skipped
+                            # Let the outer handler preserve any QA state or mark the chapter as pending/skipped.
                             raise UnifiedClientError(
                                 "Graceful stop active - not starting new API call",
                                 error_type="cancelled"
@@ -6237,8 +6243,16 @@ class BatchTranslationProcessor:
                             # Signal other chunk workers to abort quickly (chapter-local only)
                             chunk_abort_event.set()
                             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-                            save_prohibited_results = os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_prohibited_results', False))
-                            if save_prohibited_results:
+                            is_prohibited_finish = finish_reason in ("content_filter", "prohibited_content")
+                            qa_issue = ["PROHIBITED_CONTENT"] if is_prohibited_finish else ["API_ERROR"]
+                            save_failure_results = (
+                                os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1'
+                                or bool(getattr(self.config, 'save_prohibited_results', False))
+                            ) if is_prohibited_finish else (
+                                os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1'
+                                or bool(getattr(self.config, 'save_partial_results', False))
+                            )
+                            if save_failure_results:
                                 # Do NOT preserve original; save AI output if any, otherwise empty
                                 try:
                                     with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
@@ -6247,9 +6261,9 @@ class BatchTranslationProcessor:
                                     pass
                             with self.progress_lock:
                                 self.update_progress_fn(
-                                    idx, actual_num, content_hash, fname,
+                                    chapter_progress_idx, actual_num, content_hash, fname,
                                     status="qa_failed",
-                                    qa_issues_found=["PROHIBITED_CONTENT"],
+                                    qa_issues_found=qa_issue,
                                     chapter_obj=chapter
                                 )
                                 self.save_progress_fn()
@@ -6263,7 +6277,7 @@ class BatchTranslationProcessor:
                             print(f"❌ Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: Timeout - aborting chapter")
                             with self.progress_lock:
                                 self.update_progress_fn(
-                                    idx, actual_num, content_hash, fname,
+                                    chapter_progress_idx, actual_num, content_hash, fname,
                                     status="qa_failed",
                                     qa_issues_found=["TIMEOUT"],
                                     chapter_obj=chapter
@@ -6288,7 +6302,7 @@ class BatchTranslationProcessor:
                                     pass
                             with self.progress_lock:
                                 self.update_progress_fn(
-                                    idx, actual_num, content_hash, fname,
+                                    chapter_progress_idx, actual_num, content_hash, fname,
                                     status="qa_failed",
                                     qa_issues_found=["TRUNCATED"],
                                     chapter_obj=chapter
@@ -6454,7 +6468,7 @@ class BatchTranslationProcessor:
             if not cleaned or not str(cleaned).strip():
                 print(f"❌ Batch: Translation empty for chapter {actual_num} — skipping file write")
                 with self.progress_lock:
-                    self.update_progress_fn(idx, actual_num, content_hash, None, status="qa_failed", qa_issues_found=["EMPTY_OUTPUT"])
+                    self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, None, status="qa_failed", qa_issues_found=["EMPTY_OUTPUT"])
                     self.save_progress_fn()
                 return False, actual_num, None, None, None
 
@@ -6472,7 +6486,7 @@ class BatchTranslationProcessor:
                                 f.write(cleaned if isinstance(cleaned, str) else "")
                         except Exception:
                             pass
-                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="qa_failed", ai_features=ai_features)
+                    self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname, status="qa_failed", ai_features=ai_features)
                     self.save_progress_fn()
                 return False, actual_num, None, None, None
 
@@ -6549,7 +6563,7 @@ class BatchTranslationProcessor:
 
                 with self.progress_lock:
                     self.update_progress_fn(
-                        idx, actual_num, content_hash, fname,
+                        chapter_progress_idx, actual_num, content_hash, fname,
                         status="qa_failed", ai_features=ai_features,
                         qa_issues_found=qa_issue
                     )
@@ -6587,7 +6601,7 @@ class BatchTranslationProcessor:
                 
                 # Update with .txt filename
                 with self.progress_lock:
-                    self.update_progress_fn(idx, actual_num, content_hash, fname_txt, status="completed", ai_features=ai_features)
+                    self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname_txt, status="completed", ai_features=ai_features)
                     self.save_progress_fn()
             else:
                 # Original code for EPUB files
@@ -6599,7 +6613,7 @@ class BatchTranslationProcessor:
             # If we reached here, the chapter completed successfully (truncated/partial
             # cases already returned above in the early gate).
             with self.progress_lock:
-                self.update_progress_fn(idx, actual_num, content_hash, fname, status="completed", ai_features=ai_features)
+                self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname, status="completed", ai_features=ai_features)
                 self.save_progress_fn()
                 self.chapters_completed += 1
             
@@ -6627,8 +6641,23 @@ class BatchTranslationProcessor:
                 try:
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                     with self.progress_lock:
-                        # Reset back to pending so it can be resumed later.
-                        self.update_progress_fn(idx, actual_num, content_hash, fname, status="pending")
+                        if chapter_truncated:
+                            self.update_progress_fn(
+                                chapter_progress_idx, actual_num, content_hash, fname,
+                                status="qa_failed",
+                                qa_issues_found=["TRUNCATED"],
+                                chapter_obj=chapter,
+                            )
+                        elif graceful_stop_qa_issue:
+                            self.update_progress_fn(
+                                chapter_progress_idx, actual_num, content_hash, fname,
+                                status="qa_failed",
+                                qa_issues_found=graceful_stop_qa_issue,
+                                chapter_obj=chapter,
+                            )
+                        else:
+                            # Reset only truly resumable graceful-stop skips back to pending.
+                            self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname, status="pending", chapter_obj=chapter)
                         self.save_progress_fn()
                 except Exception:
                     pass
@@ -6642,7 +6671,7 @@ class BatchTranslationProcessor:
                 error_type = getattr(e, 'error_type', None)
                 if "[TIMEOUT]" in error_msg or error_type == 'timeout':
                     self.update_progress_fn(
-                        idx, actual_num, content_hash, fname,
+                        chapter_progress_idx, actual_num, content_hash, fname,
                         status="qa_failed", qa_issues_found=["TIMEOUT"], chapter_obj=chapter
                     )
                 elif (
@@ -6654,21 +6683,21 @@ class BatchTranslationProcessor:
                     or "max_tokens" in error_lower
                 ):
                     self.update_progress_fn(
-                        idx, actual_num, content_hash, fname,
+                        chapter_progress_idx, actual_num, content_hash, fname,
                         status="qa_failed", qa_issues_found=["TRUNCATED"], chapter_obj=chapter
                     )
                 elif error_type == 'prohibited_content' or 'prohibited_content' in error_lower or 'content_filter' in error_lower:
                     self.update_progress_fn(
-                        idx, actual_num, content_hash, fname,
+                        chapter_progress_idx, actual_num, content_hash, fname,
                         status="qa_failed", qa_issues_found=["PROHIBITED_CONTENT"], chapter_obj=chapter
                     )
                 elif error_type in ('api_error', 'validation') or 'api_error' in error_lower or 'invalid_argument' in error_lower:
                     self.update_progress_fn(
-                        idx, actual_num, content_hash, fname,
+                        chapter_progress_idx, actual_num, content_hash, fname,
                         status="qa_failed", qa_issues_found=["API_ERROR"], chapter_obj=chapter
                     )
                 else:
-                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="failed")
+                    self.update_progress_fn(chapter_progress_idx, actual_num, content_hash, fname, status="failed")
                 self.save_progress_fn()
 
             # Print consolidated error message
@@ -18785,6 +18814,7 @@ def main(log_callback=None, stop_callback=None):
             
             translated_chunks = []
             chunk_abort = False  # Flag to abort chapter processing on QA failures
+            chapter_truncated = False  # Track explicit truncation across all chunks
             
             for chunk_idx_enumerate, (chunk_html, chunk_idx, total_chunks) in enumerate(chunks):
                 # Apply thread delay before processing chunk (including first, when multiple chunks)
@@ -19124,12 +19154,22 @@ def main(log_callback=None, stop_callback=None):
                     merged_chapters=merged_chapters,
                     before_send_callback=_mark_sequential_progress_on_send,
                 )
+                if finish_reason in ("length", "max_tokens"):
+                    chapter_truncated = True
 
                 # If this chunk was blocked/prohibited, stop remaining chunks and mark QA fail
                 if finish_reason in ("content_filter", "prohibited_content", "error"):
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
-                    save_prohibited_results = os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(config, 'save_prohibited_results', False))
-                    if save_prohibited_results:
+                    is_prohibited_finish = finish_reason in ("content_filter", "prohibited_content")
+                    qa_issue = ["PROHIBITED_CONTENT"] if is_prohibited_finish else ["API_ERROR"]
+                    save_failure_results = (
+                        os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1'
+                        or bool(getattr(config, 'save_prohibited_results', False))
+                    ) if is_prohibited_finish else (
+                        os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1'
+                        or bool(getattr(config, 'save_partial_results', False))
+                    )
+                    if save_failure_results:
                         # Do NOT preserve original; save AI output if any, otherwise empty
                         try:
                             with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
@@ -19139,7 +19179,7 @@ def main(log_callback=None, stop_callback=None):
                     progress_manager.update(
                         idx, actual_num, content_hash, fname,
                         status="qa_failed",
-                        qa_issues_found=["PROHIBITED_CONTENT"],
+                        qa_issues_found=qa_issue,
                         chapter_obj=c
                     )
                     progress_manager.save()
@@ -19182,8 +19222,17 @@ def main(log_callback=None, stop_callback=None):
                             )
                             progress_manager.save()
                             print(f"⚠️ Chapter {actual_num} stopped (graceful stop) — marked QA failed (PARTIAL)")
+                    elif chapter_truncated:
+                        progress_manager.update(
+                            idx, actual_num, content_hash, fname,
+                            status="qa_failed",
+                            qa_issues_found=["TRUNCATED"],
+                            chapter_obj=c
+                        )
+                        progress_manager.save()
+                        print(f"⚠️ Chapter {actual_num} stopped (graceful stop) - preserved TRUNCATED status")
                     else:
-                        progress_manager.update(idx, actual_num, content_hash, fname, status="pending")
+                        progress_manager.update(idx, actual_num, content_hash, fname, status="pending", chapter_obj=c)
                         progress_manager.save()
                         print(f"⏸️ Chapter {actual_num} skipped (graceful stop)")
                     chunk_abort = True
@@ -19930,7 +19979,7 @@ def main(log_callback=None, stop_callback=None):
             # Truncation / partial-result gate — check BEFORE writing to disk.
             # When "Save interrupted chapters" is OFF we must NOT create a file.
             # ------------------------------------------------------------------
-            is_truncated_result = finish_reason in ["length", "max_tokens"]
+            is_truncated_result = chapter_truncated or finish_reason in ["length", "max_tokens"]
             if is_truncated_result or is_partial_result:
                 save_partial_results = (
                     os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1'
