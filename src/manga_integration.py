@@ -14706,7 +14706,17 @@ class MangaTranslationTab(QObject):
                 from unified_api_client import UnifiedClient as _UnifiedClient
 
                 vision_keys = self.main_gui.config.get('qa_scan_keys', []) or []
-                use_vision_keys = bool(self.main_gui.config.get('use_qa_scan_keys', False))
+                use_vision_keys = getattr(
+                    self.main_gui,
+                    'use_qa_scan_keys_var',
+                    self.main_gui.config.get('use_qa_scan_keys', False)
+                )
+                if hasattr(use_vision_keys, 'isChecked'):
+                    use_vision_keys = use_vision_keys.isChecked()
+                elif hasattr(use_vision_keys, 'get'):
+                    use_vision_keys = use_vision_keys.get()
+                use_vision_keys = bool(use_vision_keys)
+                self.main_gui.config['use_qa_scan_keys'] = use_vision_keys
                 _os.environ['USE_VISION_KEYS'] = '1' if use_vision_keys else '0'
                 _os.environ['USE_QA_SCAN_KEYS'] = _os.environ['USE_VISION_KEYS']
                 _os.environ['VISION_API_KEYS'] = _json.dumps(vision_keys)

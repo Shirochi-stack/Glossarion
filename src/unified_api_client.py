@@ -5711,7 +5711,11 @@ class UnifiedClient:
                     tls.api_call_delay = 0.0
                 except Exception:
                     pass
-                self._setup_client()
+                self._restoring_dedicated_key_override = True
+                try:
+                    self._setup_client()
+                finally:
+                    self._restoring_dedicated_key_override = False
             if watchdog_started:
                 _api_watchdog_finished(watchdog_context, model=getattr(self, 'model', None), request_id=request_id if 'request_id' in locals() else None)
             if not batch_mode:
@@ -5873,8 +5877,9 @@ class UnifiedClient:
                 # Override other model types to use custom OpenAI endpoint when toggle is enabled
                 original_client_type = self.client_type
                 self.client_type = 'openai'
-                print(f"[DEBUG] Custom endpoint override: {original_client_type} -> openai for model '{model_snapshot}'")
-                logger.info(f"Custom endpoint enabled: Overriding {original_client_type} model {model_snapshot} to use OpenAI client")
+                if not getattr(self, '_restoring_dedicated_key_override', False):
+                    print(f"[DEBUG] Custom endpoint override: {original_client_type} -> openai for model '{model_snapshot}'")
+                    logger.info(f"Custom endpoint enabled: Overriding {original_client_type} model {model_snapshot} to use OpenAI client")
         elif not use_custom_endpoint and custom_base_url and self.client_type == 'openai':
             #logger.info("Custom OpenAI endpoint disabled via toggle, using default endpoint")
             pass

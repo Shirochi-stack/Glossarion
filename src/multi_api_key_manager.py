@@ -7100,6 +7100,8 @@ class MultiAPIKeyDialog(QDialog):
             try:
                 import os as _os
                 import json as _json
+                _os.environ['USE_VISION_KEYS'] = '1'
+                _os.environ['USE_QA_SCAN_KEYS'] = '1'
                 _os.environ['VISION_API_KEYS'] = _json.dumps(qk_list)
                 _os.environ['QA_SCAN_API_KEYS'] = _os.environ['VISION_API_KEYS']
             except Exception:
