@@ -3827,8 +3827,9 @@ class AsyncProcessingDialog:
                             original_tokens = len(enc.encode(original_glossary_text))
                             compressed_tokens = len(enc.encode(glossary_text))
                             token_reduction_pct = ((original_tokens - compressed_tokens) / original_tokens * 100) if original_tokens > 0 else 0
+                            strict_gender_state = "ON" if env_vars.get('COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING') == '1' else "OFF"
                             
-                            logger.info(f"🗜️ Glossary: {original_length}→{compressed_length} chars ({reduction_pct:.1f}%), {original_tokens}→{compressed_tokens} tokens ({token_reduction_pct:.1f}%)")
+                            logger.info(f"🗜️ Glossary: {original_length}→{compressed_length} chars ({reduction_pct:.1f}%), {original_tokens}→{compressed_tokens} tokens ({token_reduction_pct:.1f}%) (strict gender {strict_gender_state})")
                         except ImportError:
                             logger.info(f"🗜️ Glossary compressed: {original_length} → {compressed_length} chars ({reduction_pct:.1f}% reduction)")
                     except Exception as e:
