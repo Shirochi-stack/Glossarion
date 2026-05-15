@@ -4340,17 +4340,6 @@ img {
                         shutil.copy2(override_path,
                                      os.path.join(self.css_dir, original_name))
                         self.log(f"✅ Synced override CSS to {self.css_dir}/{original_name}")
-                        referenced_fonts = self._referenced_font_basenames_from_css(
-                            css_content,
-                            ('.ttf', '.otf', '.woff', '.woff2')
-                        )
-                        mirrored_fonts = self._mirror_global_custom_fonts_to_workspace(
-                            ('.ttf', '.otf', '.woff', '.woff2'),
-                            referenced_fonts=referenced_fonts
-                        )
-                        missing_fonts = sorted(referenced_fonts - mirrored_fonts)
-                        if missing_fonts:
-                            self.log(f"[WARNING] Loaded CSS references font(s) not found in custom_fonts: {', '.join(missing_fonts)}")
                     except Exception as e:
                         self.log(f"[WARNING] Failed to sync CSS to disk: {e}")
                     return css_items
@@ -4409,19 +4398,6 @@ img {
         except Exception:
             return ""
 
-    def _referenced_font_basenames_from_css(self, css_text: str, font_exts) -> set:
-        """Return lowercase font basenames referenced by CSS url(...) values."""
-        import re
-        referenced = set()
-        try:
-            for m in re.finditer(r'url\s*\(\s*([\'"]?)(.*?)\1\s*\)', css_text or "", flags=re.IGNORECASE):
-                basename = self._font_basename_from_css_url(m.group(2))
-                if os.path.splitext(basename)[1].lower() in font_exts:
-                    referenced.add(basename)
-        except Exception:
-            pass
-        return referenced
-
     def _get_global_custom_fonts_dir(self) -> str:
         """Return the app-level custom_fonts directory used by the GUI."""
         try:
@@ -4433,29 +4409,25 @@ img {
         except Exception:
             return os.path.join(os.getcwd(), 'custom_fonts')
 
-    def _mirror_global_custom_fonts_to_workspace(self, font_exts, referenced_fonts=None) -> set:
+    def _mirror_global_custom_fonts_to_workspace(self, font_exts) -> set:
         """Copy loaded GUI fonts into this book's workspace fonts/ folder."""
         mirrored_fonts = set()
         global_fonts = self._get_global_custom_fonts_dir()
         if not os.path.isdir(global_fonts):
             return mirrored_fonts
-        referenced_fonts = {str(name).lower() for name in (referenced_fonts or []) if name}
 
         try:
             import shutil
             os.makedirs(self.fonts_dir, exist_ok=True)
             copied = 0
             for fname in os.listdir(global_fonts):
-                fname_lower = fname.lower()
                 if os.path.splitext(fname)[1].lower() not in font_exts:
-                    continue
-                if referenced_fonts and fname_lower not in referenced_fonts:
                     continue
                 src = os.path.join(global_fonts, fname)
                 dst = os.path.join(self.fonts_dir, fname)
                 if not os.path.isfile(src):
                     continue
-                mirrored_fonts.add(fname_lower)
+                mirrored_fonts.add(fname.lower())
                 try:
                     needs_copy = not os.path.isfile(dst)
                     if not needs_copy:
@@ -4518,10 +4490,7 @@ img {
             except Exception:
                 pass
 
-        mirrored_fonts = self._mirror_global_custom_fonts_to_workspace(
-            _FONT_EXTS,
-            referenced_fonts=referenced_fonts
-        )
+        mirrored_fonts = self._mirror_global_custom_fonts_to_workspace(_FONT_EXTS)
 
         if not referenced_fonts:
             if mirrored_fonts:

@@ -12133,6 +12133,98 @@ def cleanup_previous_extraction(output_dir, preserve_images=False):
     
     return cleaned_count
 
+def _css_url_font_basename(url_value: str) -> str:
+    try:
+        from urllib.parse import unquote
+        cleaned = unquote(str(url_value or "").strip().strip('"\''))
+        cleaned = cleaned.split('#', 1)[0].split('?', 1)[0].replace('\\', '/')
+        return os.path.basename(cleaned)
+    except Exception:
+        return ""
+
+def _css_referenced_font_names(css_text: str):
+    font_exts = {'.ttf', '.otf', '.woff', '.woff2'}
+    names = []
+    seen = set()
+    for match in re.finditer(r'url\s*\(\s*([\'"]?)(.*?)\1\s*\)', css_text or "", flags=re.IGNORECASE):
+        font_name = _css_url_font_basename(match.group(2))
+        if os.path.splitext(font_name)[1].lower() not in font_exts:
+            continue
+        key = font_name.lower()
+        if key not in seen:
+            seen.add(key)
+            names.append(font_name)
+    return names
+
+def sync_loaded_css_and_fonts_to_output(output_dir: str):
+    """Copy GUI-loaded CSS and its referenced custom fonts during Run Translation."""
+    css_override_path = os.getenv("EPUB_CSS_OVERRIDE_PATH", "").strip()
+    if not css_override_path:
+        return
+    if not os.path.isfile(css_override_path):
+        print(f"Warning: loaded CSS path does not exist: {css_override_path}")
+        return
+
+    try:
+        with open(css_override_path, "r", encoding="utf-8") as f:
+            css_text = f.read()
+    except Exception as exc:
+        print(f"Warning: could not read loaded CSS: {exc}")
+        return
+
+    css_dir = os.path.join(output_dir, "css")
+    fonts_dir = os.path.join(output_dir, "fonts")
+    os.makedirs(css_dir, exist_ok=True)
+    os.makedirs(fonts_dir, exist_ok=True)
+
+    try:
+        for old_name in os.listdir(css_dir):
+            if old_name.lower().endswith(".css"):
+                try:
+                    os.remove(os.path.join(css_dir, old_name))
+                except OSError:
+                    pass
+        css_name = os.path.basename(css_override_path) or "stylesheet.css"
+        shutil.copy2(css_override_path, os.path.join(css_dir, css_name))
+        print(f"Synced loaded CSS to: {os.path.join(css_dir, css_name)}")
+    except Exception as exc:
+        print(f"Warning: could not sync loaded CSS to output folder: {exc}")
+
+    font_names = _css_referenced_font_names(css_text)
+    if not font_names:
+        return
+
+    app_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+    custom_fonts_dir = os.path.join(app_dir, "custom_fonts")
+    try:
+        available = {name.lower(): name for name in os.listdir(custom_fonts_dir)} if os.path.isdir(custom_fonts_dir) else {}
+        copied = 0
+        missing = []
+        for font_name in font_names:
+            source_name = available.get(font_name.lower())
+            if not source_name:
+                missing.append(font_name)
+                continue
+            source_path = os.path.join(custom_fonts_dir, source_name)
+            target_path = os.path.join(fonts_dir, source_name)
+            if not os.path.isfile(source_path):
+                missing.append(font_name)
+                continue
+            needs_copy = not os.path.isfile(target_path)
+            if not needs_copy:
+                source_stat = os.stat(source_path)
+                target_stat = os.stat(target_path)
+                needs_copy = source_stat.st_size != target_stat.st_size or source_stat.st_mtime > target_stat.st_mtime
+            if needs_copy:
+                shutil.copy2(source_path, target_path)
+                copied += 1
+        if copied:
+            print(f"Copied {copied} loaded CSS font(s) to: {fonts_dir}")
+        if missing:
+            print(f"Warning: loaded CSS references missing custom font(s): {', '.join(missing)}")
+    except Exception as exc:
+        print(f"Warning: could not sync loaded CSS fonts to output folder: {exc}")
+
 def _normalize_output_basename(fname: str) -> str:
     if not fname:
         return ""
@@ -15005,6 +15097,8 @@ def main(log_callback=None, stop_callback=None):
                 log_callback("❌ Chapter extraction failed")
                 return
             
+            sync_loaded_css_and_fonts_to_output(out)
+
             # Load the extracted data
             metadata_path = os.path.join(out, "metadata.json")
             if os.path.exists(metadata_path):
@@ -15115,6 +15209,7 @@ def main(log_callback=None, stop_callback=None):
             with zipfile.ZipFile(input_path, 'r') as zf:
                 metadata = Chapter_Extractor._extract_epub_metadata(zf)
                 chapters = Chapter_Extractor.extract_chapters(zf, out, progress_callback=chapter_progress_callback)
+            sync_loaded_css_and_fonts_to_output(out)
 
             print(f"\n📚 Extraction Summary:")
             print(f"   Total chapters extracted: {len(chapters)}")

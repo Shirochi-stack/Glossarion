@@ -607,7 +607,7 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
                 gender = value.get("gender", "") if isinstance(value, dict) else ""
                 raw_name = value.get('raw_name') if isinstance(value, dict) else key
                 raw_name = raw_name or key
-                if _text_contains_term(source_text, key, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
+                if _text_contains_term(source_text, raw_name, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
                     filtered_entries[key] = value
             
             result = json_data.copy()
@@ -624,7 +624,7 @@ def _compress_json_glossary(json_data, source_text, glossary_path=None, chapter_
                     gender = value.get("gender", "") if isinstance(value, dict) else ""
                     raw_name = value.get('raw_name') if isinstance(value, dict) else key
                     raw_name = raw_name or key
-                    if _text_contains_term(source_text, key, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
+                    if _text_contains_term(source_text, raw_name, is_character=is_char) and _gender_variant_allowed(gender_tracker, raw_name, gender, chapter_ref, available_genders):
                         filtered_dict[key] = value
             return filtered_dict
     
@@ -881,7 +881,7 @@ def _text_contains_term(text, term, is_character=False):
         for token in term.split():
             if len(token) >= min_token_len and token in text:
                 return True
-    
+
     return False
 
 
