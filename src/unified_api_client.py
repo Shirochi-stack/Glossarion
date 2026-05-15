@@ -2056,24 +2056,28 @@ class UnifiedClient:
 
     @staticmethod
     def _normalize_custom_prefix_endpoint_type(endpoint_type: str) -> str:
-        """Return a supported custom-prefix endpoint URL template."""
+        """Return a supported custom-prefix endpoint path."""
         value = str(endpoint_type or '').strip().lower().replace('-', '_').replace(' ', '_')
         legacy = {
-            '': '{base_url}/chat/completions',
-            'openai_chat': '{base_url}/chat/completions',
-            'openai_images': '{base_url}/images/generations',
-            'anthropic_messages': '{base_url}/v1/messages',
+            '': '/chat/completions',
+            'openai_chat': '/chat/completions',
+            'openai_images': '/images/generations',
+            'anthropic_messages': '/v1/messages',
+            '{base_url}/chat/completions': '/chat/completions',
+            '{base_url}/images/generations': '/images/generations',
+            '{base_url}/v1/messages': '/v1/messages',
+            '{base_url}/{model_id}': '/{model_id}',
         }
         if value in legacy:
             return legacy[value]
         raw = str(endpoint_type or '').strip()
         known = {
-            '{base_url}/chat/completions',
-            '{base_url}/images/generations',
-            '{base_url}/v1/messages',
-            '{base_url}/{model_id}',
+            '/chat/completions',
+            '/images/generations',
+            '/v1/messages',
+            '/{model_id}',
         }
-        return raw if raw in known else '{base_url}/chat/completions'
+        return raw if raw in known else '/chat/completions'
 
     @classmethod
     def _load_custom_prefix_routes(cls) -> List[Dict[str, str]]:
@@ -2101,7 +2105,7 @@ class UnifiedClient:
             prefix = str(entry.get('prefix', '') or '').strip().replace('\\', '/').lstrip('/')
             routing = str(entry.get('routing', entry.get('base_url', '')) or '').strip().rstrip('/')
             endpoint_type = cls._normalize_custom_prefix_endpoint_type(
-                entry.get('endpoint_type', entry.get('type', 'openai_chat'))
+                entry.get('endpoint_type', entry.get('type', '/chat/completions'))
             )
             if not prefix or not routing:
                 continue
@@ -5959,7 +5963,7 @@ class UnifiedClient:
             logger.info(
                 f"Custom prefix route matched {custom_prefix_route.get('prefix')} -> "
                 f"{custom_prefix_route.get('routing')} "
-                f"({custom_prefix_route.get('endpoint_type', 'openai_chat')})"
+                f"({custom_prefix_route.get('endpoint_type', '/chat/completions')})"
             )
         else:
             for prefix, provider in self.MODEL_PROVIDERS.items():
@@ -6235,15 +6239,15 @@ class UnifiedClient:
             # MICROSECOND LOCK for OpenAI client
             with self._model_lock:
                 base_url_for_client = 'https://api.openai.com/v1'
-                route_endpoint_type = '{base_url}/chat/completions'
+                route_endpoint_type = '/chat/completions'
                 if self.client_type == 'custom_openai':
                     route = self._get_custom_prefix_route_for_model(model_snapshot)
                     if route:
                         base_url_for_client = route.get('routing') or base_url_for_client
                         route_endpoint_type = self._normalize_custom_prefix_endpoint_type(
-                            route.get('endpoint_type', 'openai_chat')
+                            route.get('endpoint_type', '/chat/completions')
                         )
-                if self.client_type == 'custom_openai' and route_endpoint_type != '{base_url}/chat/completions':
+                if self.client_type == 'custom_openai' and route_endpoint_type != '/chat/completions':
                     # Image and Anthropic prefix routes are handled by direct HTTP paths.
                     self.openai_client = None
                 else:
@@ -7754,7 +7758,13 @@ class UnifiedClient:
                         is_image_mode = True
                     
                     if is_image_mode or is_video_mode:
-                        is_url = extracted_content_str.startswith('http') and (' ' not in extracted_content_str)
+                        media_url_candidates = [
+                            line.strip()
+                            for line in extracted_content_str.splitlines()
+                            if line.strip().startswith(('http://', 'https://'))
+                        ]
+                        media_url = media_url_candidates[0] if media_url_candidates else extracted_content_str
+                        is_url = media_url.startswith(('http://', 'https://')) and not any(ch.isspace() for ch in media_url)
                         is_base64 = extracted_content_str.startswith('data:image') or extracted_content_str.startswith('data:video') or (';base64,' in extracted_content_str[:100])
                         
                         if is_url or is_base64:
@@ -7769,7 +7779,7 @@ class UnifiedClient:
                                 
                                 if is_url:
                                     ext = '.bin'
-                                    clean_url = extracted_content_str.split('?')[0].lower()
+                                    clean_url = media_url.split('?')[0].lower()
                                     if clean_url.endswith('.mp4'): ext = '.mp4'
                                     elif clean_url.endswith('.png'): ext = '.png'
                                     elif clean_url.endswith(('.jpg', '.jpeg')): ext = '.jpg'
@@ -7789,7 +7799,7 @@ class UnifiedClient:
                                     _max_dl_attempts = 3
                                     for _dl_attempt in range(1, _max_dl_attempts + 1):
                                         try:
-                                            req = urllib.request.Request(extracted_content_str, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+                                            req = urllib.request.Request(media_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
                                             with urllib.request.urlopen(req, timeout=60) as response_stream, open(out_path, 'wb') as out_file:
                                                 out_file.write(response_stream.read())
                                             break  # success
@@ -23066,11 +23076,11 @@ class UnifiedClient:
             if not route:
                 raise UnifiedClientError(f"No custom prefix route for model: {getattr(self, 'model', '')}")
             endpoint_type = self._normalize_custom_prefix_endpoint_type(
-                route.get('endpoint_type', '{base_url}/chat/completions')
+                route.get('endpoint_type', '/chat/completions')
             )
             base_url = route.get('routing', '').rstrip('/')
             effective_model = self._strip_custom_route_prefix(getattr(self, 'model', ''), route)
-            if endpoint_type == '{base_url}/{model_id}':
+            if endpoint_type == '/{model_id}':
                 if '/' not in effective_model and '/' in str(getattr(self, 'model', '') or ''):
                     effective_model = str(getattr(self, 'model', '') or '').strip()
                 return self._send_fal_model_api(
@@ -23079,11 +23089,17 @@ class UnifiedClient:
                     response_name=response_name,
                     model_override=effective_model,
                 )
-            if endpoint_type == '{base_url}/images/generations':
+            if endpoint_type == '/images/generations':
                 if self._is_fal_model_base_url(base_url):
-                    raise UnifiedClientError(
-                        "Fal model endpoints use {base_url}/{model_id}, not {base_url}/images/generations.",
-                        error_type='validation',
+                    if not self._is_stop_requested():
+                        print("🖼️ [fal] Routing base detected; using native /{model_id} endpoint instead of /images/generations")
+                    if '/' not in effective_model and '/' in str(getattr(self, 'model', '') or ''):
+                        effective_model = str(getattr(self, 'model', '') or '').strip()
+                    return self._send_fal_model_api(
+                        messages=messages,
+                        base_url=base_url,
+                        response_name=response_name,
+                        model_override=effective_model,
                     )
                 return self._send_openai_images_api(
                     messages=messages,
@@ -23091,7 +23107,7 @@ class UnifiedClient:
                     response_name=response_name,
                     model_override=effective_model,
                 )
-            if endpoint_type == '{base_url}/v1/messages':
+            if endpoint_type == '/v1/messages':
                 img_b64 = self._extract_first_image_base64(messages)
                 if img_b64:
                     return self._send_anthropic_image(

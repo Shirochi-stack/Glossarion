@@ -6962,9 +6962,9 @@ Recent translations to summarize:
         prefix_table.setColumnWidth(0, 160)
         prefix_table.setColumnWidth(2, 250)
         prefix_table.setToolTip(
-            "Use models like myprefix/model-name. Endpoint URL is an exact template such as "
-            "{base_url}/chat/completions or {base_url}/{model_id}."
+            "Use models like myprefix/model-name. Routing is the base URL; Endpoint Type is the path shape."
         )
+        dropdown_icon_path = os.path.join(self.base_dir, 'Halgakos.ico').replace('\\', '/')
         prefix_table.setStyleSheet("""
             QTableWidget {
                 background: #191919;
@@ -7007,7 +7007,7 @@ Recent translations to summarize:
                 color: #f5f7fa;
                 border: 1px solid #4a4a4a;
                 border-radius: 3px;
-                padding: 5px 7px;
+                padding: 5px 28px 5px 7px;
             }
             QComboBox:hover {
                 border-color: #6b7f95;
@@ -7017,9 +7017,26 @@ Recent translations to summarize:
                 background: #2c3035;
                 border: 1px solid #8ba8c7;
             }
-            QComboBox::drop-down {
+            QComboBox QLineEdit {
+                background: transparent;
+                color: #f5f7fa;
                 border: none;
-                width: 18px;
+                padding: 0px;
+                selection-background-color: #4f6f8f;
+                selection-color: #ffffff;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                background: #35516d;
+                border-left: 1px solid #4f6f8f;
+                width: 24px;
+            }
+            QComboBox::down-arrow {
+                image: url("__DROPDOWN_ICON__");
+                width: 16px;
+                height: 16px;
+                margin-right: 4px;
             }
             QComboBox QAbstractItemView {
                 background: #242424;
@@ -7027,7 +7044,7 @@ Recent translations to summarize:
                 border: 1px solid #4a4a4a;
                 selection-background-color: #35516d;
             }
-        """)
+        """.replace("__DROPDOWN_ICON__", dropdown_icon_path))
 
         class _PrefixFieldFocusFilter(QObject):
             def __init__(self, table):
@@ -7057,12 +7074,13 @@ Recent translations to summarize:
             return field
 
         endpoint_type_options = [
-            "{base_url}/chat/completions",
-            "{base_url}/images/generations",
-            "{base_url}/v1/messages",
+            "/chat/completions",
+            "/images/generations",
+            "/v1/messages",
+            "/{model_id}",
         ]
 
-        def _make_endpoint_type_combo(endpoint_type="openai_chat"):
+        def _make_endpoint_type_combo(endpoint_type="/chat/completions"):
             combo = QComboBox()
             combo.setEditable(True)
             combo.addItems(endpoint_type_options)
@@ -7079,7 +7097,7 @@ Recent translations to summarize:
                 pass
             return combo
 
-        def _add_prefix_row(prefix="", routing="", endpoint_type="openai_chat"):
+        def _add_prefix_row(prefix="", routing="", endpoint_type="/chat/completions"):
             row = prefix_table.rowCount()
             prefix_table.insertRow(row)
             prefix_table.setRowHeight(row, 40)
@@ -7098,7 +7116,7 @@ Recent translations to summarize:
             _add_prefix_row(
                 route.get('prefix', ''),
                 route.get('routing', ''),
-                route.get('endpoint_type', 'openai_chat'),
+                route.get('endpoint_type', '/chat/completions'),
             )
 
         prefix_layout.addWidget(prefix_table)
@@ -7181,33 +7199,37 @@ Recent translations to summarize:
 
     @staticmethod
     def _normalize_custom_prefix_endpoint_type(endpoint_type):
-        """Return a supported custom prefix endpoint URL template."""
+        """Return a supported custom prefix endpoint path."""
         value = str(endpoint_type or '').strip().lower().replace('-', '_').replace(' ', '_')
         legacy = {
-            '': '{base_url}/chat/completions',
-            'openai_chat': '{base_url}/chat/completions',
-            'openai_images': '{base_url}/images/generations',
-            'anthropic_messages': '{base_url}/v1/messages',
+            '': '/chat/completions',
+            'openai_chat': '/chat/completions',
+            'openai_images': '/images/generations',
+            'anthropic_messages': '/v1/messages',
+            '{base_url}/chat/completions': '/chat/completions',
+            '{base_url}/images/generations': '/images/generations',
+            '{base_url}/v1/messages': '/v1/messages',
+            '{base_url}/{model_id}': '/{model_id}',
         }
         if value in legacy:
             return legacy[value]
         raw = str(endpoint_type or '').strip()
         known = {
-            '{base_url}/chat/completions',
-            '{base_url}/images/generations',
-            '{base_url}/v1/messages',
-            '{base_url}/{model_id}',
+            '/chat/completions',
+            '/images/generations',
+            '/v1/messages',
+            '/{model_id}',
         }
-        return raw if raw in known else '{base_url}/chat/completions'
+        return raw if raw in known else '/chat/completions'
 
     @staticmethod
     def _is_known_custom_prefix_endpoint_type(endpoint_type):
         """Return True when endpoint_type is an exact supported endpoint template."""
         return str(endpoint_type or '').strip() in {
-            '{base_url}/chat/completions',
-            '{base_url}/images/generations',
-            '{base_url}/v1/messages',
-            '{base_url}/{model_id}',
+            '/chat/completions',
+            '/images/generations',
+            '/v1/messages',
+            '/{model_id}',
         }
 
     def _normalize_custom_prefix_routes(self, routes):
@@ -7228,7 +7250,7 @@ Recent translations to summarize:
             prefix = str(entry.get('prefix', '') or '').strip()
             routing = str(entry.get('routing', entry.get('base_url', '')) or '').strip()
             endpoint_type = self._normalize_custom_prefix_endpoint_type(
-                entry.get('endpoint_type', entry.get('type', 'openai_chat'))
+                entry.get('endpoint_type', entry.get('type', '/chat/completions'))
             )
             if not prefix or not routing:
                 continue
@@ -7288,16 +7310,16 @@ Recent translations to summarize:
             elif type_widget and hasattr(type_widget, 'currentData'):
                 endpoint_type = type_widget.currentData()
             else:
-                endpoint_type = type_item.text().strip() if type_item else 'openai_chat'
+                endpoint_type = type_item.text().strip() if type_item else '/chat/completions'
             if not self._is_known_custom_prefix_endpoint_type(endpoint_type):
                 QMessageBox.warning(
                     dialog,
-                    "Invalid Endpoint URL",
-                    f"Endpoint URL on row {row + 1} must be one of:\n"
-                    "{base_url}/chat/completions\n"
-                    "{base_url}/images/generations\n"
-                    "{base_url}/v1/messages\n"
-                    "{base_url}/{model_id}"
+                    "Invalid Endpoint Type",
+                    f"Endpoint Type on row {row + 1} must be one of:\n"
+                    "/chat/completions\n"
+                    "/images/generations\n"
+                    "/v1/messages\n"
+                    "/{model_id}"
                 )
                 return None
             endpoint_type = self._normalize_custom_prefix_endpoint_type(endpoint_type)
