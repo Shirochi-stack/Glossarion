@@ -10108,16 +10108,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
         info_label.setWordWrap(True)
         parent_layout.addWidget(info_label)
 
-    def open_async_processing(self):
+    def open_async_processing(self, *args, show=True):
         """Open the async processing dialog"""
         # Check if translation is running
-        if hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
+        if show and hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
             self.append_log("⚠️ Cannot open async processing while translation is in progress.")
             QMessageBox.warning(self, "Process Running", "Please wait for the current translation to complete.")
             return
         
         # Check if glossary extraction is running
-        if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
+        if show and hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
             self.append_log("⚠️ Cannot open async processing while glossary extraction is in progress.")
             QMessageBox.warning(self, "Process Running", "Please wait for glossary extraction to complete.")
             return
@@ -10125,7 +10125,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         # Check if file is selected (skip for image/video generation models)
         _async_model = str(getattr(self, 'model_var', ''))
         _is_generative_async = self._model_is_image_gen(_async_model) or self._model_is_video_gen(_async_model) or self._is_generative_output_mode()
-        if not hasattr(self, 'file_path') or not self.file_path:
+        if show and (not hasattr(self, 'file_path') or not self.file_path):
             if not _is_generative_async:
                 self.append_log("⚠️ Please select a file before opening async processing.")
                 QMessageBox.warning(self, "No File Selected", "Please select an EPUB or TXT file first.")
@@ -10135,14 +10135,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
         try:
             # Lazy import the async processor
             if not hasattr(self, '_async_processor_imported'):
-                self.append_log("Loading async processing module...")
+                if show:
+                    self.append_log("Loading async processing module...")
                 from async_api_processor import show_async_processing_dialog
                 self._async_processor_imported = True
                 self._show_async_processing_dialog = show_async_processing_dialog
             
             # Show the dialog
-            self.append_log("Opening async processing dialog...")
-            self._show_async_processing_dialog(self, self)
+            if show:
+                self.append_log("Opening async processing dialog...")
+            self._show_async_processing_dialog(self, self, show=show)
             
         except ImportError as e:
             self.append_log(f"❌ Failed to load async processing module: {e}")
@@ -20069,7 +20071,7 @@ Important rules:
            except Exception:
                pass
 
-    def _open_epub_library(self):
+    def _open_epub_library(self, *args, show=True):
         """Open the Library dialog \u2014 reuses existing instance (show/hide pattern)."""
         try:
             from epub_library import EpubLibraryDialog
@@ -20099,6 +20101,11 @@ Important rules:
                 except Exception:
                     pass
                 self._epub_library_dialog = dlg
+            if not show:
+                dlg.setAttribute(Qt.WA_DontShowOnScreen, True)
+                dlg.hide()
+                return
+            dlg.setAttribute(Qt.WA_DontShowOnScreen, False)
             if dlg.isVisible():
                 dlg.raise_()
                 dlg.activateWindow()
@@ -24610,11 +24617,6 @@ if __name__ == "__main__":
         if splash_manager:
             splash_manager.update_status("Creating main window...")
             time.sleep(0.07)
-            
-            # Extra pause to show "Ready!" before closing
-            splash_manager.update_status("Ready!")
-            time.sleep(0.1)
-            splash_manager.close_splash()
         
         # Create main window (modules already loaded)
         from PySide6.QtWidgets import QApplication
@@ -24642,6 +24644,12 @@ if __name__ == "__main__":
         # Mark modules as already loaded to skip lazy loading
         main_window._modules_loaded = True
         main_window._modules_loading = False
+
+        if splash_manager:
+            # Extra pause to show "Ready!" before closing
+            splash_manager.update_status("Ready!")
+            time.sleep(0.1)
+            splash_manager.close_splash()
         
         # Show the window (ensure not minimized)
         try:
@@ -24655,6 +24663,12 @@ if __name__ == "__main__":
             QTimer.singleShot(150, lambda: (main_window.raise_(), main_window.activateWindow()))
         except Exception:
             main_window.show()
+
+        try:
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(1200, lambda: splash_manager and splash_manager.prewarm_startup_dialogs(main_window))
+        except Exception as e:
+            print(f"⚠️ Startup dialog prewarm scheduling failed: {e}")
         
         # Re-enable quitOnLastWindowClosed now that the main window is visible.
         # This was disabled in splash_utils to prevent macOS from auto-quitting

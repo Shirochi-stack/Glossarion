@@ -4553,7 +4553,7 @@ class AsyncProcessingDialog:
         return os.getenv("API_KEY", "") or os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
 
 
-def show_async_processing_dialog(parent, translator_gui):
+def show_async_processing_dialog(parent, translator_gui, show=True):
     """Show the async processing dialog
     
     Args:
@@ -4564,13 +4564,20 @@ def show_async_processing_dialog(parent, translator_gui):
     if hasattr(translator_gui, "async_dialog") and getattr(translator_gui, "async_dialog"):
         dlg_obj = translator_gui.async_dialog
         dlg_obj._refresh_model_info()
-        dlg_obj.dialog.showNormal()
-        dlg_obj.dialog.raise_()
-        dlg_obj.dialog.activateWindow()
+        if show:
+            dlg_obj.dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+            dlg_obj.dialog.showNormal()
+            dlg_obj.dialog.raise_()
+            dlg_obj.dialog.activateWindow()
         return dlg_obj.dialog
     dlg_obj = AsyncProcessingDialog(parent, translator_gui)
     translator_gui.async_dialog = dlg_obj
-    dlg_obj.dialog.show()  # non-modal to allow hiding/restoring
+    if show:
+        dlg_obj.dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+        dlg_obj.dialog.show()  # non-modal to allow hiding/restoring
+    else:
+        dlg_obj.dialog.setAttribute(Qt.WA_DontShowOnScreen, True)
+        dlg_obj.dialog.hide()
     return dlg_obj.dialog
 
 

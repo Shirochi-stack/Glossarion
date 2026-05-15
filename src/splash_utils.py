@@ -565,7 +565,129 @@ class SplashManager(QObject):
         except (RuntimeError, AttributeError):
             # Widget deleted or not available
             pass
-    
+
+    def prewarm_glossary_manager(self, main_window):
+        """Build the glossary settings dialog while the splash screen is visible."""
+        if self._closed or main_window is None:
+            return False
+        try:
+            self.update_status("Preloading glossary manager...")
+            self.set_progress(max(self.progress_value, 94))
+            if self.app:
+                self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+
+            prewarm = getattr(main_window, 'glossary_manager', None)
+            if callable(prewarm):
+                prewarm(show=False)
+                if self.app:
+                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                self.update_status("Glossary manager ready")
+                self.set_progress(max(self.progress_value, 97))
+                return True
+        except Exception as e:
+            print(f"⚠️ Glossary manager prewarm failed: {e}")
+            import traceback
+            traceback.print_exc()
+        return False
+
+    def prewarm_startup_dialogs(self, main_window):
+        """Queue expensive optional dialog construction after the main window is usable."""
+        if main_window is None:
+            return
+
+        try:
+            if getattr(main_window, '_startup_prewarming', False) or getattr(main_window, '_startup_prewarm_done', False):
+                return
+            main_window._startup_prewarm_scheduled = True
+        except Exception:
+            pass
+
+        results = {}
+        try:
+            main_window._startup_prewarm_results = results
+            main_window._startup_prewarming = True
+        except Exception:
+            pass
+
+        def finish():
+            try:
+                main_window._startup_prewarming = False
+                main_window._startup_prewarm_done = True
+            except Exception:
+                pass
+            try:
+                print(f"[STARTUP_PREWARM] summary: {results}")
+            except Exception:
+                pass
+
+        def run_step(key, label, progress, callback, verifier):
+            try:
+                start_time = time.perf_counter()
+                self.update_status(label)
+                self.set_progress(max(self.progress_value, progress))
+                callback()
+                ok = bool(verifier())
+                results[key] = ok
+                elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+                print(f"[STARTUP_PREWARM] {key}: {'ready' if ok else 'missing'} ({elapsed_ms} ms)")
+            except Exception as e:
+                results[key] = False
+                print(f"Startup prewarm failed during '{label}': {e}")
+                import traceback
+                traceback.print_exc()
+
+        steps = [
+            (
+                "glossary_settings",
+                "Preloading glossary manager...",
+                93,
+                lambda: getattr(main_window, 'glossary_manager')(show=False),
+                lambda: (
+                    getattr(main_window, '_glossary_dialog', None) is not None and
+                    bool(getattr(main_window, '_glossary_settings_tabs_prewarmed', False))
+                )
+            ),
+            (
+                "async_translator",
+                "Preloading async translator...",
+                94,
+                lambda: getattr(main_window, 'open_async_processing')(show=False),
+                lambda: getattr(main_window, 'async_dialog', None) is not None
+            ),
+            (
+                "epub_library",
+                "Preloading EPUB library...",
+                95,
+                lambda: getattr(main_window, '_open_epub_library')(show=False),
+                lambda: getattr(main_window, '_epub_library_dialog', None) is not None
+            ),
+            (
+                "qa_settings",
+                "Preloading QA scanner settings...",
+                96,
+                lambda: getattr(main_window, 'prewarm_qa_scanner_gui')(),
+                lambda: getattr(main_window, '_qa_settings_dialog', None) is not None
+            ),
+            (
+                "other_settings",
+                "Preloading other settings...",
+                97,
+                lambda: getattr(main_window, 'open_other_settings')(show=False),
+                lambda: getattr(main_window, '_other_settings_dialog', None) is not None
+            ),
+        ]
+
+        def run_next(index=0):
+            if index >= len(steps):
+                self.update_status("Startup dialogs ready")
+                self.set_progress(max(self.progress_value, 98))
+                finish()
+                return
+            run_step(*steps[index])
+            QTimer.singleShot(150, lambda: run_next(index + 1))
+
+        QTimer.singleShot(0, run_next)
+
     def validate_all_scripts(self, base_dir=None):
         """Validate that all Python scripts in the project compile without syntax errors
         

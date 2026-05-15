@@ -350,6 +350,44 @@ class QAScannerMixin:
             except Exception:
                 pass
             QMessageBox.warning(self, "QA Report", f"Failed to open QA report:\n{e}")
+
+    def prewarm_qa_scanner_gui(self):
+        """Prebuild the QA scanner settings dialog without starting a scan."""
+        try:
+            qa_settings = dict(self.config.get('qa_scanner_settings', {}) or {})
+            if not qa_settings:
+                qa_settings = {
+                    'foreign_char_threshold': 10,
+                    'excluded_characters': '',
+                    'target_language': 'english',
+                    'source_language': 'auto',
+                    'check_encoding_issues': False,
+                    'check_repetition': True,
+                    'check_translation_artifacts': True,
+                    'check_ai_artifacts': True,
+                    'check_glossary_leakage': True,
+                    'min_file_length': 0,
+                    'report_format': 'detailed',
+                    'auto_save_report': True,
+                    'check_word_count_ratio': True,
+                    'check_multiple_headers': True,
+                    'warn_name_mismatch': True,
+                    'check_missing_html_tag': True,
+                    'check_paragraph_structure': True,
+                    'check_invalid_nesting': False,
+                    'paragraph_threshold': 0.3,
+                    'cache_enabled': True,
+                    'cache_auto_size': False,
+                    'cache_show_stats': False,
+                }
+            self.show_qa_scanner_settings(self, qa_settings, show=False)
+            return True
+        except Exception as e:
+            try:
+                print(f"QA scanner prewarm failed: {e}")
+            except Exception:
+                pass
+            return False
     
     def run_qa_scan(self, mode_override=None, non_interactive=False, preselected_files=None):
         """Run QA scan with mode selection and settings"""
@@ -508,51 +546,90 @@ class QAScannerMixin:
         
         # Optionally skip mode dialog if a mode override was provided (e.g., scanning phase)
         selected_mode_value = mode_override if mode_override else None
+        _qa_mode_dialog_reused = False
         if selected_mode_value is None:
-            # Show mode selection dialog with settings - calculate proportional sizing (halved)
-            screen = QApplication.primaryScreen().geometry()
-            screen_width = screen.width()
-            screen_height = screen.height()
-            dialog_width = int(screen_width * 0.51)  # 50% of screen width
-            dialog_height = int(screen_height * 0.43)  # 45% of screen height
-            
-            mode_dialog = QDialog(self)
-            # Apply global stylesheet for consistent appearance IMMEDIATELY to prevent white flash
-            mode_dialog.setStyleSheet("""
-                QDialog {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 #1a1a2e, stop:1 #16213e);
-                }
-                QPushButton {
-                    border: 1px solid #4a5568;
-                    border-radius: 4px;
-                    padding: 8px 16px;
-                    background-color: #2d3748;
-                    color: white;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #4a5568;
-                    border-color: #718096;
-                }
-                QPushButton:pressed {
-                    background-color: #1a202c;
-                }
-            """)
-            mode_dialog.setWindowTitle("Select QA Scanner Mode")
-            mode_dialog.resize(dialog_width, dialog_height)
-            # Non-modal, standard OS window stacking
-            mode_dialog.setModal(False)
-            mode_dialog.setWindowFlags(Qt.Window)
-            # Set window icon
+            cached_mode_dialog = getattr(self, "_qa_mode_dialog", None)
             try:
-                ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
-                if os.path.isfile(ico_path):
-                    mode_dialog.setWindowIcon(QIcon(ico_path))
-            except Exception:
-                pass
+                if cached_mode_dialog is not None:
+                    mode_dialog = cached_mode_dialog
+                    _qa_mode_dialog_reused = True
+                    mode_dialog._selected_mode_value = None
+                    mode_dialog._qa_settings_ref = qa_settings
+                    mode_dialog.setResult(0)
+                    mode_dialog.setModal(False)
+                    mode_dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+                    try:
+                        mode_dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+                    except Exception:
+                        pass
+                    quick_sample_spinbox = getattr(mode_dialog, "_quick_sample_spinbox", None)
+                    if quick_sample_spinbox is not None:
+                        try:
+                            qs_initial = int(qa_settings.get('quick_scan_sample_size', 1000))
+                        except Exception:
+                            qs_initial = 1000
+                        quick_sample_spinbox.blockSignals(True)
+                        quick_sample_spinbox.setValue(qs_initial)
+                        quick_sample_spinbox.blockSignals(False)
+            except RuntimeError:
+                self._qa_mode_dialog = None
+                cached_mode_dialog = None
+                _qa_mode_dialog_reused = False
+
+            if not _qa_mode_dialog_reused:
+                # Show mode selection dialog with settings - calculate proportional sizing (halved)
+                screen = QApplication.primaryScreen().geometry()
+                screen_width = screen.width()
+                screen_height = screen.height()
+                dialog_width = int(screen_width * 0.51)  # 50% of screen width
+                dialog_height = int(screen_height * 0.43)  # 45% of screen height
+                
+                mode_dialog = QDialog(self)
+                self._qa_mode_dialog = mode_dialog
+                mode_dialog._selected_mode_value = None
+                mode_dialog._qa_settings_ref = qa_settings
+                mode_dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+                # Apply global stylesheet for consistent appearance IMMEDIATELY to prevent white flash
+                mode_dialog.setStyleSheet("""
+                    QDialog {
+                        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                            stop:0 #1a1a2e, stop:1 #16213e);
+                    }
+                    QPushButton {
+                        border: 1px solid #4a5568;
+                        border-radius: 4px;
+                        padding: 8px 16px;
+                        background-color: #2d3748;
+                        color: white;
+                        font-weight: bold;
+                    }
+                    QPushButton:hover {
+                        background-color: #4a5568;
+                        border-color: #718096;
+                    }
+                    QPushButton:pressed {
+                        background-color: #1a202c;
+                    }
+                """)
+                mode_dialog.setWindowTitle("Select QA Scanner Mode")
+                mode_dialog.resize(dialog_width, dialog_height)
+                # Non-modal, standard OS window stacking
+                mode_dialog.setModal(False)
+                mode_dialog.setWindowFlags(Qt.Window)
+                def handle_mode_close(event):
+                    event.ignore()
+                    mode_dialog._selected_mode_value = None
+                    mode_dialog.reject()
+                mode_dialog.closeEvent = handle_mode_close
+                # Set window icon
+                try:
+                    ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+                    if os.path.isfile(ico_path):
+                        mode_dialog.setWindowIcon(QIcon(ico_path))
+                except Exception:
+                    pass
         
-        if selected_mode_value is None:
+        if selected_mode_value is None and not _qa_mode_dialog_reused:
             # Set minimum size to prevent dialog from being too small (using ratios)
             # 35% width, 35% height for better content fit
             min_width = int(screen_width * 0.45)
@@ -585,11 +662,13 @@ class QAScannerMixin:
             quick_sample_spinbox.setValue(qs_initial)
             quick_sample_spinbox.setMinimumWidth(110)
             quick_sample_spinbox.wheelEvent = lambda event: event.ignore()
+            mode_dialog._quick_sample_spinbox = quick_sample_spinbox
             # Auto-save whenever the value changes or editing finishes
             def _save_quick_sample(val):
                 try:
                     val = int(val)
-                    qa_settings['quick_scan_sample_size'] = val
+                    current_qa_settings = getattr(mode_dialog, "_qa_settings_ref", qa_settings)
+                    current_qa_settings['quick_scan_sample_size'] = val
                     if hasattr(self, 'config'):
                         self.config.setdefault('qa_scanner_settings', {})
                         self.config['qa_scanner_settings']['quick_scan_sample_size'] = val
@@ -710,7 +789,7 @@ class QAScannerMixin:
         ]
         
         # Restore original single-row layout (four cards across)
-        if selected_mode_value is None:
+        if selected_mode_value is None and not _qa_mode_dialog_reused:
             # Scale down the card contents on small screens while keeping the same 4-card row.
             try:
                 ui_scale = min(1.0, max(0.75, min(screen_width / 1600.0, screen_height / 900.0)))
@@ -879,25 +958,27 @@ class QAScannerMixin:
                     def handler():
                         nonlocal selected_mode_value
                         # Persist quick scan sample size before closing
-                        qa_settings['quick_scan_sample_size'] = quick_sample_spinbox.value()
+                        current_qa_settings = getattr(mode_dialog, "_qa_settings_ref", qa_settings)
+                        current_qa_settings['quick_scan_sample_size'] = quick_sample_spinbox.value()
                         try:
                             if hasattr(self, 'config'):
                                 if 'qa_scanner_settings' not in self.config:
                                     self.config['qa_scanner_settings'] = {}
-                                self.config['qa_scanner_settings'].update(qa_settings)
+                                self.config['qa_scanner_settings'].update(current_qa_settings)
                                 # Save quietly to persist between runs
                                 if hasattr(self, 'save_config'):
                                     self.save_config(show_message=False)
                         except Exception:
                             pass
                         selected_mode_value = mode_value
+                        mode_dialog._selected_mode_value = mode_value
                         mode_dialog.accept()
                     return handler
                 
                 # Make card clickable with mouse press event
                 card.mousePressEvent = lambda event, handler=make_click_handler(mi["value"]): handler()
         
-        if selected_mode_value is None:
+        if selected_mode_value is None and not _qa_mode_dialog_reused:
             # Quick Scan sample size control
             qs_row = QWidget()
             qs_layout = QHBoxLayout(qs_row)
@@ -948,7 +1029,7 @@ class QAScannerMixin:
             
             def show_qa_settings():
                 """Show QA Scanner settings dialog"""
-                self.show_qa_scanner_settings(mode_dialog, qa_settings)
+                self.show_qa_scanner_settings(mode_dialog, getattr(mode_dialog, "_qa_settings_ref", qa_settings))
             
             # Auto-search checkbox
             if not hasattr(self, 'qa_auto_search_output_checkbox'):
@@ -1007,7 +1088,7 @@ class QAScannerMixin:
                     background-color: #bb2d3b;
                 }
             """)
-            cancel_btn.clicked.connect(mode_dialog.reject)
+            cancel_btn.clicked.connect(lambda: [setattr(mode_dialog, "_selected_mode_value", None), mode_dialog.reject()])
             button_layout.addWidget(cancel_btn)
             
             button_layout.addStretch()
@@ -1017,6 +1098,7 @@ class QAScannerMixin:
             def on_close():
                 nonlocal selected_mode_value
                 selected_mode_value = None
+                mode_dialog._selected_mode_value = None
             mode_dialog.rejected.connect(on_close)
             
             # Show dialog non-modally and wait for result using local event loop
@@ -1026,10 +1108,42 @@ class QAScannerMixin:
             loop = QEventLoop()
             mode_dialog.finished.connect(loop.quit)
             loop.exec()
+            try:
+                mode_dialog.finished.disconnect(loop.quit)
+            except Exception:
+                pass
             
             result = mode_dialog.result()
             
             # Check if user canceled or selected a mode
+            if result == QDialog.Rejected or selected_mode_value is None:
+                self.append_log("⚠️ QA scan canceled.")
+                return
+
+        if selected_mode_value is None and _qa_mode_dialog_reused:
+            try:
+                if hasattr(self, 'qa_auto_search_output_checkbox'):
+                    self.qa_auto_search_output_checkbox.blockSignals(True)
+                    self.qa_auto_search_output_checkbox.setChecked(self.config.get('qa_auto_search_output', True))
+                    self.qa_auto_search_output_checkbox.blockSignals(False)
+            except Exception:
+                pass
+
+            mode_dialog.show()
+            mode_dialog.raise_()
+            mode_dialog.activateWindow()
+            from PySide6.QtCore import QEventLoop
+            loop = QEventLoop()
+            mode_dialog.finished.connect(loop.quit)
+            loop.exec()
+            try:
+                mode_dialog.finished.disconnect(loop.quit)
+            except Exception:
+                pass
+
+            selected_mode_value = getattr(mode_dialog, "_selected_mode_value", None)
+            result = mode_dialog.result()
+
             if result == QDialog.Rejected or selected_mode_value is None:
                 self.append_log("⚠️ QA scan canceled.")
                 return
@@ -2255,15 +2369,33 @@ class QAScannerMixin:
         # Update button IMMEDIATELY after starting thread (synchronous)
         self.update_run_button()
 
-    def show_qa_scanner_settings(self, parent_dialog, qa_settings):
+    def show_qa_scanner_settings(self, parent_dialog, qa_settings, show=True):
         """Show QA Scanner settings dialog"""
+        try:
+            existing = getattr(self, "_qa_settings_dialog", None)
+            if existing is not None:
+                existing.setModal(bool(show))
+                if show:
+                    existing.setAttribute(Qt.WA_DontShowOnScreen, False)
+                    existing.show()
+                    existing.raise_()
+                    existing.activateWindow()
+                else:
+                    existing.setAttribute(Qt.WA_DontShowOnScreen, True)
+                    existing.hide()
+                return existing
+        except RuntimeError:
+            self._qa_settings_dialog = None
+
         # Create settings dialog
         dialog = QDialog(parent_dialog)
         try:
             self._qa_settings_dialog = dialog
-            dialog.finished.connect(lambda *_: setattr(self, "_qa_settings_dialog", None))
         except Exception:
             pass
+        dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+        if not show:
+            dialog.setAttribute(Qt.WA_DontShowOnScreen, True)
         # Apply basic dark stylesheet IMMEDIATELY to prevent white flash
         # Set up icon path
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
@@ -2329,7 +2461,7 @@ class QAScannerMixin:
             }
         """)
         dialog.setWindowTitle("QA Scanner Settings")
-        dialog.setModal(True)
+        dialog.setModal(bool(show))
         # Use screen ratios: 40% width, 85% height (decreased from 100%)
         screen = QApplication.primaryScreen().geometry()
         settings_width = int(screen.width() * 0.52)
@@ -4589,7 +4721,7 @@ class QAScannerMixin:
                 
                 self.append_log("✅ QA Scanner settings saved successfully")
                 dialog._cleanup_scrolling()  # Clean up scrolling bindings
-                dialog.accept()
+                dialog.hide()
                 
             except Exception as e:
                 # Get debug_mode again in case of early exception
@@ -4719,7 +4851,7 @@ class QAScannerMixin:
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setMinimumWidth(120)
         cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
-        cancel_btn.clicked.connect(lambda: [dialog._cleanup_scrolling(), dialog.reject()])
+        cancel_btn.clicked.connect(lambda: [dialog._cleanup_scrolling(), dialog.hide()])
         button_layout.addWidget(cancel_btn)
         
         reset_btn = QPushButton("Reset to Default")
@@ -4737,17 +4869,28 @@ class QAScannerMixin:
         # Add a dummy _cleanup_scrolling method for compatibility
         dialog._cleanup_scrolling = lambda: None
         
-        # Handle window close - just cleanup, don't call reject() to avoid recursion
-        def handle_close():
-            dialog._cleanup_scrolling()
-        dialog.rejected.connect(handle_close)
+        # Handle window close - hide instead of destroying so reopen is instant
+        def handle_close_event(event):
+            try:
+                event.ignore()
+                dialog._cleanup_scrolling()
+                dialog.hide()
+            except Exception:
+                dialog.hide()
+        dialog.closeEvent = handle_close_event
+
+        if not show:
+            dialog.hide()
+            return dialog
+        dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
         
-        # Show the dialog with fade animation and return result
+        # Show the dialog with fade animation and keep it alive for reuse
         try:
-            from dialog_animations import exec_dialog_with_fade
-            return exec_dialog_with_fade(dialog, duration=250)
+            from dialog_animations import show_dialog_with_fade
+            show_dialog_with_fade(dialog, duration=250)
         except Exception:
-            return dialog.exec()
+            dialog.show()
+        return dialog
 
 
 def show_custom_detection_dialog(parent=None):

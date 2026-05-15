@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton,
                                 QGroupBox, QSpinBox, QSlider, QMessageBox, QFileDialog,
                                 QSizePolicy, QAbstractItemView, QButtonGroup, QApplication,
                                 QComboBox, QMenu, QInputDialog)
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, Property, QObject
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, Property, QObject, QEventLoop
 from PySide6.QtGui import QFont, QColor, QIcon, QKeySequence, QShortcut, QBrush
 
 # WindowManager and UIHelper removed - not needed in PySide6
@@ -23,6 +23,66 @@ from PySide6.QtGui import QFont, QColor, QIcon, QKeySequence, QShortcut, QBrush
 
 class GlossaryManagerMixin:
     """Mixin class containing glossary management methods for TranslatorGUI"""
+
+    def _prewarm_glossary_settings_tabs(self, dialog=None, notebook=None):
+        """Force hidden glossary settings tabs through their first layout pass."""
+        try:
+            dialog = dialog or getattr(self, '_glossary_dialog', None)
+            notebook = notebook or getattr(self, '_glossary_settings_notebook', None)
+            if dialog is None or notebook is None:
+                return False
+
+            app = QApplication.instance()
+            previous_index = notebook.currentIndex()
+            if previous_index < 0:
+                previous_index = 0
+
+            dialog.setAttribute(Qt.WA_DontShowOnScreen, True)
+            if not dialog.isVisible():
+                dialog.show()
+
+            def _warm_widget(widget):
+                if widget is None:
+                    return
+                try:
+                    widget.ensurePolished()
+                    widget.updateGeometry()
+                    layout = widget.layout()
+                    if layout is not None:
+                        layout.activate()
+                    if isinstance(widget, QScrollArea):
+                        inner = widget.widget()
+                        if inner is not None:
+                            inner.ensurePolished()
+                            inner.updateGeometry()
+                            inner_layout = inner.layout()
+                            if inner_layout is not None:
+                                inner_layout.activate()
+                except Exception:
+                    pass
+
+            for idx in range(notebook.count()):
+                notebook.setCurrentIndex(idx)
+                _warm_widget(notebook.widget(idx))
+                layout = dialog.layout()
+                if layout is not None:
+                    layout.activate()
+                if app is not None:
+                    app.processEvents(QEventLoop.ExcludeUserInputEvents)
+
+            if notebook.count():
+                notebook.setCurrentIndex(min(previous_index, notebook.count() - 1))
+            if app is not None:
+                app.processEvents(QEventLoop.ExcludeUserInputEvents)
+            dialog.hide()
+            self._glossary_settings_tabs_prewarmed = True
+            return True
+        except Exception as e:
+            try:
+                print(f"Glossary settings tab prewarm failed: {e}")
+            except Exception:
+                pass
+            return False
     
     @staticmethod
     def _disable_slider_mousewheel(slider):
@@ -556,7 +616,7 @@ class GlossaryManagerMixin:
         except Exception:
             pass
 
-    def glossary_manager(self):
+    def glossary_manager(self, *args, show=True):
         """Open comprehensive glossary management dialog"""
         # Reuse existing dialog if it hasn't been destroyed
         if hasattr(self, '_glossary_dialog') and self._glossary_dialog is not None:
@@ -579,9 +639,13 @@ class GlossaryManagerMixin:
                         cb.blockSignals(False)
 
                 # Dialog still alive — just bring it back
-                self._glossary_dialog.show()
-                self._glossary_dialog.raise_()
-                self._glossary_dialog.activateWindow()
+                if show:
+                    self._glossary_dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+                    self._glossary_dialog.show()
+                    self._glossary_dialog.raise_()
+                    self._glossary_dialog.activateWindow()
+                elif not getattr(self, '_glossary_settings_tabs_prewarmed', False):
+                    self._prewarm_glossary_settings_tabs(self._glossary_dialog)
                 return
             except RuntimeError:
                 # Underlying C++ object deleted; fall through to create a new one
@@ -632,6 +696,8 @@ class GlossaryManagerMixin:
         
         # Store dialog reference for use in nested functions
         self.dialog = dialog
+        if not show:
+            dialog.setAttribute(Qt.WA_DontShowOnScreen, True)
         
         # Apply simplified dark mode stylesheet
         global_stylesheet = """
@@ -968,6 +1034,7 @@ class GlossaryManagerMixin:
             def wheelEvent(self, event):
                 event.ignore()
         notebook.setTabBar(NoWheelTabBar())
+        self._glossary_settings_notebook = notebook
         main_layout.addWidget(notebook)
         
         # Create and add tabs eagerly so switching tabs never pays a construction cost.
@@ -977,6 +1044,8 @@ class GlossaryManagerMixin:
             ("Automatic Glossary Generation", self._setup_auto_glossary_tab, False), # scrollable
             ("Glossary Editor", self._setup_glossary_editor_tab, True),              # non-scrollable
         ]
+
+        self._glossary_settings_tabs_built = True
 
         for tab_idx, (tab_name, setup_method, is_editor) in enumerate(tabs):
             if is_editor:
@@ -1316,12 +1385,22 @@ class GlossaryManagerMixin:
         cancel_button.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
         control_layout.addWidget(cancel_button)
         
+        if not show:
+            self._prewarm_glossary_settings_tabs(dialog, notebook)
+            dialog.hide()
+            return
+
         # Show dialog with fade animation
-        try:
-            from dialog_animations import show_dialog_with_fade
-            show_dialog_with_fade(dialog, duration=250)
-        except Exception:
-            dialog.show()
+        if not dialog.isVisible():
+            dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(dialog, duration=250)
+            except Exception:
+                dialog.show()
+        else:
+            dialog.raise_()
+            dialog.activateWindow()
 
     def _setup_manual_glossary_tab(self, parent):
         """Setup manual glossary tab - simplified for new format"""

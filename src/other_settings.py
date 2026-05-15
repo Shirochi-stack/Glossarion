@@ -1066,15 +1066,37 @@ def toggle_gpt_reasoning_controls(self):
     except Exception:
         pass
 
-def open_other_settings(self):
+def open_other_settings(self, *args, show=True):
     """Open the Other Settings dialog (PySide6)"""
     from PySide6.QtGui import QIcon, QKeyEvent
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import Qt, QTimer
     from PySide6.QtWidgets import QApplication
+
+    def _fit_other_settings_dialog(dialog):
+        try:
+            container = getattr(self, '_other_settings_content_container', None)
+            if container is None:
+                return
+            screen = QApplication.primaryScreen().availableGeometry()
+            needed_width = container.sizeHint().width() + 40
+            max_width = int(screen.width() * 0.92)
+            target_width = min(max(dialog.width(), needed_width), max_width)
+            if target_width > dialog.width():
+                dialog.resize(target_width, dialog.height())
+                dialog_x = screen.x() + (screen.width() - dialog.width()) // 2
+                dialog_y = screen.y() + (screen.height() - dialog.height()) // 2
+                dialog.move(dialog_x, dialog_y)
+        except Exception:
+            pass
     
     # If dialog already exists, just show and focus it to preserve exact state
     try:
         if hasattr(self, "_other_settings_dialog") and self._other_settings_dialog is not None:
+            if not show:
+                self._other_settings_dialog.setAttribute(Qt.WA_DontShowOnScreen, True)
+                self._other_settings_dialog.hide()
+                return
+            self._other_settings_dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
             # Show with fade animation
             try:
                 from dialog_animations import show_dialog_with_fade
@@ -1087,6 +1109,8 @@ def open_other_settings(self):
                 self._other_settings_dialog.activateWindow()
             except Exception:
                 pass
+            QTimer.singleShot(0, lambda: _fit_other_settings_dialog(self._other_settings_dialog))
+            QTimer.singleShot(120, lambda: _fit_other_settings_dialog(self._other_settings_dialog))
             return
     except Exception:
         # If the old reference is invalid, recreate below
@@ -1096,6 +1120,8 @@ def open_other_settings(self):
     # Pass self as parent so it stays in front of main GUI but allows other dialogs on top
     dialog = QDialog(self)
     dialog.setWindowTitle("Other Settings")
+    if not show:
+        dialog.setAttribute(Qt.WA_DontShowOnScreen, True)
     
     # Do not delete widgets on close; we'll hide instead to retain exact state
     dialog.setAttribute(Qt.WA_DeleteOnClose, False)
@@ -1300,6 +1326,7 @@ def open_other_settings(self):
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
     container = QWidget()
+    self._other_settings_content_container = container
     container.setStyleSheet(checkbox_radio_style)  # Apply global stylesheet
     grid = QGridLayout(container)
     grid.setColumnStretch(0, 1)
@@ -1413,6 +1440,11 @@ def open_other_settings(self):
         dialog.move(dialog_x, dialog_y)
     except Exception:
         pass
+
+    if not show:
+        dialog.hide()
+        return
+    dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
     
     # Show with smooth fade animation (no flash of generic window)
     try:
@@ -1421,14 +1453,10 @@ def open_other_settings(self):
     except Exception:
         dialog.show()
     
-    # Auto-fit width to content after showing
-    from PySide6.QtCore import QTimer
-    def adjust_width():
-        # Calculate width needed for both columns with spacing
-        needed_width = container.sizeHint().width() + 40  # Add margins
-        if needed_width > dialog.width():
-            dialog.resize(needed_width, dialog.height())
-    QTimer.singleShot(0, adjust_width)
+    # Auto-fit width to content after showing. Hidden prewarm cannot produce
+    # reliable size hints, so run this only on visible opens/reopens.
+    QTimer.singleShot(0, lambda: _fit_other_settings_dialog(dialog))
+    QTimer.singleShot(120, lambda: _fit_other_settings_dialog(dialog))
 
 def _create_output_settings_section(self, parent):
     """Create output settings section (PDF generation + Image Compression)"""
