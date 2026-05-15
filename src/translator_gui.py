@@ -2448,15 +2448,6 @@ Text to analyze:
         
         # Initialize all environment variables after GUI setup but before first use
         self.initialize_environment_variables()
-        try:
-            from glossary_paths import start_background_glossary_migration
-            start_background_glossary_migration(
-                os.path.join(_get_app_dir(), 'Glossary'),
-                logger=lambda msg: logging.getLogger(__name__).info(msg),
-            )
-        except Exception:
-            pass
-
         # Attach logging handlers to forward client logs into the GUI
         try:
             self._attach_gui_logging_handlers()
@@ -14924,6 +14915,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
             glossary_shared_dir = os.path.join(os.path.abspath(output_override_for_env), 'Glossary')
         else:
             glossary_shared_dir = os.path.join(_get_app_dir(), 'Glossary')
+        try:
+            from glossary_paths import migrate_all_legacy_glossary_files
+            migrate_all_legacy_glossary_files(
+                glossary_shared_dir,
+                logger=lambda msg: self.append_log(msg) if hasattr(self, 'append_log') else None,
+            )
+        except Exception:
+            pass
 
         def _bool_setting(value, default=False):
             if value is None:

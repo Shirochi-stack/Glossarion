@@ -119,6 +119,22 @@ class GlossaryManagerMixin:
         if not text:
             return text
         return text.replace('\\x1F', '\x1f')
+
+    @staticmethod
+    def _display_glossary_path(path, roots=3):
+        """Display the last few path parts for glossary selectors."""
+        if not path:
+            return ''
+        parts = []
+        current = os.path.normpath(path)
+        while current:
+            parent, name = os.path.split(current)
+            if name:
+                parts.append(name)
+            if not parent or parent == current or len(parts) >= roots:
+                break
+            current = parent
+        return '/'.join(reversed(parts)) if parts else os.path.basename(path)
     
     @staticmethod
     def _add_combobox_arrow(combobox):
@@ -4525,7 +4541,7 @@ Rules:
                 shim._combo.blockSignals(True)
                 shim._combo.clear()
                 if path:
-                    display = os.path.basename(os.path.dirname(path)) + '/' + os.path.basename(path) if path else ''
+                    display = shim._owner._display_glossary_path(path)
                     shim._combo.addItem(display, path)
                 shim._combo.blockSignals(False)
                 shim._owner._update_editor_nav_buttons()
@@ -6537,7 +6553,7 @@ Rules:
                     # Pick first match for this book
                     for cand in candidates:
                         if os.path.exists(cand):
-                            display = f"{os.path.basename(os.path.dirname(cand))}/{os.path.basename(cand)}"
+                            display = self._display_glossary_path(cand)
                             if not any(fp == cand for _, fp in found_glossaries):
                                 found_glossaries.append((display, cand))
                             break

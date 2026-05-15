@@ -201,10 +201,26 @@ def discover_legacy_glossary_bases(shared_glossary_dir: str):
     return sorted(bases, key=lambda value: value.casefold())
 
 
+def _legacy_migration_quick_check(root: str) -> bool:
+    """Cheap top-level check for old flat files/shared backup folder."""
+    try:
+        for filename in os.listdir(root):
+            path = os.path.join(root, filename)
+            if os.path.isfile(path) and legacy_glossary_base_from_filename(filename):
+                return True
+            if os.path.isdir(path) and filename.strip().lower() == "backups":
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def migrate_all_legacy_glossary_files(shared_glossary_dir: str, logger=None, backup_root: str = None):
-    """Migrate every flat legacy glossary file and repair all known book folders."""
+    """Run a cheap legacy migration check for a Glossary folder."""
     root = os.path.abspath(shared_glossary_dir or os.path.join(os.getcwd(), "Glossary"))
     if not os.path.isdir(root):
+        return []
+    if not _legacy_migration_quick_check(root):
         return []
 
     moved = []
@@ -212,22 +228,6 @@ def migrate_all_legacy_glossary_files(shared_glossary_dir: str, logger=None, bac
     bases = discover_legacy_glossary_bases(root)
     for base in bases:
         moved.extend(migrate_legacy_glossary_files(root, base, logger=logger))
-
-    skip_dirs = {
-        "backups",
-        "glossary_backup",
-        "mangaglossary_backup",
-        "truncation_logs",
-        "__pycache__",
-    }
-    for dirname in list(os.listdir(root)):
-        dir_path = os.path.join(root, dirname)
-        if not os.path.isdir(dir_path):
-            continue
-        if dirname.strip().lower() in skip_dirs or dirname.startswith("."):
-            continue
-        moved.extend(repair_nested_glossary_folder(root, dirname, logger=logger))
-        moved.extend(repair_misplaced_glossary_backup(root, dirname, logger=logger))
 
     if moved:
         _safe_log(logger, f"Glossary migration sweep completed: moved/repaired {len(moved)} file(s)")
