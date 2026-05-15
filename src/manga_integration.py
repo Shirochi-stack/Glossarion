@@ -7342,12 +7342,9 @@ class MangaTranslationTab(QObject):
             os.environ['MANGA_IMAGE_REQUEST_JPEG_QUALITY'] = str(int(comp.get('jpeg_quality', 85)))
             os.environ['MANGA_IMAGE_REQUEST_PNG_COMPRESSION'] = str(int(comp.get('png_compress_level', 6)))
 
-            # OCRManager reads the generic names, so keep those in sync for manga runs.
-            os.environ['ENABLE_IMAGE_COMPRESSION'] = '1' if enabled else '0'
-            os.environ['IMAGE_COMPRESSION_FORMAT'] = fmt if enabled else 'png'
-            os.environ['WEBP_QUALITY'] = os.environ['MANGA_IMAGE_REQUEST_WEBP_QUALITY']
-            os.environ['JPEG_QUALITY'] = os.environ['MANGA_IMAGE_REQUEST_JPEG_QUALITY']
-            os.environ['PNG_COMPRESSION'] = os.environ['MANGA_IMAGE_REQUEST_PNG_COMPRESSION']
+            # Keep this setting manga-scoped. The generic IMAGE_COMPRESSION_*
+            # variables belong to the main translator GUI and are used by
+            # non-manga vision requests.
         except Exception as e:
             try:
                 self._log(f"⚠️ Failed to sync manga image request quality env: {e}", "warning")

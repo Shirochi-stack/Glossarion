@@ -4393,16 +4393,34 @@ class UnifiedClient:
             or 'function_payload_too_large' in text
         )
 
-    def _image_request_quality_enabled(self) -> bool:
-        if os.getenv('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') == '1':
-            return True
+    def _uses_manga_image_request_quality_context(self, context: Any = None) -> bool:
+        value = context if context is not None else getattr(self, 'context', None)
+        context_l = str(value or '').strip().lower()
+        return context_l in {
+            'manga_ocr',
+            'inpainter',
+            'manga_image_translation',
+            'manga_page_translation',
+            'manga_image_edit',
+            'custom_image_edit',
+            'image_edit',
+            'image_generation',
+            'imagegen',
+        }
+
+    def _image_request_quality_enabled(self, context: Any = None) -> bool:
         try:
             tls = self._get_thread_local_client()
             if bool(getattr(tls, 'force_image_request_quality_retry', False)):
                 return True
         except Exception:
             pass
-        return bool(getattr(self, '_force_image_request_quality_retry', False))
+        if bool(getattr(self, '_force_image_request_quality_retry', False)):
+            return True
+        return (
+            os.getenv('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') == '1'
+            and self._uses_manga_image_request_quality_context(context)
+        )
 
     def _should_retry_with_image_request_quality(self, context: Any, error_text: Any) -> bool:
         if not self._is_payload_too_large_error(error_text):

@@ -305,16 +305,49 @@ class CustomAPIProvider(OCRProvider):
                 return True
         return False
 
+    def _uses_local_individual_endpoint_seed(self) -> bool:
+        seed = getattr(self, '_request_vision_seed', None) or {}
+        try:
+            if not bool(seed.get('use_individual_endpoint')):
+                return False
+            endpoint = str(seed.get('azure_endpoint') or '').strip().lower()
+            return endpoint.startswith('http://localhost') or endpoint.startswith('http://127.0.0.1')
+        except Exception:
+            return False
+
     def _get_request_image_format(self) -> str:
-        manga_quality_enabled = os.environ.get('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') == '1'
+        manga_ocr_context = str(getattr(self, 'request_context', '') or '').strip().lower() == 'manga_ocr'
+        manga_quality_enabled = manga_ocr_context and os.environ.get('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') == '1'
+        local_individual_endpoint = self._uses_local_individual_endpoint_seed()
         if self._uses_nanogpt_model() and manga_quality_enabled:
-            return 'webp'
-        fmt = str(os.environ.get('IMAGE_COMPRESSION_FORMAT', 'auto') or 'auto').strip().lower()
+            return 'jpeg' if local_individual_endpoint else 'webp'
+        fmt = str(
+            os.environ.get('MANGA_IMAGE_REQUEST_FORMAT' if manga_quality_enabled else 'IMAGE_COMPRESSION_FORMAT', 'auto')
+            or 'auto'
+        ).strip().lower()
+        if local_individual_endpoint and fmt == 'webp':
+            return 'jpeg'
         if fmt == 'png':
             return 'png'
         if fmt == 'webp':
             return 'webp'
         return 'jpeg'
+
+    def _get_request_jpeg_quality(self) -> int:
+        manga_ocr_context = str(getattr(self, 'request_context', '') or '').strip().lower() == 'manga_ocr'
+        key = 'MANGA_IMAGE_REQUEST_JPEG_QUALITY' if manga_ocr_context and os.environ.get('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') == '1' else 'JPEG_QUALITY'
+        try:
+            return max(1, min(95, int(os.environ.get(key, self.image_quality) or self.image_quality)))
+        except Exception:
+            return max(1, min(95, int(getattr(self, 'image_quality', 85) or 85)))
+
+    def _get_request_webp_quality(self) -> int:
+        manga_ocr_context = str(getattr(self, 'request_context', '') or '').strip().lower() == 'manga_ocr'
+        key = 'MANGA_IMAGE_REQUEST_WEBP_QUALITY' if manga_ocr_context and os.environ.get('MANGA_IMAGE_REQUEST_QUALITY_ENABLED', '0') == '1' else 'WEBP_QUALITY'
+        try:
+            return max(1, min(100, int(os.environ.get(key, os.environ.get('JPEG_QUALITY', '85')) or '85')))
+        except Exception:
+            return 85
         
     def check_installation(self) -> bool:
         """Always installed - uses UnifiedClient"""
@@ -331,6 +364,8 @@ class CustomAPIProvider(OCRProvider):
             from unified_api_client import UnifiedClient
             context = str(kwargs.get('context') or '').strip().lower()
             vision_seed = self._get_vision_key_seed(UnifiedClient) if context == 'manga_ocr' else None
+            self.request_context = context
+            self._request_vision_seed = vision_seed
             
             # Support passing API key from GUI if available
             if vision_seed is not None:
@@ -441,10 +476,10 @@ class CustomAPIProvider(OCRProvider):
         if image_format == 'png':
             pil_image.save(buffer, format='PNG')
         elif image_format == 'webp':
-            quality = max(1, min(100, int(os.environ.get('WEBP_QUALITY', os.environ.get('JPEG_QUALITY', '85')) or '85')))
+            quality = self._get_request_webp_quality()
             pil_image.save(buffer, format='WEBP', quality=quality, method=6)
         else:
-            pil_image.save(buffer, format='JPEG', quality=self.image_quality)
+            pil_image.save(buffer, format='JPEG', quality=self._get_request_jpeg_quality())
         
         # Encode to base64
         buffer.seek(0)
@@ -656,10 +691,10 @@ class CustomAPIProvider(OCRProvider):
             if image_format == 'png':
                 pil_image.save(buffer, format='PNG')
             elif image_format == 'webp':
-                quality = max(1, min(100, int(os.environ.get('WEBP_QUALITY', os.environ.get('JPEG_QUALITY', '85')) or '85')))
+                quality = self._get_request_webp_quality()
                 pil_image.save(buffer, format='WEBP', quality=quality, method=6)
             else:
-                pil_image.save(buffer, format='JPEG', quality=self.image_quality)
+                pil_image.save(buffer, format='JPEG', quality=self._get_request_jpeg_quality())
             
             buffer.seek(0)
             image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
