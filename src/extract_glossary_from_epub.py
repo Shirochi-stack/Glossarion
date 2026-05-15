@@ -5357,8 +5357,8 @@ def main(log_callback=None, stop_callback=None):
     if args.output == 'glossary.json':
         args.output = f"{file_base}_glossary.json" 
 
-    # Keep regular EPUB glossaries in the shared Glossary subfolder. When
-    # requested, also mirror the outputs to an output-side Glossary_Backup folder.
+    # Keep regular EPUB glossaries in the shared Glossary subfolder. Output-side
+    # backup copies are written only when the caller passes an explicit target.
     save_glossary_backup_in_output = os.getenv("SAVE_GLOSSARY_IN_OUTPUT", "0").strip().lower() in ("1", "true", "yes", "on")
     base_out_dir = os.path.dirname(args.output)
     base_out_dir_abs = os.path.abspath(base_out_dir or os.getcwd())
@@ -5371,24 +5371,18 @@ def main(log_callback=None, stop_callback=None):
     ):
         shared_glossary_dir = base_out_parent_abs
         glossary_dir = base_out_dir_abs
-        backup_parent_dir = os.path.dirname(base_out_parent_abs)
     elif os.path.basename(base_out_dir_abs).lower() == "glossary":
         shared_glossary_dir = base_out_dir
-        backup_parent_dir = os.path.dirname(base_out_dir_abs)
     else:
         shared_glossary_dir = os.path.join(base_out_dir, "Glossary")
-        backup_parent_dir = base_out_dir_abs
     migrate_all_legacy_glossary_files(
         shared_glossary_dir,
-        backup_root=os.path.join(backup_parent_dir, "Glossary_Backup"),
         logger=print,
     )
     if glossary_dir is None:
         glossary_dir = get_book_glossary_dir(shared_glossary_dir, file_base)
     os.makedirs(glossary_dir, exist_ok=True)
-    if save_glossary_backup_in_output:
-        os.environ["GLOSSARY_OUTPUT_BACKUP_DIR"] = os.path.join(backup_parent_dir, "Glossary_Backup")
-    else:
+    if not save_glossary_backup_in_output:
         os.environ.pop("GLOSSARY_OUTPUT_BACKUP_DIR", None)
 
     # override the module‐level PROGRESS_FILE to include epub name

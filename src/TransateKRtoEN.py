@@ -7811,8 +7811,7 @@ def _single_pass_glossary_paths(output_dir):
     shared_glossary_dir = _single_pass_shared_glossary_dir(output_dir)
     try:
         from glossary_paths import get_book_glossary_dir, migrate_all_legacy_glossary_files
-        backup_root = os.path.join(os.path.dirname(os.path.abspath(shared_glossary_dir)), "Glossary_Backup")
-        migrate_all_legacy_glossary_files(shared_glossary_dir, backup_root=backup_root, logger=print)
+        migrate_all_legacy_glossary_files(shared_glossary_dir, logger=print)
         glossary_dir = get_book_glossary_dir(shared_glossary_dir, base)
     except Exception:
         glossary_dir = os.path.join(shared_glossary_dir, base)
@@ -16086,8 +16085,7 @@ def main(log_callback=None, stop_callback=None):
                     input_base = input_base_raw.lower()
                     try:
                         from glossary_paths import migrate_all_legacy_glossary_files
-                        backup_root = os.path.join(os.path.dirname(os.path.abspath(glossary_search_dir)), "Glossary_Backup")
-                        migrate_all_legacy_glossary_files(glossary_search_dir, backup_root=backup_root, logger=print)
+                        migrate_all_legacy_glossary_files(glossary_search_dir, logger=print)
                     except Exception:
                         pass
                     best_match = None

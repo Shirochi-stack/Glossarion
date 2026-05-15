@@ -2452,7 +2452,6 @@ Text to analyze:
             from glossary_paths import start_background_glossary_migration
             start_background_glossary_migration(
                 os.path.join(_get_app_dir(), 'Glossary'),
-                backup_root=os.path.join(_get_app_dir(), 'Glossary_Backup'),
                 logger=lambda msg: logging.getLogger(__name__).info(msg),
             )
         except Exception:
@@ -14920,6 +14919,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
         else:
             glossary_request_merging_enabled = '1' if self.config.get('glossary_request_merging_enabled', False) else '0'
             glossary_enable_chapter_split = '1' if self.config.get('glossary_enable_chapter_split', False) else '0'
+        output_override_for_env = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        if output_override_for_env:
+            glossary_shared_dir = os.path.join(os.path.abspath(output_override_for_env), 'Glossary')
+        else:
+            glossary_shared_dir = os.path.join(_get_app_dir(), 'Glossary')
 
         def _bool_setting(value, default=False):
             if value is None:
@@ -14967,8 +14971,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'TRANSLATION_TEMPERATURE': str(self.trans_temp.text()),
             'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.text()),
             'EPUB_OUTPUT_DIR': _get_app_dir(),
-            'GLOSSARY_SHARED_DIR': os.path.join(_get_app_dir(), 'Glossary'),
+            'GLOSSARY_SHARED_DIR': glossary_shared_dir,
             'SAVE_GLOSSARY_IN_OUTPUT': '1' if self.config.get('save_glossary_in_output', False) else '0',
+            'GLOSSARY_OUTPUT_BACKUP_DIR': self._output_side_glossary_backup_dir_for_source(epub_path) if self.config.get('save_glossary_in_output', False) else '',
             # Whether to include previous source text as memory context
             'INCLUDE_SOURCE_IN_HISTORY': "1" if getattr(self, 'include_source_in_history_var', False) else "0",
             'APPEND_GLOSSARY': "0" if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ("1" if self.append_glossary_var else "0"),
@@ -15551,10 +15556,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 else:
                     glossary_dir = os.path.join(_get_app_dir(), "Glossary")
                 os.makedirs(glossary_dir, exist_ok=True)
-                output_path = os.path.join(glossary_dir, f"{base_name}_glossary.json")
+                try:
+                    from glossary_paths import get_book_glossary_path
+                    output_path = get_book_glossary_path(glossary_dir, base_name, f"{base_name}_glossary.json")
+                except Exception:
+                    output_path = os.path.join(glossary_dir, base_name, f"{base_name}_glossary.json")
                 os.environ["OUTPUT_PATH"] = output_path
                 os.environ["GLOSSARY_SHARED_DIR"] = glossary_dir
                 os.environ["SAVE_GLOSSARY_IN_OUTPUT"] = "1" if save_glossary_in_output else "0"
+                if save_glossary_in_output:
+                    os.environ["GLOSSARY_OUTPUT_BACKUP_DIR"] = self._output_side_glossary_backup_dir_for_source(text_file)
+                else:
+                    os.environ.pop("GLOSSARY_OUTPUT_BACKUP_DIR", None)
                 
                 if self._extract_glossary_from_text_file(text_file):
                     successful += 1
@@ -15562,7 +15575,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 else:
                     # If failed but we have a partial file (checked inside _extract...), add to success list with note
                     # We need to manually check if partial file exists since _extract returns False on stop
-                    partial_path = os.path.join(glossary_dir, f"{base_name}_glossary.csv")
+                    partial_path = os.path.splitext(output_path)[0] + '.csv'
                     if os.path.exists(partial_path):
                         successful_items.append(f"📄 {partial_path} (Partial)")
                     failed += 1
@@ -15624,6 +15637,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.current_file_index = 0
             # Emit signal to update button (thread-safe)
             self.thread_complete_signal.emit()
+
+    def _output_side_glossary_backup_dir_for_source(self, source_path):
+        """Return the distributable Glossary_Backup folder beside this source's output."""
+        base_name = os.path.splitext(os.path.basename(source_path))[0]
+        override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        if override_dir:
+            output_dir = os.path.join(os.path.abspath(override_dir), base_name)
+        else:
+            output_dir = os.path.join(_get_app_dir(), base_name)
+        return os.path.join(output_dir, "Glossary_Backup")
 
     def _process_image_folder_for_glossary(self, folder_name, image_files, output_dir=None):
         """Process all images from a folder and create a combined glossary with new format"""
@@ -16470,8 +16493,7 @@ Important rules:
             os.makedirs(shared_glossary_dir, exist_ok=True)
             try:
                 from glossary_paths import get_book_glossary_path, migrate_all_legacy_glossary_files
-                backup_root = os.path.join(os.path.dirname(os.path.abspath(shared_glossary_dir)), "Glossary_Backup")
-                migrate_all_legacy_glossary_files(shared_glossary_dir, backup_root=backup_root, logger=self.append_log)
+                migrate_all_legacy_glossary_files(shared_glossary_dir, logger=self.append_log)
                 output_path = get_book_glossary_path(
                     shared_glossary_dir, epub_base, f"{epub_base}_glossary.json"
                 )
@@ -16479,6 +16501,7 @@ Important rules:
                 glossary_dir = os.path.join(shared_glossary_dir, epub_base)
                 os.makedirs(glossary_dir, exist_ok=True)
                 output_path = os.path.join(glossary_dir, f"{epub_base}_glossary.json")
+            output_side_backup_dir = self._output_side_glossary_backup_dir_for_source(file_path)
             
             try:
                 # Set up environment variables
@@ -16538,6 +16561,7 @@ Important rules:
                     'CONTEXT_WINDOW_SIZE': str(self.context_window_size_var),
                     'GLOSSARY_SHARED_DIR': shared_glossary_dir,
                     'SAVE_GLOSSARY_IN_OUTPUT': '1' if save_glossary_in_output else '0',
+                    'GLOSSARY_OUTPUT_BACKUP_DIR': output_side_backup_dir if save_glossary_in_output else '',
                     'VISION_OCR_SOURCE_PREPASS': str(self.config.get('vision_ocr_source_prepass', 'auto') or 'auto'),
                     'ENABLE_AUTO_GLOSSARY': "1" if (self.config.get('auto_glossary_mode', 'off') == 'minimal' or (self.config.get('auto_glossary_mode') is None and self.enable_auto_glossary_var)) else "0",
                     'AUTO_GLOSSARY_MODE': self.config.get('auto_glossary_mode', 'off'),
@@ -21391,8 +21415,7 @@ Important rules:
                 match_names.add(base.casefold())
             try:
                 from glossary_paths import migrate_all_legacy_glossary_files
-                backup_root = os.path.join(os.path.dirname(os.path.abspath(glossary_base_dir)), "Glossary_Backup")
-                migrate_all_legacy_glossary_files(glossary_base_dir, backup_root=backup_root, logger=self.append_log)
+                migrate_all_legacy_glossary_files(glossary_base_dir, logger=self.append_log)
             except Exception:
                 pass
                 
@@ -21750,8 +21773,7 @@ Important rules:
 
                 try:
                     from glossary_paths import migrate_all_legacy_glossary_files
-                    backup_root = os.path.join(os.path.dirname(os.path.abspath(glossary_dir)), "Glossary_Backup")
-                    migrate_all_legacy_glossary_files(glossary_dir, backup_root=backup_root)
+                    migrate_all_legacy_glossary_files(glossary_dir)
                 except Exception:
                     pass
 

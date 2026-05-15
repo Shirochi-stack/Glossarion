@@ -1508,49 +1508,83 @@ class RetranslationMixin:
         
         # ── Glossary Progress button ──
         # Find the glossary progress file based on automapping settings
+        def _glossary_progress_search_dirs(base):
+            """Return likely glossary progress locations, newest per-book layout first."""
+            search_dirs = []
+            seen = set()
+
+            def _add(path):
+                if not path:
+                    return
+                path = os.path.abspath(path)
+                key = os.path.normcase(path)
+                if key not in seen:
+                    seen.add(key)
+                    search_dirs.append(path)
+
+            def _add_root(root):
+                if not root:
+                    return
+                root = os.path.abspath(root)
+                shared = os.path.join(root, 'Glossary')
+                try:
+                    from glossary_paths import get_book_glossary_dir
+                    _add(get_book_glossary_dir(shared, base, create=False))
+                except Exception:
+                    _add(os.path.join(shared, base))
+                _add(shared)
+                _add(os.path.join(root, base, 'Glossary'))
+                _add(os.path.join(root, base))
+
+            _override_dir = (os.environ.get('OUTPUT_DIRECTORY') or os.environ.get('OUTPUT_DIR'))
+            if not _override_dir and hasattr(self, 'config'):
+                _override_dir = self.config.get('output_directory')
+            if _override_dir:
+                _add_root(_override_dir)
+
+            try:
+                from translator_gui import _get_app_dir
+                _app_dir = _get_app_dir()
+            except Exception:
+                _app_dir = os.getcwd()
+            _add_root(_app_dir)
+
+            if hasattr(self, 'base_dir'):
+                _add_root(self.base_dir)
+
+            return search_dirs
+
+        def _find_progress_in_dir(directory, progress_name):
+            candidate = os.path.join(directory, progress_name)
+            if os.path.isfile(candidate):
+                return candidate
+            generic = os.path.join(directory, 'glossary_progress.json')
+            if os.path.isfile(generic):
+                return generic
+            if os.path.basename(directory).lower() != 'glossary':
+                try:
+                    matches = [
+                        os.path.join(directory, name)
+                        for name in os.listdir(directory)
+                        if name.lower().endswith('_glossary_progress.json')
+                    ]
+                    if matches:
+                        return max(matches, key=lambda path: os.path.getmtime(path))
+                except Exception:
+                    pass
+            return None
+
         def _find_glossary_progress_file():
             """Locate the glossary progress file for the current EPUB."""
             try:
                 base = os.path.splitext(os.path.basename(file_path))[0]
                 progress_name = f"{base}_glossary_progress.json"
-                
-                # Determine output root (same logic as automapping)
-                _override_dir = (os.environ.get('OUTPUT_DIRECTORY') or os.environ.get('OUTPUT_DIR'))
-                if not _override_dir and hasattr(self, 'config'):
-                    _override_dir = self.config.get('output_directory')
-                
-                search_dirs = []
-                if _override_dir:
-                    _root = os.path.abspath(_override_dir)
-                    search_dirs.append(os.path.join(_root, 'Glossary'))
-                    search_dirs.append(os.path.join(_root, base, 'Glossary'))
-                    search_dirs.append(os.path.join(_root, base))
-                
-                # CWD-based paths
-                try:
-                    from translator_gui import _get_app_dir
-                    _app_dir = _get_app_dir()
-                except Exception:
-                    _app_dir = os.getcwd()
-                search_dirs.append(os.path.join(_app_dir, 'Glossary'))
-                search_dirs.append(os.path.join(_app_dir, base, 'Glossary'))
-                search_dirs.append(os.path.join(_app_dir, base))
-                
-                # Also check app base_dir
-                if hasattr(self, 'base_dir'):
-                    search_dirs.append(os.path.join(self.base_dir, 'Glossary'))
-                    search_dirs.append(os.path.join(self.base_dir, base, 'Glossary'))
-                
-                for d in search_dirs:
+                for d in _glossary_progress_search_dirs(base):
                     if not os.path.isdir(d):
                         continue
-                    candidate = os.path.join(d, progress_name)
-                    if os.path.isfile(candidate):
-                        return candidate
-                    # Also check generic name
-                    generic = os.path.join(d, 'glossary_progress.json')
-                    if os.path.isfile(generic):
-                        return generic
+                    found = _find_progress_in_dir(d, progress_name)
+                    if found:
+                        return found
             except Exception:
                 pass
             return None
@@ -1583,38 +1617,12 @@ class RetranslationMixin:
             try:
                 base = os.path.splitext(os.path.basename(fp))[0]
                 progress_name = f"{base}_glossary_progress.json"
-                
-                _override_dir = (os.environ.get('OUTPUT_DIRECTORY') or os.environ.get('OUTPUT_DIR'))
-                if not _override_dir and hasattr(self, 'config'):
-                    _override_dir = self.config.get('output_directory')
-                
-                search_dirs = []
-                if _override_dir:
-                    _root = os.path.abspath(_override_dir)
-                    search_dirs.append(os.path.join(_root, 'Glossary'))
-                    search_dirs.append(os.path.join(_root, base, 'Glossary'))
-                    search_dirs.append(os.path.join(_root, base))
-                try:
-                    from translator_gui import _get_app_dir
-                    _app_dir = _get_app_dir()
-                except Exception:
-                    _app_dir = os.getcwd()
-                search_dirs.append(os.path.join(_app_dir, 'Glossary'))
-                search_dirs.append(os.path.join(_app_dir, base, 'Glossary'))
-                search_dirs.append(os.path.join(_app_dir, base))
-                if hasattr(self, 'base_dir'):
-                    search_dirs.append(os.path.join(self.base_dir, 'Glossary'))
-                    search_dirs.append(os.path.join(self.base_dir, base, 'Glossary'))
-                
-                for d in search_dirs:
+                for d in _glossary_progress_search_dirs(base):
                     if not os.path.isdir(d):
                         continue
-                    candidate = os.path.join(d, progress_name)
-                    if os.path.isfile(candidate):
-                        return candidate
-                    generic = os.path.join(d, 'glossary_progress.json')
-                    if os.path.isfile(generic):
-                        return generic
+                    found = _find_progress_in_dir(d, progress_name)
+                    if found:
+                        return found
             except Exception:
                 pass
             return None

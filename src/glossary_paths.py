@@ -227,7 +227,7 @@ def migrate_all_legacy_glossary_files(shared_glossary_dir: str, logger=None, bac
         if dirname.strip().lower() in skip_dirs or dirname.startswith("."):
             continue
         moved.extend(repair_nested_glossary_folder(root, dirname, logger=logger))
-        moved.extend(repair_misplaced_glossary_backup(root, dirname, backup_root=backup_root, logger=logger))
+        moved.extend(repair_misplaced_glossary_backup(root, dirname, logger=logger))
 
     if moved:
         _safe_log(logger, f"Glossary migration sweep completed: moved/repaired {len(moved)} file(s)")
@@ -308,7 +308,7 @@ def start_background_glossary_migration(shared_glossary_dir: str, logger=None, b
 
         def _run():
             try:
-                migrate_all_legacy_glossary_files(root, logger=logger, backup_root=backup_root)
+                migrate_all_legacy_glossary_files(root, logger=logger)
             except Exception as exc:
                 _safe_log(logger, f"Glossary migration sweep failed: {exc}")
 
@@ -353,7 +353,7 @@ def repair_nested_glossary_folder(shared_glossary_dir: str, book_name: str, logg
 
 
 def repair_misplaced_glossary_backup(shared_glossary_dir: str, book_name: str, backup_root: str = None, logger=None):
-    """Move accidental Glossary/<book>/Glossary_Backup files back to the shared backup folder."""
+    """Move accidental Glossary/<book>/Glossary_Backup files into book-owned storage."""
     root = os.path.abspath(shared_glossary_dir or os.path.join(os.getcwd(), "Glossary"))
     base = glossary_book_base_from_output(book_name)
     book_dir = get_book_glossary_dir(root, base, create=True)
@@ -361,32 +361,32 @@ def repair_misplaced_glossary_backup(shared_glossary_dir: str, book_name: str, b
     if not os.path.isdir(misplaced_dir):
         return []
 
-    target_dir = os.path.abspath(backup_root or os.path.join(os.path.dirname(root), "Glossary_Backup"))
-    os.makedirs(target_dir, exist_ok=True)
-
     moved = []
     for filename in os.listdir(misplaced_dir):
         src = os.path.join(misplaced_dir, filename)
-        dst = os.path.join(target_dir, filename)
         if not os.path.isfile(src):
             continue
+        file_base = legacy_glossary_base_from_filename(filename)
+        if file_base and sanitize_glossary_folder_name(file_base).casefold() == sanitize_glossary_folder_name(base).casefold():
+            target_dir = book_dir
+        else:
+            target_dir = os.path.join(book_dir, "Backups")
+        os.makedirs(target_dir, exist_ok=True)
+        dst = os.path.join(target_dir, filename)
         if os.path.exists(dst):
             try:
-                if os.path.getsize(src) == os.path.getsize(dst):
-                    with open(src, "rb") as src_f, open(dst, "rb") as dst_f:
-                        if src_f.read() == dst_f.read():
-                            os.remove(src)
-                            moved.append((src, dst))
-                            _safe_log(logger, f"Removed duplicate misplaced glossary backup: {filename}")
-                            continue
+                if _files_are_identical(src, dst):
+                    os.remove(src)
+                    moved.append((src, dst))
+                    _safe_log(logger, f"Removed duplicate misplaced glossary backup: {filename}")
+                    continue
             except Exception:
                 pass
-            _safe_log(logger, f"Misplaced glossary backup repair skipped existing file: {dst}")
-            continue
+            dst = _unique_legacy_destination(dst)
         try:
             shutil.move(src, dst)
             moved.append((src, dst))
-            _safe_log(logger, f"Moved misplaced glossary backup: {filename} -> {os.path.basename(target_dir)}/")
+            _safe_log(logger, f"Moved misplaced glossary backup: {filename} -> {os.path.relpath(target_dir, book_dir)}/")
         except Exception as exc:
             _safe_log(logger, f"Misplaced glossary backup repair failed for {src}: {exc}")
 
