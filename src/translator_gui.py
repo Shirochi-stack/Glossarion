@@ -2181,6 +2181,7 @@ Text to analyze:
                 "- Preserve any Markdown formatting (headers, bold, italic, lists, etc.) if present.\n"
                 "- If the text does not contain HTML tags, use line breaks for proper formatting as expected of a novel.\n"
                 "- Maintain the original meaning, tone, and style.\n"
+                "- Strictly follow a Subject Tracking & Pronoun Resolution process: track omitted or ambiguous subjects/pronouns from surrounding context, titles, relationships, dialogue, and repeated mentions so pronouns stay consistent instead of defaulting to 'he', 'she', or 'it'.\n"
                 "- Output ONLY the translated text in {target_lang}. Do not add any explanations, notes, or conversational filler.\n"
             ),
             "Refinement": (

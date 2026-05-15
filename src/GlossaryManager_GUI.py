@@ -1829,7 +1829,8 @@ class GlossaryManagerMixin:
             "Available placeholders: {fields}, {fields1}, {language}, {entries}, "
             "{description_mandatory}, {description_detailed}, {description_in_language}, "
             "{description_excluded_note}, {description_example}, {example}, "
-            "{description_name_split_example}, {name_split_example}, {gender_instruction},  Separator: \\x1F"
+            "{description_name_split_example}, {name_split_example}, {gender_instruction}, "
+            "{subject_tracking_instruction},  Separator: \\x1F"
         )
         placeholders_line.setReadOnly(True)
         placeholders_line.setFrame(False)
@@ -1889,6 +1890,9 @@ class GlossaryManagerMixin:
             "determine gender from context clues, leave empty if insufficient. "
             "For all other entry types, leave gender empty.'</i>"
             "<br/>Blank if no entry types have 'has_gender' enabled</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{subject_tracking_instruction}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'Apply Subject Tracking & Pronoun Resolution when extracting character data...'</i>"
+            "<br/>Active when Include Gender Context is ON; stripped otherwise</td></tr>"
             "</table></qt>"
         )
         prompt_frame_layout.addWidget(placeholders_line)
@@ -3532,7 +3536,7 @@ Rules:
         desc_label = QLabel("This prompt guides the AI to extract character names, terms, and titles from the text:")
         glossary_prompt_frame_layout.addWidget(desc_label)
         
-        placeholder_line = QLineEdit("Available placeholders: {fields}, {fields1}, {language}, {entries}, {min_frequency}, {max_names}, {max_titles}, {marker}, {description_example}, {example}, {description_name_split_example}, {name_split_example}, {gender_instruction},  Separator: \\x1F")
+        placeholder_line = QLineEdit("Available placeholders: {fields}, {fields1}, {language}, {entries}, {min_frequency}, {max_names}, {max_titles}, {marker}, {description_example}, {example}, {description_name_split_example}, {name_split_example}, {gender_instruction}, {subject_tracking_instruction},  Separator: \\x1F")
         placeholder_line.setReadOnly(True)
         placeholder_line.setFrame(False)
         placeholder_line.setCursorPosition(0)
@@ -3587,6 +3591,9 @@ Rules:
             "determine gender from context clues, leave empty if insufficient. "
             "For all other entry types, leave gender empty.'</i>"
             "<br/>Blank if no entry types have 'has_gender' enabled</td></tr>"
+            "<tr><td style='white-space:nowrap; vertical-align:top; border-bottom:1px solid #444;'><b>{subject_tracking_instruction}</b></td>"
+            "<td style='word-wrap:break-word; border-bottom:1px solid #444;'><i>'Apply Subject Tracking & Pronoun Resolution when extracting character data...'</i>"
+            "<br/>Active when Include Gender Context is ON; stripped otherwise</td></tr>"
             "</table></qt>"
         )
         glossary_prompt_frame_layout.addWidget(placeholder_line)

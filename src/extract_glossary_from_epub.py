@@ -3017,6 +3017,9 @@ _DESCRIPTION_IN_LANGUAGE_TEXT = " and description"
 #   active:   ..."But" (The description column is excluded from this restriction)
 #   inactive: ..."But"
 _DESCRIPTION_EXCLUDED_NOTE_TEXT = " (The description column is excluded from this restriction)"
+_SUBJECT_TRACKING_INSTRUCTION_TEXT = (
+    'Apply Subject Tracking & Pronoun Resolution when extracting character data: track omitted or ambiguous subjects/pronouns from surrounding context, titles, relationships, dialogue, and repeated mentions so gender/person fields and descriptions stay consistent instead of defaulting to "he", "she", or "it".'
+)
 
 # Example CSV lines for glossary prompts. The description-bearing version is
 # used when description is active; the plain version when it is not.
@@ -3075,6 +3078,7 @@ The translated_name column must be a direct translation or transliteration of th
 
 CRITICAL EXTRACTION RULES:
 - Extract All {entries}
+- Apply Subject Tracking & Pronoun Resolution when extracting character data: track omitted or ambiguous subjects/pronouns from surrounding context, titles, relationships, dialogue, and repeated mentions so gender/person fields and descriptions stay consistent instead of defaulting to "he", "she", or "it".
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But"{description_excluded_note}
@@ -3110,6 +3114,7 @@ The translated_name column must be a direct translation or transliteration of th
 
 CRITICAL EXTRACTION RULES:
 - Extract All Character names, Terms, Location names, Ability/Skill names, Item names, Organization names, and Titles/Ranks
+- {subject_tracking_instruction}
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But" (The description column is excluded from this restriction)
@@ -3148,6 +3153,26 @@ _NO_DESCRIPTION_LINE_PLACEHOLDERS = (
     '{example}',
     '{name_split_example}',
 )
+
+
+def _apply_subject_tracking_placeholder(prompt_text, include_gender_context=None):
+    """Expand subject-tracking guidance only when gender context is enabled."""
+    if not isinstance(prompt_text, str) or '{subject_tracking_instruction}' not in prompt_text:
+        return prompt_text
+    if include_gender_context is None:
+        include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
+    if include_gender_context:
+        return prompt_text.replace('{subject_tracking_instruction}', _SUBJECT_TRACKING_INSTRUCTION_TEXT)
+
+    import re as _re_st
+    return _re_st.sub(
+        r'^[ \t]*-?[ \t]*'
+        + _re_st.escape('{subject_tracking_instruction}')
+        + r'[ \t]*\r?\n?',
+        '',
+        prompt_text,
+        flags=_re_st.MULTILINE,
+    )
 
 
 def _apply_description_rule_placeholders(prompt_text, custom_fields=None, description_active=None):
@@ -3281,6 +3306,7 @@ def build_prompt(chapter_text: str) -> tuple:
 
     # Replace {gender_instruction} with dynamic gender rule
     custom_prompt = custom_prompt.replace('{gender_instruction}', _gender_instruction)
+    custom_prompt = _apply_subject_tracking_placeholder(custom_prompt)
 
     # Expand (or strip) the description-rule placeholders. Done BEFORE the
     # {fields}/{fields1} expansion so no subsequent regex or format op can

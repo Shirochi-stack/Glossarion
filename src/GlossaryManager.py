@@ -51,9 +51,13 @@ def _build_header(*extra_cols):
 # Default unified auto-glossary prompt — imported from the canonical source of
 # truth in extract_glossary_from_epub so there is only one copy to maintain.
 try:
-    from extract_glossary_from_epub import DEFAULT_AUTO_GLOSSARY_PROMPT as DEFAULT_AUTO_GLOSARY_PROMPT3
+    from extract_glossary_from_epub import (
+        DEFAULT_AUTO_GLOSSARY_PROMPT as DEFAULT_AUTO_GLOSARY_PROMPT3,
+        _apply_subject_tracking_placeholder,
+    )
 except ImportError:
     DEFAULT_AUTO_GLOSARY_PROMPT3 = ""
+    _apply_subject_tracking_placeholder = None
 
 
 # Class-level shared lock for API submission timing
@@ -4514,6 +4518,11 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
             system_prompt = system_prompt.replace('{max_names}', str(max_names))
             system_prompt = system_prompt.replace('{max_titles}', str(max_titles))
             system_prompt = system_prompt.replace('{marker}', str(marker_count))
+            if _apply_subject_tracking_placeholder is not None:
+                _inc_gender_ctx = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
+                system_prompt = _apply_subject_tracking_placeholder(
+                    system_prompt, include_gender_context=_inc_gender_ctx
+                )
 
             # --- {fields1}, {fields}, {entries} placeholder replacement ---
             _has_fields1 = '{fields1}' in system_prompt
