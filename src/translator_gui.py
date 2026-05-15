@@ -8362,6 +8362,9 @@ Recent translations to summarize:
         )
         self.library_btn.setMinimumWidth(90)
         self.library_btn.clicked.connect(self._open_epub_library)
+        self._register_startup_prewarm_button(
+            'epub_library', self.library_btn, loading_text="Loading..."
+        )
         self.frame.addWidget(self.library_btn, 6, 4)
 
 
@@ -8873,6 +8876,10 @@ Recent translations to summarize:
         other_settings_btn.clicked.connect(self.open_other_settings)
         other_settings_btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; font-size: 11pt; padding-top: 8px; padding-bottom: 12px;")  # info-outline
         other_settings_btn.setMinimumWidth(90)
+        self.other_settings_btn = other_settings_btn
+        self._register_startup_prewarm_button(
+            'other_settings', other_settings_btn, loading_text="Loading..."
+        )
         self.frame.addWidget(other_settings_btn, 7, 4)
         
         # Remove AI Artifacts dropdown (row 7) — packed into a compact container
@@ -10575,6 +10582,47 @@ If you see multiple p-b cookies, use the one with the longest value."""
             except: pass
         
         return uses_zero_based
+
+    def _register_startup_prewarm_button(self, key, button, *, text_widget=None, loading_text="Loading..."):
+        """Register a button that should show a temporary startup prewarm state."""
+        try:
+            if not hasattr(self, '_startup_prewarm_button_registry'):
+                self._startup_prewarm_button_registry = {}
+            self._startup_prewarm_button_registry[key] = {
+                'button': button,
+                'text_widget': text_widget,
+                'normal_text': text_widget.text() if text_widget is not None and hasattr(text_widget, 'text') else button.text(),
+                'loading_text': loading_text,
+                'was_enabled': button.isEnabled(),
+            }
+        except Exception:
+            pass
+
+    def set_startup_prewarm_button_loading(self, key, loading=True):
+        """Toggle one registered startup prewarm button between loading and normal state."""
+        try:
+            entry = getattr(self, '_startup_prewarm_button_registry', {}).get(key)
+            if not entry:
+                return
+            button = entry.get('button')
+            text_widget = entry.get('text_widget')
+            if button is None:
+                return
+            if loading:
+                entry['was_enabled'] = button.isEnabled()
+                button.setEnabled(False)
+                if text_widget is not None and hasattr(text_widget, 'setText'):
+                    text_widget.setText(entry.get('loading_text', 'Loading...'))
+                else:
+                    button.setText(entry.get('loading_text', 'Loading...'))
+            else:
+                button.setEnabled(bool(entry.get('was_enabled', True)))
+                if text_widget is not None and hasattr(text_widget, 'setText'):
+                    text_widget.setText(entry.get('normal_text', ''))
+                else:
+                    button.setText(entry.get('normal_text', ''))
+        except Exception:
+            pass
       
     def _make_bottom_toolbar(self):
         """Create the bottom toolbar with all action buttons"""
@@ -10963,6 +11011,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self.qa_text_label = FittingLabel("QA Scan", base_point_size=8.0)  # Store as instance variable
         self.qa_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
         self.qa_text_label.setAlignment(Qt.AlignCenter)
+        self._register_startup_prewarm_button(
+            'qa_settings',
+            self.qa_button,
+            text_widget=self.qa_text_label,
+            loading_text="Loading..."
+        )
         
         qa_btn_layout.addStretch(1)
         qa_btn_layout.addWidget(self.qa_button_icon)
@@ -11032,6 +11086,17 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 btn.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Save all settings to config.json.</p></qt>")
             elif lbl not in ["Extract Glossary", "EPUB Converter"]:  # Don't connect yet for these buttons
                 btn.clicked.connect(cmd)
+
+            if lbl == "âš™ï¸ Glossary Settings":
+                self.glossary_settings_btn = btn
+                self._register_startup_prewarm_button(
+                    'glossary_settings', btn, loading_text="Loading..."
+                )
+            elif lbl == "ðŸ“¦ Async Translator":
+                self.async_translator_btn = btn
+                self._register_startup_prewarm_button(
+                    'async_translator', btn, loading_text="Loading..."
+                )
             
             btn.setMinimumHeight(toolbar_button_height)
             btn.setMinimumWidth(72)

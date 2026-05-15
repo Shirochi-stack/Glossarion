@@ -609,6 +609,26 @@ class SplashManager(QObject):
         except Exception:
             pass
 
+        prewarm_button_keys = [
+            "qa_settings",
+            "glossary_settings",
+            "other_settings",
+            "epub_library",
+            "async_translator",
+        ]
+
+        def set_prewarm_buttons_loading(loading):
+            try:
+                setter = getattr(main_window, 'set_startup_prewarm_button_loading', None)
+                if not callable(setter):
+                    return
+                for button_key in prewarm_button_keys:
+                    setter(button_key, loading)
+            except Exception:
+                pass
+
+        set_prewarm_buttons_loading(True)
+
         def finish():
             try:
                 main_window._startup_prewarming = False
@@ -619,6 +639,7 @@ class SplashManager(QObject):
                 print(f"[STARTUP_PREWARM] summary: {results}")
             except Exception:
                 pass
+            set_prewarm_buttons_loading(False)
 
         def run_step(key, label, progress, callback, verifier):
             try:
