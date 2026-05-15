@@ -788,6 +788,7 @@ class GlossarionWeb:
         
         # Glossary compression (enabled by default)
         os.environ['COMPRESS_GLOSSARY_PROMPT'] = '1' if config('compress_glossary_prompt', True) else '0'
+        os.environ['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = '1' if config('compress_glossary_strict_gender_matching', False) else '0'
         
         # Dynamic limit expansion (enabled by default)
         os.environ['GLOSSARY_INCLUDE_ALL_CHARACTERS'] = '1' if config('glossary_include_all_characters', True) else '0'

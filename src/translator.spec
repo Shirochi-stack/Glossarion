@@ -116,6 +116,7 @@ app_files = [
     ('other_settings.py', '.'),
     ('GlossaryManager.py', '.'),
     ('GlossaryManager_GUI.py', '.'),
+    ('glossary_paths.py', '.'),
     ('Retranslation_GUI.py', '.'),
     ('QA_Scanner_GUI.py', '.'),
     ('Chapter_Extractor.py', '.'),
@@ -239,6 +240,7 @@ app_modules = [
     'chapter_extraction_manager',  # Chapter extraction manager
     'GlossaryManager',
     'GlossaryManager_GUI',
+    'glossary_paths',
     'Retranslation_GUI',
     'QA_Scanner_GUI',
     'Chapter_Extractor',

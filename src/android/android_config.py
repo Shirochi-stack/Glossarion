@@ -73,6 +73,7 @@ DEFAULT_CONFIG = {
     'glossary_batch_size': 50,
     'glossary_filter_mode': 'all',
     'glossary_fuzzy_threshold': 0.90,
+    'compress_glossary_strict_gender_matching': False,
 
     # Thinking mode
     'enable_gpt_thinking': True,

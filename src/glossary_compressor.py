@@ -50,6 +50,13 @@ def _get_gender_types():
             pass
     return {'character'}  # safe fallback
 
+
+def _strict_gender_name_matching_enabled():
+    """Return True when gender-enabled entries must match the full raw name."""
+    return str(os.getenv("COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING", "0")).strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+
 try:
     from GlossaryManager import GLOSSARY_SEP, _gsep, _is_glossary_header
 except ImportError:
@@ -862,6 +869,9 @@ def _text_contains_term(text, term, is_character=False):
     # Full term match first (fast path)
     if term in text:
         return True
+
+    if is_character and _strict_gender_name_matching_enabled():
+        return False
     
     # Multi-word: check individual tokens
     # Character entries: accept any token length (≥1 char)

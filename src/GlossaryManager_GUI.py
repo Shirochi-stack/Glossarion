@@ -232,6 +232,19 @@ class GlossaryManagerMixin:
             except Exception:
                 pass
 
+    def _on_glossary_manager_strict_gender_compression_toggle(self, state=None):
+        """Sync strict gender-name compression matching to config and environment."""
+        try:
+            enabled = bool(self.strict_gender_compression_checkbox.isChecked())
+        except Exception:
+            enabled = bool(state)
+        try:
+            self.config['compress_glossary_strict_gender_matching'] = enabled
+            self.compress_glossary_strict_gender_matching_var = enabled
+            os.environ['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = '1' if enabled else '0'
+        except Exception:
+            pass
+
     def glossary_manager(self):
         """Open comprehensive glossary management dialog"""
         # Reuse existing dialog if it hasn't been destroyed
@@ -244,6 +257,7 @@ class GlossaryManagerMixin:
                     ('append_glossary_checkbox', 'append_glossary', False),
                     ('append_glossary_auto_load_checkbox', 'append_glossary_auto_load', False),
                     ('fuzzy_auto_mapping_checkbox', 'fuzzy_auto_mapping', False),
+                    ('strict_gender_compression_checkbox', 'compress_glossary_strict_gender_matching', False),
                     ('save_glossary_in_output_checkbox', 'save_glossary_in_output', False),
                 ]
                 for attr, cfg_key, default in _sync_pairs:
@@ -737,6 +751,7 @@ class GlossaryManagerMixin:
                     # auto_glossary_mode_combo is handled separately below (it's a QComboBox, not a checkbox)
                     ('add_additional_glossary_checkbox', 'add_additional_glossary_var'),
                     ('compress_glossary_checkbox', 'compress_glossary_prompt_var'),
+                    ('strict_gender_compression_checkbox', 'compress_glossary_strict_gender_matching_var'),
                     ('save_glossary_in_output_checkbox', 'save_glossary_in_output_var'),
                     ('enable_gender_nuance_checkbox', 'enable_gender_nuance_var'),
                     ('include_gender_context_checkbox', 'include_gender_context_var'),
@@ -779,6 +794,9 @@ class GlossaryManagerMixin:
                             self.config['add_additional_glossary'] = bool(checked)
                         elif checkbox_name == 'compress_glossary_checkbox':
                             self.config['compress_glossary_prompt'] = bool(checked)
+                        elif checkbox_name == 'strict_gender_compression_checkbox':
+                            self.config['compress_glossary_strict_gender_matching'] = bool(checked)
+                            os.environ['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = '1' if checked else '0'
                         elif checkbox_name == 'save_glossary_in_output_checkbox':
                             self.config['save_glossary_in_output'] = bool(checked)
                         elif checkbox_name == 'enable_gender_nuance_checkbox':
@@ -2744,6 +2762,27 @@ Rules:
         # label3.setStyleSheet("color: white; font-size: 10pt; font-style: italic;")
         compress_layout.addWidget(label3)
         compress_layout.addStretch()
+
+        strict_gender_widget = QWidget()
+        strict_gender_layout = QHBoxLayout(strict_gender_widget)
+        strict_gender_layout.setContentsMargins(20, 0, 0, 15)
+        auto_layout.addWidget(strict_gender_widget)
+
+        if not hasattr(self, 'strict_gender_compression_checkbox'):
+            self.strict_gender_compression_checkbox = self._create_styled_checkbox("Strict Gender Entry Matching")
+            self.strict_gender_compression_checkbox.setChecked(self.config.get('compress_glossary_strict_gender_matching', False))
+        if not getattr(self.strict_gender_compression_checkbox, '_glossary_manager_sync_connected', False):
+            self.strict_gender_compression_checkbox.stateChanged.connect(self._on_glossary_manager_strict_gender_compression_toggle)
+            self.strict_gender_compression_checkbox._glossary_manager_sync_connected = True
+        self.strict_gender_compression_checkbox.setToolTip(
+            "When ON, gender-enabled entries such as characters are only sent if the full raw_name appears in the source text.\n"
+            "When OFF, character names stay loose and may match surname/given-name tokens, including one-character CJK names."
+        )
+        strict_gender_layout.addWidget(self.strict_gender_compression_checkbox)
+
+        strict_gender_hint = QLabel("(Optional: stricter compression for smart models; default OFF keeps loose character matching)")
+        strict_gender_layout.addWidget(strict_gender_hint)
+        strict_gender_layout.addStretch()
 
         # Save location toggle
         output_save_widget = QWidget()

@@ -133,6 +133,7 @@ def set_all_env_vars(config):
     os.environ['MANUAL_GLOSSARY_FUZZY_THRESHOLD'] = str(_get('manual_glossary_fuzzy_threshold', 0.90))
     os.environ['GLOSSARY_USE_LEGACY_CSV'] = '1' if _get('glossary_use_legacy_csv', False) else '0'
     os.environ['COMPRESS_GLOSSARY_PROMPT'] = '1' if _get('compress_glossary_prompt', True) else '0'
+    os.environ['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = '1' if _get('compress_glossary_strict_gender_matching', False) else '0'
     os.environ['GLOSSARY_INCLUDE_ALL_CHARACTERS'] = '1' if _get('glossary_include_all_characters', True) else '0'
 
     # Glossary append prompt

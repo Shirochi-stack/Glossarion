@@ -3315,6 +3315,9 @@ class AsyncProcessingDialog:
             env_vars['COMPRESS_GLOSSARY_PROMPT'] = "1" if _val(self.gui.compress_glossary_prompt_var, False) else "0"
         else:
             env_vars['COMPRESS_GLOSSARY_PROMPT'] = "1" if self.gui.config.get('compress_glossary_prompt', False) else "0"
+        env_vars['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = (
+            "1" if self.gui.config.get('compress_glossary_strict_gender_matching', False) else "0"
+        )
         
         # History and summary settings
         env_vars['TRANSLATION_HISTORY_ROLLING'] = "1" if _val(self.gui.translation_history_rolling_var, False) else "0"
