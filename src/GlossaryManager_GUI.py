@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import threading
+import time
 from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton, 
                                 QCheckBox, QRadioButton, QTextEdit, QListWidget,
                                 QTreeWidget, QTreeWidgetItem, QScrollArea, QTabWidget, QTabBar,
@@ -26,8 +27,17 @@ class GlossaryManagerMixin:
 
     def _prewarm_glossary_settings_tabs(self, dialog=None, notebook=None):
         """Force hidden glossary settings tabs through their first layout pass."""
+        prewarm_start = time.perf_counter()
         was_visible = True
         old_opacity = 1.0
+        tab_timings = []
+        def _set_loading(loading, text=None):
+            try:
+                setter = getattr(self, 'set_startup_prewarm_button_loading', None)
+                if callable(setter):
+                    setter('glossary_settings', loading, text)
+            except Exception:
+                pass
         def _center_dialog():
             try:
                 screen = dialog.screen() or QApplication.primaryScreen()
@@ -46,6 +56,9 @@ class GlossaryManagerMixin:
             if dialog is None or notebook is None:
                 return False
 
+            self._glossary_settings_tabs_prewarmed = False
+            _set_loading(True, "Loading tabs...")
+
             app = QApplication.instance()
             previous_index = notebook.currentIndex()
             if previous_index < 0:
@@ -58,6 +71,7 @@ class GlossaryManagerMixin:
                 dialog.setWindowOpacity(0.0)
                 dialog.move(-20000, -20000)
                 dialog.show()
+                dialog._fade_native_window_seen = True
                 dialog.raise_()
 
             def _warm_widget(widget):
@@ -81,6 +95,8 @@ class GlossaryManagerMixin:
                     pass
 
             for idx in range(notebook.count()):
+                tab_start = time.perf_counter()
+                _set_loading(True, f"Tab {idx + 1}/{notebook.count()}")
                 notebook.setCurrentIndex(idx)
                 _warm_widget(notebook.widget(idx))
                 layout = dialog.layout()
@@ -88,6 +104,17 @@ class GlossaryManagerMixin:
                     layout.activate()
                 if app is not None:
                     app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                tab_timings.append(int((time.perf_counter() - tab_start) * 1000))
+
+            queued_start = time.perf_counter()
+            if app is not None:
+                deadline = time.perf_counter() + 1.5
+                while time.perf_counter() < deadline:
+                    app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                    if getattr(self, '_glossary_editor_deferred_load_done', True):
+                        break
+                    time.sleep(0.01)
+            queued_ms = int((time.perf_counter() - queued_start) * 1000)
 
             if notebook.count():
                 notebook.setCurrentIndex(min(previous_index, notebook.count() - 1))
@@ -98,6 +125,14 @@ class GlossaryManagerMixin:
                 _center_dialog()
                 dialog.setWindowOpacity(old_opacity)
             self._glossary_settings_tabs_prewarmed = True
+            self._glossary_settings_prewarm_stats = {
+                'total_ms': int((time.perf_counter() - prewarm_start) * 1000),
+                'tab_count': notebook.count(),
+                'tab_ms': tab_timings,
+                'queued_ms': queued_ms,
+            }
+            if not getattr(self, '_startup_prewarming', False):
+                _set_loading(False)
             return True
         except Exception as e:
             try:
@@ -111,6 +146,8 @@ class GlossaryManagerMixin:
                 print(f"Glossary settings tab prewarm failed: {e}")
             except Exception:
                 pass
+            if not getattr(self, '_startup_prewarming', False):
+                _set_loading(False)
             return False
     
     @staticmethod
@@ -8007,12 +8044,16 @@ Rules:
         # load_glossary_for_editing() may have silently failed because some
         # widgets were not yet constructed.  Re-run after the event loop
         # completes this tick so the tree actually renders.
+        self._glossary_editor_deferred_load_done = False
         def _deferred_editor_load():
             try:
                 if self.glossary_tree.topLevelItemCount() == 0 and self.editor_file_combo.count() > 0:
                     load_glossary_for_editing()
             except Exception as e:
                 print(f"⚠️ Deferred glossary editor load failed: {e}")
+                pass
+            finally:
+                self._glossary_editor_deferred_load_done = True
         QTimer.singleShot(0, _deferred_editor_load)
 
     def _on_tree_double_click(self, item, column_idx):

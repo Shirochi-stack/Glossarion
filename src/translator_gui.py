@@ -10598,7 +10598,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         except Exception:
             pass
 
-    def set_startup_prewarm_button_loading(self, key, loading=True):
+    def set_startup_prewarm_button_loading(self, key, loading=True, loading_text=None):
         """Toggle one registered startup prewarm button between loading and normal state."""
         try:
             entry = getattr(self, '_startup_prewarm_button_registry', {}).get(key)
@@ -10609,13 +10609,17 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if button is None:
                 return
             if loading:
-                entry['was_enabled'] = button.isEnabled()
+                if not entry.get('is_loading', False):
+                    entry['was_enabled'] = button.isEnabled()
+                entry['is_loading'] = True
                 button.setEnabled(False)
+                display_text = loading_text or entry.get('loading_text', 'Loading...')
                 if text_widget is not None and hasattr(text_widget, 'setText'):
-                    text_widget.setText(entry.get('loading_text', 'Loading...'))
+                    text_widget.setText(display_text)
                 else:
-                    button.setText(entry.get('loading_text', 'Loading...'))
+                    button.setText(display_text)
             else:
+                entry['is_loading'] = False
                 button.setEnabled(bool(entry.get('was_enabled', True)))
                 if text_widget is not None and hasattr(text_widget, 'setText'):
                     text_widget.setText(entry.get('normal_text', ''))

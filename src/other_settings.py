@@ -1094,6 +1094,7 @@ def open_other_settings(self, *args, show=True):
                 dialog.setWindowOpacity(0.0)
                 dialog.move(-20000, -20000)
                 dialog.show()
+                dialog._fade_native_window_seen = True
                 dialog.raise_()
             try:
                 dialog.ensurePolished()

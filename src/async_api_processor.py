@@ -4578,6 +4578,7 @@ def _prewarm_dialog_offscreen(dialog):
             dialog.setWindowOpacity(0.0)
             dialog.move(-20000, -20000)
             dialog.show()
+            dialog._fade_native_window_seen = True
             dialog.raise_()
         try:
             dialog.ensurePolished()

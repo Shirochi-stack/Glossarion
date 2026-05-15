@@ -6088,6 +6088,7 @@ class EpubLibraryDialog(QDialog):
         self.setWindowOpacity(0.0)
         self.move(-20000, -20000)
         self.show()
+        self._fade_native_window_seen = True
         self.raise_()
         self._warm_library_widgets()
         if self._scanner_thread and self._scanner_thread.isRunning():

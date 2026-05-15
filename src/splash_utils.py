@@ -650,7 +650,18 @@ class SplashManager(QObject):
                 ok = bool(verifier())
                 results[key] = ok
                 elapsed_ms = int((time.perf_counter() - start_time) * 1000)
-                print(f"[STARTUP_PREWARM] {key}: {'ready' if ok else 'missing'} ({elapsed_ms} ms)")
+                detail = ""
+                if key == "glossary_settings":
+                    try:
+                        stats = getattr(main_window, '_glossary_settings_prewarm_stats', {}) or {}
+                        tab_count = int(stats.get('tab_count') or 0)
+                        tab_ms = stats.get('tab_ms') or []
+                        queued_ms = int(stats.get('queued_ms') or 0)
+                        if tab_count:
+                            detail = f"; tabs={tab_count} tab_ms={tab_ms} queued_ms={queued_ms}"
+                    except Exception:
+                        detail = ""
+                print(f"[STARTUP_PREWARM] {key}: {'ready' if ok else 'missing'} ({elapsed_ms} ms{detail})")
             except Exception as e:
                 results[key] = False
                 print(f"Startup prewarm failed during '{label}': {e}")
@@ -659,21 +670,21 @@ class SplashManager(QObject):
 
         steps = [
             (
+                "other_settings",
+                "Preloading other settings...",
+                93,
+                lambda: getattr(main_window, 'open_other_settings')(show=False),
+                lambda: getattr(main_window, '_other_settings_dialog', None) is not None
+            ),
+            (
                 "glossary_settings",
                 "Preloading glossary manager...",
-                93,
+                95,
                 lambda: getattr(main_window, 'glossary_manager')(show=False),
                 lambda: (
                     getattr(main_window, '_glossary_dialog', None) is not None and
                     bool(getattr(main_window, '_glossary_settings_tabs_prewarmed', False))
                 )
-            ),
-            (
-                "epub_library",
-                "Preloading EPUB library...",
-                95,
-                lambda: getattr(main_window, '_open_epub_library')(show=False),
-                lambda: getattr(main_window, '_epub_library_dialog', None) is not None
             ),
             (
                 "qa_settings",
@@ -683,11 +694,11 @@ class SplashManager(QObject):
                 lambda: getattr(main_window, '_qa_settings_dialog', None) is not None
             ),
             (
-                "other_settings",
-                "Preloading other settings...",
+                "epub_library",
+                "Preloading EPUB library...",
                 97,
-                lambda: getattr(main_window, 'open_other_settings')(show=False),
-                lambda: getattr(main_window, '_other_settings_dialog', None) is not None
+                lambda: getattr(main_window, '_open_epub_library')(show=False),
+                lambda: getattr(main_window, '_epub_library_dialog', None) is not None
             ),
         ]
 
