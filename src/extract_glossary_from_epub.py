@@ -21,9 +21,7 @@ from typing import List, Dict, Tuple
 from unified_api_client import UnifiedClient, UnifiedClientError
 from glossary_paths import (
     get_book_glossary_dir,
-    migrate_legacy_glossary_files,
-    repair_misplaced_glossary_backup,
-    repair_nested_glossary_folder,
+    migrate_all_legacy_glossary_files,
     sanitize_glossary_folder_name,
 )
 
@@ -994,7 +992,7 @@ def _resolved_glossary_progress_file(context=None) -> str:
         if base.lower().endswith("_glossary"):
             base = base[:-len("_glossary")]
         if os.path.basename(glossary_dir).lower() == "glossary":
-            migrate_legacy_glossary_files(glossary_dir, base, logger=print)
+            migrate_all_legacy_glossary_files(glossary_dir, logger=print)
             glossary_dir = get_book_glossary_dir(glossary_dir, base)
     else:
         glossary_dir = os.getenv("GLOSSARY_SHARED_DIR", "").strip()
@@ -5380,11 +5378,8 @@ def main(log_callback=None, stop_callback=None):
     else:
         shared_glossary_dir = os.path.join(base_out_dir, "Glossary")
         backup_parent_dir = base_out_dir_abs
-    migrate_legacy_glossary_files(shared_glossary_dir, file_base, logger=print)
-    repair_nested_glossary_folder(shared_glossary_dir, file_base, logger=print)
-    repair_misplaced_glossary_backup(
+    migrate_all_legacy_glossary_files(
         shared_glossary_dir,
-        file_base,
         backup_root=os.path.join(backup_parent_dir, "Glossary_Backup"),
         logger=print,
     )

@@ -7810,9 +7810,9 @@ def _single_pass_glossary_paths(output_dir):
         base = base[:-4]
     shared_glossary_dir = _single_pass_shared_glossary_dir(output_dir)
     try:
-        from glossary_paths import get_book_glossary_dir, migrate_legacy_glossary_files, repair_nested_glossary_folder
-        migrate_legacy_glossary_files(shared_glossary_dir, base, logger=print)
-        repair_nested_glossary_folder(shared_glossary_dir, base, logger=print)
+        from glossary_paths import get_book_glossary_dir, migrate_all_legacy_glossary_files
+        backup_root = os.path.join(os.path.dirname(os.path.abspath(shared_glossary_dir)), "Glossary_Backup")
+        migrate_all_legacy_glossary_files(shared_glossary_dir, backup_root=backup_root, logger=print)
         glossary_dir = get_book_glossary_dir(shared_glossary_dir, base)
     except Exception:
         glossary_dir = os.path.join(shared_glossary_dir, base)
@@ -16085,9 +16085,9 @@ def main(log_callback=None, stop_callback=None):
                     input_base_raw = os.path.splitext(os.path.basename(input_path))[0]
                     input_base = input_base_raw.lower()
                     try:
-                        from glossary_paths import migrate_legacy_glossary_files, repair_nested_glossary_folder
-                        migrate_legacy_glossary_files(glossary_search_dir, input_base_raw, logger=print)
-                        repair_nested_glossary_folder(glossary_search_dir, input_base_raw, logger=print)
+                        from glossary_paths import migrate_all_legacy_glossary_files
+                        backup_root = os.path.join(os.path.dirname(os.path.abspath(glossary_search_dir)), "Glossary_Backup")
+                        migrate_all_legacy_glossary_files(glossary_search_dir, backup_root=backup_root, logger=print)
                     except Exception:
                         pass
                     best_match = None

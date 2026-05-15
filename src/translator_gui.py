@@ -2448,6 +2448,15 @@ Text to analyze:
         
         # Initialize all environment variables after GUI setup but before first use
         self.initialize_environment_variables()
+        try:
+            from glossary_paths import start_background_glossary_migration
+            start_background_glossary_migration(
+                os.path.join(_get_app_dir(), 'Glossary'),
+                backup_root=os.path.join(_get_app_dir(), 'Glossary_Backup'),
+                logger=lambda msg: logging.getLogger(__name__).info(msg),
+            )
+        except Exception:
+            pass
 
         # Attach logging handlers to forward client logs into the GUI
         try:
@@ -8180,9 +8189,12 @@ Recent translations to summarize:
                     base = os.path.splitext(os.path.basename(epub_path))[0]
                     backup_dirs_to_check = []
                     if override_dir:
+                        backup_dirs_to_check.append(os.path.join(os.path.abspath(override_dir), 'Glossary', base, 'Backups'))
                         backup_dirs_to_check.append(os.path.join(os.path.abspath(override_dir), 'Glossary', 'Backups'))
                         backup_dirs_to_check.append(os.path.join(os.path.abspath(override_dir), base, 'Backups'))
                     else:
+                        backup_dirs_to_check.append(os.path.join('Glossary', base, 'Backups'))
+                        backup_dirs_to_check.append(os.path.join(_get_app_dir(), 'Glossary', base, 'Backups'))
                         backup_dirs_to_check.append(os.path.join('Glossary', 'Backups'))
                         backup_dirs_to_check.append(os.path.join(_get_app_dir(), base, 'Backups'))
                     for bdir in backup_dirs_to_check:
@@ -16457,9 +16469,9 @@ Important rules:
                 shared_glossary_dir = os.path.join(os.path.dirname(os.path.abspath(file_path)), shared_glossary_dir)
             os.makedirs(shared_glossary_dir, exist_ok=True)
             try:
-                from glossary_paths import get_book_glossary_path, migrate_legacy_glossary_files, repair_nested_glossary_folder
-                migrate_legacy_glossary_files(shared_glossary_dir, epub_base, logger=self.append_log)
-                repair_nested_glossary_folder(shared_glossary_dir, epub_base, logger=self.append_log)
+                from glossary_paths import get_book_glossary_path, migrate_all_legacy_glossary_files
+                backup_root = os.path.join(os.path.dirname(os.path.abspath(shared_glossary_dir)), "Glossary_Backup")
+                migrate_all_legacy_glossary_files(shared_glossary_dir, backup_root=backup_root, logger=self.append_log)
                 output_path = get_book_glossary_path(
                     shared_glossary_dir, epub_base, f"{epub_base}_glossary.json"
                 )
@@ -21377,12 +21389,12 @@ Important rules:
             for file_path in files:
                 base = os.path.splitext(os.path.basename(file_path))[0]
                 match_names.add(base.casefold())
-                try:
-                    from glossary_paths import migrate_legacy_glossary_files, repair_nested_glossary_folder
-                    migrate_legacy_glossary_files(glossary_base_dir, base, logger=self.append_log)
-                    repair_nested_glossary_folder(glossary_base_dir, base, logger=self.append_log)
-                except Exception:
-                    pass
+            try:
+                from glossary_paths import migrate_all_legacy_glossary_files
+                backup_root = os.path.join(os.path.dirname(os.path.abspath(glossary_base_dir)), "Glossary_Backup")
+                migrate_all_legacy_glossary_files(glossary_base_dir, backup_root=backup_root, logger=self.append_log)
+            except Exception:
+                pass
                 
                 # For images, also add the parent folder name
                 ext = os.path.splitext(file_path)[1].lower()
@@ -21737,9 +21749,9 @@ Important rules:
                     return None
 
                 try:
-                    from glossary_paths import migrate_legacy_glossary_files, repair_nested_glossary_folder
-                    migrate_legacy_glossary_files(glossary_dir, base)
-                    repair_nested_glossary_folder(glossary_dir, base)
+                    from glossary_paths import migrate_all_legacy_glossary_files
+                    backup_root = os.path.join(os.path.dirname(os.path.abspath(glossary_dir)), "Glossary_Backup")
+                    migrate_all_legacy_glossary_files(glossary_dir, backup_root=backup_root)
                 except Exception:
                     pass
 
