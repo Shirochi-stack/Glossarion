@@ -648,13 +648,6 @@ class SplashManager(QObject):
                 )
             ),
             (
-                "async_translator",
-                "Preloading async translator...",
-                94,
-                lambda: getattr(main_window, 'open_async_processing')(show=False),
-                lambda: getattr(main_window, 'async_dialog', None) is not None
-            ),
-            (
                 "epub_library",
                 "Preloading EPUB library...",
                 95,
