@@ -6,6 +6,7 @@ Comprehensive glossary management for automatic and manual glossary extraction
 import os
 import sys
 import json
+import threading
 from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton, 
                                 QCheckBox, QRadioButton, QTextEdit, QListWidget,
                                 QTreeWidget, QTreeWidgetItem, QScrollArea, QTabWidget, QTabBar,
@@ -13,7 +14,7 @@ from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton,
                                 QGroupBox, QSpinBox, QSlider, QMessageBox, QFileDialog,
                                 QSizePolicy, QAbstractItemView, QButtonGroup, QApplication,
                                 QComboBox, QMenu, QInputDialog)
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, Property
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, Property, QObject
 from PySide6.QtGui import QFont, QColor, QIcon, QKeySequence, QShortcut, QBrush
 
 # WindowManager and UIHelper removed - not needed in PySide6
@@ -135,6 +136,300 @@ class GlossaryManagerMixin:
                 break
             current = parent
         return '/'.join(reversed(parts)) if parts else os.path.basename(path)
+
+    def _parse_editor_token_glossary_async(self, lines):
+        """Parse token-efficient glossary CSV text without touching Qt widgets."""
+        entries = []
+        sections = []
+        current_section = None
+        header_columns = ['translated_name', 'raw_name', 'gender', 'description']
+        default_extra_columns = []
+        try:
+            import PatternManager as _pm
+            pf = getattr(_pm, 'PATTERN_ADDITIONAL_FIELDS', [])
+            if isinstance(pf, (list, tuple)):
+                default_extra_columns.extend(pf)
+        except Exception:
+            pass
+        default_extra_columns.extend(self.config.get('custom_glossary_fields', []))
+        extra_columns = list(default_extra_columns)
+        custom_types = getattr(self, 'custom_entry_types', {}) or {
+            'character': {'enabled': True, 'has_gender': True},
+            'terms': {'enabled': True, 'has_gender': False},
+        }
+
+        type_map = {}
+        for t in custom_types.keys():
+            t_lower = t.lower()
+            type_map[t_lower] = t
+            if not t_lower.endswith('s'):
+                type_map[f"{t_lower}s"] = t
+
+        import re
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.lower().startswith('glossary columns:'):
+                cols_text = line.split(':', 1)[1]
+                header_columns = [c.strip() for c in cols_text.split(',') if c.strip()]
+                if len(header_columns) < 4:
+                    header_columns = ['translated_name', 'raw_name', 'gender', 'description']
+                positional = {'translated_name', 'raw_name', 'gender'}
+                extra_columns = [c for c in header_columns if c.lower() not in positional]
+                if not extra_columns:
+                    extra_columns = list(default_extra_columns)
+                continue
+            if line.startswith('===') and line.endswith('==='):
+                section_name = line.strip('=').strip()
+                current_section = section_name
+                sections.append(section_name)
+                continue
+            if not line.startswith('* '):
+                continue
+
+            m = re.match(r'^\*\s+(.*?)\s*\(([^)]*)\)\s*((?:\([^)]+\)\s*)*)\s*(?:\[(.*?)\])?\s*((?:\([^)]+\)\s*)*)\s*(?::\s*(.*))?$', line)
+            if not m:
+                continue
+            translated = (m.group(1) or '').strip()
+            raw_name = (m.group(2) or '').strip()
+            pre_extras_raw = (m.group(3) or '').strip()
+            bracket = (m.group(4) or '').strip()
+            post_extras_raw = (m.group(5) or '').strip()
+            desc = (m.group(6) or '').strip()
+
+            extra_values = {}
+            paren_extras_raw = f"{pre_extras_raw} {post_extras_raw}".strip()
+            if paren_extras_raw:
+                for paren_m in re.finditer(r'\(([^)]+)\)', paren_extras_raw):
+                    content = paren_m.group(1).strip()
+                    if ':' in content:
+                        k, v = content.split(':', 1)
+                        extra_values[k.strip()] = v.strip()
+            if desc and ' | ' in desc:
+                parts = desc.split(' | ')
+                desc = parts[0].strip()
+                for part in parts[1:]:
+                    if ':' in part:
+                        k, v = part.split(':', 1)
+                        extra_values[k.strip()] = v.strip()
+
+            if desc and extra_columns:
+                remaining_cols = [c for c in extra_columns if c not in extra_values]
+                if remaining_cols:
+                    paren_match = re.search(r'\s*\((.+)\)\s*$', desc)
+                    if paren_match:
+                        paren_content = paren_match.group(1).strip()
+                        cols_in_paren = [
+                            c for c in remaining_cols
+                            if re.search(re.escape(c) + r'\s*:', paren_content, re.IGNORECASE)
+                        ]
+                        if cols_in_paren:
+                            positions = []
+                            for c in cols_in_paren:
+                                col_match = re.search(re.escape(c) + r'\s*:\s*', paren_content, re.IGNORECASE)
+                                if col_match:
+                                    positions.append((col_match.start(), col_match.end(), c))
+                            positions.sort(key=lambda x: x[0])
+                            for i, (_start, end, col) in enumerate(positions):
+                                if i + 1 < len(positions):
+                                    val = paren_content[end:positions[i + 1][0]].strip().rstrip(',').strip()
+                                else:
+                                    val = paren_content[end:].strip()
+                                extra_values[col] = val
+                            desc = desc[:paren_match.start()].strip().rstrip(',').strip()
+                            remaining_cols = [c for c in remaining_cols if c not in extra_values]
+
+                    for col in remaining_cols:
+                        if not desc:
+                            break
+                        col_esc = re.escape(col)
+                        comma_match = re.compile(r',\s*' + col_esc + r'\s*:\s*', re.IGNORECASE).search(desc)
+                        if comma_match:
+                            extra_values[col] = desc[comma_match.end():].strip()
+                            desc = desc[:comma_match.start()].strip()
+                            continue
+                        start_match = re.compile(r'^' + col_esc + r'\s*:\s*', re.IGNORECASE).search(desc)
+                        if start_match:
+                            extra_values[col] = desc[start_match.end():].strip()
+                            desc = ''
+
+            entry = {
+                'type': type_map.get((current_section or 'terms').lower(), 'terms'),
+                'raw_name': raw_name,
+                'translated_name': translated,
+                'gender': bracket,
+            }
+            if desc and 'description' not in extra_values:
+                entry['description'] = desc
+            if current_section:
+                entry['_section'] = current_section
+            for col in extra_columns:
+                if col in extra_values:
+                    entry[col] = extra_values[col]
+            entries.append(entry)
+
+        return entries, sections
+
+    def _parse_glossary_file_for_editor_async(self, path):
+        """Read and parse a glossary file for the editor without touching Qt widgets."""
+        all_fields = set()
+        entries = []
+        current_data = None
+        current_format = None
+        sections = []
+
+        if path.lower().endswith('.csv'):
+            with open(path, 'r', encoding='utf-8') as f:
+                raw_content = f.read()
+            lines = raw_content.splitlines(True)
+
+            token_style = False
+            for line in lines:
+                lstrip = line.lstrip()
+                if lstrip.startswith('===') or lstrip.startswith('* '):
+                    token_style = True
+                    break
+            if not token_style and lines and lines[0].lower().startswith('glossary columns:'):
+                token_style = True
+
+            if token_style:
+                entries, sections = self._parse_editor_token_glossary_async(lines)
+                current_data = entries
+                current_format = 'token_csv'
+                for entry in entries:
+                    all_fields.update(entry.keys())
+            else:
+                import csv
+                _GSEP = '\x1F'
+                if _GSEP in raw_content:
+                    rows = []
+                    for line in raw_content.split('\n'):
+                        line = line.strip()
+                        if line:
+                            rows.append([p.strip() for p in line.split(_GSEP)])
+                else:
+                    from io import StringIO
+                    rows = list(csv.reader(StringIO(raw_content)))
+
+                header_names = None
+                data_start = 0
+                if rows and rows[0] and rows[0][0].strip().lower() == 'type':
+                    header_names = [h.strip().lower() for h in rows[0]]
+                    data_start = 1
+
+                if header_names:
+                    col_map = {name: i for i, name in enumerate(header_names)}
+                    expected_cols = len(header_names)
+                    desc_idx = col_map.get('description', -1)
+                    cols_after_desc = expected_cols - desc_idx - 1 if desc_idx >= 0 else 0
+
+                    for row in rows[data_start:]:
+                        if not row or len(row) < 3:
+                            continue
+                        entry = {}
+                        excess = len(row) - expected_cols
+                        if excess > 0 and desc_idx >= 0:
+                            for name, idx in col_map.items():
+                                if idx < desc_idx:
+                                    entry[name] = row[idx] if idx < len(row) else ''
+                            after_desc_names = [
+                                n for n, i in sorted(col_map.items(), key=lambda x: x[1])
+                                if i > desc_idx
+                            ]
+                            for offset, name in enumerate(after_desc_names):
+                                tail_idx = len(row) - cols_after_desc + offset
+                                entry[name] = row[tail_idx] if tail_idx < len(row) else ''
+                            desc_end = len(row) - cols_after_desc
+                            entry['description'] = ', '.join(row[desc_idx:desc_end])
+                        else:
+                            for name, idx in col_map.items():
+                                entry[name] = row[idx] if idx < len(row) else ''
+                        entries.append(entry)
+                else:
+                    for row in rows[data_start:]:
+                        if len(row) >= 3:
+                            entry = {
+                                'type': row[0],
+                                'raw_name': row[1],
+                                'translated_name': row[2],
+                            }
+                            if len(row) > 3:
+                                entry['gender'] = row[3]
+                            if len(row) > 4:
+                                entry['description'] = ', '.join(row[4:])
+                            entries.append(entry)
+
+                current_data = entries
+                current_format = 'list'
+                for entry in entries:
+                    all_fields.update(entry.keys())
+        else:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            if isinstance(data, dict):
+                if 'entries' in data:
+                    current_data = data
+                    current_format = 'dict'
+                    for original, translated in data['entries'].items():
+                        entry = {'original': original, 'translated': translated}
+                        entries.append(entry)
+                        all_fields.update(entry.keys())
+                else:
+                    current_data = {'entries': data}
+                    current_format = 'dict'
+                    for original, translated in data.items():
+                        entry = {'original': original, 'translated': translated}
+                        entries.append(entry)
+                        all_fields.update(entry.keys())
+            elif isinstance(data, list):
+                current_data = data
+                current_format = 'list'
+                for item in data:
+                    if isinstance(item, dict):
+                        all_fields.update(item.keys())
+                        entries.append(item)
+
+        if current_format in ['list', 'token_csv'] and entries and 'type' in entries[0]:
+            column_fields = []
+            if any('_section' in e for e in entries):
+                column_fields.append('_section')
+            column_fields.extend(['type', 'raw_name', 'translated_name', 'gender'])
+            for entry in entries:
+                for field in entry.keys():
+                    if field.startswith('_'):
+                        continue
+                    if field not in column_fields:
+                        column_fields.append(field)
+        else:
+            standard_fields = [
+                'original_name', 'name', 'original', 'translated', 'gender',
+                'title', 'group_affiliation', 'traits', 'how_they_refer_to_others',
+                'locations',
+            ]
+            column_fields = [field for field in standard_fields if field in all_fields]
+            column_fields.extend(sorted(all_fields - set(standard_fields)))
+
+        stats = [f"Total entries: {len(entries)}"]
+        if current_format in ['list', 'token_csv'] and entries and 'type' in entries[0]:
+            characters = sum(1 for e in entries if e.get('type') == 'character')
+            terms = sum(1 for e in entries if e.get('type') == 'terms')
+            stats.append(f"Characters: {characters}, Terms: {terms}")
+        elif current_format == 'list':
+            chars = sum(1 for e in entries if 'original_name' in e or 'name' in e)
+            locs = sum(1 for e in entries if 'locations' in e and e['locations'])
+            stats.append(f"Characters: {chars}, Locations: {locs}")
+
+        return {
+            'path': path,
+            'entries': entries,
+            'current_data': current_data,
+            'current_format': current_format,
+            'sections': sections,
+            'column_fields': column_fields,
+            'stats_text': " | ".join(stats),
+        }
     
     @staticmethod
     def _add_combobox_arrow(combobox):
@@ -675,24 +970,19 @@ class GlossaryManagerMixin:
         notebook.setTabBar(NoWheelTabBar())
         main_layout.addWidget(notebook)
         
-        # Create and add tabs — lazy initialization for tabs 1 and 2.
-        #
-        # Only the first visible tab (Balanced/Full Extraction) is built
-        # eagerly. The other two tabs are constructed on first switch,
-        # saving ~239 widget instantiations from blocking the dialog open.
+        # Create and add tabs eagerly so switching tabs never pays a construction cost.
+        # Glossary file parsing still happens in the editor loader's background thread.
         tabs = [
             ("Balanced/Full Extraction", self._setup_manual_glossary_tab, False),   # scrollable
             ("Automatic Glossary Generation", self._setup_auto_glossary_tab, False), # scrollable
             ("Glossary Editor", self._setup_glossary_editor_tab, True),              # non-scrollable
         ]
 
-        # Track which deferred tabs have been built
-        _deferred_tab_setup = {}  # idx -> (setup_method, is_editor)
-
         for tab_idx, (tab_name, setup_method, is_editor) in enumerate(tabs):
             if is_editor:
                 tab_widget = QWidget()
                 notebook.addTab(tab_widget, tab_name)
+                setup_method(tab_widget)
             else:
                 tab_scroll = QScrollArea()
                 tab_scroll.setWidgetResizable(True)
@@ -700,29 +990,11 @@ class GlossaryManagerMixin:
                 tab_inner = QWidget()
                 tab_scroll.setWidget(tab_inner)
                 notebook.addTab(tab_scroll, tab_name)
-
-            if tab_idx == 0:
-                # Build the first tab eagerly (it's immediately visible)
                 setup_method(tab_inner)
-            else:
-                # Defer construction until the user actually clicks this tab
-                _deferred_tab_setup[tab_idx] = (setup_method, is_editor)
 
         _editor_tab_idx = 2  # "Glossary Editor" is the 3rd tab
 
         def _on_tab_switched(idx):
-            # Lazy-build deferred tabs on first visit
-            if idx in _deferred_tab_setup:
-                setup_method, is_editor = _deferred_tab_setup.pop(idx)
-                try:
-                    if is_editor:
-                        target = notebook.widget(idx)
-                    else:
-                        target = notebook.widget(idx).widget()
-                    setup_method(target)
-                except Exception as e:
-                    print(f"⚠️ Deferred tab {idx} setup failed: {e}")
-
             # Re-run glossary editor path resolution when switching to that tab
             if idx == _editor_tab_idx and hasattr(self, '_refresh_glossary_editor'):
                 try:
@@ -4669,6 +4941,12 @@ Rules:
         self.glossary_column_fields = []
         self._original_translated_map = {}
 
+        class _EditorLoadBridge(QObject):
+            loaded = Signal(object)
+
+        self._editor_load_bridge = _EditorLoadBridge(parent)
+        self._editor_load_token = None
+
         # Undo / redo history stacks (each entry is a deep copy of current_glossary_data)
         self._undo_stack = []
         self._redo_stack = []
@@ -4705,6 +4983,93 @@ Rules:
                 return
             mark_row_updated(item, new_val != baseline)
 
+        def apply_loaded_glossary_result(payload):
+            if payload.get('token') is not getattr(self, '_editor_load_token', None):
+                return
+            if not payload.get('ok'):
+                error = payload.get('error', 'Unknown error')
+                print(f"load_glossary_for_editing failed: {error}")
+                if payload.get('traceback'):
+                    print(payload['traceback'])
+                self.stats_label.setText("Failed to load glossary")
+                self.append_log(f"Failed to load glossary: {error}")
+                return
+
+            entries = payload.get('entries', [])
+            column_fields = payload.get('column_fields', [])
+            self.current_glossary_data = payload.get('current_data')
+            self.current_glossary_format = payload.get('current_format')
+            self.current_glossary_sections = payload.get('sections', [])
+
+            self.glossary_tree.setUpdatesEnabled(False)
+            try:
+                self.glossary_tree.clear()
+                self.glossary_column_fields = list(column_fields)
+                self.glossary_tree.setColumnCount(len(column_fields) + 1)
+
+                headers = ['#'] + [field.replace('_', ' ').title() for field in column_fields]
+                self.glossary_tree.setHeaderLabels(headers)
+                self.glossary_tree.setColumnWidth(0, 80)
+
+                for idx, field in enumerate(column_fields, start=1):
+                    if field in ['raw_name', 'translated_name', 'original_name', 'name', 'original', 'translated']:
+                        width = 150
+                    elif field in ['traits', 'locations', 'how_they_refer_to_others']:
+                        width = 200
+                    else:
+                        width = 100
+                    self.glossary_tree.setColumnWidth(idx, width)
+
+                items = []
+                for idx, entry in enumerate(entries):
+                    values = [str(idx + 1)]
+                    for field in column_fields:
+                        value = entry.get(field, '') if isinstance(entry, dict) else ''
+                        if isinstance(value, list):
+                            value = ', '.join(str(v) for v in value)
+                        elif isinstance(value, dict):
+                            value = ', '.join(f"{k}: {v}" for k, v in value.items())
+                        elif value is None:
+                            value = ''
+                        values.append(str(value))
+
+                    item = QTreeWidgetItem(values)
+                    if self.current_glossary_format == 'dict':
+                        item.setData(0, Qt.UserRole, entry.get('original', '') if isinstance(entry, dict) else '')
+                    else:
+                        item.setData(0, Qt.UserRole, idx)
+                    items.append(item)
+
+                self.glossary_tree.addTopLevelItems(items)
+            finally:
+                self.glossary_tree.setUpdatesEnabled(True)
+
+            self.stats_label.setText(payload.get('stats_text', f"Total entries: {len(entries)}"))
+            log_msg = f"Loaded {len(entries)} entries from glossary"
+            if getattr(self, '_last_loaded_glossary_log', '') != log_msg:
+                self.append_log(log_msg)
+                self._last_loaded_glossary_log = log_msg
+
+            self._last_find_text = ""
+            self._last_find_pos = -1
+            if self.current_glossary_format in ['list', 'token_csv']:
+                self._original_translated_map = {
+                    idx: entry.get('translated_name', '') for idx, entry in enumerate(self.current_glossary_data or [])
+                    if isinstance(entry, dict)
+                }
+            elif self.current_glossary_format == 'dict':
+                self._original_translated_map = dict((self.current_glossary_data or {}).get('entries', {}))
+            else:
+                self._original_translated_map = {}
+
+            self._undo_stack.clear()
+            self._redo_stack.clear()
+            if hasattr(self, '_undo_btn'):
+                self._undo_btn.setEnabled(False)
+                self._redo_btn.setEnabled(False)
+
+        self._editor_load_bridge.loaded.connect(apply_loaded_glossary_result)
+
         # Editor functions
         def load_glossary_for_editing(skip_file_read=False):
            path = self.editor_file_entry.text()
@@ -4718,6 +5083,31 @@ Rules:
                # hundreds of lines of the file-read block.
                if skip_file_read and self.current_glossary_data is not None:
                    save_current_glossary()
+               elif not skip_file_read:
+                   token = object()
+                   self._editor_load_token = token
+                   self.stats_label.setText("Loading glossary...")
+
+                   def worker():
+                       try:
+                           result = self._parse_glossary_file_for_editor_async(path)
+                           result['ok'] = True
+                       except Exception as exc:
+                           import traceback
+                           result = {
+                               'ok': False,
+                               'path': path,
+                               'error': str(exc),
+                               'traceback': traceback.format_exc(),
+                           }
+                       result['token'] = token
+                       try:
+                           self._editor_load_bridge.loaded.emit(result)
+                       except RuntimeError:
+                           pass
+
+                   threading.Thread(target=worker, name="GlossaryEditorLoad", daemon=True).start()
+                   return
 
                # Helpers for token-efficient format (sectioned, bullet-style CSV text)
                def parse_token_efficient_glossary(lines):
