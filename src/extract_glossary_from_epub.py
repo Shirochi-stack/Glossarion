@@ -19,6 +19,13 @@ from chapter_splitter import ChapterSplitter
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from typing import List, Dict, Tuple
 from unified_api_client import UnifiedClient, UnifiedClientError
+from glossary_paths import (
+    get_book_glossary_dir,
+    migrate_legacy_glossary_files,
+    repair_misplaced_glossary_backup,
+    repair_nested_glossary_folder,
+    sanitize_glossary_folder_name,
+)
 
 # Thread submission throttling (glossary batch) — mirrors translation behavior
 _glossary_thread_submit_lock = threading.Lock()
@@ -986,12 +993,16 @@ def _resolved_glossary_progress_file(context=None) -> str:
         base = os.path.splitext(os.path.basename(output_file))[0]
         if base.lower().endswith("_glossary"):
             base = base[:-len("_glossary")]
+        if os.path.basename(glossary_dir).lower() == "glossary":
+            migrate_legacy_glossary_files(glossary_dir, base, logger=print)
+            glossary_dir = get_book_glossary_dir(glossary_dir, base)
     else:
         glossary_dir = os.getenv("GLOSSARY_SHARED_DIR", "").strip()
         if not glossary_dir:
             glossary_dir = os.path.join(os.getcwd(), "Glossary")
         source_path = os.getenv("EPUB_PATH", "").strip()
         base = os.path.splitext(os.path.basename(source_path))[0] if source_path else "book"
+        glossary_dir = get_book_glossary_dir(glossary_dir, base)
 
     os.makedirs(glossary_dir, exist_ok=True)
     return os.path.join(glossary_dir, f"{base or 'book'}_glossary_progress.json")
@@ -5353,12 +5364,32 @@ def main(log_callback=None, stop_callback=None):
     save_glossary_backup_in_output = os.getenv("SAVE_GLOSSARY_IN_OUTPUT", "0").strip().lower() in ("1", "true", "yes", "on")
     base_out_dir = os.path.dirname(args.output)
     base_out_dir_abs = os.path.abspath(base_out_dir or os.getcwd())
-    if os.path.basename(base_out_dir_abs).lower() == "glossary":
-        glossary_dir = base_out_dir
+    base_out_parent_abs = os.path.dirname(base_out_dir_abs)
+    expected_book_folder = sanitize_glossary_folder_name(file_base)
+    glossary_dir = None
+    if (
+        os.path.basename(base_out_parent_abs).lower() == "glossary"
+        and os.path.basename(base_out_dir_abs).casefold() == expected_book_folder.casefold()
+    ):
+        shared_glossary_dir = base_out_parent_abs
+        glossary_dir = base_out_dir_abs
+        backup_parent_dir = os.path.dirname(base_out_parent_abs)
+    elif os.path.basename(base_out_dir_abs).lower() == "glossary":
+        shared_glossary_dir = base_out_dir
         backup_parent_dir = os.path.dirname(base_out_dir_abs)
     else:
-        glossary_dir = os.path.join(base_out_dir, "Glossary")
+        shared_glossary_dir = os.path.join(base_out_dir, "Glossary")
         backup_parent_dir = base_out_dir_abs
+    migrate_legacy_glossary_files(shared_glossary_dir, file_base, logger=print)
+    repair_nested_glossary_folder(shared_glossary_dir, file_base, logger=print)
+    repair_misplaced_glossary_backup(
+        shared_glossary_dir,
+        file_base,
+        backup_root=os.path.join(backup_parent_dir, "Glossary_Backup"),
+        logger=print,
+    )
+    if glossary_dir is None:
+        glossary_dir = get_book_glossary_dir(shared_glossary_dir, file_base)
     os.makedirs(glossary_dir, exist_ok=True)
     if save_glossary_backup_in_output:
         os.environ["GLOSSARY_OUTPUT_BACKUP_DIR"] = os.path.join(backup_parent_dir, "Glossary_Backup")
@@ -5820,7 +5851,7 @@ def main(log_callback=None, stop_callback=None):
         _GLOSSARY_QA_ISSUES_FOUND.clear()
     # Load existing glossary from output file (if it exists) instead of progress file
     # This preserves manual edits to the glossary
-    output_glossary_path = os.path.join(glossary_dir, os.path.basename(args.output))
+    output_glossary_path = args.output
     if os.path.exists(output_glossary_path):
         try:
             with open(output_glossary_path, 'r', encoding='utf-8') as f:
@@ -6019,8 +6050,8 @@ def main(log_callback=None, stop_callback=None):
                     print("\U0001F500 Applying deduplication and sorting before exit...")
                     glossary[:] = skip_duplicate_entries(glossary)
                     save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
-                    save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                    save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                    save_glossary_json(glossary, args.output)
+                    save_glossary_csv(glossary, args.output)
                 return
             
             # If graceful stop requested but NO API call is active, stop immediately
@@ -6042,8 +6073,8 @@ def main(log_callback=None, stop_callback=None):
                     ))
                     
                     save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
-                    save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                    save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                    save_glossary_json(glossary, args.output)
+                    save_glossary_csv(glossary, args.output)
                     print(f"\u2705 Saved {len(glossary)} entries before graceful exit")
                 return
             
@@ -6067,8 +6098,8 @@ def main(log_callback=None, stop_callback=None):
                     ))
                     
                     save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
-                    save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                    save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                    save_glossary_json(glossary, args.output)
+                    save_glossary_csv(glossary, args.output)
                     
                     print(f"✅ Saved {len(glossary)} entries before exit")
                 return
@@ -6222,7 +6253,7 @@ def main(log_callback=None, stop_callback=None):
                                     for tracker_idx, tracker_entries in tracker_buckets.items():
                                         update_gender_tracker(
                                             tracker_entries,
-                                            os.path.join(glossary_dir, os.path.basename(args.output)),
+                                            args.output,
                                             source_path=epub_path,
                                             chapter_index=tracker_idx,
                                             chapter_num=_chapter_positions.get(tracker_idx, tracker_idx + 1),
@@ -6294,7 +6325,7 @@ def main(log_callback=None, stop_callback=None):
                             if data and len(data) > 0:
                                 update_gender_tracker(
                                     data,
-                                    os.path.join(glossary_dir, os.path.basename(args.output)),
+                                    args.output,
                                     source_path=epub_path,
                                     chapter_index=idx,
                                     chapter_num=_chapter_positions.get(idx, idx + 1),
@@ -6342,8 +6373,8 @@ def main(log_callback=None, stop_callback=None):
                         _clear_glossary_in_progress(unit_indices)
                         save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
                         # Also save glossary files for incremental updates
-                        save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                        save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                        save_glossary_json(glossary, args.output)
+                        save_glossary_csv(glossary, args.output)
                         
                     except Exception as e:
                         # Suppress expected "graceful stop" pre-send cancellations.
@@ -6546,8 +6577,8 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Save final deduplicated and sorted glossary
                 save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
-                save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                save_glossary_json(glossary, args.output)
+                save_glossary_csv(glossary, args.output)
             
             # Print batch summary
             if batch_entry_count > 0:
@@ -6574,8 +6605,8 @@ def main(log_callback=None, stop_callback=None):
                     ))
                     
                     save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
-                    save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                    save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                    save_glossary_json(glossary, args.output)
+                    save_glossary_csv(glossary, args.output)
                     
                     # Log the final size after deduplication
                     removed = max(0, original_size - len(glossary))
@@ -6612,8 +6643,8 @@ def main(log_callback=None, stop_callback=None):
                         ))
                         
                         save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
-                        save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                        save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                        save_glossary_json(glossary, args.output)
+                        save_glossary_csv(glossary, args.output)
                     
                         # Log the final size after deduplication
                         removed = max(0, original_size - len(glossary))
@@ -7296,7 +7327,7 @@ def main(log_callback=None, stop_callback=None):
                     for tracker_idx, tracker_entries in tracker_buckets.items():
                         update_gender_tracker(
                             tracker_entries,
-                            os.path.join(glossary_dir, os.path.basename(args.output)),
+                            args.output,
                             source_path=epub_path,
                             chapter_index=tracker_idx,
                             chapter_num=_chapter_positions.get(tracker_idx, tracker_idx + 1),
@@ -7350,8 +7381,8 @@ def main(log_callback=None, stop_callback=None):
 
                 _clear_glossary_in_progress(current_progress_indices)
                 save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
-                save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                save_glossary_json(glossary, args.output)
+                save_glossary_csv(glossary, args.output)
                 
                 # Add delay before next API call (but not after the last chapter)
                 if idx < len(chapters) - 1:
@@ -7462,7 +7493,7 @@ def main(log_callback=None, stop_callback=None):
     try:
         csv_output = args.output.replace('.json', '.csv')
         csv_path = os.path.join(glossary_dir, os.path.basename(csv_output))
-        save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+        save_glossary_csv(glossary, args.output)
         print(f"Also saved as CSV: {csv_path}")
     except Exception as e:
         print(f"[Warning] Could not save CSV format: {e}")

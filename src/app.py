@@ -1706,13 +1706,21 @@ class GlossarionWeb:
             extraction_logs.append("🖍️ Writing glossary to CSV...")
             yield None, None, gr.update(visible=True), "\n".join(extraction_logs), gr.update(visible=True), "Writing CSV...", 95
             
-            # The extract_glossary_from_epub module saves CSV inside a Glossary/ subfolder
+            # The extract_glossary_from_epub module saves CSV inside a per-book Glossary/ subfolder
             glossary_dir = os.path.join(os.path.dirname(output_json_path), "Glossary")
+            try:
+                from glossary_paths import get_book_glossary_path
+                book_base = os.path.splitext(os.path.basename(input_path))[0]
+                glossary_csv_in_book_subdir = get_book_glossary_path(
+                    glossary_dir, book_base, os.path.basename(output_path), create=False
+                )
+            except Exception:
+                glossary_csv_in_book_subdir = ""
             glossary_csv_in_subdir = os.path.join(glossary_dir, os.path.basename(output_path))
             
             # Check multiple possible output locations
             found_output = None
-            for candidate in [glossary_csv_in_subdir, output_path, output_json_path]:
+            for candidate in [glossary_csv_in_book_subdir, glossary_csv_in_subdir, output_path, output_json_path]:
                 if os.path.exists(candidate):
                     found_output = candidate
                     break

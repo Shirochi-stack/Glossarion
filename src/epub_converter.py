@@ -4387,6 +4387,68 @@ img {
         
         return css_items
     
+    def _font_basename_from_css_url(self, url_val: str) -> str:
+        """Return a normalized font filename from a CSS url(...) value."""
+        try:
+            from urllib.parse import unquote
+            cleaned = unquote(str(url_val).strip().strip('"\''))
+            cleaned = cleaned.split('#', 1)[0].split('?', 1)[0]
+            cleaned = cleaned.replace('\\', '/')
+            return os.path.basename(cleaned).lower()
+        except Exception:
+            return ""
+
+    def _get_global_custom_fonts_dir(self) -> str:
+        """Return the app-level custom_fonts directory used by the GUI."""
+        try:
+            if getattr(sys, 'frozen', False):
+                app_dir = os.path.dirname(sys.executable)
+            else:
+                app_dir = os.path.dirname(os.path.abspath(__file__))
+            return os.path.join(app_dir, 'custom_fonts')
+        except Exception:
+            return os.path.join(os.getcwd(), 'custom_fonts')
+
+    def _mirror_global_custom_fonts_to_workspace(self, font_exts) -> set:
+        """Copy loaded GUI fonts into this book's workspace fonts/ folder."""
+        mirrored_fonts = set()
+        global_fonts = self._get_global_custom_fonts_dir()
+        if not os.path.isdir(global_fonts):
+            return mirrored_fonts
+
+        try:
+            import shutil
+            os.makedirs(self.fonts_dir, exist_ok=True)
+            copied = 0
+            for fname in os.listdir(global_fonts):
+                if os.path.splitext(fname)[1].lower() not in font_exts:
+                    continue
+                src = os.path.join(global_fonts, fname)
+                dst = os.path.join(self.fonts_dir, fname)
+                if not os.path.isfile(src):
+                    continue
+                mirrored_fonts.add(fname.lower())
+                try:
+                    needs_copy = not os.path.isfile(dst)
+                    if not needs_copy:
+                        src_stat = os.stat(src)
+                        dst_stat = os.stat(dst)
+                        needs_copy = (
+                            src_stat.st_size != dst_stat.st_size
+                            or src_stat.st_mtime > dst_stat.st_mtime
+                        )
+                    if needs_copy:
+                        shutil.copy2(src, dst)
+                        copied += 1
+                except Exception as e:
+                    self.log(f"[WARNING] Failed to mirror custom font {fname}: {e}")
+            if copied:
+                self.log(f"[INFO] Mirrored {copied} loaded custom font(s) to workspace fonts/")
+        except Exception as e:
+            self.log(f"[WARNING] Failed to mirror custom fonts to workspace: {e}")
+
+        return mirrored_fonts
+
     def _add_fonts(self, book: epub.EpubBook):
         """Add font files to book.
 
@@ -4418,51 +4480,28 @@ img {
             try:
                 with open(css_path, 'r', encoding='utf-8') as f:
                     css_text = f.read()
-                # Match url(...) inside @font-face blocks
-                # Captures: url(../Fonts/Lexend-Regular.ttf)
-                for m in re.finditer(r'url\s*\(\s*["\']?([^"\')\s]+)["\']?\s*\)', css_text):
-                    url_val = m.group(1)
-                    basename = os.path.basename(url_val).lower()
+                # Match url(...) values used by @font-face declarations.
+                # Handles quoted paths, spaces, URL encoding, and fragments.
+                for m in re.finditer(r'url\s*\(\s*([\'"]?)(.*?)\1\s*\)', css_text, flags=re.IGNORECASE):
+                    url_val = m.group(2)
+                    basename = self._font_basename_from_css_url(url_val)
                     if os.path.splitext(basename)[1] in _FONT_EXTS:
                         referenced_fonts.add(basename)
             except Exception:
                 pass
 
+        mirrored_fonts = self._mirror_global_custom_fonts_to_workspace(_FONT_EXTS)
+
         if not referenced_fonts:
-            # No fonts referenced in any CSS — skip entirely
+            if mirrored_fonts:
+                self.log("[INFO] No CSS font references found; custom fonts were mirrored to workspace only")
+            # No fonts referenced in any CSS - skip EPUB embedding.
             return
 
         self.log(f"[INFO] CSS references {len(referenced_fonts)} font file(s): "
                  f"{', '.join(sorted(referenced_fonts))}")
 
-        # ── 2. Copy needed fonts from global custom_fonts/ → workspace fonts/ ──
-        try:
-            import platform, sys
-            if platform.system() == 'Windows':
-                if getattr(sys, 'frozen', False):
-                    app_dir = os.path.dirname(sys.executable)
-                else:
-                    app_dir = os.path.dirname(os.path.abspath(__file__))
-            else:
-                app_dir = os.getcwd()
-            global_fonts = os.path.join(app_dir, 'custom_fonts')
-            if os.path.isdir(global_fonts):
-                os.makedirs(self.fonts_dir, exist_ok=True)
-                import shutil
-                for fname in os.listdir(global_fonts):
-                    if fname.lower() in referenced_fonts:
-                        src = os.path.join(global_fonts, fname)
-                        dst = os.path.join(self.fonts_dir, fname)
-                        if not os.path.isfile(dst):
-                            try:
-                                shutil.copy2(src, dst)
-                                self.log(f"  📋 Copied global font → workspace: {fname}")
-                            except Exception:
-                                pass
-        except Exception:
-            pass
-
-        # ── 3. Bundle only referenced fonts from workspace fonts/ ──
+        # ── 2. Bundle only referenced fonts from workspace fonts/ ──
         if not os.path.isdir(self.fonts_dir):
             return
         

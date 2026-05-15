@@ -25,6 +25,7 @@ from queue import Queue, Empty
 import logging
 from manga_translator import MangaTranslator, GOOGLE_CLOUD_VISION_AVAILABLE
 from manga_settings_dialog import MangaSettingsDialog
+from glossary_paths import get_book_glossary_dir, migrate_legacy_named_files
 import ImageRenderer  # Import module-level methods
 
 # Optional: psutil/ctypes helpers to reduce GUI lag by lowering background thread priority
@@ -9123,7 +9124,16 @@ class MangaTranslationTab(QObject):
                 safe_name = self._manga_glossary_source_name()
                 current_glossary_dir = self._manga_glossary_output_dir()
                 output_json = os.path.join(current_glossary_dir, f"{safe_name}_manga_glossary.json")
-                exact_candidates.extend([output_json.replace('.json', '.csv'), output_json])
+                backup_json = self._manga_glossary_backup_json_path()
+                legacy_backup_json = self._manga_glossary_legacy_backup_json_path()
+                exact_candidates.extend([
+                    output_json.replace('.json', '.csv'),
+                    output_json,
+                    backup_json.replace('.json', '.csv'),
+                    backup_json,
+                    legacy_backup_json.replace('.json', '.csv'),
+                    legacy_backup_json,
+                ])
             except Exception:
                 pass
 
@@ -9147,8 +9157,16 @@ class MangaTranslationTab(QObject):
             if current_glossary_dir:
                 try:
                     configured_abs = os.path.abspath(configured)
-                    current_abs = os.path.abspath(current_glossary_dir)
-                    if os.path.commonpath([configured_abs, current_abs]) != current_abs:
+                    allowed_roots = [current_glossary_dir]
+                    try:
+                        allowed_roots.append(self._manga_glossary_backup_root_dir())
+                    except Exception:
+                        pass
+                    if not any(
+                        os.path.commonpath([configured_abs, os.path.abspath(root)]) == os.path.abspath(root)
+                        for root in allowed_roots
+                        if root
+                    ):
                         return ""
                 except Exception:
                     return ""
@@ -15681,8 +15699,35 @@ class MangaTranslationTab(QObject):
         return os.path.join(parent_dir, "Glossary")
 
     def _manga_glossary_backup_dir(self) -> str:
-        """Secondary backup location for generated manga glossaries."""
+        """Per-manga secondary backup location for generated manga glossaries."""
+        safe_name = self._manga_glossary_source_name()
+        root = self._manga_glossary_backup_root_dir()
+        self._migrate_legacy_manga_glossary_backup(root, safe_name)
+        return get_book_glossary_dir(root, safe_name)
+
+    def _manga_glossary_backup_root_dir(self) -> str:
+        """Root backup folder that contains one subfolder per manga source."""
         return os.path.join(self._manga_glossary_shared_root(), "MangaGlossary_Backup")
+
+    def _manga_glossary_legacy_backup_json_path(self) -> str:
+        safe_name = self._manga_glossary_source_name()
+        return os.path.join(self._manga_glossary_backup_root_dir(), f"{safe_name}_manga_glossary.json")
+
+    def _migrate_legacy_manga_glossary_backup(self, backup_root: str = None, safe_name: str = None) -> None:
+        safe_name = safe_name or self._manga_glossary_source_name()
+        backup_root = backup_root or self._manga_glossary_backup_root_dir()
+        try:
+            migrate_legacy_named_files(
+                backup_root,
+                safe_name,
+                [
+                    f"{safe_name}_manga_glossary.json",
+                    f"{safe_name}_manga_glossary.csv",
+                ],
+                logger=lambda msg: self._log(msg, "info"),
+            )
+        except Exception:
+            pass
 
     def _manga_glossary_candidate_dirs(self) -> List[str]:
         dirs = []

@@ -6054,6 +6054,7 @@ Rules:
             glossary_fname = os.path.splitext(os.path.basename(glossary_path))[0]  # e.g. "BookName_glossary" or "glossary"
             parent_of_glossary_dir = os.path.dirname(glossary_dir)
             is_shared_glossary_folder = os.path.basename(glossary_dir).lower() == 'glossary'
+            is_book_glossary_subfolder = os.path.basename(parent_of_glossary_dir).lower() == 'glossary'
 
             # ----- Determine the book output directory -----
             # Minimal mode:   <output_dir>/<book>/glossary.csv  OR  <output_dir>/<book>/Glossary/glossary.csv
@@ -6079,6 +6080,11 @@ Rules:
                 # Fallback: if we couldn't resolve per-book dir, use parent
                 if not book_output_dir:
                     book_output_dir = parent_of_glossary_dir
+            elif is_book_glossary_subfolder:
+                book_name = os.path.basename(glossary_dir)
+                grandparent = os.path.dirname(parent_of_glossary_dir)
+                candidate = os.path.join(grandparent, book_name)
+                book_output_dir = candidate if os.path.isdir(candidate) else grandparent
             else:
                 # Glossary is directly in the book output dir (minimal mode without subfolder)
                 book_output_dir = glossary_dir
@@ -6453,10 +6459,18 @@ Rules:
                             for ext in ext_priority:
                                 candidates.append(os.path.join(book_dir, 'Glossary', f"glossary{ext}"))
                             for ext in ext_priority:
+                                candidates.append(os.path.join(glossary_folder, base, f"{base}_glossary{ext}"))
+                            for ext in ext_priority:
+                                candidates.append(os.path.join(glossary_folder, base, f"{base}{ext}"))
+                            for ext in ext_priority:
                                 candidates.append(os.path.join(glossary_folder, f"{base}_glossary{ext}"))
                             for ext in ext_priority:
                                 candidates.append(os.path.join(glossary_folder, f"{base}{ext}"))
                         else:
+                            for ext in ext_priority:
+                                candidates.append(os.path.join(glossary_folder, base, f"{base}_glossary{ext}"))
+                            for ext in ext_priority:
+                                candidates.append(os.path.join(glossary_folder, base, f"{base}{ext}"))
                             for ext in ext_priority:
                                 candidates.append(os.path.join(glossary_folder, f"{base}_glossary{ext}"))
                             for ext in ext_priority:

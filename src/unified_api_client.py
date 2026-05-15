@@ -23712,7 +23712,22 @@ class UnifiedClient:
         try:
             # Use output directory if provided, otherwise current directory
             base_dir = self.output_dir if self.output_dir else "."
-            
+
+            if os.path.basename(os.path.abspath(base_dir)).lower() == "glossary":
+                try:
+                    from glossary_paths import get_book_glossary_dir
+                    source_path = (
+                        os.getenv("EPUB_PATH")
+                        or os.getenv("SOURCE_FILE")
+                        or os.getenv("INPUT_FILE")
+                        or ""
+                    )
+                    if source_path:
+                        book_name = os.path.splitext(os.path.basename(source_path))[0]
+                        base_dir = get_book_glossary_dir(base_dir, book_name, create=True)
+                except Exception:
+                    pass
+
             # Create truncation_logs subfolder inside the output directory
             log_dir = os.path.join(base_dir, "truncation_logs")
             os.makedirs(log_dir, exist_ok=True)

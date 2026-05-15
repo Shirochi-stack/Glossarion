@@ -8017,13 +8017,32 @@ Recent translations to summarize:
                     # 1. Shared Glossary/ folder at root: <root>/Glossary/<base>_glossary.*
                     gdir = os.path.join(_root, 'Glossary')
                     if os.path.isdir(gdir):
+                        nested_gdir = os.path.join(gdir, base)
+                        if os.path.isdir(nested_gdir):
+                            for ext in ['.csv', '.json', '.txt', '.md']:
+                                f = os.path.join(nested_gdir, f"{base}_glossary{ext}")
+                                if os.path.exists(f):
+                                    all_files.append((base, f))
+                            for fname in [
+                                f"{base}_glossary_progress.json",
+                                f"{base}_gender_tracker.json",
+                                f"{base}_glossary_history.json",
+                            ]:
+                                f = os.path.join(nested_gdir, fname)
+                                if os.path.exists(f):
+                                    all_files.append((base, f))
                         for ext in ['.csv', '.json', '.txt', '.md']:
                             f = os.path.join(gdir, f"{base}_glossary{ext}")
                             if os.path.exists(f):
                                 all_files.append((base, f))
-                        pf = os.path.join(gdir, f"{base}_glossary_progress.json")
-                        if os.path.exists(pf):
-                            all_files.append((base, pf))
+                        for fname in [
+                            f"{base}_glossary_progress.json",
+                            f"{base}_gender_tracker.json",
+                            f"{base}_glossary_history.json",
+                        ]:
+                            pf = os.path.join(gdir, fname)
+                            if os.path.exists(pf):
+                                all_files.append((base, pf))
 
                     # 2. Per-book folder: <root>/<base>/glossary.* and <root>/<base>/Glossary/<base>_glossary.*
                     out_dir = os.path.join(_root, base)
@@ -16428,15 +16447,25 @@ Important rules:
             save_glossary_in_output = bool(self.config.get('save_glossary_in_output', False))
             
             if override_dir:
-                glossary_dir = os.path.join(override_dir, "Glossary")
+                shared_glossary_dir = os.path.join(override_dir, "Glossary")
             else:
-                glossary_dir = "Glossary"
+                shared_glossary_dir = "Glossary"
             # On macOS .app bundles, cwd can be '/' (read-only root).
             # Only on macOS — on Windows this changes the output dir and breaks glossary progress tracking.
-            if sys.platform == 'darwin' and not os.path.isabs(glossary_dir):
-                glossary_dir = os.path.join(os.path.dirname(os.path.abspath(file_path)), glossary_dir)
-            os.makedirs(glossary_dir, exist_ok=True)
-            output_path = os.path.join(glossary_dir, f"{epub_base}_glossary.json")
+            if sys.platform == 'darwin' and not os.path.isabs(shared_glossary_dir):
+                shared_glossary_dir = os.path.join(os.path.dirname(os.path.abspath(file_path)), shared_glossary_dir)
+            os.makedirs(shared_glossary_dir, exist_ok=True)
+            try:
+                from glossary_paths import get_book_glossary_path, migrate_legacy_glossary_files, repair_nested_glossary_folder
+                migrate_legacy_glossary_files(shared_glossary_dir, epub_base, logger=self.append_log)
+                repair_nested_glossary_folder(shared_glossary_dir, epub_base, logger=self.append_log)
+                output_path = get_book_glossary_path(
+                    shared_glossary_dir, epub_base, f"{epub_base}_glossary.json"
+                )
+            except Exception:
+                glossary_dir = os.path.join(shared_glossary_dir, epub_base)
+                os.makedirs(glossary_dir, exist_ok=True)
+                output_path = os.path.join(glossary_dir, f"{epub_base}_glossary.json")
             
             try:
                 # Set up environment variables
@@ -16494,7 +16523,7 @@ Important rules:
                     'GLOSSARY_MAX_NAMES': str(self.glossary_max_names_var),
                     'GLOSSARY_MAX_TITLES': str(self.glossary_max_titles_var),
                     'CONTEXT_WINDOW_SIZE': str(self.context_window_size_var),
-                    'GLOSSARY_SHARED_DIR': glossary_dir,
+                    'GLOSSARY_SHARED_DIR': shared_glossary_dir,
                     'SAVE_GLOSSARY_IN_OUTPUT': '1' if save_glossary_in_output else '0',
                     'VISION_OCR_SOURCE_PREPASS': str(self.config.get('vision_ocr_source_prepass', 'auto') or 'auto'),
                     'ENABLE_AUTO_GLOSSARY': "1" if (self.config.get('auto_glossary_mode', 'off') == 'minimal' or (self.config.get('auto_glossary_mode') is None and self.enable_auto_glossary_var)) else "0",
@@ -16721,7 +16750,7 @@ Important rules:
                     
                 # Check in Glossary subfolder if not found
                 if not has_content:
-                    glossary_json_sub = os.path.join("Glossary", os.path.basename(output_path))
+                    glossary_json_sub = os.path.join(shared_glossary_dir, os.path.basename(output_path))
                     glossary_csv_sub = os.path.splitext(glossary_json_sub)[0] + '.csv'
                     
                     if os.path.exists(glossary_json_sub):
@@ -21347,6 +21376,12 @@ Important rules:
             for file_path in files:
                 base = os.path.splitext(os.path.basename(file_path))[0]
                 match_names.add(base.casefold())
+                try:
+                    from glossary_paths import migrate_legacy_glossary_files, repair_nested_glossary_folder
+                    migrate_legacy_glossary_files(glossary_base_dir, base, logger=self.append_log)
+                    repair_nested_glossary_folder(glossary_base_dir, base, logger=self.append_log)
+                except Exception:
+                    pass
                 
                 # For images, also add the parent folder name
                 ext = os.path.splitext(file_path)[1].lower()
@@ -21360,31 +21395,39 @@ Important rules:
             best_mtime = 0
             
             try:
-                for fn in os.listdir(glossary_base_dir):
-                    full = os.path.join(glossary_base_dir, fn)
-                    if not os.path.isfile(full):
-                        continue
-                    
-                    stem, ext = os.path.splitext(fn)
-                    ext_l = ext.lower()
-                    if ext_l not in ('.csv', '.json'):
-                        continue
-                    
-                    # Skip progress files
-                    if '_progress' in stem.lower():
-                        continue
-                    
-                    # Match against any candidate name
-                    stem_cf = stem.casefold()
-                    for name_cf in match_names:
-                        if name_cf in stem_cf or stem_cf in name_cf or f"{name_cf}_glossary" == stem_cf:
-                            mtime = os.path.getmtime(full)
-                            # Prefer most recent, and CSV over JSON
-                            priority = (1 if ext_l == '.csv' else 0)
-                            if mtime > best_mtime or (mtime == best_mtime and priority > 0):
-                                best_match = full
-                                best_mtime = mtime
-                            break
+                for root, dirs, files_in_root in os.walk(glossary_base_dir):
+                    if root != glossary_base_dir:
+                        dirs[:] = []
+                    for fn in files_in_root:
+                        full = os.path.join(root, fn)
+                        if not os.path.isfile(full):
+                            continue
+                        
+                        stem, ext = os.path.splitext(fn)
+                        ext_l = ext.lower()
+                        if ext_l not in ('.csv', '.json'):
+                            continue
+                        
+                        # Skip progress/metadata helpers
+                        stem_lower = stem.lower()
+                        if (
+                            '_progress' in stem_lower
+                            or stem_lower.endswith('_gender_tracker')
+                            or stem_lower.endswith('_glossary_history')
+                        ):
+                            continue
+                        
+                        # Match against any candidate name
+                        stem_cf = stem.casefold()
+                        for name_cf in match_names:
+                            if name_cf in stem_cf or stem_cf in name_cf or f"{name_cf}_glossary" == stem_cf:
+                                mtime = os.path.getmtime(full)
+                                # Prefer most recent, and CSV over JSON
+                                priority = (1 if ext_l == '.csv' else 0)
+                                if mtime > best_mtime or (mtime == best_mtime and priority > 0):
+                                    best_match = full
+                                    best_mtime = mtime
+                                break
             except Exception:
                 pass
             
@@ -21692,29 +21735,45 @@ Important rules:
                 if not glossary_dir or not os.path.isdir(glossary_dir):
                     return None
 
+                try:
+                    from glossary_paths import migrate_legacy_glossary_files, repair_nested_glossary_folder
+                    migrate_legacy_glossary_files(glossary_dir, base)
+                    repair_nested_glossary_folder(glossary_dir, base)
+                except Exception:
+                    pass
+
                 direct_matches = []
                 fuzzy_candidates = []
 
                 try:
-                    for fn in os.listdir(glossary_dir):
-                        full = os.path.join(glossary_dir, fn)
-                        if not os.path.isfile(full):
-                            continue
+                    for root, dirs, files_in_root in os.walk(glossary_dir):
+                        if root != glossary_dir:
+                            dirs[:] = []
+                        for fn in files_in_root:
+                            full = os.path.join(root, fn)
+                            if not os.path.isfile(full):
+                                continue
 
-                        stem, ext = os.path.splitext(fn)
-                        stem_cf = stem.casefold()
-                        ext_l = ext.lower()
-                        if ext_l not in ext_priority:
-                            continue
+                            stem, ext = os.path.splitext(fn)
+                            stem_cf = stem.casefold()
+                            ext_l = ext.lower()
+                            if ext_l not in ext_priority:
+                                continue
 
-                        # Skip progress/metadata helpers
-                        if stem_cf.endswith('_glossary_progress') or stem_cf.endswith('glossary_progress') or '_progress' in stem_cf:
-                            continue
+                            # Skip progress/metadata helpers
+                            if (
+                                stem_cf.endswith('_glossary_progress')
+                                or stem_cf.endswith('glossary_progress')
+                                or '_progress' in stem_cf
+                                or stem_cf.endswith('_gender_tracker')
+                                or stem_cf.endswith('_glossary_history')
+                            ):
+                                continue
 
-                        if stem_cf in preferred_stems:
-                            direct_matches.append((preferred_stems.index(stem_cf), ext_priority.index(ext_l), full))
-                        elif _fuzzy_enabled:
-                            fuzzy_candidates.append((stem_cf, ext_priority.index(ext_l), full))
+                            if stem_cf in preferred_stems:
+                                direct_matches.append((preferred_stems.index(stem_cf), ext_priority.index(ext_l), full))
+                            elif _fuzzy_enabled:
+                                fuzzy_candidates.append((stem_cf, ext_priority.index(ext_l), full))
                 except Exception:
                     return None
 

@@ -7808,7 +7808,14 @@ def _single_pass_glossary_paths(output_dir):
         base = os.path.basename(os.path.abspath(output_dir)) or "book"
     if base.lower().endswith("_ocr"):
         base = base[:-4]
-    glossary_dir = _single_pass_shared_glossary_dir(output_dir)
+    shared_glossary_dir = _single_pass_shared_glossary_dir(output_dir)
+    try:
+        from glossary_paths import get_book_glossary_dir, migrate_legacy_glossary_files, repair_nested_glossary_folder
+        migrate_legacy_glossary_files(shared_glossary_dir, base, logger=print)
+        repair_nested_glossary_folder(shared_glossary_dir, base, logger=print)
+        glossary_dir = get_book_glossary_dir(shared_glossary_dir, base)
+    except Exception:
+        glossary_dir = os.path.join(shared_glossary_dir, base)
     os.makedirs(glossary_dir, exist_ok=True)
     return (
         glossary_dir,
@@ -16075,25 +16082,40 @@ def main(log_callback=None, stop_callback=None):
                     glossary_search_dir = os.path.join(os.path.dirname(os.path.abspath(input_path)), glossary_search_dir)
                 
                 if os.path.isdir(glossary_search_dir):
-                    input_base = os.path.splitext(os.path.basename(input_path))[0].lower()
+                    input_base_raw = os.path.splitext(os.path.basename(input_path))[0]
+                    input_base = input_base_raw.lower()
+                    try:
+                        from glossary_paths import migrate_legacy_glossary_files, repair_nested_glossary_folder
+                        migrate_legacy_glossary_files(glossary_search_dir, input_base_raw, logger=print)
+                        repair_nested_glossary_folder(glossary_search_dir, input_base_raw, logger=print)
+                    except Exception:
+                        pass
                     best_match = None
                     best_mtime = 0
                     try:
-                        for fn in os.listdir(glossary_search_dir):
-                            fp = os.path.join(glossary_search_dir, fn)
-                            if not os.path.isfile(fp):
-                                continue
-                            stem, ext = os.path.splitext(fn)
-                            if ext.lower() not in ('.csv', '.json'):
-                                continue
-                            if '_progress' in stem.lower():
-                                continue
-                            stem_lower = stem.lower()
-                            if input_base in stem_lower or f"{input_base}_glossary" == stem_lower:
-                                mtime = os.path.getmtime(fp)
-                                if mtime > best_mtime:
-                                    best_match = fp
-                                    best_mtime = mtime
+                        for root, dirs, files_in_root in os.walk(glossary_search_dir):
+                            if root != glossary_search_dir:
+                                dirs[:] = []
+                            for fn in files_in_root:
+                                fp = os.path.join(root, fn)
+                                if not os.path.isfile(fp):
+                                    continue
+                                stem, ext = os.path.splitext(fn)
+                                if ext.lower() not in ('.csv', '.json'):
+                                    continue
+                                stem_lower = stem.lower()
+                                if (
+                                    '_progress' in stem_lower
+                                    or stem_lower.endswith('_gender_tracker')
+                                    or stem_lower.endswith('_glossary_history')
+                                ):
+                                    continue
+                                parent_lower = os.path.basename(os.path.dirname(fp)).lower()
+                                if input_base in stem_lower or f"{input_base}_glossary" == stem_lower or parent_lower == input_base:
+                                    mtime = os.path.getmtime(fp)
+                                    if mtime > best_mtime:
+                                        best_match = fp
+                                        best_mtime = mtime
                     except Exception:
                         pass
                     
