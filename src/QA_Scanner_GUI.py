@@ -2426,9 +2426,23 @@ class QAScannerMixin:
                 existing.setModal(bool(show))
                 if show:
                     existing.setAttribute(Qt.WA_DontShowOnScreen, False)
-                    existing.show()
-                    existing.raise_()
-                    existing.activateWindow()
+                    try:
+                        existing.ensurePolished()
+                        layout = existing.layout()
+                        if layout is not None:
+                            layout.activate()
+                    except Exception:
+                        pass
+                    try:
+                        from dialog_animations import show_dialog_with_fade
+                        show_dialog_with_fade(existing, duration=180)
+                    except Exception:
+                        existing.show()
+                    try:
+                        existing.raise_()
+                        existing.activateWindow()
+                    except Exception:
+                        pass
                 else:
                     _prewarm_dialog_offscreen(existing)
                 return existing
@@ -2442,6 +2456,7 @@ class QAScannerMixin:
         except Exception:
             pass
         dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.Window)
         # Apply basic dark stylesheet IMMEDIATELY to prevent white flash
         # Set up icon path
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
@@ -4882,6 +4897,20 @@ class QAScannerMixin:
                 excluded_text.setPlainText(saved_excluded_chars)
         
         scroll_layout.addStretch()
+
+        # Add a dummy _cleanup_scrolling method for compatibility
+        dialog._cleanup_scrolling = lambda: None
+
+        def hide_qa_settings_dialog():
+            try:
+                dialog._cleanup_scrolling()
+            except Exception:
+                pass
+            try:
+                dialog.setResult(QDialog.Rejected)
+            except Exception:
+                pass
+            dialog.hide()
         
         # Create fixed bottom button section (outside scroll area)
         button_widget = QWidget()
@@ -4897,7 +4926,7 @@ class QAScannerMixin:
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setMinimumWidth(120)
         cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
-        cancel_btn.clicked.connect(lambda: [dialog._cleanup_scrolling(), dialog.hide()])
+        cancel_btn.clicked.connect(hide_qa_settings_dialog)
         button_layout.addWidget(cancel_btn)
         
         reset_btn = QPushButton("Reset to Default")
@@ -4912,15 +4941,11 @@ class QAScannerMixin:
         # Show the dialog (PySide6 handles sizing automatically)
         # Note: The dialog size is already set in the constructor (800x600)
         
-        # Add a dummy _cleanup_scrolling method for compatibility
-        dialog._cleanup_scrolling = lambda: None
-        
         # Handle window close - hide instead of destroying so reopen is instant
         def handle_close_event(event):
             try:
                 event.ignore()
-                dialog._cleanup_scrolling()
-                dialog.hide()
+                hide_qa_settings_dialog()
             except Exception:
                 dialog.hide()
         dialog.closeEvent = handle_close_event
