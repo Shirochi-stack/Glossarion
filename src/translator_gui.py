@@ -8874,7 +8874,24 @@ Recent translations to summarize:
         # Other Settings button (row 7, column 4)
         other_settings_btn = QPushButton("⚙️  Other Setting")
         other_settings_btn.clicked.connect(self.open_other_settings)
-        other_settings_btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; font-size: 11pt; padding-top: 8px; padding-bottom: 12px;")  # info-outline
+        other_settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                font-weight: bold;
+                font-size: 11pt;
+                padding-top: 8px;
+                padding-bottom: 12px;
+            }
+            QPushButton:disabled {
+                background-color: #555555;
+                color: #888888;
+                font-weight: bold;
+                font-size: 11pt;
+                padding-top: 8px;
+                padding-bottom: 12px;
+            }
+        """)  # info-outline
         other_settings_btn.setMinimumWidth(90)
         self.other_settings_btn = other_settings_btn
         self._register_startup_prewarm_button(
@@ -10615,18 +10632,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     entry['was_enabled'] = button.isEnabled()
                     entry['active_style'] = button.styleSheet() if hasattr(button, 'styleSheet') else entry.get('normal_style', '')
                 entry['is_loading'] = True
-                try:
-                    base_style = entry.get('active_style', '')
-                    disabled_style = """
-                        QPushButton:disabled {
-                            background-color: #555555;
-                            color: #888888;
-                            border-color: #555555;
-                        }
-                    """
-                    button.setStyleSheet(f"{base_style}\n{disabled_style}")
-                except Exception:
-                    pass
+                if key != 'other_settings':
+                    try:
+                        base_style = entry.get('active_style', '')
+                        disabled_style = """
+                            QPushButton:disabled {
+                                background-color: #555555;
+                                color: #888888;
+                                border-color: #555555;
+                            }
+                        """
+                        button.setStyleSheet(f"{base_style}\n{disabled_style}")
+                    except Exception:
+                        pass
                 button.setEnabled(False)
                 display_text = loading_text or entry.get('loading_text', 'Loading...')
                 if text_widget is not None and hasattr(text_widget, 'setText'):
