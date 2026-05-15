@@ -10592,7 +10592,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 'button': button,
                 'text_widget': text_widget,
                 'normal_text': text_widget.text() if text_widget is not None and hasattr(text_widget, 'text') else button.text(),
+                'normal_text_style': text_widget.styleSheet() if text_widget is not None and hasattr(text_widget, 'styleSheet') else '',
                 'loading_text': loading_text,
+                'normal_style': button.styleSheet() if hasattr(button, 'styleSheet') else '',
                 'was_enabled': button.isEnabled(),
             }
         except Exception:
@@ -10611,7 +10613,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if loading:
                 if not entry.get('is_loading', False):
                     entry['was_enabled'] = button.isEnabled()
+                    entry['active_style'] = button.styleSheet() if hasattr(button, 'styleSheet') else entry.get('normal_style', '')
                 entry['is_loading'] = True
+                try:
+                    base_style = entry.get('active_style', '')
+                    disabled_style = """
+                        QPushButton:disabled {
+                            background-color: #555555;
+                            color: #888888;
+                            border-color: #555555;
+                        }
+                    """
+                    button.setStyleSheet(f"{base_style}\n{disabled_style}")
+                except Exception:
+                    pass
                 button.setEnabled(False)
                 display_text = loading_text or entry.get('loading_text', 'Loading...')
                 if text_widget is not None and hasattr(text_widget, 'setText'):
@@ -10621,10 +10636,23 @@ If you see multiple p-b cookies, use the one with the longest value."""
             else:
                 entry['is_loading'] = False
                 button.setEnabled(bool(entry.get('was_enabled', True)))
+                try:
+                    button.setStyleSheet(entry.pop('active_style', entry.get('normal_style', '')))
+                except Exception:
+                    pass
                 if text_widget is not None and hasattr(text_widget, 'setText'):
                     text_widget.setText(entry.get('normal_text', ''))
                 else:
                     button.setText(entry.get('normal_text', ''))
+        except Exception:
+            pass
+
+    def set_all_startup_prewarm_buttons_loading(self, loading=True):
+        """Toggle every registered startup prewarm button together."""
+        try:
+            registry = getattr(self, '_startup_prewarm_button_registry', {}) or {}
+            for key in list(registry.keys()):
+                self.set_startup_prewarm_button_loading(key, loading)
         except Exception:
             pass
       
@@ -24732,6 +24760,14 @@ if __name__ == "__main__":
         # Mark modules as already loaded to skip lazy loading
         main_window._modules_loaded = True
         main_window._modules_loading = False
+
+        # Apply startup-prewarm loading text before the first visible paint.
+        # The queued prewarm pass will clear this when all warmups finish.
+        if splash_manager:
+            try:
+                main_window.set_all_startup_prewarm_buttons_loading(True)
+            except Exception:
+                pass
 
         if splash_manager:
             # Extra pause to show "Ready!" before closing
