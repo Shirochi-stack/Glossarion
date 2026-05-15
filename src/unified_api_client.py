@@ -2054,9 +2054,30 @@ class UnifiedClient:
         except Exception:
             return False
 
+    @staticmethod
+    def _normalize_custom_prefix_endpoint_type(endpoint_type: str) -> str:
+        """Return a supported custom-prefix endpoint URL template."""
+        value = str(endpoint_type or '').strip().lower().replace('-', '_').replace(' ', '_')
+        legacy = {
+            '': '{base_url}/chat/completions',
+            'openai_chat': '{base_url}/chat/completions',
+            'openai_images': '{base_url}/images/generations',
+            'anthropic_messages': '{base_url}/v1/messages',
+        }
+        if value in legacy:
+            return legacy[value]
+        raw = str(endpoint_type or '').strip()
+        known = {
+            '{base_url}/chat/completions',
+            '{base_url}/images/generations',
+            '{base_url}/v1/messages',
+            '{base_url}/{model_id}',
+        }
+        return raw if raw in known else '{base_url}/chat/completions'
+
     @classmethod
     def _load_custom_prefix_routes(cls) -> List[Dict[str, str]]:
-        """Load GUI-defined OpenAI-compatible prefix routes from the environment."""
+        """Load GUI-defined custom prefix routes from the environment."""
         raw = os.environ.get('CUSTOM_OPENAI_PREFIX_ROUTES', '') or ''
         if not raw.strip():
             return []
@@ -2079,6 +2100,9 @@ class UnifiedClient:
                 continue
             prefix = str(entry.get('prefix', '') or '').strip().replace('\\', '/').lstrip('/')
             routing = str(entry.get('routing', entry.get('base_url', '')) or '').strip().rstrip('/')
+            endpoint_type = cls._normalize_custom_prefix_endpoint_type(
+                entry.get('endpoint_type', entry.get('type', 'openai_chat'))
+            )
             if not prefix or not routing:
                 continue
             if not prefix.endswith('/'):
@@ -2089,7 +2113,11 @@ class UnifiedClient:
             if key in seen:
                 continue
             seen.add(key)
-            routes.append({'prefix': prefix, 'routing': routing})
+            routes.append({
+                'prefix': prefix,
+                'routing': routing,
+                'endpoint_type': endpoint_type,
+            })
 
         routes.sort(key=lambda r: len(r.get('prefix', '')), reverse=True)
         return routes
@@ -2108,6 +2136,27 @@ class UnifiedClient:
         except Exception:
             return None
         return None
+
+    @staticmethod
+    def _strip_custom_route_prefix(model: str, route: Optional[Dict[str, str]]) -> str:
+        """Strip only the GUI route prefix from a model id."""
+        effective_model = str(model or '').strip()
+        try:
+            prefix = str((route or {}).get('prefix', '') or '')
+            if prefix and effective_model.lower().startswith(prefix.lower()):
+                effective_model = effective_model[len(prefix):].strip()
+        except Exception:
+            pass
+        return effective_model
+
+    @staticmethod
+    def _is_fal_model_base_url(base_url: str) -> bool:
+        """Return True for fal native model endpoints."""
+        try:
+            url_l = str(base_url or '').strip().lower()
+            return '://fal.run' in url_l or '://queue.fal.run' in url_l
+        except Exception:
+            return False
 
     @staticmethod
     def _is_local_custom_endpoint() -> bool:
@@ -5909,7 +5958,8 @@ class UnifiedClient:
             self.client_type = 'custom_openai'
             logger.info(
                 f"Custom prefix route matched {custom_prefix_route.get('prefix')} -> "
-                f"{custom_prefix_route.get('routing')}"
+                f"{custom_prefix_route.get('routing')} "
+                f"({custom_prefix_route.get('endpoint_type', 'openai_chat')})"
             )
         else:
             for prefix, provider in self.MODEL_PROVIDERS.items():
@@ -6185,15 +6235,23 @@ class UnifiedClient:
             # MICROSECOND LOCK for OpenAI client
             with self._model_lock:
                 base_url_for_client = 'https://api.openai.com/v1'
+                route_endpoint_type = '{base_url}/chat/completions'
                 if self.client_type == 'custom_openai':
                     route = self._get_custom_prefix_route_for_model(model_snapshot)
                     if route:
                         base_url_for_client = route.get('routing') or base_url_for_client
-                # Use regular OpenAI client - individual endpoint will be set later
-                self.openai_client = openai.OpenAI(
-                    api_key=api_key_snapshot,
-                    base_url=base_url_for_client
-                )
+                        route_endpoint_type = self._normalize_custom_prefix_endpoint_type(
+                            route.get('endpoint_type', 'openai_chat')
+                        )
+                if self.client_type == 'custom_openai' and route_endpoint_type != '{base_url}/chat/completions':
+                    # Image and Anthropic prefix routes are handled by direct HTTP paths.
+                    self.openai_client = None
+                else:
+                    # Use regular OpenAI client - individual endpoint will be set later
+                    self.openai_client = openai.OpenAI(
+                        api_key=api_key_snapshot,
+                        base_url=base_url_for_client
+                    )
         
         elif self.client_type == 'gemini':
             # Auto-detect gRPC vs OpenAI from endpoint URL format
@@ -17311,9 +17369,11 @@ class UnifiedClient:
             prompt += "\nAssistant: "
         return prompt
     
-    def _send_anthropic(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+    def _send_anthropic(self, messages, temperature, max_tokens, response_name,
+                        base_url_override=None, model_override=None) -> UnifiedResponse:
         """Send request to Anthropic API"""
         max_retries = self._get_max_retries()
+        request_model = model_override or self.model
         
         headers = {
             "X-API-Key": self.api_key,
@@ -17341,7 +17401,7 @@ class UnifiedClient:
         # Apply cached model limit if we've discovered it before
         try:
             with self.__class__._model_limits_lock:
-                cached_limit = self.__class__._model_token_limits.get(self.model)
+                cached_limit = self.__class__._model_token_limits.get(request_model)
                 if cached_limit and (max_tokens is None or max_tokens > cached_limit):
                     max_tokens = cached_limit
         except Exception:
@@ -17349,13 +17409,20 @@ class UnifiedClient:
         
         # Get user-configured anti-duplicate parameters
         anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
-        data = self._build_anthropic_payload(formatted_messages, temperature, max_tokens, anti_dupe_params, system_message)
+        original_model = self.model
+        if model_override:
+            self.model = request_model
+        try:
+            data = self._build_anthropic_payload(formatted_messages, temperature, max_tokens, anti_dupe_params, system_message)
+        finally:
+            if model_override:
+                self.model = original_model
         
         # Determine Anthropic API URL in priority order:
         # 1. User-configured ANTHROPIC_BASE_URL (from custom endpoint field)
         # 2. self.base_url when Force Native Anthropic is on (derive from custom endpoint)
         # 3. Default official Anthropic API
-        custom_anthropic_base = os.getenv('ANTHROPIC_BASE_URL', '').strip()
+        custom_anthropic_base = str(base_url_override or '').strip() or os.getenv('ANTHROPIC_BASE_URL', '').strip()
         if custom_anthropic_base:
             base = custom_anthropic_base.rstrip('/')
             # Strip trailing API paths to get clean base
@@ -17417,7 +17484,7 @@ class UnifiedClient:
                 elif thinking_mode == 'enabled':
                     budget = data.get('thinking', {}).get('budget_tokens', 0)
                     thinking_label = f", thinking=extended (budget={budget:,})"
-                print(f"🛰️ [anthropic] SSE stream start (model={self.model}, url={api_url}{thinking_label})")
+                print(f"🛰️ [anthropic] SSE stream start (model={request_model}, url={api_url}{thinking_label})")
 
             # Use httpx for streaming — requests/urllib3 buffers at the TLS
             # record level (~16 KB), causing SSE events to arrive in bursts.
@@ -18107,9 +18174,7 @@ class UnifiedClient:
         if provider == 'custom_openai':
             custom_prefix_route = self._get_custom_prefix_route_for_model(effective_model)
             if custom_prefix_route:
-                prefix = custom_prefix_route.get('prefix', '')
-                if prefix and effective_model.lower().startswith(prefix.lower()):
-                    effective_model = effective_model[len(prefix):].strip()
+                effective_model = self._strip_custom_route_prefix(effective_model, custom_prefix_route)
                 base_url = custom_prefix_route.get('routing', base_url).rstrip('/')
         # Provider-specific model normalization (transport-only)
         if provider == 'openrouter':
@@ -20721,7 +20786,176 @@ class UnifiedClient:
             provider="openai"
         )
 
-    def _send_openai_images_api(self, messages, base_url, response_name) -> UnifiedResponse:
+    def _extract_generation_prompt_and_image_url(self, messages):
+        """Extract a text prompt and first image URL/data URI from OpenAI-style messages."""
+        prompt = ''
+        image_url = None
+        for msg in reversed(messages):
+            if msg.get('role') != 'user':
+                continue
+            content = msg.get('content', '')
+            if isinstance(content, str):
+                prompt = content
+            elif isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get('type') == 'text' and not prompt:
+                        prompt = part.get('text', '') or ''
+                    elif part.get('type') == 'image_url' and image_url is None:
+                        img = part.get('image_url', {})
+                        image_url = img.get('url', '') if isinstance(img, dict) else str(img or '')
+            break
+        if not prompt:
+            for msg in messages:
+                if msg.get('role') == 'system':
+                    prompt = msg.get('content', '') or ''
+                    break
+        return prompt or 'Generate an image', image_url
+
+    def _send_fal_model_api(self, messages, base_url, response_name, model_override=None) -> UnifiedResponse:
+        """Call fal native model endpoints with Key auth and queue polling."""
+        import requests as _req
+        import json as _json
+
+        effective_model = str(model_override or self.model or '').strip()
+        if not effective_model:
+            raise UnifiedClientError('Fal API route needs a model id', error_type='validation')
+
+        prompt, image_url = self._extract_generation_prompt_and_image_url(messages)
+        base = str(base_url or 'https://queue.fal.run').strip()
+        if base and not base.startswith(('http://', 'https://')):
+            base = f"https://{base}"
+        base = base.rstrip('/')
+        model_path = effective_model.lstrip('/')
+        if base.lower().endswith(f"/{model_path.lower()}") or base.lower().endswith(model_path.lower()):
+            submit_url = base
+        else:
+            submit_url = f"{base}/{model_path}"
+
+        payload = {}
+        if prompt:
+            payload['prompt'] = prompt
+        if image_url:
+            payload['image_url'] = image_url
+
+        headers = {
+            'Authorization': f'Key {self.api_key}',
+            'Content-Type': 'application/json',
+        }
+
+        max_retries = self._get_max_retries()
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                if self._is_stop_requested():
+                    raise UnifiedClientError('Operation cancelled by user', error_type='cancelled')
+                if not self._is_stop_requested():
+                    print(f"🖼️ [fal] Submitting {effective_model} -> {submit_url}")
+
+                resp = _req.post(submit_url, headers=headers, json=payload, timeout=180)
+                if resp.status_code == 429 and attempt < max_retries - 1:
+                    wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                    print(f"⏳ [fal] Rate-limited, retrying in {wait:.1f}s...")
+                    time.sleep(wait)
+                    continue
+                if resp.status_code not in (200, 201, 202):
+                    raise UnifiedClientError(
+                        f"Fal API error ({resp.status_code}): {resp.text[:500]}",
+                        error_type='api_error',
+                    )
+
+                data = resp.json()
+                response_url = data.get('response_url') or data.get('responseUrl')
+                status_url = data.get('status_url') or data.get('statusUrl')
+                request_id = data.get('request_id') or data.get('requestId')
+                is_queue = '://queue.fal.run' in submit_url.lower() or response_url or status_url
+                if is_queue and (response_url or request_id):
+                    if not response_url and request_id:
+                        response_url = f"{submit_url}/requests/{request_id}"
+                    if not status_url and request_id:
+                        status_url = f"{submit_url}/requests/{request_id}/status"
+
+                    poll_attempts = int(os.getenv('FAL_POLL_ATTEMPTS', '360'))
+                    poll_interval = float(os.getenv('FAL_POLL_INTERVAL', '2'))
+                    for poll_index in range(poll_attempts):
+                        if self._is_stop_requested():
+                            raise UnifiedClientError('Operation cancelled by user', error_type='cancelled')
+                        if status_url:
+                            status_resp = _req.get(status_url, headers=headers, timeout=60)
+                            if status_resp.status_code not in (200, 201, 202):
+                                raise UnifiedClientError(
+                                    f"Fal status error ({status_resp.status_code}): {status_resp.text[:500]}",
+                                    error_type='api_error',
+                                )
+                            status_data = status_resp.json()
+                            status = str(status_data.get('status', '')).upper()
+                            if status == 'COMPLETED':
+                                if status_data.get('error'):
+                                    raise UnifiedClientError(
+                                        f"Fal request failed: {status_data.get('error')}",
+                                        error_type='api_error',
+                                    )
+                                break
+                            if status in ('FAILED', 'ERROR'):
+                                raise UnifiedClientError(
+                                    f"Fal request failed: {status_data.get('error') or status_data}",
+                                    error_type='api_error',
+                                )
+                        time.sleep(poll_interval)
+                    else:
+                        raise UnifiedClientError(
+                            f"Fal request timed out waiting for result ({request_id or 'unknown request'})",
+                            error_type='api_error',
+                        )
+
+                    result_resp = _req.get(response_url, headers=headers, timeout=180)
+                    if result_resp.status_code not in (200, 201):
+                        raise UnifiedClientError(
+                            f"Fal result error ({result_resp.status_code}): {result_resp.text[:500]}",
+                            error_type='api_error',
+                        )
+                    data = result_resp.json()
+
+                urls = []
+                for key in ('images', 'image', 'videos', 'video', 'audios', 'audio'):
+                    value = data.get(key) if isinstance(data, dict) else None
+                    values = value if isinstance(value, list) else ([value] if value else [])
+                    for item in values:
+                        if isinstance(item, dict):
+                            if item.get('url'):
+                                urls.append(item['url'])
+                            elif item.get('content'):
+                                urls.append(str(item['content']))
+                        elif isinstance(item, str):
+                            urls.append(item)
+
+                content_out = '\n'.join(urls) if urls else _json.dumps(data, ensure_ascii=False)
+                if not self._is_stop_requested():
+                    print(f"✅ [fal] Completed {effective_model}")
+                return UnifiedResponse(
+                    content=content_out,
+                    finish_reason='stop',
+                    usage=None,
+                    raw_response=data,
+                )
+            except UnifiedClientError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                if attempt < max_retries - 1:
+                    wait = min(2 ** attempt + random.uniform(0, 1), 30)
+                    print(f"🔄 [fal] API error - retrying in {wait:.1f}s (attempt {attempt + 1}/{max_retries}): {exc}")
+                    time.sleep(wait)
+                else:
+                    break
+
+        raise UnifiedClientError(
+            f"Fal API failed after {max_retries} attempts: {last_error}",
+            error_type='api_error',
+        )
+
+    def _send_openai_images_api(self, messages, base_url, response_name, model_override=None) -> UnifiedResponse:
         """Call OpenAI Images API for GPT image models (gpt-image-1, chatgpt-image-latest, dall-e-3, etc.).
 
         If the messages contain an embedded input image (base64 image_url part from
@@ -20734,7 +20968,8 @@ class UnifiedClient:
         import requests as _req
         import io as _io
 
-        model_lower = (self.model or '').lower()
+        model_name = model_override or self.model or ''
+        model_lower = model_name.lower()
         base_url = str(base_url or '').strip()
         if base_url and not base_url.startswith(('http://', 'https://')):
             lower_base = base_url.lower()
@@ -20747,7 +20982,7 @@ class UnifiedClient:
             base_url = scheme + base_url
 
         # Strip any routing prefix (nan/, eh/, etc.) – keep bare model name
-        effective_model = self.model or 'gpt-image-1'
+        effective_model = model_name or 'gpt-image-1'
         for pfx in ('nan/', 'eh/', 'or/', 'fireworks/', 'chutes/'):
             if effective_model.lower().startswith(pfx):
                 effective_model = effective_model[len(pfx):]
@@ -22830,11 +23065,57 @@ class UnifiedClient:
             route = self._get_custom_prefix_route_for_model(getattr(self, 'model', ''))
             if not route:
                 raise UnifiedClientError(f"No custom prefix route for model: {getattr(self, 'model', '')}")
+            endpoint_type = self._normalize_custom_prefix_endpoint_type(
+                route.get('endpoint_type', '{base_url}/chat/completions')
+            )
+            base_url = route.get('routing', '').rstrip('/')
+            effective_model = self._strip_custom_route_prefix(getattr(self, 'model', ''), route)
+            if endpoint_type == '{base_url}/{model_id}':
+                if '/' not in effective_model and '/' in str(getattr(self, 'model', '') or ''):
+                    effective_model = str(getattr(self, 'model', '') or '').strip()
+                return self._send_fal_model_api(
+                    messages=messages,
+                    base_url=base_url,
+                    response_name=response_name,
+                    model_override=effective_model,
+                )
+            if endpoint_type == '{base_url}/images/generations':
+                if self._is_fal_model_base_url(base_url):
+                    raise UnifiedClientError(
+                        "Fal model endpoints use {base_url}/{model_id}, not {base_url}/images/generations.",
+                        error_type='validation',
+                    )
+                return self._send_openai_images_api(
+                    messages=messages,
+                    base_url=base_url,
+                    response_name=response_name,
+                    model_override=effective_model,
+                )
+            if endpoint_type == '{base_url}/v1/messages':
+                img_b64 = self._extract_first_image_base64(messages)
+                if img_b64:
+                    return self._send_anthropic_image(
+                        messages=messages,
+                        image_base64=img_b64,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        response_name=response_name,
+                        base_url_override=base_url,
+                        model_override=effective_model,
+                    )
+                return self._send_anthropic(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_name=response_name,
+                    base_url_override=base_url,
+                    model_override=effective_model,
+                )
             return self._send_openai_compatible(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                base_url=route.get('routing', '').rstrip('/'),
+                base_url=base_url,
                 response_name=response_name,
                 provider='custom_openai'
             )
@@ -23480,8 +23761,10 @@ class UnifiedClient:
     # Removed: _send_openai_image
     # OpenAI-compatible providers handle images within messages via _get_response and _send_openai_compatible
     
-    def _send_anthropic_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
+    def _send_anthropic_image(self, messages, image_base64, temperature, max_tokens, response_name,
+                              base_url_override=None, model_override=None) -> UnifiedResponse:
         """Send image request to Anthropic API"""
+        request_model = model_override or self.model
         mime_type = "image/jpeg"
         try:
             image_bytes = base64.b64decode(str(image_base64 or "").split(',', 1)[-1], validate=False)
@@ -23531,14 +23814,14 @@ class UnifiedClient:
         # Apply cached model limit if we've discovered it before
         try:
             with self.__class__._model_limits_lock:
-                cached_limit = self.__class__._model_token_limits.get(self.model)
+                cached_limit = self.__class__._model_token_limits.get(request_model)
                 if cached_limit and (max_tokens is None or max_tokens > cached_limit):
                     max_tokens = cached_limit
         except Exception:
             pass
         
         data = {
-            "model": self.model,
+            "model": request_model,
             "messages": formatted_messages,
             "temperature": temperature,
             "max_tokens": max_tokens
@@ -23553,7 +23836,7 @@ class UnifiedClient:
             
         try:
             # Determine Anthropic API URL (same priority as _send_anthropic)
-            custom_anthropic_base = os.getenv('ANTHROPIC_BASE_URL', '').strip()
+            custom_anthropic_base = str(base_url_override or '').strip() or os.getenv('ANTHROPIC_BASE_URL', '').strip()
             if custom_anthropic_base:
                 _base = custom_anthropic_base.rstrip('/')
                 for _sfx in ['/v1/messages', '/v1/chat/completions', '/v1', '/chat/completions']:

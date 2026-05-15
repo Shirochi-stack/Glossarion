@@ -6682,7 +6682,7 @@ Recent translations to summarize:
                                         QListWidget, QPushButton, QLabel,
                                         QApplication, QLineEdit, QMessageBox,
                                         QTabWidget, QWidget, QTableWidget,
-                                        QTableWidgetItem, QHeaderView)
+                                        QTableWidgetItem, QHeaderView, QComboBox)
         from PySide6.QtCore import Qt, QObject, QEvent
         from PySide6.QtGui import QIcon
 
@@ -6942,12 +6942,12 @@ Recent translations to summarize:
         prefix_tab = QWidget()
         prefix_layout = QVBoxLayout(prefix_tab)
 
-        prefix_label = QLabel("Custom OpenAI-compatible prefixes:")
+        prefix_label = QLabel("Custom prefixes:")
         prefix_label.setStyleSheet("font-weight: bold; margin-bottom: 6px;")
         prefix_layout.addWidget(prefix_label)
 
-        prefix_table = QTableWidget(0, 2)
-        prefix_table.setHorizontalHeaderLabels(["Prefix", "Routing"])
+        prefix_table = QTableWidget(0, 3)
+        prefix_table.setHorizontalHeaderLabels(["Prefix", "Routing", "Endpoint Type"])
         prefix_table.setSelectionBehavior(QTableWidget.SelectRows)
         prefix_table.setSelectionMode(QTableWidget.SingleSelection)
         prefix_table.setAlternatingRowColors(True)
@@ -6958,8 +6958,13 @@ Recent translations to summarize:
         prefix_table.horizontalHeader().setMinimumSectionSize(140)
         prefix_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
         prefix_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        prefix_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)
         prefix_table.setColumnWidth(0, 160)
-        prefix_table.setToolTip("Use models like myprefix/model-name. Routing must be an OpenAI-compatible base URL.")
+        prefix_table.setColumnWidth(2, 250)
+        prefix_table.setToolTip(
+            "Use models like myprefix/model-name. Endpoint URL is an exact template such as "
+            "{base_url}/chat/completions or {base_url}/{model_id}."
+        )
         prefix_table.setStyleSheet("""
             QTableWidget {
                 background: #191919;
@@ -6997,6 +7002,31 @@ Recent translations to summarize:
                 background: #2c3035;
                 border: 1px solid #8ba8c7;
             }
+            QComboBox {
+                background: #242424;
+                color: #f5f7fa;
+                border: 1px solid #4a4a4a;
+                border-radius: 3px;
+                padding: 5px 7px;
+            }
+            QComboBox:hover {
+                border-color: #6b7f95;
+                background: #292929;
+            }
+            QComboBox:focus {
+                background: #2c3035;
+                border: 1px solid #8ba8c7;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 18px;
+            }
+            QComboBox QAbstractItemView {
+                background: #242424;
+                color: #f5f7fa;
+                border: 1px solid #4a4a4a;
+                selection-background-color: #35516d;
+            }
         """)
 
         class _PrefixFieldFocusFilter(QObject):
@@ -7026,12 +7056,36 @@ Recent translations to summarize:
             field.installEventFilter(prefix_field_filter)
             return field
 
-        def _add_prefix_row(prefix="", routing=""):
+        endpoint_type_options = [
+            "{base_url}/chat/completions",
+            "{base_url}/images/generations",
+            "{base_url}/v1/messages",
+        ]
+
+        def _make_endpoint_type_combo(endpoint_type="openai_chat"):
+            combo = QComboBox()
+            combo.setEditable(True)
+            combo.addItems(endpoint_type_options)
+            normalized_type = self._normalize_custom_prefix_endpoint_type(endpoint_type)
+            idx = combo.findText(normalized_type)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            else:
+                combo.setEditText(normalized_type)
+            combo.installEventFilter(prefix_field_filter)
+            try:
+                combo.lineEdit().installEventFilter(prefix_field_filter)
+            except Exception:
+                pass
+            return combo
+
+        def _add_prefix_row(prefix="", routing="", endpoint_type="openai_chat"):
             row = prefix_table.rowCount()
             prefix_table.insertRow(row)
             prefix_table.setRowHeight(row, 40)
             prefix_table.setCellWidget(row, 0, _make_prefix_field(prefix))
             prefix_table.setCellWidget(row, 1, _make_prefix_field(routing))
+            prefix_table.setCellWidget(row, 2, _make_endpoint_type_combo(endpoint_type))
             prefix_table.setCurrentCell(row, 0)
             try:
                 prefix_table.cellWidget(row, 0).setFocus()
@@ -7041,7 +7095,11 @@ Recent translations to summarize:
             return row
 
         for route in self._normalize_custom_prefix_routes(self.config.get('custom_prefix_routes', [])):
-            _add_prefix_row(route.get('prefix', ''), route.get('routing', ''))
+            _add_prefix_row(
+                route.get('prefix', ''),
+                route.get('routing', ''),
+                route.get('endpoint_type', 'openai_chat'),
+            )
 
         prefix_layout.addWidget(prefix_table)
 
@@ -7121,8 +7179,39 @@ Recent translations to summarize:
         self.append_log("✓ Model list updated")
         dialog.accept()
 
+    @staticmethod
+    def _normalize_custom_prefix_endpoint_type(endpoint_type):
+        """Return a supported custom prefix endpoint URL template."""
+        value = str(endpoint_type or '').strip().lower().replace('-', '_').replace(' ', '_')
+        legacy = {
+            '': '{base_url}/chat/completions',
+            'openai_chat': '{base_url}/chat/completions',
+            'openai_images': '{base_url}/images/generations',
+            'anthropic_messages': '{base_url}/v1/messages',
+        }
+        if value in legacy:
+            return legacy[value]
+        raw = str(endpoint_type or '').strip()
+        known = {
+            '{base_url}/chat/completions',
+            '{base_url}/images/generations',
+            '{base_url}/v1/messages',
+            '{base_url}/{model_id}',
+        }
+        return raw if raw in known else '{base_url}/chat/completions'
+
+    @staticmethod
+    def _is_known_custom_prefix_endpoint_type(endpoint_type):
+        """Return True when endpoint_type is an exact supported endpoint template."""
+        return str(endpoint_type or '').strip() in {
+            '{base_url}/chat/completions',
+            '{base_url}/images/generations',
+            '{base_url}/v1/messages',
+            '{base_url}/{model_id}',
+        }
+
     def _normalize_custom_prefix_routes(self, routes):
-        """Return validated custom prefix route dictionaries for OpenAI-compatible endpoints."""
+        """Return validated custom prefix route dictionaries for custom endpoints."""
         normalized = []
         seen = set()
 
@@ -7138,6 +7227,9 @@ Recent translations to summarize:
                 continue
             prefix = str(entry.get('prefix', '') or '').strip()
             routing = str(entry.get('routing', entry.get('base_url', '')) or '').strip()
+            endpoint_type = self._normalize_custom_prefix_endpoint_type(
+                entry.get('endpoint_type', entry.get('type', 'openai_chat'))
+            )
             if not prefix or not routing:
                 continue
             prefix = prefix.replace('\\', '/').lstrip('/')
@@ -7150,7 +7242,11 @@ Recent translations to summarize:
             if key in seen:
                 continue
             seen.add(key)
-            normalized.append({'prefix': prefix, 'routing': routing})
+            normalized.append({
+                'prefix': prefix,
+                'routing': routing,
+                'endpoint_type': endpoint_type,
+            })
 
         return normalized
 
@@ -7180,9 +7276,31 @@ Recent translations to summarize:
         for row in range(table.rowCount()):
             prefix_widget = table.cellWidget(row, 0)
             routing_widget = table.cellWidget(row, 1)
+            type_widget = table.cellWidget(row, 2)
             prefix_item = table.item(row, 0)
             routing_item = table.item(row, 1)
+            type_item = table.item(row, 2)
             prefix = prefix_widget.text().strip() if prefix_widget and hasattr(prefix_widget, 'text') else (prefix_item.text().strip() if prefix_item else '')
+            if type_widget and hasattr(type_widget, 'currentText'):
+                endpoint_type = type_widget.currentText().strip()
+            elif type_widget and hasattr(type_widget, 'text'):
+                endpoint_type = type_widget.text().strip()
+            elif type_widget and hasattr(type_widget, 'currentData'):
+                endpoint_type = type_widget.currentData()
+            else:
+                endpoint_type = type_item.text().strip() if type_item else 'openai_chat'
+            if not self._is_known_custom_prefix_endpoint_type(endpoint_type):
+                QMessageBox.warning(
+                    dialog,
+                    "Invalid Endpoint URL",
+                    f"Endpoint URL on row {row + 1} must be one of:\n"
+                    "{base_url}/chat/completions\n"
+                    "{base_url}/images/generations\n"
+                    "{base_url}/v1/messages\n"
+                    "{base_url}/{model_id}"
+                )
+                return None
+            endpoint_type = self._normalize_custom_prefix_endpoint_type(endpoint_type)
             routing = routing_widget.text().strip() if routing_widget and hasattr(routing_widget, 'text') else (routing_item.text().strip() if routing_item else '')
 
             if not prefix and not routing:
@@ -7212,7 +7330,11 @@ Recent translations to summarize:
                                     f"'{prefix}' is already listed.")
                 return None
             seen.add(key)
-            routes.append({'prefix': prefix, 'routing': routing})
+            routes.append({
+                'prefix': prefix,
+                'routing': routing,
+                'endpoint_type': endpoint_type,
+            })
 
         return routes
 
