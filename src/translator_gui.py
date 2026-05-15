@@ -20184,7 +20184,11 @@ Important rules:
                 # re-scan and negate the instant-open optimization.
                 if not first_creation:
                     dlg._auto_refresh()  # lightweight \u2014 only reloads if file list changed
-                dlg.show()
+                try:
+                    from dialog_animations import show_dialog_with_fade
+                    show_dialog_with_fade(dlg, duration=180)
+                except Exception:
+                    dlg.show()
                 dlg.raise_()
                 dlg.activateWindow()
         except Exception as e:

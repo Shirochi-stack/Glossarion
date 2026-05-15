@@ -1152,7 +1152,11 @@ class QAScannerMixin:
             
             # Show dialog non-modally and wait for result using local event loop
             # This allows interaction with the main window while waiting
-            mode_dialog.show()
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(mode_dialog, duration=180)
+            except Exception:
+                mode_dialog.show()
             from PySide6.QtCore import QEventLoop
             loop = QEventLoop()
             mode_dialog.finished.connect(loop.quit)
@@ -1178,7 +1182,11 @@ class QAScannerMixin:
             except Exception:
                 pass
 
-            mode_dialog.show()
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(mode_dialog, duration=180)
+            except Exception:
+                mode_dialog.show()
             mode_dialog.raise_()
             mode_dialog.activateWindow()
             from PySide6.QtCore import QEventLoop

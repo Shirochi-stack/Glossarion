@@ -3,8 +3,8 @@ Dialog Animation Utilities
 Provides smooth fade-in/fade-out animations for PySide6 dialogs
 """
 
-from PySide6.QtCore import QPropertyAnimation, QEasingCurve
-from PySide6.QtWidgets import QGraphicsOpacityEffect
+from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QEventLoop
+from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect
 
 
 def add_fade_in_animation(dialog, duration=250, on_complete=None):
@@ -181,8 +181,30 @@ def show_dialog_with_fade(dialog, duration=250):
         dialog: The QDialog to show
         duration: Animation duration in milliseconds (default: 250ms)
     """
-    # Show dialog first
+    # Start fully transparent before the native window is mapped. This prevents
+    # the brief white frame Windows can paint before Qt applies stylesheets.
+    old_window_opacity = 1.0
+    try:
+        old_window_opacity = dialog.windowOpacity()
+        if old_window_opacity <= 0.0:
+            old_window_opacity = 1.0
+        dialog.setWindowOpacity(0.0)
+    except Exception:
+        pass
+
     dialog.show()
+
+    try:
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents(QEventLoop.ExcludeUserInputEvents)
+    except Exception:
+        pass
+
+    try:
+        dialog.setWindowOpacity(old_window_opacity)
+    except Exception:
+        pass
     
     # Then add fade animation
     add_fade_in_animation(dialog, duration)

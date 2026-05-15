@@ -4615,7 +4615,11 @@ def show_async_processing_dialog(parent, translator_gui, show=True):
         dlg_obj._refresh_model_info()
         if show:
             dlg_obj.dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
-            dlg_obj.dialog.showNormal()
+            try:
+                from dialog_animations import show_dialog_with_fade
+                show_dialog_with_fade(dlg_obj.dialog, duration=180)
+            except Exception:
+                dlg_obj.dialog.showNormal()
             dlg_obj.dialog.raise_()
             dlg_obj.dialog.activateWindow()
         else:
@@ -4625,7 +4629,11 @@ def show_async_processing_dialog(parent, translator_gui, show=True):
     translator_gui.async_dialog = dlg_obj
     if show:
         dlg_obj.dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
-        dlg_obj.dialog.show()  # non-modal to allow hiding/restoring
+        try:
+            from dialog_animations import show_dialog_with_fade
+            show_dialog_with_fade(dlg_obj.dialog, duration=180)
+        except Exception:
+            dlg_obj.dialog.show()  # non-modal to allow hiding/restoring
     else:
         _prewarm_dialog_offscreen(dlg_obj.dialog)
     return dlg_obj.dialog

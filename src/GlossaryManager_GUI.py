@@ -670,7 +670,11 @@ class GlossaryManagerMixin:
                 # Dialog still alive — just bring it back
                 if show:
                     self._glossary_dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
-                    self._glossary_dialog.show()
+                    try:
+                        from dialog_animations import show_dialog_with_fade
+                        show_dialog_with_fade(self._glossary_dialog, duration=180)
+                    except Exception:
+                        self._glossary_dialog.show()
                     self._glossary_dialog.raise_()
                     self._glossary_dialog.activateWindow()
                 elif not getattr(self, '_glossary_settings_tabs_prewarmed', False):
