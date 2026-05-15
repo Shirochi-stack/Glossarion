@@ -3018,7 +3018,7 @@ _DESCRIPTION_IN_LANGUAGE_TEXT = " and description"
 #   inactive: ..."But"
 _DESCRIPTION_EXCLUDED_NOTE_TEXT = " (The description column is excluded from this restriction)"
 _SUBJECT_TRACKING_INSTRUCTION_TEXT = (
-    'Apply Subject Tracking & Pronoun Resolution when extracting character data: track omitted or ambiguous subjects/pronouns from surrounding context, titles, relationships, dialogue, and repeated mentions so gender/person fields and descriptions stay consistent instead of defaulting to "he", "she", or "it".'
+    'Strictly follow a Subject Tracking & Pronoun Resolution process when extracting character data: track omitted or ambiguous subjects/pronouns from surrounding context, titles, relationships, dialogue, and repeated mentions so gender/person fields and descriptions stay consistent instead of defaulting to "he", "she", or "it".'
 )
 
 # Example CSV lines for glossary prompts. The description-bearing version is
@@ -3078,7 +3078,7 @@ The translated_name column must be a direct translation or transliteration of th
 
 CRITICAL EXTRACTION RULES:
 - Extract All {entries}
-- Apply Subject Tracking & Pronoun Resolution when extracting character data: track omitted or ambiguous subjects/pronouns from surrounding context, titles, relationships, dialogue, and repeated mentions so gender/person fields and descriptions stay consistent instead of defaulting to "he", "she", or "it".
+- Strictly follow a Subject Tracking & Pronoun Resolution process when extracting character data: track omitted or ambiguous subjects/pronouns from surrounding context, titles, relationships, dialogue, and repeated mentions so gender/person fields and descriptions stay consistent instead of defaulting to "he", "she", or "it".
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "Me", "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But"{description_excluded_note}
