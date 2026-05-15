@@ -26,6 +26,20 @@ class GlossaryManagerMixin:
 
     def _prewarm_glossary_settings_tabs(self, dialog=None, notebook=None):
         """Force hidden glossary settings tabs through their first layout pass."""
+        was_visible = True
+        old_opacity = 1.0
+        def _center_dialog():
+            try:
+                screen = dialog.screen() or QApplication.primaryScreen()
+                if screen is None:
+                    return
+                geo = screen.availableGeometry()
+                dialog.move(
+                    geo.x() + max(0, (geo.width() - dialog.width()) // 2),
+                    geo.y() + max(0, (geo.height() - dialog.height()) // 2),
+                )
+            except Exception:
+                pass
         try:
             dialog = dialog or getattr(self, '_glossary_dialog', None)
             notebook = notebook or getattr(self, '_glossary_settings_notebook', None)
@@ -37,9 +51,14 @@ class GlossaryManagerMixin:
             if previous_index < 0:
                 previous_index = 0
 
-            dialog.setAttribute(Qt.WA_DontShowOnScreen, True)
-            if not dialog.isVisible():
+            was_visible = dialog.isVisible()
+            old_opacity = dialog.windowOpacity()
+            dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+            if not was_visible:
+                dialog.setWindowOpacity(0.0)
+                dialog.move(-20000, -20000)
                 dialog.show()
+                dialog.raise_()
 
             def _warm_widget(widget):
                 if widget is None:
@@ -74,10 +93,20 @@ class GlossaryManagerMixin:
                 notebook.setCurrentIndex(min(previous_index, notebook.count() - 1))
             if app is not None:
                 app.processEvents(QEventLoop.ExcludeUserInputEvents)
-            dialog.hide()
+            if not was_visible:
+                dialog.hide()
+                _center_dialog()
+                dialog.setWindowOpacity(old_opacity)
             self._glossary_settings_tabs_prewarmed = True
             return True
         except Exception as e:
+            try:
+                if dialog is not None and not was_visible:
+                    dialog.hide()
+                    _center_dialog()
+                    dialog.setWindowOpacity(old_opacity)
+            except Exception:
+                pass
             try:
                 print(f"Glossary settings tab prewarm failed: {e}")
             except Exception:
@@ -696,8 +725,6 @@ class GlossaryManagerMixin:
         
         # Store dialog reference for use in nested functions
         self.dialog = dialog
-        if not show:
-            dialog.setAttribute(Qt.WA_DontShowOnScreen, True)
         
         # Apply simplified dark mode stylesheet
         global_stylesheet = """

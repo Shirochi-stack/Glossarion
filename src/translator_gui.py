@@ -20102,9 +20102,13 @@ Important rules:
                     pass
                 self._epub_library_dialog = dlg
             if not show:
-                dlg.setAttribute(Qt.WA_DontShowOnScreen, True)
-                dlg.hide()
+                if hasattr(dlg, 'prewarm_flash_cards'):
+                    dlg.prewarm_flash_cards()
+                else:
+                    dlg.hide()
                 return
+            if hasattr(dlg, 'cancel_hidden_prewarm_for_visible_show'):
+                dlg.cancel_hidden_prewarm_for_visible_show()
             dlg.setAttribute(Qt.WA_DontShowOnScreen, False)
             if dlg.isVisible():
                 dlg.raise_()
@@ -24666,7 +24670,7 @@ if __name__ == "__main__":
 
         try:
             from PySide6.QtCore import QTimer
-            QTimer.singleShot(1200, lambda: splash_manager and splash_manager.prewarm_startup_dialogs(main_window))
+            QTimer.singleShot(100, lambda: splash_manager and splash_manager.prewarm_startup_dialogs(main_window))
         except Exception as e:
             print(f"⚠️ Startup dialog prewarm scheduling failed: {e}")
         

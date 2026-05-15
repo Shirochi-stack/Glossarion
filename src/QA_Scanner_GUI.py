@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QWidget, QLabel, QPushButt
                                QCheckBox, QSpinBox, QSlider, QTextEdit, QScrollArea,
                                QRadioButton, QButtonGroup, QGroupBox, QComboBox,
                                QFileDialog, QMessageBox, QSizePolicy)
-from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject, QUrl
+from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject, QUrl, QEventLoop
 from PySide6.QtGui import QFont, QPixmap, QIcon, QDesktopServices
 import threading
 import traceback
@@ -20,6 +20,55 @@ import traceback
 # WindowManager and UIHelper removed - not needed in PySide6
 # Qt handles window management and UI utilities automatically
 scan_html_folder = None  # Will be lazy-loaded from translator_gui
+
+
+def _prewarm_dialog_offscreen(dialog):
+    """Show a dialog offscreen at zero opacity once so Qt creates native resources."""
+    if dialog is None:
+        return
+    def _center_dialog():
+        try:
+            screen = dialog.screen() or QApplication.primaryScreen()
+            if screen is None:
+                return
+            geo = screen.availableGeometry()
+            dialog.move(
+                geo.x() + max(0, (geo.width() - dialog.width()) // 2),
+                geo.y() + max(0, (geo.height() - dialog.height()) // 2),
+            )
+        except Exception:
+            pass
+    app = QApplication.instance()
+    was_visible = dialog.isVisible()
+    old_opacity = dialog.windowOpacity()
+    try:
+        dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+        if not was_visible:
+            dialog.setWindowOpacity(0.0)
+            dialog.move(-20000, -20000)
+            dialog.show()
+            dialog.raise_()
+        try:
+            dialog.ensurePolished()
+            layout = dialog.layout()
+            if layout is not None:
+                layout.activate()
+        except Exception:
+            pass
+        if app is not None:
+            app.processEvents(QEventLoop.ExcludeUserInputEvents)
+        if not was_visible:
+            dialog.hide()
+            _center_dialog()
+            dialog.setWindowOpacity(old_opacity)
+    except Exception:
+        try:
+            if not was_visible:
+                dialog.hide()
+                _center_dialog()
+                dialog.setWindowOpacity(old_opacity)
+        except Exception:
+            pass
 
 
 def _qa_owner_output_mode(owner):
@@ -2381,8 +2430,7 @@ class QAScannerMixin:
                     existing.raise_()
                     existing.activateWindow()
                 else:
-                    existing.setAttribute(Qt.WA_DontShowOnScreen, True)
-                    existing.hide()
+                    _prewarm_dialog_offscreen(existing)
                 return existing
         except RuntimeError:
             self._qa_settings_dialog = None
@@ -2394,8 +2442,6 @@ class QAScannerMixin:
         except Exception:
             pass
         dialog.setAttribute(Qt.WA_DeleteOnClose, False)
-        if not show:
-            dialog.setAttribute(Qt.WA_DontShowOnScreen, True)
         # Apply basic dark stylesheet IMMEDIATELY to prevent white flash
         # Set up icon path
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
@@ -4880,7 +4926,7 @@ class QAScannerMixin:
         dialog.closeEvent = handle_close_event
 
         if not show:
-            dialog.hide()
+            _prewarm_dialog_offscreen(dialog)
             return dialog
         dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
         

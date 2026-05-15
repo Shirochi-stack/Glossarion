@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QToolButton,
     QApplication, QMenu, QComboBox, QStackedWidget
 )
-from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, Slot, QThread, QTimer, QSizeF, QPointF, QUrl
+from PySide6.QtCore import Qt, QSize, QRect, QRectF, Signal, Slot, QThread, QTimer, QSizeF, QPointF, QUrl, QEventLoop
 from PySide6.QtGui import QPixmap, QFont, QFontMetrics, QIcon, QImage, QCursor, QShortcut, QKeySequence, QTransform, QTextLayout, QTextOption
 
 # Use QWebEngineView for full CSS support (images, block layout, etc.)
@@ -6026,6 +6026,93 @@ class EpubLibraryDialog(QDialog):
         self._auto_refresh_timer.timeout.connect(self._auto_refresh)
         QTimer.singleShot(2500, self._auto_refresh_timer.start)
 
+    def _warm_library_widgets(self) -> None:
+        """Polish/layout library tabs and currently built cards."""
+        app = QApplication.instance()
+        try:
+            self.ensurePolished()
+            layout = self.layout()
+            if layout is not None:
+                layout.activate()
+            for widget in (
+                getattr(self, "_tabs", None),
+                getattr(self, "_ip_scroll", None),
+                getattr(self, "_comp_scroll", None),
+                getattr(self, "_ip_grid_container", None),
+                getattr(self, "_comp_grid_container", None),
+            ):
+                if widget is None:
+                    continue
+                try:
+                    widget.ensurePolished()
+                    widget.updateGeometry()
+                    widget_layout = widget.layout()
+                    if widget_layout is not None:
+                        widget_layout.activate()
+                except Exception:
+                    pass
+            for card in [*getattr(self, "_ip_cards", []), *getattr(self, "_comp_cards", [])]:
+                try:
+                    card.ensurePolished()
+                    card.updateGeometry()
+                    card_layout = card.layout()
+                    if card_layout is not None:
+                        card_layout.activate()
+                except Exception:
+                    pass
+            if app is not None:
+                app.processEvents(QEventLoop.ExcludeUserInputEvents)
+        except Exception:
+            pass
+
+    def _center_on_screen(self) -> None:
+        try:
+            screen = self.screen() or QApplication.primaryScreen()
+            if screen is None:
+                return
+            geo = screen.availableGeometry()
+            self.move(
+                geo.x() + max(0, (geo.width() - self.width()) // 2),
+                geo.y() + max(0, (geo.height() - self.height()) // 2),
+            )
+        except Exception:
+            pass
+
+    def prewarm_flash_cards(self) -> None:
+        """Keep the library offscreen during scan so flash cards pre-render."""
+        if getattr(self, "_hidden_prewarm_active", False):
+            return
+        self._hidden_prewarm_active = True
+        self._hidden_prewarm_old_opacity = self.windowOpacity()
+        self.setAttribute(Qt.WA_DontShowOnScreen, False)
+        self.setWindowOpacity(0.0)
+        self.move(-20000, -20000)
+        self.show()
+        self.raise_()
+        self._warm_library_widgets()
+        if self._scanner_thread and self._scanner_thread.isRunning():
+            self._hide_after_initial_prewarm = True
+        else:
+            self._finish_hidden_prewarm(hide=True)
+
+    def _finish_hidden_prewarm(self, hide: bool = True) -> None:
+        if not getattr(self, "_hidden_prewarm_active", False):
+            return
+        self._warm_library_widgets()
+        old_opacity = getattr(self, "_hidden_prewarm_old_opacity", 1.0)
+        if hide:
+            self.hide()
+        self._center_on_screen()
+        self.setWindowOpacity(old_opacity)
+        self._hidden_prewarm_active = False
+        self._hide_after_initial_prewarm = False
+        self._library_flash_cards_prewarmed = True
+
+    def cancel_hidden_prewarm_for_visible_show(self) -> None:
+        """Restore an offscreen prewarm window before the user opens it."""
+        if getattr(self, "_hidden_prewarm_active", False):
+            self._finish_hidden_prewarm(hide=False)
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F11:
             if self.isFullScreen():
@@ -8616,6 +8703,8 @@ class EpubLibraryDialog(QDialog):
         self._hide_loading()
         self._refresh_view()
         self._update_organize_counts()
+        if getattr(self, "_hide_after_initial_prewarm", False):
+            self._finish_hidden_prewarm(hide=True)
         # Schedule deferred re-layouts so the grid sees the scroll
         # viewport's real dimensions after Qt finishes processing the
         # pending show / layout events. Without this the initial column

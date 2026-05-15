@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGrid
                                 QLabel, QPushButton, QCheckBox, QSpinBox, QTreeWidget, QTreeWidgetItem,
                                 QScrollArea, QProgressBar, QGroupBox, QFrame, QMessageBox, QMenu, QApplication,
                                 QAbstractItemView)
-from PySide6.QtCore import Qt, QTimer, Signal, QObject
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QEventLoop
 from PySide6.QtGui import QIcon, QBrush, QColor
 from dataclasses import dataclass, asdict
 from enum import Enum
@@ -4553,6 +4553,55 @@ class AsyncProcessingDialog:
         return os.getenv("API_KEY", "") or os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
 
 
+def _prewarm_dialog_offscreen(dialog):
+    """Show a dialog offscreen at zero opacity once so Qt creates native resources."""
+    if dialog is None:
+        return
+    def _center_dialog():
+        try:
+            screen = dialog.screen() or QApplication.primaryScreen()
+            if screen is None:
+                return
+            geo = screen.availableGeometry()
+            dialog.move(
+                geo.x() + max(0, (geo.width() - dialog.width()) // 2),
+                geo.y() + max(0, (geo.height() - dialog.height()) // 2),
+            )
+        except Exception:
+            pass
+    app = QApplication.instance()
+    was_visible = dialog.isVisible()
+    old_opacity = dialog.windowOpacity()
+    try:
+        dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+        if not was_visible:
+            dialog.setWindowOpacity(0.0)
+            dialog.move(-20000, -20000)
+            dialog.show()
+            dialog.raise_()
+        try:
+            dialog.ensurePolished()
+            layout = dialog.layout()
+            if layout is not None:
+                layout.activate()
+        except Exception:
+            pass
+        if app is not None:
+            app.processEvents(QEventLoop.ExcludeUserInputEvents)
+        if not was_visible:
+            dialog.hide()
+            _center_dialog()
+            dialog.setWindowOpacity(old_opacity)
+    except Exception:
+        try:
+            if not was_visible:
+                dialog.hide()
+                _center_dialog()
+                dialog.setWindowOpacity(old_opacity)
+        except Exception:
+            pass
+
+
 def show_async_processing_dialog(parent, translator_gui, show=True):
     """Show the async processing dialog
     
@@ -4569,6 +4618,8 @@ def show_async_processing_dialog(parent, translator_gui, show=True):
             dlg_obj.dialog.showNormal()
             dlg_obj.dialog.raise_()
             dlg_obj.dialog.activateWindow()
+        else:
+            _prewarm_dialog_offscreen(dlg_obj.dialog)
         return dlg_obj.dialog
     dlg_obj = AsyncProcessingDialog(parent, translator_gui)
     translator_gui.async_dialog = dlg_obj
@@ -4576,8 +4627,7 @@ def show_async_processing_dialog(parent, translator_gui, show=True):
         dlg_obj.dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
         dlg_obj.dialog.show()  # non-modal to allow hiding/restoring
     else:
-        dlg_obj.dialog.setAttribute(Qt.WA_DontShowOnScreen, True)
-        dlg_obj.dialog.hide()
+        _prewarm_dialog_offscreen(dlg_obj.dialog)
     return dlg_obj.dialog
 
 

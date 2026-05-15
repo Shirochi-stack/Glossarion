@@ -1069,8 +1069,53 @@ def toggle_gpt_reasoning_controls(self):
 def open_other_settings(self, *args, show=True):
     """Open the Other Settings dialog (PySide6)"""
     from PySide6.QtGui import QIcon, QKeyEvent
-    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtCore import Qt, QTimer, QEventLoop
     from PySide6.QtWidgets import QApplication
+
+    def _prewarm_dialog_offscreen(dialog):
+        def _center_dialog():
+            try:
+                screen = dialog.screen() or QApplication.primaryScreen()
+                if screen is None:
+                    return
+                geo = screen.availableGeometry()
+                dialog.move(
+                    geo.x() + max(0, (geo.width() - dialog.width()) // 2),
+                    geo.y() + max(0, (geo.height() - dialog.height()) // 2),
+                )
+            except Exception:
+                pass
+        app = QApplication.instance()
+        was_visible = dialog.isVisible()
+        old_opacity = dialog.windowOpacity()
+        try:
+            dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+            if not was_visible:
+                dialog.setWindowOpacity(0.0)
+                dialog.move(-20000, -20000)
+                dialog.show()
+                dialog.raise_()
+            try:
+                dialog.ensurePolished()
+                layout = dialog.layout()
+                if layout is not None:
+                    layout.activate()
+            except Exception:
+                pass
+            if app is not None:
+                app.processEvents(QEventLoop.ExcludeUserInputEvents)
+            if not was_visible:
+                dialog.hide()
+                _center_dialog()
+                dialog.setWindowOpacity(old_opacity)
+        except Exception:
+            try:
+                if not was_visible:
+                    dialog.hide()
+                    _center_dialog()
+                    dialog.setWindowOpacity(old_opacity)
+            except Exception:
+                pass
 
     def _fit_other_settings_dialog(dialog):
         try:
@@ -1093,8 +1138,7 @@ def open_other_settings(self, *args, show=True):
     try:
         if hasattr(self, "_other_settings_dialog") and self._other_settings_dialog is not None:
             if not show:
-                self._other_settings_dialog.setAttribute(Qt.WA_DontShowOnScreen, True)
-                self._other_settings_dialog.hide()
+                _prewarm_dialog_offscreen(self._other_settings_dialog)
                 return
             self._other_settings_dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
             # Show with fade animation
@@ -1120,8 +1164,6 @@ def open_other_settings(self, *args, show=True):
     # Pass self as parent so it stays in front of main GUI but allows other dialogs on top
     dialog = QDialog(self)
     dialog.setWindowTitle("Other Settings")
-    if not show:
-        dialog.setAttribute(Qt.WA_DontShowOnScreen, True)
     
     # Do not delete widgets on close; we'll hide instead to retain exact state
     dialog.setAttribute(Qt.WA_DeleteOnClose, False)
@@ -1442,7 +1484,7 @@ def open_other_settings(self, *args, show=True):
         pass
 
     if not show:
-        dialog.hide()
+        _prewarm_dialog_offscreen(dialog)
         return
     dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
     
