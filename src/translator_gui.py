@@ -11060,14 +11060,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
             QPushButton {
                 background-color: #e67e22;
                 color: white;
-                border: none;
+                border: 1px solid transparent;
                 border-radius: 0px;
                 padding: 4px 6px;
                 font-weight: bold;
             }
+            QPushButton:hover {
+                border-color: #7bb3e0;
+                background-color: #e67e22;
+            }
             QPushButton:disabled {
                 background-color: #555555;
                 color: #888888;
+                border-color: #555555;
             }
         """)
         
@@ -11187,7 +11192,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             
             color = style_colors.get(style, "#95a5a6")
-            btn.setStyleSheet(f"background-color: {color}; color: white; border: none; border-radius: 0px; padding: 4px 6px; font-weight: bold;")
+            btn.setStyleSheet(
+                f"QPushButton {{ "
+                f"background-color: {color}; "
+                f"color: white; "
+                f"border: 1px solid transparent; "
+                f"border-radius: 0px; "
+                f"padding: 4px 6px; "
+                f"font-weight: bold; "
+                f"}} "
+                f"QPushButton:hover {{ "
+                f"border-color: #7bb3e0; "
+                f"background-color: {color}; "
+                f"}}"
+            )
 
             # Give Progress Manager extra horizontal stretch so it actually grows.
             try:
@@ -11291,14 +11309,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     QPushButton {{
                         background-color: {color};
                         color: white;
-                        border: none;
+                        border: 1px solid transparent;
                         border-radius: 0px;
                         padding: 4px 6px;
                         font-weight: bold;
                     }}
+                    QPushButton:hover {{
+                        border-color: #7bb3e0;
+                        background-color: {color};
+                    }}
                     QPushButton:disabled {{
                         background-color: #555555;
                         color: #888888;
+                        border-color: #555555;
                     }}
                 """)
             elif lbl == "EPUB Converter":
@@ -11392,14 +11415,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     QPushButton {{
                         background-color: {color};
                         color: white;
-                        border: none;
+                        border: 1px solid transparent;
                         border-radius: 0px;
                         padding: 4px 6px;
                         font-weight: bold;
                     }}
+                    QPushButton:hover {{
+                        border-color: #7bb3e0;
+                        background-color: {color};
+                    }}
                     QPushButton:disabled {{
                         background-color: #555555;
                         color: #888888;
+                        border-color: #555555;
                     }}
                 """)
             elif lbl == "📦 Async Translator":
@@ -11481,14 +11509,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     QPushButton {{
                         background-color: {color};
                         color: white;
-                        border: none;
+                        border: 1px solid transparent;
                         border-radius: 0px;
                         padding: 4px 8px;
                         font-weight: bold;
                     }}
+                    QPushButton:hover {{
+                        border-color: #7bb3e0;
+                        background-color: {color};
+                    }}
                     QPushButton:disabled {{
                         background-color: #555555;
                         color: #888888;
+                        border-color: #555555;
                     }}
                 """)
                 # Replace default connection to wrap with spinner + instant restore
@@ -17381,7 +17414,13 @@ Important rules:
                    QPushButton {
                        background-color: #dc3545;
                        color: white;
+                       border: 1px solid transparent;
+                       border-radius: 0px;
                        padding: 6px;
+                   }
+                   QPushButton:hover {
+                       border-color: #7bb3e0;
+                       background-color: #dc3545;
                    }
                """)
                self.glossary_button.clicked.connect(self.stop_glossary_extraction)
@@ -17397,12 +17436,19 @@ Important rules:
                    QPushButton {
                        background-color: #e67e22;
                        color: white;
+                       border: 1px solid transparent;
+                       border-radius: 0px;
                        padding: 6px;
                        font-weight: bold;
+                   }
+                   QPushButton:hover {
+                       border-color: #7bb3e0;
+                       background-color: #e67e22;
                    }
                    QPushButton:disabled {
                        background-color: #555555;
                        color: #888888;
+                       border-color: #555555;
                    }
                """)
                self.glossary_button.clicked.connect(self.run_glossary_extraction_thread)
@@ -17432,7 +17478,13 @@ Important rules:
                    QPushButton {
                        background-color: #dc3545;
                        color: white;
+                       border: 1px solid transparent;
+                       border-radius: 0px;
                        padding: 6px;
+                   }
+                   QPushButton:hover {
+                       border-color: #7bb3e0;
+                       background-color: #dc3545;
                    }
                """)
                self.epub_button.clicked.connect(self.stop_epub_converter)
@@ -17448,12 +17500,19 @@ Important rules:
                    QPushButton {
                        background-color: #17a2b8;
                        color: white;
+                       border: 1px solid transparent;
+                       border-radius: 0px;
                        padding: 6px;
                        font-weight: bold;
+                   }
+                   QPushButton:hover {
+                       border-color: #7bb3e0;
+                       background-color: #17a2b8;
                    }
                    QPushButton:disabled {
                        background-color: #555555;
                        color: #888888;
+                       border-color: #555555;
                    }
                """)
                self.epub_button.clicked.connect(self.epub_converter)
@@ -17488,7 +17547,13 @@ Important rules:
                    QPushButton {
                        background-color: #dc3545;
                        color: white;
+                       border: 1px solid transparent;
+                       border-radius: 0px;
                        padding: 6px;
+                   }
+                   QPushButton:hover {
+                       border-color: #7bb3e0;
+                       background-color: #dc3545;
                    }
                """)
                self.qa_button.clicked.connect(self.stop_qa_scan)
@@ -17504,12 +17569,19 @@ Important rules:
                    QPushButton {
                        background-color: #e67e22;
                        color: white;
+                       border: 1px solid transparent;
+                       border-radius: 0px;
                        padding: 6px;
                        font-weight: bold;
+                   }
+                   QPushButton:hover {
+                       border-color: #7bb3e0;
+                       background-color: #e67e22;
                    }
                    QPushButton:disabled {
                        background-color: #555555;
                        color: #888888;
+                       border-color: #555555;
                    }
                """)
                self.qa_button.clicked.connect(self.run_qa_scan)
@@ -18038,7 +18110,18 @@ Important rules:
                 QPushButton {
                     background-color: #6c757d;
                     color: white;
+                    border: 1px solid transparent;
+                    border-radius: 0px;
                     padding: 6px;
+                }
+                QPushButton:hover {
+                    border-color: #7bb3e0;
+                    background-color: #6c757d;
+                }
+                QPushButton:disabled {
+                    background-color: #555555;
+                    color: #888888;
+                    border-color: #555555;
                 }
             """)
         
@@ -18224,7 +18307,18 @@ Important rules:
                 QPushButton {
                     background-color: #6c757d;
                     color: white;
+                    border: 1px solid transparent;
+                    border-radius: 0px;
                     padding: 6px;
+                }
+                QPushButton:hover {
+                    border-color: #7bb3e0;
+                    background-color: #6c757d;
+                }
+                QPushButton:disabled {
+                    background-color: #555555;
+                    color: #888888;
+                    border-color: #555555;
                 }
             """)
         
@@ -18283,7 +18377,18 @@ Important rules:
                 QPushButton {
                     background-color: #6c757d;
                     color: white;
+                    border: 1px solid transparent;
+                    border-radius: 0px;
                     padding: 6px;
+                }
+                QPushButton:hover {
+                    border-color: #7bb3e0;
+                    background-color: #6c757d;
+                }
+                QPushButton:disabled {
+                    background-color: #555555;
+                    color: #888888;
+                    border-color: #555555;
                 }
             """)
         
