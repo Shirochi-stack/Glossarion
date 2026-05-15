@@ -11102,6 +11102,17 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     'async_translator', btn, loading_text="Loading..."
                 )
             
+            if "Glossary Settings" in lbl:
+                self.glossary_settings_btn = btn
+                self._register_startup_prewarm_button(
+                    'glossary_settings', btn, loading_text="Loading..."
+                )
+            elif "Async Translator" in lbl:
+                self.async_translator_btn = btn
+                self._register_startup_prewarm_button(
+                    'async_translator', btn, loading_text="Loading..."
+                )
+
             btn.setMinimumHeight(toolbar_button_height)
             btn.setMinimumWidth(72)
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
