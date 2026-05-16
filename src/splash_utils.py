@@ -610,11 +610,8 @@ class SplashManager(QObject):
             pass
 
         prewarm_button_keys = [
-            "qa_settings",
             "glossary_settings",
-            "other_settings",
             "epub_library",
-            "async_translator",
         ]
 
         def set_prewarm_buttons_loading(loading):
@@ -646,6 +643,16 @@ class SplashManager(QObject):
                 start_time = time.perf_counter()
                 self.update_status(label)
                 self.set_progress(max(self.progress_value, progress))
+                try:
+                    visible_requests = getattr(main_window, '_startup_visible_dialog_requests', set()) or set()
+                    if key in visible_requests:
+                        ok = bool(verifier())
+                        results[key] = ok
+                        elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+                        print(f"[STARTUP_PREWARM] {key}: skipped for visible open ({elapsed_ms} ms)")
+                        return
+                except Exception:
+                    pass
                 callback()
                 ok = bool(verifier())
                 results[key] = ok
@@ -670,16 +677,16 @@ class SplashManager(QObject):
 
         steps = [
             (
-                "other_settings",
-                "Preloading other settings...",
+                "model_manager",
+                "Preloading model manager...",
                 93,
-                lambda: getattr(main_window, 'open_other_settings')(show=False),
-                lambda: getattr(main_window, '_other_settings_dialog', None) is not None
+                lambda: getattr(main_window, '_open_model_manager')(show=False),
+                lambda: getattr(main_window, '_model_manager_dialog', None) is not None
             ),
             (
                 "glossary_settings",
                 "Preloading glossary manager...",
-                95,
+                94,
                 lambda: getattr(main_window, 'glossary_manager')(show=False),
                 lambda: (
                     getattr(main_window, '_glossary_dialog', None) is not None and
@@ -689,16 +696,23 @@ class SplashManager(QObject):
             (
                 "qa_settings",
                 "Preloading QA scanner settings...",
-                96,
+                95,
                 lambda: getattr(main_window, 'prewarm_qa_scanner_gui')(),
                 lambda: getattr(main_window, '_qa_settings_dialog', None) is not None
             ),
             (
                 "epub_library",
                 "Preloading EPUB library...",
-                97,
+                96,
                 lambda: getattr(main_window, '_open_epub_library')(show=False),
                 lambda: getattr(main_window, '_epub_library_dialog', None) is not None
+            ),
+            (
+                "other_settings",
+                "Preloading other settings...",
+                97,
+                lambda: getattr(main_window, 'open_other_settings')(show=False),
+                lambda: getattr(main_window, '_other_settings_dialog', None) is not None
             ),
         ]
 

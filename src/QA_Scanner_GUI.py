@@ -2446,6 +2446,10 @@ class QAScannerMixin:
                         from dialog_animations import show_dialog_with_fade
                         show_dialog_with_fade(existing, duration=180)
                     except Exception:
+                        try:
+                            existing.setWindowOpacity(1.0)
+                        except Exception:
+                            pass
                         existing.show()
                     try:
                         existing.raise_()

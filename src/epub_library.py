@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 import platform
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -3800,6 +3800,83 @@ class _DualScannerThread(QThread):
         self.finished.emit(in_progress, completed)
 
 
+class _LibraryDeleteThread(QThread):
+    """Delete top-level library targets off the UI thread.
+
+    Each target is still one logical item from the confirmation dialog:
+    either a file or a whole output workspace folder. The thread fans
+    those top-level targets out across a small pool so selecting several
+    workspaces does not wait for ``shutil.rmtree`` one folder at a time.
+    """
+    progress = Signal(int, int, str)
+    delete_finished = Signal(list)
+
+    def __init__(self, targets: list[tuple[str, str, bool]], parent=None):
+        super().__init__(parent)
+        self._targets = list(targets or [])
+
+    @staticmethod
+    def _delete_one(label: str, pth: str, is_folder: bool) -> tuple:
+        try:
+            if is_folder:
+                shutil.rmtree(pth)
+            else:
+                os.remove(pth)
+            return (label, pth, is_folder, True, "")
+        except Exception as exc:
+            return (label, pth, is_folder, False, str(exc))
+
+    def run(self):
+        total = len(self._targets)
+        if total <= 0:
+            self.delete_finished.emit([])
+            return
+
+        results: list[tuple] = []
+        done = 0
+        # Disk deletion is I/O-heavy. A small cap gives real parallelism
+        # without turning a spinning disk or network share into a traffic jam.
+        max_workers = min(4, total)
+        try:
+            with ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix="LibraryDelete",
+            ) as pool:
+                future_map = {
+                    pool.submit(self._delete_one, label, pth, is_folder):
+                    (label, pth, is_folder)
+                    for label, pth, is_folder in self._targets
+                }
+                for future in as_completed(future_map):
+                    label, pth, is_folder = future_map[future]
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        result = (label, pth, is_folder, False, str(exc))
+                    results.append(result)
+                    done += 1
+                    self.progress.emit(done, total, label)
+        except Exception:
+            logger.error("Parallel library delete failed: %s",
+                         traceback.format_exc())
+            seen = {
+                os.path.normcase(os.path.normpath(os.path.abspath(r[1])))
+                for r in results if len(r) > 1
+            }
+            for label, pth, is_folder in self._targets:
+                try:
+                    key = os.path.normcase(os.path.normpath(
+                        os.path.abspath(pth)))
+                except Exception:
+                    key = pth
+                if key not in seen:
+                    results.append(
+                        (label, pth, is_folder, False,
+                         "Delete worker stopped before this item finished.")
+                    )
+        self.delete_finished.emit(results)
+
+
 class _CoverLoader(QThread):
     finished = Signal(str, str)
 
@@ -6002,6 +6079,8 @@ class EpubLibraryDialog(QDialog):
             self._config.get('epub_library_show_raw_titles', False)
         )
         self._scanner_thread: _DualScannerThread | None = None
+        self._delete_thread: _LibraryDeleteThread | None = None
+        self._delete_progress = None
         # Enable drag-and-drop of EPUB / TXT / PDF / HTML files onto the
         # dialog. Drops are routed through the same import pipeline as the
         # "Import EPUB" button (see :meth:`_import_paths_into_library`).
@@ -6113,6 +6192,10 @@ class EpubLibraryDialog(QDialog):
         """Restore an offscreen prewarm window before the user opens it."""
         if getattr(self, "_hidden_prewarm_active", False):
             self._finish_hidden_prewarm(hide=False)
+        try:
+            self.setWindowOpacity(1.0)
+        except Exception:
+            pass
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F11:
@@ -8629,6 +8712,9 @@ class EpubLibraryDialog(QDialog):
 
     def _auto_refresh(self):
         """Lightweight auto-refresh: only reload if either tab changed."""
+        if (self._delete_thread is not None
+                and self._delete_thread.isRunning()):
+            return
         if self._scanner_thread and self._scanner_thread.isRunning():
             return
         self._scanner_thread = _DualScannerThread(self._config, self)
@@ -8684,6 +8770,9 @@ class EpubLibraryDialog(QDialog):
         (later refreshes from the "Refresh" button) — ``_show_loading``
         is idempotent.
         """
+        if (self._delete_thread is not None
+                and self._delete_thread.isRunning()):
+            return
         for t in self._cover_threads:
             try:
                 t.quit()
@@ -9865,6 +9954,14 @@ class EpubLibraryDialog(QDialog):
         """
         if not books:
             return
+        if (self._delete_thread is not None
+                and self._delete_thread.isRunning()):
+            QMessageBox.information(
+                self, "Delete",
+                "A delete operation is already running. "
+                "Wait for it to finish before starting another one.",
+            )
+            return
         # Resolve targets: (label, path, is_folder, book_dict). We keep
         # the book dict so the confirmation dialog can classify each
         # target (Not Started vs. In Progress vs. Completed) and
@@ -10091,45 +10188,132 @@ class EpubLibraryDialog(QDialog):
         # offer per-target opt-out since there's nothing to lose).
         targets = list(confirmed_targets)
 
+        delete_targets = [
+            (label, pth, is_folder) for label, pth, is_folder, _b in targets
+        ]
+        self._start_delete_worker(
+            delete_targets,
+            len(targets),
+            _unregister_unsafe_cards,
+        )
+        return
+
+    def _start_delete_worker(
+            self,
+            targets: list[tuple[str, str, bool]],
+            target_count: int,
+            unregister_callback) -> None:
+        """Start a background, parallel delete batch."""
+        if not targets:
+            return
+        if (self._delete_thread is not None
+                and self._delete_thread.isRunning()):
+            QMessageBox.information(
+                self, "Delete",
+                "A delete operation is already running. "
+                "Wait for it to finish before starting another one.",
+            )
+            return
+
+        from PySide6.QtWidgets import QProgressDialog
+
+        total = len(targets)
+        progress = QProgressDialog("Deleting selected items...", "", 0,
+                                   total, self)
+        progress.setWindowTitle("Delete")
+        progress.setCancelButton(None)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setValue(0)
+        self._delete_progress = progress
+
+        auto_refresh_was_active = False
+        try:
+            auto_refresh_was_active = self._auto_refresh_timer.isActive()
+            if auto_refresh_was_active:
+                self._auto_refresh_timer.stop()
+        except Exception:
+            auto_refresh_was_active = False
+
+        worker = _LibraryDeleteThread(targets, self)
+        self._delete_thread = worker
+        worker.progress.connect(self._on_delete_progress)
+        worker.delete_finished.connect(
+            lambda results, w=worker, count=target_count,
+                   cb=unregister_callback, resume=auto_refresh_was_active:
+            self._on_delete_finished(w, results, count, cb, resume)
+        )
+        worker.finished.connect(worker.deleteLater)
+        progress.show()
+        worker.start()
+
+    @Slot(int, int, str)
+    def _on_delete_progress(self, done: int, total: int, label: str) -> None:
+        progress = getattr(self, "_delete_progress", None)
+        if progress is None:
+            return
+        progress.setLabelText(
+            f"Deleting selected items... ({done}/{total})\n{label}"
+        )
+        progress.setMaximum(max(1, total))
+        progress.setValue(done)
+
+    def _on_delete_finished(
+            self,
+            worker: _LibraryDeleteThread,
+            results: list,
+            target_count: int,
+            unregister_callback,
+            resume_auto_refresh: bool) -> None:
+        progress = getattr(self, "_delete_progress", None)
+        if progress is not None:
+            progress.close()
+        self._delete_progress = None
+        if self._delete_thread is worker:
+            self._delete_thread = None
+
         deleted = 0
         errors: list[str] = []
-        for label, pth, is_folder, _b in targets:
-            try:
-                if is_folder:
-                    shutil.rmtree(pth)
-                else:
-                    os.remove(pth)
+        for result in results or []:
+            label, pth, _is_folder, ok, error = result
+            if ok:
                 deleted += 1
-                # Drop the deleted path out of every selection set so the
-                # next context-menu open doesn't resurrect it.
                 try:
                     self._selected_paths_ip.discard(pth)
                     self._selected_paths_comp.discard(pth)
                 except Exception:
                     pass
-            except Exception as exc:
-                logger.error("Delete failed for %s: %s\n%s",
-                             pth, exc, traceback.format_exc())
-                errors.append(f"{label}: {exc}")
+            else:
+                logger.error("Delete failed for %s: %s", pth, error)
+                errors.append(f"{label}: {error}")
 
-        # Silently unregister any unsafe cards that rode along with
-        # this batch. The flash cards disappear on the next scan but
-        # the summary doesn't mention them — they're an implementation
-        # detail, not a user-facing failure.
-        _unregister_unsafe_cards()
+        # Unsafe cards are registry-only removals. Keep them out of the
+        # visible summary, matching the old behavior.
+        try:
+            unregister_callback()
+        except Exception:
+            logger.debug("Silent unregister after delete failed: %s",
+                         traceback.format_exc())
 
-        summary = f"Deleted {deleted} of {len(targets)} item" \
-                  f"{'s' if len(targets) != 1 else ''}."
+        summary = f"Deleted {deleted} of {target_count} item" \
+                  f"{'s' if target_count != 1 else ''}."
         if errors:
             summary += (
                 f"\n\n{len(errors)} error"
                 f"{'s' if len(errors) != 1 else ''}:\n"
-                + "\n".join("  \u2022 " + e for e in errors[:5])
+                + "\n".join("  - " + e for e in errors[:5])
             )
             QMessageBox.warning(self, "Delete", summary)
         else:
             QMessageBox.information(self, "Delete", summary)
-        # Re-scan so the library immediately reflects the deletions.
+
+        if resume_auto_refresh:
+            try:
+                self._auto_refresh_timer.start()
+            except Exception:
+                pass
         QTimer.singleShot(0, self._load_books)
 
     # -- Delete-confirmation helpers ----------------------------------------

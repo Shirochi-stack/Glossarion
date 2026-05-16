@@ -194,6 +194,13 @@ def show_dialog_with_fade(dialog, duration=250):
             dialog.setWindowOpacity(0.0)
         except Exception:
             pass
+    else:
+        try:
+            # If the user opens a dialog while hidden prewarm has it mapped at
+            # zero opacity, make the visible open win immediately.
+            dialog.setWindowOpacity(1.0)
+        except Exception:
+            pass
 
     dialog.show()
     try:

@@ -4620,6 +4620,10 @@ def show_async_processing_dialog(parent, translator_gui, show=True):
                 from dialog_animations import show_dialog_with_fade
                 show_dialog_with_fade(dlg_obj.dialog, duration=180)
             except Exception:
+                try:
+                    dlg_obj.dialog.setWindowOpacity(1.0)
+                except Exception:
+                    pass
                 dlg_obj.dialog.showNormal()
             dlg_obj.dialog.raise_()
             dlg_obj.dialog.activateWindow()

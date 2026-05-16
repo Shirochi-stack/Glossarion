@@ -1072,6 +1072,16 @@ def open_other_settings(self, *args, show=True):
     from PySide6.QtCore import Qt, QTimer, QEventLoop
     from PySide6.QtWidgets import QApplication
 
+    if show:
+        try:
+            requests = getattr(self, '_startup_visible_dialog_requests', None)
+            if requests is None:
+                requests = set()
+                self._startup_visible_dialog_requests = requests
+            requests.add('other_settings')
+        except Exception:
+            pass
+
     def _prewarm_dialog_offscreen(dialog):
         def _center_dialog():
             try:
@@ -1147,6 +1157,10 @@ def open_other_settings(self, *args, show=True):
                 from dialog_animations import show_dialog_with_fade
                 show_dialog_with_fade(self._other_settings_dialog, duration=220)
             except Exception:
+                try:
+                    self._other_settings_dialog.setWindowOpacity(1.0)
+                except Exception:
+                    pass
                 self._other_settings_dialog.show()
             # Bring to front and focus
             try:

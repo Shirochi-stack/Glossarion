@@ -6676,23 +6676,80 @@ Recent translations to summarize:
         elif action == paste_action and line_edit is not None:
             line_edit.paste()
 
-    def _open_model_manager(self):
+    def _open_model_manager(self, *args, show=True):
         """Open a dialog for managing the model dropdown list."""
         from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
                                         QListWidget, QPushButton, QLabel,
                                         QApplication, QLineEdit, QMessageBox,
                                         QTabWidget, QWidget, QTableWidget,
                                         QTableWidgetItem, QHeaderView, QComboBox)
-        from PySide6.QtCore import Qt, QObject, QEvent
+        from PySide6.QtCore import Qt, QObject, QEvent, QEventLoop
         from PySide6.QtGui import QIcon
 
-        # Reuse existing window if it's already open
+        def _center_dialog(dialog):
+            try:
+                screen = dialog.screen() or QApplication.primaryScreen()
+                if screen is None:
+                    return
+                geo = screen.availableGeometry()
+                dialog.move(
+                    geo.x() + max(0, (geo.width() - dialog.width()) // 2),
+                    geo.y() + max(0, (geo.height() - dialog.height()) // 2),
+                )
+            except Exception:
+                pass
+
+        def _prewarm_dialog_offscreen(dialog):
+            app = QApplication.instance()
+            was_visible = dialog.isVisible()
+            old_opacity = dialog.windowOpacity()
+            try:
+                dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+                if not was_visible:
+                    dialog.setWindowOpacity(0.0)
+                    dialog.move(-20000, -20000)
+                    dialog.show()
+                    dialog._fade_native_window_seen = True
+                    dialog.raise_()
+                try:
+                    dialog.ensurePolished()
+                    layout = dialog.layout()
+                    if layout is not None:
+                        layout.activate()
+                except Exception:
+                    pass
+                if app is not None:
+                    app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                if not was_visible:
+                    dialog.hide()
+                    _center_dialog(dialog)
+                    dialog.setWindowOpacity(old_opacity)
+            except Exception:
+                try:
+                    if not was_visible:
+                        dialog.hide()
+                        _center_dialog(dialog)
+                        dialog.setWindowOpacity(old_opacity)
+                except Exception:
+                    pass
+
+        # Reuse existing window if it has already been built.
         try:
             existing = getattr(self, '_model_manager_dialog', None)
-            if existing is not None and existing.isVisible():
+            if existing is not None:
+                if not show:
+                    _prewarm_dialog_offscreen(existing)
+                    return existing
+                existing.setAttribute(Qt.WA_DontShowOnScreen, False)
+                _center_dialog(existing)
+                try:
+                    existing.setWindowOpacity(1.0)
+                except Exception:
+                    pass
+                existing.show()
                 existing.raise_()
                 existing.activateWindow()
-                return
+                return existing
         except Exception:
             pass
 
@@ -7160,9 +7217,20 @@ Recent translations to summarize:
 
         layout.addLayout(button_layout)
 
+        if not show:
+            _prewarm_dialog_offscreen(dialog)
+            return dialog
+
+        dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+        _center_dialog(dialog)
+        try:
+            dialog.setWindowOpacity(1.0)
+        except Exception:
+            pass
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+        return dialog
 
     def _save_model_order(self, list_widget, dialog):
         """Save the new model order from the list widget."""
@@ -10812,9 +10880,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def set_all_startup_prewarm_buttons_loading(self, loading=True):
         """Toggle every registered startup prewarm button together."""
         try:
-            registry = getattr(self, '_startup_prewarm_button_registry', {}) or {}
-            for key in list(registry.keys()):
-                self.set_startup_prewarm_button_loading(key, loading)
+            self.set_startup_prewarm_button_loading('glossary_settings', loading)
+            self.set_startup_prewarm_button_loading('epub_library', loading)
         except Exception:
             pass
       

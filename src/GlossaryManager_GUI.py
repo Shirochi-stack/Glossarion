@@ -711,6 +711,10 @@ class GlossaryManagerMixin:
                         from dialog_animations import show_dialog_with_fade
                         show_dialog_with_fade(self._glossary_dialog, duration=180)
                     except Exception:
+                        try:
+                            self._glossary_dialog.setWindowOpacity(1.0)
+                        except Exception:
+                            pass
                         self._glossary_dialog.show()
                     self._glossary_dialog.raise_()
                     self._glossary_dialog.activateWindow()
