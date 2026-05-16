@@ -21880,7 +21880,6 @@ Important rules:
             
             back_btn = QPushButton("← Back")
             back_btn.setVisible(False)
-            nav_layout.addWidget(back_btn)
             
             next_btn = QPushButton("Next →")
             skip_btn = QPushButton("Skip Welcome Setup")
@@ -21900,6 +21899,7 @@ Important rules:
                 QPushButton:disabled { color: #4b5563; }
             """)
             nav_layout.addWidget(skip_btn)
+            nav_layout.addWidget(back_btn)
             nav_layout.addSpacing(28)
 
             next_btn.setStyleSheet("""
