@@ -2114,9 +2114,11 @@ Text to analyze:
                 from PySide6.QtCore import QTimer
                 QTimer.singleShot(5000, self._check_updates_on_startup)
             
-            # Show first-time glossary mode selection dialog
-            if not self.config.get('glossary_mode_dialog_shown', False):
-                QTimer.singleShot(250, self._show_glossary_mode_welcome)
+            # Show first-time glossary mode selection dialog after the main
+            # window is visible. Scheduling it here can fire during splash
+            # cleanup because close_splash() pumps Qt events.
+            self._pending_glossary_mode_welcome = not self.config.get(
+                'glossary_mode_dialog_shown', False)
         except ImportError as e:
             self.update_manager = None
             print(f"[DEBUG] Update manager not available: {e}")
@@ -21678,6 +21680,25 @@ Important rules:
             nav_layout.addWidget(back_btn)
             
             next_btn = QPushButton("Next →")
+            skip_btn = QPushButton("Skip Welcome Setup")
+            skip_btn.setCursor(Qt.PointingHandCursor)
+            skip_btn.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    border: none;
+                    color: #9ca3af;
+                    padding: 4px 10px;
+                    font-size: 9pt;
+                    font-weight: normal;
+                    text-decoration: underline;
+                }
+                QPushButton:hover { color: #d1d5db; }
+                QPushButton:pressed { color: #6b7280; }
+                QPushButton:disabled { color: #4b5563; }
+            """)
+            nav_layout.addWidget(skip_btn)
+            nav_layout.addSpacing(28)
+
             next_btn.setStyleSheet("""
                 QPushButton { background-color: #5b9df6; color: white; padding: 10px 32px;
                               border-radius: 5px; font-weight: bold; font-size: 12pt;
@@ -21696,11 +21717,13 @@ Important rules:
                 _nav_locked[0] = True
                 next_btn.setEnabled(False)
                 back_btn.setEnabled(False)
+                skip_btn.setEnabled(False)
                 QTimer.singleShot(500, _unlock_nav)
             def _unlock_nav():
                 _nav_locked[0] = False
                 next_btn.setEnabled(True)
                 back_btn.setEnabled(True)
+                skip_btn.setEnabled(True)
             
             def _update_nav():
                 ci = stack.currentIndex()
@@ -21835,9 +21858,26 @@ Important rules:
                 if ci > 0:
                     stack.setCurrentIndex(ci - 1)
                     _update_nav()
+
+            def skip_welcome():
+                if not getattr(skip_btn, '_skip_armed', False):
+                    skip_btn._skip_armed = True
+                    skip_btn.setText("Click again to skip")
+                    QTimer.singleShot(2500, lambda: (
+                        setattr(skip_btn, '_skip_armed', False),
+                        skip_btn.setText("Skip Welcome Setup")
+                    ) if getattr(skip_btn, '_skip_armed', False) else None)
+                    return
+                self.config['glossary_mode_dialog_shown'] = True
+                try:
+                    self.save_config(show_message=False)
+                except Exception:
+                    pass
+                dialog.accept()
             
             next_btn.clicked.connect(go_next)
             back_btn.clicked.connect(go_back)
+            skip_btn.clicked.connect(skip_welcome)
             
             # Center dialog on screen
             dialog_geo = dialog.frameGeometry()
@@ -25129,6 +25169,13 @@ if __name__ == "__main__":
             QTimer.singleShot(150, lambda: (main_window.raise_(), main_window.activateWindow()))
         except Exception:
             main_window.show()
+
+        try:
+            if getattr(main_window, '_pending_glossary_mode_welcome', False):
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(300, main_window._show_glossary_mode_welcome)
+        except Exception as e:
+            print(f"⚠️ Welcome dialog scheduling failed: {e}")
 
         # Re-enable quitOnLastWindowClosed now that the main window is visible.
         # This was disabled in splash_utils to prevent macOS from auto-quitting
