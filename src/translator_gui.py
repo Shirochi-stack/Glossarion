@@ -7130,7 +7130,7 @@ Recent translations to summarize:
 
             def _apply_styles(self):
                 selected_style = (
-                    "background: #35516d; color: #ffffff; border: 1px solid #8ba8c7; "
+                    "background: #30363d; color: #ffffff; border: 1px solid #6f859d; "
                     "border-radius: 3px; padding: 5px 7px;"
                 )
                 normal_field_style = (
@@ -7196,6 +7196,22 @@ Recent translations to summarize:
             def handle_row_click(self, row, col, event):
                 from PySide6.QtCore import QItemSelectionModel
                 index = self.table.model().index(row, col)
+                try:
+                    if event.button() == Qt.RightButton:
+                        if row not in self.selected_rows:
+                            self.selected_rows = {row}
+                            self.anchor_row = row
+                        self.table.selectionModel().clearSelection()
+                        for selected_row in self.selected_rows:
+                            self.table.selectionModel().select(
+                                self.table.model().index(selected_row, 0),
+                                QItemSelectionModel.Select | QItemSelectionModel.Rows
+                            )
+                        self.table.selectionModel().setCurrentIndex(index, QItemSelectionModel.NoUpdate)
+                        self._apply_styles()
+                        return
+                except Exception:
+                    pass
                 mods = QApplication.keyboardModifiers()
                 if mods & Qt.ShiftModifier and self.anchor_row is not None:
                     start = min(self.anchor_row, row)
@@ -7222,12 +7238,43 @@ Recent translations to summarize:
                     pass
                 self._apply_styles()
 
+            def show_context_menu(self, row, col, event):
+                from PySide6.QtCore import QItemSelectionModel
+                if row not in self.selected_rows:
+                    self.selected_rows = {row}
+                    self.anchor_row = row
+                try:
+                    self.table.selectionModel().clearSelection()
+                    for selected_row in self.selected_rows:
+                        self.table.selectionModel().select(
+                            self.table.model().index(selected_row, 0),
+                            QItemSelectionModel.Select | QItemSelectionModel.Rows
+                        )
+                    self.table.selectionModel().setCurrentIndex(
+                        self.table.model().index(row, col),
+                        QItemSelectionModel.NoUpdate
+                    )
+                except Exception:
+                    pass
+                self._apply_styles()
+                menu = QMenu(self.table)
+                delete_action = QAction("Delete Selected Prefixes", menu)
+                delete_action.triggered.connect(lambda: getattr(self.table, '_delete_prefix_rows', lambda: None)())
+                menu.addAction(delete_action)
+                try:
+                    menu.exec(event.globalPos())
+                except Exception:
+                    pass
+
             def eventFilter(self, obj, event):
-                if event.type() in (QEvent.FocusIn, QEvent.MouseButtonPress):
+                if event.type() in (QEvent.FocusIn, QEvent.MouseButtonPress, QEvent.ContextMenu):
                     try:
                         for r in range(self.table.rowCount()):
                             for c in range(self.table.columnCount()):
                                 if self._widget_for_event(obj, r, c) is not None:
+                                    if event.type() == QEvent.ContextMenu:
+                                        self.show_context_menu(r, c, event)
+                                        return True
                                     if event.type() == QEvent.MouseButtonPress:
                                         self.handle_row_click(r, c, event)
                                     elif not self.selected_rows and not self.table.selectionModel().selectedRows():
@@ -7331,6 +7378,7 @@ Recent translations to summarize:
             for row in rows:
                 prefix_table.removeRow(row)
             prefix_field_filter.drop_rows(rows)
+        prefix_table._delete_prefix_rows = _delete_prefix_rows
         delete_prefix_btn.clicked.connect(_delete_prefix_rows)
         prefix_buttons.addWidget(delete_prefix_btn)
         prefix_buttons.addStretch()
