@@ -217,7 +217,10 @@ class AsyncAPIProcessor:
             return 'gemini'
         elif model_lower.startswith(('claude', 'sonnet', 'opus', 'haiku')):
             return 'anthropic'
-        elif model_lower.startswith(('mistral', 'mixtral', 'codestral')):
+        elif model_lower.startswith((
+            'mistral', 'open-mistral', 'mixtral', 'codestral', 'devstral',
+            'pixtral', 'voxtral', 'magistral', 'ministral', 'labs-leanstral'
+        )):
             return 'mistral'
         elif model_lower.startswith('groq'):
             return 'groq'

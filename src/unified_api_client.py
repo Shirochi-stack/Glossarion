@@ -13,7 +13,7 @@ Supported models and their prefixes (Updated July 2025):
 - Google: gemini*, palm*, bard* (e.g., gemini-2.0-flash-exp, gemini-2.5-pro, gemini-2.5-flash)
 - Anthropic: claude*, sonnet*, opus*, haiku* (e.g., claude-3.5-sonnet, claude-3.7-sonnet, claude-4-opus, claude-4-sonnet, claude-opus-4-20250514, claude-sonnet-4-20250514)
 - DeepSeek: deepseek* (e.g., deepseek-chat, deepseek-vl, deepseek-r1)
-- Mistral: mistral*, mixtral*, codestral*
+- Mistral: mistral*, open-mistral*, mixtral*, codestral*, devstral*, pixtral*, voxtral*, magistral*, ministral*, labs-leanstral*
 - Cohere: command*, cohere*, aya* (e.g., aya-vision, command-r7b)
 - AI21: j2*, jurassic*, jamba*
 - Together AI: llama*, together*, alpaca*, vicuna*, wizardlm*, openchat*
@@ -1977,8 +1977,15 @@ class UnifiedClient:
         'haiku': 'anthropic',
         'deepseek': 'deepseek',
         'mistral': 'mistral',
+        'open-mistral': 'mistral',
         'mixtral': 'mistral',
         'codestral': 'mistral',
+        'devstral': 'mistral',
+        'pixtral': 'mistral',
+        'voxtral': 'mistral',
+        'magistral': 'mistral',
+        'ministral': 'mistral',
+        'labs-leanstral': 'mistral',
         'command': 'cohere',
         'cohere': 'cohere',
         'aya': 'cohere',

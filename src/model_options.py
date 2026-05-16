@@ -78,8 +78,22 @@ def get_model_options() -> List[str]:
         "deepseek-chat","deepseek-reasoner", "deepseek-coder", "deepseek-coder-33b-instruct",
         
         # Mistral Models
-        "mistral-large", "mistral-medium", "mistral-small", "mistral-tiny",
-        "mixtral-8x7b-instruct", "mixtral-8x22b", "codestral-latest",
+        "codestral-2508", "codestral-embed",
+        "devstral-2512", "devstral-medium-2507", "devstral-small-2507",
+        "labs-leanstral-2603",
+        "magistral-medium-2509", "magistral-small-2509",
+        "ministral-14b-2512", "ministral-3b-2512", "ministral-8b-2512",
+        "mistral-embed-2312",
+        "mistral-large-2411", "mistral-large-2512",
+        "mistral-medium-2505", "mistral-medium-2508", "mistral-medium-3-5",
+        "mistral-moderation-2411", "mistral-moderation-2603",
+        "mistral-ocr-2505", "mistral-ocr-2512",
+        "mistral-small-2506", "mistral-small-2603",
+        "open-mistral-nemo",
+        "pixtral-large-2411",
+        "voxtral-mini-2507", "voxtral-mini-2602",
+        "voxtral-mini-transcribe-2507", "voxtral-mini-transcribe-realtime-2602",
+        "voxtral-mini-tts-2603", "voxtral-small-2507",
         
         # Meta Llama Models (via Together/other providers)
         "llama-2-7b-chat", "llama-2-13b-chat", "llama-2-70b-chat",
