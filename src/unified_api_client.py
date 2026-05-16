@@ -1459,7 +1459,7 @@ class UnifiedClient:
         # Heuristic patterns consolidated from previous branches
         # 1) Suspicious finish reasons that explicitly indicate content filtering
         normalized_finish = str(finish_reason or "").strip().lower()
-        if normalized_finish in ['content_filter', 'prohibited_content', 'blocked']:
+        if normalized_finish in ['content_filter', 'prohibited_content', 'blocked', 'censorship_blocked']:
             return True
         # Truncation is not a safety block. Vertex/Gemini responses can still
         # contain safetyRatings/BLOCK_NONE metadata, so return before raw-response
@@ -1487,7 +1487,8 @@ class UnifiedClient:
             'refused', 'content_filter', 'content policy', 'violation',
             'cannot assist', 'unable to process', 'against guidelines',
             'ethical', 'responsible ai', 'harm_category', 'nsfw',
-            'adult content', 'explicit', 'violence', 'disturbing'
+            'adult content', 'explicit', 'violence', 'disturbing',
+            'censorship_blocked'
         ]
         if any(ind in response_str for ind in safety_indicators):
             return True
@@ -1498,7 +1499,7 @@ class UnifiedClient:
                 'blocked', 'safety', 'cannot', 'unable', 'prohibited',
                 'content filter', 'refused', 'inappropriate', 'i cannot',
                 "i can't", "i'm not able", "not able to", "against my",
-                'content policy', 'guidelines', 'ethical',
+                'content policy', 'guidelines', 'ethical', 'censorship_blocked',
                 'analyze this image', 'process this image', 'describe this image', 'nsfw'
             ]
             if any(p in content_lower for p in safety_phrases):
@@ -22655,8 +22656,16 @@ class UnifiedClient:
                 resp = _req.post(url, json=payload, headers=headers, timeout=120)
                 if resp.status_code not in (200, 201):
                     err = resp.text[:400]
+                    err_type = ""
                     try:
-                        err = resp.json().get("error", {}).get("message", err)
+                        err_body = resp.json()
+                        err_value = err_body.get("error", err)
+                        err_type = str(err_body.get("type", "") or "")
+                        if isinstance(err_value, dict):
+                            err = err_value.get("message", err)
+                            err_type = err_type or str(err_value.get("type", "") or "")
+                        else:
+                            err = str(err_value or err)
                     except Exception:
                         pass
                     if (resp.status_code == 413 or self._is_payload_too_large_error(err)) and source_image_data_urls and not self._image_request_quality_enabled():
@@ -22679,6 +22688,17 @@ class UnifiedClient:
                         print(f"⏳ [NanoGPT] Rate-limited, retrying in {wait:.1f}s…")
                         time.sleep(wait)
                         continue
+                    error_text = f"{err} {err_type}".lower()
+                    if (
+                        resp.status_code == 451
+                        or "censorship_blocked" in error_text
+                        or self._detect_safety_filter(messages, "", err_type or err, {"error": err, "type": err_type}, "nanogpt")
+                    ):
+                        raise UnifiedClientError(
+                            f"NanoGPT image content blocked ({resp.status_code}): {err}",
+                            error_type="prohibited_content",
+                            details={"status_code": resp.status_code, "type": err_type, "error": err},
+                        )
                     raise UnifiedClientError(
                         f"NanoGPT image API error ({resp.status_code}): {err}",
                         error_type="api_error",

@@ -13782,8 +13782,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         force_rotation=self.config.get('force_key_rotation', True),
                         rotation_frequency=self.config.get('rotation_frequency', 1),
                     )
+                    self.append_log(f"[ImageGenEdit] Key pool ENABLED for image output ({len(inpainter_keys)} keys)")
                 else:
                     UnifiedClient.clear_in_memory_inpainter_keys()
+                    if inpainter_keys_enabled:
+                        self.append_log("[ImageGenEdit] Enabled but no keys configured")
             except Exception:
                 pass
             
