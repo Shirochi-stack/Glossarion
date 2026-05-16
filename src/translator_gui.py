@@ -6947,7 +6947,7 @@ Recent translations to summarize:
         prefix_layout.addWidget(prefix_label)
 
         prefix_table = QTableWidget(0, 3)
-        prefix_table.setHorizontalHeaderLabels(["Prefix", "Routing", "Endpoint Type"])
+        prefix_table.setHorizontalHeaderLabels(["Prefix", "Base URL", "Endpoint Type"])
         prefix_table.setSelectionBehavior(QTableWidget.SelectRows)
         prefix_table.setSelectionMode(QTableWidget.SingleSelection)
         prefix_table.setAlternatingRowColors(True)
@@ -6955,14 +6955,14 @@ Recent translations to summarize:
         prefix_table.setEditTriggers(QTableWidget.NoEditTriggers)
         prefix_table.setFocusPolicy(Qt.NoFocus)
         prefix_table.verticalHeader().setVisible(False)
-        prefix_table.horizontalHeader().setMinimumSectionSize(140)
+        prefix_table.horizontalHeader().setMinimumSectionSize(110)
         prefix_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Interactive)
         prefix_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         prefix_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Interactive)
         prefix_table.setColumnWidth(0, 160)
-        prefix_table.setColumnWidth(2, 250)
+        prefix_table.setColumnWidth(2, 180)
         prefix_table.setToolTip(
-            "Use models like myprefix/model-name. Routing is the base URL; Endpoint Type is the path shape."
+            "Use models like myprefix/model-name. Base URL is the provider root; Endpoint Type is the path shape."
         )
         dropdown_icon_path = os.path.join(self.base_dir, 'Halgakos.ico').replace('\\', '/')
         prefix_table.setStyleSheet("""
@@ -7329,7 +7329,7 @@ Recent translations to summarize:
                 continue
             if not prefix or not routing:
                 QMessageBox.warning(dialog, "Incomplete Prefix Route",
-                                    f"Row {row + 1} needs both a prefix and routing URL.")
+                                    f"Row {row + 1} needs both a prefix and Base URL.")
                 return None
 
             prefix = prefix.replace('\\', '/').lstrip('/')
@@ -7342,8 +7342,8 @@ Recent translations to summarize:
 
             routing = routing.rstrip('/')
             if not routing.lower().startswith(('http://', 'https://')):
-                QMessageBox.warning(dialog, "Invalid Routing URL",
-                                    f"Routing URL on row {row + 1} must start with http:// or https://.")
+                QMessageBox.warning(dialog, "Invalid Base URL",
+                                    f"Base URL on row {row + 1} must start with http:// or https://.")
                 return None
 
             key = prefix.lower()
@@ -13766,6 +13766,24 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     )
                 else:
                     UnifiedClient.clear_in_memory_glossary_keys()
+            except Exception:
+                pass
+
+            # Configure Image Gen/Edit key pool for image output mode requests.
+            try:
+                from unified_api_client import UnifiedClient
+                inpainter_keys_enabled = bool(self.config.get('use_inpainter_keys', False))
+                inpainter_keys = self.config.get('inpainter_keys', []) or []
+                os.environ['USE_INPAINTER_KEYS'] = '1' if inpainter_keys_enabled else '0'
+                os.environ['INPAINTER_API_KEYS'] = json.dumps(inpainter_keys)
+                if inpainter_keys_enabled and inpainter_keys:
+                    UnifiedClient.set_in_memory_inpainter_keys(
+                        inpainter_keys,
+                        force_rotation=self.config.get('force_key_rotation', True),
+                        rotation_frequency=self.config.get('rotation_frequency', 1),
+                    )
+                else:
+                    UnifiedClient.clear_in_memory_inpainter_keys()
             except Exception:
                 pass
             
