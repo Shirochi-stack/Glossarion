@@ -7015,7 +7015,7 @@ Recent translations to summarize:
         prefix_table = QTableWidget(0, 3)
         prefix_table.setHorizontalHeaderLabels(["Prefix", "Base URL", "Endpoint Type"])
         prefix_table.setSelectionBehavior(QTableWidget.SelectRows)
-        prefix_table.setSelectionMode(QTableWidget.SingleSelection)
+        prefix_table.setSelectionMode(QTableWidget.ExtendedSelection)
         prefix_table.setAlternatingRowColors(True)
         prefix_table.setShowGrid(True)
         prefix_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -7116,14 +7116,122 @@ Recent translations to summarize:
             def __init__(self, table):
                 super().__init__(table)
                 self.table = table
+                self.anchor_row = None
+                self.selected_rows = set()
+
+            def _widget_for_event(self, obj, row, col):
+                widget = self.table.cellWidget(row, col)
+                try:
+                    if widget is obj or widget.isAncestorOf(obj):
+                        return widget
+                except Exception:
+                    pass
+                return None
+
+            def _apply_styles(self):
+                selected_style = (
+                    "background: #35516d; color: #ffffff; border: 1px solid #8ba8c7; "
+                    "border-radius: 3px; padding: 5px 7px;"
+                )
+                normal_field_style = (
+                    "background: #242424; color: #f5f7fa; border: 1px solid #4a4a4a; "
+                    "border-radius: 3px; padding: 5px 7px;"
+                )
+                normal_combo_style = (
+                    "background: #242424; color: #f5f7fa; border: 1px solid #4a4a4a; "
+                    "border-radius: 3px; padding: 5px 28px 5px 7px;"
+                )
+                for row in range(self.table.rowCount()):
+                    is_selected = row in self.selected_rows
+                    for col in range(self.table.columnCount()):
+                        widget = self.table.cellWidget(row, col)
+                        if widget is None:
+                            continue
+                        if is_selected:
+                            widget.setStyleSheet(selected_style)
+                            try:
+                                if hasattr(widget, 'lineEdit') and widget.lineEdit():
+                                    widget.lineEdit().setStyleSheet("background: transparent; color: #ffffff; border: none; padding: 0px;")
+                            except Exception:
+                                pass
+                        elif isinstance(widget, QComboBox):
+                            widget.setStyleSheet(normal_combo_style)
+                            try:
+                                if widget.lineEdit():
+                                    widget.lineEdit().setStyleSheet("background: transparent; color: #f5f7fa; border: none; padding: 0px;")
+                            except Exception:
+                                pass
+                        else:
+                            widget.setStyleSheet(normal_field_style)
+
+            def rows_for_delete(self):
+                if self.selected_rows:
+                    return sorted(self.selected_rows, reverse=True)
+                rows = sorted({idx.row() for idx in self.table.selectedIndexes()}, reverse=True)
+                if rows:
+                    return rows
+                current = self.table.currentRow()
+                return [current] if current >= 0 else []
+
+            def drop_rows(self, rows):
+                removed = set(rows)
+                self.selected_rows = {
+                    row - sum(1 for removed_row in removed if removed_row < row)
+                    for row in self.selected_rows
+                    if row not in removed
+                }
+                if self.anchor_row in removed:
+                    self.anchor_row = None
+                elif self.anchor_row is not None:
+                    self.anchor_row = self.anchor_row - sum(1 for removed_row in removed if removed_row < self.anchor_row)
+                self._apply_styles()
+
+            def add_row(self, row):
+                self.selected_rows = {r for r in self.selected_rows if r < self.table.rowCount()}
+                self.selected_rows = {r + 1 if r >= row else r for r in self.selected_rows}
+                if self.anchor_row is not None and self.anchor_row >= row:
+                    self.anchor_row += 1
+                self._apply_styles()
+
+            def handle_row_click(self, row, col, event):
+                from PySide6.QtCore import QItemSelectionModel
+                index = self.table.model().index(row, col)
+                mods = QApplication.keyboardModifiers()
+                if mods & Qt.ShiftModifier and self.anchor_row is not None:
+                    start = min(self.anchor_row, row)
+                    end = max(self.anchor_row, row)
+                    self.selected_rows = set(range(start, end + 1))
+                elif mods & Qt.ControlModifier:
+                    if row in self.selected_rows:
+                        self.selected_rows.remove(row)
+                    else:
+                        self.selected_rows.add(row)
+                    self.anchor_row = row
+                else:
+                    self.selected_rows = {row}
+                    self.anchor_row = row
+                try:
+                    self.table.selectionModel().clearSelection()
+                    for selected_row in self.selected_rows:
+                        self.table.selectionModel().select(
+                            self.table.model().index(selected_row, 0),
+                            QItemSelectionModel.Select | QItemSelectionModel.Rows
+                        )
+                    self.table.selectionModel().setCurrentIndex(index, QItemSelectionModel.NoUpdate)
+                except Exception:
+                    pass
+                self._apply_styles()
 
             def eventFilter(self, obj, event):
                 if event.type() in (QEvent.FocusIn, QEvent.MouseButtonPress):
                     try:
                         for r in range(self.table.rowCount()):
                             for c in range(self.table.columnCount()):
-                                if self.table.cellWidget(r, c) is obj:
-                                    self.table.setCurrentCell(r, c)
+                                if self._widget_for_event(obj, r, c) is not None:
+                                    if event.type() == QEvent.MouseButtonPress:
+                                        self.handle_row_click(r, c, event)
+                                    elif not self.selected_rows and not self.table.selectionModel().selectedRows():
+                                        self.table.setCurrentCell(r, c)
                                     return False
                     except Exception:
                         pass
@@ -7162,9 +7270,17 @@ Recent translations to summarize:
             row = prefix_table.rowCount()
             prefix_table.insertRow(row)
             prefix_table.setRowHeight(row, 40)
+            try:
+                prefix_field_filter.add_row(row)
+            except Exception:
+                pass
             prefix_table.setCellWidget(row, 0, _make_prefix_field(prefix))
             prefix_table.setCellWidget(row, 1, _make_prefix_field(routing))
             prefix_table.setCellWidget(row, 2, _make_endpoint_type_combo(endpoint_type))
+            try:
+                prefix_field_filter._apply_styles()
+            except Exception:
+                pass
             prefix_table.setCurrentCell(row, 0)
             try:
                 prefix_table.cellWidget(row, 0).setFocus()
@@ -7191,12 +7307,30 @@ Recent translations to summarize:
         delete_prefix_btn = QPushButton("Delete")
         delete_prefix_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
         def _delete_prefix_rows():
-            rows = sorted({idx.row() for idx in prefix_table.selectedIndexes()}, reverse=True)
+            rows = prefix_field_filter.rows_for_delete()
             if not rows:
-                current = prefix_table.currentRow()
-                rows = [current] if current >= 0 else []
+                return
+            prefix_names = []
+            for row in sorted(rows):
+                widget = prefix_table.cellWidget(row, 0)
+                item = prefix_table.item(row, 0)
+                text = widget.text().strip() if widget and hasattr(widget, 'text') else (item.text().strip() if item else '')
+                prefix_names.append(text or f"row {row + 1}")
+            preview = "\n".join(f"• {name}" for name in prefix_names[:8])
+            if len(prefix_names) > 8:
+                preview += f"\n• ...and {len(prefix_names) - 8} more"
+            reply = QMessageBox.question(
+                dialog,
+                "Delete Prefix Route",
+                f"Delete {len(rows)} custom prefix route{'s' if len(rows) != 1 else ''}?\n\n{preview}",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
             for row in rows:
                 prefix_table.removeRow(row)
+            prefix_field_filter.drop_rows(rows)
         delete_prefix_btn.clicked.connect(_delete_prefix_rows)
         prefix_buttons.addWidget(delete_prefix_btn)
         prefix_buttons.addStretch()
@@ -7271,7 +7405,7 @@ Recent translations to summarize:
 
     @staticmethod
     def _normalize_custom_prefix_endpoint_type(endpoint_type):
-        """Return a supported custom prefix endpoint path."""
+        """Return a custom prefix endpoint path, preserving user-defined paths."""
         value = str(endpoint_type or '').strip().lower().replace('-', '_').replace(' ', '_')
         legacy = {
             '': '/chat/completions',
@@ -7288,15 +7422,21 @@ Recent translations to summarize:
         if value in legacy:
             return legacy[value]
         raw = str(endpoint_type or '').strip()
-        known = {
-            *TranslatorGUI._CUSTOM_PREFIX_ENDPOINT_TYPES,
-        }
-        return raw if raw in known else '/chat/completions'
+        if raw.startswith('{base_url}/'):
+            raw = raw[len('{base_url}'):]
+        if raw.startswith('/') and not any(ch.isspace() for ch in raw):
+            return raw
+        return '/chat/completions'
 
     @staticmethod
-    def _is_known_custom_prefix_endpoint_type(endpoint_type):
-        """Return True when endpoint_type is an exact supported endpoint template."""
-        return str(endpoint_type or '').strip() in TranslatorGUI._CUSTOM_PREFIX_ENDPOINT_TYPES
+    def _is_valid_custom_prefix_endpoint_type(endpoint_type):
+        """Return True when endpoint_type is a preset or custom absolute endpoint path."""
+        raw = str(endpoint_type or '').strip()
+        if raw in TranslatorGUI._CUSTOM_PREFIX_ENDPOINT_TYPES:
+            return True
+        if raw.startswith('{base_url}/'):
+            raw = raw[len('{base_url}'):]
+        return bool(raw.startswith('/') and not any(ch.isspace() for ch in raw))
 
     def _normalize_custom_prefix_routes(self, routes):
         """Return validated custom prefix route dictionaries for custom endpoints."""
@@ -7377,12 +7517,12 @@ Recent translations to summarize:
                 endpoint_type = type_widget.currentData()
             else:
                 endpoint_type = type_item.text().strip() if type_item else '/chat/completions'
-            if not self._is_known_custom_prefix_endpoint_type(endpoint_type):
+            if not self._is_valid_custom_prefix_endpoint_type(endpoint_type):
                 QMessageBox.warning(
                     dialog,
                     "Invalid Endpoint Type",
-                    f"Endpoint Type on row {row + 1} must be one of:\n"
-                    + "\n".join(self._CUSTOM_PREFIX_ENDPOINT_TYPES)
+                    f"Endpoint Type on row {row + 1} must be an absolute path like "
+                    "/chat/completions, /v1/ocr, or /v1/custom."
                 )
                 return None
             endpoint_type = self._normalize_custom_prefix_endpoint_type(endpoint_type)

@@ -2121,7 +2121,7 @@ class UnifiedClient:
 
     @staticmethod
     def _normalize_custom_prefix_endpoint_type(endpoint_type: str) -> str:
-        """Return a supported custom-prefix endpoint path."""
+        """Return a custom-prefix endpoint path, preserving user-defined paths."""
         value = str(endpoint_type or '').strip().lower().replace('-', '_').replace(' ', '_')
         legacy = {
             '': '/chat/completions',
@@ -2138,8 +2138,11 @@ class UnifiedClient:
         if value in legacy:
             return legacy[value]
         raw = str(endpoint_type or '').strip()
-        known = set(UnifiedClient._CUSTOM_PREFIX_ENDPOINT_TYPES)
-        return raw if raw in known else '/chat/completions'
+        if raw.startswith('{base_url}/'):
+            raw = raw[len('{base_url}'):]
+        if raw.startswith('/') and not any(ch.isspace() for ch in raw):
+            return raw
+        return '/chat/completions'
 
     @classmethod
     def _load_custom_prefix_routes(cls) -> List[Dict[str, str]]:
@@ -23375,6 +23378,54 @@ class UnifiedClient:
             raw_response=json_resp,
         )
 
+    def _send_custom_openai_path_api(
+        self,
+        messages,
+        base_url: str,
+        endpoint_path: str,
+        temperature,
+        max_tokens,
+        response_name: str,
+        model_override: Optional[str] = None,
+    ) -> UnifiedResponse:
+        """Send an OpenAI-chat-shaped payload to a user-defined endpoint path."""
+        endpoint_path = self._normalize_custom_prefix_endpoint_type(endpoint_path)
+        if endpoint_path in ('/chat/completions', '/images/generations', '/v1/messages', '/v1/ocr', '/{model_id}'):
+            raise UnifiedClientError(
+                f"Internal routing error: preset endpoint {endpoint_path} reached generic custom path sender.",
+                error_type="validation",
+            )
+        headers = self._build_openai_headers("custom_openai", self.api_key, None)
+        norm_mt, norm_mct = self._normalize_token_params(max_tokens, None)
+        payload = {
+            "model": model_override or self.model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if norm_mct is not None:
+            payload["max_completion_tokens"] = norm_mct
+        elif norm_mt is not None:
+            payload["max_tokens"] = norm_mt
+        url = f"{base_url.rstrip('/')}{endpoint_path}"
+        resp = self._http_request_with_retries(
+            method="POST",
+            url=url,
+            headers=headers,
+            json=payload,
+            expected_status=(200,),
+            max_retries=self._get_max_retries(),
+            provider_name=f"custom_openai {endpoint_path}",
+            use_session=True,
+        )
+        json_resp = resp.json()
+        content, finish_reason, usage = self._extract_openai_json(json_resp)
+        return UnifiedResponse(
+            content=content,
+            finish_reason=finish_reason,
+            usage=usage,
+            raw_response=json_resp,
+        )
+
     def _send_openai_provider_router(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Generic router for many OpenAI-compatible providers to reduce wrapper duplication."""
         # Re-apply per-key individual endpoint (if any) before routing, so routing can't override it.
@@ -23450,6 +23501,16 @@ class UnifiedClient:
                 return self._send_mistral_ocr_api(
                     messages=messages,
                     base_url=base_url,
+                    response_name=response_name,
+                    model_override=effective_model,
+                )
+            if endpoint_type != '/chat/completions':
+                return self._send_custom_openai_path_api(
+                    messages=messages,
+                    base_url=base_url,
+                    endpoint_path=endpoint_type,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
                     response_name=response_name,
                     model_override=effective_model,
                 )
