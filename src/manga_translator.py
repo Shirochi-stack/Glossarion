@@ -2514,6 +2514,24 @@ class MangaTranslator:
             return (det_type, model_id, self._get_rtdetr_onnx_filename(ocr_settings))
         return (det_type, model_id)
 
+    def _current_detector_selection(self):
+        """Return (detector_type, model_id, pool_key) for the current live OCR settings."""
+        ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {}) if hasattr(self, 'main_gui') else {}
+        det_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+        model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
+        try:
+            if det_type in ('rtdetr', 'rtdetr_onnx'):
+                if model_id and (model_id.lower().endswith('.json') or os.path.isfile(model_id)):
+                    model_id = ''
+                if not model_id:
+                    model_id = 'ogkalu/comic-text-and-bubble-detector'
+            elif det_type in ('yolo', 'custom'):
+                if model_id and model_id.lower().endswith('.json'):
+                    model_id = ''
+        except Exception:
+            pass
+        return det_type, model_id, self._detector_pool_key(det_type, model_id, ocr_settings)
+
     def _ensure_bubble_detector_ready(self, ocr_settings):
         """Ensure a usable BubbleDetector for current thread, auto-reloading models after cleanup."""
         try:
@@ -14145,27 +14163,17 @@ class MangaTranslator:
         # Use thread-local instance with pool checkout
         if not hasattr(self, '_thread_local') or getattr(self, '_thread_local', None) is None:
             self._thread_local = threading.local()
+        det_type, model_id, key = self._current_detector_selection()
+        if (
+            hasattr(self._thread_local, 'bubble_detector')
+            and self._thread_local.bubble_detector is not None
+            and getattr(self, '_bubble_detector_pool_key', None) != key
+        ):
+            self._log(f"Bubble detector selection changed from {getattr(self, '_bubble_detector_pool_key', None)} to {key}; returning old detector", "info")
+            self._return_bubble_detector_to_pool()
         if not hasattr(self._thread_local, 'bubble_detector') or self._thread_local.bubble_detector is None:
             from bubble_detector import BubbleDetector
             import time
-            
-            # Get key for pool lookup
-            ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {}) if hasattr(self, 'main_gui') else {}
-            det_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
-            model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
-            # Sanitize model_id to match preload key (must mirror _preload_bubble_detectors logic)
-            try:
-                if det_type in ('rtdetr', 'rtdetr_onnx'):
-                    if model_id and (model_id.lower().endswith('.json') or os.path.isfile(model_id)):
-                        model_id = ''
-                    if not model_id:
-                        model_id = 'ogkalu/comic-text-and-bubble-detector'
-                elif det_type in ('yolo', 'custom'):
-                    if model_id and model_id.lower().endswith('.json'):
-                        model_id = ''
-            except Exception:
-                pass
-            key = self._detector_pool_key(det_type, model_id, ocr_settings)
             
             # Polling parameters
             max_wait_time = 60  # Maximum 60 seconds
@@ -14194,13 +14202,57 @@ class MangaTranslator:
                                 self._log(f"   Spares: {len(rec.get('spares', []))}, Checked out: {len(rec.get('checked_out', []))}", "info")
                             else:
                                 self._log("⚠️ DETECTOR KEY MISMATCH - requested key not in pool!", "warning")
+                        if rec is None:
+                            for old_key, old_rec in list(MangaTranslator._detector_pool.items()):
+                                if old_key == key:
+                                    continue
+                                old_checked = (old_rec or {}).get('checked_out') or []
+                                if old_checked:
+                                    continue
+                                for old_spare in (old_rec or {}).get('spares') or []:
+                                    try:
+                                        if hasattr(old_spare, 'unload'):
+                                            old_spare.unload(release_shared=True)
+                                    except Exception:
+                                        pass
+                                MangaTranslator._detector_pool.pop(old_key, None)
+                                self._log(f"Unloaded stale bubble detector pool entry {old_key}", "info")
+                            bd = BubbleDetector()
+                            if hasattr(bd, 'set_stop_flag') and hasattr(self, 'stop_flag'):
+                                try:
+                                    bd.set_stop_flag(self.stop_flag)
+                                except Exception:
+                                    pass
+                            rec = {'spares': [bd], 'checked_out': [bd]}
+                            MangaTranslator._detector_pool[key] = rec
+                            self._thread_local.bubble_detector = bd
+                            self._checked_out_bubble_detector = bd
+                            self._bubble_detector_pool_key = key
+                            self._log(f"Created new bubble detector pool entry for {key}", "info")
+                            return bd
+
                         if rec and isinstance(rec, dict):
                             spares = rec.get('spares') or []
                             # Initialize checked_out list if it doesn't exist
                             if 'checked_out' not in rec:
                                 rec['checked_out'] = []
                             checked_out = rec['checked_out']
-                            
+
+                            if not spares and not checked_out:
+                                bd = BubbleDetector()
+                                if hasattr(bd, 'set_stop_flag') and hasattr(self, 'stop_flag'):
+                                    try:
+                                        bd.set_stop_flag(self.stop_flag)
+                                    except Exception:
+                                        pass
+                                rec['spares'] = [bd]
+                                rec['checked_out'] = [bd]
+                                self._thread_local.bubble_detector = bd
+                                self._checked_out_bubble_detector = bd
+                                self._bubble_detector_pool_key = key
+                                self._log(f"Created bubble detector instance for empty pool entry {key}", "info")
+                                return bd
+                             
                             # Look for an available spare (not checked out)
                             if spares:
                                 for spare in spares:
