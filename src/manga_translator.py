@@ -287,7 +287,7 @@ def set_should_inpaint_from_bubble_type(region, ocr_settings, main_gui):
             if main_gui and hasattr(main_gui, 'config'):
                 cfg = main_gui.config
                 live_detect_free = cfg.get('manga_settings', {}).get('ocr', {}).get('detect_free_text')
-                free_text_only_bg = bool(cfg.get('manga_free_text_only_bg_opacity', False))
+                free_text_only_bg = bool(cfg.get('manga_free_text_only_bg_opacity', True))
         except Exception:
             live_detect_free = None
         # Fallback to ocr_settings if GUI not available
@@ -340,7 +340,7 @@ def classify_rtdetr_region_and_set_inpaint(region, bbox, rtdetr_detections, ocr_
             if main_gui and hasattr(main_gui, 'config'):
                 cfg = main_gui.config
                 live_detect_free = cfg.get('manga_settings', {}).get('ocr', {}).get('detect_free_text')
-                free_text_only_bg = bool(cfg.get('manga_free_text_only_bg_opacity', False))
+                free_text_only_bg = bool(cfg.get('manga_free_text_only_bg_opacity', True))
         except Exception:
             live_detect_free = None
         # Fallback to local settings if GUI not available
@@ -1507,7 +1507,7 @@ class MangaTranslator:
         # Enhanced text rendering settings - Load from config if available
         config = main_gui.config if hasattr(main_gui, 'config') else {}
         
-        self.text_bg_opacity = config.get('manga_bg_opacity', 255)  # 0-255, default fully opaque
+        self.text_bg_opacity = config.get('manga_bg_opacity', 128)  # 0-255, default 50%
         self.text_bg_style = config.get('manga_bg_style', 'box')  # 'box', 'circle', 'wrap'
         self.text_bg_reduction = config.get('manga_bg_reduction', 1.0)  # Size reduction factor (0.5-1.0)
         self.constrain_to_bubble = config.get('manga_constrain_to_bubble', True) 
@@ -1534,7 +1534,7 @@ class MangaTranslator:
         self.shadow_blur = config.get('manga_shadow_blur', 0)  # 0 = sharp shadow, higher = more blur
         self.force_caps_lock = config.get('manga_force_caps_lock', False)
         self.skip_inpainting = config.get('manga_skip_inpainting', False)  # Default: perform inpainting
-        self.free_text_only_bg_opacity = bool(config.get('manga_free_text_only_bg_opacity', False))
+        self.free_text_only_bg_opacity = bool(config.get('manga_free_text_only_bg_opacity', True))
 
         # Safe area controls
         self.safe_area_enabled = bool(config.get('manga_safe_area_enabled', False))

@@ -17,7 +17,8 @@ from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout
                                QGroupBox, QListWidget, QComboBox, QLineEdit, QCheckBox,
                                QRadioButton, QSlider, QSpinBox, QDoubleSpinBox, QTextEdit,
                                QProgressBar, QFileDialog, QMessageBox, QColorDialog, QScrollArea,
-                               QDialog, QButtonGroup, QApplication, QSizePolicy, QToolButton)
+                               QDialog, QButtonGroup, QApplication, QSizePolicy, QToolButton,
+                               QAbstractItemView)
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QEvent, QPropertyAnimation, QEasingCurve, Property, QThread
 from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent, QPixmap, QTransform, QBrush
 from typing import List, Dict, Optional, Any
@@ -4105,21 +4106,25 @@ class MangaTranslationTab(QObject):
         add_files_btn = QPushButton("Add Files")
         add_files_btn.clicked.connect(self._add_files)
         add_files_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 4px 10px; font-size: 10pt; font-weight: bold; }")
+        self.add_files_btn = add_files_btn
         file_btn_layout.addWidget(add_files_btn)
         
         add_folder_btn = QPushButton("Add Folder")
         add_folder_btn.clicked.connect(self._add_folder)
         add_folder_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 4px 10px; font-size: 10pt; font-weight: bold; }")
+        self.add_folder_btn = add_folder_btn
         file_btn_layout.addWidget(add_folder_btn)
         
         remove_btn = QPushButton("Remove Selected")
         remove_btn.clicked.connect(self._remove_selected)
         remove_btn.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 4px 10px; font-size: 10pt; font-weight: bold; }")
+        self.remove_files_btn = remove_btn
         file_btn_layout.addWidget(remove_btn)
         
         clear_btn = QPushButton("Clear All")
         clear_btn.clicked.connect(self._clear_all)
         clear_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: black; padding: 4px 10px; font-size: 10pt; font-weight: bold; }")
+        self.clear_files_btn = clear_btn
         file_btn_layout.addWidget(clear_btn)
         
         file_btn_layout.addStretch()
@@ -7144,8 +7149,8 @@ class MangaTranslationTab(QObject):
                 pass
         
         # Initialize with defaults (plain Python values, no Tkinter variables)
-        self.bg_opacity_value = config.get('manga_bg_opacity', 0)
-        self.free_text_only_bg_opacity_value = config.get('manga_free_text_only_bg_opacity', False)
+        self.bg_opacity_value = config.get('manga_bg_opacity', 128)
+        self.free_text_only_bg_opacity_value = config.get('manga_free_text_only_bg_opacity', True)
         self.bg_style_value = config.get('manga_bg_style', 'circle')
         self.bg_reduction_value = config.get('manga_bg_reduction', 1.0)
         self.font_size_value = config.get('manga_font_size', 0)
@@ -7828,8 +7833,8 @@ class MangaTranslationTab(QObject):
         
         try:
             # Background settings
-            self.bg_opacity_value = 0
-            self.free_text_only_bg_opacity_value = False
+            self.bg_opacity_value = 128
+            self.free_text_only_bg_opacity_value = True
             self.bg_style_value = 'circle'
             self.bg_reduction_value = 1.0
             
@@ -12401,6 +12406,40 @@ class MangaTranslationTab(QObject):
         self._update_manga_image_range_display()
         self._persist_selected_files()
     
+    def _set_file_selection_editing_enabled(self, enabled: bool):
+        """Enable/disable file-list mutations without disabling list scrolling."""
+        try:
+            enabled = bool(enabled)
+            for attr in ('add_files_btn', 'add_folder_btn', 'remove_files_btn', 'clear_files_btn'):
+                btn = getattr(self, attr, None)
+                if btn is not None:
+                    btn.setEnabled(enabled)
+            if hasattr(self, 'file_listbox') and self.file_listbox:
+                self.file_listbox.setEnabled(True)
+                self.file_listbox.setDragDropMode(
+                    QAbstractItemView.DragDropMode.InternalMove
+                    if enabled else QAbstractItemView.DragDropMode.NoDragDrop
+                )
+        except Exception as e:
+            print(f"[FILE_LIST] Failed to update editing controls: {e}")
+
+    def _set_file_list_current_row_without_scroll(self, row: int):
+        """Select a file-list row while preserving the user's scrollbar position."""
+        if not hasattr(self, 'file_listbox') or not self.file_listbox:
+            return
+        if row < 0 or row >= self.file_listbox.count():
+            return
+        scrollbar = self.file_listbox.verticalScrollBar()
+        saved_scroll = scrollbar.value() if scrollbar else None
+        self.file_listbox.blockSignals(True)
+        try:
+            self.file_listbox.setCurrentRow(row)
+        finally:
+            self.file_listbox.blockSignals(False)
+        if scrollbar is not None and saved_scroll is not None:
+            scrollbar.setValue(saved_scroll)
+            QTimer.singleShot(0, lambda sb=scrollbar, value=saved_scroll: sb.setValue(value))
+
     def _remove_selected(self):
         """Remove selected files from the list and clear preview if the current image was removed.
         Before removing, persist the current image state to avoid losing OCR/rectangles.
@@ -13506,11 +13545,9 @@ class MangaTranslationTab(QObject):
                     _, state = update
                     if state == 'translation_started':
                         try:
-                            # REMOVED: Don't disable start button - it's now a toggle button that should stay red/enabled
-                            # The button is already updated to Stop state in _start_translation()
-                            # Just disable file list to prevent modification during translation
-                            if hasattr(self, 'file_listbox') and self.file_listbox:
-                                self.file_listbox.setEnabled(False)
+                            # Keep the file list enabled so its scrollbar remains usable during long runs.
+                            # Only disable file mutations and drag reordering while translation is active.
+                            self._set_file_selection_editing_enabled(False)
                         except Exception:
                             pass
                     elif state == 'translation_complete':
@@ -14004,10 +14041,8 @@ class MangaTranslationTab(QObject):
                             # Find index of this image in selected_files
                             try:
                                 index = self.selected_files.index(image_path)
-                                # Block signals to prevent triggering _on_file_selection_changed
-                                self.file_listbox.blockSignals(True)
-                                self.file_listbox.setCurrentRow(index)
-                                self.file_listbox.blockSignals(False)
+                                # Keep the user's scroll position stable while still updating selection.
+                                self._set_file_list_current_row_without_scroll(index)
                                 print(f"[BATCH_SYNC] Synced file list selection to row {index}")
                                 
                                 # Also sync thumbnail selection
@@ -17957,8 +17992,10 @@ class MangaTranslationTab(QObject):
                     stop_spinning()
             
             # Re-enable file modification - check if listbox exists (PySide6)
-            if hasattr(self, 'file_listbox') and self.file_listbox:
-                if not self.file_listbox.isEnabled():
+            try:
+                self._set_file_selection_editing_enabled(True)
+            except Exception:
+                if hasattr(self, 'file_listbox') and self.file_listbox:
                     self.file_listbox.setEnabled(True)
             
             # Re-enable ALL workflow buttons after translation stops/completes
