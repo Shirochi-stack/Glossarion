@@ -1026,6 +1026,13 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
     refresh_preview_signal = Signal()
     # Qt Signal to request Progress Manager open on main thread
     open_progress_manager_signal = Signal()
+    _CUSTOM_PREFIX_ENDPOINT_TYPES = (
+        "/chat/completions",
+        "/images/generations",
+        "/v1/messages",
+        "/v1/ocr",
+        "/{model_id}",
+    )
 
     class _CachedSpinner(QObject):
         """Tiny helper to spin an icon smoothly using cached frames (no QPainter)."""
@@ -7132,12 +7139,7 @@ Recent translations to summarize:
             field.installEventFilter(prefix_field_filter)
             return field
 
-        endpoint_type_options = [
-            "/chat/completions",
-            "/images/generations",
-            "/v1/messages",
-            "/{model_id}",
-        ]
+        endpoint_type_options = list(self._CUSTOM_PREFIX_ENDPOINT_TYPES)
 
         def _make_endpoint_type_combo(endpoint_type="/chat/completions"):
             combo = QComboBox()
@@ -7276,31 +7278,25 @@ Recent translations to summarize:
             'openai_chat': '/chat/completions',
             'openai_images': '/images/generations',
             'anthropic_messages': '/v1/messages',
+            'mistral_ocr': '/v1/ocr',
             '{base_url}/chat/completions': '/chat/completions',
             '{base_url}/images/generations': '/images/generations',
             '{base_url}/v1/messages': '/v1/messages',
+            '{base_url}/v1/ocr': '/v1/ocr',
             '{base_url}/{model_id}': '/{model_id}',
         }
         if value in legacy:
             return legacy[value]
         raw = str(endpoint_type or '').strip()
         known = {
-            '/chat/completions',
-            '/images/generations',
-            '/v1/messages',
-            '/{model_id}',
+            *TranslatorGUI._CUSTOM_PREFIX_ENDPOINT_TYPES,
         }
         return raw if raw in known else '/chat/completions'
 
     @staticmethod
     def _is_known_custom_prefix_endpoint_type(endpoint_type):
         """Return True when endpoint_type is an exact supported endpoint template."""
-        return str(endpoint_type or '').strip() in {
-            '/chat/completions',
-            '/images/generations',
-            '/v1/messages',
-            '/{model_id}',
-        }
+        return str(endpoint_type or '').strip() in TranslatorGUI._CUSTOM_PREFIX_ENDPOINT_TYPES
 
     def _normalize_custom_prefix_routes(self, routes):
         """Return validated custom prefix route dictionaries for custom endpoints."""
@@ -7386,10 +7382,7 @@ Recent translations to summarize:
                     dialog,
                     "Invalid Endpoint Type",
                     f"Endpoint Type on row {row + 1} must be one of:\n"
-                    "/chat/completions\n"
-                    "/images/generations\n"
-                    "/v1/messages\n"
-                    "/{model_id}"
+                    + "\n".join(self._CUSTOM_PREFIX_ENDPOINT_TYPES)
                 )
                 return None
             endpoint_type = self._normalize_custom_prefix_endpoint_type(endpoint_type)

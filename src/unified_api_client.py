@@ -1233,6 +1233,13 @@ def extend_deferred_batch_logs(messages) -> None:
 
 class UnifiedClient:
     # ----- Helper methods to reduce duplication -----
+    _CUSTOM_PREFIX_ENDPOINT_TYPES = (
+        "/chat/completions",
+        "/images/generations",
+        "/v1/messages",
+        "/v1/ocr",
+        "/{model_id}",
+    )
 
     def _log_invalid_authorization_header_error(self, exc: Exception) -> None:
         """Log actionable, non-secret diagnostics for invalid Authorization header errors."""
@@ -1431,6 +1438,48 @@ class UnifiedClient:
                             if url.startswith('data:') and ',' in url:
                                 return url.split(',', 1)[1]
                             return url
+        return None
+
+    def _extract_first_image_url_for_document_api(self, messages) -> Optional[str]:
+        """Return the first image URL/data URL from chat-style messages."""
+        if messages is None:
+            return None
+        for msg in messages:
+            if msg is None:
+                continue
+            content = msg.get('content')
+            if isinstance(content, str):
+                text = content.strip()
+                if text.startswith('data:image/') or text.startswith(('http://', 'https://')):
+                    return text
+                continue
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                url = None
+                if part.get('type') == 'image_url':
+                    image_url = part.get('image_url', {})
+                    url = image_url.get('url', '') if isinstance(image_url, dict) else image_url
+                elif part.get('type') == 'image':
+                    image = part.get('image', {})
+                    if isinstance(image, dict):
+                        url = image.get('url') or image.get('data') or image.get('base64')
+                    else:
+                        url = image
+                if not isinstance(url, str) or not url.strip():
+                    continue
+                url = url.strip()
+                if url.startswith('data:image/') or url.startswith(('http://', 'https://')):
+                    return url
+                if ';base64,' in url:
+                    return url
+                try:
+                    base64.b64decode(url, validate=True)
+                    return f"data:image/png;base64,{url}"
+                except Exception:
+                    continue
         return None
     
 
@@ -2064,20 +2113,17 @@ class UnifiedClient:
             'openai_chat': '/chat/completions',
             'openai_images': '/images/generations',
             'anthropic_messages': '/v1/messages',
+            'mistral_ocr': '/v1/ocr',
             '{base_url}/chat/completions': '/chat/completions',
             '{base_url}/images/generations': '/images/generations',
             '{base_url}/v1/messages': '/v1/messages',
+            '{base_url}/v1/ocr': '/v1/ocr',
             '{base_url}/{model_id}': '/{model_id}',
         }
         if value in legacy:
             return legacy[value]
         raw = str(endpoint_type or '').strip()
-        known = {
-            '/chat/completions',
-            '/images/generations',
-            '/v1/messages',
-            '/{model_id}',
-        }
+        known = set(UnifiedClient._CUSTOM_PREFIX_ENDPOINT_TYPES)
         return raw if raw in known else '/chat/completions'
 
     @classmethod
@@ -2160,6 +2206,23 @@ class UnifiedClient:
         try:
             url_l = str(base_url or '').strip().lower()
             return '://fal.run' in url_l or '://queue.fal.run' in url_l
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_mistral_base_url(base_url: str) -> bool:
+        """Return True for Mistral API hosts."""
+        try:
+            url_l = str(base_url or '').strip().lower()
+            return '://api.mistral.ai' in url_l
+        except Exception:
+            return False
+
+    @staticmethod
+    def _model_name_looks_like_ocr(model: str) -> bool:
+        """Return True when a model id appears to target OCR."""
+        try:
+            return 'ocr' in str(model or '').strip().lower()
         except Exception:
             return False
 
@@ -6249,7 +6312,7 @@ class UnifiedClient:
                             route.get('endpoint_type', '/chat/completions')
                         )
                 if self.client_type == 'custom_openai' and route_endpoint_type != '/chat/completions':
-                    # Image and Anthropic prefix routes are handled by direct HTTP paths.
+                    # Non-chat prefix routes are handled by direct HTTP/provider-specific paths.
                     self.openai_client = None
                 else:
                     # Use regular OpenAI client - individual endpoint will be set later
@@ -6520,6 +6583,10 @@ class UnifiedClient:
         log_model = model_snapshot
         try:
             if getattr(self, '_multi_key_mode', False):
+                active_pool = self.__dict__.get(
+                    '_api_key_pool',
+                    getattr(self.__class__, '_api_key_pool', None)
+                )
                 # Prefer thread-local model (most accurate)
                 try:
                     tls = self._get_thread_local_client()
@@ -6530,10 +6597,9 @@ class UnifiedClient:
 
                 # Next, prefer the currently selected key index
                 try:
-                    pool = getattr(self.__class__, '_api_key_pool', None)
                     idx = getattr(self, 'current_key_index', None)
-                    if pool is not None and idx is not None and 0 <= int(idx) < len(getattr(pool, 'keys', [])):
-                        km = getattr(pool.keys[int(idx)], 'model', None)
+                    if active_pool is not None and idx is not None and 0 <= int(idx) < len(getattr(active_pool, 'keys', [])):
+                        km = getattr(active_pool.keys[int(idx)], 'model', None)
                         if km:
                             log_model = km
                 except Exception:
@@ -6541,8 +6607,7 @@ class UnifiedClient:
 
                 # Finally, if all enabled keys share one model, log that
                 try:
-                    pool = getattr(self.__class__, '_api_key_pool', None)
-                    keys = list(getattr(pool, 'keys', []) or []) if pool is not None else []
+                    keys = list(getattr(active_pool, 'keys', []) or []) if active_pool is not None else []
                     models = [getattr(k, 'model', None) for k in keys if getattr(k, 'enabled', True)]
                     uniq = sorted({m for m in models if m})
                     if len(uniq) == 1:
@@ -6555,8 +6620,19 @@ class UnifiedClient:
         try:
             if getattr(self, '_multi_key_mode', False) and not self._is_stop_requested():
                 # Distinguish between real multi-key mode and glossary/Vision pool overrides
-                _is_glossary_pool = (self._api_key_pool is getattr(self.__class__, '_glossary_key_pool', None))
-                _is_qa_pool = (self._api_key_pool is getattr(self.__class__, '_qa_scan_key_pool', None))
+                active_pool = self.__dict__.get(
+                    '_api_key_pool',
+                    getattr(self.__class__, '_api_key_pool', None)
+                )
+                _key_identifier = str(getattr(self, 'key_identifier', '') or '')
+                _is_glossary_pool = (
+                    active_pool is getattr(self.__class__, '_glossary_key_pool', None)
+                    or _key_identifier.startswith('GlossaryKey#')
+                )
+                _is_qa_pool = (
+                    active_pool is getattr(self.__class__, '_qa_scan_key_pool', None)
+                    or _key_identifier.startswith('VisionKey#')
+                )
                 _pool_label = "(glossary-key)" if _is_glossary_pool else "(vision-key)" if _is_qa_pool else "(multi-key)"
                 defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model} {_pool_label}")
             elif log_model != model_snapshot and not self._is_stop_requested():
@@ -17931,6 +18007,14 @@ class UnifiedClient:
     
     def _send_mistral(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Mistral API"""
+        if self._model_name_looks_like_ocr(self.model):
+            return self._send_mistral_ocr_api(
+                messages=messages,
+                base_url="https://api.mistral.ai",
+                response_name=response_name,
+                model_override=self.model,
+            )
+
         max_retries = self._get_max_retries()
 
         if MistralClient is not None and ChatMessage is not None:
@@ -23082,6 +23166,61 @@ class UnifiedClient:
             error_type="api_error",
         )
 
+    def _send_mistral_ocr_api(self, messages, base_url: str, response_name: str, model_override: Optional[str] = None) -> UnifiedResponse:
+        """Send an image/document OCR request to Mistral's native /v1/ocr endpoint."""
+        document_url = self._extract_first_image_url_for_document_api(messages)
+        if not document_url:
+            raise UnifiedClientError(
+                "Mistral OCR requires an image URL or data:image payload in the request.",
+                error_type="validation",
+            )
+
+        model = (model_override or self.model or "mistral-ocr-latest").strip()
+        payload = {
+            "model": model,
+            "document": {
+                "type": "image_url",
+                "image_url": {
+                    "url": document_url,
+                },
+            },
+        }
+        headers = self._build_openai_headers("mistral", self.api_key, None)
+        api_root = base_url.rstrip('/')
+        if api_root.lower().endswith('/v1'):
+            api_root = api_root[:-3].rstrip('/')
+        url = f"{api_root}/v1/ocr"
+        resp = self._http_request_with_retries(
+            method="POST",
+            url=url,
+            headers=headers,
+            json=payload,
+            expected_status=(200,),
+            max_retries=self._get_max_retries(),
+            provider_name="Mistral OCR",
+            use_session=True,
+        )
+        json_resp = resp.json()
+        page_texts = []
+        for page in json_resp.get("pages", []) or []:
+            if not isinstance(page, dict):
+                continue
+            markdown = page.get("markdown")
+            if isinstance(markdown, str) and markdown.strip():
+                page_texts.append(markdown.strip())
+        content = "\n\n".join(page_texts).strip()
+        if not content:
+            annotation = json_resp.get("document_annotation")
+            if isinstance(annotation, str):
+                content = annotation.strip()
+        usage = json_resp.get("usage_info")
+        return UnifiedResponse(
+            content=content,
+            finish_reason="stop",
+            usage=usage if isinstance(usage, dict) else None,
+            raw_response=json_resp,
+        )
+
     def _send_openai_provider_router(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Generic router for many OpenAI-compatible providers to reduce wrapper duplication."""
         # Re-apply per-key individual endpoint (if any) before routing, so routing can't override it.
@@ -23100,6 +23239,17 @@ class UnifiedClient:
             )
             base_url = route.get('routing', '').rstrip('/')
             effective_model = self._strip_custom_route_prefix(getattr(self, 'model', ''), route)
+            if (
+                endpoint_type == '/chat/completions'
+                and self._is_mistral_base_url(base_url)
+                and self._model_name_looks_like_ocr(effective_model)
+            ):
+                return self._send_mistral_ocr_api(
+                    messages=messages,
+                    base_url=base_url,
+                    response_name=response_name,
+                    model_override=effective_model,
+                )
             if endpoint_type == '/{model_id}':
                 if '/' not in effective_model and '/' in str(getattr(self, 'model', '') or ''):
                     effective_model = str(getattr(self, 'model', '') or '').strip()
@@ -23140,6 +23290,13 @@ class UnifiedClient:
                     max_tokens=max_tokens,
                     response_name=response_name,
                     base_url_override=base_url,
+                    model_override=effective_model,
+                )
+            if endpoint_type == '/v1/ocr':
+                return self._send_mistral_ocr_api(
+                    messages=messages,
+                    base_url=base_url,
+                    response_name=response_name,
                     model_override=effective_model,
                 )
             return self._send_openai_compatible(
