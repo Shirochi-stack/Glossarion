@@ -3080,7 +3080,7 @@ class MangaImagePreviewWidget(QWidget):
             }
         """)
         is_skipped = self._is_thumbnail_skipped(image_path)
-        skip_action = menu.addAction("Process This Image" if is_skipped else "Skip Processing")
+        skip_action = menu.addAction("▶️ Process This Image" if is_skipped else "⏭️ Skip Processing")
 
         def toggle_skip_processing():
             try:

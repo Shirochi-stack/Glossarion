@@ -9027,7 +9027,7 @@ class MangaTranslationTab(QObject):
 
             menu = QMenu(self.dialog if hasattr(self, 'dialog') else None)
             is_skipped = self._is_manually_skipped_processing_file(filepath)
-            action = menu.addAction("Process This Image" if is_skipped else "Skip Processing")
+            action = menu.addAction("▶️ Process This Image" if is_skipped else "⏭️ Skip Processing")
             action.triggered.connect(lambda checked=False, path=filepath: self._toggle_skip_processing_for_path(path))
             menu.exec(self.file_listbox.mapToGlobal(position))
         except Exception as e:

@@ -6316,14 +6316,14 @@ def _add_context_menu_to_rectangle(self, rect_item, region_index: int):
                     actual_index = rect_item.region_index
                     is_free_text_rect = _is_free_text_region_metadata(rect_item=rect_item)
                     if is_free_text_rect:
-                        type_action = QAction("Type: Free text", menu)
+                        type_action = QAction("🏷️ Type: Free text", menu)
                         type_action.setEnabled(False)
                         menu.addAction(type_action)
                     elif getattr(rect_item, 'bubble_type', None) or getattr(rect_item, 'region_type', None):
-                        type_action = QAction("Type: Bubble text", menu)
+                        type_action = QAction("🏷️ Type: Bubble text", menu)
                         type_action.setEnabled(False)
                         menu.addAction(type_action)
-                    mark_action = QAction("Mark as Bubble Text" if is_free_text_rect else "Mark as Free Text", menu)
+                    mark_action = QAction("🫧 Mark as Bubble Text" if is_free_text_rect else "🦅 Mark as Free Text", menu)
                     def make_mark_type_handler(idx, rect):
                         return lambda: _handle_toggle_free_text_region(self, idx, rect)
                     mark_action.triggered.connect(make_mark_type_handler(actual_index, rect_item))
