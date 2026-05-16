@@ -8,7 +8,7 @@ param(
     [string]$PublisherDisplayName = "Shirochi",
     [string]$DisplayName = "Glossarion",
     [string]$Description = "Glossarion translation toolkit",
-    [string]$PackageVersion = "8.6.5.0",
+    [string]$PackageVersion = "8.8.5.0",
     [ValidateSet("x64", "x86", "arm", "arm64", "neutral")]
     [string]$Architecture = "x64",
     [string]$MinVersion = "10.0.17763.0",
@@ -70,7 +70,7 @@ function Get-WindowsSdkTool([string]$ToolName) {
 function Convert-ToPackageVersion([string]$VersionValue) {
     $parts = $VersionValue.Split(".")
     if ($parts.Count -lt 3 -or $parts.Count -gt 4) {
-        throw "PackageVersion must be 3 or 4 numeric parts, for example 8.6.5.0."
+        throw "PackageVersion must be 3 or 4 numeric parts, for example 8.8.5.0."
     }
     while ($parts.Count -lt 4) {
         $parts += "0"
