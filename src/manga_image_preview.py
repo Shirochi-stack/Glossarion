@@ -2300,6 +2300,10 @@ class MangaImagePreviewWidget(QWidget):
                         'height': r.height(),
                         'shape': getattr(rect_item, 'shape_type', 'rect')
                     }
+                    for key in ('bubble_type', 'region_type', 'bubble_bounds'):
+                        value = getattr(rect_item, key, None)
+                        if value is not None:
+                            entry[key] = value
                     # Persist polygon points if lasso
                     try:
                         if entry['shape'] == 'polygon' and hasattr(rect_item, 'path'):

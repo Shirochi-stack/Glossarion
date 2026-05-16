@@ -6831,6 +6831,14 @@ class MangaTranslationTab(QObject):
     
     def _on_ft_only_bg_opacity_changed(self):
         """Handle free text only background opacity checkbox change (PySide6)"""
+        try:
+            self.free_text_only_bg_opacity_value = bool(self.ft_only_checkbox.isChecked())
+            if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config'):
+                self.main_gui.config['manga_free_text_only_bg_opacity'] = self.free_text_only_bg_opacity_value
+            if hasattr(self, 'translator') and self.translator:
+                self.translator.free_text_only_bg_opacity = self.free_text_only_bg_opacity_value
+        except Exception:
+            pass
 
     def _on_safe_area_scale_changed(self, value: float):
         """Handle safe area scale change (PySide6)"""
@@ -6840,8 +6848,6 @@ class MangaTranslationTab(QObject):
                 self.safe_area_scale_value_label.setText(f"{float(value):.2f}")
         except Exception:
             pass
-        # Update the value from checkbox state
-        self.free_text_only_bg_opacity_value = self.ft_only_checkbox.isChecked()
     
     def _update_color_preview(self, event=None):
         """Update the font color preview"""

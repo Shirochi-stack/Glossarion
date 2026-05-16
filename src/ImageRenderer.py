@@ -22,6 +22,115 @@ import logging
 from manga_translator import MangaTranslator, GOOGLE_CLOUD_VISION_AVAILABLE
 from manga_settings_dialog import MangaSettingsDialog
 
+_REGION_METADATA_KEYS = ('bubble_type', 'region_type', 'bubble_bounds')
+
+
+def _normalize_region_kind(value) -> str:
+    try:
+        return str(value or '').strip().lower().replace('-', '_').replace(' ', '_')
+    except Exception:
+        return ''
+
+
+def _is_free_text_region_metadata(region=None, rect_item=None) -> bool:
+    candidates = []
+    for source in (region, rect_item):
+        if not source:
+            continue
+        try:
+            if isinstance(source, dict):
+                candidates.extend([source.get('bubble_type'), source.get('region_type')])
+            else:
+                candidates.extend([getattr(source, 'bubble_type', None), getattr(source, 'region_type', None)])
+        except Exception:
+            continue
+    return any(_normalize_region_kind(value) in ('free_text', 'text_free', 'freetext') for value in candidates)
+
+
+def _preserve_free_text_inpaint_enabled(self) -> bool:
+    values = []
+    try:
+        if hasattr(self, 'free_text_only_bg_opacity_value'):
+            values.append(bool(self.free_text_only_bg_opacity_value))
+    except Exception:
+        pass
+    try:
+        translator = getattr(self, 'translator', None)
+        if translator is not None and hasattr(translator, 'free_text_only_bg_opacity'):
+            values.append(bool(translator.free_text_only_bg_opacity))
+    except Exception:
+        pass
+    try:
+        if getattr(self, 'main_gui', None):
+            values.append(bool(self.main_gui.config.get('manga_free_text_only_bg_opacity', False)))
+    except Exception:
+        pass
+    try:
+        if hasattr(self, 'ft_only_checkbox'):
+            values.append(bool(self.ft_only_checkbox.isChecked()))
+    except Exception:
+        pass
+    return any(values)
+
+
+def _copy_region_metadata_to_item(item, *sources):
+    for source in sources:
+        if not source:
+            continue
+        for key in _REGION_METADATA_KEYS:
+            try:
+                value = source.get(key) if isinstance(source, dict) else getattr(source, key, None)
+            except Exception:
+                value = None
+            if value is not None:
+                try:
+                    setattr(item, key, value)
+                except Exception:
+                    pass
+
+
+def _saved_rect_metadata(state: dict, index: int, rect_data: dict) -> dict:
+    metadata = {}
+    if isinstance(rect_data, dict):
+        for key in _REGION_METADATA_KEYS:
+            if rect_data.get(key) is not None:
+                metadata[key] = rect_data.get(key)
+    try:
+        detection_regions = state.get('detection_regions') or []
+        if 0 <= index < len(detection_regions) and isinstance(detection_regions[index], dict):
+            det = detection_regions[index]
+            for key in _REGION_METADATA_KEYS:
+                if metadata.get(key) is None and det.get(key) is not None:
+                    metadata[key] = det.get(key)
+    except Exception:
+        pass
+    return metadata
+
+
+def _apply_rectangle_clean_style(rect_item, *, is_recognized=False, excluded=False):
+    try:
+        from PySide6.QtGui import QPen, QBrush, QColor
+        if excluded:
+            pen = QPen(QColor(255, 140, 0), 3)
+            brush = QBrush(QColor(255, 140, 0, 30))
+        elif is_recognized:
+            pen = QPen(QColor(0, 150, 255), 2)
+            brush = QBrush(QColor(0, 150, 255, 50))
+        elif _is_free_text_region_metadata(rect_item=rect_item):
+            pen = QPen(QColor(0, 220, 180), 2)
+            brush = QBrush(QColor(0, 220, 180, 45))
+        else:
+            pen = QPen(QColor(0, 255, 0), 2)
+            brush = QBrush(QColor(0, 255, 0, 50))
+        try:
+            pen.setCosmetic(True)
+        except Exception:
+            pass
+        rect_item.setPen(pen)
+        rect_item.setBrush(brush)
+    except Exception:
+        pass
+
 # Optional: psutil/ctypes helpers to reduce GUI lag by lowering background thread priority
 try:
     import psutil  # type: ignore
@@ -1073,6 +1182,10 @@ def _persist_current_image_state(self):
                     'height': br.height(),
                     'shape': getattr(rect_item, 'shape_type', 'rect')
                 }
+                for key in _REGION_METADATA_KEYS:
+                    value = getattr(rect_item, key, None)
+                    if value is not None:
+                        entry[key] = value
                 # Persist polygon points if lasso/path
                 try:
                     if entry['shape'] == 'polygon' and hasattr(rect_item, 'path'):
@@ -1324,6 +1437,10 @@ def _restore_image_state(self, image_path: str):
                     item = MoveablePathItem(path, pen=pen, brush=brush)
                 else:
                     item = MoveableRectItem(rect, pen=pen, brush=brush)
+                metadata = _saved_rect_metadata(state, idx, rect_data)
+                _copy_region_metadata_to_item(item, metadata)
+                if not has_text_for_this_rect:
+                    _apply_rectangle_clean_style(item, is_recognized=False, excluded=False)
 
                 # Attach viewer and metadata
                 try:
@@ -1494,6 +1611,10 @@ def _restore_image_state(self, image_path: str):
                     item = MoveablePathItem(path, pen=pen, brush=brush)
                 else:
                     item = MoveableRectItem(rect, pen=pen, brush=brush)
+                metadata = _saved_rect_metadata(state, idx, rect_data)
+                _copy_region_metadata_to_item(item, metadata)
+                if not has_text:
+                    _apply_rectangle_clean_style(item, is_recognized=False, excluded=False)
                 
                 # Attach viewer reference so moved emits
                 try:
@@ -1678,6 +1799,10 @@ def _restore_image_state_overlays_only(self, image_path: str):
                     rect_item = MoveablePathItem(path, pen=pen, brush=brush)
                 else:
                     rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
+                metadata = _saved_rect_metadata(state, idx, rect_data)
+                _copy_region_metadata_to_item(rect_item, metadata)
+                if not has_text_for_this_rect:
+                    _apply_rectangle_clean_style(rect_item, is_recognized=False, excluded=False)
                 # Attach viewer for move signal
                 try:
                     rect_item._viewer = viewer
@@ -1842,6 +1967,10 @@ def _restore_image_state_overlays_only(self, image_path: str):
                     rect_item = MoveablePathItem(path, pen=pen, brush=brush)
                 else:
                     rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
+                metadata = _saved_rect_metadata(state, idx, rect_data)
+                _copy_region_metadata_to_item(rect_item, metadata)
+                if not has_text_for_this_rect:
+                    _apply_rectangle_clean_style(rect_item, is_recognized=False, excluded=False)
                 # Attach viewer reference so moved emits
                 try:
                     rect_item._viewer = viewer
@@ -2091,12 +2220,20 @@ def _draw_detection_boxes_on_preview(self):
                 rect = QRectF(x, y, width, height)
                 print(f"[DRAW_BOXES] Drawing shape {i}: x={x}, y={y}, w={width}, h={height}")
                 
+                is_free_text = _is_free_text_region_metadata(region)
+                if is_free_text:
+                    pen_color = QColor(0, 220, 180)
+                    brush_color = QColor(0, 220, 180, 45)
+                else:
+                    pen_color = QColor(0, 255, 0)
+                    brush_color = QColor(0, 255, 0, 50)
+
                 # Create pen and brush with detection colors
-                pen = QPen(QColor(0, 255, 0), 1)  # Green border (width 1 to avoid double-line artifact)
+                pen = QPen(pen_color, 2 if is_free_text else 1)  # Green/teal border
                 pen.setCosmetic(True)  # Pen width stays constant regardless of zoom
                 pen.setCapStyle(Qt.PenCapStyle.SquareCap)
                 pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
-                brush = QBrush(QColor(0, 255, 0, 50))  # Semi-transparent green fill
+                brush = QBrush(brush_color)
                 
                 # Create shape item (ellipse or rectangle)
                 item = MoveableEllipseItem(rect, pen=pen, brush=brush) if getattr(self, '_use_circle_shapes', False) else MoveableRectItem(rect, pen=pen, brush=brush)
@@ -2117,6 +2254,7 @@ def _draw_detection_boxes_on_preview(self):
                 # Track region index on the item and attach move-sync handler
                 try:
                     item.region_index = i
+                    _copy_region_metadata_to_item(item, region)
                     _attach_move_sync_to_rectangle(self, item, i)
                     # Add context menu to green detection rectangles
                     _add_context_menu_to_rectangle(self, item, i)
@@ -2222,6 +2360,19 @@ def _extract_regions_from_preview(self) -> list:
                     'rect_index': i,
                     'shape': shape
                 }
+                for key in _REGION_METADATA_KEYS:
+                    value = getattr(rect_item, key, None)
+                    if value is not None:
+                        region_dict[key] = value
+                try:
+                    if not region_dict.get('bubble_type') and hasattr(self, '_current_regions') and 0 <= i < len(self._current_regions):
+                        _current = self._current_regions[i]
+                        if isinstance(_current, dict):
+                            for key in _REGION_METADATA_KEYS:
+                                if region_dict.get(key) is None and _current.get(key) is not None:
+                                    region_dict[key] = _current.get(key)
+                except Exception:
+                    pass
                 # If polygon, capture points in scene coordinates
                 try:
                     if shape == 'polygon' and hasattr(rect_item, 'path'):
@@ -2275,6 +2426,7 @@ def _run_clean_background(self, image_path: str, regions: list):
         
         # Get exclusion list directly from rectangle objects (session-only)
         excluded_regions = []
+        rectangles = []
         try:
             if hasattr(self.image_preview_widget, 'viewer') and self.image_preview_widget.viewer.rectangles:
                 rectangles = self.image_preview_widget.viewer.rectangles
@@ -2299,17 +2451,31 @@ def _run_clean_background(self, image_path: str, regions: list):
         # Filter regions based on exclusion status
         filtered_regions = []
         excluded_count = 0
+        free_text_skipped_count = 0
+        preserve_free_text = _preserve_free_text_inpaint_enabled(self)
         
         print(f"[CLEAN_DEBUG] Processing {len(regions)} regions for exclusion filtering")
         for i, region in enumerate(regions):
             # Check if this region should be excluded (using rect_index if available)
             rect_index = region.get('rect_index', None)
+            rect_item = None
+            try:
+                lookup_index = rect_index if rect_index is not None else i
+                if rectangles and 0 <= int(lookup_index) < len(rectangles):
+                    rect_item = rectangles[int(lookup_index)]
+            except Exception:
+                rect_item = None
             print(f"[CLEAN_DEBUG] Region {i}: rect_index={rect_index}, excluded_regions={excluded_regions}")
             
             if rect_index is not None and rect_index in excluded_regions:
                 excluded_count += 1
                 print(f"[CLEAN_DEBUG] EXCLUDING region {i} (rect_index={rect_index})")
                 self._log(f"🚫 Skipping region {rect_index} (excluded from clean)", "info")
+                continue
+            if preserve_free_text and _is_free_text_region_metadata(region, rect_item):
+                free_text_skipped_count += 1
+                print(f"[CLEAN_DEBUG] SKIPPING free-text region {i} (rect_index={rect_index})")
+                self._log(f"Skipping free-text region {rect_index if rect_index is not None else i} (preserve free text enabled)", "info")
                 continue
             else:
                 print(f"[CLEAN_DEBUG] INCLUDING region {i} (rect_index={rect_index})")
@@ -2318,6 +2484,8 @@ def _run_clean_background(self, image_path: str, regions: list):
         
         self._log(f"🎨 Creating mask from {len(filtered_regions)} regions ({excluded_count} excluded)", "info")
         
+        if free_text_skipped_count:
+            print(f"[CLEAN_DEBUG] Preserved {free_text_skipped_count} free-text regions during clean mask creation")
         # ===== CANCELLATION CHECK: Before creating mask =====
         if _is_translation_cancelled(self):
             self._log(f"⏹ Cleaning cancelled before mask creation", "warning")
@@ -3024,6 +3192,8 @@ def _run_inpainting_sync(
         
         regions_to_inpaint = []
         excluded_count = 0
+        free_text_skipped_count = 0
+        preserve_free_text = _preserve_free_text_inpaint_enabled(self)
         
         print(f"[INPAINT_SYNC] Processing {len(regions)} regions for inpainting")
         for i, region in enumerate(regions):
@@ -3032,10 +3202,14 @@ def _run_inpainting_sync(
                 excluded_count += 1
                 print(f"[INPAINT_SYNC] Skipping region {i} (excluded from clean)")
                 continue
+            if preserve_free_text and _is_free_text_region_metadata(region):
+                free_text_skipped_count += 1
+                print(f"[INPAINT_SYNC] Skipping region {i} (free text preserved)")
+                continue
             
             regions_to_inpaint.append((i, region))
         
-        print(f"[INPAINT_SYNC] Creating mask from {len(regions_to_inpaint)} regions ({excluded_count} excluded)")
+        print(f"[INPAINT_SYNC] Creating mask from {len(regions_to_inpaint)} regions ({excluded_count} excluded, {free_text_skipped_count} free-text preserved)")
         for region_index, region in regions_to_inpaint:
             # Handle both dictionary format (from detect) and object format (from translator)
             if isinstance(region, dict):
@@ -6140,7 +6314,23 @@ def _add_context_menu_to_rectangle(self, rect_item, region_index: int):
                     # Get recognition data (fresh lookup for up-to-date text)
                     # Use rect_item.region_index to get the actual stored index for this specific rectangle
                     actual_index = rect_item.region_index
-                    
+                    is_free_text_rect = _is_free_text_region_metadata(rect_item=rect_item)
+                    if is_free_text_rect:
+                        type_action = QAction("Type: Free text", menu)
+                        type_action.setEnabled(False)
+                        menu.addAction(type_action)
+                    elif getattr(rect_item, 'bubble_type', None) or getattr(rect_item, 'region_type', None):
+                        type_action = QAction("Type: Bubble text", menu)
+                        type_action.setEnabled(False)
+                        menu.addAction(type_action)
+                    mark_action = QAction("Mark as Bubble Text" if is_free_text_rect else "Mark as Free Text", menu)
+                    def make_mark_type_handler(idx, rect):
+                        return lambda: _handle_toggle_free_text_region(self, idx, rect)
+                    mark_action.triggered.connect(make_mark_type_handler(actual_index, rect_item))
+                    menu.addAction(mark_action)
+                    if not menu.isEmpty():
+                        menu.addSeparator()
+
                     # ALWAYS add "OCR this text" option first - available for all rectangles
                     ocr_this_action = QAction("🔍 OCR This Text", menu)
                     def make_ocr_this_handler(idx, rect):
@@ -6430,6 +6620,7 @@ def _handle_toggle_exclude_clean(self, region_index: int, rect_item):
                 # Green for detection boxes
                 rect_item.setPen(QPen(QColor(0, 255, 0), 2))
                 rect_item.setBrush(QBrush(QColor(0, 255, 0, 50)))
+            _apply_rectangle_clean_style(rect_item, is_recognized=getattr(rect_item, 'is_recognized', False), excluded=False)
             self._log(f"✅ Rectangle {region_index} included in inpainting", "info")
         
         # EXCLUSION PERSISTENCE REMOVAL: Don't save exclusion state to persist across sessions
@@ -6443,6 +6634,60 @@ def _handle_toggle_exclude_clean(self, region_index: int, rect_item):
         import traceback
         print(f"[EXCLUDE_CLEAN] Traceback: {traceback.format_exc()}")
         self._log(f"❌ Failed to toggle exclude status: {str(e)}", "error")
+
+def _handle_toggle_free_text_region(self, region_index: int, rect_item):
+    """Toggle whether a preview rectangle should be treated as free text."""
+    try:
+        make_free_text = not _is_free_text_region_metadata(rect_item=rect_item)
+        bubble_type = 'free_text' if make_free_text else 'text_bubble'
+        region_type = 'free_text' if make_free_text else 'text_bubble'
+
+        rect_item.bubble_type = bubble_type
+        rect_item.region_type = region_type
+
+        try:
+            br = rect_item.sceneBoundingRect()
+            rect_item.bubble_bounds = [int(br.x()), int(br.y()), int(br.width()), int(br.height())]
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, '_current_regions') and 0 <= region_index < len(self._current_regions):
+                region = self._current_regions[region_index]
+                if isinstance(region, dict):
+                    region['bubble_type'] = bubble_type
+                    region['region_type'] = region_type
+                    if getattr(rect_item, 'bubble_bounds', None) is not None:
+                        region['bubble_bounds'] = rect_item.bubble_bounds
+        except Exception:
+            pass
+
+        try:
+            current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+            if current_image and hasattr(self, 'image_state_manager'):
+                state = self.image_state_manager.get_state(current_image) or {}
+                for key in ('detection_regions', 'viewer_rectangles'):
+                    entries = state.get(key) or []
+                    if 0 <= region_index < len(entries) and isinstance(entries[region_index], dict):
+                        entries[region_index]['bubble_type'] = bubble_type
+                        entries[region_index]['region_type'] = region_type
+                        if getattr(rect_item, 'bubble_bounds', None) is not None:
+                            entries[region_index]['bubble_bounds'] = rect_item.bubble_bounds
+                self.image_state_manager.set_state(current_image, state, save=True)
+        except Exception as state_err:
+            print(f"[FREE_TEXT_TOGGLE] Failed to persist region type: {state_err}")
+
+        _apply_rectangle_clean_style(
+            rect_item,
+            is_recognized=getattr(rect_item, 'is_recognized', False),
+            excluded=getattr(rect_item, 'exclude_from_clean', False)
+        )
+        label = "free text" if make_free_text else "bubble text"
+        self._log(f"Rectangle {region_index} marked as {label}", "info")
+        print(f"[FREE_TEXT_TOGGLE] Rectangle {region_index} marked as {label}")
+    except Exception as e:
+        print(f"[FREE_TEXT_TOGGLE] Error toggling free-text status: {e}")
+        self._log(f"Failed to update rectangle type: {str(e)}", "error")
 
 def _handle_set_inpainting_iterations(self, region_index: int, rect_item):
     """Handle setting custom inpainting iterations for a rectangle"""
@@ -7310,6 +7555,7 @@ def _restore_exclusion_status_from_state(self, image_path: str):
                     # Green for detection boxes
                     rect_item.setPen(QPen(QColor(0, 255, 0), 2))
                     rect_item.setBrush(QBrush(QColor(0, 255, 0, 50)))
+                _apply_rectangle_clean_style(rect_item, is_recognized=getattr(rect_item, 'is_recognized', False), excluded=False)
         
         print(f"[EXCLUDE_RESTORE] All rectangles initialized with no exclusions")
         

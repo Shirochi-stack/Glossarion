@@ -811,12 +811,14 @@ class GlossarionWeb:
         
         print("✅ All environment variables set from configuration")
     
-    def save_config(self, config):
+    def save_config(self, config=None, show_message=True):
         """Save configuration - to persistent file on HF Spaces or local file"""
         is_hf_spaces = os.getenv('SPACE_ID') is not None or os.getenv('HF_SPACES') == 'true'
         
         # Always try to save to file (works both locally and on HF Spaces with persistent storage)
         try:
+            if config is None:
+                config = getattr(self, 'config', {}) or {}
             config_to_save = config.copy()
             
             # Only encrypt if we have the encryption module AND keys aren't already encrypted
