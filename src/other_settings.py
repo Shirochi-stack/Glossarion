@@ -1416,30 +1416,42 @@ def open_other_settings(self, *args, show=True):
     scroll.setWidgetResizable(True)
     main_layout.addWidget(scroll, 1)
     pump_other_settings_open()
-    self._create_response_handling_section(container)
-    pump_other_settings_open()
-    self._create_prompt_management_section(container)
-    pump_other_settings_open()
-    self._create_processing_options_section(container)
-    pump_other_settings_open()
-    self._create_image_translation_section(container)
-    pump_other_settings_open()
-    self._create_anti_duplicate_section(container)
-    pump_other_settings_open()
-    self._create_custom_api_endpoints_section(container)
-    pump_other_settings_open()
-    
-    # Add debug controls section at the bottom
-    self._create_debug_controls_section(container)
-    pump_other_settings_open()
-    
-    # Add Output Settings section (PDF generation + Image Compression)
-    self._create_output_settings_section(container)
-    pump_other_settings_open()
-    
-    # Add Danger Zone section
-    self._create_danger_zone_section(container)
-    pump_other_settings_open()
+    remaining_section_builders = [
+        ("response_handling", lambda: self._create_response_handling_section(container)),
+        ("prompt_management", lambda: self._create_prompt_management_section(container)),
+        ("processing_options", lambda: self._create_processing_options_section(container)),
+        ("image_translation", lambda: self._create_image_translation_section(container)),
+        ("anti_duplicate", lambda: self._create_anti_duplicate_section(container)),
+        ("custom_api_endpoints", lambda: self._create_custom_api_endpoints_section(container)),
+        ("debug_controls", lambda: self._create_debug_controls_section(container)),
+        ("output_settings", lambda: self._create_output_settings_section(container)),
+        ("danger_zone", lambda: self._create_danger_zone_section(container)),
+    ]
+
+    def _build_remaining_other_settings_sections(index=0):
+        if index >= len(remaining_section_builders):
+            try:
+                self._other_settings_sections_pending = 0
+            except Exception:
+                pass
+            QTimer.singleShot(0, lambda: _fit_other_settings_dialog(dialog))
+            QTimer.singleShot(120, lambda: _fit_other_settings_dialog(dialog))
+            return
+        key, builder = remaining_section_builders[index]
+        try:
+            builder()
+        except Exception as e:
+            try:
+                print(f"⚠️ Other Settings section build failed ({key}): {e}")
+            except Exception:
+                pass
+        pump_other_settings_open()
+        QTimer.singleShot(0, lambda: _build_remaining_other_settings_sections(index + 1))
+
+    try:
+        self._other_settings_sections_pending = len(remaining_section_builders)
+    except Exception:
+        pass
 
     # Buttons row (Save and Close) - always visible at bottom
     btns = QHBoxLayout()
@@ -1525,6 +1537,15 @@ def open_other_settings(self, *args, show=True):
         pass
 
     if not show:
+        for _idx in range(len(remaining_section_builders)):
+            try:
+                remaining_section_builders[_idx][1]()
+            except Exception:
+                pass
+        try:
+            self._other_settings_sections_pending = 0
+        except Exception:
+            pass
         _prewarm_dialog_offscreen(dialog)
         return
     dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
@@ -1537,6 +1558,7 @@ def open_other_settings(self, *args, show=True):
             pass
         QTimer.singleShot(0, lambda: _fit_other_settings_dialog(dialog))
         QTimer.singleShot(120, lambda: _fit_other_settings_dialog(dialog))
+        QTimer.singleShot(0, _build_remaining_other_settings_sections)
         return
     
     # Show with smooth fade animation (no flash of generic window)
@@ -1550,6 +1572,7 @@ def open_other_settings(self, *args, show=True):
     # reliable size hints, so run this only on visible opens/reopens.
     QTimer.singleShot(0, lambda: _fit_other_settings_dialog(dialog))
     QTimer.singleShot(120, lambda: _fit_other_settings_dialog(dialog))
+    QTimer.singleShot(0, _build_remaining_other_settings_sections)
 
 def _create_output_settings_section(self, parent):
     """Create output settings section (PDF generation + Image Compression)"""
