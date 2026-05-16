@@ -1208,6 +1208,34 @@ def open_other_settings(self, *args, show=True):
         dialog.resize(width, height)
     except Exception:
         dialog.resize(950, 850)  # Fallback
+    first_paint_done = False
+
+    def pump_other_settings_open():
+        """Let the visible Other Settings dialog paint while sections build."""
+        nonlocal first_paint_done
+        if not show:
+            return
+        try:
+            dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+            if not first_paint_done:
+                try:
+                    screen = QApplication.primaryScreen().availableGeometry()
+                    dialog.move(
+                        screen.x() + (screen.width() - dialog.width()) // 2,
+                        screen.y() + (screen.height() - dialog.height()) // 2,
+                    )
+                except Exception:
+                    pass
+                dialog.setWindowOpacity(1.0)
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+                first_paint_done = True
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents(QEventLoop.ExcludeUserInputEvents)
+        except Exception:
+            pass
     
     # Store original size for restoring after fullscreen
     original_geometry = None
@@ -1384,26 +1412,37 @@ def open_other_settings(self, *args, show=True):
 
     # Build sections (converted sections will populate the Qt layout)
     self._create_context_management_section(container)
+    pump_other_settings_open()
     self._create_response_handling_section(container)
+    pump_other_settings_open()
     self._create_prompt_management_section(container)
+    pump_other_settings_open()
     self._create_processing_options_section(container)
+    pump_other_settings_open()
     self._create_image_translation_section(container)
+    pump_other_settings_open()
     self._create_anti_duplicate_section(container)
+    pump_other_settings_open()
     self._create_custom_api_endpoints_section(container)
+    pump_other_settings_open()
     
     # Add debug controls section at the bottom
     self._create_debug_controls_section(container)
+    pump_other_settings_open()
     
     # Add Output Settings section (PDF generation + Image Compression)
     self._create_output_settings_section(container)
+    pump_other_settings_open()
     
     # Add Danger Zone section
     self._create_danger_zone_section(container)
+    pump_other_settings_open()
     
     scroll.setWidget(container)
     scroll.setWidgetResizable(True)
     
     main_layout.addWidget(scroll, 1)
+    pump_other_settings_open()
 
     # Buttons row (Save and Close) - always visible at bottom
     btns = QHBoxLayout()
@@ -1492,6 +1531,16 @@ def open_other_settings(self, *args, show=True):
         _prewarm_dialog_offscreen(dialog)
         return
     dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+
+    if dialog.isVisible():
+        try:
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception:
+            pass
+        QTimer.singleShot(0, lambda: _fit_other_settings_dialog(dialog))
+        QTimer.singleShot(120, lambda: _fit_other_settings_dialog(dialog))
+        return
     
     # Show with smooth fade animation (no flash of generic window)
     try:
