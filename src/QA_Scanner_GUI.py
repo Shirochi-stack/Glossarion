@@ -2551,6 +2551,12 @@ class QAScannerMixin:
             try:
                 dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
                 if not first_paint_done:
+                    try:
+                        layout = dialog.layout()
+                        if layout is not None:
+                            layout.activate()
+                    except Exception:
+                        pass
                     dialog.setWindowOpacity(1.0)
                     dialog.show()
                     dialog.raise_()
@@ -2617,7 +2623,6 @@ class QAScannerMixin:
         title_label.setAlignment(Qt.AlignCenter)
         scroll_layout.addWidget(title_label)
         scroll_layout.addSpacing(20)
-        pump_settings_open()
         
         # Foreign Character Settings Section
         foreign_group = QGroupBox("Foreign Character Detection")
