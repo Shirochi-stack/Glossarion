@@ -519,6 +519,7 @@ class GlossarionWeb:
             'manga_settings': {
                 'ocr': {
                     'detector_type': 'rtdetr_onnx',
+                    'rtdetr_onnx_variant': 'detector.onnx',
                     'rtdetr_confidence': 0.3,
                     'bubble_confidence': 0.3,
                     'detect_text_bubbles': True,
@@ -755,6 +756,7 @@ class GlossarionWeb:
             # OCR settings
             ocr = manga_settings.get('ocr', {})
             os.environ['DETECTOR_TYPE'] = ocr.get('detector_type', 'rtdetr_onnx')
+            os.environ['RTDETR_ONNX_FILENAME'] = ocr.get('rtdetr_onnx_variant', 'detector.onnx')
             os.environ['RTDETR_CONFIDENCE'] = str(ocr.get('rtdetr_confidence', 0.3))
             os.environ['BUBBLE_CONFIDENCE'] = str(ocr.get('bubble_confidence', 0.3))
             os.environ['DETECT_TEXT_BUBBLES'] = '1' if ocr.get('detect_text_bubbles', True) else '0'

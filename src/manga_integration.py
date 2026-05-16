@@ -1527,6 +1527,7 @@ class MangaTranslationTab(QObject):
             if bubble_detection_enabled:
                 detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
                 model_url = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
+                onnx_filename = ocr_settings.get('rtdetr_onnx_variant', 'detector.onnx')
                 # Sanitize model_url to avoid unrelated JSON paths
                 try:
                     if model_url and model_url.lower().endswith('.json'):
@@ -1540,8 +1541,8 @@ class MangaTranslationTab(QObject):
                 if detector_type in ('rtdetr', 'rtdetr_onnx') and not model_url:
                     pass
                 else:
-                    key = (detector_type, model_url)
-                    model_id = f"detector_{detector_type}_{model_url}"
+                    key = (detector_type, model_url, onnx_filename) if detector_type == 'rtdetr_onnx' else (detector_type, model_url)
+                    model_id = f"detector_{detector_type}_{model_url}_{onnx_filename}" if detector_type == 'rtdetr_onnx' else f"detector_{detector_type}_{model_url}"
                 
                 # Skip if already loaded in this session
                 if detector_type in ('rtdetr', 'rtdetr_onnx') and not model_url:
@@ -1552,7 +1553,7 @@ class MangaTranslationTab(QObject):
                             rec = MangaTranslator._detector_pool.get(key)
                             if not rec or not rec.get('spares'):
                                 detector_name = 'RT-DETR ONNX' if detector_type == 'rtdetr_onnx' else 'RT-DETR' if detector_type == 'rtdetr' else 'YOLO'
-                                models_to_load.append(('detector', detector_type, detector_name, model_url))
+                                models_to_load.append(('detector', detector_type, detector_name, model_url, onnx_filename))
             
             if inpainting_enabled:
                 # Check top-level config first (manga_local_inpaint_model), then nested config
@@ -1570,7 +1571,7 @@ class MangaTranslationTab(QObject):
                     with MangaTranslator._inpaint_pool_lock:
                         rec = MangaTranslator._inpaint_pool.get(key)
                         if not rec or not rec.get('spares'):
-                            models_to_load.append(('inpainter', local_method, local_method.capitalize(), model_path))
+                            models_to_load.append(('inpainter', local_method, local_method.capitalize(), model_path, None))
         except Exception as e:
             print(f"Error checking models: {e}")
             return
@@ -1584,9 +1585,10 @@ class MangaTranslationTab(QObject):
         
         # Store models being loaded for tracking
         models_being_loaded = []
-        for model_type, model_key, model_name, model_path in models_to_load:
+        for model_type, model_key, model_name, model_path, onnx_filename in models_to_load:
             if model_type == 'detector':
-                models_being_loaded.append(f"detector_{model_key}_{model_path}")
+                suffix = f"_{onnx_filename}" if model_key == 'rtdetr_onnx' and onnx_filename else ""
+                models_being_loaded.append(f"detector_{model_key}_{model_path}{suffix}")
             elif model_type == 'inpainter':
                 models_being_loaded.append(f"inpainter_{model_key}_{model_path}")
         
@@ -1602,7 +1604,7 @@ class MangaTranslationTab(QObject):
                 
                 loaded_count = 0
                 
-                for model_type, model_key, model_name, model_path in models_to_load:
+                for model_type, model_key, model_name, model_path, onnx_filename in models_to_load:
                     try:
                         
                         # Guard: ignore JSON paths (credentials) for inpainter models
@@ -1613,7 +1615,7 @@ class MangaTranslationTab(QObject):
                             pass
                         
                         if model_type == 'detector':
-                            key = (model_key, model_path or '')
+                            key = (model_key, model_path or '', onnx_filename or 'detector.onnx') if model_key == 'rtdetr_onnx' else (model_key, model_path or '')
                             
                             # Check if already in pool
                             with MangaTranslator._detector_pool_lock:
@@ -1628,7 +1630,7 @@ class MangaTranslationTab(QObject):
                             bd = BubbleDetector()
                             if model_key == 'rtdetr_onnx':
                                 model_repo = model_path if model_path else 'ogkalu/comic-text-and-bubble-detector'
-                                bd.load_rtdetr_onnx_model(model_repo)
+                                bd.load_rtdetr_onnx_model(model_repo, onnx_filename=onnx_filename or 'detector.onnx')
                             elif model_key == 'rtdetr':
                                 bd.load_rtdetr_model()
                             elif model_key == 'yolo':
@@ -14153,6 +14155,7 @@ class MangaTranslationTab(QObject):
                 default_ocr = {
                     'bubble_detection_enabled': True,
                     'detector_type': 'rtdetr_onnx',
+                    'rtdetr_onnx_variant': 'detector.onnx',
                     'rtdetr_confidence': 0.3,
                     'detect_empty_bubbles': True,
                     'detect_text_bubbles': True,
@@ -14916,6 +14919,9 @@ class MangaTranslationTab(QObject):
                         # User has bubble detection OFF -> set non-intrusive defaults only
                         if 'detector_type' not in ocr_set:
                             ocr_set['detector_type'] = 'rtdetr_onnx'
+                            changed = True
+                        if 'rtdetr_onnx_variant' not in ocr_set:
+                            ocr_set['rtdetr_onnx_variant'] = 'detector.onnx'
                             changed = True
                         if not ocr_set.get('rtdetr_model_url') and not ocr_set.get('bubble_model_path'):
                             # Default HF repo (detector.onnx lives here)

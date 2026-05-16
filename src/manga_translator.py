@@ -2499,6 +2499,21 @@ class MangaTranslator:
         except Exception:
             return 1
 
+    def _get_rtdetr_onnx_filename(self, ocr_settings: Dict[str, Any]) -> str:
+        """Return the configured RT-DETR ONNX export filename."""
+        try:
+            from bubble_detector import BubbleDetector
+            return BubbleDetector.normalize_rtdetr_onnx_filename(
+                (ocr_settings or {}).get('rtdetr_onnx_variant', 'detector.onnx')
+            )
+        except Exception:
+            return 'detector.onnx'
+
+    def _detector_pool_key(self, det_type: str, model_id: str, ocr_settings: Dict[str, Any]):
+        if det_type == 'rtdetr_onnx':
+            return (det_type, model_id, self._get_rtdetr_onnx_filename(ocr_settings))
+        return (det_type, model_id)
+
     def _ensure_bubble_detector_ready(self, ocr_settings):
         """Ensure a usable BubbleDetector for current thread, auto-reloading models after cleanup."""
         try:
@@ -2512,10 +2527,15 @@ class MangaTranslator:
             except Exception:
                 model_id = None
             if detector_type == 'rtdetr_onnx':
-                if not getattr(bd, 'rtdetr_onnx_loaded', False):
+                onnx_filename = self._get_rtdetr_onnx_filename(ocr_settings)
+                already_loaded = (
+                    getattr(bd, 'rtdetr_onnx_loaded', False)
+                    and getattr(bd, 'rtdetr_onnx_filename', None) == onnx_filename
+                )
+                if not already_loaded:
                     if not model_id:
                         return None
-                    if not bd.load_rtdetr_onnx_model(model_id=model_id):
+                    if not bd.load_rtdetr_onnx_model(model_id=model_id, onnx_filename=onnx_filename):
                         return None
             elif detector_type == 'rtdetr':
                 if not getattr(bd, 'rtdetr_loaded', False):
@@ -2581,16 +2601,22 @@ class MangaTranslator:
             
             if detector_type == 'rtdetr_onnx':
                 self._log("🤖 Using RTEDR_onnx for bubble detection", "info")
-                if not getattr(bd, 'rtdetr_onnx_loaded', False):
+                onnx_filename = self._get_rtdetr_onnx_filename(ocr_settings)
+                already_loaded = (
+                    getattr(bd, 'rtdetr_onnx_loaded', False)
+                    and getattr(bd, 'rtdetr_onnx_filename', None) == onnx_filename
+                )
+                if not already_loaded:
                     self._log("📥 Loading RTEDR_onnx model...", "info")
-                    if not bd.load_rtdetr_onnx_model():
+                    model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or 'ogkalu/comic-text-and-bubble-detector'
+                    if not bd.load_rtdetr_onnx_model(model_id=model_id, onnx_filename=onnx_filename):
                         self._log("⚠️ Failed to load RTEDR_onnx, falling back to traditional merging", "warning")
                         return self._merge_nearby_regions(regions)
                     else:
                         # Model loaded successfully - mark in pool for reuse
                         try:
                             model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
-                            key = ('rtdetr_onnx', model_id)
+                            key = self._detector_pool_key('rtdetr_onnx', model_id, ocr_settings)
                             with MangaTranslator._detector_pool_lock:
                                 if key not in MangaTranslator._detector_pool:
                                     MangaTranslator._detector_pool[key] = {'spares': []}
@@ -3229,13 +3255,17 @@ class MangaTranslator:
                 # This avoids redundant load checks inside the detector itself
                 if detector_type == 'rtdetr_onnx' or 'RTEDR_onnx' in str(detector_type):
                     # Check if RT-DETR ONNX is already loaded (from pool or previous load)
-                    already_loaded = getattr(bd, 'rtdetr_onnx_loaded', False)
+                    onnx_filename = self._get_rtdetr_onnx_filename(ocr_settings)
+                    already_loaded = (
+                        getattr(bd, 'rtdetr_onnx_loaded', False)
+                        and getattr(bd, 'rtdetr_onnx_filename', None) == onnx_filename
+                    )
                     if not already_loaded:
                         # Load RT-DETR ONNX model
                         self._log(f"📥 Loading RT-DETR ONNX model (attempt {attempt}/{max_attempts})", "info")
                         if not model_id:
                             raise RuntimeError("Invalid RT-DETR model id (empty or JSON)")
-                        if not bd.load_rtdetr_onnx_model(model_id=model_id):
+                        if not bd.load_rtdetr_onnx_model(model_id=model_id, onnx_filename=onnx_filename):
                             raise RuntimeError("load_rtdetr_onnx_model returned False")
                     # Model is loaded (either from pool or just loaded), run detection
                     return bd.detect_with_rtdetr_onnx(
@@ -10534,7 +10564,7 @@ class MangaTranslator:
                     model_id = ''
         except Exception:
             pass
-        key = (det_type, model_id)
+        key = self._detector_pool_key(det_type, model_id, ocr_settings or {})
         created = 0
         
         # CRITICAL: Clean up pool entries that don't match current GUI settings
@@ -10616,7 +10646,10 @@ class MangaTranslator:
                             else:
                                 raise
                 elif det_type == 'rtdetr_onnx':
-                    ok = bool(bd.load_rtdetr_onnx_model(model_id=model_id))
+                    ok = bool(bd.load_rtdetr_onnx_model(
+                        model_id=model_id,
+                        onnx_filename=self._get_rtdetr_onnx_filename(ocr_settings or {})
+                    ))
                 elif det_type == 'yolo':
                     if model_id:
                         ok = bool(bd.load_model(model_id))
@@ -14132,7 +14165,7 @@ class MangaTranslator:
                         model_id = ''
             except Exception:
                 pass
-            key = (det_type, model_id)
+            key = self._detector_pool_key(det_type, model_id, ocr_settings)
             
             # Polling parameters
             max_wait_time = 60  # Maximum 60 seconds

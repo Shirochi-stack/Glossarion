@@ -88,6 +88,7 @@ class MangaSettingsDialog(QDialog):
                 'bubble_model_path': '',
                 'bubble_confidence': 0.3,
                 'detector_type': 'rtdetr_onnx',
+                'rtdetr_onnx_variant': 'detector.onnx',
                 'rtdetr_confidence': 0.3,
                 'detect_empty_bubbles': True,
                 'detect_text_bubbles': True,
@@ -3176,6 +3177,37 @@ class MangaSettingsDialog(QDialog):
         detector_type_layout.addWidget(self.detector_type_combo)
         detector_type_layout.addStretch()
 
+        # RT-DETR ONNX export selector
+        onnx_variant_widget = QWidget()
+        onnx_variant_layout = QHBoxLayout(onnx_variant_widget)
+        onnx_variant_layout.setContentsMargins(0, 5, 0, 0)
+        bubble_layout.addWidget(onnx_variant_widget)
+        self.rtdetr_onnx_variant_frame = onnx_variant_widget
+
+        onnx_variant_label = QLabel("ONNX Export:")
+        onnx_variant_label.setMinimumWidth(120)
+        onnx_variant_layout.addWidget(onnx_variant_label)
+
+        self.rtdetr_onnx_variants = {
+            'Full (detector.onnx, 168 MB)': 'detector.onnx',
+            'INT8 (detector_int8.onnx, 43.8 MB)': 'detector_int8.onnx',
+            'V4 Small INT8 (detector-v4-s_int8.onnx, 11.1 MB)': 'detector-v4-s_int8.onnx',
+        }
+        saved_onnx_variant = self.settings['ocr'].get('rtdetr_onnx_variant', 'detector.onnx')
+        self.rtdetr_onnx_variant_combo = QComboBox()
+        self.rtdetr_onnx_variant_combo.addItems(list(self.rtdetr_onnx_variants.keys()))
+        for label, filename in self.rtdetr_onnx_variants.items():
+            if filename == saved_onnx_variant:
+                self.rtdetr_onnx_variant_combo.setCurrentText(label)
+                break
+        self.rtdetr_onnx_variant_combo.setToolTip(
+            "Choose which ONNX export to download and run for RT-DETR.\n"
+            "Full is the current default and most conservative.\n"
+            "INT8 and V4 Small INT8 are smaller/faster opt-in exports from the same Hugging Face repo."
+        )
+        onnx_variant_layout.addWidget(self.rtdetr_onnx_variant_combo)
+        onnx_variant_layout.addStretch()
+
         # NOW create the settings frame
         self.yolo_settings_group = QGroupBox("Model Settings")
         yolo_settings_layout = QVBoxLayout(self.yolo_settings_group)
@@ -3481,7 +3513,10 @@ class MangaSettingsDialog(QDialog):
             self.rtdetr_download_btn.setVisible(True)
         
         # Show/hide RT-DETR specific controls
-        is_rtdetr = 'RT-DETR' in detector or 'RTEDR_onnx' in detector
+        is_onnx_rtdetr = 'RTEDR_onnx' in detector or 'ONNX' in detector.upper()
+        is_rtdetr = 'RT-DETR' in detector or is_onnx_rtdetr
+        if hasattr(self, 'rtdetr_onnx_variant_frame'):
+            self.rtdetr_onnx_variant_frame.setVisible(is_onnx_rtdetr)
         
         if is_rtdetr:
             self.rtdetr_classes_frame.setVisible(True)
@@ -3511,6 +3546,10 @@ class MangaSettingsDialog(QDialog):
         try:
             detector = self.detector_type_combo.currentText()
             model_url = self.bubble_model_entry.text()
+            onnx_filename = self.rtdetr_onnx_variants.get(
+                self.rtdetr_onnx_variant_combo.currentText(),
+                'detector.onnx'
+            ) if hasattr(self, 'rtdetr_onnx_variant_combo') else 'detector.onnx'
             
             self.rtdetr_status_label.setText("Downloading...")
             self.rtdetr_status_label.setStyleSheet("color: orange;")
@@ -3519,7 +3558,7 @@ class MangaSettingsDialog(QDialog):
             if 'RTEDR_onnx' in detector:
                 from bubble_detector import BubbleDetector
                 bd = BubbleDetector()
-                if bd.load_rtdetr_onnx_model(model_id=model_url):
+                if bd.load_rtdetr_onnx_model(model_id=model_url, onnx_filename=onnx_filename):
                     self.rtdetr_status_label.setText("✅ Downloaded")
                     self.rtdetr_status_label.setStyleSheet("color: green;")
                     self._show_styled_messagebox(QMessageBox.Information, "Success", "RTEDR_onnx model downloaded successfully!")
@@ -3629,12 +3668,18 @@ class MangaSettingsDialog(QDialog):
             
             detector = self.detector_type_combo.currentText()
             model_path = self.bubble_model_entry.text()
+            onnx_filename = self.rtdetr_onnx_variants.get(
+                self.rtdetr_onnx_variant_combo.currentText(),
+                'detector.onnx'
+            ) if hasattr(self, 'rtdetr_onnx_variant_combo') else 'detector.onnx'
             
             # Map display names to internal detector types
             detector_type_map = {
                 'RTEDR_onnx': 'rtdetr_onnx',
                 'RT-DETR': 'rtdetr',
                 'YOLOv8 Speech': 'yolo',
+                'YOLOv8 Text': 'yolo',
+                'YOLOv8 Manga': 'yolo',
                 'Custom Model': 'custom'
             }
             detector_type = detector_type_map.get(detector, 'rtdetr_onnx')
@@ -3677,6 +3722,7 @@ class MangaSettingsDialog(QDialog):
                 'detector_type': detector_type,
                 'bubble_model_path': model_path,
                 'rtdetr_model_url': model_path,
+                'rtdetr_onnx_variant': onnx_filename,
             }
             
             # Track result in a dict that can be accessed from timer
@@ -4977,8 +5023,13 @@ class MangaSettingsDialog(QDialog):
             self.settings['ocr']['skip_rtdetr_merging'] = self.skip_rtdetr_merging_checkbox.isChecked()
             self.settings['ocr']['preserve_empty_blocks'] = self.preserve_empty_blocks_checkbox.isChecked()
             model_text = self.bubble_model_entry.text().strip()
+            onnx_filename = self.rtdetr_onnx_variants.get(
+                self.rtdetr_onnx_variant_combo.currentText(),
+                'detector.onnx'
+            ) if hasattr(self, 'rtdetr_onnx_variant_combo') else 'detector.onnx'
             self.settings['ocr']['bubble_confidence'] = self.bubble_conf_slider.value() / 100.0
             self.settings['ocr']['rtdetr_confidence'] = self.bubble_conf_slider.value() / 100.0
+            self.settings['ocr']['rtdetr_onnx_variant'] = onnx_filename
             self.settings['ocr']['detect_empty_bubbles'] = self.detect_empty_bubbles_checkbox.isChecked()
             self.settings['ocr']['detect_text_bubbles'] = self.detect_text_bubbles_checkbox.isChecked()
             self.settings['ocr']['detect_free_text'] = self.detect_free_text_checkbox.isChecked()

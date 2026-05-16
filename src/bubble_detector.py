@@ -200,6 +200,8 @@ class BubbleDetector:
     _rtdetr_onnx_loaded = False
     _rtdetr_onnx_providers = None
     _rtdetr_onnx_model_path = None
+    _rtdetr_onnx_model_key = None
+    _rtdetr_onnx_filename = None
     # C++ backend shared instance
     _rtdetr_onnx_cpp_backend = None
     _rtdetr_onnx_use_cpp = False
@@ -213,6 +215,27 @@ class BubbleDetector:
         _rtdetr_onnx_max_concurrent = 1
     _rtdetr_onnx_sema = threading.Semaphore(max(1, _rtdetr_onnx_max_concurrent))
     _rtdetr_onnx_sema_initialized = False
+
+    RTDETR_ONNX_FILENAMES = {
+        'detector.onnx',
+        'detector_int8.onnx',
+        'detector-v4-s_int8.onnx',
+    }
+
+    @classmethod
+    def normalize_rtdetr_onnx_filename(cls, filename: str = None) -> str:
+        """Return a safe ONNX filename from the supported comic detector exports."""
+        candidate = str(filename or '').strip()
+        if not candidate:
+            candidate = os.environ.get('RTDETR_ONNX_FILENAME', '').strip()
+        if not candidate:
+            candidate = 'detector.onnx'
+
+        candidate = os.path.basename(candidate)
+        if candidate not in cls.RTDETR_ONNX_FILENAMES:
+            logger.warning(f"Unsupported RT-DETR ONNX file '{candidate}', falling back to detector.onnx")
+            return 'detector.onnx'
+        return candidate
     
     def __init__(self, config_path: str = "config.json"):
         """Initialize the bubble detector with CUDA DSA support."""
@@ -256,6 +279,7 @@ class BubbleDetector:
         self.rtdetr_onnx_session = None
         self.rtdetr_onnx_loaded = False
         self.rtdetr_onnx_repo = 'ogkalu/comic-text-and-bubble-detector'
+        self.rtdetr_onnx_filename = None
         
         # RT-DETR class definitions
         self.CLASS_BUBBLE = 0      # Empty speech bubble
@@ -1601,6 +1625,11 @@ class BubbleDetector:
                         BubbleDetector._rtdetr_onnx_cpp_backend.unload()
                         BubbleDetector._rtdetr_onnx_cpp_backend = None
                         BubbleDetector._rtdetr_onnx_use_cpp = False
+                    BubbleDetector._rtdetr_onnx_loaded = False
+                    BubbleDetector._rtdetr_onnx_shared_session = None
+                    BubbleDetector._rtdetr_onnx_model_path = None
+                    BubbleDetector._rtdetr_onnx_model_key = None
+                    BubbleDetector._rtdetr_onnx_filename = None
                 except Exception:
                     pass
             for attr in ['model', 'rtdetr_model', 'rtdetr_processor']:
@@ -1615,6 +1644,7 @@ class BubbleDetector:
                         setattr(self, flag, False)
                 except Exception:
                     pass
+            self.rtdetr_onnx_filename = None
 
             # Optional: release shared caches
             if release_shared:
@@ -1754,19 +1784,29 @@ class BubbleDetector:
     # ============================
     # RT-DETR (ONNX) BACKEND
     # ============================
-    def load_rtdetr_onnx_model(self, model_id: str = None, force_reload: bool = False) -> bool:
+    def load_rtdetr_onnx_model(self, model_id: str = None, force_reload: bool = False, onnx_filename: str = None) -> bool:
         """
-        Load RT-DETR ONNX model using onnxruntime. Downloads detector.onnx and config.json
+        Load RT-DETR ONNX model using onnxruntime. Downloads the selected ONNX file and config.json
         from the provided Hugging Face repo if not already cached.
         """
         if not ONNX_AVAILABLE:
             logger.error("ONNX Runtime not available for RT-DETR ONNX backend")
             return False
+
+        repo = model_id or self.rtdetr_onnx_repo
+        selected_onnx = self.normalize_rtdetr_onnx_filename(onnx_filename)
+        requested_key = (repo, selected_onnx)
         
         # CRITICAL: If C++ backend is already loaded globally, use it and skip everything else
-        if BubbleDetector._rtdetr_onnx_use_cpp and BubbleDetector._rtdetr_onnx_loaded and not force_reload:
+        if (
+            BubbleDetector._rtdetr_onnx_use_cpp
+            and BubbleDetector._rtdetr_onnx_loaded
+            and BubbleDetector._rtdetr_onnx_model_key == requested_key
+            and not force_reload
+        ):
             logger.info("✅ RT-DETR using existing C++ backend (Python ONNX skipped, memory saved)")
             self.rtdetr_onnx_loaded = True
+            self.rtdetr_onnx_filename = selected_onnx
             self.rtdetr_onnx_session = None  # No Python session needed
             return True
         
@@ -1778,7 +1818,6 @@ class BubbleDetector:
         
         try:
 
-            repo = model_id or self.rtdetr_onnx_repo
             if hf_hub_download is None:
                 logger.error("huggingface_hub required to fetch RT-DETR ONNX. Install with: pip install -U huggingface_hub")
                 return False
@@ -1792,7 +1831,8 @@ class BubbleDetector:
                 _ = hf_hub_download(repo_id=repo, filename='config.json', cache_dir=cache_dir, local_dir=cache_dir, local_dir_use_symlinks=False)
             except Exception:
                 pass
-            onnx_fp = hf_hub_download(repo_id=repo, filename='detector.onnx', cache_dir=cache_dir, local_dir=cache_dir, local_dir_use_symlinks=False)
+            logger.info(f"Resolving RT-DETR ONNX export '{selected_onnx}' from {repo}...")
+            onnx_fp = hf_hub_download(repo_id=repo, filename=selected_onnx, cache_dir=cache_dir, local_dir=cache_dir, local_dir_use_symlinks=False)
             BubbleDetector._rtdetr_onnx_model_path = onnx_fp
 
             # Pick providers: prefer CUDA if available; otherwise CPU. Do NOT use DML.
@@ -1822,11 +1862,30 @@ class BubbleDetector:
 
             with BubbleDetector._rtdetr_onnx_init_lock:
                 # Check if C++ backend already loaded
-                if BubbleDetector._rtdetr_onnx_use_cpp and BubbleDetector._rtdetr_onnx_cpp_backend is not None and not force_reload:
+                if (
+                    BubbleDetector._rtdetr_onnx_use_cpp
+                    and BubbleDetector._rtdetr_onnx_cpp_backend is not None
+                    and BubbleDetector._rtdetr_onnx_model_key == requested_key
+                    and not force_reload
+                ):
                     self.rtdetr_onnx_loaded = True
+                    self.rtdetr_onnx_filename = selected_onnx
                     logger.info("✅ RT-DETR C++ backend attached from shared (Python ONNX never loaded)")
                     return True
                 
+                if (
+                    BubbleDetector._rtdetr_onnx_cpp_backend is not None
+                    and BubbleDetector._rtdetr_onnx_model_key != requested_key
+                ):
+                    try:
+                        BubbleDetector._rtdetr_onnx_cpp_backend.unload()
+                    except Exception:
+                        pass
+                    BubbleDetector._rtdetr_onnx_cpp_backend = None
+                    BubbleDetector._rtdetr_onnx_use_cpp = False
+                    BubbleDetector._rtdetr_onnx_loaded = False
+                    BubbleDetector._rtdetr_onnx_shared_session = None
+
                 # Load C++ backend - NO FALLBACK
                 logger.info("🚀 Loading RT-DETR with C++ ONNX backend (Python fallback disabled)...")
                 cpp_backend = ONNXCppBackend()
@@ -1835,7 +1894,10 @@ class BubbleDetector:
                     BubbleDetector._rtdetr_onnx_use_cpp = True
                     BubbleDetector._rtdetr_onnx_loaded = True
                     BubbleDetector._rtdetr_onnx_model_path = onnx_fp
+                    BubbleDetector._rtdetr_onnx_model_key = requested_key
+                    BubbleDetector._rtdetr_onnx_filename = selected_onnx
                     self.rtdetr_onnx_loaded = True
+                    self.rtdetr_onnx_filename = selected_onnx
                     # Skip Python session entirely
                     self.rtdetr_onnx_session = None
                     BubbleDetector._rtdetr_onnx_shared_session = None
