@@ -23091,15 +23091,10 @@ class UnifiedClient:
                 )
             if endpoint_type == '/images/generations':
                 if self._is_fal_model_base_url(base_url):
-                    if not self._is_stop_requested():
-                        print("🖼️ [fal] Routing base detected; using native /{model_id} endpoint instead of /images/generations")
-                    if '/' not in effective_model and '/' in str(getattr(self, 'model', '') or ''):
-                        effective_model = str(getattr(self, 'model', '') or '').strip()
-                    return self._send_fal_model_api(
-                        messages=messages,
-                        base_url=base_url,
-                        response_name=response_name,
-                        model_override=effective_model,
+                    raise UnifiedClientError(
+                        "fal.ai native endpoints use Endpoint Type /{model_id}. "
+                        "Choose /{model_id} from the custom prefix dropdown for queue.fal.run/fal.run routes.",
+                        error_type='validation',
                     )
                 return self._send_openai_images_api(
                     messages=messages,
