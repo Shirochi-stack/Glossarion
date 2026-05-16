@@ -20820,7 +20820,7 @@ class UnifiedClient:
             for msg in messages:
                 if msg.get('role') == 'system':
                     prompt = msg.get('content', '') or ''
-                    break
+                break
         return prompt or 'Generate an image', image_url
 
     def _send_fal_model_api(self, messages, base_url, response_name, model_override=None) -> UnifiedResponse:
