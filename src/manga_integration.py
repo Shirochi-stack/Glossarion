@@ -5457,8 +5457,8 @@ class MangaTranslationTab(QObject):
         bg_settings_layout.setContentsMargins(10, 15, 10, 15)  # Increased vertical padding from 10 to 15
         bg_settings_layout.setSpacing(8)
         
-        # Free text only background opacity toggle (applies BG opacity only to free-text regions)
-        self.ft_only_checkbox = self._create_styled_checkbox("Free text only background opacity")
+        # Free text preservation toggle (renders free text with BG opacity and skips inpainting)
+        self.ft_only_checkbox = self._create_styled_checkbox("Preserve free text (skip inpaint, use background opacity)")
         self.ft_only_checkbox.setChecked(self.free_text_only_bg_opacity_value)
         # Connect directly to save+apply (working pattern)
         self.ft_only_checkbox.stateChanged.connect(lambda: (self._on_ft_only_bg_opacity_changed(), self._save_rendering_settings(), self._apply_rendering_settings()))

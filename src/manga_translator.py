@@ -282,15 +282,18 @@ def set_should_inpaint_from_bubble_type(region, ocr_settings, main_gui):
     if getattr(region, 'bubble_type', None) == 'free_text':
         # Read from live GUI config for immediate setting changes
         live_detect_free = None
+        free_text_only_bg = False
         try:
             if main_gui and hasattr(main_gui, 'config'):
-                live_detect_free = main_gui.config.get('manga_settings', {}).get('ocr', {}).get('detect_free_text')
+                cfg = main_gui.config
+                live_detect_free = cfg.get('manga_settings', {}).get('ocr', {}).get('detect_free_text')
+                free_text_only_bg = bool(cfg.get('manga_free_text_only_bg_opacity', False))
         except Exception:
             live_detect_free = None
         # Fallback to ocr_settings if GUI not available
         cfg_detect_free = ocr_settings.get('detect_free_text', True) if isinstance(ocr_settings, dict) else True
         detect_free = cfg_detect_free if (live_detect_free is None) else bool(live_detect_free)
-        region.should_inpaint = bool(detect_free)
+        region.should_inpaint = bool(detect_free) and not free_text_only_bg
     else:
         # Text bubbles and other types always get inpainted
         region.should_inpaint = True
@@ -331,10 +334,13 @@ def classify_rtdetr_region_and_set_inpaint(region, bbox, rtdetr_detections, ocr_
     if norm_bbox in free_text_set:
         # Always read from live GUI config for immediate setting changes
         live_detect_free = None
+        free_text_only_bg = False
         try:
             # First try getting from live GUI config
             if main_gui and hasattr(main_gui, 'config'):
-                live_detect_free = main_gui.config.get('manga_settings', {}).get('ocr', {}).get('detect_free_text')
+                cfg = main_gui.config
+                live_detect_free = cfg.get('manga_settings', {}).get('ocr', {}).get('detect_free_text')
+                free_text_only_bg = bool(cfg.get('manga_free_text_only_bg_opacity', False))
         except Exception:
             live_detect_free = None
         # Fallback to local settings if GUI not available
@@ -343,7 +349,7 @@ def classify_rtdetr_region_and_set_inpaint(region, bbox, rtdetr_detections, ocr_
         
         region.region_type = 'free_text'
         region.bubble_type = 'free_text'
-        region.should_inpaint = bool(detect_free)
+        region.should_inpaint = bool(detect_free) and not free_text_only_bg
         
         if log_func:
             # Only log classification details when debug mode is enabled
@@ -354,7 +360,7 @@ def classify_rtdetr_region_and_set_inpaint(region, bbox, rtdetr_detections, ocr_
                     debug_mode = main_gui.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False)
                 
                 if debug_mode:
-                    if detect_free:
+                    if region.should_inpaint:
                         log_func(f"📝 Classified RT-DETR block as FREE TEXT (ENABLED): {norm_bbox}", "debug")
                     else:
                         log_func(f"📝 Classified RT-DETR block as FREE TEXT (DISABLED by toggle) — will NOT inpaint: {norm_bbox}", "debug")
@@ -1528,6 +1534,7 @@ class MangaTranslator:
         self.shadow_blur = config.get('manga_shadow_blur', 0)  # 0 = sharp shadow, higher = more blur
         self.force_caps_lock = config.get('manga_force_caps_lock', False)
         self.skip_inpainting = config.get('manga_skip_inpainting', False)  # Default: perform inpainting
+        self.free_text_only_bg_opacity = bool(config.get('manga_free_text_only_bg_opacity', False))
 
         # Safe area controls
         self.safe_area_enabled = bool(config.get('manga_safe_area_enabled', False))
@@ -2925,7 +2932,7 @@ class MangaTranslator:
                         # If "Free Text" checkbox is checked, include ALL text outside bubbles
                         # Don't require RT-DETR to specifically detect it as free text
                         if ocr_settings.get('detect_free_text', True):
-                            region.should_inpaint = True
+                            region.should_inpaint = not getattr(self, 'free_text_only_bg_opacity', False)
                             self._log(f"   • Setting should_inpaint=True (detect_free_text is enabled)", "debug")
                             # If RT-DETR detected free text box covering this region's center, mark explicitly
                             try:
@@ -2956,6 +2963,7 @@ class MangaTranslator:
                                 if not found_free_text_box:
                                     # Text outside bubbles but not in free text box - still mark as free text
                                     region.bubble_type = 'free_text'
+                                    region.region_type = 'free_text'
                                     # Use region's own bbox if no RT-DETR free text box found
                                     if not hasattr(region, 'bubble_bounds') or region.bubble_bounds is None:
                                         region.bubble_bounds = region.bounding_box
@@ -2963,6 +2971,7 @@ class MangaTranslator:
                             except Exception:
                                 # Default to free text if check fails
                                 region.bubble_type = 'free_text'
+                                region.region_type = 'free_text'
                                 if not hasattr(region, 'bubble_bounds') or region.bubble_bounds is None:
                                     region.bubble_bounds = region.bounding_box
                         else:
@@ -3781,6 +3790,7 @@ class MangaTranslator:
                                                         # Reclassify as free text
                                                         old_type = region.bubble_type
                                                         region.bubble_type = 'free_text'
+                                                        region.region_type = 'free_text'
                                                         # Set should_inpaint based on free text toggle
                                                         set_should_inpaint_from_bubble_type(
                                                             region, ocr_settings,
@@ -3847,7 +3857,7 @@ class MangaTranslator:
                                                         vertices=all_vertices,
                                                         bounding_box=(min_x, min_y, max_x - min_x, max_y - min_y),
                                                         confidence=0.95,
-                                                        region_type='text_block'
+                                                        region_type='free_text'
                                                     )
                                                     merged_region.bubble_type = 'free_text'
                                                     # Set should_inpaint based on free text toggle
@@ -9603,6 +9613,8 @@ class MangaTranslator:
         
         for i, region in enumerate(regions):
             # CHECK: Should this region be inpainted?
+            if getattr(self, 'free_text_only_bg_opacity', False) and self._is_free_text_region(region):
+                region.should_inpaint = False
             if not getattr(region, 'should_inpaint', True):
                 # Skip this region - it shouldn't be inpainted
                 regions_skipped += 1
