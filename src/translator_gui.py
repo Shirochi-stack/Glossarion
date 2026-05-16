@@ -8149,7 +8149,7 @@ Recent translations to summarize:
             "Single Pass: Extract glossary inline during each translation request"
         )
         self.auto_glossary_shortcut_combo.setMinimumWidth(82)
-        self.auto_glossary_shortcut_combo.setMaximumWidth(150)
+        self.auto_glossary_shortcut_combo.setMaximumWidth(165)
         self.auto_glossary_shortcut_combo.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.auto_glossary_shortcut_combo.setIconSize(QSize(18, 18))
         self.auto_glossary_shortcut_combo.setStyleSheet("""
