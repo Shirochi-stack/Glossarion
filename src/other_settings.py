@@ -1412,6 +1412,9 @@ def open_other_settings(self, *args, show=True):
 
     # Build sections (converted sections will populate the Qt layout)
     self._create_context_management_section(container)
+    scroll.setWidget(container)
+    scroll.setWidgetResizable(True)
+    main_layout.addWidget(scroll, 1)
     pump_other_settings_open()
     self._create_response_handling_section(container)
     pump_other_settings_open()
@@ -1436,12 +1439,6 @@ def open_other_settings(self, *args, show=True):
     
     # Add Danger Zone section
     self._create_danger_zone_section(container)
-    pump_other_settings_open()
-    
-    scroll.setWidget(container)
-    scroll.setWidgetResizable(True)
-    
-    main_layout.addWidget(scroll, 1)
     pump_other_settings_open()
 
     # Buttons row (Save and Close) - always visible at bottom

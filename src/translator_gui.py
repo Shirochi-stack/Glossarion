@@ -25130,12 +25130,6 @@ if __name__ == "__main__":
         except Exception:
             main_window.show()
 
-        try:
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(100, lambda: splash_manager and splash_manager.prewarm_startup_dialogs(main_window))
-        except Exception as e:
-            print(f"⚠️ Startup dialog prewarm scheduling failed: {e}")
-        
         # Re-enable quitOnLastWindowClosed now that the main window is visible.
         # This was disabled in splash_utils to prevent macOS from auto-quitting
         # during the gap between splash close and main window creation.
