@@ -1023,11 +1023,19 @@ except ImportError:
     cohere = None
 
 # Mistral SDK (optional)
+MistralSDKStyle = None
 try:
     from mistralai.client import MistralClient
     from mistralai.models.chat_completion import ChatMessage
+    MistralSDKStyle = "legacy"
 except ImportError:
-    MistralClient = None
+    try:
+        from mistralai.client import Mistral as MistralClient
+        ChatMessage = None
+        MistralSDKStyle = "modern"
+    except ImportError:
+        MistralClient = None
+        ChatMessage = None
     
 # Google Vertex AI API Cloud
 # NOTE: We do NOT eagerly import vertexai here — doing so loads 1,265+ proto
@@ -6612,6 +6620,18 @@ class UnifiedClient:
                     uniq = sorted({m for m in models if m})
                     if len(uniq) == 1:
                         log_model = uniq[0]
+                except Exception:
+                    pass
+
+                # Dedicated Vision/Glossary overrides call _setup_client() before
+                # thread-local state is repopulated, so stale TLS from the main
+                # pool can otherwise win the cosmetic log line.
+                try:
+                    key_identifier = str(getattr(self, 'key_identifier', '') or '')
+                    if key_identifier.startswith(('VisionKey#', 'GlossaryKey#')):
+                        current_model = getattr(self, 'model', None)
+                        if current_model:
+                            log_model = current_model
                 except Exception:
                     pass
         except Exception:
@@ -18017,21 +18037,29 @@ class UnifiedClient:
 
         max_retries = self._get_max_retries()
 
-        if MistralClient is not None and ChatMessage is not None:
+        if MistralClient is not None:
             # Use Mistral SDK, but do NOT reuse clients across calls.
             def _do():
                 client = None
                 try:
                     client = MistralClient(api_key=self.api_key)
-                    chat_messages = []
-                    for msg in messages:
-                        chat_messages.append(ChatMessage(role=msg['role'], content=msg['content']))
-                    response = client.chat(
-                        model=self.model,
-                        messages=chat_messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens
-                    )
+                    if ChatMessage is not None:
+                        chat_messages = []
+                        for msg in messages:
+                            chat_messages.append(ChatMessage(role=msg['role'], content=msg['content']))
+                        response = client.chat(
+                            model=self.model,
+                            messages=chat_messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens
+                        )
+                    else:
+                        response = client.chat.complete(
+                            model=self.model,
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens
+                        )
                     content = response.choices[0].message.content if response.choices else ""
                     finish_reason = response.choices[0].finish_reason if response.choices else 'stop'
                     return UnifiedResponse(
@@ -18043,6 +18071,8 @@ class UnifiedClient:
                     try:
                         if client is not None and hasattr(client, 'close'):
                             client.close()
+                        elif client is not None and hasattr(client, '__exit__'):
+                            client.__exit__(None, None, None)
                     except Exception:
                         pass
 
