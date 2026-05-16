@@ -609,23 +609,6 @@ class SplashManager(QObject):
         except Exception:
             pass
 
-        prewarm_button_keys = [
-            "glossary_settings",
-            "epub_library",
-        ]
-
-        def set_prewarm_buttons_loading(loading):
-            try:
-                setter = getattr(main_window, 'set_startup_prewarm_button_loading', None)
-                if not callable(setter):
-                    return
-                for button_key in prewarm_button_keys:
-                    setter(button_key, loading)
-            except Exception:
-                pass
-
-        set_prewarm_buttons_loading(True)
-
         def finish():
             try:
                 main_window._startup_prewarming = False
@@ -636,23 +619,12 @@ class SplashManager(QObject):
                 print(f"[STARTUP_PREWARM] summary: {results}")
             except Exception:
                 pass
-            set_prewarm_buttons_loading(False)
 
         def run_step(key, label, progress, callback, verifier):
             try:
                 start_time = time.perf_counter()
                 self.update_status(label)
                 self.set_progress(max(self.progress_value, progress))
-                try:
-                    visible_requests = getattr(main_window, '_startup_visible_dialog_requests', set()) or set()
-                    if key in visible_requests:
-                        ok = bool(verifier())
-                        results[key] = ok
-                        elapsed_ms = int((time.perf_counter() - start_time) * 1000)
-                        print(f"[STARTUP_PREWARM] {key}: skipped for visible open ({elapsed_ms} ms)")
-                        return
-                except Exception:
-                    pass
                 callback()
                 ok = bool(verifier())
                 results[key] = ok
@@ -675,46 +647,9 @@ class SplashManager(QObject):
                 import traceback
                 traceback.print_exc()
 
-        steps = [
-            (
-                "model_manager",
-                "Preloading model manager...",
-                93,
-                lambda: getattr(main_window, '_open_model_manager')(show=False),
-                lambda: getattr(main_window, '_model_manager_dialog', None) is not None
-            ),
-            (
-                "glossary_settings",
-                "Preloading glossary manager...",
-                94,
-                lambda: getattr(main_window, 'glossary_manager')(show=False),
-                lambda: (
-                    getattr(main_window, '_glossary_dialog', None) is not None and
-                    bool(getattr(main_window, '_glossary_settings_tabs_prewarmed', False))
-                )
-            ),
-            (
-                "qa_settings",
-                "Preloading QA scanner settings...",
-                95,
-                lambda: getattr(main_window, 'prewarm_qa_scanner_gui')(),
-                lambda: getattr(main_window, '_qa_settings_dialog', None) is not None
-            ),
-            (
-                "epub_library",
-                "Preloading EPUB library...",
-                96,
-                lambda: getattr(main_window, '_open_epub_library')(show=False),
-                lambda: getattr(main_window, '_epub_library_dialog', None) is not None
-            ),
-            (
-                "other_settings",
-                "Preloading other settings...",
-                97,
-                lambda: getattr(main_window, 'open_other_settings')(show=False),
-                lambda: getattr(main_window, '_other_settings_dialog', None) is not None
-            ),
-        ]
+        # Temporarily disabled: keep the orchestration hook intact, but do
+        # not construct any optional dialogs during startup.
+        steps = []
 
         def run_next(index=0):
             if index >= len(steps):

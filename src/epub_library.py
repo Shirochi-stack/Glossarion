@@ -6081,6 +6081,7 @@ class EpubLibraryDialog(QDialog):
         self._scanner_thread: _DualScannerThread | None = None
         self._delete_thread: _LibraryDeleteThread | None = None
         self._delete_progress = None
+        self._initial_scan_started = False
         # Enable drag-and-drop of EPUB / TXT / PDF / HTML files onto the
         # dialog. Drops are routed through the same import pipeline as the
         # "Import EPUB" button (see :meth:`_import_paths_into_library`).
@@ -6095,15 +6096,13 @@ class EpubLibraryDialog(QDialog):
         # widget swap here guarantees the very first paint already
         # shows the Halgakos spinner + "Scanning library…" strip.
         self._show_loading()
-        # Defer the filesystem scan so the dialog paints the loading
-        # state immediately and the scanner thread only kicks off on
-        # the next event-loop tick (keeps the show-flow snappy).
-        QTimer.singleShot(0, self._load_books)
-        # Auto-refresh library every 2 seconds (start after initial load)
+        # The filesystem scan is intentionally visible-demand: hidden
+        # startup prewarm should polish the widgets, not enumerate every
+        # output folder. showEvent starts the worker thread when the user
+        # actually opens the Library.
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.setInterval(2000)
         self._auto_refresh_timer.timeout.connect(self._auto_refresh)
-        QTimer.singleShot(2500, self._auto_refresh_timer.start)
 
     def _warm_library_widgets(self) -> None:
         """Polish/layout library tabs and currently built cards."""
@@ -8712,6 +8711,9 @@ class EpubLibraryDialog(QDialog):
 
     def _auto_refresh(self):
         """Lightweight auto-refresh: only reload if either tab changed."""
+        if (not self.isVisible()
+                or getattr(self, "_hidden_prewarm_active", False)):
+            return
         if (self._delete_thread is not None
                 and self._delete_thread.isRunning()):
             return
@@ -8783,6 +8785,7 @@ class EpubLibraryDialog(QDialog):
         if self._scanner_thread and self._scanner_thread.isRunning():
             return
         self._show_loading()
+        self._initial_scan_started = True
         self._scanner_thread = _DualScannerThread(self._config, self)
         self._scanner_thread.finished.connect(self._on_initial_scan_done)
         self._scanner_thread.start()
@@ -10720,8 +10723,25 @@ class EpubLibraryDialog(QDialog):
     def showEvent(self, event):
         super().showEvent(event)
         self._reposition_overlays()
+        if not getattr(self, "_hidden_prewarm_active", False):
+            if not getattr(self, "_initial_scan_started", False):
+                QTimer.singleShot(0, self._load_books)
+            else:
+                QTimer.singleShot(0, self._auto_refresh)
+            try:
+                if not self._auto_refresh_timer.isActive():
+                    self._auto_refresh_timer.start()
+            except Exception:
+                pass
         if self._ip_cards or self._comp_cards:
             self._schedule_grid_reflow()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        try:
+            self._auto_refresh_timer.stop()
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         """Hide the dialog instead of closing \u2014 persist settings.

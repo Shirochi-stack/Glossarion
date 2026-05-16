@@ -1072,16 +1072,6 @@ def open_other_settings(self, *args, show=True):
     from PySide6.QtCore import Qt, QTimer, QEventLoop
     from PySide6.QtWidgets import QApplication
 
-    if show:
-        try:
-            requests = getattr(self, '_startup_visible_dialog_requests', None)
-            if requests is None:
-                requests = set()
-                self._startup_visible_dialog_requests = requests
-            requests.add('other_settings')
-        except Exception:
-            pass
-
     def _prewarm_dialog_offscreen(dialog):
         def _center_dialog():
             try:

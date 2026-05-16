@@ -31,13 +31,6 @@ class GlossaryManagerMixin:
         was_visible = True
         old_opacity = 1.0
         tab_timings = []
-        def _set_loading(loading, text=None):
-            try:
-                setter = getattr(self, 'set_startup_prewarm_button_loading', None)
-                if callable(setter):
-                    setter('glossary_settings', loading, text)
-            except Exception:
-                pass
         def _center_dialog():
             try:
                 screen = dialog.screen() or QApplication.primaryScreen()
@@ -57,7 +50,6 @@ class GlossaryManagerMixin:
                 return False
 
             self._glossary_settings_tabs_prewarmed = False
-            _set_loading(True, "Loading tabs...")
 
             app = QApplication.instance()
             previous_index = notebook.currentIndex()
@@ -96,7 +88,6 @@ class GlossaryManagerMixin:
 
             for idx in range(notebook.count()):
                 tab_start = time.perf_counter()
-                _set_loading(True, f"Tab {idx + 1}/{notebook.count()}")
                 notebook.setCurrentIndex(idx)
                 _warm_widget(notebook.widget(idx))
                 layout = dialog.layout()
@@ -131,8 +122,6 @@ class GlossaryManagerMixin:
                 'tab_ms': tab_timings,
                 'queued_ms': queued_ms,
             }
-            if not getattr(self, '_startup_prewarming', False):
-                _set_loading(False)
             return True
         except Exception as e:
             try:
@@ -146,8 +135,6 @@ class GlossaryManagerMixin:
                 print(f"Glossary settings tab prewarm failed: {e}")
             except Exception:
                 pass
-            if not getattr(self, '_startup_prewarming', False):
-                _set_loading(False)
             return False
     
     @staticmethod

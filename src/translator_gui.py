@@ -20577,11 +20577,6 @@ Important rules:
                 dlg.raise_()
                 dlg.activateWindow()
             else:
-                # On first creation the dialog already schedules a deferred
-                # scan; calling _auto_refresh here would force a synchronous
-                # re-scan and negate the instant-open optimization.
-                if not first_creation:
-                    dlg._auto_refresh()  # lightweight \u2014 only reloads if file list changed
                 try:
                     from dialog_animations import show_dialog_with_fade
                     show_dialog_with_fade(dlg, duration=180)
@@ -25115,14 +25110,6 @@ if __name__ == "__main__":
         # Mark modules as already loaded to skip lazy loading
         main_window._modules_loaded = True
         main_window._modules_loading = False
-
-        # Apply startup-prewarm loading text before the first visible paint.
-        # The queued prewarm pass will clear this when all warmups finish.
-        if splash_manager:
-            try:
-                main_window.set_all_startup_prewarm_buttons_loading(True)
-            except Exception:
-                pass
 
         if splash_manager:
             # Extra pause to show "Ready!" before closing
