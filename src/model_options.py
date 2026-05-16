@@ -87,6 +87,7 @@ def get_model_options() -> List[str]:
         "mistral-large-2411", "mistral-large-2512",
         "mistral-medium-2505", "mistral-medium-2508", "mistral-medium-3-5",
         "mistral-moderation-2411", "mistral-moderation-2603",
+        "mistral-ocr-latest",
         "mistral-ocr-2505", "mistral-ocr-2512",
         "mistral-small-2506", "mistral-small-2603",
         "open-mistral-nemo",

@@ -18048,8 +18048,120 @@ class UnifiedClient:
             # Use Mistral SDK, but do NOT reuse clients across calls.
             def _do():
                 client = None
+                stream_resp = None
                 try:
                     client = MistralClient(api_key=self.api_key)
+                    use_streaming = self._streaming_enabled()
+                    log_stream = self._stream_logging_enabled(use_streaming)
+                    if use_streaming and ChatMessage is None and hasattr(getattr(client, 'chat', None), 'stream'):
+                        import time as _t
+                        start_ts = _t.time()
+                        if not self._is_stop_requested():
+                            print(f"🛰️ [mistral] SDK stream start (model={self.model})")
+                        stream_resp = client.chat.stream(
+                            model=self.model,
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens
+                        )
+                        with self._active_streams_lock:
+                            self._active_streams.add(stream_resp)
+                        if not self._is_stop_requested():
+                            print(f"🛰️ [mistral] SDK stream opened in {_t.time() - start_ts:.1f}s")
+
+                        text_parts = []
+                        log_buf = []
+                        finish_reason = 'stop'
+                        usage = None
+
+                        def _flush_mistral_log_buffer(force=False):
+                            if not log_stream or self._is_stop_requested():
+                                return
+                            combined = ''.join(log_buf)
+                            if not combined:
+                                return
+                            temp_combined = combined.replace('\x1f', '\\x1F')
+                            for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
+                                temp_combined = temp_combined.replace(tag, tag + '\n')
+                            if '\n' in temp_combined:
+                                parts = temp_combined.split('\n')
+                                for part in parts[:-1]:
+                                    print(part, flush=True)
+                                log_buf[:] = [parts[-1]]
+                            elif force or len(temp_combined) >= 160:
+                                print(temp_combined, flush=True)
+                                log_buf.clear()
+
+                        def _mistral_fragment_text(fragment):
+                            if fragment is None:
+                                return ""
+                            if isinstance(fragment, str):
+                                return fragment
+                            if isinstance(fragment, list):
+                                parts = []
+                                for item in fragment:
+                                    val = None
+                                    if isinstance(item, dict):
+                                        val = item.get('text') or item.get('content')
+                                    else:
+                                        val = getattr(item, 'text', None) or getattr(item, 'content', None)
+                                    if isinstance(val, str):
+                                        parts.append(val)
+                                return ''.join(parts)
+                            return ""
+
+                        for event in stream_resp:
+                            if self._is_stop_requested():
+                                self._cancelled = True
+                                try:
+                                    if hasattr(stream_resp, 'close'):
+                                        stream_resp.close()
+                                except Exception:
+                                    pass
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            chunk = getattr(event, 'data', event)
+                            if isinstance(chunk, dict):
+                                choices = chunk.get('choices') or []
+                                usage = chunk.get('usage') or usage
+                            else:
+                                choices = getattr(chunk, 'choices', None) or []
+                                usage = getattr(chunk, 'usage', None) or usage
+                            if not choices:
+                                continue
+                            choice = choices[0]
+                            if isinstance(choice, dict):
+                                delta = choice.get('delta') or {}
+                                finish_reason = choice.get('finish_reason') or finish_reason
+                            else:
+                                delta = getattr(choice, 'delta', None)
+                                finish_reason = getattr(choice, 'finish_reason', None) or finish_reason
+                            if isinstance(delta, dict):
+                                frag = _mistral_fragment_text(delta.get('content'))
+                            else:
+                                frag = _mistral_fragment_text(getattr(delta, 'content', None))
+                            if frag:
+                                text_parts.append(frag)
+                                if log_stream and not self._is_stop_requested():
+                                    log_buf.append(frag)
+                                    _flush_mistral_log_buffer(force=False)
+
+                        content = ''.join(text_parts)
+                        if log_stream and not self._is_stop_requested():
+                            _flush_mistral_log_buffer(force=True)
+                        if usage is not None and hasattr(usage, 'model_dump'):
+                            try:
+                                usage = usage.model_dump()
+                            except Exception:
+                                pass
+                        if not self._is_stop_requested():
+                            print(f"🛰️ [mistral] SDK stream complete: {len(content)} chars, finish={finish_reason}")
+                        return UnifiedResponse(
+                            content=content,
+                            finish_reason=finish_reason,
+                            usage=usage if isinstance(usage, dict) else None,
+                            raw_response={"streamed": True, "model": self.model}
+                        )
+
                     if ChatMessage is not None:
                         chat_messages = []
                         for msg in messages:
@@ -18076,6 +18188,11 @@ class UnifiedClient:
                     )
                 finally:
                     try:
+                        if stream_resp is not None:
+                            with self._active_streams_lock:
+                                self._active_streams.discard(stream_resp)
+                            if hasattr(stream_resp, 'close'):
+                                stream_resp.close()
                         if client is not None and hasattr(client, 'close'):
                             client.close()
                         elif client is not None and hasattr(client, '__exit__'):
