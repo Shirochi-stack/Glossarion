@@ -1722,6 +1722,11 @@ class MangaImagePreviewWidget(QWidget):
                 background-color: #3a3a3a;
                 border-color: #5a9fd4;
             }
+            QListWidget::item:disabled {
+                background-color: #202020;
+                border-color: #555555;
+                color: #7d8795;
+            }
             QListWidget::item:hover {
                 border-color: #7bb3e0;
             }
@@ -1736,6 +1741,7 @@ class MangaImagePreviewWidget(QWidget):
         
         # Store image paths for thumbnails
         self.image_paths = []
+        self.skipped_processing_paths = set()
         
         layout.addWidget(viewer_container, stretch=1)
         
@@ -2775,7 +2781,55 @@ class MangaImagePreviewWidget(QWidget):
             self._thumbnail_folder_poll_timer.start()
         else:
             self._thumbnail_folder_poll_timer.stop()
-    
+
+    def _skip_key_for_path(self, path: str) -> str:
+        try:
+            return os.path.normcase(os.path.abspath(os.path.normpath(path)))
+        except Exception:
+            return str(path or '')
+
+    def set_skipped_processing_paths(self, paths) -> None:
+        """Mark thumbnails that should be visible but skipped during processing."""
+        try:
+            self.skipped_processing_paths = {
+                self._skip_key_for_path(path)
+                for path in (paths or [])
+                if path
+            }
+            self._apply_thumbnail_skip_states()
+        except Exception as e:
+            print(f"[THUMB_SKIP] Failed to set skipped paths: {e}")
+
+    def _is_thumbnail_skipped(self, path: str) -> bool:
+        return self._skip_key_for_path(path) in (getattr(self, 'skipped_processing_paths', set()) or set())
+
+    def _apply_thumbnail_skip_state(self, item) -> None:
+        try:
+            path = item.data(Qt.ItemDataRole.UserRole)
+            skipped = self._is_thumbnail_skipped(path)
+            flags = item.flags()
+            if skipped:
+                item.setFlags(flags & ~Qt.ItemFlag.ItemIsEnabled & ~Qt.ItemFlag.ItemIsSelectable)
+                item.setForeground(QBrush(QColor("#7d8795")))
+                item.setBackground(QBrush(QColor("#202020")))
+                item.setToolTip(f"Skipped during processing: {path}")
+            else:
+                item.setFlags(flags | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                item.setForeground(QBrush(QColor("#ffffff")))
+                item.setBackground(QBrush(QColor("#2d2d2d")))
+                item.setToolTip(path or "")
+        except Exception:
+            pass
+
+    def _apply_thumbnail_skip_states(self) -> None:
+        try:
+            for i in range(self.thumbnail_list.count()):
+                item = self.thumbnail_list.item(i)
+                if item:
+                    self._apply_thumbnail_skip_state(item)
+        except Exception:
+            pass
+
     def _populate_thumbnails(self):
         """Populate thumbnail list with images"""
         self.thumbnail_list.clear()
@@ -2791,6 +2845,7 @@ class MangaImagePreviewWidget(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, path)  # Store path
             item.setText(os.path.basename(path))
             item.setSizeHint(QSize(110, 110))
+            self._apply_thumbnail_skip_state(item)
             self.thumbnail_list.addItem(item)
         
         # Load thumbnails in background thread
@@ -2834,6 +2889,7 @@ class MangaImagePreviewWidget(QWidget):
                     icon = QIcon(pixmap)
                     item.setIcon(icon)
                     item.setText("")  # Remove text once icon is loaded
+                    self._apply_thumbnail_skip_state(item)
                     break
         except Exception as e:
             print(f"Error updating thumbnail: {e}")
@@ -3023,7 +3079,27 @@ class MangaImagePreviewWidget(QWidget):
                 color: #666666;
             }
         """)
-        
+        is_skipped = self._is_thumbnail_skipped(image_path)
+        skip_action = menu.addAction("Process This Image" if is_skipped else "Skip Processing")
+
+        def toggle_skip_processing():
+            try:
+                if hasattr(self, 'manga_integration') and self.manga_integration:
+                    self.manga_integration._toggle_skip_processing_for_path(image_path)
+                else:
+                    skipped = set(getattr(self, 'skipped_processing_paths', set()) or set())
+                    key = self._skip_key_for_path(image_path)
+                    if key in skipped:
+                        skipped.remove(key)
+                    else:
+                        skipped.add(key)
+                    self.set_skipped_processing_paths(skipped)
+            except Exception as e:
+                print(f"[THUMB_SKIP] Failed to toggle skip: {e}")
+
+        skip_action.triggered.connect(toggle_skip_processing)
+        menu.addSeparator()
+
         # Add "Open Translated Folder" action only if it exists
         if os.path.exists(translated_folder) and os.path.isdir(translated_folder):
             open_folder_action = menu.addAction("📂 Open Translated Folder")
@@ -3053,6 +3129,8 @@ class MangaImagePreviewWidget(QWidget):
         """Handle thumbnail click - load the corresponding image and sync file list selection"""
         from PySide6.QtCore import Qt
         image_path = item.data(Qt.ItemDataRole.UserRole)
+        if self._is_thumbnail_skipped(image_path):
+            return
         if image_path and os.path.exists(image_path):
             # Find the index of this image
             try:
@@ -3101,13 +3179,17 @@ class MangaImagePreviewWidget(QWidget):
             except ValueError:
                 pass
         
-        # Move to previous (wrap around to end if at start)
-        if current_index > 0:
-            new_index = current_index - 1
-        elif current_index == 0:
-            new_index = len(self.image_paths) - 1  # Wrap to last
+        enabled_indices = [
+            i for i, path in enumerate(self.image_paths)
+            if not self._is_thumbnail_skipped(path)
+        ]
+        if not enabled_indices:
+            return
+        if current_index in enabled_indices:
+            pos = enabled_indices.index(current_index)
+            new_index = enabled_indices[pos - 1]
         else:
-            new_index = 0  # Default to first if current not found
+            new_index = enabled_indices[-1]
         
         # Sync with file list selection in manga_integration (this will trigger proper state restoration)
         new_path = self.image_paths[new_index]
@@ -3126,13 +3208,17 @@ class MangaImagePreviewWidget(QWidget):
             except ValueError:
                 pass
         
-        # Move to next (wrap around to start if at end)
-        if current_index >= 0 and current_index < len(self.image_paths) - 1:
-            new_index = current_index + 1
-        elif current_index == len(self.image_paths) - 1:
-            new_index = 0  # Wrap to first
+        enabled_indices = [
+            i for i, path in enumerate(self.image_paths)
+            if not self._is_thumbnail_skipped(path)
+        ]
+        if not enabled_indices:
+            return
+        if current_index in enabled_indices:
+            pos = enabled_indices.index(current_index)
+            new_index = enabled_indices[(pos + 1) % len(enabled_indices)]
         else:
-            new_index = 0  # Default to first if current not found
+            new_index = enabled_indices[0]
         
         # Sync with file list selection in manga_integration (this will trigger proper state restoration)
         new_path = self.image_paths[new_index]
@@ -3148,9 +3234,12 @@ class MangaImagePreviewWidget(QWidget):
             if hasattr(self, 'manga_integration') and self.manga_integration:
                 mi = self.manga_integration
                 if hasattr(mi, 'file_listbox') and mi.file_listbox:
+                    target_index = index
+                    if hasattr(mi, 'selected_files') and image_path in mi.selected_files:
+                        target_index = mi.selected_files.index(image_path)
                     # Set the selection in the file list (this triggers _on_file_selection_changed)
-                    mi.file_listbox.setCurrentRow(index)
-                    print(f"[NAV] Synced file list selection to row {index}: {os.path.basename(image_path)}")
+                    mi.file_listbox.setCurrentRow(target_index)
+                    print(f"[NAV] Synced file list selection to row {target_index}: {os.path.basename(image_path)}")
                     return
             
             # Fallback: just load the image directly if manga_integration not available

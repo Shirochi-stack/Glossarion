@@ -805,6 +805,7 @@ class MangaTranslationTab(QObject):
         except Exception:
             self.executor = None
         self.selected_files = []
+        self.skipped_processing_files = set()
         self.manga_image_range_value = ""
         self._manga_processing_files = None
         self.current_file_index = 0
@@ -4134,6 +4135,8 @@ class MangaTranslationTab(QObject):
         
         # Connect file list selection to image preview
         self.file_listbox.itemSelectionChanged.connect(self._on_file_selection_changed)
+        self.file_listbox.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.file_listbox.customContextMenuRequested.connect(self._show_file_list_context_menu)
         
         # Add method to main_gui for parallel processing thread-safe GUI updates
         def _execute_parallel_gui_update(region_index: int, trans_text: str) -> bool:
@@ -7149,8 +7152,8 @@ class MangaTranslationTab(QObject):
                 pass
         
         # Initialize with defaults (plain Python values, no Tkinter variables)
-        self.bg_opacity_value = config.get('manga_bg_opacity', 128)
-        self.free_text_only_bg_opacity_value = config.get('manga_free_text_only_bg_opacity', True)
+        self.bg_opacity_value = config.get('manga_bg_opacity', 0)
+        self.free_text_only_bg_opacity_value = config.get('manga_free_text_only_bg_opacity', False)
         self.bg_style_value = config.get('manga_bg_style', 'circle')
         self.bg_reduction_value = config.get('manga_bg_reduction', 1.0)
         self.font_size_value = config.get('manga_font_size', 0)
@@ -7833,8 +7836,8 @@ class MangaTranslationTab(QObject):
         
         try:
             # Background settings
-            self.bg_opacity_value = 128
-            self.free_text_only_bg_opacity_value = True
+            self.bg_opacity_value = 0
+            self.free_text_only_bg_opacity_value = False
             self.bg_style_value = 'circle'
             self.bg_reduction_value = 1.0
             
@@ -8875,9 +8878,13 @@ class MangaTranslationTab(QObject):
         indices, error = self._parse_manga_image_range(len(files))
         if error:
             return [], error
+        manual_skipped = self._manual_skipped_processing_keys()
         if indices is None:
-            return files, None
-        return [path for idx, path in enumerate(files, start=1) if idx in indices], None
+            return [path for path in files if self._skip_key_for_path(path) not in manual_skipped], None
+        return [
+            path for idx, path in enumerate(files, start=1)
+            if idx in indices and self._skip_key_for_path(path) not in manual_skipped
+        ], None
 
     def _current_manga_processing_files(self) -> List[str]:
         """Files for the current run; falls back to the full visible list outside a run."""
@@ -8890,9 +8897,8 @@ class MangaTranslationTab(QObject):
         """Keep the preview thumbnails aligned with the active visible-order range."""
         if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget:
             return
-        files, error = self._manga_range_filtered_files()
-        if error:
-            files = list(getattr(self, 'selected_files', []) or [])
+        all_files = list(getattr(self, 'selected_files', []) or [])
+        files = list(all_files)
         groups = self._manga_current_process_groups()
         if len(groups) > 1:
             index = self._manga_selected_process_group_index()
@@ -8901,10 +8907,16 @@ class MangaTranslationTab(QObject):
 
         current_path = getattr(self.image_preview_widget, 'current_image_path', None)
         self.image_preview_widget.set_image_list(files)
+        try:
+            if hasattr(self.image_preview_widget, 'set_skipped_processing_paths'):
+                self.image_preview_widget.set_skipped_processing_paths(self._skipped_processing_keys_for_preview())
+        except Exception:
+            pass
 
         if not files:
             return
-        if current_path in files:
+        skipped_keys = self._skipped_processing_keys_for_preview()
+        if current_path in files and self._skip_key_for_path(current_path) not in skipped_keys:
             try:
                 if hasattr(self.image_preview_widget, '_update_thumbnail_selection'):
                     self.image_preview_widget._update_thumbnail_selection(current_path)
@@ -8912,7 +8924,9 @@ class MangaTranslationTab(QObject):
                 pass
             return
 
-        first_path = files[0]
+        first_path = next((path for path in files if self._skip_key_for_path(path) not in skipped_keys), None)
+        if not first_path:
+            return
         try:
             if first_path in self.selected_files and hasattr(self, 'file_listbox') and self.file_listbox:
                 target_row = self.selected_files.index(first_path)
@@ -8966,6 +8980,77 @@ class MangaTranslationTab(QObject):
         self._update_manga_image_range_display()
         self._update_manga_preview_image_list_for_range()
 
+    def _skip_key_for_path(self, path: str) -> str:
+        try:
+            return os.path.normcase(os.path.abspath(os.path.normpath(path)))
+        except Exception:
+            return str(path or '')
+
+    def _manual_skipped_processing_keys(self) -> set:
+        skipped = getattr(self, 'skipped_processing_files', set()) or set()
+        return {self._skip_key_for_path(path) for path in skipped if path}
+
+    def _is_manually_skipped_processing_file(self, path: str) -> bool:
+        return self._skip_key_for_path(path) in self._manual_skipped_processing_keys()
+
+    def _visible_range_skipped_keys(self) -> set:
+        files = list(getattr(self, 'selected_files', []) or [])
+        indices, error = self._parse_manga_image_range(len(files))
+        if error or indices is None:
+            return set()
+        return {
+            self._skip_key_for_path(path)
+            for idx, path in enumerate(files, start=1)
+            if idx not in indices
+        }
+
+    def _skipped_processing_keys_for_preview(self) -> set:
+        return self._manual_skipped_processing_keys() | self._visible_range_skipped_keys()
+
+    def _prune_skipped_processing_files(self) -> None:
+        valid_keys = {self._skip_key_for_path(path) for path in getattr(self, 'selected_files', []) or []}
+        current = self._manual_skipped_processing_keys()
+        self.skipped_processing_files = {path for path in current if path in valid_keys}
+
+    def _show_file_list_context_menu(self, position) -> None:
+        try:
+            from PySide6.QtWidgets import QMenu
+            item = self.file_listbox.itemAt(position)
+            if not item:
+                return
+            filepath = item.data(Qt.UserRole)
+            row = self.file_listbox.row(item)
+            if not filepath and 0 <= row < len(self.selected_files):
+                filepath = self.selected_files[row]
+            if not filepath:
+                return
+
+            menu = QMenu(self.dialog if hasattr(self, 'dialog') else None)
+            is_skipped = self._is_manually_skipped_processing_file(filepath)
+            action = menu.addAction("Process This Image" if is_skipped else "Skip Processing")
+            action.triggered.connect(lambda checked=False, path=filepath: self._toggle_skip_processing_for_path(path))
+            menu.exec(self.file_listbox.mapToGlobal(position))
+        except Exception as e:
+            print(f"[FILE_SKIP] Failed to show file context menu: {e}")
+
+    def _toggle_skip_processing_for_path(self, path: str) -> None:
+        try:
+            key = self._skip_key_for_path(path)
+            skipped = self._manual_skipped_processing_keys()
+            if key in skipped:
+                skipped.remove(key)
+                label = "processing enabled"
+            else:
+                skipped.add(key)
+                label = "processing skipped"
+            self.skipped_processing_files = skipped
+            self._update_manga_image_range_display()
+            self._update_manga_preview_image_list_for_range()
+            self._persist_selected_files()
+            self._log(f"{os.path.basename(path)}: {label}", "info")
+        except Exception as e:
+            print(f"[FILE_SKIP] Failed to toggle skip state: {e}")
+
     def _update_manga_image_range_display(self) -> None:
         """Grey out rows skipped by the current visible-order image range."""
         if not hasattr(self, 'file_listbox') or not self.file_listbox:
@@ -8978,6 +9063,7 @@ class MangaTranslationTab(QObject):
         skipped_brush = QBrush(QColor("#7d8795"))
         active_background = QBrush(QColor("#2b2b2b"))
         skipped_background = QBrush(QColor("#202020"))
+        manual_skipped = self._manual_skipped_processing_keys()
 
         for row in range(total):
             item = self.file_listbox.item(row)
@@ -8988,11 +9074,19 @@ class MangaTranslationTab(QObject):
                 filepath = self.selected_files[row]
                 item.setData(Qt.UserRole, filepath)
             basename = os.path.basename(filepath or item.text().replace("[SKIP] ", "", 1))
-            skipped = active_filter and (row + 1) not in indices
+            key = self._skip_key_for_path(filepath or basename)
+            skipped_by_range = active_filter and (row + 1) not in indices
+            skipped_manually = key in manual_skipped
+            skipped = skipped_by_range or skipped_manually
             item.setText(f"[SKIP] {basename}" if skipped else basename)
             item.setForeground(skipped_brush if skipped else active_brush)
             item.setBackground(skipped_background if skipped else active_background)
-            if skipped:
+            if skipped_manually:
+                reason = "Skipped manually"
+                if skipped_by_range:
+                    reason += " and by image range"
+                item.setToolTip(f"{reason} ({row + 1}): {filepath or basename}")
+            elif skipped_by_range:
                 item.setToolTip(f"Skipped by image range ({row + 1}): {filepath or basename}")
             else:
                 item.setToolTip(filepath or basename)
@@ -9003,11 +9097,24 @@ class MangaTranslationTab(QObject):
                 status.setText(error)
                 status.setStyleSheet("color: #ff6b6b; font-size: 8pt;")
             elif not active_filter:
-                status.setText(f"All {total} images" if total else "All images")
+                manual_count = sum(
+                    1 for path in getattr(self, 'selected_files', []) or []
+                    if self._skip_key_for_path(path) in manual_skipped
+                )
+                active_count = max(0, total - manual_count)
+                if manual_count:
+                    status.setText(f"Processing {active_count}/{total} ({manual_count} skipped)")
+                else:
+                    status.setText(f"All {total} images" if total else "All images")
                 status.setStyleSheet("color: #9fb7d5; font-size: 8pt;")
             else:
-                active_count = sum(1 for idx in range(1, total + 1) if idx in indices)
-                status.setText(f"Processing {active_count}/{total}")
+                active_count = sum(
+                    1 for idx, path in enumerate(getattr(self, 'selected_files', []) or [], start=1)
+                    if idx in indices and self._skip_key_for_path(path) not in manual_skipped
+                )
+                skipped_count = max(0, total - active_count)
+                suffix = f" ({skipped_count} skipped)" if skipped_count else ""
+                status.setText(f"Processing {active_count}/{total}{suffix}")
                 status.setStyleSheet("color: #9be38f; font-size: 8pt;")
 
     def _autoload_manga_glossary_for_selection(self) -> None:
@@ -12467,6 +12574,12 @@ class MangaTranslationTab(QObject):
             if 0 <= row < len(self.selected_files):
                 removed_paths.add(self.selected_files[row])
                 del self.selected_files[row]
+        if removed_paths:
+            removed_keys = {self._skip_key_for_path(path) for path in removed_paths}
+            self.skipped_processing_files = {
+                key for key in self._manual_skipped_processing_keys()
+                if key not in removed_keys
+            }
         
         # If the current image was removed or list is now empty, clear the active preview state.
         if self.file_listbox.count() == 0:
@@ -12497,6 +12610,7 @@ class MangaTranslationTab(QObject):
         
         self.file_listbox.clear()
         self.selected_files.clear()
+        self.skipped_processing_files.clear()
         if hasattr(self, 'manga_selected_folder_roots'):
             self.manga_selected_folder_roots.clear()
         self._current_image_path = None
@@ -12674,6 +12788,12 @@ class MangaTranslationTab(QObject):
             # Only save files that still exist
             valid_files = [f for f in self.selected_files if os.path.exists(f)]
             self.main_gui.config['manga_selected_files'] = valid_files
+            self._prune_skipped_processing_files()
+            valid_keys = {self._skip_key_for_path(path) for path in valid_files}
+            self.main_gui.config['manga_skipped_processing_files'] = sorted(
+                key for key in self._manual_skipped_processing_keys()
+                if key in valid_keys
+            )
             folder_roots = [
                 folder for folder in getattr(self, 'manga_selected_folder_roots', []) or []
                 if folder and os.path.isdir(folder)
@@ -12700,6 +12820,14 @@ class MangaTranslationTab(QObject):
             valid_files = self._filter_manga_paths_to_single_source(valid_files)
             if not valid_files:
                 return
+            valid_keys = {self._skip_key_for_path(path) for path in valid_files}
+            saved_skipped = self.main_gui.config.get('manga_skipped_processing_files', [])
+            if isinstance(saved_skipped, list):
+                self.skipped_processing_files = {
+                    self._skip_key_for_path(path)
+                    for path in saved_skipped
+                    if self._skip_key_for_path(path) in valid_keys
+                }
             saved_folder_roots = self.main_gui.config.get('manga_selected_folder_roots', [])
             if isinstance(saved_folder_roots, list):
                 self.manga_selected_folder_roots = [
@@ -15302,9 +15430,11 @@ class MangaTranslationTab(QObject):
             return
         self._manga_processing_files = processing_files
         range_text = str(getattr(self, 'manga_image_range_value', '') or '').strip()
-        if range_text and len(processing_files) != len(self.selected_files):
+        skipped_count = max(0, len(self.selected_files) - len(processing_files))
+        if skipped_count:
+            detail = f" ({range_text})" if range_text else ""
             self._log(
-                f"Image range active: processing {len(processing_files)}/{len(self.selected_files)} visible images ({range_text})",
+                f"Processing {len(processing_files)}/{len(self.selected_files)} visible images; skipping {skipped_count}{detail}",
                 "info"
             )
 

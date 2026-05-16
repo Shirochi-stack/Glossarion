@@ -514,8 +514,8 @@ class GlossarionWeb:
             'manga_shadow_offset_x': 2,  # Match manga integration
             'manga_shadow_offset_y': 2,  # Match manga integration
             'manga_shadow_blur': 0,  # Match manga integration (no blur)
-            'manga_bg_opacity': 128,  # 50% background opacity by default
-            'manga_free_text_only_bg_opacity': True,
+            'manga_bg_opacity': 0,  # Transparent background by default
+            'manga_free_text_only_bg_opacity': False,
             'manga_bg_style': 'circle',
             'manga_settings': {
                 'ocr': {
@@ -732,7 +732,7 @@ class GlossarionWeb:
         os.environ['MANGA_SHADOW_OFFSET_X'] = str(config('manga_shadow_offset_x', 2))
         os.environ['MANGA_SHADOW_OFFSET_Y'] = str(config('manga_shadow_offset_y', 2))
         os.environ['MANGA_SHADOW_BLUR'] = str(config('manga_shadow_blur', 0))
-        os.environ['MANGA_BG_OPACITY'] = str(config('manga_bg_opacity', 128))
+        os.environ['MANGA_BG_OPACITY'] = str(config('manga_bg_opacity', 0))
         os.environ['MANGA_BG_STYLE'] = config('manga_bg_style', 'circle')
         
         # OCR Provider Settings
@@ -3899,7 +3899,7 @@ class GlossarionWeb:
                                 bg_opacity = gr.Slider(
                                     minimum=0,
                                     maximum=255,
-                                    value=self.get_config_value('manga_bg_opacity', 128),
+                                    value=self.get_config_value('manga_bg_opacity', 0),
                                     step=1,
                                     label="Background Opacity"
                                 )
@@ -4426,7 +4426,7 @@ class GlossarionWeb:
                                 config.get('manga_shadow_offset_x', 2),
                                 config.get('manga_shadow_offset_y', 2),
                                 config.get('manga_shadow_blur', 0),
-                                config.get('manga_bg_opacity', 128),
+                                config.get('manga_bg_opacity', 0),
                                 config.get('manga_bg_style', 'auto'),
                                 config.get('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False),
                                 config.get('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 7)
@@ -6170,7 +6170,7 @@ CRITICAL EXTRACTION RULES:
                     self.get_config_value('manga_shadow_offset_x', 2),  # shadow_offset_x
                     self.get_config_value('manga_shadow_offset_y', 2),  # shadow_offset_y
                     self.get_config_value('manga_shadow_blur', 0),  # shadow_blur
-                    self.get_config_value('manga_bg_opacity', 128),  # bg_opacity
+                    self.get_config_value('manga_bg_opacity', 0),  # bg_opacity
                     self.get_config_value('manga_bg_style', 'circle'),  # bg_style
                     self.get_config_value('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False),  # parallel_panel_translation
                     self.get_config_value('manga_settings', {}).get('advanced', {}).get('panel_max_workers', 7),  # panel_max_workers
