@@ -2541,6 +2541,26 @@ class QAScannerMixin:
         settings_width = int(screen.width() * 0.52)
         settings_height = int(screen.height() * 0.85)
         dialog.resize(settings_width, settings_height)
+        first_paint_done = False
+
+        def pump_settings_open():
+            """Let the visible settings dialog paint while heavy sections build."""
+            nonlocal first_paint_done
+            if not show:
+                return
+            try:
+                dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+                if not first_paint_done:
+                    dialog.setWindowOpacity(1.0)
+                    dialog.show()
+                    dialog.raise_()
+                    dialog.activateWindow()
+                    first_paint_done = True
+                app = QApplication.instance()
+                if app is not None:
+                    app.processEvents(QEventLoop.ExcludeUserInputEvents)
+            except Exception:
+                pass
         
         # Set window icon and prepare icon path for comboboxes
         try:
@@ -2597,6 +2617,7 @@ class QAScannerMixin:
         title_label.setAlignment(Qt.AlignCenter)
         scroll_layout.addWidget(title_label)
         scroll_layout.addSpacing(20)
+        pump_settings_open()
         
         # Foreign Character Settings Section
         foreign_group = QGroupBox("Foreign Character Detection")
@@ -2717,6 +2738,7 @@ class QAScannerMixin:
         foreign_layout.addWidget(excluded_hint)
         
         scroll_layout.addSpacing(20)
+        pump_settings_open()
         
         # Detection Options Section
         detection_group = QGroupBox("Detection Options")
@@ -2865,6 +2887,7 @@ class QAScannerMixin:
         detection_layout.addWidget(check_potential_truncation_checkbox)
         
         scroll_layout.addSpacing(20)
+        pump_settings_open()
         
         # File Processing Section
         file_group = QGroupBox("File Processing")
@@ -2943,6 +2966,7 @@ class QAScannerMixin:
         file_layout.addWidget(min_spacing_text_widget)
 
         scroll_layout.addSpacing(15)
+        pump_settings_open()
         
         # Word Count Cross-Reference Section
         wordcount_group = QGroupBox("Word Count Analysis")
@@ -3223,6 +3247,7 @@ class QAScannerMixin:
         wordcount_layout.addWidget(images_desc)
 
         scroll_layout.addSpacing(20)
+        pump_settings_open()
         
         # Additional Checks Section
         additional_group = QGroupBox("Additional Checks")
@@ -4074,6 +4099,7 @@ class QAScannerMixin:
         toggle_paragraph_threshold(check_paragraph_structure_checkbox.isChecked())  # Set initial state
 
         scroll_layout.addSpacing(20)
+        pump_settings_open()
         
         # Report Settings Section
         report_group = QGroupBox("Report Settings")
@@ -4168,6 +4194,7 @@ class QAScannerMixin:
         wordcount_layout.addWidget(ratio_hint)
 
         scroll_layout.addSpacing(15)
+        pump_settings_open()
         
         # HTML Structure Analysis Section
         cache_group = QGroupBox("Performance Cache Settings")
@@ -4350,6 +4377,7 @@ class QAScannerMixin:
         cache_layout.addWidget(cache_info)
 
         scroll_layout.addSpacing(20)
+        pump_settings_open()
         
         # AI Hunter Performance Section
         ai_hunter_group = QGroupBox("AI Hunter Performance Settings")
@@ -4967,6 +4995,14 @@ class QAScannerMixin:
             _prewarm_dialog_offscreen(dialog)
             return dialog
         dialog.setAttribute(Qt.WA_DontShowOnScreen, False)
+
+        if dialog.isVisible():
+            try:
+                dialog.raise_()
+                dialog.activateWindow()
+            except Exception:
+                pass
+            return dialog
         
         # Show the dialog with fade animation and keep it alive for reuse
         try:
