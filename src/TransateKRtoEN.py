@@ -18,7 +18,8 @@ try:
     from bs4 import XMLParsedAsHTMLWarning
     import warnings
     # Suppress the warning since we handle both HTML and XHTML content
-    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+    if isinstance(XMLParsedAsHTMLWarning, type):
+        warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 except ImportError:
     # Older versions of BeautifulSoup might not have this warning
     pass
@@ -8435,6 +8436,41 @@ def set_output_redirect(log_callback=None):
 # EPUB AND FILE PROCESSING
 # =====================================================
 
+def _parse_special_file_tokens(value):
+    return [token.strip().lower() for token in str(value or '').split(',') if token.strip()]
+
+
+def _special_file_stem(filename):
+    base = os.path.basename(str(filename or '')).lower()
+    if base.startswith('response_'):
+        base = base[len('response_'):]
+    while True:
+        stem, ext = os.path.splitext(base)
+        if ext.lower() not in {'.html', '.xhtml', '.htm', '.xml', '.txt'}:
+            break
+        base = stem
+    return base
+
+
+def is_configured_special_filename(filename):
+    stem = _special_file_stem(filename)
+    if not stem:
+        return False
+    special_kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
+    special_keywords = (
+        _parse_special_file_tokens(special_kw_env)
+        if special_kw_env
+        else ['cover', 'title', 'toc', 'copyright', 'preface', 'nav', 'message', 'notice', 'info', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
+    )
+    special_exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
+    special_exact = (
+        _parse_special_file_tokens(special_exact_env)
+        if special_exact_env
+        else ['cover', 'index', 'glossary', 'glossary_extension']
+    )
+    return stem in special_exact or any(keyword in stem for keyword in special_keywords)
+
+
 def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_spine_data=None):
     """Extract chapter number from filename.
 
@@ -8448,6 +8484,13 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
     if base_no_ext.lower().startswith('response_'):
         base_no_ext = base_no_ext[len('response_'):]
     base_no_ext_lower = base_no_ext.lower()
+
+    # Special files always display/track as chapter 0. The
+    # TRANSLATE_ALL_NUMBERED_HTML setting only controls whether they are sent
+    # for translation; it must not turn notice/info pages into numbered
+    # chapters.
+    if is_configured_special_filename(base_no_ext):
+        return 0, 'configured_special'
 
     # Priority 1: digits in filename (use rightmost match to mirror GUI column)
     numbers = re.findall(r'[0-9]+', base_no_ext)
@@ -10240,16 +10283,25 @@ def _vision_ocr_source_prepass_enabled_for_mode(config=None):
     return mode in ("minimal", "balanced", "full")
 
 
+def parse_chapter_range(value):
+    """Return (start, end), accepting either 'N' or 'N-M'."""
+    value = str(value or "").strip()
+    if re.match(r"^\d+$", value):
+        num = int(value)
+        return num, num
+    if re.match(r"^\d+\s*-\s*\d+$", value):
+        return tuple(map(int, re.split(r"\s*-\s*", value, 1)))
+    return None
+
+
 def _vision_chapter_allowed_by_current_range(chapter, idx):
     if isinstance(chapter, dict) and chapter.get("_range_allowed_for_translation") is False:
         return False
     rng = os.getenv("CHAPTER_RANGE", "").strip()
-    if not rng or not re.match(r"^\d+\s*-\s*\d+$", rng):
+    parsed_range = parse_chapter_range(rng)
+    if not parsed_range:
         return True
-    try:
-        start_num, end_num = map(int, re.split(r"\s*-\s*", rng, 1))
-    except Exception:
-        return True
+    start_num, end_num = parsed_range
     if os.getenv("USE_SPINE_ORDER", "0") == "1" and isinstance(chapter, dict):
         spine_pos = chapter.get("spine_order")
         if spine_pos is None:
@@ -10296,7 +10348,7 @@ def _vision_ocr_glossary_should_skip_special_chapter(chapter):
     special_keywords = (
         [k.strip().lower() for k in special_kw_env.split(",") if k.strip()]
         if special_kw_env
-        else ["cover", "title", "toc", "copyright", "preface", "nav", "message", "notice", "colophon", "dedication", "epigraph", "foreword", "acknowledgment", "author", "appendix", "bibliography"]
+        else ["cover", "title", "toc", "copyright", "preface", "nav", "message", "notice", "info", "colophon", "dedication", "epigraph", "foreword", "acknowledgment", "author", "appendix", "bibliography"]
     )
     special_exact_env = os.getenv("SPECIAL_FILE_EXACT", "")
     special_exact = (
@@ -10704,9 +10756,10 @@ def run_vision_ocr_source_pdf_prepass(image_translator, input_path, output_dir, 
     ]
     image_paths.sort(key=_natural_pdf_image_key)
     rng = os.getenv("CHAPTER_RANGE", "").strip()
-    if rng and re.match(r"^\d+\s*-\s*\d+$", rng):
+    parsed_range = parse_chapter_range(rng)
+    if parsed_range:
         try:
-            start_page, end_page = map(int, re.split(r"\s*-\s*", rng, 1))
+            start_page, end_page = parsed_range
             indexed_paths = [
                 (idx, path)
                 for idx, path in enumerate(image_paths, 1)
@@ -11758,6 +11811,8 @@ def detect_novel_numbering(chapters):
         elif 'filename' in chapter:
             filename = os.path.basename(chapter['filename'])
         else:
+            continue
+        if is_configured_special_filename(filename):
             continue
             
         # First check for prefix_suffix pattern
@@ -16400,8 +16455,9 @@ def main(log_callback=None, stop_callback=None):
     start = None
     end = None
     use_spine_order = os.getenv("USE_SPINE_ORDER", "0") == "1"
-    if rng and re.match(r"^\d+\s*-\s*\d+$", rng):
-            start, end = map(int, rng.split("-", 1))
+    parsed_range = parse_chapter_range(rng)
+    if parsed_range:
+            start, end = parsed_range
             
             if use_spine_order:
                 print(f"📊 Using SPINE ORDER for chapter range: positions {start}-{end}")
@@ -16431,7 +16487,7 @@ def main(log_callback=None, stop_callback=None):
     _special_keywords = (
         [k.strip().lower() for k in _special_kw_env.split(',') if k.strip()]
         if _special_kw_env
-        else ['cover', 'title', 'toc', 'copyright', 'preface', 'nav', 'message', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
+        else ['cover', 'title', 'toc', 'copyright', 'preface', 'nav', 'message', 'notice', 'info', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'bibliography']
     )
     _special_exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
     _special_exact = (
@@ -16441,8 +16497,7 @@ def main(log_callback=None, stop_callback=None):
     )
 
     def _is_configured_special_file(fname):
-        name = os.path.basename(str(fname or '')).lower()
-        name_noext = os.path.splitext(name)[0]
+        name_noext = _special_file_stem(fname)
         if not name_noext:
             return False
         return name_noext in _special_exact or any(kw in name_noext for kw in _special_keywords)
@@ -16572,6 +16627,8 @@ def main(log_callback=None, stop_callback=None):
         # Extract the raw chapter number from the file
         raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
         #print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
+        name_for_numbering = c.get('original_basename') or os.path.basename(c.get('filename', ''))
+        is_special_for_numbering = (not is_text_file and _is_configured_special_file(name_for_numbering))
         # Spine position (reading order) fallback
         spine_pos = c.get('spine_order')
         if spine_pos is None:
@@ -16582,10 +16639,14 @@ def main(log_callback=None, stop_callback=None):
         # Normalize chapter number using extracted number (spine/file aware)
         normalized_num = raw_num if raw_num is not None else 0
         offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
-        raw_num = normalized_num + offset
+        raw_num = 0 if is_special_for_numbering else normalized_num + offset
         
         # When toggle is disabled, use raw numbers without any 0-based adjustment
-        if config.DISABLE_ZERO_DETECTION:
+        if is_special_for_numbering:
+            c['actual_chapter_num'] = 0
+            c['raw_chapter_num'] = 0
+            c['zero_adjusted'] = False
+        elif config.DISABLE_ZERO_DETECTION:
             c['actual_chapter_num'] = raw_num
             # Store raw number for consistency
             c['raw_chapter_num'] = raw_num
@@ -17348,12 +17409,18 @@ def main(log_callback=None, stop_callback=None):
             
             raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
             raw_num = raw_num if raw_num is not None else 0
+            name_for_numbering = c.get('original_basename') or os.path.basename(c.get('filename', ''))
+            is_special_for_numbering = (not is_text_file and _is_configured_special_file(name_for_numbering))
 
             # Apply offset if configured
             offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
-            raw_num += offset
+            raw_num = 0 if is_special_for_numbering else raw_num + offset
             
-            if config.DISABLE_ZERO_DETECTION:
+            if is_special_for_numbering:
+                c['actual_chapter_num'] = 0
+                c['raw_chapter_num'] = 0
+                c['zero_adjusted'] = False
+            elif config.DISABLE_ZERO_DETECTION:
                 # Use raw numbers without adjustment
                 c['actual_chapter_num'] = raw_num
                 c['raw_chapter_num'] = raw_num
@@ -18200,13 +18267,19 @@ def main(log_callback=None, stop_callback=None):
         for idx, c in enumerate(chapters):
             raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
             #print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
+            name_for_numbering = c.get('original_basename') or os.path.basename(c.get('filename', ''))
+            is_special_for_numbering = (not is_text_file and _is_configured_special_file(name_for_numbering))
 
             
             # Apply offset if configured
             offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
-            raw_num += offset
+            raw_num = 0 if is_special_for_numbering else raw_num + offset
             
-            if config.DISABLE_ZERO_DETECTION:
+            if is_special_for_numbering:
+                c['actual_chapter_num'] = 0
+                c['raw_chapter_num'] = 0
+                c['zero_adjusted'] = False
+            elif config.DISABLE_ZERO_DETECTION:
                 # Use raw numbers without adjustment
                 c['actual_chapter_num'] = raw_num
                 c['raw_chapter_num'] = raw_num

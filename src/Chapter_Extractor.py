@@ -39,6 +39,36 @@ except ImportError:
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from collections import Counter
 
+_DEFAULT_SPECIAL_KEYWORDS = [
+    'cover', 'title', 'toc', 'copyright', 'preface', 'nav', 'message',
+    'notice', 'info', 'colophon', 'dedication', 'epigraph', 'foreword',
+    'acknowledgment', 'author', 'appendix', 'bibliography'
+]
+_DEFAULT_SPECIAL_EXACT = ['cover', 'index', 'glossary', 'glossary_extension']
+
+
+def _special_file_stem(filename):
+    base = os.path.basename(str(filename or '')).lower()
+    if base.startswith('response_'):
+        base = base[len('response_'):]
+    while True:
+        stem, ext = os.path.splitext(base)
+        if ext.lower() not in {'.html', '.xhtml', '.htm', '.xml', '.txt'}:
+            break
+        base = stem
+    return base
+
+
+def _is_configured_special_file(filename):
+    stem = _special_file_stem(filename)
+    if not stem:
+        return False
+    kw_env = os.getenv('SPECIAL_FILE_KEYWORDS', '')
+    exact_env = os.getenv('SPECIAL_FILE_EXACT', '')
+    keywords = [k.strip().lower() for k in kw_env.split(',') if k.strip()] if kw_env else _DEFAULT_SPECIAL_KEYWORDS
+    exact = [k.strip().lower() for k in exact_env.split(',') if k.strip()] if exact_env else _DEFAULT_SPECIAL_EXACT
+    return stem in exact or any(keyword in stem for keyword in keywords)
+
 # ---------------------------------------------------------------------------
 # Inlined pattern constants for chapter extraction.
 # These MUST NOT trigger TransateKRtoEN import (which takes ~18s).
@@ -663,12 +693,13 @@ def ensure_all_opf_chapters_extracted(zf, chapters, out):
                     href = manifest[idref]
                     filename = os.path.basename(href)
                     
-                    # Skip nav, toc, cover - BUT only if filename has NO numbers
-                    # Files with numbers like 'nav01', 'toc05' are real chapters
+                    # Skip configured special files only when they have no
+                    # numbers. Numbered special files can still be translated
+                    # later, but they keep chapter number 0.
                     import re
                     has_numbers = bool(re.search(r'\d', filename))
                     translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
-                    if not translate_special and not has_numbers and any(skip in filename.lower() for skip in ['nav', 'toc', 'cover']):
+                    if not translate_special and not has_numbers and _is_configured_special_file(filename):
                         continue
                     
                     opf_chapters.append(href)
@@ -703,7 +734,9 @@ def ensure_all_opf_chapters_extracted(zf, chapters, out):
                     import re
                     basename = os.path.basename(href)
                     matches = re.findall(r'(\d+)', basename)
-                    if matches:
+                    if _is_configured_special_file(basename):
+                        chapter_num = 0
+                    elif matches:
                         chapter_num = int(matches[-1])
                     else:
                         chapter_num = len(chapters) + 1
@@ -2859,6 +2892,9 @@ def _process_single_html_file(
         # Ensure chapter_num is always an integer
         if isinstance(chapter_num, float):
             chapter_num = int(chapter_num)
+        if _is_configured_special_file(file_path):
+            chapter_num = 0
+            detection_method = "configured_special_file"
         
         # Create chapter info
         chapter_info = {

@@ -2,13 +2,13 @@ param(
     [switch]$RunPyInstaller,
     [string]$SpecPath = "src\translator.spec",
     [string]$DistDir = "src\dist",
-    [string]$ExecutablePattern = "Glossarion v*.exe",
+    [string]$ExecutablePattern = "",
     [string]$PackageName = "Shirochi.Glossarion",
     [string]$Publisher = "CN=Shirochi",
     [string]$PublisherDisplayName = "Shirochi",
     [string]$DisplayName = "Glossarion",
     [string]$Description = "Glossarion translation toolkit",
-    [string]$PackageVersion = "8.8.5.0",
+    [string]$PackageVersion = "",
     [ValidateSet("x64", "x86", "arm", "arm64", "neutral")]
     [string]$Architecture = "x64",
     [string]$MinVersion = "10.0.17763.0",
@@ -31,6 +31,32 @@ function Resolve-RepoPath([string]$PathValue) {
         return [System.IO.Path]::GetFullPath($PathValue)
     }
     return [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $PathValue))
+}
+
+function Get-AppVersion {
+    $appVersionPath = Resolve-RepoPath "src\app_version.py"
+    if (-not (Test-Path -LiteralPath $appVersionPath)) {
+        throw "Version script not found: $appVersionPath"
+    }
+
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) {
+        throw "Python was not found on PATH. It is required to read src\app_version.py."
+    }
+
+    $appVersionDir = Split-Path -Parent $appVersionPath
+    $script = "import sys; sys.path.insert(0, r'$appVersionDir'); from app_version import APP_VERSION; print(APP_VERSION)"
+    $versionOutput = & $python.Source -c $script
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to read APP_VERSION from $appVersionPath."
+    }
+
+    $version = (($versionOutput | Select-Object -First 1) -as [string]).Trim()
+    if (-not $version) {
+        throw "APP_VERSION in $appVersionPath did not produce a version value."
+    }
+
+    return $version
 }
 
 function Get-WindowsSdkTool([string]$ToolName) {
@@ -70,7 +96,7 @@ function Get-WindowsSdkTool([string]$ToolName) {
 function Convert-ToPackageVersion([string]$VersionValue) {
     $parts = $VersionValue.Split(".")
     if ($parts.Count -lt 3 -or $parts.Count -gt 4) {
-        throw "PackageVersion must be 3 or 4 numeric parts, for example 8.8.5.0."
+        throw "PackageVersion must be 3 or 4 numeric parts, for example 1.2.3.0."
     }
     while ($parts.Count -lt 4) {
         $parts += "0"
@@ -130,6 +156,13 @@ $StageFullPath = Resolve-RepoPath $StageRoot
 $PackageRoot = Join-Path $StageFullPath "package"
 $AppRoot = Join-Path $PackageRoot "App"
 $AssetsRoot = Join-Path $PackageRoot "Assets"
+$AppVersion = Get-AppVersion
+if (-not $PackageVersion) {
+    $PackageVersion = $AppVersion
+}
+if (-not $ExecutablePattern) {
+    $ExecutablePattern = "Glossarion v$AppVersion.exe"
+}
 $PackageVersion = Convert-ToPackageVersion $PackageVersion
 
 if ($RunPyInstaller) {

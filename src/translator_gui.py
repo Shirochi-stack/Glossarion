@@ -3519,7 +3519,7 @@ Recent translations to summarize:
         self.translate_special_files_var = self.config.get('translate_special_files', False)
         self.skip_image_title_translation_var = bool(self.config.get('skip_image_title_translation', True))
         # Custom special file keywords (comma-separated)
-        _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, copyright, preface, nav, message, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'
+        _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, copyright, preface, nav, message, notice, info, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'
         _DEFAULT_SPECIAL_EXACT = 'index, glossary, glossary_extension'
         self.special_file_keywords_var = self.config.get('special_file_keywords', _DEFAULT_SPECIAL_KEYWORDS)
         self.special_file_exact_var = self.config.get('special_file_exact', _DEFAULT_SPECIAL_EXACT)
@@ -7658,7 +7658,7 @@ Recent translations to summarize:
         chapter_range_layout.setSpacing(6)
         
         self.chapter_range_entry = QLineEdit()
-        self.chapter_range_entry.setPlaceholderText("e.g. 5-10")
+        self.chapter_range_entry.setPlaceholderText("e.g. 5 or 5-10")
         self.chapter_range_entry.setText(self.config.get('chapter_range', ''))
         self.chapter_range_entry.setMaximumWidth(120)
         self.chapter_range_entry.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -12235,9 +12235,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self.config['use_spine_order'] = checked
         # Update placeholder to hint the user
         if checked:
-            self.chapter_range_entry.setPlaceholderText("e.g. 5-10  📓")
+            self.chapter_range_entry.setPlaceholderText("e.g. 5 or 5-10  📓")
         else:
-            self.chapter_range_entry.setPlaceholderText("e.g. 5-10")
+            self.chapter_range_entry.setPlaceholderText("e.g. 5 or 5-10")
+
+    def _parse_chapter_range_text(self, value):
+        """Parse chapter range text. A single number means that one chapter."""
+        value = str(value or '').strip()
+        if re.match(r"^\d+$", value):
+            num = int(value)
+            return num, num
+        if re.match(r"^\d+\s*-\s*\d+$", value):
+            return tuple(map(int, re.split(r"\s*-\s*", value, 1)))
+        return None
 
     def _show_chapter_range_context_menu(self, pos):
         """Show right-click context menu on chapter range entry with file preview option."""
@@ -12274,11 +12284,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def _preview_chapter_range_files(self):
         """Show a non-modal, stay-on-top dialog previewing which files will be translated."""
         chap_range = self.chapter_range_entry.text().strip()
-        if not chap_range or not re.match(r"^\d+\s*-\s*\d+$", chap_range):
-            QMessageBox.information(self, "Preview", "Enter a valid chapter range (e.g. 5-10) first.")
+        parsed_range = self._parse_chapter_range_text(chap_range)
+        if not parsed_range:
+            QMessageBox.information(self, "Preview", "Enter a valid chapter range (e.g. 5 or 5-10) first.")
             return
 
-        start, end = map(int, chap_range.split("-", 1))
+        start, end = parsed_range
         use_spine = getattr(self, 'use_spine_order_checkbox', None)
         spine_mode = use_spine and use_spine.isChecked()
 
@@ -12388,8 +12399,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def _is_special_file(self, filename):
         """Check if a filename is a special file using configurable keyword lists.
         
-        When ``translate_all_numbered_html_var`` is enabled, files whose name
-        contains a digit are NOT considered special — they will be translated.
+        Numbered HTML translation is handled separately; files whose name
+        contains a digit can still be classified as special.
         """
         name_lower = filename.lower()
         base = os.path.basename(name_lower)
@@ -12413,13 +12424,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 _exact = [k.strip().lower() for k in _exact_str.split(',') if k.strip()]
                 if name_noext in _exact:
                     is_keyword_match = True
-        if not is_keyword_match:
+        return is_keyword_match
+
+    def _should_skip_special_file(self, filename, translate_special=False):
+        """Return True when a configured special file should be skipped."""
+        if translate_special:
             return False
-        # Numbered file override: if TRANSLATE_ALL_NUMBERED_HTML is enabled
-        # and the filename contains a digit, it's NOT special.
+        if not self._is_special_file(filename):
+            return False
         if getattr(self, 'translate_all_numbered_html_var', True):
             import re as _re
-            if _re.search(r'\d', name_noext):
+            name = os.path.splitext(os.path.basename(str(filename or '')))[0]
+            if name.lower().startswith("response_"):
+                name = name[len("response_"):]
+            if _re.search(r'\d', name):
                 return False
         return True
 
@@ -12492,7 +12510,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     translatable_pos = 0
                     for i, fname in enumerate(spine_items):
                         is_special = self._is_special_file(fname)
-                        skip_this = (not translate_special and is_special)
+                        skip_this = self._should_skip_special_file(fname, translate_special)
 
                         if not skip_this:
                             translatable_pos += 1
@@ -12513,13 +12531,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # Range refers to chapter numbers parsed from filenames
                     for i, fname in enumerate(spine_items):
                         is_special = self._is_special_file(fname)
-                        skip_this = (not translate_special and is_special)
+                        skip_this = self._should_skip_special_file(fname, translate_special)
 
-                        matches = re.findall(r'(\d+)', fname)
-                        if matches:
-                            chap_num = int(matches[-1])
-                        else:
+                        if is_special:
                             chap_num = 0
+                        else:
+                            matches = re.findall(r'(\d+)', fname)
+                            if matches:
+                                chap_num = int(matches[-1])
+                            else:
+                                chap_num = 0
                         if start <= chap_num <= end:
                             if skip_this:
                                 results.append((f"Ch.{chap_num}", fname, True))
@@ -12624,8 +12645,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 spine_order = []
                 for item in spine_order_full:
-                    # Skip special files unless override is enabled
-                    if translate_special or not self._is_special_file(item):
+                    # Numbered special files may be translated, but they still
+                    # remain special for chapter numbering/progress display.
+                    if not self._should_skip_special_file(item, translate_special):
                         spine_order.append(item)
                 
                 self.append_log(f"📋 Found {len(spine_order_full)} items in OPF spine ({len(spine_order)} after filtering)")

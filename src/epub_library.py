@@ -57,7 +57,7 @@ _BASE_PIXMAP_CACHE_LIMIT = 256
 _BASE_PIXMAP_CACHE: dict[str, QPixmap] = {}
 
 _DEFAULT_SPECIAL_FILE_KEYWORDS = (
-    "title, toc, copyright, preface, nav, message, notice, colophon, "
+    "title, toc, copyright, preface, nav, message, notice, info, colophon, "
     "dedication, epigraph, foreword, acknowledgment, author, appendix, "
     "bibliography"
 )
@@ -142,14 +142,6 @@ def _is_configured_special_file(name: str, config: dict | None = None) -> bool:
     keywords, exact = _resolve_special_file_lists(config)
     is_match = stem in exact or any(kw in stem for kw in keywords)
     if not is_match:
-        return False
-    # Numbered file override
-    cfg = config or {}
-    _all_numbered = (
-        os.environ.get('TRANSLATE_ALL_NUMBERED_HTML', '0') == '1'
-        or cfg.get('translate_all_numbered_html', True)
-    )
-    if _all_numbered and re.search(r'\d', stem):
         return False
     return True
 

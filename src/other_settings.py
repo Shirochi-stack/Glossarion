@@ -8697,7 +8697,7 @@ def _create_processing_options_section(self, parent):
     section_v.addWidget(translate_special_desc)
     
     # --- Collapsible keywords panel ---
-    _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, copyright, preface, nav, message, notice, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'
+    _DEFAULT_SPECIAL_KEYWORDS = 'title, toc, copyright, preface, nav, message, notice, info, colophon, dedication, epigraph, foreword, acknowledgment, author, appendix, bibliography'
     _DEFAULT_SPECIAL_EXACT = 'index, glossary, glossary_extension'
     
     # Initialize vars from config

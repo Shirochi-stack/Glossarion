@@ -129,6 +129,33 @@ class AnimatedRefreshButton(QPushButton):
 
 class RetranslationMixin:
     """Mixin class containing retranslation methods for TranslatorGUI"""
+
+    def _progress_file_is_skipped_special(self, filename, fallback_is_special=False):
+        """Return True only for special files that translation would skip."""
+        translate_special = bool(
+            getattr(self, 'translate_special_files_var', False)
+            or getattr(self, 'config', {}).get('translate_special_files', False)
+        )
+        if hasattr(self, '_should_skip_special_file'):
+            return self._should_skip_special_file(filename, translate_special)
+        if translate_special:
+            return False
+        is_special = fallback_is_special
+        if filename and hasattr(self, '_is_special_file'):
+            is_special = self._is_special_file(filename)
+        if not is_special:
+            return False
+        translate_all_numbered = bool(
+            getattr(self, 'translate_all_numbered_html_var', True)
+            or getattr(self, 'config', {}).get('translate_all_numbered_html', True)
+        )
+        if translate_all_numbered:
+            stem = os.path.splitext(os.path.basename(str(filename or '')))[0]
+            if stem.lower().startswith('response_'):
+                stem = stem[len('response_'):]
+            if re.search(r'\d', stem):
+                return False
+        return True
     
     def _ui_yield(self, ms=5):
         """Let the Qt event loop process pending events briefly."""
@@ -661,12 +688,14 @@ class RetranslationMixin:
                                     import re
                                     matches = re.findall(r'(\d+)', filename)
                                     if matches:
-                                        file_chapter_num = int(matches[-1])
+                                        file_chapter_num = 0 if is_special else int(matches[-1])
                                     elif is_special:
                                         # Special files without numbers should be chapter 0
                                         file_chapter_num = 0
                                     else:
-                                        file_chapter_num = len(spine_chapters)
+                                        # Non-numbered OPF files like info.xhtml are
+                                        # not real chapter numbers in the progress UI.
+                                        file_chapter_num = 0
                                     
                                     # Add all files - UI will handle filtering based on toggle
                                     spine_chapters.append({
@@ -3106,12 +3135,12 @@ class RetranslationMixin:
                             # translate_all_numbered_html setting.
                             _info = item_data.get('info') or {}
                             _fname = _info.get('original_filename', '') or _info.get('output_file', '') or _info.get('key', '')
-                            if _fname and hasattr(self, '_is_special_file'):
-                                is_special = self._is_special_file(_fname)
-                            else:
-                                is_special = item_data.get('is_special', False)
-                            # Show all items if toggle is on, hide special files if toggle is off
-                            item.setHidden(is_special and not show_special_files[0])
+                            is_skipped_special = self._progress_file_is_skipped_special(
+                                _fname,
+                                item_data.get('is_special', False),
+                            )
+                            # Show all items if toggle is on, hide only files that translation skips.
+                            item.setHidden(is_skipped_special and not show_special_files[0])
         
         # Connect the checkbox to the handler
         show_special_files_cb.stateChanged.connect(on_toggle_special_files)
@@ -3397,12 +3426,10 @@ class RetranslationMixin:
             # Add item to listbox first
             listbox.addItem(item)
             
-            # Then hide special files if toggle is off (must be done after adding to listbox)
-            # Dynamically re-evaluate is_special to respect current settings
+            # Then hide skipped special files if toggle is off (must be done after adding to listbox)
             _fname = info.get('original_filename', '') or info.get('output_file', '') or info.get('key', '')
-            if _fname and hasattr(self, '_is_special_file'):
-                is_special = self._is_special_file(_fname)
-            if is_special and not show_special_files[0]:
+            is_skipped_special = self._progress_file_is_skipped_special(_fname, is_special)
+            if is_skipped_special and not show_special_files[0]:
                 item.setHidden(True)
         
         # Selection count label
@@ -4926,14 +4953,13 @@ class RetranslationMixin:
                         if not item:
                             continue
                         meta = item.data(Qt.UserRole) or {}
-                        # Dynamically re-evaluate is_special to respect current settings
                         _info = meta.get('info') or {}
                         _fname = _info.get('original_filename', '') or _info.get('output_file', '') or _info.get('key', '')
-                        if _fname and hasattr(self, '_is_special_file'):
-                            is_special = self._is_special_file(_fname)
-                        else:
-                            is_special = meta.get('is_special', False)
-                        item.setHidden(is_special and not show_special)
+                        is_skipped_special = self._progress_file_is_skipped_special(
+                            _fname,
+                            meta.get('is_special', False),
+                        )
+                        item.setHidden(is_skipped_special and not show_special)
                 data['show_special_files_state'] = show_special
             except Exception:
                 pass
@@ -6092,13 +6118,11 @@ class RetranslationMixin:
                 item.setText(build_display(info, max_original_len, max_output_len))
                 apply_item_visuals(item, display_status)
                 is_special = info.get('is_special', False)
-                # Dynamically re-evaluate is_special to respect current settings
                 _fname = info.get('original_filename', '') or info.get('output_file', '') or info.get('key', '')
-                if _fname and hasattr(self, '_is_special_file'):
-                    is_special = self._is_special_file(_fname)
+                is_skipped_special = self._progress_file_is_skipped_special(_fname, is_special)
                 item.setData(Qt.UserRole, {'is_special': is_special, 'info': info, 'progress_key': info.get('progress_key')})
                 item.setData(Qt.UserRole + 2, display_status)
-                item.setHidden(is_special and not show_special_files)
+                item.setHidden(is_skipped_special and not show_special_files)
         else:
             # Recreate items
             listbox.clear()
@@ -6111,13 +6135,11 @@ class RetranslationMixin:
                 display_status = self._progress_display_status(info, data)
                 apply_item_visuals(item, display_status)
                 is_special = info.get('is_special', False)
-                # Dynamically re-evaluate is_special to respect current settings
                 _fname = info.get('original_filename', '') or info.get('output_file', '') or info.get('key', '')
-                if _fname and hasattr(self, '_is_special_file'):
-                    is_special = self._is_special_file(_fname)
+                is_skipped_special = self._progress_file_is_skipped_special(_fname, is_special)
                 item.setData(Qt.UserRole, {'is_special': is_special, 'info': info, 'progress_key': info.get('progress_key')})
                 item.setData(Qt.UserRole + 2, display_status)
-                item.setHidden(is_special and not show_special_files)
+                item.setHidden(is_skipped_special and not show_special_files)
                 listbox.addItem(item)
 
         listbox.blockSignals(False)
