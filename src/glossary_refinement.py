@@ -8,6 +8,8 @@ coupled to each other's implementation details.
 """
 
 import hashlib
+import csv
+import io
 import json
 import os
 import tempfile
@@ -22,8 +24,11 @@ DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT = """You are refining an already extra
 
 Your job is cleanup, not broad re-extraction. Preserve useful entries and return only the refined glossary entries for the provided entry type or entry types.
 
+Glossary schema:
+{fields}
+
 Critical refinement rules:
-- Keep the existing glossary schema and fields. Return refined glossary CSV only, using the same columns and delimiter shown in the provided glossary content.
+- Keep the existing glossary schema and fields. Return refined glossary CSV data rows only, using the columns and delimiter shown in the glossary schema above. Do not include a header row.
 - Remove duplicate entries, near-duplicates, and entries that only differ by trivial spacing, casing, honorifics, or punctuation.
 - Remove generic or unnecessary entries that are not useful for translation consistency.
 - For character entries, ensure there are no full-name character entries. If a character appears as a full name, split it into separate entries for the given name/first name and surname/family name. Do not combine first names, surnames, titles, nicknames, or aliases into one entry. Keep raw_name focused on the exact source form and translated_name focused on the target form.
@@ -37,6 +42,7 @@ Return only the refined glossary content. Do not include markdown, explanations,
 DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT = ""
 
 _progress_lock = threading.Lock()
+_SCHEMA_PLACEHOLDERS = ("{fields1}", "{{fields1}}", "{fields}", "{{fields}}", "{columns}", "{{columns}}")
 
 
 def refinement_enabled() -> bool:
@@ -54,23 +60,66 @@ def selected_refinement_types(active_types: Iterable[str]) -> List[str]:
     return [t for t in active if t.lower() in selected_lc]
 
 
+def _has_schema_placeholder(prompt_text: str) -> bool:
+    text = str(prompt_text or "")
+    return any(token in text for token in _SCHEMA_PLACEHOLDERS)
+
+
+def _is_legacy_default_refinement_prompt(prompt_text: str) -> bool:
+    text = str(prompt_text or "")
+    return (
+        "using the same columns and delimiter shown in the provided glossary content" in text
+        and not _has_schema_placeholder(text)
+    )
+
+
 def _entry_columns(entries: List[Dict]) -> List[str]:
     columns = ["type", "raw_name", "translated_name"]
+    try:
+        custom_fields = json.loads(os.getenv("GLOSSARY_CUSTOM_FIELDS", "[]"))
+        if not isinstance(custom_fields, list):
+            custom_fields = []
+    except Exception:
+        custom_fields = []
     for entry in entries or []:
         if not isinstance(entry, dict):
             continue
         for key in entry.keys():
             if key not in columns:
                 columns.append(key)
+    for field in custom_fields:
+        field = str(field or "").strip()
+        if field and field not in columns:
+            columns.append(field)
     return columns
 
 
-def _entry_payload(entries: List[Dict]) -> str:
-    sep = "\x1F"
-    columns = _entry_columns(entries)
-    lines = [sep.join(columns)]
+def _prompt_requests_unit_separator(system_prompt: str, user_prompt: str) -> bool:
+    prompt_text = f"{system_prompt or ''}\n{user_prompt or ''}"
+    return (
+        "{fields1}" in prompt_text
+        or "{{fields1}}" in prompt_text
+        or "Unit Separator" in prompt_text
+        or "\\x1F" in prompt_text
+        or "\\x1f" in prompt_text
+        or "\x1F" in prompt_text
+    )
+
+
+def _join_payload_row(values: List[str], delimiter: str) -> str:
+    if delimiter == "\x1F":
+        return delimiter.join(values)
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="")
+    writer.writerow(values)
+    return out.getvalue()
+
+
+def _entry_payload(entries: List[Dict], columns: Optional[List[str]] = None, delimiter: str = ",") -> str:
+    columns = columns or _entry_columns(entries)
+    lines = []
     for entry in entries:
-        lines.append(sep.join(str(entry.get(col, "")) for col in columns))
+        lines.append(_join_payload_row([str(entry.get(col, "")) for col in columns], delimiter))
     return "\n".join(lines)
 
 
@@ -148,8 +197,36 @@ def update_refinement_progress(
         _atomic_replace_file(temp_path, progress_file, atomic_replace_fn)
 
 
-def _build_messages(system_prompt: str, user_prompt: str, entry_type: str, chunk_text: str, chunk_idx=None, total_chunks=None) -> List[Dict]:
+def _render_prompt_placeholders(prompt_text: str, columns: List[str], entry_type: str, chunk_idx=None, total_chunks=None) -> str:
+    if not prompt_text:
+        return ""
+    sep = "\x1F"
+    fields1 = f"Columns (separated by Unit Separator character \\x1F):\n{sep.join(columns)}"
+    fields = f"Columns:\n{', '.join(columns)}"
+    replacements = {
+        "{fields1}": fields1,
+        "{{fields1}}": fields1,
+        "{fields}": fields,
+        "{{fields}}": fields,
+        "{columns}": fields,
+        "{{columns}}": fields,
+        "{entry_type}": str(entry_type or ""),
+        "{{entry_type}}": str(entry_type or ""),
+        "{chunk_index}": str(chunk_idx or ""),
+        "{{chunk_index}}": str(chunk_idx or ""),
+        "{total_chunks}": str(total_chunks or ""),
+        "{{total_chunks}}": str(total_chunks or ""),
+    }
+    rendered = str(prompt_text)
+    for needle, replacement in replacements.items():
+        rendered = rendered.replace(needle, replacement)
+    return rendered
+
+
+def _build_messages(system_prompt: str, user_prompt: str, entry_type: str, chunk_text: str, columns: List[str], chunk_idx=None, total_chunks=None) -> List[Dict]:
     messages = []
+    system_prompt = _render_prompt_placeholders(system_prompt, columns, entry_type, chunk_idx, total_chunks)
+    user_prompt = _render_prompt_placeholders(user_prompt, columns, entry_type, chunk_idx, total_chunks)
     if system_prompt and system_prompt.strip():
         messages.append({"role": "system", "content": system_prompt.strip()})
     user_parts = []
@@ -237,13 +314,16 @@ def refine_glossary_entries(
         return glossary
 
     system_prompt = os.getenv("GLOSSARY_REFINEMENT_SYSTEM_PROMPT", DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT)
-    if not str(system_prompt or "").strip():
+    if not str(system_prompt or "").strip() or _is_legacy_default_refinement_prompt(system_prompt):
         system_prompt = DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
     user_prompt = os.getenv("GLOSSARY_REFINEMENT_USER_PROMPT", DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT)
     chunking_mode = os.getenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", "separate").strip().lower()
     send_all_types = chunking_mode in ("all", "all_types", "all_in_one")
     canonical_mode = "all" if send_all_types else "separate"
     skip_dedupe = os.getenv("GLOSSARY_REFINEMENT_SKIP_DEDUPE", "0").strip().lower() in ("1", "true", "yes", "on")
+    payload_delimiter = "\x1F" if _prompt_requests_unit_separator(system_prompt, user_prompt) else ","
+    payload_delimiter_name = "unit_separator" if payload_delimiter == "\x1F" else "comma"
+    hash_mode = f"{canonical_mode}:{payload_delimiter_name}"
 
     log(f"\n🧹 Glossary refinement enabled for: {', '.join(selected_types)}")
     refined_by_type = {}
@@ -262,6 +342,31 @@ def refine_glossary_entries(
             entries = [dict(e) for e in glossary if str(e.get("type", "")).strip().lower() == entry_type.lower()]
             groups.append((entry_type, entries, f"type::{entry_type}", {entry_type.lower()}))
 
+    for entry_type, entries, type_key, _allowed_types_lc in groups:
+        if not entries:
+            continue
+        type_hash = _entry_hash(entry_type, entries, hash_mode)
+        type_progress = progress.get(type_key, {})
+        if (
+            isinstance(type_progress, dict)
+            and type_progress.get("status") == "completed"
+            and type_hash in (type_progress.get("input_hash"), type_progress.get("output_hash"))
+        ):
+            continue
+        placeholder = {
+            "entry_type": entry_type,
+            "status": "not_refined",
+            "input_hash": type_hash,
+            "chunking_mode": canonical_mode,
+            "payload_delimiter": payload_delimiter_name,
+            "entry_count_before": len(entries),
+            "output_file": os.path.basename(output_path or ""),
+        }
+        update_refinement_progress(progress_file, type_key, placeholder, atomic_replace_fn=atomic_replace_fn)
+        existing = dict(type_progress) if isinstance(type_progress, dict) else {}
+        existing.update(placeholder)
+        progress[type_key] = existing
+
     for entry_type, entries, type_key, allowed_types_lc in groups:
         if check_stop():
             log("Glossary refinement stopped before completion")
@@ -269,7 +374,7 @@ def refine_glossary_entries(
         if not entries:
             continue
 
-        type_hash = _entry_hash(entry_type, entries, canonical_mode)
+        type_hash = _entry_hash(entry_type, entries, hash_mode)
         type_progress = progress.get(type_key, {})
         if (
             isinstance(type_progress, dict)
@@ -287,7 +392,8 @@ def refine_glossary_entries(
                 refined_by_type[entry_type] = entries
             continue
 
-        payload = _entry_payload(entries)
+        payload_columns = _entry_columns(entries)
+        payload = _entry_payload(entries, payload_columns, payload_delimiter)
         chunks = [(payload, 1, 1)]
         try:
             token_count = chapter_splitter.count_tokens(payload)
@@ -309,6 +415,7 @@ def refine_glossary_entries(
             "status": "in_progress",
             "input_hash": type_hash,
             "chunking_mode": canonical_mode,
+            "payload_delimiter": payload_delimiter_name,
             "total_chunks": len(chunks),
             "output_file": os.path.basename(output_path or ""),
         }, atomic_replace_fn=atomic_replace_fn)
@@ -326,7 +433,7 @@ def refine_glossary_entries(
                 return glossary
 
             log(f"✨ Refining {entry_type} entries ({chunk_idx}/{total_chunks})...")
-            msgs = _build_messages(system_prompt, user_prompt, entry_type, chunk_text, chunk_idx, total_chunks)
+            msgs = _build_messages(system_prompt, user_prompt, entry_type, chunk_text, payload_columns, chunk_idx, total_chunks)
             msgs = _sanitize_messages_for_api(msgs, chunk_text)
             context_label = f"glossary refinement ({entry_type} {chunk_idx}/{total_chunks})"
             try:
@@ -361,7 +468,7 @@ def refine_glossary_entries(
                 if isinstance(entry, dict) and str(entry.get("type", "")).strip().lower() in allowed_types_lc
             ]
             if not parsed:
-                log(f"Refinement returned no valid {entry_type} entries for chunk {chunk_idx}; keeping original entries for this type.")
+                log(f"⚠️ Refinement returned no valid {entry_type} entries for chunk {chunk_idx}; keeping original entries for this type.")
                 update_refinement_progress(
                     progress_file,
                     type_key,
@@ -407,12 +514,12 @@ def refine_glossary_entries(
             update_refinement_progress(progress_file, type_key, {
                 "status": "completed",
                 "input_hash": type_hash,
-                "output_hash": _entry_hash(entry_type, refined_entries, canonical_mode),
+                "output_hash": _entry_hash(entry_type, refined_entries, hash_mode),
                 "entry_count_before": len(entries),
                 "entry_count_after": len(refined_entries),
                 "completed_chunks": len(chunks),
             }, atomic_replace_fn=atomic_replace_fn)
-            log(f"Refined {entry_type}: {len(entries)} -> {len(refined_entries)} entries")
+            log(f"✅ Refined {entry_type}: {len(entries)} -> {len(refined_entries)} entries")
         else:
             if send_all_types:
                 for selected_type in selected_types:

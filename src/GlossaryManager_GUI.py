@@ -5089,6 +5089,23 @@ Rules:
         prompt_layout = QVBoxLayout(prompt_box)
         layout.addWidget(prompt_box)
 
+        placeholder_line = QLineEdit("Available placeholders: {fields}, {columns}, {fields1}, {entry_type}, {chunk_index}, {total_chunks}")
+        placeholder_line.setReadOnly(True)
+        placeholder_line.setFrame(False)
+        placeholder_line.setCursorPosition(0)
+        placeholder_line.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
+        placeholder_line.setToolTip(
+            "<qt><table width='560' style='font-size:9pt; border-collapse:collapse;' cellpadding='4'>"
+            "<tr><td><b>{fields}</b></td><td>comma-separated glossary column schema, including active custom columns.</td></tr>"
+            "<tr><td><b>{columns}</b></td><td>alias for {fields}.</td></tr>"
+            "<tr><td><b>{fields1}</b></td><td>\\x1F-separated glossary column schema, only for prompts that explicitly want Unit Separator.</td></tr>"
+            "<tr><td><b>{entry_type}</b></td><td>entry type currently being refined.</td></tr>"
+            "<tr><td><b>{chunk_index}</b></td><td>current refinement chunk number.</td></tr>"
+            "<tr><td><b>{total_chunks}</b></td><td>total chunks for this entry type.</td></tr>"
+            "</table></qt>"
+        )
+        prompt_layout.addWidget(placeholder_line)
+
         prompt_layout.addWidget(QLabel("System Prompt:"))
         self.glossary_refinement_system_prompt_text = QTextEdit()
         self.glossary_refinement_system_prompt_text.setMinimumHeight(220)

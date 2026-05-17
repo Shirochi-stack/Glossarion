@@ -11,7 +11,7 @@ import copy
 from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget, 
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
-                                QScrollArea, QSizePolicy, QMenu)
+                                QScrollArea, QSizePolicy, QMenu, QAbstractItemView)
 from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl, QItemSelectionModel
 from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices
 import xml.etree.ElementTree as ET
@@ -1655,6 +1655,73 @@ class RetranslationMixin:
             except Exception:
                 pass
             return None
+
+        def _bool_setting(value):
+            if isinstance(value, str):
+                return value.strip().lower() in ('1', 'true', 'yes', 'on')
+            return bool(value)
+
+        def _glossary_refinement_settings_enabled():
+            try:
+                cfg = getattr(self, 'config', {}) or {}
+                if _bool_setting(cfg.get('glossary_refinement_enabled', False)):
+                    return True
+                return os.getenv('GLOSSARY_REFINEMENT_ENABLED', '').strip().lower() in ('1', 'true', 'yes', 'on')
+            except Exception:
+                return False
+
+        def _glossary_refinement_expected_entries():
+            if not _glossary_refinement_settings_enabled():
+                return {}
+            cfg = getattr(self, 'config', {}) or {}
+            custom_types = getattr(self, 'custom_entry_types', None) or cfg.get('custom_entry_types', {}) or {}
+            if not isinstance(custom_types, dict) or not custom_types:
+                custom_types = {
+                    'character': {'enabled': True},
+                    'terms': {'enabled': True},
+                }
+
+            active_types = []
+            for type_name, type_cfg in custom_types.items():
+                if isinstance(type_cfg, dict) and not type_cfg.get('enabled', True):
+                    continue
+                type_name = str(type_name or '').strip()
+                if type_name:
+                    active_types.append(type_name)
+
+            type_mode = str(cfg.get('glossary_refinement_type_mode', 'all') or 'all').lower()
+            if type_mode == 'selected':
+                selected = cfg.get('glossary_refinement_selected_types', [])
+                if isinstance(selected, str):
+                    selected = [t.strip() for t in selected.split(',') if t.strip()]
+                selected_lc = {str(t).strip().lower() for t in selected if str(t).strip()}
+                active_types = [t for t in active_types if t.lower() in selected_lc]
+
+            if not active_types:
+                return {}
+
+            chunking_mode = str(cfg.get('glossary_refinement_chunking_mode', 'separate') or 'separate').lower()
+            if chunking_mode in ('all', 'all_types', 'all_in_one'):
+                entry_type = 'all selected entry types'
+                return {
+                    f"all::{','.join(active_types)}": {
+                        'entry_type': entry_type,
+                        'status': 'not_refined',
+                        'chunking_mode': 'all',
+                    }
+                }
+
+            return {
+                f"type::{entry_type}": {
+                    'entry_type': entry_type,
+                    'status': 'not_refined',
+                    'chunking_mode': 'separate',
+                }
+                for entry_type in active_types
+            }
+
+        if _glossary_refinement_settings_enabled():
+            glossary_progress_btn.setVisible(True)
         
         def _build_gp_panel(fp, gp_path, parent_widget):
             """Build a glossary progress panel for a single EPUB. Returns (panel_widget, refresh_func)."""
@@ -2001,7 +2068,10 @@ class RetranslationMixin:
             def _gp_refinement_rows(_d):
                 refinement = _d.get('refinement', {}) if isinstance(_d, dict) else {}
                 if not isinstance(refinement, dict):
-                    return []
+                    refinement = {}
+                refinement = dict(refinement)
+                for expected_key, expected_info in _glossary_refinement_expected_entries().items():
+                    refinement.setdefault(expected_key, expected_info)
                 rows = []
                 for key, info in sorted(refinement.items()):
                     if not isinstance(info, dict):
@@ -2022,11 +2092,19 @@ class RetranslationMixin:
                         'failed': '\u274c',
                         'qa_failed': '\u274c',
                         'in_progress': '\U0001f504',
+                        'not_refined': '\u2728',
                     }
                     icon = icon_map.get(status, '\u2b1c')
                     display = f"Refinement | {icon} {status.replace('_', ' ').title():14s} | {entry_type}{detail}"
                     rows.append((key, display, status))
                 return rows
+
+            def _gp_refinement_status_counts(_d):
+                counts = {}
+                for _key, _display, status in _gp_refinement_rows(_d):
+                    status = str(status or 'unknown').lower().replace(' ', '_')
+                    counts[status] = counts.get(status, 0) + 1
+                return counts
 
             def _gp_color_for(status):
                 if status == 'completed':
@@ -2220,6 +2298,7 @@ class RetranslationMixin:
             n_merged = len(_merg_set_init)
             n_in_progress = len(_in_prog_set_init)
             n_remaining = max(0, panel_state['total'] - len(_comp_set_init | _fail_set_init | _merg_set_init | _in_prog_set_init))
+            n_not_refined = _gp_refinement_status_counts(gp_data).get('not_refined', 0)
             
             gp_stats_frame = QWidget()
             gp_stats_layout = QHBoxLayout(gp_stats_frame)
@@ -2258,11 +2337,18 @@ class RetranslationMixin:
             if n_merged == 0:
                 lbl_gp_merged.setVisible(False)
             
-            lbl_gp_remaining = QLabel(f"⬜ Not Translated: {n_remaining}")
+            lbl_gp_remaining = QLabel(f"⬜ Not Translated: {n_remaining}{' | ' if n_not_refined else ''}")
             lbl_gp_remaining.setFont(gp_stats_font)
             lbl_gp_remaining.setStyleSheet("color: #5a9fd4;")
             lbl_gp_remaining.setCursor(Qt.PointingHandCursor)
             gp_stats_layout.addWidget(lbl_gp_remaining)
+
+            lbl_gp_not_refined = QLabel(f"✨ Not Refined: {n_not_refined}")
+            lbl_gp_not_refined.setFont(gp_stats_font)
+            lbl_gp_not_refined.setStyleSheet("color: #5a9fd4;")
+            lbl_gp_not_refined.setCursor(Qt.PointingHandCursor)
+            lbl_gp_not_refined.setVisible(n_not_refined > 0)
+            gp_stats_layout.addWidget(lbl_gp_not_refined)
             
             gp_stats_layout.addStretch()
             p_layout.addWidget(gp_stats_frame)
@@ -2302,6 +2388,34 @@ class RetranslationMixin:
                 item.setData(Qt.UserRole, status)
                 item.setData(Qt.UserRole + 1, ci)  # Store chapter index for deletion
                 gp_listbox.addItem(item)
+
+            def _refresh_refinement_rows(_d, keep_updates_disabled=False):
+                selected_ref_keys = {
+                    it.data(Qt.UserRole + 3)
+                    for it in gp_listbox.selectedItems()
+                    if it and it.data(Qt.UserRole + 3)
+                }
+                if not keep_updates_disabled:
+                    gp_listbox.setUpdatesEnabled(False)
+                try:
+                    for row in range(gp_listbox.count() - 1, -1, -1):
+                        item = gp_listbox.item(row)
+                        if item and item.data(Qt.UserRole + 3):
+                            gp_listbox.takeItem(row)
+
+                    for ref_key, ref_display, ref_status in _gp_refinement_rows(_d):
+                        item = QListWidgetItem(ref_display)
+                        item.setForeground(QColor(_gp_color_for(ref_status)))
+                        item.setData(Qt.UserRole, ref_status)
+                        item.setData(Qt.UserRole + 1, None)
+                        item.setData(Qt.UserRole + 3, ref_key)
+                        gp_listbox.addItem(item)
+                        if ref_key in selected_ref_keys:
+                            item.setSelected(True)
+                finally:
+                    if not keep_updates_disabled:
+                        gp_listbox.setUpdatesEnabled(True)
+                        gp_listbox.viewport().update()
             
             def _populate_gp_listbox(_d, chunk_size=150):
                 panel_state['populate_generation'] = panel_state.get('populate_generation', 0) + 1
@@ -2332,13 +2446,7 @@ class RetranslationMixin:
                     if end_ci < total:
                         QTimer.singleShot(0, _add_chunk)
                     else:
-                        for ref_key, ref_display, ref_status in _gp_refinement_rows(_d):
-                            item = QListWidgetItem(ref_display)
-                            item.setForeground(QColor(_gp_color_for(ref_status)))
-                            item.setData(Qt.UserRole, ref_status)
-                            item.setData(Qt.UserRole + 1, None)
-                            item.setData(Qt.UserRole + 3, ref_key)
-                            gp_listbox.addItem(item)
+                        _refresh_refinement_rows(_d, keep_updates_disabled=True)
                         gp_listbox.setUpdatesEnabled(True)
                         gp_listbox.viewport().update()
 
@@ -2351,6 +2459,7 @@ class RetranslationMixin:
                 _comp2, _fail2, _merg2 = _gp_sets(_d)
                 _prog2 = _gp_in_progress_set(_d, _precomputed_sets=(_comp2, _fail2, _merg2))
                 _total = panel_state['total']
+                _not_refined2 = _gp_refinement_status_counts(_d).get('not_refined', 0)
                 lbl_total.setText(f"Total: {_total} | ")
                 lbl_gp_completed.setText(f"✅ Completed: {len(_comp2 - _merg2)} | ")
                 lbl_gp_in_progress.setText(f"🔄 In Progress: {len(_prog2)} | ")
@@ -2358,7 +2467,9 @@ class RetranslationMixin:
                 lbl_gp_failed.setText(f"❌ Failed: {len(_fail2)} | ")
                 lbl_gp_merged.setText(f"🔗 Merged: {len(_merg2)} | ")
                 lbl_gp_merged.setVisible(len(_merg2) > 0)
-                lbl_gp_remaining.setText(f"⬜ Not Translated: {max(0, _total - len(_comp2 | _fail2 | _merg2 | _prog2))}")
+                lbl_gp_remaining.setText(f"⬜ Not Translated: {max(0, _total - len(_comp2 | _fail2 | _merg2 | _prog2))}{' | ' if _not_refined2 else ''}")
+                lbl_gp_not_refined.setText(f"✨ Not Refined: {_not_refined2}")
+                lbl_gp_not_refined.setVisible(_not_refined2 > 0)
             
             # Right-click context menu to delete entries from progress
             def _gp_context_menu(pos):
@@ -2368,7 +2479,7 @@ class RetranslationMixin:
                     gp_listbox.clearSelection()
                     clicked_item.setSelected(True)
                 selected = gp_listbox.selectedItems()
-                deletable_statuses = ('completed', 'merged', 'in_progress', 'failed', 'qa_failed')
+                deletable_statuses = ('completed', 'merged', 'in_progress', 'failed', 'qa_failed', 'not_refined')
                 targets = []
                 for it in selected:
                     if it.data(Qt.UserRole) not in deletable_statuses:
@@ -2535,7 +2646,8 @@ class RetranslationMixin:
             lbl_gp_in_progress.mousePressEvent = _gp_make_cycle(('in_progress',), gp_listbox)
             lbl_gp_failed.mousePressEvent = _gp_make_cycle(('failed', 'qa_failed'), gp_listbox)
             lbl_gp_merged.mousePressEvent = _gp_make_cycle(('merged',), gp_listbox)
-            lbl_gp_remaining.mousePressEvent = _gp_make_cycle(('not_completed', 'not_translated', 'not_refined', 'no_tts'), gp_listbox)
+            lbl_gp_remaining.mousePressEvent = _gp_make_cycle(('not_completed', 'not_translated', 'no_tts'), gp_listbox)
+            lbl_gp_not_refined.mousePressEvent = _gp_make_cycle(('not_refined',), gp_listbox)
             
             p_layout.addWidget(gp_listbox)
             
@@ -2758,6 +2870,7 @@ class RetranslationMixin:
                     
                     _comp, _fail, _merg = _gp_sets(_d)
                     _prog = _gp_in_progress_set(_d, _precomputed_sets=(_comp, _fail, _merg))
+                    _not_refined = _gp_refinement_status_counts(_d).get('not_refined', 0)
                     _total = panel_state['total']
                     _cmap = panel_state['chapter_map']
                     
@@ -2769,7 +2882,9 @@ class RetranslationMixin:
                     lbl_gp_failed.setText(f"❌ Failed: {len(_fail)} | ")
                     lbl_gp_merged.setText(f"🔗 Merged: {len(_merg)} | ")
                     lbl_gp_merged.setVisible(len(_merg) > 0)
-                    lbl_gp_remaining.setText(f"⬜ Not Translated: {_nr}")
+                    lbl_gp_remaining.setText(f"⬜ Not Translated: {_nr}{' | ' if _not_refined else ''}")
+                    lbl_gp_not_refined.setText(f"✨ Not Refined: {_not_refined}")
+                    lbl_gp_not_refined.setVisible(_not_refined > 0)
                     
                     _bt = _d.get('book_title', '')
                     if _bt and bt_label:
@@ -2779,6 +2894,8 @@ class RetranslationMixin:
                     for ci in range(min(gp_listbox.count(), _total)):
                         item = gp_listbox.item(ci)
                         if not item:
+                            continue
+                        if item.data(Qt.UserRole + 3):
                             continue
                         old_status = item.data(Qt.UserRole)
                         new_status, _issues = _gp_status_for(ci, _d, _cache)
@@ -2793,6 +2910,7 @@ class RetranslationMixin:
                             item.setText(display2)
                             item.setForeground(QColor(new_color))
                             item.setData(Qt.UserRole, new_status)
+                    _refresh_refinement_rows(_d)
                 except Exception:
                     pass
             
@@ -2838,7 +2956,7 @@ class RetranslationMixin:
                 
                 # Hide button only when no EPUB has progress at all AND it's single-file mode
                 has_any_progress = any(gp is not None for _, gp in all_file_entries)
-                if not has_any_progress and len(all_file_entries) <= 1:
+                if not has_any_progress and len(all_file_entries) <= 1 and not _glossary_refinement_settings_enabled():
                     glossary_progress_btn.setVisible(False)
                     return
                 
@@ -2893,16 +3011,41 @@ class RetranslationMixin:
                     empty_icon.setStyleSheet("font-size: 36pt;")
                     p_layout.addWidget(empty_icon)
                     
+                    expected_refinement = _glossary_refinement_expected_entries()
                     empty_label = QLabel(f"No glossary extraction progress found for:\n{epub_base}")
                     empty_label.setAlignment(Qt.AlignCenter)
                     empty_label.setStyleSheet("color: #7a8a9e; font-size: 11pt;")
                     empty_label.setWordWrap(True)
                     p_layout.addWidget(empty_label)
                     
-                    hint_label = QLabel("Run glossary extraction to see progress here.")
+                    hint_text = "Run glossary extraction to see progress here."
+                    if expected_refinement:
+                        hint_text = "Glossary refinement is enabled; expected refinement entry types are listed below."
+                    hint_label = QLabel(hint_text)
                     hint_label.setAlignment(Qt.AlignCenter)
                     hint_label.setStyleSheet("color: #555; font-size: 9pt; font-style: italic;")
                     p_layout.addWidget(hint_label)
+
+                    if expected_refinement:
+                        ref_list = QListWidget(panel)
+                        ref_list.setSelectionMode(QAbstractItemView.NoSelection)
+                        ref_list.setStyleSheet("""
+                            QListWidget {
+                                background-color: #1f1f1f;
+                                color: white;
+                                border: 1px solid #4a5568;
+                                border-radius: 4px;
+                                padding: 4px;
+                            }
+                            QListWidget::item { padding: 3px 6px; }
+                        """)
+                        ref_list.setMaximumHeight(160)
+                        for _ref_key, ref_info in sorted(expected_refinement.items()):
+                            entry_type = str(ref_info.get('entry_type') or _ref_key.replace('type::', '')).strip() or 'entry type'
+                            item = QListWidgetItem(f"Refinement | \u2728 Not Refined    | {entry_type}")
+                            item.setForeground(QColor('#5a9fd4'))
+                            ref_list.addItem(item)
+                        p_layout.addWidget(ref_list)
                     
                     p_layout.addStretch()
                     
@@ -3109,9 +3252,10 @@ class RetranslationMixin:
                 gp_results = {fp: _find_gp_for_file(fp) for fp in all_epubs}
                 found_paths = {fp: gp for fp, gp in gp_results.items() if gp}
                 any_exists = bool(found_paths)
+                refinement_expected = _glossary_refinement_settings_enabled()
                 # In multi-file mode, always show button (dialog shows all EPUBs);
-                # in single-file mode, only show when a progress file exists.
-                glossary_progress_btn.setVisible(any_exists or is_multi)
+                # in single-file mode, show when a progress file exists or refinement is enabled.
+                glossary_progress_btn.setVisible(any_exists or is_multi or refinement_expected)
                 if any_exists:
                     count = len(found_paths)
                     if count == 1:
@@ -3119,6 +3263,8 @@ class RetranslationMixin:
                         glossary_progress_btn.setToolTip(f"View glossary extraction progress\n{gp}")
                     else:
                         glossary_progress_btn.setToolTip(f"View glossary extraction progress ({count}/{len(all_epubs)} files)")
+                elif refinement_expected:
+                    glossary_progress_btn.setToolTip("View glossary extraction and refinement progress")
                 elif is_multi:
                     glossary_progress_btn.setToolTip(f"View glossary extraction progress ({len(all_epubs)} files)")
             except RuntimeError:

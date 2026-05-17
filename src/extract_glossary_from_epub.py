@@ -2936,7 +2936,7 @@ def parse_api_response(response_text: str) -> List[Dict]:
                 custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
                 try:
                     custom_fields = json.loads(custom_fields_json)
-                    start_idx = 4  # Always 4, not conditional
+                    start_idx = 4 if type_config.get('has_gender', False) else 3
                     for i, field in enumerate(custom_fields):
                         if len(parts) > start_idx + i:
                             field_value = parts[start_idx + i]
