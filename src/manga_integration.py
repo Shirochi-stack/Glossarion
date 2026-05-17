@@ -4814,6 +4814,26 @@ class MangaTranslationTab(QObject):
         manga_glossary_compress_layout.addStretch()
         manga_glossary_layout.addWidget(manga_glossary_compress_frame)
 
+        manga_glossary_debug_frame = QWidget()
+        manga_glossary_debug_layout = QHBoxLayout(manga_glossary_debug_frame)
+        manga_glossary_debug_layout.setContentsMargins(20, 0, 0, 0)
+        manga_glossary_debug_layout.setSpacing(10)
+
+        self.manga_glossary_debug_ocr_checkbox = self._create_styled_checkbox("Save OCR/glossary debug subfolder")
+        self.manga_glossary_debug_ocr_checkbox.setChecked(bool(getattr(self, 'manga_glossary_debug_ocr_text_value', self.main_gui.config.get('manga_glossary_debug_ocr_text', False))))
+        self.manga_glossary_debug_ocr_checkbox.setToolTip(
+            "When generating a manga glossary, save a debug subfolder next to the generated glossary.\n"
+            "Includes the OCR text sent to glossary generation and the raw undeduped glossary output."
+        )
+        self.manga_glossary_debug_ocr_checkbox.stateChanged.connect(self._on_manga_glossary_debug_ocr_toggle)
+        manga_glossary_debug_layout.addWidget(self.manga_glossary_debug_ocr_checkbox)
+
+        manga_glossary_debug_hint = QLabel("(OCR text + raw undeduped glossary output)")
+        manga_glossary_debug_hint.setStyleSheet("color: #b8c7d9; font-size: 8pt;")
+        manga_glossary_debug_layout.addWidget(manga_glossary_debug_hint)
+        manga_glossary_debug_layout.addStretch()
+        manga_glossary_layout.addWidget(manga_glossary_debug_frame)
+
         manga_glossary_load_frame = QWidget()
         manga_glossary_load_layout = QHBoxLayout(manga_glossary_load_frame)
         manga_glossary_load_layout.setContentsMargins(20, 0, 0, 0)
@@ -7276,6 +7296,7 @@ class MangaTranslationTab(QObject):
         self.manga_glossary_auto_load_suppressed = config.get('manga_glossary_auto_load_suppressed', False)
         self.manga_glossary_auto_load_suppressed_root = config.get('manga_glossary_auto_load_suppressed_root', '')
         self.manga_split_first_level_subfolders_value = config.get('manga_split_first_level_subfolders', False)
+        self.manga_glossary_debug_ocr_text_value = config.get('manga_glossary_debug_ocr_text', False)
         self.compress_glossary_prompt_value = self._get_compress_glossary_prompt_value()
         self.manga_loaded_glossary_text = ''
         self.manga_generated_glossary_text = ''
@@ -7534,6 +7555,8 @@ class MangaTranslationTab(QObject):
                 self.manga_glossary_enabled_value = bool(self.manga_glossary_checkbox.isChecked())
             if hasattr(self, 'manga_compress_glossary_checkbox'):
                 self.compress_glossary_prompt_value = bool(self.manga_compress_glossary_checkbox.isChecked())
+            if hasattr(self, 'manga_glossary_debug_ocr_checkbox'):
+                self.manga_glossary_debug_ocr_text_value = bool(self.manga_glossary_debug_ocr_checkbox.isChecked())
             if hasattr(self, 'visual_context_checkbox'):
                 self.visual_context_enabled_value = bool(self.visual_context_checkbox.isChecked())
             if hasattr(self, 'manga_ocr_disable_thinking_checkbox'):
@@ -7763,6 +7786,8 @@ class MangaTranslationTab(QObject):
                 self.main_gui.config['manga_glossary_auto_load_suppressed_root'] = self.manga_glossary_auto_load_suppressed_root
             if hasattr(self, 'compress_glossary_prompt_value'):
                 self._sync_compress_glossary_prompt_setting(self.compress_glossary_prompt_value)
+            if hasattr(self, 'manga_glossary_debug_ocr_text_value'):
+                self.main_gui.config['manga_glossary_debug_ocr_text'] = bool(self.manga_glossary_debug_ocr_text_value)
             if hasattr(self, 'manga_split_first_level_subfolders_value'):
                 self.main_gui.config['manga_split_first_level_subfolders'] = bool(self.manga_split_first_level_subfolders_value)
             
@@ -8326,6 +8351,28 @@ class MangaTranslationTab(QObject):
         except Exception:
             enabled = bool(state)
         self._sync_compress_glossary_prompt_setting(enabled)
+        self._save_rendering_settings()
+
+    def _manga_glossary_debug_ocr_enabled(self) -> bool:
+        """Return True when manga glossary generation should save OCR/debug artifacts."""
+        try:
+            if hasattr(self, 'manga_glossary_debug_ocr_checkbox'):
+                return bool(self.manga_glossary_debug_ocr_checkbox.isChecked())
+        except Exception:
+            pass
+        return bool(getattr(self, 'manga_glossary_debug_ocr_text_value', self.main_gui.config.get('manga_glossary_debug_ocr_text', False)))
+
+    def _on_manga_glossary_debug_ocr_toggle(self, state=None):
+        """Persist the manga glossary OCR/debug output toggle."""
+        try:
+            enabled = bool(self.manga_glossary_debug_ocr_checkbox.isChecked()) if hasattr(self, 'manga_glossary_debug_ocr_checkbox') else bool(state)
+        except Exception:
+            enabled = bool(state)
+        self.manga_glossary_debug_ocr_text_value = enabled
+        try:
+            self.main_gui.config['manga_glossary_debug_ocr_text'] = enabled
+        except Exception:
+            pass
         self._save_rendering_settings()
 
     def _update_manga_glossary_status_label(self):
@@ -15935,6 +15982,109 @@ class MangaTranslationTab(QObject):
         os.makedirs(glossary_dir, exist_ok=True)
         return os.path.join(glossary_dir, f"{safe_name}_manga_glossary.json")
 
+    def _manga_glossary_debug_dirs(self) -> List[str]:
+        """Return debug subfolders beside both generated manga glossary copies."""
+        dirs = []
+        for base_dir in (self._manga_glossary_output_dir(), self._manga_glossary_backup_dir()):
+            try:
+                if base_dir:
+                    dirs.append(os.path.join(base_dir, "debug"))
+            except Exception:
+                pass
+        seen = set()
+        unique_dirs = []
+        for path in dirs:
+            norm = os.path.normcase(os.path.abspath(path))
+            if norm not in seen:
+                seen.add(norm)
+                unique_dirs.append(path)
+        return unique_dirs
+
+    def _manga_glossary_debug_json_safe(self, value: Any) -> Any:
+        """Convert parsed glossary/debug values into JSON-safe primitives."""
+        if isinstance(value, dict):
+            return {str(k): self._manga_glossary_debug_json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._manga_glossary_debug_json_safe(v) for v in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    def _write_manga_glossary_debug_file(self, debug_dir: str, filename: str, content: str) -> str:
+        os.makedirs(debug_dir, exist_ok=True)
+        path = os.path.join(debug_dir, filename)
+        with open(path, 'w', encoding='utf-8', newline='') as f:
+            f.write(content)
+            if content and not content.endswith('\n'):
+                f.write('\n')
+        return path
+
+    def _save_manga_glossary_generation_debug(
+        self,
+        ocr_pages: List[Dict[str, Any]],
+        combined_text: str,
+        response_text: str,
+        parsed_entries: List[Dict[str, Any]],
+        valid_entries_before_dedupe: List[Dict[str, Any]],
+    ) -> None:
+        """Save optional manga glossary generation debug artifacts."""
+        if not self._manga_glossary_debug_ocr_enabled():
+            return
+
+        debug_dirs = self._manga_glossary_debug_dirs()
+        if not debug_dirs:
+            return
+
+        ocr_pages_payload = []
+        for page in ocr_pages or []:
+            ocr_pages_payload.append({
+                "index": page.get("index"),
+                "path": page.get("path"),
+                "filename": os.path.basename(page.get("path", "")),
+                "texts": [str(text or "") for text in (page.get("texts", []) or [])],
+            })
+
+        total_regions = sum(len(page.get("texts", []) or []) for page in (ocr_pages or []))
+        manifest = {
+            "source": self._manga_glossary_source_name(),
+            "pages": len(ocr_pages or []),
+            "ocr_regions": total_regions,
+            "raw_response_chars": len(response_text or ""),
+            "parsed_undeduped_entries": len(parsed_entries or []),
+            "valid_undeduped_entries": len(valid_entries_before_dedupe or []),
+            "note": "Raw/valid entries are saved before manga glossary deduplication.",
+        }
+
+        written = []
+        try:
+            for debug_dir in debug_dirs:
+                written.append(self._write_manga_glossary_debug_file(debug_dir, "ocr_text.txt", combined_text or ""))
+                self._write_manga_glossary_debug_file(
+                    debug_dir,
+                    "ocr_pages.json",
+                    json.dumps(ocr_pages_payload, ensure_ascii=False, indent=2),
+                )
+                self._write_manga_glossary_debug_file(debug_dir, "raw_undeduped_glossary_output.txt", response_text or "")
+                self._write_manga_glossary_debug_file(
+                    debug_dir,
+                    "parsed_undeduped_entries.json",
+                    json.dumps(self._manga_glossary_debug_json_safe(parsed_entries or []), ensure_ascii=False, indent=2),
+                )
+                self._write_manga_glossary_debug_file(
+                    debug_dir,
+                    "valid_undeduped_entries.json",
+                    json.dumps(self._manga_glossary_debug_json_safe(valid_entries_before_dedupe or []), ensure_ascii=False, indent=2),
+                )
+                self._write_manga_glossary_debug_file(
+                    debug_dir,
+                    "manifest.json",
+                    json.dumps(manifest, ensure_ascii=False, indent=2),
+                )
+            if written:
+                self._log(f"🧪 Manga glossary debug saved: {', '.join(os.path.dirname(path) for path in written)}", "info")
+        except Exception as debug_err:
+            self._log(f"⚠️ Could not save manga glossary debug files: {debug_err}", "warning")
+
     def _normalize_manga_api_response_text(self, response: Any) -> str:
         if hasattr(response, 'content'):
             response = response.content
@@ -16098,6 +16248,14 @@ class MangaTranslationTab(QObject):
                         entries.append(entry)
                 except Exception:
                     continue
+
+            self._save_manga_glossary_generation_debug(
+                ocr_pages,
+                combined_text,
+                response_text,
+                parsed_entries,
+                entries,
+            )
 
             if entries:
                 try:
