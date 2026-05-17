@@ -3240,10 +3240,9 @@ Text to analyze:
         # Glossary prompt defaults — single source of truth in extract_glossary_from_epub
         try:
             from extract_glossary_from_epub import DEFAULT_GLOSSARY_PROMPT, DEFAULT_AUTO_GLOSSARY_PROMPT
-            from glossary_refinement import DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
             self.default_manual_glossary_prompt = DEFAULT_GLOSSARY_PROMPT
             self.default_unified_auto_glosary_prompt3 = DEFAULT_AUTO_GLOSSARY_PROMPT
-            self.default_glossary_refinement_system_prompt = DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
+            self.default_glossary_refinement_system_prompt = ""
         except ImportError:
             self.default_manual_glossary_prompt = ""
             self.default_unified_auto_glosary_prompt3 = ""

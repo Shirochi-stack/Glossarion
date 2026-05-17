@@ -18,24 +18,6 @@ from typing import Callable, Dict, Iterable, List, Optional
 from bs4 import BeautifulSoup
 
 
-DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT = """You are refining an already extracted translation glossary.
-
-Your job is cleanup, not broad re-extraction. Preserve useful entries and return only the refined glossary entries for the provided entry type.
-
-Critical extraction rules to enforce:
-- Keep the existing glossary schema and fields. Return refined glossary CSV only, using the same columns and delimiter shown in the provided glossary content.
-- Remove duplicate entries, near-duplicates, and entries that only differ by trivial spacing, casing, honorifics, or punctuation.
-- Remove generic or unnecessary entries that are not useful for translation consistency.
-- For character entries, split personal names correctly: do not combine unrelated first names, surnames, titles, nicknames, and aliases into one entry. Keep raw_name focused on the exact source form and translated_name focused on the target form.
-- Preserve gender fields only when the entry type supports gender and the value is supported by evidence.
-- Do not invent entries, translations, genders, descriptions, aliases, or facts that are not present in the provided glossary content.
-- If two entries conflict, keep the more specific and translation-useful one.
-- Keep active custom entry types separate; do not move entries into another type unless the current entry type is plainly wrong.
-
-Return only the refined glossary content. Do not include markdown, explanations, comments, or surrounding prose."""
-
-DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT = ""
-
 _progress_lock = threading.Lock()
 
 
@@ -149,22 +131,15 @@ def update_refinement_progress(
 
 
 def _build_messages(system_prompt: str, user_prompt: str, entry_type: str, chunk_text: str, chunk_idx=None, total_chunks=None) -> List[Dict]:
-    chunk_label = ""
-    if chunk_idx and total_chunks and int(total_chunks) > 1:
-        chunk_label = f"\nChunk: {chunk_idx}/{total_chunks}"
+    messages = []
+    if system_prompt and system_prompt.strip():
+        messages.append({"role": "system", "content": system_prompt.strip()})
     user_parts = []
     if user_prompt:
         user_parts.append(user_prompt.strip())
-    user_parts.append(
-        f"Entry type to refine: {entry_type}{chunk_label}\n\n"
-        "Glossary content follows as CSV. "
-        "Refine only these entries and return the refined CSV with the same columns:\n"
-        f"{chunk_text}"
-    )
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": "\n\n".join(user_parts)},
-    ]
+    user_parts.append(chunk_text)
+    messages.append({"role": "user", "content": "\n\n".join(user_parts)})
+    return messages
 
 
 def _sanitize_messages_for_api(msgs: List[Dict], fallback_text: str) -> List[Dict]:
@@ -243,10 +218,8 @@ def refine_glossary_entries(
         log("Glossary refinement enabled, but no active/selected entry types matched; skipping.")
         return glossary
 
-    system_prompt = os.getenv("GLOSSARY_REFINEMENT_SYSTEM_PROMPT", DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT)
-    if not system_prompt.strip():
-        system_prompt = DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
-    user_prompt = os.getenv("GLOSSARY_REFINEMENT_USER_PROMPT", DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT)
+    system_prompt = os.getenv("GLOSSARY_REFINEMENT_SYSTEM_PROMPT", "")
+    user_prompt = os.getenv("GLOSSARY_REFINEMENT_USER_PROMPT", "")
     chunking_mode = os.getenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", "separate").strip().lower()
     send_all_types = chunking_mode in ("all", "all_types", "all_in_one")
     canonical_mode = "all" if send_all_types else "separate"

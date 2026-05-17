@@ -2711,11 +2711,7 @@ class GlossaryManagerMixin:
             traceback.print_exc()
     
     def _default_glossary_refinement_system_prompt(self):
-        try:
-            from glossary_refinement import DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
-            return DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
-        except Exception:
-            return ""
+        return ""
 
     def _default_single_pass_header_prompt(self):
         return """You have two tasks for this request.
