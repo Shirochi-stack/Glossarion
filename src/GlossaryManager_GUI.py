@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton,
                                 QGroupBox, QSpinBox, QSlider, QMessageBox, QFileDialog,
                                 QSizePolicy, QAbstractItemView, QButtonGroup, QApplication,
                                 QComboBox, QMenu, QInputDialog)
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, Property, QObject, QEventLoop
+from PySide6.QtCore import Qt, Signal, Slot, QTimer, Property, QObject, QEventLoop, QSize
 from PySide6.QtGui import QFont, QColor, QIcon, QKeySequence, QShortcut, QBrush
 
 # WindowManager and UIHelper removed - not needed in PySide6
@@ -156,6 +156,18 @@ class GlossaryManagerMixin:
     def _disable_combobox_mousewheel(combobox):
         """Disable mousewheel scrolling on a combobox"""
         combobox.wheelEvent = lambda event: None
+
+    def _apply_halgakos_combo_icons(self, combo, size=18):
+        """Apply the Halgakos mascot icon to every item in a combo box."""
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                combo_icon = QIcon(icon_path)
+                for i in range(combo.count()):
+                    combo.setItemIcon(i, combo_icon)
+                combo.setIconSize(QSize(size, size))
+        except Exception:
+            pass
 
     def _set_glossary_tree_font_size(self, point_size, persist=True):
         """Apply a bounded font size to the glossary editor tree."""
@@ -4963,6 +4975,7 @@ Rules:
         type_mode_layout.addWidget(QLabel("Entry types:"))
         self.glossary_refinement_type_mode_combo = QComboBox()
         self.glossary_refinement_type_mode_combo.addItems(["All Active Entry Types", "Selected Entry Types"])
+        self._apply_halgakos_combo_icons(self.glossary_refinement_type_mode_combo)
         saved_type_mode = str(self.config.get('glossary_refinement_type_mode', 'all')).lower()
         self.glossary_refinement_type_mode_combo.setCurrentIndex(1 if saved_type_mode == 'selected' else 0)
         self.glossary_refinement_type_mode_combo.wheelEvent = lambda event: None
@@ -5073,6 +5086,7 @@ Rules:
         request_layout.addWidget(QLabel("Request mode:"))
         self.glossary_refinement_chunking_combo = QComboBox()
         self.glossary_refinement_chunking_combo.addItems(["Send each entry type in a separate request", "Send all entry types"])
+        self._apply_halgakos_combo_icons(self.glossary_refinement_chunking_combo)
         saved_chunking = str(self.config.get('glossary_refinement_chunking_mode', 'separate')).lower()
         self.glossary_refinement_chunking_combo.setCurrentIndex(1 if saved_chunking in ('all', 'all_types', 'all_in_one') else 0)
         self.glossary_refinement_chunking_combo.wheelEvent = lambda event: None
