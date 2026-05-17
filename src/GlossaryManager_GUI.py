@@ -5129,10 +5129,28 @@ Rules:
         btn_layout.setContentsMargins(0, 0, 0, 0)
         reset_btn = QPushButton("Reset to Default")
         reset_btn.setToolTip("Restore both refinement prompt fields to their defaults.")
+        reset_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b8860b;  /* dark yellow */
+                color: black;
+                padding: 5px;
+                border: 1px solid #8a6a08;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #9a6d07; }
+            QPushButton:pressed { background-color: #8a6106; }
+        """)
 
         def _reset_refinement_prompts_to_default():
-            self.glossary_refinement_system_prompt_text.setPlainText(self._sep_for_display(default_system))
-            self.glossary_refinement_user_prompt_text.setPlainText(self._sep_for_display(default_user))
+            reply = QMessageBox.question(
+                parent,
+                "Reset Prompt",
+                "Reset refinement system and user prompts to default?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self.glossary_refinement_system_prompt_text.setPlainText(self._sep_for_display(default_system))
+                self.glossary_refinement_user_prompt_text.setPlainText(self._sep_for_display(default_user))
 
         reset_btn.clicked.connect(_reset_refinement_prompts_to_default)
         btn_layout.addWidget(reset_btn)

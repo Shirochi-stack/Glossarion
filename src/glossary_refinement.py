@@ -15,6 +15,7 @@ import os
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, Iterable, List, Optional
 
 from bs4 import BeautifulSoup
@@ -60,6 +61,17 @@ def selected_refinement_types(active_types: Iterable[str]) -> List[str]:
     return [t for t in active if t.lower() in selected_lc]
 
 
+def _batch_translation_enabled() -> bool:
+    return os.getenv("BATCH_TRANSLATION", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _batch_size() -> int:
+    try:
+        return max(1, int(os.getenv("BATCH_SIZE", os.getenv("GLOSSARY_BATCH_SIZE", "1"))))
+    except Exception:
+        return 1
+
+
 def _has_schema_placeholder(prompt_text: str) -> bool:
     text = str(prompt_text or "")
     return any(token in text for token in _SCHEMA_PLACEHOLDERS)
@@ -73,18 +85,46 @@ def _is_legacy_default_refinement_prompt(prompt_text: str) -> bool:
     )
 
 
-def _entry_columns(entries: List[Dict]) -> List[str]:
-    columns = ["type", "raw_name", "translated_name"]
+def _active_custom_fields() -> List[str]:
     try:
         custom_fields = json.loads(os.getenv("GLOSSARY_CUSTOM_FIELDS", "[]"))
         if not isinstance(custom_fields, list):
-            custom_fields = []
+            return []
+        return [str(field).strip() for field in custom_fields if str(field).strip()]
     except Exception:
-        custom_fields = []
+        return []
+
+
+def _description_active(custom_fields: Optional[List[str]] = None) -> bool:
+    fields = custom_fields if custom_fields is not None else _active_custom_fields()
+    return any(str(field).strip().lower() == "description" for field in fields or [])
+
+
+def _strip_inactive_description(entries: List[Dict]) -> List[Dict]:
+    if _description_active():
+        return [dict(entry) for entry in entries or [] if isinstance(entry, dict)]
+    cleaned = []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        cleaned.append({
+            key: value
+            for key, value in dict(entry).items()
+            if str(key).strip().lower() != "description"
+        })
+    return cleaned
+
+
+def _entry_columns(entries: List[Dict]) -> List[str]:
+    columns = ["type", "raw_name", "translated_name"]
+    custom_fields = _active_custom_fields()
+    description_active = _description_active(custom_fields)
     for entry in entries or []:
         if not isinstance(entry, dict):
             continue
         for key in entry.keys():
+            if str(key).strip().lower() == "description" and not description_active:
+                continue
             if key not in columns:
                 columns.append(key)
     for field in custom_fields:
@@ -305,6 +345,7 @@ def refine_glossary_entries(
     if not glossary:
         log("Glossary refinement enabled, but glossary is empty; skipping.")
         return glossary
+    glossary = _strip_inactive_description(glossary)
 
     custom_types = custom_entry_types_fn()
     active_types = [t for t, cfg in custom_types.items() if not isinstance(cfg, dict) or cfg.get("enabled", True)]
@@ -367,12 +408,23 @@ def refine_glossary_entries(
         existing.update(placeholder)
         progress[type_key] = existing
 
-    for entry_type, entries, type_key, allowed_types_lc in groups:
+    def _original_mapping_for_group(entry_type, entries):
+        if send_all_types:
+            return {
+                selected_type: [
+                    e for e in entries
+                    if str(e.get("type", "")).strip().lower() == selected_type.lower()
+                ]
+                for selected_type in selected_types
+            }
+        return {entry_type: entries}
+
+    def _process_group(group):
+        entry_type, entries, type_key, allowed_types_lc = group
         if check_stop():
-            log("Glossary refinement stopped before completion")
-            break
+            return "stopped", entry_type, {}
         if not entries:
-            continue
+            return "empty", entry_type, {}
 
         type_hash = _entry_hash(entry_type, entries, hash_mode)
         type_progress = progress.get(type_key, {})
@@ -382,15 +434,7 @@ def refine_glossary_entries(
             and type_hash in (type_progress.get("input_hash"), type_progress.get("output_hash"))
         ):
             log(f"Refinement already completed for {entry_type}; skipping.")
-            if send_all_types:
-                for selected_type in selected_types:
-                    refined_by_type[selected_type] = [
-                        e for e in entries
-                        if str(e.get("type", "")).strip().lower() == selected_type.lower()
-                    ]
-            else:
-                refined_by_type[entry_type] = entries
-            continue
+            return "skipped", entry_type, _original_mapping_for_group(entry_type, entries)
 
         payload_columns = _entry_columns(entries)
         payload = _entry_payload(entries, payload_columns, payload_delimiter)
@@ -430,7 +474,7 @@ def refine_glossary_entries(
                     {"status": "in_progress", "completed_chunks": chunk_idx - 1},
                     atomic_replace_fn=atomic_replace_fn,
                 )
-                return glossary
+                return "stopped", entry_type, {}
 
             log(f"✨ Refining {entry_type} entries ({chunk_idx}/{total_chunks})...")
             msgs = _build_messages(system_prompt, user_prompt, entry_type, chunk_text, payload_columns, chunk_idx, total_chunks)
@@ -467,6 +511,7 @@ def refine_glossary_entries(
                 entry for entry in parsed
                 if isinstance(entry, dict) and str(entry.get("type", "")).strip().lower() in allowed_types_lc
             ]
+            parsed = _strip_inactive_description(parsed)
             if not parsed:
                 log(f"⚠️ Refinement returned no valid {entry_type} entries for chunk {chunk_idx}; keeping original entries for this type.")
                 update_refinement_progress(
@@ -500,17 +545,18 @@ def refine_glossary_entries(
             if not skip_dedupe:
                 refined_entries = dedupe_fn(refined_entries)
             if send_all_types:
+                result_mapping = {}
                 for selected_type in selected_types:
                     typed_refined = [
                         e for e in refined_entries
                         if str(e.get("type", "")).strip().lower() == selected_type.lower()
                     ]
-                    refined_by_type[selected_type] = typed_refined or [
+                    result_mapping[selected_type] = typed_refined or [
                         e for e in entries
                         if str(e.get("type", "")).strip().lower() == selected_type.lower()
                     ]
             else:
-                refined_by_type[entry_type] = refined_entries
+                result_mapping = {entry_type: refined_entries}
             update_refinement_progress(progress_file, type_key, {
                 "status": "completed",
                 "input_hash": type_hash,
@@ -520,15 +566,43 @@ def refine_glossary_entries(
                 "completed_chunks": len(chunks),
             }, atomic_replace_fn=atomic_replace_fn)
             log(f"✅ Refined {entry_type}: {len(entries)} -> {len(refined_entries)} entries")
-        else:
-            if send_all_types:
-                for selected_type in selected_types:
-                    refined_by_type[selected_type] = [
-                        e for e in entries
-                        if str(e.get("type", "")).strip().lower() == selected_type.lower()
-                    ]
-            else:
-                refined_by_type[entry_type] = entries
+            return "ok", entry_type, result_mapping
+
+        return "failed", entry_type, _original_mapping_for_group(entry_type, entries)
+
+    work_groups = [group for group in groups if group[1]]
+    stopped = False
+    batch_enabled = _batch_translation_enabled() and not send_all_types and len(work_groups) > 1
+    if batch_enabled:
+        max_workers = min(_batch_size(), len(work_groups))
+        log(f"🚀 Glossary refinement batch mode: {max_workers} parallel request(s)")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_process_group, group): group[0] for group in work_groups}
+            for future in as_completed(futures):
+                try:
+                    status, entry_type, result_mapping = future.result()
+                except Exception as e:
+                    entry_type = futures.get(future, "entry type")
+                    log(f"Refinement failed for {entry_type}: {e}")
+                    status, result_mapping = "failed", {}
+                if result_mapping:
+                    refined_by_type.update(result_mapping)
+                if status == "stopped":
+                    stopped = True
+                    for pending in futures:
+                        pending.cancel()
+                    break
+    else:
+        for group in work_groups:
+            status, _entry_type, result_mapping = _process_group(group)
+            if result_mapping:
+                refined_by_type.update(result_mapping)
+            if status == "stopped":
+                stopped = True
+                break
+
+    if stopped:
+        return glossary
 
     if not refined_by_type:
         return glossary
@@ -537,6 +611,8 @@ def refine_glossary_entries(
     rebuilt = [entry for entry in glossary if str(entry.get("type", "")).strip().lower() not in selected_lc]
     for entry_type in selected_types:
         rebuilt.extend(refined_by_type.get(entry_type, []))
+    rebuilt = _strip_inactive_description(rebuilt)
     if not skip_dedupe:
         rebuilt = dedupe_fn(rebuilt)
+        rebuilt = _strip_inactive_description(rebuilt)
     return rebuilt
