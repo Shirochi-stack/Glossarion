@@ -7620,6 +7620,17 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             existing_chapters_by_idx = {}
 
         manual_removed_set = set(manual_removed_indices)
+        if manual_removed_set:
+            if total_chapters:
+                all_chapters_removed = len(manual_removed_set) >= int(total_chapters)
+            else:
+                all_chapters_removed = bool(completed_clean or failed_clean or merged_clean or requested_in_progress_set) and manual_removed_set.issuperset(
+                    set(completed_clean) | set(failed_clean) | set(merged_clean) | requested_in_progress_set
+                )
+            if all_chapters_removed and (completed_clean or failed_clean or merged_clean or requested_in_progress_set):
+                print("⚠️ Ignoring stale glossary progress manual_removed_indices that covered every chapter.")
+                manual_removed_indices = []
+                manual_removed_set = set()
         if manual_removed_indices:
             completed_clean = [idx for idx in completed_clean if idx not in manual_removed_set]
             failed_clean = [idx for idx in failed_clean if idx not in manual_removed_set]

@@ -2528,32 +2528,33 @@ class RetranslationMixin:
                     indices_to_remove = set(value for _, (kind, value) in targets if kind == 'chapter')
                     refinement_keys_to_remove = set(value for _, (kind, value) in targets if kind == 'refinement')
                     changed = False
-                    removed_indices = _d.get('manual_removed_indices', [])
-                    if not isinstance(removed_indices, list):
-                        removed_indices = []
-                    removed_set = set()
-                    for value in removed_indices:
-                        mapped_ci = _gp_index_for_progress_value(value, _d)
-                        if mapped_ci is not None:
-                            removed_set.add(mapped_ci)
-                    removed_set.update(indices_to_remove)
-                    _d['manual_removed_indices'] = sorted(removed_set)
-                    _d['manual_removed_session_id'] = _d.get('progress_session_id')
-                    changed = True
+                    if indices_to_remove:
+                        removed_indices = _d.get('manual_removed_indices', [])
+                        if not isinstance(removed_indices, list):
+                            removed_indices = []
+                        removed_set = set()
+                        for value in removed_indices:
+                            mapped_ci = _gp_index_for_progress_value(value, _d)
+                            if mapped_ci is not None:
+                                removed_set.add(mapped_ci)
+                        removed_set.update(indices_to_remove)
+                        _d['manual_removed_indices'] = sorted(removed_set)
+                        _d['manual_removed_session_id'] = _d.get('progress_session_id')
+                        changed = True
 
                     for key in ('completed', 'failed', 'merged_indices', 'in_progress'):
                         lst = _d.get(key, [])
                         new_lst = []
                         for v in lst:
                             mapped_ci = _gp_index_for_progress_value(v, _d)
-                            if mapped_ci not in indices_to_remove:
+                            if not indices_to_remove or mapped_ci not in indices_to_remove:
                                 new_lst.append(v)
                         if len(new_lst) != len(lst):
                             _d[key] = new_lst
                             changed = True
 
                     qa_map = _d.get('qa_issues_found', {})
-                    if isinstance(qa_map, dict):
+                    if indices_to_remove and isinstance(qa_map, dict):
                         new_qa_map = {}
                         for k, v in qa_map.items():
                             mapped_ci = _gp_index_for_progress_value(k, _d)
@@ -2565,7 +2566,7 @@ class RetranslationMixin:
                             changed = True
 
                     chapters = _d.get('chapters', {})
-                    if isinstance(chapters, dict):
+                    if indices_to_remove and isinstance(chapters, dict):
                         new_chapters = {}
                         chapters_changed = False
                         for k, v in chapters.items():
