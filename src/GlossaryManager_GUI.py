@@ -1121,9 +1121,15 @@ class GlossaryManagerMixin:
                 notebook.addTab(tab_scroll, tab_name)
                 setup_method(tab_inner)
 
+        _refinement_tab_idx = 2
         _editor_tab_idx = 3  # "Glossary Editor" follows the refinement tab
 
         def _on_tab_switched(idx):
+            if idx == _refinement_tab_idx and hasattr(self, '_refresh_glossary_refinement_type_list'):
+                try:
+                    self._refresh_glossary_refinement_type_list()
+                except Exception:
+                    pass
             # Re-run glossary editor path resolution when switching to that tab
             if idx == _editor_tab_idx and hasattr(self, '_refresh_glossary_editor'):
                 try:
@@ -1146,9 +1152,9 @@ class GlossaryManagerMixin:
                 # Check if any types are enabled before saving
                 # Note: save_config will update enabled status from checkboxes automatically
                 enabled_types = []
-                if hasattr(self, 'type_enabled_checks') and hasattr(self, 'custom_entry_types'):
+                if hasattr(self, 'type_enabled_checkboxes') and hasattr(self, 'custom_entry_types'):
                     # Check from UI checkboxes
-                    for type_name, checkbox in self.type_enabled_checks.items():
+                    for type_name, checkbox in self.type_enabled_checkboxes.items():
                         if checkbox.isChecked():
                             enabled_types.append(type_name)
                 elif hasattr(self, 'custom_entry_types'):
@@ -4991,26 +4997,74 @@ Rules:
                 color: white;
             }
         """)
-        selected_types = set(self.config.get('glossary_refinement_selected_types', []))
-        custom_types = self.config.get('custom_entry_types', getattr(self, 'custom_entry_types', {})) or {}
-        if not custom_types:
-            custom_types = {'character': {'enabled': True}, 'term': {'enabled': True}}
         from PySide6.QtWidgets import QListWidgetItem
-        for type_name, type_cfg in custom_types.items():
-            if not isinstance(type_cfg, dict) or not type_cfg.get('enabled', True):
-                continue
-            list_item = QListWidgetItem()
-            list_item.setData(Qt.UserRole, type_name)
-            list_item.setFlags(Qt.ItemIsEnabled)
-            checkbox = self._create_styled_checkbox(type_name)
-            checkbox.setProperty('entry_type', type_name)
-            checkbox.setChecked(bool(not selected_types or type_name in selected_types))
-            try:
-                list_item.setSizeHint(checkbox.sizeHint())
-            except Exception:
-                pass
-            self.glossary_refinement_type_list.addItem(list_item)
-            self.glossary_refinement_type_list.setItemWidget(list_item, checkbox)
+
+        def _current_refinement_entry_types():
+            custom_types = dict(getattr(self, 'custom_entry_types', {}) or self.config.get('custom_entry_types', {}) or {})
+            if not custom_types:
+                custom_types = {'character': {'enabled': True}, 'terms': {'enabled': True}}
+            if 'term' in custom_types and 'terms' not in custom_types:
+                custom_types['terms'] = custom_types.pop('term')
+            if 'term' in custom_types and 'terms' in custom_types:
+                custom_types.pop('term', None)
+
+            live_checkboxes = getattr(self, 'type_enabled_checkboxes', {}) or {}
+            for type_name, checkbox in live_checkboxes.items():
+                if type_name in custom_types and isinstance(custom_types[type_name], dict):
+                    custom_types[type_name]['enabled'] = checkbox.isChecked()
+
+            return sorted(
+                (
+                    (type_name, type_cfg)
+                    for type_name, type_cfg in custom_types.items()
+                    if isinstance(type_cfg, dict) and type_cfg.get('enabled', True)
+                ),
+                key=lambda x: (x[0] not in ['character', 'terms'], x[0])
+            )
+
+        def _rebuild_refinement_type_list():
+            selected_types = set(self.config.get('glossary_refinement_selected_types', []))
+            current_checks = {}
+            for i in range(self.glossary_refinement_type_list.count()):
+                item = self.glossary_refinement_type_list.item(i)
+                widget = self.glossary_refinement_type_list.itemWidget(item) if item else None
+                if isinstance(widget, QCheckBox):
+                    current_checks[widget.property('entry_type') or widget.text()] = widget.isChecked()
+            if current_checks:
+                selected_types = {type_name for type_name, checked in current_checks.items() if checked}
+
+            self.glossary_refinement_type_list.clear()
+            active_types = _current_refinement_entry_types()
+            for type_name, _type_cfg in active_types:
+                list_item = QListWidgetItem()
+                list_item.setData(Qt.UserRole, type_name)
+                list_item.setFlags(Qt.ItemIsEnabled)
+                checkbox = self._create_styled_checkbox(type_name)
+                checkbox.setProperty('entry_type', type_name)
+                checkbox.setChecked(bool(not selected_types or type_name in selected_types))
+                try:
+                    list_item.setSizeHint(checkbox.sizeHint())
+                except Exception:
+                    pass
+                self.glossary_refinement_type_list.addItem(list_item)
+                self.glossary_refinement_type_list.setItemWidget(list_item, checkbox)
+
+            if hasattr(self, 'glossary_refinement_enabled_checkbox') and hasattr(self, 'glossary_refinement_type_mode_combo'):
+                type_list_enabled = (
+                    self.glossary_refinement_enabled_checkbox.isChecked()
+                    and self.glossary_refinement_type_mode_combo.currentIndex() == 1
+                )
+                self.glossary_refinement_type_list.setEnabled(type_list_enabled)
+                for i in range(self.glossary_refinement_type_list.count()):
+                    item = self.glossary_refinement_type_list.item(i)
+                    widget = self.glossary_refinement_type_list.itemWidget(item) if item else None
+                    if isinstance(widget, QCheckBox):
+                        widget.setEnabled(type_list_enabled)
+                        if hasattr(widget, '_update_checkmark'):
+                            QTimer.singleShot(0, widget._update_checkmark)
+
+        self._refresh_glossary_refinement_type_list = _rebuild_refinement_type_list
+        _rebuild_refinement_type_list()
         options_layout.addWidget(self.glossary_refinement_type_list)
 
         request_row = QWidget()

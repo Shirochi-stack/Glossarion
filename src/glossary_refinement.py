@@ -245,7 +245,7 @@ def refine_glossary_entries(
     canonical_mode = "all" if send_all_types else "separate"
     skip_dedupe = os.getenv("GLOSSARY_REFINEMENT_SKIP_DEDUPE", "0").strip().lower() in ("1", "true", "yes", "on")
 
-    log(f"\nGlossary refinement enabled for: {', '.join(selected_types)}")
+    log(f"\n🧹 Glossary refinement enabled for: {', '.join(selected_types)}")
     refined_by_type = {}
     progress = load_refinement_progress(progress_file)
     selected_lc = {t.lower() for t in selected_types}
@@ -325,7 +325,7 @@ def refine_glossary_entries(
                 )
                 return glossary
 
-            log(f"Refining {entry_type} entries ({chunk_idx}/{total_chunks})...")
+            log(f"✨ Refining {entry_type} entries ({chunk_idx}/{total_chunks})...")
             msgs = _build_messages(system_prompt, user_prompt, entry_type, chunk_text, chunk_idx, total_chunks)
             msgs = _sanitize_messages_for_api(msgs, chunk_text)
             context_label = f"glossary refinement ({entry_type} {chunk_idx}/{total_chunks})"
