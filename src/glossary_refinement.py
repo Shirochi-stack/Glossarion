@@ -394,11 +394,7 @@ def refine_glossary_entries(
             continue
         type_hash = _entry_hash(entry_type, entries, hash_mode)
         type_progress = progress.get(type_key, {})
-        if (
-            isinstance(type_progress, dict)
-            and type_progress.get("status") == "completed"
-            and type_hash in (type_progress.get("input_hash"), type_progress.get("output_hash"))
-        ):
+        if isinstance(type_progress, dict) and type_progress.get("status") == "completed":
             continue
         placeholder = {
             "entry_type": entry_type,
@@ -434,11 +430,7 @@ def refine_glossary_entries(
 
         type_hash = _entry_hash(entry_type, entries, hash_mode)
         type_progress = progress.get(type_key, {})
-        if (
-            isinstance(type_progress, dict)
-            and type_progress.get("status") == "completed"
-            and type_hash in (type_progress.get("input_hash"), type_progress.get("output_hash"))
-        ):
+        if isinstance(type_progress, dict) and type_progress.get("status") == "completed":
             log(f"Refinement already completed for {entry_type}; skipping.")
             return "skipped", entry_type, _original_mapping_for_group(entry_type, entries)
 
