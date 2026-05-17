@@ -25,6 +25,7 @@ from glossary_paths import (
     sanitize_glossary_folder_name,
 )
 from glossary_refinement import (
+    DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT,
     refine_glossary_entries,
     refinement_enabled as _glossary_refinement_enabled,
 )
@@ -5406,7 +5407,7 @@ def main(log_callback=None, stop_callback=None):
 
     refinement_env_defaults = {
         "GLOSSARY_REFINEMENT_ENABLED": "1" if config.get("glossary_refinement_enabled", False) else "0",
-        "GLOSSARY_REFINEMENT_SYSTEM_PROMPT": config.get("glossary_refinement_system_prompt", ""),
+        "GLOSSARY_REFINEMENT_SYSTEM_PROMPT": config.get("glossary_refinement_system_prompt") or DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT,
         "GLOSSARY_REFINEMENT_USER_PROMPT": config.get("glossary_refinement_user_prompt", ""),
         "GLOSSARY_REFINEMENT_TYPE_MODE": config.get("glossary_refinement_type_mode", "all"),
         "GLOSSARY_REFINEMENT_SELECTED_TYPES": ",".join(config.get("glossary_refinement_selected_types", [])),

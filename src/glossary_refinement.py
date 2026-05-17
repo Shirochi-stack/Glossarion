@@ -18,6 +18,24 @@ from typing import Callable, Dict, Iterable, List, Optional
 from bs4 import BeautifulSoup
 
 
+DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT = """You are refining an already extracted translation glossary.
+
+Your job is cleanup, not broad re-extraction. Preserve useful entries and return only the refined glossary entries for the provided entry type or entry types.
+
+Critical refinement rules:
+- Keep the existing glossary schema and fields. Return refined glossary CSV only, using the same columns and delimiter shown in the provided glossary content.
+- Remove duplicate entries, near-duplicates, and entries that only differ by trivial spacing, casing, honorifics, or punctuation.
+- Remove generic or unnecessary entries that are not useful for translation consistency.
+- For character entries, ensure there are no full-name character entries. If a character appears as a full name, split it into separate entries for the given name/first name and surname/family name. Do not combine first names, surnames, titles, nicknames, or aliases into one entry. Keep raw_name focused on the exact source form and translated_name focused on the target form.
+- Reject useless entries where raw_name and translated_name are essentially the same word or duplicate text.
+- Do not invent entries, translations, genders, descriptions, aliases, or facts that are not present in the provided glossary content.
+- If two entries conflict, keep the more specific and translation-useful one.
+- Keep active custom entry types separate; do not move entries into another type unless the current entry type is plainly wrong.
+
+Return only the refined glossary content. Do not include markdown, explanations, comments, or surrounding prose."""
+
+DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT = ""
+
 _progress_lock = threading.Lock()
 
 
@@ -218,8 +236,10 @@ def refine_glossary_entries(
         log("Glossary refinement enabled, but no active/selected entry types matched; skipping.")
         return glossary
 
-    system_prompt = os.getenv("GLOSSARY_REFINEMENT_SYSTEM_PROMPT", "")
-    user_prompt = os.getenv("GLOSSARY_REFINEMENT_USER_PROMPT", "")
+    system_prompt = os.getenv("GLOSSARY_REFINEMENT_SYSTEM_PROMPT", DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT)
+    if not str(system_prompt or "").strip():
+        system_prompt = DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
+    user_prompt = os.getenv("GLOSSARY_REFINEMENT_USER_PROMPT", DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT)
     chunking_mode = os.getenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", "separate").strip().lower()
     send_all_types = chunking_mode in ("all", "all_types", "all_in_one")
     canonical_mode = "all" if send_all_types else "separate"

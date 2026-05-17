@@ -2711,7 +2711,18 @@ class GlossaryManagerMixin:
             traceback.print_exc()
     
     def _default_glossary_refinement_system_prompt(self):
-        return ""
+        try:
+            from glossary_refinement import DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
+            return DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
+        except Exception:
+            return ""
+
+    def _default_glossary_refinement_user_prompt(self):
+        try:
+            from glossary_refinement import DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT
+            return DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT
+        except Exception:
+            return ""
 
     def _default_single_pass_header_prompt(self):
         return """You have two tasks for this request.
@@ -5037,15 +5048,22 @@ Rules:
         prompt_layout.addWidget(QLabel("User Prompt (optional):"))
         self.glossary_refinement_user_prompt_text = QTextEdit()
         self.glossary_refinement_user_prompt_text.setMinimumHeight(120)
-        self.glossary_refinement_user_prompt_text.setPlainText(self._sep_for_display(self.config.get('glossary_refinement_user_prompt', '')))
+        default_user = self._default_glossary_refinement_user_prompt()
+        self.glossary_refinement_user_prompt_text.setPlainText(self._sep_for_display(self.config.get('glossary_refinement_user_prompt', default_user)))
         self.glossary_refinement_user_prompt_text.setPlaceholderText("Leave empty to send only the glossary content.")
         prompt_layout.addWidget(self.glossary_refinement_user_prompt_text)
 
         btn_row = QWidget()
         btn_layout = QHBoxLayout(btn_row)
         btn_layout.setContentsMargins(0, 0, 0, 0)
-        reset_btn = QPushButton("Reset System Prompt")
-        reset_btn.clicked.connect(lambda: self.glossary_refinement_system_prompt_text.setPlainText(self._sep_for_display(default_system)))
+        reset_btn = QPushButton("Reset to Default")
+        reset_btn.setToolTip("Restore both refinement prompt fields to their defaults.")
+
+        def _reset_refinement_prompts_to_default():
+            self.glossary_refinement_system_prompt_text.setPlainText(self._sep_for_display(default_system))
+            self.glossary_refinement_user_prompt_text.setPlainText(self._sep_for_display(default_user))
+
+        reset_btn.clicked.connect(_reset_refinement_prompts_to_default)
         btn_layout.addWidget(reset_btn)
         btn_layout.addStretch()
         prompt_layout.addWidget(btn_row)

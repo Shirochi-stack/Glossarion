@@ -3240,13 +3240,16 @@ Text to analyze:
         # Glossary prompt defaults — single source of truth in extract_glossary_from_epub
         try:
             from extract_glossary_from_epub import DEFAULT_GLOSSARY_PROMPT, DEFAULT_AUTO_GLOSSARY_PROMPT
+            from glossary_refinement import DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT, DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT
             self.default_manual_glossary_prompt = DEFAULT_GLOSSARY_PROMPT
             self.default_unified_auto_glosary_prompt3 = DEFAULT_AUTO_GLOSSARY_PROMPT
-            self.default_glossary_refinement_system_prompt = ""
+            self.default_glossary_refinement_system_prompt = DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
+            self.default_glossary_refinement_user_prompt = DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT
         except ImportError:
             self.default_manual_glossary_prompt = ""
             self.default_unified_auto_glosary_prompt3 = ""
             self.default_glossary_refinement_system_prompt = ""
+            self.default_glossary_refinement_user_prompt = ""
         
         self.default_rolling_summary_system_prompt = """You are a context summarization assistant. Create concise, informative summaries that preserve key story elements for translation continuity."""
         
@@ -3366,7 +3369,10 @@ Recent translations to summarize:
         )
         if not self.glossary_refinement_system_prompt or not str(self.glossary_refinement_system_prompt).strip():
             self.glossary_refinement_system_prompt = getattr(self, 'default_glossary_refinement_system_prompt', '')
-        self.glossary_refinement_user_prompt = self.config.get('glossary_refinement_user_prompt', '')
+        self.glossary_refinement_user_prompt = self.config.get(
+            'glossary_refinement_user_prompt',
+            getattr(self, 'default_glossary_refinement_user_prompt', '')
+        )
         self.rolling_summary_system_prompt = self.config.get('rolling_summary_system_prompt', self.default_rolling_summary_system_prompt)
         self.rolling_summary_user_prompt = self.config.get('rolling_summary_user_prompt', self.default_rolling_summary_user_prompt)
         self.append_glossary_prompt = self.config.get('append_glossary_prompt', "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
@@ -15619,7 +15625,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SINGLE_PASS_GLOSSARY_HEADER_PROMPT': self.config.get('single_pass_glossary_header_prompt', ''),
             'AUTO_GLOSSARY_PROMPT': self.unified_auto_glosary_prompt3 if hasattr(self, 'unified_auto_glosary_prompt3') else '',
             'GLOSSARY_REFINEMENT_ENABLED': '1' if self.config.get('glossary_refinement_enabled', False) else '0',
-            'GLOSSARY_REFINEMENT_SYSTEM_PROMPT': self.config.get('glossary_refinement_system_prompt', getattr(self, 'glossary_refinement_system_prompt', '')),
+            'GLOSSARY_REFINEMENT_SYSTEM_PROMPT': self.config.get('glossary_refinement_system_prompt') or getattr(self, 'glossary_refinement_system_prompt', ''),
             'GLOSSARY_REFINEMENT_USER_PROMPT': self.config.get('glossary_refinement_user_prompt', getattr(self, 'glossary_refinement_user_prompt', '')),
             'GLOSSARY_REFINEMENT_TYPE_MODE': self.config.get('glossary_refinement_type_mode', 'all'),
             'GLOSSARY_REFINEMENT_SELECTED_TYPES': ','.join(self.config.get('glossary_refinement_selected_types', [])),
@@ -24123,7 +24129,7 @@ Important rules:
                     ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', '')),
                     ('AUTO_GLOSSARY_PROMPT', self.config.get('unified_auto_glosary_prompt3', '')),
                     ('GLOSSARY_REFINEMENT_ENABLED', '1' if self.config.get('glossary_refinement_enabled', False) else '0'),
-                    ('GLOSSARY_REFINEMENT_SYSTEM_PROMPT', self.config.get('glossary_refinement_system_prompt', '')),
+                    ('GLOSSARY_REFINEMENT_SYSTEM_PROMPT', self.config.get('glossary_refinement_system_prompt') or getattr(self, 'glossary_refinement_system_prompt', '')),
                     ('GLOSSARY_REFINEMENT_USER_PROMPT', self.config.get('glossary_refinement_user_prompt', '')),
                     ('GLOSSARY_REFINEMENT_TYPE_MODE', self.config.get('glossary_refinement_type_mode', 'all')),
                     ('GLOSSARY_REFINEMENT_SELECTED_TYPES', ','.join(self.config.get('glossary_refinement_selected_types', []))),
@@ -24555,7 +24561,7 @@ Important rules:
                 ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', getattr(self, 'manual_glossary_prompt', ''))),
                 ('AUTO_GLOSSARY_PROMPT', self.config.get('unified_auto_glosary_prompt3', getattr(self, 'unified_auto_glosary_prompt3', ''))),
                 ('GLOSSARY_REFINEMENT_ENABLED', '1' if self.config.get('glossary_refinement_enabled', False) else '0'),
-                ('GLOSSARY_REFINEMENT_SYSTEM_PROMPT', self.config.get('glossary_refinement_system_prompt', getattr(self, 'glossary_refinement_system_prompt', ''))),
+                ('GLOSSARY_REFINEMENT_SYSTEM_PROMPT', self.config.get('glossary_refinement_system_prompt') or getattr(self, 'glossary_refinement_system_prompt', '')),
                 ('GLOSSARY_REFINEMENT_USER_PROMPT', self.config.get('glossary_refinement_user_prompt', getattr(self, 'glossary_refinement_user_prompt', ''))),
                 ('GLOSSARY_REFINEMENT_TYPE_MODE', self.config.get('glossary_refinement_type_mode', 'all')),
                 ('GLOSSARY_REFINEMENT_SELECTED_TYPES', ','.join(self.config.get('glossary_refinement_selected_types', []))),

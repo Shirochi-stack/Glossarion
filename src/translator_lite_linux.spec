@@ -83,6 +83,7 @@ app_files = [
     
     # Glossary extractors
     ('extract_glossary_from_epub.py', '.'),
+    ('glossary_refinement.py', '.'),
     ('extract_glossary_from_txt.py', '.'),
     ('glossary_process_worker.py', '.'),
     ('chapter_extraction_worker.py', '.'),
@@ -180,6 +181,7 @@ datas.append(('enable_debug_mode.py', '.'))
 app_modules = [
     'TransateKRtoEN',
     'extract_glossary_from_epub',
+    'glossary_refinement',
     'extract_glossary_from_txt',
     'glossary_process_worker',
     'chapter_extraction_worker',
