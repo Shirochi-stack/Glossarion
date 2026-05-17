@@ -28,6 +28,9 @@ Your job is cleanup, not broad re-extraction. Preserve useful entries and return
 Glossary schema:
 {fields}
 
+Active refinement entry types:
+{entries}
+
 Critical refinement rules:
 - Keep the existing glossary schema and fields. Return refined glossary CSV data rows only, using the columns and delimiter shown in the glossary schema above. Do not include a header row.
 - Remove duplicate entries, near-duplicates, and entries that only differ by trivial spacing, casing, honorifics, or punctuation.
@@ -237,12 +240,13 @@ def update_refinement_progress(
         _atomic_replace_file(temp_path, progress_file, atomic_replace_fn)
 
 
-def _render_prompt_placeholders(prompt_text: str, columns: List[str], entry_type: str, chunk_idx=None, total_chunks=None) -> str:
+def _render_prompt_placeholders(prompt_text: str, columns: List[str], entry_type: str, chunk_idx=None, total_chunks=None, active_entry_types: Optional[List[str]] = None) -> str:
     if not prompt_text:
         return ""
     sep = "\x1F"
     fields1 = f"Columns (separated by Unit Separator character \\x1F):\n{sep.join(columns)}"
     fields = f"Columns:\n{', '.join(columns)}"
+    entries = ", ".join(str(t).strip() for t in (active_entry_types or []) if str(t).strip())
     replacements = {
         "{fields1}": fields1,
         "{{fields1}}": fields1,
@@ -250,6 +254,8 @@ def _render_prompt_placeholders(prompt_text: str, columns: List[str], entry_type
         "{{fields}}": fields,
         "{columns}": fields,
         "{{columns}}": fields,
+        "{entries}": entries,
+        "{{entries}}": entries,
         "{entry_type}": str(entry_type or ""),
         "{{entry_type}}": str(entry_type or ""),
         "{chunk_index}": str(chunk_idx or ""),
@@ -263,10 +269,10 @@ def _render_prompt_placeholders(prompt_text: str, columns: List[str], entry_type
     return rendered
 
 
-def _build_messages(system_prompt: str, user_prompt: str, entry_type: str, chunk_text: str, columns: List[str], chunk_idx=None, total_chunks=None) -> List[Dict]:
+def _build_messages(system_prompt: str, user_prompt: str, entry_type: str, chunk_text: str, columns: List[str], chunk_idx=None, total_chunks=None, active_entry_types: Optional[List[str]] = None) -> List[Dict]:
     messages = []
-    system_prompt = _render_prompt_placeholders(system_prompt, columns, entry_type, chunk_idx, total_chunks)
-    user_prompt = _render_prompt_placeholders(user_prompt, columns, entry_type, chunk_idx, total_chunks)
+    system_prompt = _render_prompt_placeholders(system_prompt, columns, entry_type, chunk_idx, total_chunks, active_entry_types)
+    user_prompt = _render_prompt_placeholders(user_prompt, columns, entry_type, chunk_idx, total_chunks, active_entry_types)
     if system_prompt and system_prompt.strip():
         messages.append({"role": "system", "content": system_prompt.strip()})
     user_parts = []
@@ -477,7 +483,7 @@ def refine_glossary_entries(
                 return "stopped", entry_type, {}
 
             log(f"✨ Refining {entry_type} entries ({chunk_idx}/{total_chunks})...")
-            msgs = _build_messages(system_prompt, user_prompt, entry_type, chunk_text, payload_columns, chunk_idx, total_chunks)
+            msgs = _build_messages(system_prompt, user_prompt, entry_type, chunk_text, payload_columns, chunk_idx, total_chunks, selected_types)
             msgs = _sanitize_messages_for_api(msgs, chunk_text)
             context_label = f"glossary refinement ({entry_type} {chunk_idx}/{total_chunks})"
             try:

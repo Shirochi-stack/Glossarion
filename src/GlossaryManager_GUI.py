@@ -5103,7 +5103,7 @@ Rules:
         prompt_layout = QVBoxLayout(prompt_box)
         layout.addWidget(prompt_box)
 
-        placeholder_line = QLineEdit("Available placeholders: {fields}, {columns}, {fields1}, {entry_type}, {chunk_index}, {total_chunks}")
+        placeholder_line = QLineEdit("Available placeholders: {fields}, {columns}, {fields1}, {entries}, {chunk_index}, {total_chunks}")
         placeholder_line.setReadOnly(True)
         placeholder_line.setFrame(False)
         placeholder_line.setCursorPosition(0)
@@ -5113,7 +5113,7 @@ Rules:
             "<tr><td><b>{fields}</b></td><td>comma-separated glossary column schema, including active custom columns.</td></tr>"
             "<tr><td><b>{columns}</b></td><td>alias for {fields}.</td></tr>"
             "<tr><td><b>{fields1}</b></td><td>\\x1F-separated glossary column schema, only for prompts that explicitly want Unit Separator.</td></tr>"
-            "<tr><td><b>{entry_type}</b></td><td>entry type currently being refined.</td></tr>"
+            "<tr><td><b>{entries}</b></td><td>comma-separated active refinement entry types.</td></tr>"
             "<tr><td><b>{chunk_index}</b></td><td>current refinement chunk number.</td></tr>"
             "<tr><td><b>{total_chunks}</b></td><td>total chunks for this entry type.</td></tr>"
             "</table></qt>"
