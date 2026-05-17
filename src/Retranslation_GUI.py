@@ -1998,6 +1998,36 @@ class RetranslationMixin:
                     display += f" | {issues_display}"
                 return display, status
 
+            def _gp_refinement_rows(_d):
+                refinement = _d.get('refinement', {}) if isinstance(_d, dict) else {}
+                if not isinstance(refinement, dict):
+                    return []
+                rows = []
+                for key, info in sorted(refinement.items()):
+                    if not isinstance(info, dict):
+                        continue
+                    entry_type = str(info.get('entry_type') or key.replace('type::', '')).strip() or 'entry type'
+                    status = str(info.get('status') or 'unknown').lower()
+                    before = info.get('entry_count_before')
+                    after = info.get('entry_count_after')
+                    total_chunks = info.get('total_chunks')
+                    completed_chunks = info.get('completed_chunks')
+                    detail = ""
+                    if before is not None and after is not None:
+                        detail = f" | {before} -> {after} entries"
+                    elif total_chunks:
+                        detail = f" | chunks {completed_chunks or 0}/{total_chunks}"
+                    icon_map = {
+                        'completed': '\u2705',
+                        'failed': '\u274c',
+                        'qa_failed': '\u274c',
+                        'in_progress': '\U0001f504',
+                    }
+                    icon = icon_map.get(status, '\u2b1c')
+                    display = f"Refinement | {icon} {status.replace('_', ' ').title():14s} | {entry_type}{detail}"
+                    rows.append((key, display, status))
+                return rows
+
             def _gp_color_for(status):
                 if status == 'completed':
                     return '#27ae60'
@@ -2302,6 +2332,13 @@ class RetranslationMixin:
                     if end_ci < total:
                         QTimer.singleShot(0, _add_chunk)
                     else:
+                        for ref_key, ref_display, ref_status in _gp_refinement_rows(_d):
+                            item = QListWidgetItem(ref_display)
+                            item.setForeground(QColor(_gp_color_for(ref_status)))
+                            item.setData(Qt.UserRole, ref_status)
+                            item.setData(Qt.UserRole + 1, None)
+                            item.setData(Qt.UserRole + 3, ref_key)
+                            gp_listbox.addItem(item)
                         gp_listbox.setUpdatesEnabled(True)
                         gp_listbox.viewport().update()
 
@@ -2332,8 +2369,16 @@ class RetranslationMixin:
                     clicked_item.setSelected(True)
                 selected = gp_listbox.selectedItems()
                 deletable_statuses = ('completed', 'merged', 'in_progress', 'failed', 'qa_failed')
-                targets = [(it, it.data(Qt.UserRole + 1)) for it in selected
-                           if it.data(Qt.UserRole) in deletable_statuses and it.data(Qt.UserRole + 1) is not None]
+                targets = []
+                for it in selected:
+                    if it.data(Qt.UserRole) not in deletable_statuses:
+                        continue
+                    refinement_key = it.data(Qt.UserRole + 3)
+                    chapter_index = it.data(Qt.UserRole + 1)
+                    if refinement_key:
+                        targets.append((it, ('refinement', refinement_key)))
+                    elif chapter_index is not None:
+                        targets.append((it, ('chapter', chapter_index)))
                 if not targets:
                     return
                 
@@ -2346,11 +2391,14 @@ class RetranslationMixin:
                 
                 n = len(targets)
                 if n == 1:
-                    ci = targets[0][1]
+                    target_kind, target_value = targets[0][1]
                     status = targets[0][0].data(Qt.UserRole)
                     display_text = targets[0][0].text() or ""
-                    label_match = re.search(r'\bCh\.\d+(?:\.\d+)?\b', display_text)
-                    chapter_label = label_match.group(0) if label_match else f"Ch.{ci+1}"
+                    if target_kind == 'refinement':
+                        chapter_label = display_text.split('|')[-1].strip() or str(target_value)
+                    else:
+                        label_match = re.search(r'\bCh\.\d+(?:\.\d+)?\b', display_text)
+                        chapter_label = label_match.group(0) if label_match else f"Ch.{target_value+1}"
                     action = menu.addAction(f"🗑️ Remove {chapter_label} from progress ({status})")
                 else:
                     action = menu.addAction(f"🗑️ Remove {n} chapters from progress")
@@ -2366,7 +2414,8 @@ class RetranslationMixin:
                         return
                     _d = _gp_load_progress_dict(_rp)
                     
-                    indices_to_remove = set(ci for _, ci in targets)
+                    indices_to_remove = set(value for _, (kind, value) in targets if kind == 'chapter')
+                    refinement_keys_to_remove = set(value for _, (kind, value) in targets if kind == 'refinement')
                     changed = False
                     removed_indices = _d.get('manual_removed_indices', [])
                     if not isinstance(removed_indices, list):
@@ -2419,18 +2468,35 @@ class RetranslationMixin:
                         if chapters_changed or len(new_chapters) != len(chapters):
                             _d['chapters'] = new_chapters
                             changed = True
+
+                    if refinement_keys_to_remove and isinstance(_d.get('refinement'), dict):
+                        for ref_key in refinement_keys_to_remove:
+                            if ref_key in _d['refinement']:
+                                del _d['refinement'][ref_key]
+                                changed = True
                     
                     if changed:
                         with open(_rp, 'w', encoding='utf-8') as _f:
                             json.dump(_d, _f, ensure_ascii=False, indent=2)
                         # Update all affected items
                         _cmap = panel_state['chapter_map']
-                        for it, ci in targets:
-                            fname = _cmap.get(ci, f'chapter {ci + 1}')
-                            display3, restored_status = _gp_display_for(ci, fname, _d)
-                            it.setText(display3)
-                            it.setForeground(QColor(_gp_color_for(restored_status)))
-                            it.setData(Qt.UserRole, restored_status)
+                        for it, (kind, value) in targets:
+                            if kind == 'refinement':
+                                row = next((r for r in _gp_refinement_rows(_d) if r[0] == value), None)
+                                if row:
+                                    _rk, display3, restored_status = row
+                                    it.setText(display3)
+                                    it.setForeground(QColor(_gp_color_for(restored_status)))
+                                    it.setData(Qt.UserRole, restored_status)
+                                else:
+                                    gp_listbox.takeItem(gp_listbox.row(it))
+                            else:
+                                ci = value
+                                fname = _cmap.get(ci, f'chapter {ci + 1}')
+                                display3, restored_status = _gp_display_for(ci, fname, _d)
+                                it.setText(display3)
+                                it.setForeground(QColor(_gp_color_for(restored_status)))
+                                it.setData(Qt.UserRole, restored_status)
                         _refresh_stats_from_dict(_d)
                 except Exception as e:
                     print(f"⚠️ Error removing chapters from progress: {e}")

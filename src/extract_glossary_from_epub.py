@@ -3184,6 +3184,25 @@ def _apply_subject_tracking_placeholder(prompt_text, include_gender_context=None
     )
 
 
+DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT = """You are refining an already extracted translation glossary.
+
+Your job is cleanup, not broad re-extraction. Preserve useful entries and return only the refined glossary entries for the provided entry type.
+
+Critical extraction rules to enforce:
+- Keep the existing output schema and fields. Return a valid JSON array of entry objects only.
+- Remove duplicate entries, near-duplicates, and entries that only differ by trivial spacing, casing, honorifics, or punctuation.
+- Remove generic or unnecessary entries that are not useful for translation consistency.
+- For character entries, split personal names correctly: do not combine unrelated first names, surnames, titles, nicknames, and aliases into one entry. Keep raw_name focused on the exact source form and translated_name focused on the target form.
+- Preserve gender fields only when the entry type supports gender and the value is supported by evidence.
+- Do not invent entries, translations, genders, descriptions, aliases, or facts that are not present in the provided glossary content.
+- If two entries conflict, keep the more specific and translation-useful one.
+- Keep active custom entry types separate; do not move entries into another type unless the current entry type is plainly wrong.
+
+Return only JSON. Do not include markdown, explanations, comments, or surrounding prose."""
+
+DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT = ""
+
+
 def _apply_description_rule_placeholders(prompt_text, custom_fields=None, description_active=None):
     """Replace description-rule placeholders in glossary prompts.
 
@@ -3205,7 +3224,7 @@ def _apply_description_rule_placeholders(prompt_text, custom_fields=None, descri
             When True/False, skips the Custom Fields lookup entirely.
             Useful for the auto/minimal prompt path which uses the
             ``GLOSSARY_INCLUDE_DESCRIPTION`` env var instead.
-    """
+"""
     if not isinstance(prompt_text, str):
         return prompt_text
     all_placeholders = (
@@ -4010,6 +4029,236 @@ def _load_glossary_file(path: str) -> List[Dict]:
     except Exception as e:
         print(f"⚠️ Could not load glossary file {path}: {e}")
         return []
+
+def _glossary_refinement_enabled() -> bool:
+    return os.getenv("GLOSSARY_REFINEMENT_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+
+def _glossary_refinement_selected_types(active_types):
+    mode = os.getenv("GLOSSARY_REFINEMENT_TYPE_MODE", "all").strip().lower()
+    if mode != "selected":
+        return list(active_types)
+    raw = os.getenv("GLOSSARY_REFINEMENT_SELECTED_TYPES", "")
+    selected = [t.strip() for t in raw.split(",") if t.strip()]
+    selected_lc = {t.lower() for t in selected}
+    return [t for t in active_types if t.lower() in selected_lc]
+
+def _glossary_refinement_entry_payload(entries):
+    return "\n".join(json.dumps(entry, ensure_ascii=False, sort_keys=True) for entry in entries)
+
+def _glossary_refinement_hash(entry_type, entries, chunking_mode):
+    payload = {
+        "entry_type": entry_type,
+        "chunking_mode": chunking_mode,
+        "entries": entries,
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+def _load_refinement_progress(context=None):
+    progress_file = _resolved_glossary_progress_file(context)
+    if not os.path.exists(progress_file):
+        return {}
+    try:
+        with open(progress_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        refinement = data.get("refinement", {}) if isinstance(data, dict) else {}
+        return refinement if isinstance(refinement, dict) else {}
+    except Exception:
+        return {}
+
+def _update_refinement_progress(context, key, entry):
+    progress_file = _resolved_glossary_progress_file(context)
+    with _progress_lock:
+        data = {}
+        if os.path.exists(progress_file):
+            try:
+                with open(progress_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        refinement = data.setdefault("refinement", {})
+        if not isinstance(refinement, dict):
+            refinement = {}
+            data["refinement"] = refinement
+        existing = refinement.get(key, {}) if isinstance(refinement.get(key), dict) else {}
+        merged = dict(existing)
+        merged.update(entry)
+        merged["last_updated"] = time.time()
+        refinement[key] = merged
+        os.makedirs(os.path.dirname(progress_file) or ".", exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(progress_file) or ".", delete=False, suffix=".tmp") as temp_f:
+            temp_path = temp_f.name
+            json.dump(data, temp_f, ensure_ascii=False, indent=2)
+            temp_f.flush()
+            os.fsync(temp_f.fileno())
+        _atomic_replace_file(temp_path, progress_file)
+
+def _build_refinement_messages(system_prompt, user_prompt, entry_type, chunk_text, chunk_idx=None, total_chunks=None):
+    chunk_label = ""
+    if chunk_idx and total_chunks and int(total_chunks) > 1:
+        chunk_label = f"\nChunk: {chunk_idx}/{total_chunks}"
+    user_parts = []
+    if user_prompt:
+        user_parts.append(user_prompt.strip())
+    user_parts.append(
+        f"Entry type to refine: {entry_type}{chunk_label}\n\n"
+        "Glossary content follows as one JSON object per line. Refine only these entries and return a JSON array:\n"
+        f"{chunk_text}"
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+
+def _refine_glossary_entries(
+    glossary,
+    *,
+    client,
+    temp,
+    mtoks,
+    check_stop,
+    chapter_splitter,
+    available_tokens,
+    chunk_timeout,
+    context=None,
+    output_path=None,
+):
+    if not _glossary_refinement_enabled():
+        return glossary
+    if not glossary:
+        print("✨ Glossary refinement enabled, but glossary is empty; skipping.")
+        return glossary
+
+    custom_types = get_custom_entry_types()
+    active_types = [t for t, cfg in custom_types.items() if cfg.get("enabled", True)]
+    selected_types = _glossary_refinement_selected_types(active_types)
+    if not selected_types:
+        print("✨ Glossary refinement enabled, but no active/selected entry types matched; skipping.")
+        return glossary
+
+    system_prompt = os.getenv("GLOSSARY_REFINEMENT_SYSTEM_PROMPT", DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT)
+    if not system_prompt.strip():
+        system_prompt = DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
+    user_prompt = os.getenv("GLOSSARY_REFINEMENT_USER_PROMPT", "")
+    chunking_mode = os.getenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", "chunked").strip().lower()
+    send_all_in_one = chunking_mode in ("single", "all", "all_in_one", "one")
+    skip_dedupe = os.getenv("GLOSSARY_REFINEMENT_SKIP_DEDUPE", "0").strip().lower() in ("1", "true", "yes", "on")
+
+    print(f"\n✨ Glossary refinement enabled for: {', '.join(selected_types)}")
+    refined_by_type = {}
+    progress = _load_refinement_progress(context)
+
+    for entry_type in selected_types:
+        if check_stop():
+            print("❌ Glossary refinement stopped before completion")
+            break
+        entries = [dict(e) for e in glossary if str(e.get("type", "")).strip().lower() == entry_type.lower()]
+        if not entries:
+            continue
+
+        type_hash = _glossary_refinement_hash(entry_type, entries, "single" if send_all_in_one else "chunked")
+        type_key = f"type::{entry_type}"
+        type_progress = progress.get(type_key, {})
+        if (
+            isinstance(type_progress, dict)
+            and type_progress.get("status") == "completed"
+            and type_hash in (type_progress.get("input_hash"), type_progress.get("output_hash"))
+        ):
+            print(f"✨ Refinement already completed for {entry_type}; skipping.")
+            refined_by_type[entry_type] = entries
+            continue
+
+        payload = _glossary_refinement_entry_payload(entries)
+        chunks = [(payload, 1, 1)]
+        if not send_all_in_one and chapter_splitter.count_tokens(payload) > available_tokens:
+            wrapped = f"<html><body><p>{payload.replace(chr(10), '</p><p>')}</p></body></html>"
+            chunks = [
+                (BeautifulSoup(chunk_html, "html.parser").get_text("\n", strip=True), chunk_idx, total_chunks)
+                for chunk_html, chunk_idx, total_chunks in chapter_splitter.split_chapter(wrapped, available_tokens, filename="glossary_refinement.txt")
+            ]
+
+        _update_refinement_progress(context, type_key, {
+            "entry_type": entry_type,
+            "status": "in_progress",
+            "input_hash": type_hash,
+            "chunking_mode": "single" if send_all_in_one else "chunked",
+            "total_chunks": len(chunks),
+            "output_file": os.path.basename(output_path or ""),
+        })
+
+        refined_entries = []
+        for chunk_text, chunk_idx, total_chunks in chunks:
+            if check_stop():
+                print(f"❌ Glossary refinement stopped during {entry_type} chunk {chunk_idx}/{total_chunks}")
+                _update_refinement_progress(context, type_key, {"status": "in_progress", "completed_chunks": chunk_idx - 1})
+                return glossary
+            print(f"✨ Refining {entry_type} entries ({chunk_idx}/{total_chunks})...")
+            msgs = _build_refinement_messages(system_prompt, user_prompt, entry_type, chunk_text, chunk_idx, total_chunks)
+            msgs = _sanitize_messages_for_api(msgs, chunk_text)
+            try:
+                raw, finish_reason, _raw_obj = send_with_interrupt(
+                    msgs,
+                    client,
+                    temp,
+                    mtoks,
+                    check_stop,
+                    chunk_timeout=chunk_timeout,
+                    chunk_idx=chunk_idx,
+                    total_chunks=total_chunks,
+                )
+            except Exception as e:
+                print(f"⚠️ Refinement failed for {entry_type} chunk {chunk_idx}: {e}")
+                _update_refinement_progress(context, type_key, {"status": "failed", "error": str(e)})
+                refined_entries = []
+                break
+            response_text = raw[0] if isinstance(raw, tuple) else raw
+            response_text = response_text if isinstance(response_text, str) else str(response_text or "")
+            parsed = parse_api_response(response_text)
+            parsed = [
+                entry for entry in parsed
+                if isinstance(entry, dict) and str(entry.get("type", "")).strip().lower() == entry_type.lower()
+            ]
+            if not parsed:
+                print(f"⚠️ Refinement returned no valid {entry_type} entries for chunk {chunk_idx}; keeping original entries for this type.")
+                _update_refinement_progress(context, type_key, {"status": "failed", "error": "empty_or_invalid_response"})
+                refined_entries = []
+                break
+            refined_entries.extend(parsed)
+            _update_refinement_progress(context, type_key, {"status": "in_progress", "completed_chunks": chunk_idx})
+            issue = _glossary_issue_from_finish_reason(finish_reason, None)
+            if issue == "TRUNCATED":
+                print(f"⚠️ Refinement for {entry_type} chunk {chunk_idx} was truncated; keeping original entries for this type.")
+                _update_refinement_progress(context, type_key, {"status": "failed", "error": "TRUNCATED"})
+                refined_entries = []
+                break
+
+        if refined_entries:
+            if not skip_dedupe:
+                refined_entries = skip_duplicate_entries(refined_entries)
+            refined_by_type[entry_type] = refined_entries
+            _update_refinement_progress(context, type_key, {
+                "status": "completed",
+                "input_hash": type_hash,
+                "output_hash": _glossary_refinement_hash(entry_type, refined_entries, "single" if send_all_in_one else "chunked"),
+                "entry_count_before": len(entries),
+                "entry_count_after": len(refined_entries),
+                "completed_chunks": len(chunks),
+            })
+            print(f"✅ Refined {entry_type}: {len(entries)} -> {len(refined_entries)} entries")
+        else:
+            refined_by_type[entry_type] = entries
+
+    if not refined_by_type:
+        return glossary
+
+    selected_lc = {t.lower() for t in refined_by_type}
+    rebuilt = [entry for entry in glossary if str(entry.get("type", "")).strip().lower() not in selected_lc]
+    for entry_type in selected_types:
+        rebuilt.extend(refined_by_type.get(entry_type, []))
+    if not skip_dedupe:
+        rebuilt = skip_duplicate_entries(rebuilt)
+    return rebuilt
 
 def _dedupe_worker_chunk(chunk_items, all_items, fuzzy_threshold, use_rapidfuzz):
     """Process a chunk of items in parallel - reduces memory overhead"""
@@ -5399,6 +5648,19 @@ def main(log_callback=None, stop_callback=None):
     )
 
     config = load_config(args.config)
+
+    refinement_env_defaults = {
+        "GLOSSARY_REFINEMENT_ENABLED": "1" if config.get("glossary_refinement_enabled", False) else "0",
+        "GLOSSARY_REFINEMENT_SYSTEM_PROMPT": config.get("glossary_refinement_system_prompt", DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT),
+        "GLOSSARY_REFINEMENT_USER_PROMPT": config.get("glossary_refinement_user_prompt", ""),
+        "GLOSSARY_REFINEMENT_TYPE_MODE": config.get("glossary_refinement_type_mode", "all"),
+        "GLOSSARY_REFINEMENT_SELECTED_TYPES": ",".join(config.get("glossary_refinement_selected_types", [])),
+        "GLOSSARY_REFINEMENT_CHUNKING_MODE": config.get("glossary_refinement_chunking_mode", "chunked"),
+        "GLOSSARY_REFINEMENT_SKIP_DEDUPE": "1" if config.get("glossary_refinement_skip_dedupe", False) else "0",
+    }
+    for _env_key, _env_value in refinement_env_defaults.items():
+        if os.getenv(_env_key) is None:
+            os.environ[_env_key] = str(_env_value or "")
     
     # Log assistant prompt if configured
     _log_assistant_prompt_once()
@@ -7475,6 +7737,25 @@ def main(log_callback=None, stop_callback=None):
                 "Retry the chapter, check the surrounding logs, or switch model/provider if it repeats."
             )
         save_progress(completed, glossary, merged_indices, failed=failed, context=progress_context)
+
+    if _glossary_refinement_enabled() and not check_stop():
+        before_refinement_count = len(glossary)
+        glossary = _refine_glossary_entries(
+            glossary,
+            client=client,
+            temp=temp,
+            mtoks=mtoks,
+            check_stop=check_stop,
+            chapter_splitter=chapter_splitter,
+            available_tokens=available_tokens,
+            chunk_timeout=chunk_timeout,
+            context=progress_context,
+            output_path=args.output,
+        )
+        if len(glossary) != before_refinement_count or _glossary_refinement_enabled():
+            save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
+            save_glossary_json(glossary, args.output)
+            save_glossary_csv(glossary, args.output)
     
     print(f"\nDone. Glossary saved to {args.output}")
     
@@ -7544,6 +7825,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             merged_indices[:] = merged_clean
 
         existing_chapters_by_idx = {}
+        existing_refinement = {}
         preserved_in_progress = []
         externally_failed = []
         manual_removed_indices = []
@@ -7556,6 +7838,8 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                     and existing_progress.get("manual_removed_session_id") in (None, "", _GLOSSARY_PROGRESS_SESSION_ID)
                 ):
                     manual_removed_indices = _unique_int_list(existing_progress.get("manual_removed_indices", []))
+                if isinstance(existing_progress, dict) and isinstance(existing_progress.get("refinement"), dict):
+                    existing_refinement = existing_progress.get("refinement", {})
                 existing_chapters = existing_progress.get("chapters", {}) if isinstance(existing_progress, dict) else {}
                 if isinstance(existing_chapters, dict):
                     for existing_key, existing_info in existing_chapters.items():
@@ -7765,6 +8049,8 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             # Glossary is saved separately to output files, not in progress
             # This prevents the progress file from overwriting manual edits
         }
+        if existing_refinement:
+            progress_data["refinement"] = existing_refinement
         if manual_removed_indices:
             progress_data["manual_removed_indices"] = manual_removed_indices
             progress_data["manual_removed_session_id"] = _GLOSSARY_PROGRESS_SESSION_ID

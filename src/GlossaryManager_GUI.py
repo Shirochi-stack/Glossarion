@@ -1101,6 +1101,7 @@ class GlossaryManagerMixin:
         tabs = [
             ("Balanced/Full Extraction", self._setup_manual_glossary_tab, False),   # scrollable
             ("Automatic Glossary Generation", self._setup_auto_glossary_tab, False), # scrollable
+            ("Glossary Refinement", self._setup_glossary_refinement_tab, False),     # scrollable
             ("Glossary Editor", self._setup_glossary_editor_tab, True),              # non-scrollable
         ]
 
@@ -1120,7 +1121,7 @@ class GlossaryManagerMixin:
                 notebook.addTab(tab_scroll, tab_name)
                 setup_method(tab_inner)
 
-        _editor_tab_idx = 2  # "Glossary Editor" is the 3rd tab
+        _editor_tab_idx = 3  # "Glossary Editor" follows the refinement tab
 
         def _on_tab_switched(idx):
             # Re-run glossary editor path resolution when switching to that tab
@@ -1275,6 +1276,31 @@ class GlossaryManagerMixin:
                     split_enabled = self.glossary_enable_chapter_split_checkbox.isChecked()
                     self.config['glossary_enable_chapter_split'] = split_enabled
                     setattr(self, 'glossary_enable_chapter_split_var', split_enabled)
+
+                if hasattr(self, 'glossary_refinement_enabled_checkbox'):
+                    refinement_enabled = self.glossary_refinement_enabled_checkbox.isChecked()
+                    self.config['glossary_refinement_enabled'] = bool(refinement_enabled)
+                    self.glossary_refinement_enabled_var = bool(refinement_enabled)
+                if hasattr(self, 'glossary_refinement_type_mode_combo'):
+                    type_mode = 'selected' if self.glossary_refinement_type_mode_combo.currentIndex() == 1 else 'all'
+                    self.config['glossary_refinement_type_mode'] = type_mode
+                    self.glossary_refinement_type_mode_var = type_mode
+                if hasattr(self, 'glossary_refinement_type_list'):
+                    selected_refinement_types = []
+                    for i in range(self.glossary_refinement_type_list.count()):
+                        item = self.glossary_refinement_type_list.item(i)
+                        if item and item.checkState() == Qt.Checked:
+                            selected_refinement_types.append(item.text())
+                    self.config['glossary_refinement_selected_types'] = selected_refinement_types
+                    self.glossary_refinement_selected_types_var = selected_refinement_types
+                if hasattr(self, 'glossary_refinement_chunking_combo'):
+                    chunking_mode = 'single' if self.glossary_refinement_chunking_combo.currentIndex() == 1 else 'chunked'
+                    self.config['glossary_refinement_chunking_mode'] = chunking_mode
+                    self.glossary_refinement_chunking_mode_var = chunking_mode
+                if hasattr(self, 'glossary_refinement_skip_dedupe_checkbox'):
+                    skip_refinement_dedupe = self.glossary_refinement_skip_dedupe_checkbox.isChecked()
+                    self.config['glossary_refinement_skip_dedupe'] = bool(skip_refinement_dedupe)
+                    self.glossary_refinement_skip_dedupe_var = bool(skip_refinement_dedupe)
 
                 # Gender tracker false-positive controls
                 if hasattr(self, 'gender_noise_threshold_slider'):
@@ -2661,12 +2687,32 @@ class GlossaryManagerMixin:
                 self.config['single_pass_glossary_header_prompt'] = self.single_pass_glossary_header_prompt
                 if debug_enabled:
                     print(f"🔍 [UPDATE] single_pass_glossary_header_prompt: {len(self.single_pass_glossary_header_prompt)} chars")
+            if hasattr(self, 'glossary_refinement_system_prompt_text'):
+                self.glossary_refinement_system_prompt = self._sep_from_display(
+                    self.glossary_refinement_system_prompt_text.toPlainText()
+                ).strip()
+                if not self.glossary_refinement_system_prompt:
+                    self.glossary_refinement_system_prompt = self._default_glossary_refinement_system_prompt()
+                self.config['glossary_refinement_system_prompt'] = self.glossary_refinement_system_prompt
+
+            if hasattr(self, 'glossary_refinement_user_prompt_text'):
+                self.glossary_refinement_user_prompt = self._sep_from_display(
+                    self.glossary_refinement_user_prompt_text.toPlainText()
+                ).strip()
+                self.config['glossary_refinement_user_prompt'] = self.glossary_refinement_user_prompt
             
         except Exception as e:
             print(f"❌ Error updating glossary prompts: {e}")
             import traceback
             traceback.print_exc()
     
+    def _default_glossary_refinement_system_prompt(self):
+        try:
+            from extract_glossary_from_epub import DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
+            return DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
+        except Exception:
+            return ""
+
     def _default_single_pass_header_prompt(self):
         return """You have two tasks for this request.
 
@@ -4870,6 +4916,119 @@ Rules:
         
         if hasattr(self, 'append_log'):
             self.append_log("🔄 Glossary anti-duplicate parameters reset to defaults")
+
+    def _setup_glossary_refinement_tab(self, parent):
+        """Setup optional post-generation glossary refinement controls."""
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        header = QLabel("Glossary Refinement")
+        header.setStyleSheet("font-weight: bold; font-size: 12pt;")
+        layout.addWidget(header)
+
+        desc = QLabel("Optional cleanup pass after automatic glossary generation.")
+        desc.setStyleSheet("color: #aaa;")
+        layout.addWidget(desc)
+
+        self.glossary_refinement_enabled_checkbox = self._create_styled_checkbox("Enable Glossary Refinement")
+        self.glossary_refinement_enabled_checkbox.setChecked(bool(self.config.get('glossary_refinement_enabled', False)))
+        self.glossary_refinement_enabled_checkbox.setToolTip("Run a final refinement API pass after glossary extraction completes.")
+        layout.addWidget(self.glossary_refinement_enabled_checkbox)
+
+        options_box = QGroupBox("Refinement Scope")
+        options_layout = QVBoxLayout(options_box)
+        layout.addWidget(options_box)
+
+        type_mode_row = QWidget()
+        type_mode_layout = QHBoxLayout(type_mode_row)
+        type_mode_layout.setContentsMargins(0, 0, 0, 0)
+        type_mode_layout.addWidget(QLabel("Entry types:"))
+        self.glossary_refinement_type_mode_combo = QComboBox()
+        self.glossary_refinement_type_mode_combo.addItems(["All Active Entry Types", "Selected Entry Types"])
+        saved_type_mode = str(self.config.get('glossary_refinement_type_mode', 'all')).lower()
+        self.glossary_refinement_type_mode_combo.setCurrentIndex(1 if saved_type_mode == 'selected' else 0)
+        self.glossary_refinement_type_mode_combo.wheelEvent = lambda event: None
+        type_mode_layout.addWidget(self.glossary_refinement_type_mode_combo)
+        type_mode_layout.addStretch()
+        options_layout.addWidget(type_mode_row)
+
+        self.glossary_refinement_type_list = QListWidget()
+        self.glossary_refinement_type_list.setMaximumHeight(150)
+        selected_types = set(self.config.get('glossary_refinement_selected_types', []))
+        custom_types = self.config.get('custom_entry_types', getattr(self, 'custom_entry_types', {})) or {}
+        if not custom_types:
+            custom_types = {'character': {'enabled': True}, 'term': {'enabled': True}}
+        from PySide6.QtWidgets import QListWidgetItem
+        for type_name, type_cfg in custom_types.items():
+            if not isinstance(type_cfg, dict) or not type_cfg.get('enabled', True):
+                continue
+            list_item = QListWidgetItem(type_name)
+            list_item.setFlags(list_item.flags() | Qt.ItemIsUserCheckable)
+            list_item.setCheckState(Qt.Checked if (not selected_types or type_name in selected_types) else Qt.Unchecked)
+            self.glossary_refinement_type_list.addItem(list_item)
+        options_layout.addWidget(self.glossary_refinement_type_list)
+
+        request_row = QWidget()
+        request_layout = QHBoxLayout(request_row)
+        request_layout.setContentsMargins(0, 0, 0, 0)
+        request_layout.addWidget(QLabel("Request mode:"))
+        self.glossary_refinement_chunking_combo = QComboBox()
+        self.glossary_refinement_chunking_combo.addItems(["Chunk by token budget", "Send each entry type in one request"])
+        saved_chunking = str(self.config.get('glossary_refinement_chunking_mode', 'chunked')).lower()
+        self.glossary_refinement_chunking_combo.setCurrentIndex(1 if saved_chunking in ('single', 'all_in_one', 'one') else 0)
+        self.glossary_refinement_chunking_combo.wheelEvent = lambda event: None
+        request_layout.addWidget(self.glossary_refinement_chunking_combo)
+        request_layout.addStretch()
+        options_layout.addWidget(request_row)
+
+        self.glossary_refinement_skip_dedupe_checkbox = self._create_styled_checkbox("Skip deduplication after refinement")
+        self.glossary_refinement_skip_dedupe_checkbox.setChecked(bool(self.config.get('glossary_refinement_skip_dedupe', False)))
+        self.glossary_refinement_skip_dedupe_checkbox.setToolTip("If enabled, refinement output is saved without the normal duplicate cleanup pass.")
+        options_layout.addWidget(self.glossary_refinement_skip_dedupe_checkbox)
+
+        prompt_box = QGroupBox("Refinement Prompts")
+        prompt_layout = QVBoxLayout(prompt_box)
+        layout.addWidget(prompt_box)
+
+        prompt_layout.addWidget(QLabel("System Prompt:"))
+        self.glossary_refinement_system_prompt_text = QTextEdit()
+        self.glossary_refinement_system_prompt_text.setMinimumHeight(220)
+        default_system = self._default_glossary_refinement_system_prompt()
+        system_prompt = self.config.get('glossary_refinement_system_prompt', default_system)
+        if not system_prompt or not str(system_prompt).strip():
+            system_prompt = default_system
+        self.glossary_refinement_system_prompt_text.setPlainText(self._sep_for_display(system_prompt))
+        prompt_layout.addWidget(self.glossary_refinement_system_prompt_text)
+
+        prompt_layout.addWidget(QLabel("User Prompt (optional):"))
+        self.glossary_refinement_user_prompt_text = QTextEdit()
+        self.glossary_refinement_user_prompt_text.setMinimumHeight(120)
+        self.glossary_refinement_user_prompt_text.setPlainText(self._sep_for_display(self.config.get('glossary_refinement_user_prompt', '')))
+        self.glossary_refinement_user_prompt_text.setPlaceholderText("Leave empty to send only the glossary content.")
+        prompt_layout.addWidget(self.glossary_refinement_user_prompt_text)
+
+        btn_row = QWidget()
+        btn_layout = QHBoxLayout(btn_row)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        reset_btn = QPushButton("Reset System Prompt")
+        reset_btn.clicked.connect(lambda: self.glossary_refinement_system_prompt_text.setPlainText(self._sep_for_display(default_system)))
+        btn_layout.addWidget(reset_btn)
+        btn_layout.addStretch()
+        prompt_layout.addWidget(btn_row)
+
+        def _sync_refinement_widgets(*_args):
+            enabled = self.glossary_refinement_enabled_checkbox.isChecked()
+            options_box.setEnabled(enabled)
+            prompt_box.setEnabled(enabled)
+            self.glossary_refinement_type_list.setEnabled(
+                enabled and self.glossary_refinement_type_mode_combo.currentIndex() == 1
+            )
+
+        self.glossary_refinement_enabled_checkbox.toggled.connect(_sync_refinement_widgets)
+        self.glossary_refinement_type_mode_combo.currentIndexChanged.connect(_sync_refinement_widgets)
+        _sync_refinement_widgets()
+        layout.addStretch()
 
     def _setup_glossary_editor_tab(self, parent):
         """Set up the glossary editor/trimmer tab"""
