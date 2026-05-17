@@ -3782,10 +3782,21 @@ class ContentProcessor:
             for header in headers:
                 header.decompose()
 
-            text_elements = soup_copy.find_all(['p', 'div', 'span'])
+            def _clean_visible_text(value):
+                value = re.sub(r'https?://\S+', ' ', value or '')
+                value = re.sub(r'\b\S+\.(?:png|jpe?g|gif|webp|svg|bmp)(?:[?#]\S*)?', ' ', value, flags=re.IGNORECASE)
+                return value.strip()
+
+            paragraph_text = ' '.join(
+                elem.get_text(strip=True) for elem in soup_copy.find_all('p')
+            )
+            paragraph_text = _clean_visible_text(paragraph_text)
+            if paragraph_text:
+                return True
+
+            text_elements = soup_copy.find_all(['div', 'span'])
             text_content = ' '.join(elem.get_text(strip=True) for elem in text_elements)
-            text_content = re.sub(r'https?://\S+', ' ', text_content)
-            text_content = re.sub(r'\b\S+\.(?:png|jpe?g|gif|webp|svg|bmp)(?:[?#]\S*)?', ' ', text_content, flags=re.IGNORECASE)
+            text_content = _clean_visible_text(text_content)
             
             if len(text_content.strip()) > 200:
                 return True
