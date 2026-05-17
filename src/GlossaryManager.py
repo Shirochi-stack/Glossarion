@@ -13,6 +13,7 @@ import json
 from bs4 import BeautifulSoup
 import PatternManager as PM
 import duplicate_detection_config as ddc
+from glossary_refinement import refine_glossary_entries, refinement_enabled as _glossary_refinement_enabled
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 # ---------------------------------------------------------------------------
@@ -1116,6 +1117,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             if entries:
                 entries.sort(key=_csv_sort_key)
             all_csv_lines = [header] + entries
+
+            all_csv_lines = _refine_csv_lines_if_enabled(all_csv_lines, output_dir)
             
             # Save
             # Check format preference
@@ -1314,6 +1317,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         entries = csv_lines[1:]
         entries.sort(key=_csv_sort_key)
         csv_lines = [header] + entries
+
+        csv_lines = _refine_csv_lines_if_enabled(csv_lines, output_dir)
         
         # Token-efficient format if enabled
         use_legacy_format = os.getenv('GLOSSARY_USE_LEGACY_CSV', '0') == '1'
@@ -2344,6 +2349,150 @@ def _parse_csv_to_dict(csv_content):
             result[parts[1]] = parts[2]  # raw_name -> translated_name
     
     return result
+
+def _csv_lines_to_refinement_entries(csv_lines):
+    """Convert canonical glossary CSV rows to shared refinement entry dicts."""
+    if not csv_lines:
+        return [], _build_header(), ['type', 'raw_name', 'translated_name']
+
+    header_line = csv_lines[0] if _is_glossary_header(str(csv_lines[0])) else _build_header()
+    header_sep = _gsep(header_line)
+    header_parts = [p.strip() for p in str(header_line).split(header_sep) if p.strip()]
+    if not header_parts:
+        header_parts = ['type', 'raw_name', 'translated_name']
+        header_line = _build_header()
+
+    entries = []
+    data_lines = csv_lines[1:] if csv_lines and _is_glossary_header(str(csv_lines[0])) else csv_lines
+    for line in data_lines:
+        if not str(line).strip():
+            continue
+        sep = _gsep(str(line))
+        parts = [p.strip() for p in str(line).split(sep)]
+        if len(parts) < 3:
+            continue
+        if len(parts) < len(header_parts):
+            parts += [''] * (len(header_parts) - len(parts))
+        entry = {}
+        for idx, key in enumerate(header_parts):
+            entry[key] = parts[idx] if idx < len(parts) else ''
+        if entry.get('type') and entry.get('raw_name') and entry.get('translated_name'):
+            entries.append(entry)
+    return entries, header_line, header_parts
+
+def _refinement_entries_to_csv_lines(entries, header_parts):
+    """Convert shared refinement entry dicts back to canonical glossary CSV rows."""
+    ordered_cols = list(header_parts or ['type', 'raw_name', 'translated_name'])
+    for required in ('type', 'raw_name', 'translated_name'):
+        if required not in ordered_cols:
+            ordered_cols.append(required)
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        for key in entry.keys():
+            if key not in ordered_cols:
+                ordered_cols.append(key)
+
+    lines = [GLOSSARY_SEP.join(ordered_cols)]
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        if not entry.get('type') or not entry.get('raw_name') or not entry.get('translated_name'):
+            continue
+        lines.append(GLOSSARY_SEP.join(str(entry.get(key, '')) for key in ordered_cols))
+    return lines
+
+def _parse_refinement_response(response_text):
+    from extract_glossary_from_epub import parse_api_response
+    return parse_api_response(response_text)
+
+def _dedupe_refinement_entries(entries):
+    from extract_glossary_from_epub import skip_duplicate_entries
+    return skip_duplicate_entries(entries)
+
+def _custom_entry_types_for_refinement():
+    from extract_glossary_from_epub import get_custom_entry_types
+    return get_custom_entry_types()
+
+def _refine_csv_lines_if_enabled(csv_lines, output_dir):
+    """Run the shared glossary refinement step for the minimal glossary path."""
+    if not _glossary_refinement_enabled():
+        return csv_lines
+
+    entries, _header_line, header_parts = _csv_lines_to_refinement_entries(csv_lines)
+    if not entries:
+        print("Glossary refinement enabled, but no CSV entries were available; skipping.")
+        return csv_lines
+
+    MODEL = os.getenv("MODEL", "gemini-2.0-flash")
+    API_KEY = (
+        os.getenv("API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or os.getenv("OPENAI_OR_Gemini_API_KEY")
+        or os.getenv("GEMINI_API_KEY")
+    )
+    if is_traditional_translation_api(MODEL):
+        print("Traditional translation API selected - skipping glossary refinement")
+        return csv_lines
+    if not API_KEY and not _model_uses_own_auth(MODEL):
+        print("No API key found - skipping glossary refinement")
+        return csv_lines
+
+    try:
+        _ensure_multi_key_config_loaded()
+        from unified_api_client import UnifiedClient
+        from chapter_splitter import ChapterSplitter
+
+        client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
+        client.context = "glossary refinement"
+        if hasattr(client, 'reset_cleanup_state'):
+            client.reset_cleanup_state()
+
+        mtoks = int(os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", os.getenv("MAX_OUTPUT_TOKENS", "4096")))
+        temp = float(os.getenv("GLOSSARY_TEMPERATURE", os.getenv("TEMPERATURE", "0.3")))
+        compression_factor = float(os.getenv("GLOSSARY_COMPRESSION_FACTOR", os.getenv("COMPRESSION_FACTOR", "1.0")))
+        available_tokens = int(mtoks / max(compression_factor, 0.1)) if compression_factor > 0 else int(mtoks * 0.8)
+        available_tokens = max(512, available_tokens)
+
+        retry_env = os.getenv("RETRY_TIMEOUT")
+        retry_timeout_enabled = retry_env is None or retry_env.strip().lower() not in ("0", "false", "off", "")
+        chunk_timeout = None
+        if retry_timeout_enabled:
+            try:
+                timeout_val = float(os.getenv("CHUNK_TIMEOUT", "1800"))
+                chunk_timeout = None if timeout_val <= 0 else timeout_val
+            except Exception:
+                chunk_timeout = None
+
+        splitter = ChapterSplitter(model_name=MODEL, target_tokens=available_tokens)
+        progress_file = os.path.join(output_dir, "glossary_progress.json")
+        refined_entries = refine_glossary_entries(
+            entries,
+            client=client,
+            temp=temp,
+            mtoks=mtoks,
+            check_stop=is_stop_requested,
+            chapter_splitter=splitter,
+            available_tokens=available_tokens,
+            chunk_timeout=chunk_timeout,
+            parse_response_fn=_parse_refinement_response,
+            dedupe_fn=_dedupe_refinement_entries,
+            custom_entry_types_fn=_custom_entry_types_for_refinement,
+            send_fn=send_with_interrupt,
+            progress_file=progress_file,
+            output_path=os.path.join(output_dir, "glossary.csv"),
+            log=print,
+        )
+        refined_lines = _refinement_entries_to_csv_lines(refined_entries, header_parts)
+        if len(refined_lines) > 1:
+            header = refined_lines[0]
+            body = refined_lines[1:]
+            body.sort(key=_csv_sort_key)
+            refined_lines = [header] + body
+        return refined_lines
+    except Exception as e:
+        print(f"Glossary refinement failed; keeping unrefined glossary: {e}")
+        return csv_lines
 
 def _fuzzy_match(term1, term2, threshold=0.90):
     """Check if two terms match using fuzzy matching"""
@@ -4747,6 +4896,7 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 
                 # Apply filter mode to final results
                 csv_lines = _filter_csv_by_mode(csv_lines, filter_mode)
+                csv_lines = _refine_csv_lines_if_enabled(csv_lines, output_dir)
                 
                 # Check if we should use token-efficient format
                 use_legacy_format = os.getenv('GLOSSARY_USE_LEGACY_CSV', '0') == '1'
@@ -5809,6 +5959,7 @@ def _extract_with_patterns(all_text, language, min_frequency,
     
     # Fuzzy matching deduplication
     csv_lines = _deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold)
+    csv_lines = _refine_csv_lines_if_enabled(csv_lines, output_dir)
     
     # Create CSV content
     csv_content = '\n'.join(csv_lines)

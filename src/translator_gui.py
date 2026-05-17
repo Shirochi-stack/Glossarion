@@ -3239,7 +3239,8 @@ Text to analyze:
         """Initialize all default prompt templates"""
         # Glossary prompt defaults — single source of truth in extract_glossary_from_epub
         try:
-            from extract_glossary_from_epub import DEFAULT_GLOSSARY_PROMPT, DEFAULT_AUTO_GLOSSARY_PROMPT, DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
+            from extract_glossary_from_epub import DEFAULT_GLOSSARY_PROMPT, DEFAULT_AUTO_GLOSSARY_PROMPT
+            from glossary_refinement import DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
             self.default_manual_glossary_prompt = DEFAULT_GLOSSARY_PROMPT
             self.default_unified_auto_glosary_prompt3 = DEFAULT_AUTO_GLOSSARY_PROMPT
             self.default_glossary_refinement_system_prompt = DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
@@ -15623,7 +15624,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_REFINEMENT_USER_PROMPT': self.config.get('glossary_refinement_user_prompt', getattr(self, 'glossary_refinement_user_prompt', '')),
             'GLOSSARY_REFINEMENT_TYPE_MODE': self.config.get('glossary_refinement_type_mode', 'all'),
             'GLOSSARY_REFINEMENT_SELECTED_TYPES': ','.join(self.config.get('glossary_refinement_selected_types', [])),
-            'GLOSSARY_REFINEMENT_CHUNKING_MODE': self.config.get('glossary_refinement_chunking_mode', 'chunked'),
+            'GLOSSARY_REFINEMENT_CHUNKING_MODE': self.config.get('glossary_refinement_chunking_mode', 'separate'),
             'GLOSSARY_REFINEMENT_SKIP_DEDUPE': '1' if self.config.get('glossary_refinement_skip_dedupe', False) else '0',
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
             'GLOSSARY_TRANSLATION_PROMPT': self.glossary_translation_prompt if hasattr(self, 'glossary_translation_prompt') else '',
@@ -24127,7 +24128,7 @@ Important rules:
                     ('GLOSSARY_REFINEMENT_USER_PROMPT', self.config.get('glossary_refinement_user_prompt', '')),
                     ('GLOSSARY_REFINEMENT_TYPE_MODE', self.config.get('glossary_refinement_type_mode', 'all')),
                     ('GLOSSARY_REFINEMENT_SELECTED_TYPES', ','.join(self.config.get('glossary_refinement_selected_types', []))),
-                    ('GLOSSARY_REFINEMENT_CHUNKING_MODE', self.config.get('glossary_refinement_chunking_mode', 'chunked')),
+                    ('GLOSSARY_REFINEMENT_CHUNKING_MODE', self.config.get('glossary_refinement_chunking_mode', 'separate')),
                     ('GLOSSARY_REFINEMENT_SKIP_DEDUPE', '1' if self.config.get('glossary_refinement_skip_dedupe', False) else '0'),
                     ('APPEND_GLOSSARY_PROMPT', self.config.get('append_glossary_prompt', '') or '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'),
                     ('APPEND_GLOSSARY', '0' if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ('1' if self.config.get('append_glossary') else '0')),
@@ -24559,7 +24560,7 @@ Important rules:
                 ('GLOSSARY_REFINEMENT_USER_PROMPT', self.config.get('glossary_refinement_user_prompt', getattr(self, 'glossary_refinement_user_prompt', ''))),
                 ('GLOSSARY_REFINEMENT_TYPE_MODE', self.config.get('glossary_refinement_type_mode', 'all')),
                 ('GLOSSARY_REFINEMENT_SELECTED_TYPES', ','.join(self.config.get('glossary_refinement_selected_types', []))),
-                ('GLOSSARY_REFINEMENT_CHUNKING_MODE', self.config.get('glossary_refinement_chunking_mode', 'chunked')),
+                ('GLOSSARY_REFINEMENT_CHUNKING_MODE', self.config.get('glossary_refinement_chunking_mode', 'separate')),
                 ('GLOSSARY_REFINEMENT_SKIP_DEDUPE', '1' if self.config.get('glossary_refinement_skip_dedupe', False) else '0'),
                 ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0'),
                 ('GLOSSARY_STRIP_HONORIFICS', '1' if self.config.get('strip_honorifics', False) else '0'),

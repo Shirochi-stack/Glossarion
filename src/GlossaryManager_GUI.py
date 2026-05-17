@@ -1099,8 +1099,8 @@ class GlossaryManagerMixin:
         # Create and add tabs eagerly so switching tabs never pays a construction cost.
         # Glossary file parsing still happens in the editor loader's background thread.
         tabs = [
-            ("Balanced/Full Extraction", self._setup_manual_glossary_tab, False),   # scrollable
-            ("Automatic Glossary Generation", self._setup_auto_glossary_tab, False), # scrollable
+            ("Balanced/Full Generation", self._setup_manual_glossary_tab, False),   # scrollable
+            ("Minimal Glossary Generation", self._setup_auto_glossary_tab, False),  # scrollable
             ("Glossary Refinement", self._setup_glossary_refinement_tab, False),     # scrollable
             ("Glossary Editor", self._setup_glossary_editor_tab, True),              # non-scrollable
         ]
@@ -1289,12 +1289,16 @@ class GlossaryManagerMixin:
                     selected_refinement_types = []
                     for i in range(self.glossary_refinement_type_list.count()):
                         item = self.glossary_refinement_type_list.item(i)
-                        if item and item.checkState() == Qt.Checked:
-                            selected_refinement_types.append(item.text())
+                        widget = self.glossary_refinement_type_list.itemWidget(item) if item else None
+                        if isinstance(widget, QCheckBox):
+                            if widget.isChecked():
+                                selected_refinement_types.append(widget.property('entry_type') or widget.text())
+                        elif item and item.checkState() == Qt.Checked:
+                            selected_refinement_types.append(item.data(Qt.UserRole) or item.text())
                     self.config['glossary_refinement_selected_types'] = selected_refinement_types
                     self.glossary_refinement_selected_types_var = selected_refinement_types
                 if hasattr(self, 'glossary_refinement_chunking_combo'):
-                    chunking_mode = 'single' if self.glossary_refinement_chunking_combo.currentIndex() == 1 else 'chunked'
+                    chunking_mode = 'all' if self.glossary_refinement_chunking_combo.currentIndex() == 1 else 'separate'
                     self.config['glossary_refinement_chunking_mode'] = chunking_mode
                     self.glossary_refinement_chunking_mode_var = chunking_mode
                 if hasattr(self, 'glossary_refinement_skip_dedupe_checkbox'):
@@ -2708,7 +2712,7 @@ class GlossaryManagerMixin:
     
     def _default_glossary_refinement_system_prompt(self):
         try:
-            from extract_glossary_from_epub import DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
+            from glossary_refinement import DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
             return DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
         except Exception:
             return ""
@@ -4954,7 +4958,32 @@ Rules:
         options_layout.addWidget(type_mode_row)
 
         self.glossary_refinement_type_list = QListWidget()
+        self.glossary_refinement_type_list.setObjectName("glossaryRefinementTypeList")
         self.glossary_refinement_type_list.setMaximumHeight(150)
+        self.glossary_refinement_type_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.glossary_refinement_type_list.setFocusPolicy(Qt.NoFocus)
+        self.glossary_refinement_type_list.setStyleSheet("""
+            QListWidget#glossaryRefinementTypeList {
+                background-color: transparent;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 3px;
+                padding: 2px;
+            }
+            QListWidget#glossaryRefinementTypeList:disabled {
+                color: #777777;
+                border-color: #3a3a3a;
+                background-color: #202020;
+            }
+            QListWidget#glossaryRefinementTypeList::item {
+                min-height: 24px;
+                padding: 1px 4px;
+            }
+            QListWidget#glossaryRefinementTypeList::item:selected {
+                background-color: transparent;
+                color: white;
+            }
+        """)
         selected_types = set(self.config.get('glossary_refinement_selected_types', []))
         custom_types = self.config.get('custom_entry_types', getattr(self, 'custom_entry_types', {})) or {}
         if not custom_types:
@@ -4963,10 +4992,18 @@ Rules:
         for type_name, type_cfg in custom_types.items():
             if not isinstance(type_cfg, dict) or not type_cfg.get('enabled', True):
                 continue
-            list_item = QListWidgetItem(type_name)
-            list_item.setFlags(list_item.flags() | Qt.ItemIsUserCheckable)
-            list_item.setCheckState(Qt.Checked if (not selected_types or type_name in selected_types) else Qt.Unchecked)
+            list_item = QListWidgetItem()
+            list_item.setData(Qt.UserRole, type_name)
+            list_item.setFlags(Qt.ItemIsEnabled)
+            checkbox = self._create_styled_checkbox(type_name)
+            checkbox.setProperty('entry_type', type_name)
+            checkbox.setChecked(bool(not selected_types or type_name in selected_types))
+            try:
+                list_item.setSizeHint(checkbox.sizeHint())
+            except Exception:
+                pass
             self.glossary_refinement_type_list.addItem(list_item)
+            self.glossary_refinement_type_list.setItemWidget(list_item, checkbox)
         options_layout.addWidget(self.glossary_refinement_type_list)
 
         request_row = QWidget()
@@ -4974,9 +5011,9 @@ Rules:
         request_layout.setContentsMargins(0, 0, 0, 0)
         request_layout.addWidget(QLabel("Request mode:"))
         self.glossary_refinement_chunking_combo = QComboBox()
-        self.glossary_refinement_chunking_combo.addItems(["Chunk by token budget", "Send each entry type in one request"])
-        saved_chunking = str(self.config.get('glossary_refinement_chunking_mode', 'chunked')).lower()
-        self.glossary_refinement_chunking_combo.setCurrentIndex(1 if saved_chunking in ('single', 'all_in_one', 'one') else 0)
+        self.glossary_refinement_chunking_combo.addItems(["Send each entry type in a separate request", "Send all entry types"])
+        saved_chunking = str(self.config.get('glossary_refinement_chunking_mode', 'separate')).lower()
+        self.glossary_refinement_chunking_combo.setCurrentIndex(1 if saved_chunking in ('all', 'all_types', 'all_in_one') else 0)
         self.glossary_refinement_chunking_combo.wheelEvent = lambda event: None
         request_layout.addWidget(self.glossary_refinement_chunking_combo)
         request_layout.addStretch()
@@ -5021,9 +5058,15 @@ Rules:
             enabled = self.glossary_refinement_enabled_checkbox.isChecked()
             options_box.setEnabled(enabled)
             prompt_box.setEnabled(enabled)
-            self.glossary_refinement_type_list.setEnabled(
-                enabled and self.glossary_refinement_type_mode_combo.currentIndex() == 1
-            )
+            type_list_enabled = enabled and self.glossary_refinement_type_mode_combo.currentIndex() == 1
+            self.glossary_refinement_type_list.setEnabled(type_list_enabled)
+            for i in range(self.glossary_refinement_type_list.count()):
+                item = self.glossary_refinement_type_list.item(i)
+                widget = self.glossary_refinement_type_list.itemWidget(item) if item else None
+                if isinstance(widget, QCheckBox):
+                    widget.setEnabled(type_list_enabled)
+                    if hasattr(widget, '_update_checkmark'):
+                        QTimer.singleShot(0, widget._update_checkmark)
 
         self.glossary_refinement_enabled_checkbox.toggled.connect(_sync_refinement_widgets)
         self.glossary_refinement_type_mode_combo.currentIndexChanged.connect(_sync_refinement_widgets)
