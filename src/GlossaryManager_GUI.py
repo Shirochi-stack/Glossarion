@@ -3142,6 +3142,7 @@ Rules:
                         self.auto_loaded_glossary_for_file = None
                         self.manual_glossary_manually_loaded = False
                         os.environ.pop('MANUAL_GLOSSARY', None)
+                        os.environ.pop('GLOSSARY_SOURCE_MODE', None)
                     except Exception:
                         pass
 
@@ -3167,6 +3168,7 @@ Rules:
                         self.auto_loaded_glossary_for_file = None
                         self.manual_glossary_manually_loaded = False
                         os.environ.pop('MANUAL_GLOSSARY', None)
+                        os.environ.pop('GLOSSARY_SOURCE_MODE', None)
                     except Exception:
                         pass
                     try:
@@ -4412,6 +4414,7 @@ Rules:
                     self.auto_loaded_glossary_for_file = None
                     self.manual_glossary_manually_loaded = False
                     os.environ.pop('MANUAL_GLOSSARY', None)
+                    os.environ.pop('GLOSSARY_SOURCE_MODE', None)
                     if _use_subfolder:
                         if hasattr(self, '_autofill_glossary_for_current_selection'):
                             self._autofill_glossary_for_current_selection()
@@ -8001,6 +8004,7 @@ Rules:
                 os.environ['APPEND_GLOSSARY'] = '1'
                 self.config['manual_glossary_path'] = path
                 os.environ['MANUAL_GLOSSARY'] = path
+                os.environ['GLOSSARY_SOURCE_MODE'] = 'manual'
                 if hasattr(self, 'append_glossary_checkbox'):
                     try:
                         self.append_glossary_checkbox.setChecked(True)

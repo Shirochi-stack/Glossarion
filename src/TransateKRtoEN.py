@@ -3,6 +3,7 @@
 import json
 import logging
 import shutil
+import filecmp
 import threading
 import queue
 import uuid
@@ -8251,6 +8252,15 @@ def apply_emergency_glossary_compliance(content, output_dir):
     if not glossary_path or not os.path.exists(glossary_path):
         print("⚠️ Emergency Glossary Compliance: No glossary file found — skipping")
         return content
+    try:
+        glossary_path_abs = os.path.abspath(glossary_path)
+        if not hasattr(apply_emergency_glossary_compliance, "_logged_paths"):
+            apply_emergency_glossary_compliance._logged_paths = set()
+        if glossary_path_abs not in apply_emergency_glossary_compliance._logged_paths:
+            apply_emergency_glossary_compliance._logged_paths.add(glossary_path_abs)
+            print(f"🔄 Emergency Glossary Compliance using: {glossary_path_abs}")
+    except Exception:
+        pass
     
     try:
         with open(glossary_path, "r", encoding="utf-8") as gf:
@@ -15523,6 +15533,7 @@ def main(log_callback=None, stop_callback=None):
         print("   CSV/JSON/MD files are treated as plain text and typically don't need glossaries")
     else:
         print(f"📑 DEBUG: ENABLE_AUTO_GLOSSARY = '{os.getenv('ENABLE_AUTO_GLOSSARY', 'NOT SET')}'")
+        print(f"📑 DEBUG: GLOSSARY_SOURCE_MODE = '{os.getenv('GLOSSARY_SOURCE_MODE', 'NOT SET')}'")
         print(f"📑 DEBUG: MANUAL_GLOSSARY = '{config.MANUAL_GLOSSARY}'")
         print(f"📑 DEBUG: Manual glossary exists? {os.path.isfile(config.MANUAL_GLOSSARY) if config.MANUAL_GLOSSARY else False}")
         print(f"📑 DEBUG: APPEND_GLOSSARY = '{os.getenv('APPEND_GLOSSARY', '1')}'")
@@ -15591,6 +15602,9 @@ def main(log_callback=None, stop_callback=None):
         manual_glossary_active = False
         if config.MANUAL_GLOSSARY and os.path.isfile(config.MANUAL_GLOSSARY) and _has_glossary_data(config.MANUAL_GLOSSARY):
             manual_glossary_active = True
+            glossary_source_mode = (os.getenv("GLOSSARY_SOURCE_MODE", "") or "").strip().lower()
+            auto_glossary_modes = {"auto", "auto_map", "automap", "auto-loaded", "auto_loaded"}
+            glossary_label = "auto glossary" if glossary_source_mode in auto_glossary_modes else "manual glossary"
             ext = os.path.splitext(config.MANUAL_GLOSSARY)[1].lower()
             # Treat .txt and .md files as CSV format (keep original extension)
             if ext in [".csv", ".txt"]:
@@ -15607,11 +15621,18 @@ def main(log_callback=None, stop_callback=None):
             target_path = os.path.join(out, target_name)
             
             if os.path.abspath(config.MANUAL_GLOSSARY) != os.path.abspath(target_path):
+                original_manual_glossary = config.MANUAL_GLOSSARY
                 shutil.copy2(config.MANUAL_GLOSSARY, target_path)
-                print("📑 Using manual glossary from:", config.MANUAL_GLOSSARY)
-                print("📑 Synced manual glossary to output:", target_path)
+                print(f"📑 Using {glossary_label} from:", original_manual_glossary)
+                print(f"📑 Synced {glossary_label} to output:", target_path)
+                os.environ["GLOSSARY_SYNC_SOURCE"] = os.path.abspath(original_manual_glossary)
             else:
-                print("📑 Using existing glossary:", config.MANUAL_GLOSSARY)
+                print(f"📑 Using existing {glossary_label}:", config.MANUAL_GLOSSARY)
+                os.environ.pop("GLOSSARY_SYNC_SOURCE", None)
+
+            runtime_glossary_path = os.path.abspath(target_path)
+            config.MANUAL_GLOSSARY = runtime_glossary_path
+            os.environ["MANUAL_GLOSSARY"] = runtime_glossary_path
             
             # Copy glossary extension if configured
             if os.getenv('ADD_ADDITIONAL_GLOSSARY', '0') == '1':
@@ -15643,18 +15664,30 @@ def main(log_callback=None, stop_callback=None):
             except Exception as e:
                 print(f"⚠️ Could not remove empty glossary.json: {e}")
 
-        elif (not manual_glossary_active) and (
-             (os.path.exists(existing_glossary_csv) and _has_glossary_data(existing_glossary_csv)) or
-             (os.path.exists(existing_glossary_json) and _has_glossary_data(existing_glossary_json))
-        ):
-            print("📑 Existing glossary file detected in source folder - skipping automatic generation")
-            target_glossary_path = None
-            if os.path.exists(existing_glossary_csv) and _has_glossary_data(existing_glossary_csv):
-                print(f"📑 Using existing glossary.csv: {existing_glossary_csv}")
-                target_glossary_path = existing_glossary_csv
-            elif os.path.exists(existing_glossary_json) and _has_glossary_data(existing_glossary_json):
-                print(f"📑 Using existing glossary.json: {existing_glossary_json}")
-                target_glossary_path = existing_glossary_json
+        used_existing_glossary = False
+        target_glossary_path = None
+        auto_mode_for_existing = os.getenv("AUTO_GLOSSARY_MODE", "off").lower()
+        preextracted_auto_glossary_active = auto_mode_for_existing in ("balanced", "full")
+        if not manual_glossary_active and not preextracted_auto_glossary_active:
+            preferred_existing_glossary = find_glossary_file(out) if not manual_glossary_active else None
+            if preferred_existing_glossary and _has_glossary_data(preferred_existing_glossary):
+                print("📑 Existing glossary file detected - skipping automatic generation")
+                print(f"📑 Using resolved glossary: {preferred_existing_glossary}")
+                target_glossary_path = preferred_existing_glossary
+                used_existing_glossary = True
+            elif (not manual_glossary_active) and (
+                 (os.path.exists(existing_glossary_csv) and _has_glossary_data(existing_glossary_csv)) or
+                 (os.path.exists(existing_glossary_json) and _has_glossary_data(existing_glossary_json))
+            ):
+                print("📑 Existing glossary file detected in source folder - skipping automatic generation")
+                target_glossary_path = None
+                if os.path.exists(existing_glossary_csv) and _has_glossary_data(existing_glossary_csv):
+                    print(f"📑 Using existing glossary.csv: {existing_glossary_csv}")
+                    target_glossary_path = existing_glossary_csv
+                elif os.path.exists(existing_glossary_json) and _has_glossary_data(existing_glossary_json):
+                    print(f"📑 Using existing glossary.json: {existing_glossary_json}")
+                    target_glossary_path = existing_glossary_json
+                used_existing_glossary = bool(target_glossary_path)
             
             # --- Check and inject book title if missing ---
             if target_glossary_path and target_glossary_path.endswith('.csv'):
@@ -15749,7 +15782,9 @@ def main(log_callback=None, stop_callback=None):
                             print(f"⚠️ Failed to copy glossary extension: {e}")
                     else:
                         print(f"📑 Using existing glossary extension in output folder")
-        elif os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1":
+        ran_auto_glossary_generation = False
+        if (not manual_glossary_active) and (not used_existing_glossary) and os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1":
+            ran_auto_glossary_generation = True
             model = os.getenv("MODEL", "gpt-4")
             if is_traditional_translation_api(model):
                 print("📑 Automatic glossary generation disabled")
@@ -16239,7 +16274,7 @@ def main(log_callback=None, stop_callback=None):
                     
                 except Exception as e:
                     print(f"❌ Glossary generation failed: {e}")
-        else:
+        if (not manual_glossary_active) and (not used_existing_glossary) and not ran_auto_glossary_generation:
             # Check if the new AUTO_GLOSSARY_MODE is balanced/full
             # (glossary was pre-extracted by the GUI before translation started)
             auto_mode = os.getenv("AUTO_GLOSSARY_MODE", "off").lower()
@@ -16299,14 +16334,20 @@ def main(log_callback=None, stop_callback=None):
                         target_ext = os.path.splitext(best_match)[1]
                         target_name = f"glossary{target_ext}"
                         target_path = os.path.join(out, target_name)
-                        if not os.path.exists(target_path):
-                            try:
-                                shutil.copy(best_match, target_path)
-                                print(f"📑 Copied glossary to output: {target_name}")
-                            except Exception as e:
-                                print(f"⚠️ Failed to copy glossary: {e}")
-                        else:
-                            print(f"📑 Glossary already exists in output: {target_name}")
+                        try:
+                            needs_sync = True
+                            if os.path.exists(target_path):
+                                try:
+                                    needs_sync = not filecmp.cmp(best_match, target_path, shallow=False)
+                                except Exception:
+                                    needs_sync = True
+                            if needs_sync:
+                                shutil.copy2(best_match, target_path)
+                                print(f"📑 Synced pre-extracted glossary to output: {target_name}")
+                            else:
+                                print(f"📑 Glossary already up to date in output: {target_name}")
+                        except Exception as e:
+                            print(f"⚠️ Failed to sync glossary: {e}")
                     else:
                         print(f"📑 No matching glossary found in {glossary_search_dir} for '{input_base}'")
                 else:
@@ -16323,21 +16364,56 @@ def main(log_callback=None, stop_callback=None):
     if glossary_file and os.path.exists(glossary_file):
         if append_glossary_enabled:
             try:
+                print(f"📑 Glossary selected: {glossary_file}")
+                synced_from = (os.getenv("GLOSSARY_SYNC_SOURCE", "") or "").strip()
+                if synced_from and os.path.exists(synced_from):
+                    print(f"📑 Glossary synced from: {synced_from}")
                 if glossary_file.lower().endswith(('.csv', '.txt', '.md')):
-                    # Quick CSV/TXT/MD stats
+                    # CSV/TXT/MD stats using entry parsing instead of raw line count.
                     with open(glossary_file, 'r', encoding='utf-8') as f:
-                        lines = [ln.strip() for ln in f.readlines() if ln.strip()]
-                    entry_count = max(0, len(lines) - 1) if lines and ',' in lines[0] else len(lines)
+                        raw_glossary_text = f.read()
+                    entries_for_preview = []
+                    if "=== " in raw_glossary_text and "* " in raw_glossary_text:
+                        for line in raw_glossary_text.splitlines():
+                            stripped = line.strip()
+                            if not stripped.startswith("* "):
+                                continue
+                            paren_start = stripped.find("(")
+                            paren_end = stripped.find(")", paren_start) if paren_start != -1 else -1
+                            translated = stripped[2:paren_start].strip() if paren_start != -1 else stripped[2:].strip()
+                            raw_name = stripped[paren_start + 1:paren_end].strip() if paren_start != -1 and paren_end != -1 else ""
+                            if raw_name and translated:
+                                entries_for_preview.append((raw_name, translated, stripped))
+                    else:
+                        import csv as _csv
+                        import io as _io
+                        _GLOSSARY_SEP = '\x1F'
+                        if _GLOSSARY_SEP in raw_glossary_text:
+                            rows = [line.split(_GLOSSARY_SEP) for line in raw_glossary_text.splitlines()]
+                        else:
+                            rows = list(_csv.reader(_io.StringIO(raw_glossary_text)))
+                        for row in rows:
+                            if len(row) < 3:
+                                continue
+                            if row[0].strip().lower() == "type":
+                                continue
+                            raw_name = row[1].strip()
+                            translated = row[2].strip()
+                            if raw_name and translated:
+                                entries_for_preview.append((raw_name, translated, ""))
+                    entry_count = len(entries_for_preview)
+                    unique_count = len({raw_name for raw_name, _translated, _line in entries_for_preview})
                     if glossary_file.lower().endswith('.txt'):
                         file_type = "TXT"
                     elif glossary_file.lower().endswith('.md'):
                         file_type = "MD"
                     else:
                         file_type = "CSV"
-                    print(f"📑 Glossary ready ({file_type}) with {entry_count} entries")
-                    print("📑 Sample glossary lines:")
-                    for ln in lines[1:6]:
-                        print(f"   • {ln}")
+                    duplicate_note = f", {unique_count} unique raw names" if unique_count != entry_count else ""
+                    print(f"📑 Glossary ready ({file_type}) with {entry_count} entries{duplicate_note}")
+                    print("📑 Sample glossary entries:")
+                    for raw_name, translated, original_line in entries_for_preview[:5]:
+                        print(f"   • {original_line or f'{raw_name} → {translated}'}")
                 elif glossary_file.lower().endswith('.json'):
                     with open(glossary_file, 'r', encoding='utf-8') as f:
                         glossary_data = json.load(f)

@@ -8374,6 +8374,7 @@ Recent translations to summarize:
             try:
                 self.config['manual_glossary_path'] = ''
                 os.environ.pop('MANUAL_GLOSSARY', None)
+                os.environ.pop('GLOSSARY_SOURCE_MODE', None)
                 self.save_config(show_message=False)
             except Exception:
                 pass
@@ -8493,7 +8494,7 @@ Recent translations to summarize:
 
                     # 4. Also include the currently active auto-mapped glossary
                     _auto_gp = getattr(self, 'auto_loaded_glossary_path', None) or getattr(self, 'manual_glossary_path', None)
-                    if _auto_gp and os.path.exists(_auto_gp) and not getattr(self, 'manual_glossary_manually_loaded', False):
+                    if _auto_gp and os.path.exists(_auto_gp) and not (self._is_user_manual_glossary_active(epub_path) if hasattr(self, '_is_user_manual_glossary_active') else getattr(self, 'manual_glossary_manually_loaded', False)):
                         _auto_norm = os.path.normpath(os.path.abspath(_auto_gp))
                         if _auto_norm not in {os.path.normpath(os.path.abspath(fp)) for _, fp in all_files}:
                             all_files.append((base, _auto_gp))
@@ -8565,6 +8566,7 @@ Recent translations to summarize:
                 self.manual_glossary_path = None
                 self.manual_glossary_manually_loaded = False
                 os.environ.pop('MANUAL_GLOSSARY', None)
+                os.environ.pop('GLOSSARY_SOURCE_MODE', None)
 
                 if deleted:
                     self.append_log(f"🗑️ Deleted ({len(deleted)} files backed up): {', '.join(deleted)}")
@@ -12848,7 +12850,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 if current_file_base not in glossary_name and current_file_base not in glossary_parent:
                     # Glossary doesn't match, clear it
                     old_glossary = glossary_full_path
-                    was_manual = getattr(self, 'manual_glossary_manually_loaded', False)
+                    was_manual = self._is_user_manual_glossary_active(file_path) if hasattr(self, '_is_user_manual_glossary_active') else getattr(self, 'manual_glossary_manually_loaded', False)
                     source_type = "manually loaded" if was_manual else "auto-loaded"
                     self.append_log(f"📑 Cleared {source_type} glossary from different source: {os.path.basename(os.path.dirname(old_glossary))}")
                     self.manual_glossary_path = None
@@ -13051,22 +13053,40 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     os.environ['GLOSSARY_REQUEST_MERGE_COUNT'] = glossary_merge_count
                     self.append_log(f"📑 Vision mode: OCR prepass will run before glossary extraction (merge count: {glossary_merge_count})")
                 elif auto_glossary_mode in ('balanced', 'full'):
-                    # Check if a glossary was MANUALLY loaded by the user for this file
-                    # Auto-loaded glossaries (from autofill) could be incomplete from a stopped extraction
+                    # Only a true user-loaded manual glossary can skip balanced/full extraction.
+                    # Auto-mapped/generated glossaries must respect the extraction progress file.
+                    glossary_source_mode = self._resolve_glossary_source_mode_for_env(self.file_path) if hasattr(self, '_resolve_glossary_source_mode_for_env') else ''
+                    user_manual_glossary_active = self._is_user_manual_glossary_active(self.file_path) if hasattr(self, '_is_user_manual_glossary_active') else False
+                    auto_progress_complete = False
+                    auto_progress_detail = ""
+                    auto_progress_path = ""
+                    try:
+                        auto_progress_complete, auto_progress_detail, auto_progress_path = self._glossary_progress_is_complete_for_input(self.file_path)
+                    except Exception:
+                        pass
                     has_existing_glossary = bool(
                         getattr(self, 'manual_glossary_path', None) and 
                         os.path.exists(getattr(self, 'manual_glossary_path', '')) and
-                        getattr(self, 'manual_glossary_manually_loaded', False)
+                        (
+                            user_manual_glossary_active
+                            or auto_progress_complete
+                        )
                     )
                     
                     if not has_existing_glossary:
+                        if auto_progress_path:
+                            self.append_log(f"📑 Auto glossary progress incomplete ({auto_progress_detail}) - regenerating")
+                            self.append_log(f"   Progress: {auto_progress_path}")
+                        else:
+                            self.append_log("📑 Auto glossary progress missing - regenerating")
                         # Clear any auto-loaded glossary before re-extraction
                         # (it may be incomplete from a previous stopped extraction)
                         if (getattr(self, 'manual_glossary_path', None) and 
-                            not getattr(self, 'manual_glossary_manually_loaded', False)):
+                            not user_manual_glossary_active):
                             self.append_log(f"📑 Clearing auto-loaded glossary for fresh extraction")
                             self.manual_glossary_path = None
                             os.environ.pop('MANUAL_GLOSSARY', None)
+                            os.environ.pop('GLOSSARY_SOURCE_MODE', None)
                         
                         mode_display = auto_glossary_mode.capitalize()
                         self.append_log(f"\n{'='*60}")
@@ -13110,9 +13130,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             if self.stop_requested or getattr(self, '_glossary_stop_was_requested', False):
                                 self.append_log("⏹️ Translation cancelled during glossary extraction")
                                 # Clear auto-loaded glossary so next run re-extracts
-                                if not getattr(self, 'manual_glossary_manually_loaded', False):
+                                if not user_manual_glossary_active:
                                     self.manual_glossary_path = None
                                     os.environ.pop('MANUAL_GLOSSARY', None)
+                                    os.environ.pop('GLOSSARY_SOURCE_MODE', None)
                                 return
                             
                             # Auto-load the generated glossary (only if extraction completed fully)
@@ -13131,7 +13152,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                                     else:
                                         os.environ[key] = val
                     else:
-                        self.append_log(f"📑 Glossary already loaded, skipping auto-extraction")
+                        if auto_progress_complete and glossary_source_mode == 'auto_map':
+                            self.append_log(f"📑 Existing auto glossary progress complete ({auto_progress_detail}), skipping auto-extraction")
+                        else:
+                            self.append_log(f"📑 User-loaded manual glossary already loaded, skipping auto-extraction")
                 # ===== END PRE-TRANSLATION GLOSSARY EXTRACTION =====
                 
                 # Call the direct function
@@ -13436,10 +13460,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
             else:
                 if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
                     os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
+                    if self._is_user_manual_glossary_active() if hasattr(self, '_is_user_manual_glossary_active') else getattr(self, 'manual_glossary_manually_loaded', False):
+                        os.environ['GLOSSARY_SOURCE_MODE'] = 'manual'
+                    else:
+                        os.environ['GLOSSARY_SOURCE_MODE'] = 'auto_map'
                     self.append_log(f"📑 Set glossary in environment: {os.path.basename(self.manual_glossary_path)}")
                 else:
                     # Clear any previous glossary from environment
                     os.environ.pop('MANUAL_GLOSSARY', None)
+                    os.environ.pop('GLOSSARY_SOURCE_MODE', None)
                     self.append_log(f"ℹ️ No glossary loaded")
 
             # ========== NEW: APPLY OPF-BASED SORTING ==========
@@ -13526,6 +13555,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         gp = mgm.get(file_path) or mgm.get(key) or mgm.get(os.path.normpath(file_path))
                         if gp:
                             os.environ['MANUAL_GLOSSARY'] = gp
+                            os.environ['GLOSSARY_SOURCE_MODE'] = 'auto_map'
                             # Inform user which glossary is used for this EPUB
                             try:
                                 if str(file_path).lower().endswith('.epub'):
@@ -13536,6 +13566,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                                 pass
                         else:
                             os.environ.pop('MANUAL_GLOSSARY', None)
+                            os.environ.pop('GLOSSARY_SOURCE_MODE', None)
                 except Exception:
                     pass
                 
@@ -14181,6 +14212,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             manual_glossary_path = None
                             # Clear env/config so workers don't think a glossary exists
                             os.environ.pop('MANUAL_GLOSSARY', None)
+                            os.environ.pop('GLOSSARY_SOURCE_MODE', None)
                             if hasattr(self, 'manual_glossary_path'):
                                 self.manual_glossary_path = ''
                             self.config['manual_glossary_path'] = ''
@@ -15225,7 +15257,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 # Log glossary status
                 if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
-                    self.append_log(f"📑 Manual glossary loaded: {os.path.basename(self.manual_glossary_path)}")
+                    if self._is_user_manual_glossary_active(file_path) if hasattr(self, '_is_user_manual_glossary_active') else getattr(self, 'manual_glossary_manually_loaded', False):
+                        self.append_log(f"📑 Manual glossary loaded: {os.path.basename(self.manual_glossary_path)}")
+                    else:
+                        self.append_log(f"📑 Auto glossary mapped: {os.path.basename(self.manual_glossary_path)}")
                 else:
                     self.append_log(f"📑 No manual glossary loaded")
                 
@@ -15274,6 +15309,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 _mapped_gp = os.environ.get('MANUAL_GLOSSARY', '')
                 if _mapped_gp and os.path.exists(_mapped_gp):
                     # Already set by the per-EPUB mapping loop – keep it
+                    os.environ.setdefault('GLOSSARY_SOURCE_MODE', 'auto_map')
                     pass
                 elif hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
                     if (hasattr(self, 'auto_loaded_glossary_path') and 
@@ -15282,9 +15318,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             hasattr(self, 'file_path') and 
                             self.file_path == self.auto_loaded_glossary_for_file):
                             os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
+                            os.environ['GLOSSARY_SOURCE_MODE'] = 'auto_map'
                             self.append_log(f"📑 Using auto-loaded glossary: {os.path.basename(self.manual_glossary_path)}")
                     else:
                         os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
+                        os.environ['GLOSSARY_SOURCE_MODE'] = 'manual'
                         self.append_log(f"📑 Using manual glossary: {os.path.basename(self.manual_glossary_path)}")
                 
                 # Set sys.argv to match what TransateKRtoEN.py expects
@@ -15396,6 +15434,155 @@ If you see multiple p-b cookies, use the one with the longest value."""
             pass
 
         return ''
+
+    def _resolve_glossary_source_mode_for_env(self, file_path: str) -> str:
+        """Return whether the resolved glossary came from auto-map or manual load."""
+        try:
+            resolved = self._resolve_glossary_for_env(file_path)
+            if not resolved:
+                return ''
+            resolved_norm = os.path.normpath(os.path.abspath(resolved))
+        except Exception:
+            return ''
+
+        try:
+            mgm = getattr(self, 'manual_glossary_map', None)
+            if isinstance(mgm, dict) and file_path:
+                key = os.path.normpath(os.path.abspath(file_path))
+                gp = mgm.get(file_path) or mgm.get(key) or mgm.get(os.path.normpath(file_path))
+                if gp and os.path.normpath(os.path.abspath(gp)) == resolved_norm:
+                    return 'auto_map'
+        except Exception:
+            pass
+
+        try:
+            auto_path = getattr(self, 'auto_loaded_glossary_path', None)
+            if auto_path and os.path.normpath(os.path.abspath(auto_path)) == resolved_norm:
+                return 'auto_map'
+        except Exception:
+            pass
+
+        return 'manual'
+
+    def _is_user_manual_glossary_active(self, file_path: str = "") -> bool:
+        """True only when the current glossary was explicitly loaded by the user."""
+        try:
+            path = getattr(self, 'manual_glossary_path', None)
+            if not path or not os.path.exists(path):
+                return False
+            if not getattr(self, 'manual_glossary_manually_loaded', False):
+                return False
+            auto_path = getattr(self, 'auto_loaded_glossary_path', None)
+            if auto_path and os.path.normpath(os.path.abspath(path)) == os.path.normpath(os.path.abspath(auto_path)):
+                return False
+            if self._resolve_glossary_source_mode_for_env(file_path or getattr(self, 'file_path', '')) == 'auto_map':
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _glossary_progress_path_for_input(self, file_path: str) -> str:
+        """Return the balanced/full glossary progress file for an input file."""
+        try:
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            override_dir = self._current_output_override()
+            if override_dir:
+                glossary_dir = os.path.join(os.path.abspath(override_dir), "Glossary")
+            else:
+                glossary_dir = os.path.join(_get_app_dir(), "Glossary")
+            try:
+                from glossary_paths import get_book_glossary_path
+                return get_book_glossary_path(
+                    glossary_dir,
+                    base_name,
+                    f"{base_name}_glossary_progress.json",
+                )
+            except Exception:
+                return os.path.join(glossary_dir, base_name, f"{base_name}_glossary_progress.json")
+        except Exception:
+            return ""
+
+    def _glossary_progress_is_complete_for_input(self, file_path: str):
+        """Return (complete, detail, progress_path) for balanced/full glossary progress."""
+        progress_path = self._glossary_progress_path_for_input(file_path)
+        if not progress_path or not os.path.exists(progress_path):
+            return False, "no progress file", progress_path
+
+        try:
+            with open(progress_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            return False, f"progress unreadable: {e}", progress_path
+
+        if not isinstance(data, dict):
+            return False, "progress is not a JSON object", progress_path
+
+        chapters = data.get("chapters", {})
+        completed = set()
+        failed = set()
+        in_progress = set()
+        merged = set()
+
+        def _add_ints(target, values):
+            for value in values or []:
+                try:
+                    target.add(int(value))
+                except (TypeError, ValueError):
+                    pass
+
+        _add_ints(completed, data.get("completed", []))
+        _add_ints(failed, data.get("failed", []))
+        _add_ints(in_progress, data.get("in_progress", []))
+        _add_ints(merged, data.get("merged_indices", []))
+
+        if isinstance(chapters, dict):
+            for key, info in chapters.items():
+                if not isinstance(info, dict):
+                    continue
+                try:
+                    idx = int(info.get("chapter_index", key))
+                except (TypeError, ValueError):
+                    continue
+                status = str(info.get("status", "")).strip().lower()
+                if status == "completed":
+                    completed.add(idx)
+                elif status == "merged":
+                    completed.add(idx)
+                    merged.add(idx)
+                elif status in ("failed", "qa_failed", "error"):
+                    failed.add(idx)
+                elif status == "in_progress":
+                    in_progress.add(idx)
+
+        total = 0
+        for key in ("chapter_count", "total_chapters"):
+            try:
+                total = max(total, int(data.get(key) or 0))
+            except (TypeError, ValueError):
+                pass
+        for key in ("chapter_filenames", "chapter_numbers", "chapter_positions"):
+            value = data.get(key)
+            if isinstance(value, dict):
+                total = max(total, len(value))
+        total = max(total, len(completed | failed | in_progress | merged))
+
+        done = completed | merged
+        manual_removed = set()
+        _add_ints(manual_removed, data.get("manual_removed_indices", []))
+
+        if total <= 0:
+            return False, "progress has no chapter count", progress_path
+        if failed:
+            return False, f"{len(failed)} failed chapter(s)", progress_path
+        if in_progress:
+            return False, f"{len(in_progress)} chapter(s) still in progress", progress_path
+        if len(done) < total:
+            detail = f"{len(done)}/{total} completed"
+            if manual_removed:
+                detail += f", {len(manual_removed)} manually marked not completed"
+            return False, detail, progress_path
+
+        return True, f"{len(done)}/{total} completed", progress_path
 
     def _get_environment_variables(self, epub_path, api_key):
         """Get all environment variables for translation/glossary"""
@@ -15776,6 +15963,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_DUPLICATE_KEY_MODE': self.config.get('glossary_duplicate_key_mode', 'auto'),
             'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', ''),
             'MANUAL_GLOSSARY': self._resolve_glossary_for_env(epub_path),
+            'GLOSSARY_SOURCE_MODE': self._resolve_glossary_source_mode_for_env(epub_path),
             'FORCE_NCX_ONLY': '1' if self.force_ncx_only_var else '0',
             'SINGLE_API_IMAGE_CHUNKS': "1" if self.single_api_image_chunks_var else "0",
             'ENABLE_GEMINI_THINKING': "1" if self.enable_gemini_thinking_var else "0",
@@ -17249,6 +17437,7 @@ Important rules:
                     'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
                     'GLOSSARY_ENTRY_TYPE_FILTER_MODE': self.config.get('glossary_entry_type_filter_mode', 'Loose'),
                     'MANUAL_GLOSSARY': self._resolve_glossary_for_env(text_file) if hasattr(self, '_resolve_glossary_for_env') else (self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else ''),
+                    'GLOSSARY_SOURCE_MODE': self._resolve_glossary_source_mode_for_env(text_file) if hasattr(self, '_resolve_glossary_source_mode_for_env') else '',
                     'GLOSSARY_FORMAT_INSTRUCTIONS': self.glossary_format_instructions if hasattr(self, 'glossary_format_instructions') else '',
                     'GLOSSARY_MAX_SENTENCES': str(self.config.get('glossary_max_sentences', 200)),
                     'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 0)),
@@ -17442,6 +17631,12 @@ Important rules:
                     except Exception:
                         pass
                     return False
+
+                try:
+                    progress_complete, progress_detail, progress_path = self._glossary_progress_is_complete_for_input(file_path)
+                except Exception:
+                    progress_complete, progress_detail, progress_path = False, "progress check failed", ""
+
                 # Check if output file exists - check both JSON and CSV
                 # Even if stopped, we consider it a partial success if the file exists and has content
                 
@@ -17473,6 +17668,11 @@ Important rules:
                         # Don't return True here so it doesn't count as fully successful, 
                         # but we can track it as partial if needed
                         return False 
+                    elif not progress_complete:
+                        self.append_log(f"⚠️ Glossary output exists but extraction progress is incomplete ({progress_detail})")
+                        if progress_path:
+                            self.append_log(f"   Progress: {progress_path}")
+                        return False
                     else:
                         self.append_log(f"✅ Glossary saved to: {output_path}")
                         return True
@@ -19922,7 +20122,7 @@ Important rules:
             if (
                 self.auto_loaded_glossary_path and
                 self.manual_glossary_path == self.auto_loaded_glossary_path and
-                not getattr(self, 'manual_glossary_manually_loaded', False)
+                not (self._is_user_manual_glossary_active(file_path) if hasattr(self, '_is_user_manual_glossary_active') else getattr(self, 'manual_glossary_manually_loaded', False))
             ):
                 self.manual_glossary_path = None
                 self.append_log("📑 Cleared auto-loaded glossary from previous novel")
@@ -19931,7 +20131,7 @@ Important rules:
             self.auto_loaded_glossary_for_file = None
 
         # If the user manually loaded a glossary, keep using it until they clear it.
-        if getattr(self, 'manual_glossary_manually_loaded', False) and self.manual_glossary_path:
+        if self._is_user_manual_glossary_active(file_path) if hasattr(self, '_is_user_manual_glossary_active') else (getattr(self, 'manual_glossary_manually_loaded', False) and self.manual_glossary_path):
             return False
 
         file_base = os.path.splitext(os.path.basename(file_path))[0]
@@ -20353,6 +20553,7 @@ Important rules:
                 if self.manual_glossary_path == self.auto_loaded_glossary_path:
                     self.manual_glossary_path = None
                     os.environ.pop('MANUAL_GLOSSARY', None)
+                    os.environ.pop('GLOSSARY_SOURCE_MODE', None)
                 self.auto_loaded_glossary_path = None
                 self.auto_loaded_glossary_for_file = None
                 self.append_log("📑 Cleared auto-loaded glossary (new files selected)")
@@ -20365,7 +20566,7 @@ Important rules:
             if len(epub_files) == 1:
                 # Log + clear any previous auto-mapped glossary before re-mapping
                 _prev_glossary = getattr(self, 'manual_glossary_path', None)
-                if _prev_glossary and not getattr(self, 'manual_glossary_manually_loaded', False):
+                if _prev_glossary and not (self._is_user_manual_glossary_active(epub_files[0]) if hasattr(self, '_is_user_manual_glossary_active') else getattr(self, 'manual_glossary_manually_loaded', False)):
                     try:
                         self.append_log(f"📑 Cleared auto-mapped glossary: {os.path.basename(_prev_glossary)}")
                     except Exception:
@@ -20545,7 +20746,7 @@ Important rules:
                     if current_file_base not in glossary_name and current_file_base not in glossary_parent:
                         # Glossary doesn't match, clear it
                         old_glossary = glossary_full_path
-                        was_manual = getattr(self, 'manual_glossary_manually_loaded', False)
+                        was_manual = self._is_user_manual_glossary_active(current_file) if hasattr(self, '_is_user_manual_glossary_active') else getattr(self, 'manual_glossary_manually_loaded', False)
                         source_type = "manually loaded" if was_manual else "auto-loaded"
                         self.append_log(f"📑 Cleared {source_type} glossary from different source: {os.path.basename(os.path.dirname(old_glossary))}")
                         self.manual_glossary_path = None
@@ -20554,7 +20755,7 @@ Important rules:
                         self.auto_loaded_glossary_for_file = None
                     else:
                         # Glossary matches the current file, keep it
-                        was_manual = getattr(self, 'manual_glossary_manually_loaded', False)
+                        was_manual = self._is_user_manual_glossary_active(current_file) if hasattr(self, '_is_user_manual_glossary_active') else getattr(self, 'manual_glossary_manually_loaded', False)
                         source_type = "manually loaded" if was_manual else "auto-loaded"
                         self.append_log(f"📑 Keeping {source_type} glossary: {glossary_name}")
 
@@ -22264,6 +22465,7 @@ Important rules:
                 self.manual_glossary_manually_loaded = False
                 self.config['manual_glossary_path'] = best_match
                 os.environ['MANUAL_GLOSSARY'] = best_match
+                os.environ['GLOSSARY_SOURCE_MODE'] = 'auto_map'
                 self.append_log(f"📑 Auto-loaded generated glossary: {os.path.basename(best_match)}")
                 return  # Loaded successfully
             
@@ -22298,14 +22500,14 @@ Important rules:
             if hasattr(self, '_is_any_process_running') and self._is_any_process_running():
                 return
 
-            # Guard: user manually loaded a glossary — don't override it
-            if getattr(self, 'manual_glossary_manually_loaded', False):
-                return
-
             # Guard: need at least one selected EPUB
             files = list(getattr(self, 'selected_files', []) or [])
             epubs = [p for p in files if str(p).lower().endswith('.epub')]
             if not epubs:
+                return
+
+            # Guard: user manually loaded a glossary — don't override it
+            if self._is_user_manual_glossary_active(epubs[0]) if hasattr(self, '_is_user_manual_glossary_active') else getattr(self, 'manual_glossary_manually_loaded', False):
                 return
 
             # Remember current glossary before re-mapping
@@ -22336,7 +22538,7 @@ Important rules:
             has_label = hasattr(self, 'manual_glossary_status_label')
             if gp:
                 basename = os.path.basename(gp)
-                is_manual = getattr(self, 'manual_glossary_manually_loaded', False)
+                is_manual = self._is_user_manual_glossary_active(getattr(self, 'file_path', '')) if hasattr(self, '_is_user_manual_glossary_active') else getattr(self, 'manual_glossary_manually_loaded', False)
                 prefix = "📑 Manual" if is_manual else "📑 Auto"
                 # Truncate long filenames for display; full path in tooltip
                 display_name = basename if len(basename) <= 20 else basename[:17] + "..."
@@ -22375,7 +22577,7 @@ Important rules:
             try:
                 if getattr(self, 'manual_glossary_path', None):
                     # If user manually loaded this glossary, don't override it
-                    if getattr(self, 'manual_glossary_manually_loaded', False):
+                    if self._is_user_manual_glossary_active(epubs[0]) if hasattr(self, '_is_user_manual_glossary_active') else getattr(self, 'manual_glossary_manually_loaded', False):
                         return 0
                     # Check what auto-mapping would assign.
                     # Only clear+re-map if there's a DIFFERENT glossary to replace with.
@@ -22412,6 +22614,7 @@ Important rules:
                     pass
                 try:
                     os.environ['MANUAL_GLOSSARY'] = gp
+                    os.environ['GLOSSARY_SOURCE_MODE'] = 'auto_map'
                 except Exception:
                     pass
                 try:

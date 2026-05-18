@@ -3292,6 +3292,12 @@ class AsyncProcessingDialog:
         
         # Glossary settings
         env_vars['MANUAL_GLOSSARY'] = self.gui.manual_glossary_path if hasattr(self.gui, 'manual_glossary_path') and self.gui.manual_glossary_path else ''
+        if hasattr(self.gui, '_resolve_glossary_source_mode_for_env'):
+            env_vars['GLOSSARY_SOURCE_MODE'] = self.gui._resolve_glossary_source_mode_for_env(getattr(self.gui, 'file_path', ''))
+        elif getattr(self.gui, 'auto_loaded_glossary_path', None) and env_vars['MANUAL_GLOSSARY'] == getattr(self.gui, 'auto_loaded_glossary_path', None):
+            env_vars['GLOSSARY_SOURCE_MODE'] = 'auto_map'
+        else:
+            env_vars['GLOSSARY_SOURCE_MODE'] = 'manual' if env_vars['MANUAL_GLOSSARY'] else ''
         env_vars['DISABLE_AUTO_GLOSSARY'] = "0" if _val(self.gui.enable_auto_glossary_var, False) else "1"
         env_vars['DISABLE_GLOSSARY_TRANSLATION'] = "0" if _val(self.gui.enable_auto_glossary_var, False) else "1"
         env_vars['APPEND_GLOSSARY'] = "1" if _val(self.gui.append_glossary_var, False) else "0"

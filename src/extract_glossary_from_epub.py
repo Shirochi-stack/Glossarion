@@ -5848,6 +5848,19 @@ def main(log_callback=None, stop_callback=None):
     completed = prog['completed']
     failed = prog.get('failed', [])
     in_progress = prog.get('in_progress', [])
+    try:
+        progress_total = int(getattr(progress_context, "total_chapters", 0) or len(chapters))
+    except Exception:
+        progress_total = len(chapters)
+    completed_count = len(set(_unique_int_list(completed)))
+    failed_count = len(set(_unique_int_list(failed)))
+    in_progress_count = len(set(_unique_int_list(in_progress)))
+    print(
+        f"📑 Glossary progress resume: {completed_count}/{progress_total} completed, "
+        f"{failed_count} failed, {in_progress_count} in progress"
+    )
+    if completed_count < progress_total:
+        print(f"📑 Glossary extraction will process {max(0, progress_total - completed_count)} incomplete chapter(s)")
     # Remove failed chapters from completed so they get retried
     if failed:
         before = len(completed)
@@ -7619,6 +7632,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         except Exception:
             existing_chapters_by_idx = {}
 
+        requested_in_progress_set = set(_unique_int_list(in_progress)) if in_progress is not None else set()
         manual_removed_set = set(manual_removed_indices)
         if manual_removed_set:
             if total_chapters:
@@ -7663,7 +7677,6 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             if int(idx) in failed_set
         }
 
-        requested_in_progress_set = set(_unique_int_list(in_progress)) if in_progress is not None else set()
         current_override_set = set(completed_clean) | set(merged_clean) | requested_in_progress_set
         if current_override_set:
             failed_clean = [
