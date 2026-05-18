@@ -1895,7 +1895,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             self.unified_auto_glosary_prompt3 = unified_prompt_from_config
         
         # Get append_glossary_prompt from config, but treat empty string as missing
-        default_append_prompt = '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'
+        default_append_prompt = '- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n'
         append_prompt_from_config = self.config.get('append_glossary_prompt', default_append_prompt)
         if not append_prompt_from_config or not append_prompt_from_config.strip():
             self.append_glossary_prompt = default_append_prompt
@@ -3375,7 +3375,7 @@ Recent translations to summarize:
         )
         self.rolling_summary_system_prompt = self.config.get('rolling_summary_system_prompt', self.default_rolling_summary_system_prompt)
         self.rolling_summary_user_prompt = self.config.get('rolling_summary_user_prompt', self.default_rolling_summary_user_prompt)
-        self.append_glossary_prompt = self.config.get('append_glossary_prompt', "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
+        self.append_glossary_prompt = self.config.get('append_glossary_prompt', "- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n")
         self.translation_chunk_prompt = self.config.get('translation_chunk_prompt', self.default_translation_chunk_prompt)
         self.image_chunk_prompt = self.config.get('image_chunk_prompt', self.default_image_chunk_prompt)
         self.vision_ocr_prompt = self.config.get('vision_ocr_prompt', self.default_vision_ocr_prompt)
@@ -8340,7 +8340,10 @@ Recent translations to summarize:
         """)
 
         def _clear_manual_glossary():
-            _prev = getattr(self, 'manual_glossary_path', None)
+            _prev = (
+                getattr(self, 'manual_glossary_path', None)
+                or getattr(self, 'auto_loaded_glossary_path', None)
+            )
             if not _prev:
                 return
             # Confirmation dialog with centered buttons
@@ -8365,8 +8368,13 @@ Recent translations to summarize:
             self.auto_loaded_glossary_path = None
             self.auto_loaded_glossary_for_file = None
             try:
+                self.manual_glossary_map = {}
+            except Exception:
+                pass
+            try:
                 self.config['manual_glossary_path'] = ''
                 os.environ.pop('MANUAL_GLOSSARY', None)
+                self.save_config(show_message=False)
             except Exception:
                 pass
             self.append_log(f"📑 Cleared glossary: {os.path.basename(_prev)}")
@@ -8409,7 +8417,7 @@ Recent translations to summarize:
                     QMessageBox.warning(self, "No File", "No input file selected.")
                     return
 
-                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                override_dir = self._current_output_override()
                 mode = self.config.get('auto_glossary_mode', 'off').lower()
                 is_balanced_full = mode in ('balanced', 'full')
 
@@ -8581,7 +8589,7 @@ Recent translations to summarize:
                 if not epubs:
                     return None, []
 
-                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                override_dir = self._current_output_override()
                 latest_dir = None
                 latest_time = ''
                 for epub_path in epubs:
@@ -8969,7 +8977,7 @@ Recent translations to summarize:
     def _resolve_translation_output_dir(self, input_file: str) -> str:
         """Return the expected translation output directory for one input file."""
         base_name = os.path.splitext(os.path.basename(input_file))[0]
-        override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        override_dir = self._current_output_override()
         if override_dir:
             return os.path.join(os.path.abspath(override_dir), base_name)
         relative_output = base_name
@@ -9117,7 +9125,7 @@ Recent translations to summarize:
              return
 
         # Check for output directory override
-        override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        override_dir = self._current_output_override()
         
         # Check for batch image mode
         image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
@@ -13467,7 +13475,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
             # Honor OUTPUT_DIRECTORY override globally for this run
             try:
-                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                override_dir = self._current_output_override()
                 if override_dir:
                     os.environ['OUTPUT_DIRECTORY'] = os.path.abspath(override_dir)
                     self.append_log(f"📁 Using output override: {os.environ['OUTPUT_DIRECTORY']}")
@@ -13491,7 +13499,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 folder_name = os.path.basename(parent_dir) if parent_dir else f"OCR_{int(time.time())}"
                 
                 # Check for output directory override
-                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                override_dir = self._current_output_override()
                 if override_dir:
                     combined_image_output_dir = os.path.join(override_dir, folder_name)
                 else:
@@ -13707,7 +13715,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 output_dir = combined_output_dir
             else:
                 # Check for output directory override
-                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                override_dir = self._current_output_override()
                 if override_dir:
                     output_dir = os.path.join(override_dir, base_name)
                 else:
@@ -14186,7 +14194,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     os.environ['DEFER_GLOSSARY_APPEND'] = '1'
                     # Store the append prompt for later use
                     glossary_prompt = self.config.get('append_glossary_prompt', 
-                        "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
+                        "- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n")
                     os.environ['GLOSSARY_APPEND_PROMPT'] = glossary_prompt
                 else:
                     # Original behavior - append manual glossary immediately
@@ -14212,7 +14220,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                                 if system_prompt:
                                     system_prompt += "\n\n"
                                 glossary_prompt = self.config.get('append_glossary_prompt', 
-                                    "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
+                                    "- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n")
                                 system_prompt += f"{glossary_prompt}\n{csv_text}"
                                 self.append_log(f"✅ Appended CSV glossary to system prompt")
                             else:
@@ -14246,7 +14254,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                                     if system_prompt:
                                         system_prompt += "\n\n"
                                     glossary_prompt = self.config.get('append_glossary_prompt', 
-                                        "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
+                                        "- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n")
                                     system_prompt += f"{glossary_prompt}\n{glossary_block}"
                                     self.append_log(f"✅ Added {len(formatted_entries)} glossary entries to system prompt")
                                 else:
@@ -15147,7 +15155,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 base_name = os.path.splitext(os.path.basename(file_path))[0]
                 
                 # Check for output directory override
-                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                override_dir = self._current_output_override()
                 if override_dir:
                     # If absolute, use as is. If relative, join with CWD (or file dir?)
                     # TransateKRtoEN treats it as root, so we should too.
@@ -15522,7 +15530,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         else:
             glossary_request_merging_enabled = '1' if self.config.get('glossary_request_merging_enabled', False) else '0'
             glossary_enable_chapter_split = '1' if self.config.get('glossary_enable_chapter_split', False) else '0'
-        output_override_for_env = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        output_override_for_env = self._current_output_override()
         if output_override_for_env:
             glossary_shared_dir = os.path.join(os.path.abspath(output_override_for_env), 'Glossary')
         else:
@@ -15582,13 +15590,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'TRANSLATION_TEMPERATURE': str(self.trans_temp.text()),
             'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.text()),
             'EPUB_OUTPUT_DIR': _get_app_dir(),
+            'OUTPUT_DIRECTORY': os.path.abspath(output_override_for_env) if output_override_for_env else '',
+            'OUTPUT_DIR': os.path.abspath(output_override_for_env) if output_override_for_env else '',
             'GLOSSARY_SHARED_DIR': glossary_shared_dir,
             'SAVE_GLOSSARY_IN_OUTPUT': '1' if self.config.get('save_glossary_in_output', False) else '0',
             'GLOSSARY_OUTPUT_BACKUP_DIR': self._output_side_glossary_backup_dir_for_source(epub_path) if self.config.get('save_glossary_in_output', False) else '',
             # Whether to include previous source text as memory context
             'INCLUDE_SOURCE_IN_HISTORY': "1" if getattr(self, 'include_source_in_history_var', False) else "0",
             'APPEND_GLOSSARY': "0" if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ("1" if self.append_glossary_var else "0"),
-            'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
+            'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n',
             'ADD_ADDITIONAL_GLOSSARY': "1" if self.config.get('add_additional_glossary', False) else "0",
             'ADDITIONAL_GLOSSARY_PATH': self.config.get('additional_glossary_path', ''),
             'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var else "0",
@@ -15631,7 +15641,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_REFINEMENT_SELECTED_TYPES': ','.join(self.config.get('glossary_refinement_selected_types', [])),
             'GLOSSARY_REFINEMENT_CHUNKING_MODE': self.config.get('glossary_refinement_chunking_mode', 'separate'),
             'GLOSSARY_REFINEMENT_SKIP_DEDUPE': '1' if self.config.get('glossary_refinement_skip_dedupe', False) else '0',
-            'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
+            'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n',
             'GLOSSARY_TRANSLATION_PROMPT': self.glossary_translation_prompt if hasattr(self, 'glossary_translation_prompt') else '',
             'GLOSSARY_FORMAT_INSTRUCTIONS': self.glossary_format_instructions if hasattr(self, 'glossary_format_instructions') else '',
             'GLOSSARY_USE_LEGACY_CSV': '1' if self.use_legacy_csv_var else '0',
@@ -16074,7 +16084,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 pass
 
             # Create Glossary folder
-            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+            override_dir = self._current_output_override()
             save_glossary_in_output = bool(self.config.get('save_glossary_in_output', False))
             if override_dir:
                 glossary_base_dir = os.path.join(override_dir, "Glossary")
@@ -16168,7 +16178,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 # Determine shared glossary directory. Glossary extraction
                 # state belongs in repo/exe Glossary or output-override Glossary.
-                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                override_dir = self._current_output_override()
                 save_glossary_in_output = bool(self.config.get('save_glossary_in_output', False))
                 if override_dir:
                     glossary_dir = os.path.join(os.path.abspath(override_dir), "Glossary")
@@ -16260,12 +16270,52 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def _output_side_glossary_backup_dir_for_source(self, source_path):
         """Return the distributable Glossary_Backup folder beside this source's output."""
         base_name = os.path.splitext(os.path.basename(source_path))[0]
-        override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        override_dir = self._current_output_override()
         if override_dir:
-            output_dir = os.path.join(os.path.abspath(override_dir), base_name)
+            output_dir = os.path.join(override_dir, base_name)
         else:
             output_dir = os.path.join(_get_app_dir(), base_name)
         return os.path.join(output_dir, "Glossary_Backup")
+
+    def _current_output_override(self):
+        """Return the live output override path, preferring unsaved UI text."""
+        def _read_widget_text(widget):
+            if widget is None:
+                return ""
+            for attr in ("text", "get", "currentText", "toPlainText"):
+                fn = getattr(widget, attr, None)
+                if callable(fn):
+                    try:
+                        value = fn()
+                    except Exception:
+                        continue
+                    if value is not None:
+                        return str(value)
+            return ""
+
+        candidates = [
+            _read_widget_text(getattr(self, "output_dir_entry", None)),
+            _read_widget_text(getattr(self, "output_entry", None)),
+        ]
+        try:
+            candidates.append(self.config.get("output_directory", ""))
+        except Exception:
+            pass
+        candidates.extend([
+            os.environ.get("OUTPUT_DIRECTORY", ""),
+            os.environ.get("OUTPUT_DIR", ""),
+        ])
+        for value in candidates:
+            value = str(value or "").strip().strip('"')
+            if value:
+                return os.path.abspath(value)
+        return ""
+
+    def _current_glossary_shared_dir(self):
+        override_dir = self._current_output_override()
+        if override_dir:
+            return os.path.join(override_dir, "Glossary")
+        return os.path.join(_get_app_dir(), "Glossary")
 
     def _process_image_folder_for_glossary(self, folder_name, image_files, output_dir=None):
         """Process all images from a folder and create a combined glossary with new format"""
@@ -16815,7 +16865,7 @@ Important rules:
                 if bool(self.config.get('save_glossary_in_output', False)):
                     try:
                         import shutil
-                        backup_root = os.environ.get('OUTPUT_DIRECTORY') or (
+                        backup_root = self._current_output_override() or (
                             os.path.dirname(os.path.abspath(image_files[0])) if image_files else os.path.dirname(os.path.abspath(output_dir))
                         )
                         backup_dir = os.path.join(os.path.abspath(backup_root), "Glossary_Backup")
@@ -16969,7 +17019,7 @@ Important rules:
         """Save intermediate glossary results with skip logic"""
         try:
             # Determine output directory (same logic as main process)
-            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+            override_dir = self._current_output_override()
             if override_dir:
                 output_dir = os.path.join(override_dir, "Glossary")
             else:
@@ -17098,11 +17148,12 @@ Important rules:
             
             # Determine output directory
             epub_base = os.path.splitext(os.path.basename(file_path))[0]
-            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+            override_dir = self._current_output_override()
+            override_dir_abs = os.path.abspath(override_dir) if override_dir else ''
             save_glossary_in_output = bool(self.config.get('save_glossary_in_output', False))
             
-            if override_dir:
-                shared_glossary_dir = os.path.join(override_dir, "Glossary")
+            if override_dir_abs:
+                shared_glossary_dir = os.path.join(override_dir_abs, "Glossary")
             else:
                 shared_glossary_dir = "Glossary"
             # On macOS .app bundles, cwd can be '/' (read-only root).
@@ -17178,6 +17229,8 @@ Important rules:
                     'GLOSSARY_MAX_NAMES': str(self.glossary_max_names_var),
                     'GLOSSARY_MAX_TITLES': str(self.glossary_max_titles_var),
                     'CONTEXT_WINDOW_SIZE': str(self.context_window_size_var),
+                    'OUTPUT_DIRECTORY': override_dir_abs,
+                    'OUTPUT_DIR': override_dir_abs,
                     'GLOSSARY_SHARED_DIR': shared_glossary_dir,
                     'SAVE_GLOSSARY_IN_OUTPUT': '1' if save_glossary_in_output else '0',
                     'GLOSSARY_OUTPUT_BACKUP_DIR': output_side_backup_dir if save_glossary_in_output else '',
@@ -17189,13 +17242,13 @@ Important rules:
                     'APPEND_GLOSSARY': "0" if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ("1" if self.append_glossary_var else "0"),
                     'GLOSSARY_STRIP_HONORIFICS': '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var else '1',
                     'AUTO_GLOSSARY_PROMPT': getattr(self, 'unified_auto_glosary_prompt3', ''),
-                    'APPEND_GLOSSARY_PROMPT': getattr(self, 'append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'),
+                    'APPEND_GLOSSARY_PROMPT': getattr(self, 'append_glossary_prompt', '- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n'),
                     'GLOSSARY_TRANSLATION_PROMPT': getattr(self, 'glossary_translation_prompt', ''),
                     'GLOSSARY_CUSTOM_ENTRY_TYPES': json.dumps(getattr(self, 'custom_entry_types', {})),
                     'GLOSSARY_CUSTOM_FIELDS': json.dumps(getattr(self, 'custom_glossary_fields', [])),
                     'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
                     'GLOSSARY_ENTRY_TYPE_FILTER_MODE': self.config.get('glossary_entry_type_filter_mode', 'Loose'),
-                    'MANUAL_GLOSSARY': self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else '',
+                    'MANUAL_GLOSSARY': self._resolve_glossary_for_env(text_file) if hasattr(self, '_resolve_glossary_for_env') else (self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else ''),
                     'GLOSSARY_FORMAT_INSTRUCTIONS': self.glossary_format_instructions if hasattr(self, 'glossary_format_instructions') else '',
                     'GLOSSARY_MAX_SENTENCES': str(self.config.get('glossary_max_sentences', 200)),
                     'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 0)),
@@ -17746,7 +17799,7 @@ Important rules:
                self.review_indicator_label.hide()
                return
            file_base = os.path.splitext(os.path.basename(str(files[0])))[0]
-           override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+           override_dir = self._current_output_override()
            if override_dir:
                review_path = os.path.join(os.path.abspath(override_dir), file_base, "review", "review.md")
            else:
@@ -19885,7 +19938,7 @@ Important rules:
 
         # Honor output directory override (matches translation output behavior)
         try:
-            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+            override_dir = self._current_output_override()
         except Exception:
             override_dir = None
 
@@ -22127,7 +22180,7 @@ Important rules:
                 return
             
             # Determine glossary base dir
-            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+            override_dir = self._current_output_override()
             if override_dir:
                 glossary_base_dir = os.path.join(override_dir, "Glossary")
             else:
@@ -22206,6 +22259,8 @@ Important rules:
             
             if best_match and os.path.exists(best_match):
                 self.manual_glossary_path = best_match
+                self.auto_loaded_glossary_path = best_match
+                self.auto_loaded_glossary_for_file = files[0] if len(files) == 1 else None
                 self.manual_glossary_manually_loaded = False
                 self.config['manual_glossary_path'] = best_match
                 os.environ['MANUAL_GLOSSARY'] = best_match
@@ -22579,7 +22634,7 @@ Important rules:
 
                 return None
 
-            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+            override_dir = self._current_output_override()
 
             if override_dir:
                 override_shared_glossary = os.path.join(os.path.abspath(override_dir), 'Glossary')
@@ -22933,18 +22988,7 @@ Important rules:
                         if _epub_path.lower().endswith('.exe'):
                             return None
                         _base = os.path.splitext(os.path.basename(_epub_path))[0]
-                        _override = None
-                        for _c in (
-                            os.environ.get('OUTPUT_DIRECTORY'),
-                            os.environ.get('OUTPUT_DIR'),
-                            self.config.get('output_directory') if hasattr(self, 'config') else None,
-                        ):
-                            if _c is None:
-                                continue
-                            _c = str(_c).strip().strip('"')
-                            if _c:
-                                _override = _c
-                                break
+                        _override = self._current_output_override()
                         _out = os.path.join(os.path.abspath(_override), _base) if _override else _base
                         if _sys.platform == 'darwin' and not os.path.isabs(_out):
                             _out = os.path.join(os.path.dirname(os.path.abspath(_epub_path)), _out)
@@ -23321,7 +23365,7 @@ Important rules:
         
         # Determine output directory override (matches translator behavior)
         try:
-            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+            override_dir = self._current_output_override()
         except Exception:
             override_dir = os.environ.get('OUTPUT_DIRECTORY')
         
@@ -24125,6 +24169,17 @@ Important rules:
                 for key in prompt_keys:
                     self.config[key] = self.config.get(key, '') or ''
 
+                output_override_for_env = self._current_output_override()
+                if output_override_for_env:
+                    output_override_for_env = os.path.abspath(output_override_for_env)
+                    glossary_shared_dir_for_env = os.path.join(output_override_for_env, 'Glossary')
+                    os.environ['OUTPUT_DIRECTORY'] = output_override_for_env
+                    os.environ['OUTPUT_DIR'] = output_override_for_env
+                else:
+                    glossary_shared_dir_for_env = os.path.join(_get_app_dir(), 'Glossary')
+                    os.environ.pop('OUTPUT_DIRECTORY', None)
+                    os.environ.pop('OUTPUT_DIR', None)
+
                 glossary_env_mappings = [
                     ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', '')),
                     ('AUTO_GLOSSARY_PROMPT', self.config.get('unified_auto_glosary_prompt3', '')),
@@ -24135,11 +24190,11 @@ Important rules:
                     ('GLOSSARY_REFINEMENT_SELECTED_TYPES', ','.join(self.config.get('glossary_refinement_selected_types', []))),
                     ('GLOSSARY_REFINEMENT_CHUNKING_MODE', self.config.get('glossary_refinement_chunking_mode', 'separate')),
                     ('GLOSSARY_REFINEMENT_SKIP_DEDUPE', '1' if self.config.get('glossary_refinement_skip_dedupe', False) else '0'),
-                    ('APPEND_GLOSSARY_PROMPT', self.config.get('append_glossary_prompt', '') or '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'),
+                    ('APPEND_GLOSSARY_PROMPT', self.config.get('append_glossary_prompt', '') or '- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n'),
                     ('APPEND_GLOSSARY', '0' if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ('1' if self.config.get('append_glossary') else '0')),
                     ('ADD_ADDITIONAL_GLOSSARY', '1' if self.config.get('add_additional_glossary') else '0'),
                     ('ADDITIONAL_GLOSSARY_PATH', self.config.get('additional_glossary_path', '')),
-                    ('GLOSSARY_SHARED_DIR', os.path.join(_get_app_dir(), 'Glossary')),
+                    ('GLOSSARY_SHARED_DIR', glossary_shared_dir_for_env),
                     ('SAVE_GLOSSARY_IN_OUTPUT', '1' if self.config.get('save_glossary_in_output', False) else '0'),
                     ('VISION_OCR_SOURCE_PREPASS', str(self.config.get('vision_ocr_source_prepass', 'auto') or 'auto')),
                     ('ENABLE_AUTO_GLOSSARY', '1' if self.config.get('auto_glossary_mode', 'off') == 'minimal' else '0'),

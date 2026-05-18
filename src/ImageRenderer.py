@@ -4735,7 +4735,7 @@ def _append_loaded_manga_glossary_to_system_prompt(self, system_prompt: str, sou
             pass
         return system_prompt or ""
 
-    default_append_prompt = "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
+    default_append_prompt = "- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n"
     try:
         append_prompt = (
             getattr(self.main_gui, 'append_glossary_prompt', None)

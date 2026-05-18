@@ -1397,7 +1397,7 @@ async def translate(
         # TransateKRtoEN.build_system_prompt() hard-fails if APPEND_GLOSSARY_PROMPT is blank.
         append_prompt = (config.get('append_glossary_prompt') or '').strip()
         if not append_prompt:
-            append_prompt = '- Follow this reference glossary for consistent translation (Do not output any raw entries):'
+            append_prompt = '- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):'
         if not append_prompt.endswith('\n'):
             append_prompt += '\n'
         os.environ['APPEND_GLOSSARY_PROMPT'] = append_prompt

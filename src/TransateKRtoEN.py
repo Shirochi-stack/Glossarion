@@ -7692,6 +7692,20 @@ def clean_ai_artifacts(text, remove_artifacts=True):
 
 def find_glossary_file(output_dir):
     """Return path to glossary file preferring CSV/MD/TXT over JSON, or None if not found"""
+    ext_priority = [".csv", ".md", ".txt", ".json"]
+
+    def _usable_glossary_file(path):
+        if not path:
+            return False
+        try:
+            if not os.path.isfile(path):
+                return False
+            stem, ext = os.path.splitext(os.path.basename(path))
+            stem_cf = stem.casefold()
+            return ext.lower() in ext_priority and "progress" not in stem_cf
+        except Exception:
+            return False
+
     def _matching_glossary_candidates(glossary_dir):
         if not glossary_dir or not os.path.isdir(glossary_dir):
             return []
@@ -7701,34 +7715,48 @@ def find_glossary_file(output_dir):
             base = os.path.basename(os.path.abspath(output_dir))
         base_cf = base.casefold()
         preferred = [f"{base}_glossary".casefold(), base_cf] if base else []
-        ext_priority = [".csv", ".md", ".txt", ".json"]
         direct = []
         fallback = []
         try:
-            for name in os.listdir(glossary_dir):
-                full = os.path.join(glossary_dir, name)
-                if not os.path.isfile(full):
-                    continue
-                stem, ext = os.path.splitext(name)
-                stem_cf = stem.casefold()
-                ext_l = ext.lower()
-                if ext_l not in ext_priority:
-                    continue
-                if "progress" in stem_cf:
-                    continue
-                if preferred and stem_cf in preferred:
-                    direct.append((preferred.index(stem_cf), ext_priority.index(ext_l), full))
-                elif "glossary" in stem_cf:
-                    fallback.append((ext_priority.index(ext_l), full))
+            for root, dirs, files_in_root in os.walk(glossary_dir):
+                if root != glossary_dir:
+                    dirs[:] = []
+                parent_cf = os.path.basename(root).casefold()
+                parent_rank = 0 if root == glossary_dir else (1 if base_cf and parent_cf == base_cf else 2)
+                for name in files_in_root:
+                    full = os.path.join(root, name)
+                    if not os.path.isfile(full):
+                        continue
+                    stem, ext = os.path.splitext(name)
+                    stem_cf = stem.casefold()
+                    ext_l = ext.lower()
+                    if ext_l not in ext_priority:
+                        continue
+                    if "progress" in stem_cf:
+                        continue
+                    if preferred and stem_cf in preferred:
+                        direct.append((parent_rank, preferred.index(stem_cf), ext_priority.index(ext_l), full))
+                    elif "glossary" in stem_cf:
+                        fallback.append((parent_rank, ext_priority.index(ext_l), full))
         except Exception:
             return []
-        direct.sort(key=lambda item: (item[0], item[1]))
-        fallback.sort(key=lambda item: item[0])
-        return [item[2] for item in direct] + [item[1] for item in fallback]
+        direct.sort(key=lambda item: (item[0], item[1], item[2]))
+        fallback.sort(key=lambda item: (item[0], item[1]))
+        return [item[3] for item in direct] + [item[2] for item in fallback]
 
     shared_glossary_dir = _single_pass_shared_glossary_dir(output_dir)
     auto_mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower()
-    prefer_shared = auto_mode in ("balanced", "full", "single_pass") or bool(_single_pass_glossary_mode())
+    output_override_active = bool((os.getenv("OUTPUT_DIRECTORY") or os.getenv("OUTPUT_DIR") or "").strip())
+    prefer_shared = (
+        auto_mode in ("balanced", "full", "single_pass")
+        or bool(_single_pass_glossary_mode())
+        or output_override_active
+    )
+
+    manual_glossary = (os.getenv("MANUAL_GLOSSARY") or "").strip()
+    manual_candidates = []
+    if _usable_glossary_file(manual_glossary):
+        manual_candidates.append(manual_glossary)
 
     candidates = [
         os.path.join(output_dir, "glossary.csv"),
@@ -7743,6 +7771,7 @@ def find_glossary_file(output_dir):
         candidates.extend(_matching_glossary_candidates(glossary_dir))
     if not prefer_shared:
         candidates.extend(_matching_glossary_candidates(shared_glossary_dir))
+    candidates = manual_candidates + candidates
     for p in candidates:
         if os.path.exists(p):
             return p
@@ -14708,7 +14737,10 @@ def main(log_callback=None, stop_callback=None):
     if glossary_root_override:
         os.environ["GLOSSARY_SHARED_DIR"] = os.path.join(os.path.abspath(glossary_root_override), "Glossary")
     else:
-        os.environ["GLOSSARY_SHARED_DIR"] = os.path.join(os.getcwd(), "Glossary")
+        os.environ["GLOSSARY_SHARED_DIR"] = (
+            os.getenv("GLOSSARY_SHARED_DIR", "").strip()
+            or os.path.join(os.getcwd(), "Glossary")
+        )
     payloads_dir = out
 
     # Manage translation history persistence based on contextual + rolling settings
@@ -15556,7 +15588,9 @@ def main(log_callback=None, stop_callback=None):
             config.MANUAL_GLOSSARY = ""
             os.environ.pop("MANUAL_GLOSSARY", None)
 
+        manual_glossary_active = False
         if config.MANUAL_GLOSSARY and os.path.isfile(config.MANUAL_GLOSSARY) and _has_glossary_data(config.MANUAL_GLOSSARY):
+            manual_glossary_active = True
             ext = os.path.splitext(config.MANUAL_GLOSSARY)[1].lower()
             # Treat .txt and .md files as CSV format (keep original extension)
             if ext in [".csv", ".txt"]:
@@ -15572,32 +15606,10 @@ def main(log_callback=None, stop_callback=None):
             
             target_path = os.path.join(out, target_name)
             
-            # In "Manual Glossary Only" mode (off_no_automap) the user may have edited
-            # the glossary in the in-app editor after loading it. Prefer whatever is
-            # already present in the output folder so we don't clobber those edits.
-            _auto_mode_env = os.getenv("AUTO_GLOSSARY_MODE", "off").lower()
-            _existing_in_output = find_glossary_file(out)
-            if (
-                _auto_mode_env == "off_no_automap"
-                and _existing_in_output
-                and os.path.isfile(_existing_in_output)
-                and _has_glossary_data(_existing_in_output)
-            ):
-                print(
-                    "📑 Manual Glossary Only mode: using existing glossary from output folder "
-                    f"(preserves editor changes): {_existing_in_output}"
-                )
-                # Repoint MANUAL_GLOSSARY to the in-output copy so downstream
-                # consumers (system-prompt append, emergency compliance, etc.)
-                # all see the user-edited version.
-                try:
-                    config.MANUAL_GLOSSARY = _existing_in_output
-                    os.environ["MANUAL_GLOSSARY"] = _existing_in_output
-                except Exception:
-                    pass
-            elif os.path.abspath(config.MANUAL_GLOSSARY) != os.path.abspath(target_path):
-                shutil.copy(config.MANUAL_GLOSSARY, target_path)
+            if os.path.abspath(config.MANUAL_GLOSSARY) != os.path.abspath(target_path):
+                shutil.copy2(config.MANUAL_GLOSSARY, target_path)
                 print("📑 Using manual glossary from:", config.MANUAL_GLOSSARY)
+                print("📑 Synced manual glossary to output:", target_path)
             else:
                 print("📑 Using existing glossary:", config.MANUAL_GLOSSARY)
             
@@ -15631,8 +15643,10 @@ def main(log_callback=None, stop_callback=None):
             except Exception as e:
                 print(f"⚠️ Could not remove empty glossary.json: {e}")
 
-        elif (os.path.exists(existing_glossary_csv) and _has_glossary_data(existing_glossary_csv)) or \
-             (os.path.exists(existing_glossary_json) and _has_glossary_data(existing_glossary_json)):
+        elif (not manual_glossary_active) and (
+             (os.path.exists(existing_glossary_csv) and _has_glossary_data(existing_glossary_csv)) or
+             (os.path.exists(existing_glossary_json) and _has_glossary_data(existing_glossary_json))
+        ):
             print("📑 Existing glossary file detected in source folder - skipping automatic generation")
             target_glossary_path = None
             if os.path.exists(existing_glossary_csv) and _has_glossary_data(existing_glossary_csv):
