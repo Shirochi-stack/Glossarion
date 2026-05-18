@@ -102,8 +102,10 @@ if msys2_bin and os.path.exists(msys2_bin):
 else:
     print(f"  WARNING: No MSYS2 directory found in any candidate location")
 
-# Collect data files from packages that need them
-for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer', 'rapidocr_onnxruntime', 'onnx', 'onnxruntime']:
+# Collect data files from packages that need them. Keep ONNX out of
+# collect_all(); it pulls the backend test suite into hidden imports and makes
+# local NoCuda builds crawl near the end of Analysis.
+for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer', 'rapidocr_onnxruntime', 'onnxruntime']:
     try:
         data, bins, hidden = collect_all(package)
         datas.extend(data)
@@ -111,6 +113,14 @@ for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'charde
         hiddenimports.extend(hidden)
     except:
         pass
+
+hiddenimports.extend([
+    'onnx',
+    'onnx.checker',
+    'onnx.helper',
+    'onnx.numpy_helper',
+    'onnx.shape_inference',
+])
 
 # ============================================================================
 # APPLICATION FILES
@@ -1138,6 +1148,25 @@ excludes = [
     # CUDA-specific ONNX
     'onnxruntime-gpu',
     'onnxruntime_gpu',
+
+    # Optional GPU/training accelerators pulled in by transformers/diffusers
+    # hooks from a developer's global site-packages. NoCuda keeps CPU torch,
+    # transformers, diffusers, and ONNX Runtime, but should not analyze these.
+    'bitsandbytes', 'bitsandbytes.*',
+    'triton', 'triton.*',
+    'xformers', 'xformers.*',
+    'flash_attn', 'flash_attn.*',
+    'flash_attn_2_cuda',
+    'deepspeed', 'deepspeed.*',
+    'cupy', 'cupy.*',
+    'cupy_backends', 'cupy_backends.*',
+    'jax', 'jax.*',
+    'jaxlib', 'jaxlib.*',
+    'flax', 'flax.*',
+    'tensorflow', 'tensorflow.*',
+    'tensorflow_hub', 'tensorflow_hub.*',
+    'tensorboard', 'tensorboard.*',
+    'keras', 'keras.*',
     
     # Paddle GPU
     'paddle.fluid.core_avx',
