@@ -93,6 +93,7 @@ azure-core
 azure-identity
 
 # YOLO Bubble Detection
+onnx
 onnxruntime
 # onnxruntime-gpu  # Optional, uncomment for GPU support
 ultralytics  # Optional, for PT to ONNX conversion

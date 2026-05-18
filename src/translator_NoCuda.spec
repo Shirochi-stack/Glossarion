@@ -103,7 +103,7 @@ else:
     print(f"  WARNING: No MSYS2 directory found in any candidate location")
 
 # Collect data files from packages that need them
-for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer', 'rapidocr_onnxruntime', 'onnxruntime']:
+for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer', 'rapidocr_onnxruntime', 'onnx', 'onnxruntime']:
     try:
         data, bins, hidden = collect_all(package)
         datas.extend(data)
