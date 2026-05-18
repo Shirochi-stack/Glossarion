@@ -2563,22 +2563,25 @@ def _create_context_management_section(self, parent):
     self.output_dir_entry.setPlaceholderText("Leave empty for default (relative to source file)")
     # Load current value
     current_output_dir = self.config.get('output_directory', os.environ.get('OUTPUT_DIRECTORY', ''))
-    self.output_dir_entry.setText(current_output_dir)
     
     def _on_output_dir_changed(text):
         try:
             text = text.strip()
             self.config['output_directory'] = text
             if text:
-                os.environ['OUTPUT_DIRECTORY'] = text
+                resolved = os.path.abspath(text)
+                os.environ['OUTPUT_DIRECTORY'] = resolved
+                os.environ['OUTPUT_DIR'] = resolved
             else:
-                # Remove from env if empty to fallback to default behavior
-                if 'OUTPUT_DIRECTORY' in os.environ:
-                    del os.environ['OUTPUT_DIRECTORY']
+                # Remove both names so runtime fallback checks cannot see a stale override.
+                os.environ.pop('OUTPUT_DIRECTORY', None)
+                os.environ.pop('OUTPUT_DIR', None)
         except Exception:
             pass
             
     self.output_dir_entry.textChanged.connect(_on_output_dir_changed)
+    self.output_dir_entry.setText(current_output_dir)
+    _on_output_dir_changed(current_output_dir)
     output_dir_h.addWidget(self.output_dir_entry)
     
     def _browse_output_dir():
