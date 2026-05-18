@@ -7572,6 +7572,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         merged_clean = _unique_int_list(merged_indices or [])
         failed_set = set(failed_clean)
         merged_set = set(merged_clean)
+        requested_in_progress_set = set(_unique_int_list(in_progress)) if in_progress is not None else set()
 
         # Failed chapters must not also be persisted as completed. The glossary
         # extractor may keep partial entries, but the chapter itself still needs
@@ -7663,7 +7664,6 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             if int(idx) in failed_set
         }
 
-        requested_in_progress_set = set(_unique_int_list(in_progress)) if in_progress is not None else set()
         current_override_set = set(completed_clean) | set(merged_clean) | requested_in_progress_set
         if current_override_set:
             failed_clean = [
