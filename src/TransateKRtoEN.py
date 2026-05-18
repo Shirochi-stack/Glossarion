@@ -16355,10 +16355,48 @@ def main(log_callback=None, stop_callback=None):
         if append_glossary_enabled:
             try:
                 if glossary_file.lower().endswith(('.csv', '.txt', '.md')):
-                    # Quick CSV/TXT/MD stats
+                    # CSV/TXT/MD stats using actual glossary entry parsing.
                     with open(glossary_file, 'r', encoding='utf-8') as f:
-                        lines = [ln.strip() for ln in f.readlines() if ln.strip()]
-                    entry_count = max(0, len(lines) - 1) if lines and ',' in lines[0] else len(lines)
+                        raw_glossary_text = f.read()
+                    preview_entries = []
+                    is_token_efficient = "=== " in raw_glossary_text and "* " in raw_glossary_text
+                    if is_token_efficient:
+                        for line in raw_glossary_text.splitlines():
+                            stripped = line.strip()
+                            if not stripped.startswith("* "):
+                                continue
+                            entry_text = stripped[2:]
+                            paren_start = entry_text.find("(")
+                            paren_end = entry_text.find(")", paren_start) if paren_start != -1 else -1
+                            if paren_start == -1 or paren_end == -1:
+                                continue
+                            translated = entry_text[:paren_start].strip()
+                            raw_name = entry_text[paren_start + 1:paren_end].strip()
+                            if raw_name and translated:
+                                preview_entries.append((raw_name, translated, stripped))
+                    else:
+                        _GLOSSARY_SEP = '\x1F'
+                        if _GLOSSARY_SEP in raw_glossary_text:
+                            rows = [
+                                [p.strip() for p in line.split(_GLOSSARY_SEP)]
+                                for line in raw_glossary_text.splitlines()
+                                if line.strip()
+                            ]
+                        else:
+                            import csv as _csv
+                            import io as _io
+                            rows = list(_csv.reader(_io.StringIO(raw_glossary_text)))
+                        for row in rows:
+                            if len(row) < 3:
+                                continue
+                            entry_type = row[0].strip().lower()
+                            if entry_type == "type":
+                                continue
+                            raw_name = row[1].strip()
+                            translated = row[2].strip()
+                            if raw_name and translated and re.match(r'^[a-z_]+$', entry_type):
+                                preview_entries.append((raw_name, translated, ""))
+                    entry_count = len(preview_entries)
                     if glossary_file.lower().endswith('.txt'):
                         file_type = "TXT"
                     elif glossary_file.lower().endswith('.md'):
@@ -16366,9 +16404,9 @@ def main(log_callback=None, stop_callback=None):
                     else:
                         file_type = "CSV"
                     print(f"📑 Glossary ready ({file_type}) with {entry_count} entries")
-                    print("📑 Sample glossary lines:")
-                    for ln in lines[1:6]:
-                        print(f"   • {ln}")
+                    print("📑 Sample glossary entries:")
+                    for raw_name, translated, original_line in preview_entries[:5]:
+                        print(f"   • {original_line or f'{raw_name} -> {translated}'}")
                 elif glossary_file.lower().endswith('.json'):
                     with open(glossary_file, 'r', encoding='utf-8') as f:
                         glossary_data = json.load(f)
