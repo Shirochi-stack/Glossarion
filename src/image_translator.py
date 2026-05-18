@@ -2543,7 +2543,7 @@ class ImageTranslator:
                     print(f"   ⚠️ Vision OCR glossary compression failed: {e}")
             append_prompt = os.getenv(
                 "GLOSSARY_APPEND_PROMPT",
-                "- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n"
+                "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
             )
             print(f"   📑 Vision OCR glossary applied: {os.path.basename(glossary_path)}")
             return f"{system_prompt}\n\n{append_prompt}\n{glossary_text}"

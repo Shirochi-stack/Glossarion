@@ -697,7 +697,7 @@ class ExtractGlossaryScreen(MDScreen):
         os.environ["APPEND_GLOSSARY_PROMPT"] = str(
             cfg.get(
                 "append_glossary_prompt",
-                "- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n",
+                "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n",
             )
         )
         os.environ["GLOSSARY_TRANSLATION_PROMPT"] = str(cfg.get("glossary_translation_prompt", ""))

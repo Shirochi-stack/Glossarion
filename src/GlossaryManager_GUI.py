@@ -3141,8 +3141,6 @@ Rules:
                         self.auto_loaded_glossary_path = None
                         self.auto_loaded_glossary_for_file = None
                         self.manual_glossary_manually_loaded = False
-                        os.environ.pop('MANUAL_GLOSSARY', None)
-                        os.environ.pop('GLOSSARY_SOURCE_MODE', None)
                     except Exception:
                         pass
 
@@ -3167,8 +3165,6 @@ Rules:
                         self.auto_loaded_glossary_path = None
                         self.auto_loaded_glossary_for_file = None
                         self.manual_glossary_manually_loaded = False
-                        os.environ.pop('MANUAL_GLOSSARY', None)
-                        os.environ.pop('GLOSSARY_SOURCE_MODE', None)
                     except Exception:
                         pass
                     try:
@@ -3496,7 +3492,7 @@ Rules:
         
         # Always reload append prompt from config to ensure fresh state
         # Treat empty string as missing to ensure users get the default
-        default_append_prompt = "- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n"
+        default_append_prompt = "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
         append_prompt_from_config = self.config.get('append_glossary_prompt', default_append_prompt)
         if not append_prompt_from_config or not append_prompt_from_config.strip():
             self.append_glossary_prompt = default_append_prompt
@@ -3514,7 +3510,7 @@ Rules:
             reply = QMessageBox.question(parent, "Reset Prompt", "Reset to default glossary append format?",
                                          QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
-                self.append_prompt_text.setPlainText("- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n")
+                self.append_prompt_text.setPlainText("- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
         
         reset_append_btn = QPushButton("Reset to Default")
         reset_append_btn.clicked.connect(reset_append_prompt)
@@ -4413,8 +4409,6 @@ Rules:
                     self.auto_loaded_glossary_path = None
                     self.auto_loaded_glossary_for_file = None
                     self.manual_glossary_manually_loaded = False
-                    os.environ.pop('MANUAL_GLOSSARY', None)
-                    os.environ.pop('GLOSSARY_SOURCE_MODE', None)
                     if _use_subfolder:
                         if hasattr(self, '_autofill_glossary_for_current_selection'):
                             self._autofill_glossary_for_current_selection()
@@ -5997,7 +5991,7 @@ Rules:
         def browse_glossary():
            start_dir = ""
            try:
-               override_dir = self._current_output_override() if hasattr(self, '_current_output_override') else (os.environ.get("OUTPUT_DIRECTORY") or self.config.get("output_directory", ""))
+               override_dir = os.environ.get("OUTPUT_DIRECTORY") or self.config.get("output_directory", "")
                if override_dir:
                    start_dir = os.path.abspath(override_dir)
            except Exception:
@@ -7265,7 +7259,7 @@ Rules:
         # ------------------------------------------------------------------
         def auto_select_current_glossary():
             try:
-                override_dir = self._current_output_override() if hasattr(self, '_current_output_override') else (os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory'))
+                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
 
                 # Collect all selected EPUBs
                 epub_paths = []
@@ -7863,7 +7857,27 @@ Rules:
             if not epub_path:
                 return None, None
             file_base = os.path.splitext(os.path.basename(epub_path))[0]
-            override_dir = self._current_output_override() if hasattr(self, '_current_output_override') else None
+            override_dir = None
+            try:
+                # Check every path used across the codebase:
+                #   - OUTPUT_DIRECTORY / OUTPUT_DIR env vars
+                #   - config['output_directory']
+                # Trim whitespace + treat empty strings as "no override".
+                _candidates = [
+                    os.environ.get('OUTPUT_DIRECTORY'),
+                    os.environ.get('OUTPUT_DIR'),
+                ]
+                if hasattr(self, 'config'):
+                    _candidates.append(self.config.get('output_directory'))
+                for _c in _candidates:
+                    if _c is None:
+                        continue
+                    _c = str(_c).strip().strip('"')
+                    if _c:
+                        override_dir = _c
+                        break
+            except Exception:
+                override_dir = None
             if override_dir:
                 output_dir = os.path.join(os.path.abspath(override_dir), file_base)
             else:
@@ -8004,7 +8018,6 @@ Rules:
                 os.environ['APPEND_GLOSSARY'] = '1'
                 self.config['manual_glossary_path'] = path
                 os.environ['MANUAL_GLOSSARY'] = path
-                os.environ['GLOSSARY_SOURCE_MODE'] = 'manual'
                 if hasattr(self, 'append_glossary_checkbox'):
                     try:
                         self.append_glossary_checkbox.setChecked(True)
@@ -8489,7 +8502,7 @@ Rules:
         if current_path:
             default_csv_path = current_path.replace('.json', '.csv')
         else:
-            override_dir = self._current_output_override() if hasattr(self, '_current_output_override') else (os.environ.get("OUTPUT_DIRECTORY") or self.config.get("output_directory", ""))
+            override_dir = os.environ.get("OUTPUT_DIRECTORY") or self.config.get("output_directory", "")
             default_csv_path = os.path.join(os.path.abspath(override_dir) if override_dir else os.getcwd(), "glossary.csv")
         
         # Ask user for CSV save location

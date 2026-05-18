@@ -7594,7 +7594,7 @@ class MangaTranslator:
             self._log("Manga glossary skipped for this page (no matching entries after compression)", "info")
             return system_prompt or ""
 
-        default_append_prompt = "- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n"
+        default_append_prompt = "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
         append_prompt = default_append_prompt
         try:
             append_prompt = getattr(self.main_gui, 'append_glossary_prompt', None) or self.main_gui.config.get('append_glossary_prompt', default_append_prompt)

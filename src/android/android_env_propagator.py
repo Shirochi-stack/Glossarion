@@ -139,7 +139,7 @@ def set_all_env_vars(config):
     # Glossary append prompt
     append_gloss = _get('append_glossary_prompt', '')
     if not append_gloss:
-        append_gloss = '- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n'
+        append_gloss = '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'
     os.environ['APPEND_GLOSSARY_PROMPT'] = append_gloss
 
     # Auto glossary prompt

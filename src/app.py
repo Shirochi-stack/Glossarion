@@ -783,7 +783,7 @@ class GlossarionWeb:
         # Glossary Append Prompt (CRITICAL: Must be set or build_system_prompt raises ValueError)
         append_gloss_prompt = config('append_glossary_prompt', '')
         if not append_gloss_prompt:
-            append_gloss_prompt = '- Strictly follow a glossary compliace resolution process using the listed glossary entries below for a consistent translation (Do not output any raw entries):\n'
+            append_gloss_prompt = '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'
         os.environ['APPEND_GLOSSARY_PROMPT'] = append_gloss_prompt
         
         # Output language

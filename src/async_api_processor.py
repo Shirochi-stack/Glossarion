@@ -3292,12 +3292,6 @@ class AsyncProcessingDialog:
         
         # Glossary settings
         env_vars['MANUAL_GLOSSARY'] = self.gui.manual_glossary_path if hasattr(self.gui, 'manual_glossary_path') and self.gui.manual_glossary_path else ''
-        if hasattr(self.gui, '_resolve_glossary_source_mode_for_env'):
-            env_vars['GLOSSARY_SOURCE_MODE'] = self.gui._resolve_glossary_source_mode_for_env(getattr(self.gui, 'file_path', ''))
-        elif getattr(self.gui, 'auto_loaded_glossary_path', None) and env_vars['MANUAL_GLOSSARY'] == getattr(self.gui, 'auto_loaded_glossary_path', None):
-            env_vars['GLOSSARY_SOURCE_MODE'] = 'auto_map'
-        else:
-            env_vars['GLOSSARY_SOURCE_MODE'] = 'manual' if env_vars['MANUAL_GLOSSARY'] else ''
         env_vars['DISABLE_AUTO_GLOSSARY'] = "0" if _val(self.gui.enable_auto_glossary_var, False) else "1"
         env_vars['DISABLE_GLOSSARY_TRANSLATION'] = "0" if _val(self.gui.enable_auto_glossary_var, False) else "1"
         env_vars['APPEND_GLOSSARY'] = "1" if _val(self.gui.append_glossary_var, False) else "0"
@@ -3435,14 +3429,8 @@ class AsyncProcessingDialog:
         
         # Output settings
         env_vars['EPUB_OUTPUT_DIR'] = os.getcwd()
-        output_path = ''
-        try:
-            if hasattr(self.gui, '_current_output_override'):
-                output_path = self.gui._current_output_override()
-            elif hasattr(self.gui, 'output_entry'):
-                output_path = self.gui.output_entry.get().strip()
-        except Exception:
-            output_path = ''
+        env_vars['GLOSSARY_SHARED_DIR'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Glossary')
+        output_path = self.gui.output_entry.get().strip() if hasattr(self.gui, 'output_entry') else ''
         if not output_path:
             try:
                 output_path = str(self.gui.config.get('output_directory', '') or '').strip()
@@ -3453,8 +3441,6 @@ class AsyncProcessingDialog:
             env_vars['OUTPUT_DIR'] = output_path
             env_vars['OUTPUT_DIRECTORY'] = output_path
             env_vars['GLOSSARY_SHARED_DIR'] = os.path.join(output_path, 'Glossary')
-        else:
-            env_vars['GLOSSARY_SHARED_DIR'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Glossary')
         
         # File path (needed by some modules)
         env_vars['EPUB_PATH'] = self.gui.file_path
@@ -4148,7 +4134,7 @@ class AsyncProcessingDialog:
             base_name = os.path.splitext(os.path.basename(source_path))[0]
             
             # Check for override
-            override_dir = self.gui._current_output_override() if hasattr(self.gui, '_current_output_override') else (os.environ.get('OUTPUT_DIRECTORY') or self.gui.config.get('output_directory'))
+            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.gui.config.get('output_directory')
             if override_dir:
                 output_dir = os.path.join(override_dir, base_name)
             else:
