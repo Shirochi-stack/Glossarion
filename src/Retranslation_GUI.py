@@ -2320,8 +2320,6 @@ class RetranslationMixin:
             lbl_gp_in_progress.setStyleSheet("color: #f59e0b;")
             lbl_gp_in_progress.setCursor(Qt.PointingHandCursor)
             gp_stats_layout.addWidget(lbl_gp_in_progress)
-            if n_in_progress == 0:
-                lbl_gp_in_progress.setVisible(False)
             
             lbl_gp_failed = QLabel(f"❌ Failed: {n_failed} | ")
             lbl_gp_failed.setFont(gp_stats_font)
@@ -2463,7 +2461,7 @@ class RetranslationMixin:
                 lbl_total.setText(f"Total: {_total} | ")
                 lbl_gp_completed.setText(f"✅ Completed: {len(_comp2 - _merg2)} | ")
                 lbl_gp_in_progress.setText(f"🔄 In Progress: {len(_prog2)} | ")
-                lbl_gp_in_progress.setVisible(len(_prog2) > 0)
+                lbl_gp_in_progress.setVisible(True)
                 lbl_gp_failed.setText(f"❌ Failed: {len(_fail2)} | ")
                 lbl_gp_merged.setText(f"🔗 Merged: {len(_merg2)} | ")
                 lbl_gp_merged.setVisible(len(_merg2) > 0)
@@ -2879,7 +2877,7 @@ class RetranslationMixin:
                     lbl_total.setText(f"Total: {_total} | ")
                     lbl_gp_completed.setText(f"✅ Completed: {len(_comp - _merg)} | ")
                     lbl_gp_in_progress.setText(f"🔄 In Progress: {len(_prog)} | ")
-                    lbl_gp_in_progress.setVisible(len(_prog) > 0)
+                    lbl_gp_in_progress.setVisible(True)
                     lbl_gp_failed.setText(f"❌ Failed: {len(_fail)} | ")
                     lbl_gp_merged.setText(f"🔗 Merged: {len(_merg)} | ")
                     lbl_gp_merged.setVisible(len(_merg) > 0)

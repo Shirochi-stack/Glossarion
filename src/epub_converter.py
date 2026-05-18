@@ -3056,10 +3056,13 @@ class EPUBCompiler:
 
                     # Include auxiliary files in spine but omit from TOC
                     base_name = os.path.basename(chapter_data['filename'])
-                    if hasattr(self, 'auxiliary_html_files') and base_name in self.auxiliary_html_files:
+                    base_core = os.path.splitext(base_name)[0].removeprefix('response_').lower()
+                    title_lower = str(chapter_data.get('title', '')).strip().lower()
+                    if base_core == 'cover':
+                        self.log(f"  🛈 Added existing cover page to spine (not in TOC): {base_name}")
+                    elif hasattr(self, 'auxiliary_html_files') and base_name in self.auxiliary_html_files:
                         self.log(f"  🛈 Added auxiliary page to spine (not in TOC): {base_name}")
                     else:
-                        title_lower = str(chapter_data.get('title', '')).strip().lower()
                         if title_lower in ('untitled chapter', 'untitled'):
                             self.log(f"  🛈 Skipped TOC entry for untitled chapter: {base_name}")
                         else:
@@ -6433,6 +6436,18 @@ img {
             if hasattr(it, 'href'):
                 return getattr(it, 'href', '')
             return ''
+
+        if has_cover and cover_item is not None:
+            cover_href = _href_without_fragment(_get_toc_href(cover_item))
+            if cover_href:
+                before_toc_count = len(toc)
+                toc = [
+                    item for item in toc
+                    if _href_without_fragment(_get_toc_href(item)) != cover_href
+                ]
+                removed_cover_toc = before_toc_count - len(toc)
+                if removed_cover_toc:
+                    self.log(f"📔 Removed cover page from EPUB TOC ({removed_cover_toc} entry)")
 
         # DEBUG: Log what we have before sorting (only if debug mode is enabled)
         debug_mode_enabled = os.environ.get('DEBUG_MODE', '0') == '1'
