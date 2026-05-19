@@ -76,13 +76,9 @@ class AnimatedRefreshButton(QPushButton):
         if self._timer and self._timer.isActive():
             return  # Already animating
         
-        # Update stylesheet to show active state
-        current_style = self.styleSheet()
-        if "background-color: #17a2b8" in current_style:
-            self.setStyleSheet(current_style.replace(
-                "background-color: #17a2b8",
-                "background-color: #138496"
-            ))
+        self.setProperty("refreshActive", True)
+        self.style().unpolish(self)
+        self.style().polish(self)
         
         # Start timer-based animation for icon rotation
         self._animation_step = 0
@@ -116,13 +112,9 @@ class AnimatedRefreshButton(QPushButton):
             if self._original_icon:
                 self.setIcon(self._original_icon)
             
-            # Restore original stylesheet
-            current_style = self.styleSheet()
-            if "background-color: #138496" in current_style:
-                self.setStyleSheet(current_style.replace(
-                    "background-color: #138496",
-                    "background-color: #17a2b8"
-                ))
+            self.setProperty("refreshActive", False)
+            self.style().unpolish(self)
+            self.style().polish(self)
             
             self.update()
 
@@ -4213,6 +4205,9 @@ class RetranslationMixin:
             "font-weight: bold; "
             "font-size: 10pt; "
             "}"
+            "QPushButton[refreshActive=\"true\"] { "
+            "background-color: #138496; "
+            "}"
         )
         
         # Create refresh handler with animation
@@ -7954,6 +7949,9 @@ class RetranslationMixin:
             "color: white; "
             "padding: 5px 15px; "
             "font-weight: bold; "
+            "}"
+            "QPushButton[refreshActive=\"true\"] { "
+            "background-color: #138496; "
             "}"
         )
         

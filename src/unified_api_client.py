@@ -12176,7 +12176,7 @@ class UnifiedClient:
                     _t_start = _time.time()
                     result_text = ""
                     image_data = None
-                    finish_reason = 'stop'
+                    finish_reason = None if _enable_streaming else 'stop'
                     raw_usage = None
                     last_response = None
                     prompt_feedback = None
@@ -12326,7 +12326,10 @@ class UnifiedClient:
                         for candidate in candidates:
                             fr_raw = getattr(candidate, 'finish_reason', None)
                             fr_name = _normalize_finish_reason(fr_raw)
-                            if not fr_name or fr_name in ('STOP', 'FINISH_REASON_UNSPECIFIED'):
+                            if not fr_name or fr_name == 'FINISH_REASON_UNSPECIFIED':
+                                continue
+                            if fr_name == 'STOP':
+                                finish_reason = 'stop'
                                 continue
                             if fr_name in _FR_BLOCK:
                                 # Content block — surface a precise message so
@@ -12393,6 +12396,8 @@ class UnifiedClient:
                                 print(tail)
                             log_buf.clear()
                         response = last_response
+                        if finish_reason is None:
+                            finish_reason = 'incomplete'
                     else:
                         # Non-streaming path (single call)
                         response = vertex_genai_client.models.generate_content(
@@ -12853,7 +12858,7 @@ class UnifiedClient:
 
                             result_text = ""
                             image_data = None
-                            finish_reason = 'stop'
+                            finish_reason = None if _enable_streaming else 'stop'
                             raw_usage = None
                             last_response = None
 
@@ -12888,6 +12893,8 @@ class UnifiedClient:
                                     if getattr(_chunk, 'usage_metadata', None) is not None:
                                         raw_usage = _chunk.usage_metadata
                                 response_retry = last_response
+                                if finish_reason is None:
+                                    finish_reason = 'incomplete'
                             else:
                                 response_retry = vertex_genai_client.models.generate_content(
                                     model=model_name,
@@ -16928,7 +16935,7 @@ class UnifiedClient:
                             )
                             text_parts = []
                             stream_image_data = None  # Capture image bytes from stream
-                            finish_reason = 'stop'
+                            finish_reason = None
                             response = None
                             log_stream = self._stream_logging_enabled(use_streaming)
                             log_buf = []
@@ -16945,7 +16952,7 @@ class UnifiedClient:
                                 if not cands:
                                     continue
                                 cand = cands[0]
-                                if hasattr(cand, 'finish_reason') and cand.finish_reason:
+                                if hasattr(cand, 'finish_reason') and cand.finish_reason is not None:
                                     finish_reason = str(cand.finish_reason)
                                 content_obj = getattr(cand, 'content', None)
                                 if content_obj:
@@ -17014,6 +17021,8 @@ class UnifiedClient:
                                 image_data = stream_image_data
                             if not self._is_stop_requested():
                                 print(f"🛰️ [gemini-native] Stream finished, tokens≈{len(text_content)//4}")
+                            if finish_reason is None:
+                                finish_reason = 'incomplete'
                         else:
                             response = self.gemini_client.models.generate_content(
                                 model=self.model,
@@ -17047,7 +17056,7 @@ class UnifiedClient:
                     # Check if response has candidates with blocked/prohibited finish reasons
                     prohibited_detected = False
                     blocked_reason = ''
-                    finish_reason = 'stop'  # Default
+                    finish_reason = finish_reason if use_streaming else 'stop'  # Default
                     
                     # All finish reasons that indicate content was blocked (mirrors Vertex _FR_BLOCK)
                     _BLOCK_REASONS = {
@@ -17068,6 +17077,10 @@ class UnifiedClient:
                                     finish_reason = 'prohibited_content'
                                     print(f"   🚫 Content blocked: {fr_name}")
                                     break
+                                elif fr_name == 'STOP':
+                                    finish_reason = 'stop'
+                                elif fr_name in ('FINISH_REASON_UNSPECIFIED', 'NONE'):
+                                    continue
                                 elif fr_name == 'MAX_TOKENS':
                                     finish_reason = 'length'
                                 elif fr_name == 'MALFORMED_FUNCTION_CALL':
@@ -18074,7 +18087,7 @@ class UnifiedClient:
 
                         text_parts = []
                         log_buf = []
-                        finish_reason = 'stop'
+                        finish_reason = None
                         usage = None
 
                         def _flush_mistral_log_buffer(force=False):
@@ -18134,10 +18147,12 @@ class UnifiedClient:
                             choice = choices[0]
                             if isinstance(choice, dict):
                                 delta = choice.get('delta') or {}
-                                finish_reason = choice.get('finish_reason') or finish_reason
+                                chunk_finish_reason = choice.get('finish_reason')
                             else:
                                 delta = getattr(choice, 'delta', None)
-                                finish_reason = getattr(choice, 'finish_reason', None) or finish_reason
+                                chunk_finish_reason = getattr(choice, 'finish_reason', None)
+                            if chunk_finish_reason is not None:
+                                finish_reason = chunk_finish_reason
                             if isinstance(delta, dict):
                                 frag = _mistral_fragment_text(delta.get('content'))
                             else:
@@ -18149,6 +18164,8 @@ class UnifiedClient:
                                     _flush_mistral_log_buffer(force=False)
 
                         content = ''.join(text_parts)
+                        if finish_reason is None:
+                            finish_reason = 'incomplete'
                         if log_stream and not self._is_stop_requested():
                             _flush_mistral_log_buffer(force=True)
                         if usage is not None and hasattr(usage, 'model_dump'):
@@ -19644,7 +19661,7 @@ class UnifiedClient:
                     if use_streaming:
                         text_parts = []
                         log_buf = []  # Always define to avoid UnboundLocalError
-                        finish_reason = 'stop'
+                        finish_reason = None
                         # Thinking/reasoning streaming state
                         oai_stream_thinking = self._stream_thinking_logging_enabled()
                         oai_thinking_started = False
@@ -19924,8 +19941,12 @@ class UnifiedClient:
                                                         print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
                                                         log_buf = []
 
-                                    if getattr(ch, "finish_reason", None):
-                                        finish_reason = ch.finish_reason
+                                    if isinstance(ch, dict):
+                                        chunk_finish_reason = ch.get("finish_reason")
+                                    else:
+                                        chunk_finish_reason = getattr(ch, "finish_reason", None)
+                                    if chunk_finish_reason is not None:
+                                        finish_reason = chunk_finish_reason
                                 # 2) Fallback: event has direct text/content fields (provider-specific)
                                 if not frag_collected:
                                     alt_frag = None
@@ -19965,6 +19986,8 @@ class UnifiedClient:
                         if log_stream and not self._is_stop_requested():
                             print()  # final newline
                         content = "".join(text_parts)
+                        if finish_reason is None:
+                            finish_reason = 'incomplete'
                         
                         # Clean up streaming response after completion
                         try:
