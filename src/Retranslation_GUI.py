@@ -1974,19 +1974,24 @@ class RetranslationMixin:
                     _d = {}
                 result = set()
                 chapters = _d.get('chapters', {})
+                used_chapter_entries = False
                 if isinstance(chapters, dict):
                     for key, info in chapters.items():
                         if not isinstance(info, dict):
                             continue
-                        if str(info.get('status', '')).lower() != 'in_progress':
+                        status = str(info.get('status', '')).lower()
+                        if status:
+                            used_chapter_entries = True
+                        if status != 'in_progress':
                             continue
                         ci = _gp_index_for_entry(info, key, _d)
                         if ci is not None:
                             result.add(ci)
-                for value in _gp_int_list(_d.get('in_progress', [])):
-                    ci = _gp_index_for_progress_value(value, _d)
-                    if ci is not None:
-                        result.add(ci)
+                if not used_chapter_entries:
+                    for value in _gp_int_list(_d.get('in_progress', [])):
+                        ci = _gp_index_for_progress_value(value, _d)
+                        if ci is not None:
+                            result.add(ci)
                 if _precomputed_sets:
                     comp, fail, merg = _precomputed_sets
                 else:

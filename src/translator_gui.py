@@ -1701,6 +1701,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         print(f"🔧 Initial Azure API Version set: {azure_version}")
         self.use_fallback_keys_var = self.config.get('use_fallback_keys', False)
         self.use_glossary_keys_var = self.config.get('use_glossary_keys', False)
+        self.use_glossary_refinement_keys_var = self.config.get('use_glossary_refinement_keys', False)
         self.use_qa_scan_keys_var = self.config.get('use_qa_scan_keys', False)
         self.use_inpainter_keys_var = self.config.get('use_inpainter_keys', False)
 
@@ -4376,6 +4377,7 @@ Recent translations to summarize:
                 'multi_api_keys': 'use_multi_api_keys',
                 'fallback_keys': 'use_fallback_keys',
                 'glossary_keys': 'use_glossary_keys',
+                'glossary_refinement_keys': 'use_glossary_refinement_keys',
             }
             for pool_key, toggle_key in pool_map.items():
                 if self.config.get(toggle_key, False):
@@ -4400,6 +4402,7 @@ Recent translations to summarize:
                 'multi_api_keys': 'use_multi_api_keys',
                 'fallback_keys': 'use_fallback_keys',
                 'glossary_keys': 'use_glossary_keys',
+                'glossary_refinement_keys': 'use_glossary_refinement_keys',
             }
             for pool_key, toggle_key in pool_map.items():
                 if self.config.get(toggle_key, False):
@@ -4423,6 +4426,7 @@ Recent translations to summarize:
                 'multi_api_keys': 'use_multi_api_keys',
                 'fallback_keys': 'use_fallback_keys',
                 'glossary_keys': 'use_glossary_keys',
+                'glossary_refinement_keys': 'use_glossary_refinement_keys',
             }
             for pool_key, toggle_key in pool_map.items():
                 if self.config.get(toggle_key, False):
@@ -4448,6 +4452,7 @@ Recent translations to summarize:
                 'multi_api_keys': 'use_multi_api_keys',
                 'fallback_keys': 'use_fallback_keys',
                 'glossary_keys': 'use_glossary_keys',
+                'glossary_refinement_keys': 'use_glossary_refinement_keys',
             }
             for pool_key, toggle_key in pool_map.items():
                 if self.config.get(toggle_key, False):
@@ -14064,6 +14069,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     )
                 else:
                     UnifiedClient.clear_in_memory_glossary_keys()
+                refinement_keys_enabled = bool(self.config.get('use_glossary_refinement_keys', False))
+                refinement_keys = self.config.get('glossary_refinement_keys', []) or []
+                os.environ['USE_GLOSSARY_REFINEMENT_KEYS'] = '1' if refinement_keys_enabled else '0'
+                os.environ['GLOSSARY_REFINEMENT_API_KEYS'] = json.dumps(refinement_keys)
+                if refinement_keys_enabled and refinement_keys:
+                    UnifiedClient.set_in_memory_glossary_refinement_keys(
+                        refinement_keys,
+                        force_rotation=self.config.get('force_key_rotation', True),
+                        rotation_frequency=self.config.get('rotation_frequency', 1),
+                    )
+                else:
+                    UnifiedClient.clear_in_memory_glossary_refinement_keys()
             except Exception:
                 pass
 
@@ -14793,6 +14810,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['USE_MAIN_KEY_FALLBACK'] = '1' if self.config.get('use_main_key_fallback', True) else '0'
                 os.environ['FALLBACK_KEY_SHUFFLE'] = '1' if self.config.get('fallback_key_shuffle', False) else '0'
                 os.environ['USE_GLOSSARY_KEYS'] = '1' if self.config.get('use_glossary_keys', False) else '0'
+                refinement_keys_enabled = self.config.get('use_glossary_refinement_keys', False)
+                refinement_keys = self.config.get('glossary_refinement_keys', [])
                 vision_keys_enabled = self.config.get('use_qa_scan_keys', False)
                 vision_keys = self.config.get('qa_scan_keys', [])
                 inpainter_keys_enabled = self.config.get('use_inpainter_keys', False)
@@ -14802,6 +14821,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['USE_INPAINTER_KEYS'] = '1' if inpainter_keys_enabled else '0'
                 os.environ['FALLBACK_KEYS'] = json.dumps(self.config.get('fallback_keys', []))
                 os.environ['GLOSSARY_API_KEYS'] = json.dumps(self.config.get('glossary_keys', []))
+                os.environ['USE_GLOSSARY_REFINEMENT_KEYS'] = '1' if refinement_keys_enabled else '0'
+                os.environ['GLOSSARY_REFINEMENT_API_KEYS'] = json.dumps(refinement_keys)
                 os.environ['VISION_API_KEYS'] = json.dumps(vision_keys)
                 os.environ['QA_SCAN_API_KEYS'] = os.environ['VISION_API_KEYS']
                 os.environ['INPAINTER_API_KEYS'] = json.dumps(inpainter_keys)
@@ -14816,6 +14837,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 if self.config.get('use_glossary_keys', False) and self.config.get('glossary_keys', []):
                     UnifiedClient.set_in_memory_glossary_keys(
                         self.config.get('glossary_keys', []),
+                        force_rotation=self.config.get('force_key_rotation', True),
+                        rotation_frequency=self.config.get('rotation_frequency', 1),
+                    )
+                if refinement_keys_enabled and refinement_keys:
+                    UnifiedClient.set_in_memory_glossary_refinement_keys(
+                        refinement_keys,
                         force_rotation=self.config.get('force_key_rotation', True),
                         rotation_frequency=self.config.get('rotation_frequency', 1),
                     )
@@ -15460,6 +15487,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['USE_GLOSSARY_KEYS'] = '1'
             else:
                 os.environ['USE_GLOSSARY_KEYS'] = '0'
+            os.environ['USE_GLOSSARY_REFINEMENT_KEYS'] = '1' if self.config.get('use_glossary_refinement_keys', False) else '0'
+            os.environ['GLOSSARY_REFINEMENT_API_KEYS'] = json.dumps(self.config.get('glossary_refinement_keys', []))
             if self.config.get('use_qa_scan_keys', False):
                 os.environ['USE_VISION_KEYS'] = '1'
                 os.environ['USE_QA_SCAN_KEYS'] = '1'
@@ -15492,6 +15521,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 )
             else:
                 UnifiedClient.clear_in_memory_glossary_keys()
+            if self.config.get('use_glossary_refinement_keys', False) and self.config.get('glossary_refinement_keys', []):
+                UnifiedClient.set_in_memory_glossary_refinement_keys(
+                    self.config.get('glossary_refinement_keys', []),
+                    force_rotation=self.config.get('force_key_rotation', True),
+                    rotation_frequency=self.config.get('rotation_frequency', 1),
+                )
+            else:
+                UnifiedClient.clear_in_memory_glossary_refinement_keys()
             
             # Configure Vision key pool in memory (mirrors glossary-key setup)
             if self.config.get('use_qa_scan_keys', False) and self.config.get('qa_scan_keys', []):
@@ -15731,6 +15768,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
             'USE_GLOSSARY_KEYS': '1' if self.config.get('use_glossary_keys', False) else '0',
             'GLOSSARY_API_KEYS': json.dumps(self.config.get('glossary_keys', [])),
+            'USE_GLOSSARY_REFINEMENT_KEYS': '1' if self.config.get('use_glossary_refinement_keys', False) else '0',
+            'GLOSSARY_REFINEMENT_API_KEYS': json.dumps(self.config.get('glossary_refinement_keys', [])),
             'USE_VISION_KEYS': '1' if self.config.get('use_qa_scan_keys', False) else '0',
             'VISION_API_KEYS': json.dumps(self.config.get('qa_scan_keys', [])),
             'USE_QA_SCAN_KEYS': '1' if self.config.get('use_qa_scan_keys', False) else '0',
@@ -17230,6 +17269,8 @@ Important rules:
                     'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
                     'USE_GLOSSARY_KEYS': '1' if getattr(self, 'use_glossary_keys_var', False) else '0',
                     'GLOSSARY_API_KEYS': json.dumps(self.config.get('glossary_keys', [])),
+                    'USE_GLOSSARY_REFINEMENT_KEYS': '1' if getattr(self, 'use_glossary_refinement_keys_var', False) else '0',
+                    'GLOSSARY_REFINEMENT_API_KEYS': json.dumps(self.config.get('glossary_refinement_keys', [])),
                     
                     # Glossary-specific overrides (with fallback to global settings)
                     # Check os.environ first to respect balanced mode hardcoded overrides
@@ -17295,6 +17336,8 @@ Important rules:
                         os.environ['USE_GLOSSARY_KEYS'] = '1'
                     else:
                         os.environ['USE_GLOSSARY_KEYS'] = '0'
+                    os.environ['USE_GLOSSARY_REFINEMENT_KEYS'] = '1' if self.config.get('use_glossary_refinement_keys', False) else '0'
+                    os.environ['GLOSSARY_REFINEMENT_API_KEYS'] = json.dumps(self.config.get('glossary_refinement_keys', []))
                 except Exception:
                     # Keep going even if we can't set env for some reason
                     pass
@@ -23678,6 +23721,7 @@ Important rules:
                 ('use_gemini_openai_endpoint', ['use_gemini_openai_endpoint_var'], False, bool),
                 ('use_fallback_keys', ['use_fallback_keys_var'], False, bool),
                 ('use_glossary_keys', ['use_glossary_keys_var'], False, bool),
+                ('use_glossary_refinement_keys', ['use_glossary_refinement_keys_var'], False, bool),
                 ('use_qa_scan_keys', ['use_qa_scan_keys_var'], False, bool),
                 ('auto_update_check', ['auto_update_check_var'], True, bool),
                 ('auto_dpi_scale', ['auto_dpi_scale_var'], True, bool),
@@ -24950,6 +24994,8 @@ Important rules:
                 ('FALLBACK_KEYS', _json.dumps(self.config.get('fallback_keys', []))),
                 ('USE_GLOSSARY_KEYS', '1' if self.config.get('use_glossary_keys', False) else '0'),
                 ('GLOSSARY_API_KEYS', _json.dumps(self.config.get('glossary_keys', []))),
+                ('USE_GLOSSARY_REFINEMENT_KEYS', '1' if self.config.get('use_glossary_refinement_keys', False) else '0'),
+                ('GLOSSARY_REFINEMENT_API_KEYS', _json.dumps(self.config.get('glossary_refinement_keys', []))),
                 ('IMAGE_CHUNK_OVERLAP_PERCENT', str(getattr(self, 'image_chunk_overlap_var', '3'))),
                 ('IMAGE_CHUNK_MIN_OVERLAP_PIXELS', str(getattr(self, 'image_chunk_min_overlap_pixels_var', '80'))),
                 ('IMAGE_SMART_CHUNKING', '1' if getattr(self, 'image_smart_chunking_var', True) else '0'),

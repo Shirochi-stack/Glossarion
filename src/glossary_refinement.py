@@ -311,6 +311,7 @@ def _call_send(send_fn, messages, client, temp, mtoks, check_stop, chunk_timeout
             chunk_timeout=chunk_timeout,
             chunk_idx=chunk_idx,
             total_chunks=total_chunks,
+            context=context_label,
         )
     except TypeError:
         return send_fn(
@@ -510,7 +511,7 @@ def refine_glossary_entries(
                 log(f"✨ Refining glossary chunks ({chunk_idx}/{total_chunks})...")
             msgs = _build_messages(system_prompt, user_prompt, chunk_entry_type, chunk_text, payload_columns, chunk_idx, total_chunks, selected_types)
             msgs = _sanitize_messages_for_api(msgs, chunk_text)
-            context_label = f"glossary refinement chunk {chunk_idx}/{total_chunks}"
+            context_label = "glossary_refinement"
             try:
                 raw, finish_reason, _raw_obj = _call_send(
                     send_fn,

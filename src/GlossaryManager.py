@@ -461,7 +461,10 @@ def _ensure_multi_key_config_loaded():
     initialize UnifiedClient's in-memory pool.
     """
     try:
-        if os.getenv('USE_MULTI_API_KEYS', '0') != '1':
+        if (
+            os.getenv('USE_MULTI_API_KEYS', '0') != '1'
+            and os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') != '1'
+        ):
             return
     except Exception:
         return
@@ -469,7 +472,9 @@ def _ensure_multi_key_config_loaded():
     # If keys are already present in env or in-memory, nothing to do.
     try:
         mk_env = os.getenv('MULTI_API_KEYS', '')
-        if mk_env and str(mk_env).strip() not in ('', '[]', 'null', 'None'):
+        refinement_env = os.getenv('GLOSSARY_REFINEMENT_API_KEYS', '')
+        refinement_missing = os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1' and str(refinement_env).strip() in ('', '[]', 'null', 'None')
+        if mk_env and str(mk_env).strip() not in ('', '[]', 'null', 'None') and not refinement_missing:
             return
     except Exception:
         pass
@@ -477,7 +482,9 @@ def _ensure_multi_key_config_loaded():
     try:
         import unified_api_client as _uac
         with _uac.UnifiedClient._in_memory_multi_keys_lock:
-            if _uac.UnifiedClient._in_memory_multi_keys:
+            refinement_env = os.getenv('GLOSSARY_REFINEMENT_API_KEYS', '')
+            refinement_missing = os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1' and str(refinement_env).strip() in ('', '[]', 'null', 'None')
+            if _uac.UnifiedClient._in_memory_multi_keys and not refinement_missing:
                 return
     except Exception:
         pass
@@ -525,6 +532,20 @@ def _ensure_multi_key_config_loaded():
 
     if not isinstance(cfg, dict):
         return
+
+    try:
+        refinement_keys = cfg.get('glossary_refinement_keys') or []
+        if cfg.get('use_glossary_refinement_keys', False) and refinement_keys:
+            os.environ['USE_GLOSSARY_REFINEMENT_KEYS'] = '1'
+            os.environ['GLOSSARY_REFINEMENT_API_KEYS'] = json.dumps(refinement_keys)
+            import unified_api_client as _uac
+            _uac.UnifiedClient.set_in_memory_glossary_refinement_keys(
+                refinement_keys,
+                force_rotation=bool(cfg.get('force_key_rotation', True)),
+                rotation_frequency=int(cfg.get('rotation_frequency', 1)),
+            )
+    except Exception:
+        pass
 
     keys = cfg.get('multi_api_keys') or []
     if not keys:
@@ -2444,7 +2465,7 @@ def _refine_csv_lines_if_enabled(csv_lines, output_dir):
         from chapter_splitter import ChapterSplitter
 
         client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
-        client.context = "glossary refinement"
+        client.context = "glossary_refinement"
         if hasattr(client, 'reset_cleanup_state'):
             client.reset_cleanup_state()
 

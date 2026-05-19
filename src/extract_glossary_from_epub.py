@@ -92,6 +92,28 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config):
     
     # ── Step 1: Determine which key pool to use ──────────────────────────
     use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
+    use_refinement_keys = os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1' or config.get('use_glossary_refinement_keys', False)
+    refinement_keys = []
+    if use_refinement_keys:
+        refinement_keys_json = os.getenv('GLOSSARY_REFINEMENT_API_KEYS', '[]')
+        try:
+            if refinement_keys_json and refinement_keys_json.strip() not in ('', '[]', 'null', 'None'):
+                refinement_keys = json.loads(refinement_keys_json)
+        except Exception:
+            refinement_keys = []
+        if not refinement_keys:
+            refinement_keys = config.get('glossary_refinement_keys', [])
+        if refinement_keys:
+            os.environ['USE_GLOSSARY_REFINEMENT_KEYS'] = '1'
+            os.environ['GLOSSARY_REFINEMENT_API_KEYS'] = json.dumps(refinement_keys)
+            try:
+                UnifiedClient.set_in_memory_glossary_refinement_keys(
+                    refinement_keys,
+                    force_rotation=config.get('force_key_rotation', True),
+                    rotation_frequency=config.get('rotation_frequency', 1),
+                )
+            except Exception:
+                pass
     
     # Try to load glossary-specific keys
     glossary_keys = []
@@ -218,7 +240,7 @@ def _log_assistant_prompt_once():
             print(f"🤖 Assistant Prompt: {assistant_prompt}")
             _log_assistant_prompt_once._logged = True
 
-def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, chapter_idx=None, chunk_idx=None, total_chunks=None, merged_chapters=None, before_send_callback=None):
+def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, chapter_idx=None, chunk_idx=None, total_chunks=None, merged_chapters=None, before_send_callback=None, context='glossary'):
     """Send API request with interrupt capability and optional timeout retry
     
     Args:
@@ -331,7 +353,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
 
                 start_time = time.time()
                 try:
-                    result = client.send(messages, temperature=temperature, max_tokens=max_tokens, context='glossary')
+                    result = client.send(messages, temperature=temperature, max_tokens=max_tokens, context=context or 'glossary')
                 finally:
                     if tls_for_callback is not None:
                         try:
@@ -368,7 +390,14 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
 
         # 1. Peek at glossary key pool — find the key that will be selected next
         try:
-            _gk_pool = getattr(UnifiedClient, '_glossary_key_pool', None)
+            _ctx_norm = str(context or '').strip().lower().replace(' ', '_').replace('-', '_')
+            _gk_pool = (
+                getattr(UnifiedClient, '_glossary_refinement_key_pool', None)
+                if _ctx_norm == 'glossary_refinement'
+                else getattr(UnifiedClient, '_glossary_key_pool', None)
+            )
+            if _ctx_norm == 'glossary_refinement' and not (_gk_pool and hasattr(_gk_pool, 'keys') and _gk_pool.keys):
+                _gk_pool = getattr(UnifiedClient, '_glossary_key_pool', None)
             if _gk_pool and hasattr(_gk_pool, 'keys') and _gk_pool.keys:
                 _pool_keys = _gk_pool.keys
                 _cur_idx = getattr(_gk_pool, 'current_index', 0) % len(_pool_keys)
@@ -7579,6 +7608,12 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         failed_set = set(failed_clean)
         merged_set = set(merged_clean)
         requested_in_progress_set = set(_unique_int_list(in_progress)) if in_progress is not None else set()
+        requested_output_stems = {}
+        for req_idx in sorted(set(completed_clean) | set(failed_clean) | set(merged_clean) | requested_in_progress_set):
+            req_file = _glossary_chapter_output_file(req_idx, context=context)
+            req_stem = os.path.splitext(os.path.basename(str(req_file or "").lower()))[0]
+            if req_stem:
+                requested_output_stems[int(req_idx)] = req_stem
 
         # Failed chapters must not also be persisted as completed. The glossary
         # extractor may keep partial entries, but the chapter itself still needs
@@ -7615,6 +7650,14 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                             continue
                         existing_idx = _glossary_progress_entry_index(existing_info, existing_key)
                         if existing_idx is not None:
+                            existing_file = ""
+                            for fname_key in ("output_file", "chapter_file", "original_basename", "filename", "source_filename"):
+                                existing_file = _glossary_progress_filename(existing_info.get(fname_key, ""))
+                                if existing_file:
+                                    break
+                            existing_stem = os.path.splitext(os.path.basename(str(existing_file or "").lower()))[0]
+                            if any(req_idx != int(existing_idx) and req_stem == existing_stem for req_idx, req_stem in requested_output_stems.items()):
+                                continue
                             existing_chapters_by_idx[int(existing_idx)] = existing_info
                             existing_status = str(existing_info.get("status", "")).lower()
                             if existing_status == "in_progress":

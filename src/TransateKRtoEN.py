@@ -7982,7 +7982,13 @@ def _single_pass_chapter_refs(output_dir, chapter_num=None, chapter_file=None, p
     idx = None
     actual = None
 
-    if chapter_basename and isinstance(progress, dict):
+    if chapter_basename:
+        spine_idx, spine_pos = _single_pass_spine_ref_for_file(output_dir, chapter_basename)
+        if spine_idx is not None:
+            idx = spine_idx
+            actual = spine_pos
+
+    if chapter_basename and idx is None and isinstance(progress, dict):
         target = os.path.splitext(os.path.basename(chapter_basename).lower())[0]
         chapters = progress.get("chapters", {})
         if isinstance(chapters, dict):
@@ -8003,12 +8009,6 @@ def _single_pass_chapter_refs(output_dir, chapter_num=None, chapter_file=None, p
                         break
                 if idx is not None:
                     break
-
-    if chapter_basename and idx is None:
-        spine_idx, spine_pos = _single_pass_spine_ref_for_file(output_dir, chapter_basename)
-        if spine_idx is not None:
-            idx = spine_idx
-            actual = spine_pos
 
     if idx is None:
         try:
@@ -8186,6 +8186,7 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
                 _single_pass_glossary_active_indices.discard(int(chapter_idx))
             if chapter_idx is not None and chapter_idx not in completed:
                 completed.append(chapter_idx)
+            if chapter_idx is not None:
                 glossary_extractor.save_progress(
                     completed,
                     glossary_extractor._load_glossary_file(json_path),

@@ -1618,6 +1618,14 @@ class MultiAPIKeyDialog(QDialog):
             )
             self.translator_gui.config['use_glossary_keys'] = use_glossary
 
+            use_glossary_refinement = (
+                self.use_glossary_refinement_keys_checkbox.isChecked()
+                if hasattr(self, 'use_glossary_refinement_keys_checkbox')
+                else bool(self.translator_gui.config.get('use_glossary_refinement_keys', False))
+            )
+            self.translator_gui.config['use_glossary_refinement_keys'] = use_glossary_refinement
+            self.translator_gui.use_glossary_refinement_keys_var = use_glossary_refinement
+
             # Save Vision keys toggle (stored under the legacy qa_scan config key)
             use_qa_scan = (
                 self.use_qa_scan_keys_checkbox.isChecked()
@@ -1949,6 +1957,8 @@ class MultiAPIKeyDialog(QDialog):
 
         # Create glossary keys container (hidden by default)
         self._create_glossary_section(scrollable_layout)
+
+        self._create_glossary_refinement_section(scrollable_layout)
 
         # Create Vision keys container (hidden by default)
         self._create_qa_scan_section(scrollable_layout)
@@ -5669,6 +5679,185 @@ class MultiAPIKeyDialog(QDialog):
                 UnifiedClient.clear_in_memory_glossary_keys()
         except Exception:
             pass
+
+    def _create_glossary_refinement_section(self, parent_layout):
+        """Create a dedicated key pool section for glossary refinement requests."""
+        self.glossary_refinement_container = QWidget()
+        layout = QVBoxLayout(self.glossary_refinement_container)
+        layout.setContentsMargins(0, 5, 0, 0)
+
+        frame = QGroupBox("Glossary Refinement Keys")
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(15, 15, 15, 15)
+
+        desc_label = QLabel(
+            "Dedicated keys for glossary_refinement API calls. "
+            "When enabled, this pool is tried before the regular Glossary Keys pool."
+        )
+        desc_label.setWordWrap(True)
+        desc_label.setStyleSheet("color: gray; font-style: italic;")
+        frame_layout.addWidget(desc_label)
+
+        toggle_row = QWidget()
+        toggle_layout = QHBoxLayout(toggle_row)
+        toggle_layout.setContentsMargins(0, 0, 0, 0)
+        self.use_glossary_refinement_keys_checkbox = self._create_styled_checkbox("Enable Glossary Refinement Keys")
+        self.use_glossary_refinement_keys_checkbox.setChecked(self.translator_gui.config.get('use_glossary_refinement_keys', False))
+        self.use_glossary_refinement_keys_checkbox.toggled.connect(self._toggle_glossary_refinement_section)
+        toggle_layout.addWidget(self.use_glossary_refinement_keys_checkbox)
+        toggle_layout.addStretch()
+        frame_layout.addWidget(toggle_row)
+
+        self.add_glossary_refinement_frame = QWidget()
+        add_grid = QGridLayout(self.add_glossary_refinement_frame)
+        add_grid.setContentsMargins(0, 0, 0, 10)
+        add_grid.addWidget(QLabel("API Key:"), 0, 0, Qt.AlignLeft)
+        self.glossary_refinement_key_entry = QLineEdit()
+        self.glossary_refinement_key_entry.setEchoMode(QLineEdit.Password)
+        add_grid.addWidget(self.glossary_refinement_key_entry, 0, 1)
+        self.show_glossary_refinement_btn = QPushButton("👁")
+        self.show_glossary_refinement_btn.setFixedWidth(40)
+        self.show_glossary_refinement_btn.clicked.connect(self._toggle_glossary_refinement_visibility)
+        add_grid.addWidget(self.show_glossary_refinement_btn, 0, 2)
+        add_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
+        self.glossary_refinement_model_combo = QComboBox()
+        self.glossary_refinement_model_combo.addItems(get_model_options())
+        self.glossary_refinement_model_combo.setEditable(True)
+        self._disable_combobox_mousewheel(self.glossary_refinement_model_combo)
+        add_grid.addWidget(self.glossary_refinement_model_combo, 0, 4)
+        add_btn = QPushButton("Add Refinement Key")
+        add_btn.clicked.connect(self._add_glossary_refinement_key)
+        add_grid.addWidget(add_btn, 0, 5, Qt.AlignRight)
+        add_grid.setColumnStretch(1, 1)
+        add_grid.setColumnStretch(4, 1)
+        frame_layout.addWidget(self.add_glossary_refinement_frame)
+
+        self.glossary_refinement_tree = QTreeWidget()
+        self.glossary_refinement_tree.setHeaderLabels(['API Key', 'Model', 'Status'])
+        self.glossary_refinement_tree.setColumnWidth(0, 160)
+        self.glossary_refinement_tree.setColumnWidth(1, 260)
+        self.glossary_refinement_tree.setMinimumHeight(120)
+        frame_layout.addWidget(self.glossary_refinement_tree)
+
+        self.glossary_refinement_action_frame = QWidget()
+        action_layout = QHBoxLayout(self.glossary_refinement_action_frame)
+        action_layout.setContentsMargins(0, 10, 0, 0)
+        remove_btn = QPushButton("Remove Selected")
+        remove_btn.clicked.connect(self._remove_selected_glossary_refinement)
+        action_layout.addWidget(remove_btn)
+        clear_btn = QPushButton("Clear All")
+        clear_btn.clicked.connect(self._clear_all_glossary_refinement)
+        action_layout.addWidget(clear_btn)
+        action_layout.addStretch()
+        self.glossary_refinement_status_label = QLabel()
+        self.glossary_refinement_status_label.setStyleSheet("color: gray;")
+        action_layout.addWidget(self.glossary_refinement_status_label)
+        frame_layout.addWidget(self.glossary_refinement_action_frame)
+
+        layout.addWidget(frame)
+        parent_layout.addWidget(self.glossary_refinement_container)
+        self._load_glossary_refinement_keys()
+        self._toggle_glossary_refinement_section()
+
+    def _load_glossary_refinement_keys(self):
+        keys = self.translator_gui.config.get('glossary_refinement_keys', []) or []
+        self.glossary_refinement_tree.clear()
+        for key_data in keys:
+            api_key = key_data.get('api_key', '')
+            model = key_data.get('model', '')
+            masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+            item = QTreeWidgetItem([masked_key, model, "Enabled" if key_data.get('enabled', True) else "Disabled"])
+            item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
+            self.glossary_refinement_tree.addTopLevelItem(item)
+        if not getattr(self, '_initializing', False):
+            self._refresh_glossary_refinement_pool()
+
+    def _add_glossary_refinement_key(self):
+        api_key = self.glossary_refinement_key_entry.text().strip()
+        model = self.glossary_refinement_model_combo.currentText().strip()
+        if not model:
+            QMessageBox.critical(self, "Error", "Please enter a model name")
+            return
+        keys = self.translator_gui.config.get('glossary_refinement_keys', []) or []
+        keys.append({
+            'api_key': api_key,
+            'model': model,
+            'api_call_delay': 0.0,
+            'times_used': 0,
+            'enabled': True,
+        })
+        self.translator_gui.config['glossary_refinement_keys'] = keys
+        self.translator_gui.save_config(show_message=False)
+        self.glossary_refinement_key_entry.clear()
+        self.glossary_refinement_model_combo.setCurrentText("")
+        self._load_glossary_refinement_keys()
+        self.glossary_refinement_status_label.setText(f"Added refinement key for model: {model}")
+
+    def _remove_selected_glossary_refinement(self):
+        keys = self.translator_gui.config.get('glossary_refinement_keys', []) or []
+        indices = sorted(
+            [self.glossary_refinement_tree.indexOfTopLevelItem(item) for item in self.glossary_refinement_tree.selectedItems()],
+            reverse=True,
+        )
+        for idx in indices:
+            if 0 <= idx < len(keys):
+                del keys[idx]
+        self.translator_gui.config['glossary_refinement_keys'] = keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_refinement_keys()
+        self.glossary_refinement_status_label.setText(f"Removed {len(indices)} refinement key(s)")
+
+    def _clear_all_glossary_refinement(self):
+        self.translator_gui.config['glossary_refinement_keys'] = []
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_refinement_keys()
+        self.glossary_refinement_status_label.setText("Cleared all refinement keys")
+
+    def _toggle_glossary_refinement_section(self):
+        enabled = self.use_glossary_refinement_keys_checkbox.isChecked()
+        for widget_name in ('add_glossary_refinement_frame', 'glossary_refinement_tree', 'glossary_refinement_action_frame'):
+            if hasattr(self, widget_name):
+                getattr(self, widget_name).setVisible(enabled)
+        self.translator_gui.config['use_glossary_refinement_keys'] = enabled
+        self.translator_gui.use_glossary_refinement_keys_var = enabled
+        try:
+            import os as _os
+            _os.environ['USE_GLOSSARY_REFINEMENT_KEYS'] = '1' if enabled else '0'
+            _os.environ['GLOSSARY_REFINEMENT_API_KEYS'] = json.dumps(self.translator_gui.config.get('glossary_refinement_keys', []) or [])
+        except Exception:
+            pass
+        if enabled:
+            self._refresh_glossary_refinement_pool()
+        else:
+            try:
+                from unified_api_client import UnifiedClient
+                UnifiedClient.clear_in_memory_glossary_refinement_keys()
+            except Exception:
+                pass
+        if hasattr(self, 'glossary_refinement_status_label'):
+            self.glossary_refinement_status_label.setText(f"Glossary Refinement Keys {'enabled' if enabled else 'disabled'}")
+
+    def _refresh_glossary_refinement_pool(self):
+        try:
+            use_keys = self.use_glossary_refinement_keys_checkbox.isChecked() if hasattr(self, 'use_glossary_refinement_keys_checkbox') else False
+            from unified_api_client import UnifiedClient
+            keys = self.translator_gui.config.get('glossary_refinement_keys', []) or []
+            os.environ['USE_GLOSSARY_REFINEMENT_KEYS'] = '1' if use_keys else '0'
+            os.environ['GLOSSARY_REFINEMENT_API_KEYS'] = json.dumps(keys)
+            if use_keys and keys:
+                UnifiedClient.set_in_memory_glossary_refinement_keys(keys)
+            else:
+                UnifiedClient.clear_in_memory_glossary_refinement_keys()
+        except Exception:
+            pass
+
+    def _toggle_glossary_refinement_visibility(self):
+        if self.glossary_refinement_key_entry.echoMode() == QLineEdit.Password:
+            self.glossary_refinement_key_entry.setEchoMode(QLineEdit.Normal)
+            self.show_glossary_refinement_btn.setText('🔒')
+        else:
+            self.glossary_refinement_key_entry.setEchoMode(QLineEdit.Password)
+            self.show_glossary_refinement_btn.setText('👁')
 
     def _toggle_glossary_visibility(self):
         """Toggle glossary key field visibility"""
