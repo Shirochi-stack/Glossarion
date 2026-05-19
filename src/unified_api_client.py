@@ -11263,7 +11263,6 @@ class UnifiedClient:
                         'messages': cleaned_messages,
                         'timestamp': datetime.now().isoformat(),
                         'debug': debug_info,
-                        'system_prompt_role_analysis': system_role_analysis,
                         'request_params': request_params,
                         'key_identifier': getattr(self, 'key_identifier', None),
                         'retry_info': {
@@ -13684,7 +13683,7 @@ class UnifiedClient:
             'openai', 'deepseek', 'together', 'mistral', 'yi', 'qwen',
             'moonshot', 'groq', 'electronhub', 'openrouter', 'fireworks',
             'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu',
-            'nanogpt', 'sambanova', 'custom_openai',
+            'nanogpt', 'sambanova', 'literouter', 'custom_openai',
         }
         _is_sdk_provider = False
         try:

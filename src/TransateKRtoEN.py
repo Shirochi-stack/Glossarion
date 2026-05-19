@@ -8086,6 +8086,17 @@ def _single_pass_progress_lists_for_ref(progress, chapter_idx, chapter_basename)
         merged = _without_ref(merged)
     return completed, failed, merged
 
+def _single_pass_without_chapter_idx(values, chapter_idx):
+    kept = []
+    for idx_value in values or []:
+        try:
+            if int(idx_value) == int(chapter_idx):
+                continue
+        except (TypeError, ValueError):
+            pass
+        kept.append(idx_value)
+    return kept
+
 def _mark_single_pass_glossary_in_progress(output_dir, chapter_num=None, chapter_file=None):
     """Write a live in-progress row for Single Pass glossary progress."""
     global _single_pass_glossary_active_indices
@@ -8105,6 +8116,9 @@ def _mark_single_pass_glossary_in_progress(output_dir, chapter_num=None, chapter
         if chapter_basename:
             context.chapter_filenames[int(chapter_idx)] = chapter_basename
         completed, failed, merged_indices = _single_pass_progress_lists_for_ref(progress, chapter_idx, chapter_basename)
+        completed = _single_pass_without_chapter_idx(completed, chapter_idx)
+        failed = _single_pass_without_chapter_idx(failed, chapter_idx)
+        merged_indices = _single_pass_without_chapter_idx(merged_indices, chapter_idx)
         _single_pass_glossary_active_indices.add(int(chapter_idx))
         glossary_extractor.save_progress(
             completed,
@@ -8139,18 +8153,8 @@ def _restore_single_pass_glossary_in_progress(output_dir, chapter_num=None, chap
         _single_pass_glossary_active_indices.discard(int(chapter_idx))
         in_progress = sorted(_single_pass_glossary_active_indices)
         if not glossary_extractor._glossary_disk_entry_is_still_in_progress(chapter_idx, context=context):
-            def _without_chapter_idx(values):
-                kept = []
-                for idx_value in values:
-                    try:
-                        if int(idx_value) == int(chapter_idx):
-                            continue
-                    except (TypeError, ValueError):
-                        pass
-                    kept.append(idx_value)
-                return kept
-            completed = _without_chapter_idx(completed)
-            merged_indices = _without_chapter_idx(merged_indices)
+            completed = _single_pass_without_chapter_idx(completed, chapter_idx)
+            merged_indices = _single_pass_without_chapter_idx(merged_indices, chapter_idx)
             failed_ints = []
             for idx_value in failed:
                 try:
