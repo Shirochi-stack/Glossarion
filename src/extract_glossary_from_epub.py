@@ -3479,13 +3479,20 @@ Rules:
 - Any glossary prompt instruction to return only CSV/JSON applies only inside the <glossary> block.
 - After </glossary>, output only the translated content.
 - The translation must use the generated glossary consistently while still following the active translation prompt.
+- A response that contains only the glossary is invalid; the full translation after </glossary> is mandatory.
 - Do not explain the process, mention these tasks, or add notes outside the required glossary block and translation.
 
 [Glossary Prompt]
 {glossary_prompt}
 
 [Translation Prompt]
-{translation_prompt}"""
+{translation_prompt}
+
+[Final Single-Pass Override]
+The final answer must contain exactly:
+1. One <glossary>...</glossary> block.
+2. The complete translated source text immediately after </glossary>.
+Do not stop after the glossary."""
 
 STALE_SINGLE_PASS_GLOSSARY_HEADER_MARKERS = (
     "Balanced/Full glossary logic",
@@ -3505,13 +3512,22 @@ def build_single_pass_translation_system_prompt(translation_prompt: str, source_
     header = (os.getenv("SINGLE_PASS_GLOSSARY_HEADER_PROMPT", "") or "").strip()
     if not header or any(marker in header for marker in STALE_SINGLE_PASS_GLOSSARY_HEADER_MARKERS):
         header = DEFAULT_SINGLE_PASS_GLOSSARY_HEADER_PROMPT
+    final_override = (
+        "\n\n[Final Single-Pass Override]\n"
+        "The final answer must contain exactly one <glossary>...</glossary> block followed immediately by the complete translated source text. "
+        "Any instruction inside the glossary prompt to return only CSV/JSON applies only inside <glossary>; do not stop after the glossary."
+    )
     if "{glossary_prompt}" in header or "{translation_prompt}" in header:
-        return (
+        combined = (
             header
             .replace("{glossary_prompt}", glossary_system_prompt)
             .replace("{translation_prompt}", translation_prompt)
         )
-    return f"{header}\n\n[Balanced/Full Glossary Prompt]\n{glossary_system_prompt}\n\n[Translation Prompt]\n{translation_prompt}"
+    else:
+        combined = f"{header}\n\n[Balanced/Full Glossary Prompt]\n{glossary_system_prompt}\n\n[Translation Prompt]\n{translation_prompt}"
+    if "[Final Single-Pass Override]" not in combined:
+        combined += final_override
+    return combined
 
 def split_single_pass_response(response_text: str) -> tuple:
     """Split a single-pass response into (translation_text, glossary_block)."""

@@ -2754,13 +2754,20 @@ Rules:
 - Any glossary prompt instruction to return only CSV/JSON applies only inside the <glossary> block.
 - After </glossary>, output only the translated content.
 - The translation must use the generated glossary consistently while still following the active translation prompt.
+- A response that contains only the glossary is invalid; the full translation after </glossary> is mandatory.
 - Do not explain the process, mention these tasks, or add notes outside the required glossary block and translation.
 
 [Glossary Prompt]
 {glossary_prompt}
 
 [Translation Prompt]
-{translation_prompt}"""
+{translation_prompt}
+
+[Final Single-Pass Override]
+The final answer must contain exactly:
+1. One <glossary>...</glossary> block.
+2. The complete translated source text immediately after </glossary>.
+Do not stop after the glossary."""
 
     def _load_additional_glossary(self):
         """Load an additional glossary file (CSV/TXT/JSON/PDF) to append to auto-generated glossary"""
