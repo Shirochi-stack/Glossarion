@@ -15676,8 +15676,8 @@ def main(log_callback=None, stop_callback=None):
             except Exception as e:
                 print(f"⚠️ Could not remove empty glossary.json: {e}")
 
-        elif (os.path.exists(existing_glossary_csv) and _has_glossary_data(existing_glossary_csv)) or \
-             (os.path.exists(existing_glossary_json) and _has_glossary_data(existing_glossary_json)):
+        elif os.getenv("AUTO_GLOSSARY_MODE", "off").strip().lower().replace(" ", "_").replace("-", "_") not in ("balanced", "full", "single_pass", "singlepass") and ((os.path.exists(existing_glossary_csv) and _has_glossary_data(existing_glossary_csv)) or \
+             (os.path.exists(existing_glossary_json) and _has_glossary_data(existing_glossary_json))):
             print("📑 Existing glossary file detected in source folder - skipping automatic generation")
             target_glossary_path = None
             if os.path.exists(existing_glossary_csv) and _has_glossary_data(existing_glossary_csv):

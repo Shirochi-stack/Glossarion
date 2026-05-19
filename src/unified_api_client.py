@@ -2045,6 +2045,8 @@ class UnifiedClient:
         'poe': 'poe',
         'or': 'openrouter',
         'openrouter': 'openrouter',
+        'lr/': 'literouter',
+        'lr': 'literouter',
         'fireworks': 'fireworks',
         'nd/': 'nvidia',
         'eh/': 'electronhub',
@@ -14949,6 +14951,7 @@ class UnifiedClient:
             'databricks': self._send_openai_provider_router,
             'huggingface': self._send_huggingface,
             'openrouter': self._send_openai_provider_router,  # OpenRouter aggregator
+            'literouter': self._send_openai_provider_router,  # LiteRouter aggregator
             'poe': self._send_poe,  # POE platform (restored)
             'electronhub': self._send_electronhub,  # ElectronHub aggregator (restored)
             'fireworks': self._send_openai_provider_router,
@@ -18452,6 +18455,10 @@ class UnifiedClient:
                     effective_model = effective_model[len(prefix):]
                     break
             effective_model = effective_model.strip()
+        elif provider == 'literouter':
+            if effective_model.startswith('lr/'):
+                effective_model = effective_model[3:]
+            effective_model = effective_model.strip()
         elif provider == 'fireworks':
             if effective_model.startswith('fireworks/'):
                 effective_model = effective_model[len('fireworks/') :]
@@ -18717,7 +18724,7 @@ class UnifiedClient:
         
         # Use OpenAI SDK for providers known to work well with it
         sdk_compatible = ['openai', 'deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq', 
-                         'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu', 'nanogpt', 'sambanova', 'custom_openai']
+                         'electronhub', 'openrouter', 'literouter', 'fireworks', 'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu', 'nanogpt', 'sambanova', 'custom_openai']
         
         # Allow forcing HTTP-only for OpenRouter via toggle (default: disabled)
         openrouter_http_only = os.getenv('OPENROUTER_USE_HTTP_ONLY', '0') == '1'
@@ -23581,6 +23588,7 @@ class UnifiedClient:
             'databricks': lambda: f"{os.getenv('DATABRICKS_API_URL', 'https://YOUR-WORKSPACE.databricks.com')}/serving/endpoints",
             'together': "https://api.together.xyz/v1",
             'openrouter': "https://openrouter.ai/api/v1",
+            'literouter': "https://api.literouter.com/v1",
             'fireworks': lambda: os.getenv("FIREWORKS_API_URL", "https://api.fireworks.ai/inference/v1"),
             'xai': lambda: os.getenv("XAI_API_URL", "https://api.x.ai/v1"),
             'deepseek': lambda: os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1"),

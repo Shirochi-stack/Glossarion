@@ -173,6 +173,20 @@ def get_model_options() -> List[str]:
        # "poe/claude-3-opus", "poe/claude-4-opus", "poe/claude-3-sonnet", "poe/claude-4-sonnet",
        # "poe/claude", "poe/Assistant",
        # "poe/gemini-2.5-flash", "poe/gemini-2.5-pro",
+
+        # LiteRouter (lr/ prefix)
+        "lr/deepseek-v3.2:free", "lr/devstral-small-2507:free",
+        "lr/gemini-2.0-flash-lite-001:free", "lr/gemma-3-27b-it:free",
+        "lr/glm-4-32b:free", "lr/gpt-oss-120b:free",
+        "lr/gpt-oss-20b:free", "lr/grok-4.1-fast-reasoning:free",
+        "lr/l3-8b-lunaris:free", "lr/llama-3-8b-instruct:free",
+        "lr/llama-3.1-8b-instruct-turbo:free", "lr/llama-3.1-8b-instruct:free",
+        "lr/llama-3.2-3b-instruct:free", "lr/llama-3.3-70b-instruct-turbo:free",
+        "lr/mimo-v2-flash:free", "lr/ministral-3b-2512:free",
+        "lr/mistral-nemo-instruct-2407:free", "lr/mistral-small-24b-instruct-2501:free",
+        "lr/mythomax-l2-13b:free", "lr/nemotron-nano-9b-v2:free",
+        "lr/openrouter:free:full-context", "lr/owl-alpha:free:full-context",
+        "lr/qwen3-4b-fp8:free", "lr/trinity-mini:free",
         
         # For OR, prefix with 'or/'
         "or/openrouter/free",
