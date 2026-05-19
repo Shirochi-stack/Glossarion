@@ -36,6 +36,7 @@ from unified_api_client import (
 _translation_thread_submit_lock = threading.Lock()
 _translation_last_thread_submit = 0.0
 _single_pass_glossary_lock = threading.Lock()
+_single_pass_glossary_active_indices = set()
 import hashlib
 import tempfile
 import unicodedata
@@ -8078,6 +8079,7 @@ def _single_pass_progress_lists_for_ref(progress, chapter_idx, chapter_basename)
 
 def _mark_single_pass_glossary_in_progress(output_dir, chapter_num=None, chapter_file=None):
     """Write a live in-progress row for Single Pass glossary progress."""
+    global _single_pass_glossary_active_indices
     if not _single_pass_glossary_mode():
         return
     try:
@@ -8094,12 +8096,13 @@ def _mark_single_pass_glossary_in_progress(output_dir, chapter_num=None, chapter
         if chapter_basename:
             context.chapter_filenames[int(chapter_idx)] = chapter_basename
         completed, failed, merged_indices = _single_pass_progress_lists_for_ref(progress, chapter_idx, chapter_basename)
+        _single_pass_glossary_active_indices.add(int(chapter_idx))
         glossary_extractor.save_progress(
             completed,
             glossary_extractor._load_glossary_file(json_path),
             merged_indices,
             failed=failed,
-            in_progress=list(set(progress.get("in_progress", []) + [int(chapter_idx)])),
+            in_progress=sorted(_single_pass_glossary_active_indices),
             context=context,
         )
     except Exception as e:
@@ -8107,6 +8110,7 @@ def _mark_single_pass_glossary_in_progress(output_dir, chapter_num=None, chapter
 
 def _restore_single_pass_glossary_in_progress(output_dir, chapter_num=None, chapter_file=None):
     """Restore/remove a Single Pass glossary in-progress row after a hard stop."""
+    global _single_pass_glossary_active_indices
     if not _single_pass_glossary_mode():
         return
     try:
@@ -8123,14 +8127,8 @@ def _restore_single_pass_glossary_in_progress(output_dir, chapter_num=None, chap
         if chapter_basename:
             context.chapter_filenames[int(chapter_idx)] = chapter_basename
         completed, failed, merged_indices = _single_pass_progress_lists_for_ref(progress, chapter_idx, chapter_basename)
-        in_progress = []
-        for idx_value in progress.get("in_progress", []):
-            try:
-                if int(idx_value) == int(chapter_idx):
-                    continue
-            except (TypeError, ValueError):
-                pass
-            in_progress.append(idx_value)
+        _single_pass_glossary_active_indices.discard(int(chapter_idx))
+        in_progress = sorted(_single_pass_glossary_active_indices)
         if not glossary_extractor._glossary_disk_entry_is_still_in_progress(chapter_idx, context=context):
             def _without_chapter_idx(values):
                 kept = []
@@ -8165,6 +8163,7 @@ def _restore_single_pass_glossary_in_progress(output_dir, chapter_num=None, chap
 
 def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, source_text=None, chapter_file=None):
     """Parse, dedupe, and save inline glossary output using the glossary pipeline."""
+    global _single_pass_glossary_active_indices
     if not _single_pass_glossary_mode():
         return 0
 
@@ -8183,6 +8182,8 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
                     context.chapter_filenames[int(chapter_idx)] = chapter_basename
 
             completed, failed, merged_indices = _single_pass_progress_lists_for_ref(progress, chapter_idx, chapter_basename)
+            if chapter_idx is not None:
+                _single_pass_glossary_active_indices.discard(int(chapter_idx))
             if chapter_idx is not None and chapter_idx not in completed:
                 completed.append(chapter_idx)
                 glossary_extractor.save_progress(
@@ -8190,6 +8191,7 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
                     glossary_extractor._load_glossary_file(json_path),
                     merged_indices,
                     failed=failed,
+                    in_progress=sorted(_single_pass_glossary_active_indices),
                     context=context,
                 )
                 progress = glossary_extractor.load_progress(context=context)
@@ -8229,7 +8231,19 @@ def _persist_single_pass_glossary(output_dir, glossary_block, chapter_num=None, 
 
             glossary_extractor.save_glossary_json(deduped, json_path)
             glossary_extractor.save_glossary_csv(deduped, json_path)
-            glossary_extractor.save_progress(completed, deduped, merged_indices, failed=failed, context=context)
+            try:
+                legacy_json_path = os.path.join(output_dir, "glossary.json")
+                glossary_extractor.save_glossary_csv(deduped, legacy_json_path)
+            except Exception as e:
+                print(f"⚠️ Single Pass Glossary: failed to refresh legacy glossary.csv: {e}")
+            glossary_extractor.save_progress(
+                completed,
+                deduped,
+                merged_indices,
+                failed=failed,
+                in_progress=sorted(_single_pass_glossary_active_indices),
+                context=context,
+            )
 
             print(
                 f"📑 Single Pass Glossary: saved {len(valid)} new entr"
