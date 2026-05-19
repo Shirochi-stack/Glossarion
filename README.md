@@ -114,13 +114,19 @@
 | **Cohere** | `command-*` | command-r, command-r-plus |
 | **ElectronHub** | `eh/*` | eh/gpt-5-chat-latest, eh/claude-sonnet-4-6, eh/gemini-3.1-pro-preview, eh/grok-4-fast |
 | **OpenRouter** | `or/*` | or/openai/gpt-5.4, or/google/gemini-3.1-pro-preview, or/deepseek/deepseek-v3.2 |
+| **LiteRouter** | `lr/*` | lr/deepseek-v3.2:free, lr/gpt-oss-120b:free, lr/openrouter:free:full-context |
 | **Poe** | `poe/*` | poe/gpt-4.5, poe/claude-4-opus, poe/gemini-2.5-pro |
 | **VertexAI** | `vertex/*` | vertex/gemini-3.1-pro-preview, vertex/claude-4-opus |
 | **Groq** | `groq/*` | groq/llama-3.3-70b-versatile, groq/meta-llama/llama-4-maverick-17b |
 | **AuthGPT** | `authgpt/*` | authgpt/gpt-5.4, authgpt/gpt-5.3-codex, authgpt/gpt-5.2 |
+| **AuthCD** | `authcd/*` | authcd/claude-sonnet-4-6, authcd/claude-haiku-4-5-20251001 |
+| **AuthGem** | `authgem/*`, `authgem-vertex/*` | authgem/gemini-3.1-pro-preview, authgem-vertex/gemini-3.1-pro-preview |
 | **Antigravity** | `antigravity/*` | antigravity/claude-opus-4-6-thinking, antigravity/gemini-3.1-pro |
 | **NVIDIA** | `nd/*` | nd/deepseek-ai/deepseek-v3.2, nd/moonshotai/kimi-k2-thinking |
 | **Chutes** | `chutes/*` | chutes/deepseek-ai/DeepSeek-V3.2, chutes/openai/gpt-oss-120b |
+| **Zhipu Intl.** | `za/*` | za/glm-4.6, za/glm-4-plus |
+| **NanoGPT** | `nan/*` | nan/gpt-image-2, nan/deepseek/deepseek-v4-flash, nan/openai/gpt-latest |
+| **SambaNova** | `sam/*` | sam/DeepSeek-V3.2, sam/Meta-Llama-3.3-70B-Instruct, sam/gpt-oss-120b |
 | **Fireworks** | `fireworks/*` | fireworks/llama-v3-70b |
 | **Together AI** | `together/*` | together/llama-3-70b |
 | **Perplexity** | `perplexity/*`, `pplx-*` | perplexity-70b-online, pplx-70b-online |
@@ -129,10 +135,15 @@
 | **Yi** | `yi-*` | yi-34b-chat-200k |
 | **DeepL** | `deepl` | deepl (traditional translation API) |
 | **Google Translate** | `google-translate*` | google-translate, google-translate-free |
+| **Custom Prefix Routes** | user-defined `prefix/*` | Route custom prefixes to OpenAI-compatible endpoints in Model Manager |
+
+Custom prefix routing is supported for user-defined OpenAI-compatible endpoints; add the prefix route in Model Manager, then use `prefix/model-name` in the model field.
 
 > **Note:** Many more providers are supported — including Baichuan, Zhipu AI (GLM), Moonshot/Kimi, Baidu ERNIE, Tencent Hunyuan, ByteDance Doubao, MiniMax, Meta Llama, Microsoft Phi, Falcon, and others. See `model_options.py` and `unified_api_client.py` for the full catalog.
 
 ### API Key Setup
+Custom endpoints can use either a base URL or a user-defined prefix route for self-hosted and alternative OpenAI-compatible endpoints.
+
 1. **Direct Providers** — use API keys from OpenAI, Google, Anthropic, etc.
 2. **ElectronHub** — single API key for access to models from multiple providers
 3. **AuthGPT** — use your ChatGPT subscription via OAuth (no API key needed)

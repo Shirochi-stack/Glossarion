@@ -5498,6 +5498,14 @@ Recent translations to summarize:
             <li><b>or/openai/gpt-5</b> - GPT-5 via OpenRouter</li>
             <li><b>or/deepseek/deepseek-chat-v3.1:free</b> - DeepSeek Chat (free tier)</li>
         </ul>
+
+        <h4>LiteRouter (lr/)</h4>
+        <p>Access free and full-context routes through LiteRouter API</p>
+        <ul>
+            <li><b>lr/deepseek-v3.2:free</b> - DeepSeek V3.2 free route</li>
+            <li><b>lr/gpt-oss-120b:free</b> - GPT OSS 120B free route</li>
+            <li><b>lr/openrouter:free:full-context</b> - OpenRouter full-context route</li>
+        </ul>
         
         <h4>ElectronHub (eh/)</h4>
         <p>Access models through ElectronHub API</p>
@@ -5638,6 +5646,9 @@ Recent translations to summarize:
             <li><b>nd/meta/llama-4-maverick-17b-128e-instruct</b></li>
             <li><b>nd/deepseek-ai/deep-r1</b></li>
         </ul>
+
+        <h4>Custom Prefix Routes</h4>
+        <p>User-defined prefixes can route models to custom OpenAI-compatible endpoints from Model Manager.</p>
         
         <p style="margin-top: 15px;"><i>Note: Each provider may have different pricing, rate limits, and model availability.</i></p>
         """
@@ -21749,6 +21760,7 @@ Important rules:
             p4_lay.addLayout(m4_row)
             
             prefix_data = [
+                ("LR", "lr/", "LiteRouter", "Free & full-context routes", "#102030", "#38bdf8"),
                 ("🌐", "or/", "OpenRouter", "Any model via OpenRouter", "#122040", "#5b9df6"),
                 ("⚡", "eh/", "ElectronHub", "Affordable AI proxy", "#122018", "#2dd4a0"),
                 ("🚀", "chutes/", "Chute AI", "Open-source model hosting", "#1e1828", "#a878d8"),
@@ -21813,7 +21825,7 @@ Important rules:
             p4_lay.addWidget(pfx_w, 1)
             
             pfx_note = QLabel("💡 Type any model name in the Model field. Add the provider prefix to route through a specific service.\n"
-                             "Example: eh/gpt-5.4 routes GPT-5.4 through ElectronHub. No prefix = direct API call.")
+                             "Example: lr/deepseek-v3.2:free routes through LiteRouter. Custom prefixes can be added in Model Manager.")
             pfx_note.setWordWrap(True)
             pfx_note.setAlignment(Qt.AlignCenter)
             pfx_note.setTextInteractionFlags(Qt.TextSelectableByMouse)
