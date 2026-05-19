@@ -14345,7 +14345,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             
 
             has_markdown = any([
-                '##' in plain_text,
+                re.search(r'(?m)^\s{0,3}#{1,6}(?:\s+|$)', plain_text) is not None,
                 '**' in plain_text,
                 '*' in plain_text and not '**' in plain_text,
                 '[' in plain_text and '](' in plain_text,
@@ -14427,7 +14427,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
         
         # Check if the text contains markdown patterns
         has_markdown = any([
-            '##' in plain_text,  # Headers
+            re.search(r'(?m)^\s{0,3}#{1,6}(?:\s+|$)', plain_text) is not None,  # Headers
             '**' in plain_text,  # Bold
             '*' in plain_text and not '**' in plain_text,  # Italic
             '[' in plain_text and '](' in plain_text,  # Links
