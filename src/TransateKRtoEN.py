@@ -7832,9 +7832,14 @@ def _split_single_pass_glossary_response(response_text):
         return glossary_extractor.split_single_pass_response(response_text)
     except Exception:
         pass
-    if not isinstance(response_text, str) or "<glossary" not in response_text.lower():
+    lower_response = response_text.lower() if isinstance(response_text, str) else ""
+    if not isinstance(response_text, str) or ("<glossary" not in lower_response and "&lt;glossary" not in lower_response):
         return response_text, ""
-    match = re.search(r"<glossary\b[^>]*>(.*?)</glossary>", response_text, flags=re.IGNORECASE | re.DOTALL)
+    match = re.search(
+        r"(?:<glossary\b[^>]*>|&lt;glossary\b.*?&gt;)(.*?)(?:</glossary>|&lt;/glossary&gt;)",
+        response_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     if not match:
         return response_text, ""
     return (response_text[:match.start()] + response_text[match.end():]).strip(), (match.group(1) or "").strip()

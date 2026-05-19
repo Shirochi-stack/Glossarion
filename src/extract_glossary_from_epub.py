@@ -3546,15 +3546,21 @@ def split_single_pass_response(response_text: str) -> tuple:
         block = text[line_start:block_end].strip()
         return line_start, block_end, block
 
+    glossary_open_re = r"(?:<glossary\b[^>]*>|&lt;glossary\b.*?&gt;)"
+    glossary_close_re = r"(?:</glossary>|&lt;/glossary&gt;)"
     lower_response = response_text.lower()
-    if "<glossary" in lower_response:
-        match = re.search(r"<glossary\b[^>]*>(.*?)</glossary>", response_text, flags=re.IGNORECASE | re.DOTALL)
+    if "<glossary" in lower_response or "&lt;glossary" in lower_response:
+        match = re.search(
+            glossary_open_re + r"(.*?)" + glossary_close_re,
+            response_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
         if match:
             glossary_block = (match.group(1) or "").strip()
             translation = (response_text[:match.start()] + response_text[match.end():]).strip()
             return translation, glossary_block
 
-        open_match = re.search(r"<glossary\b[^>]*>", response_text, flags=re.IGNORECASE)
+        open_match = re.search(glossary_open_re, response_text, flags=re.IGNORECASE | re.DOTALL)
         if open_match:
             fallback = _extract_csv_glossary_block(response_text, open_match.end())
             if fallback:

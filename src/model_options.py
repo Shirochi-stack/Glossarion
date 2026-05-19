@@ -25,6 +25,7 @@ def get_model_options() -> List[str]:
         # - gemini-3-pro-preview shut down March 9 2026, removed
         # - gemini-pro / gemini-pro-vision are legacy 1.0 models, removed
         # - gemini-2.0-flash/lite scheduled shutdown June 1 2026, still available
+        "gemini-3.5-flash","gemini-3-flash-preview",
         "gemini-3.1-pro-preview","gemini-3.1-flash-lite",
         "gemini-3.1-flash-image-preview",
         "gemini-3-flash-preview", "gemini-3-pro-image-preview",
