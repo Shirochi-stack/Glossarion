@@ -9927,6 +9927,109 @@ class UnifiedClient:
                 msg['content'] = ''
             cleaned_messages.append(msg)
         return cleaned_messages
+
+    def _message_content_text_for_payload_analysis(self, content: Any) -> str:
+        """Best-effort text extraction for payload role diagnostics."""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    if part.get("type") in (None, "text", "input_text", "output_text"):
+                        value = part.get("text") or part.get("content") or ""
+                        if value:
+                            parts.append(str(value))
+                elif isinstance(part, str):
+                    parts.append(part)
+            return "\n".join(parts)
+        return str(content)
+
+    def _analyze_system_prompt_role_payload(self, messages, retry_reason=None) -> dict:
+        """Add payload-only diagnostics for system->user prompt downgrades.
+
+        This can prove local role changes before dispatch. It cannot prove a
+        remote router/model internally down-ranked or rewrote the system role
+        after receiving the request, so the payload records that limitation.
+        """
+        role_counts = {}
+        system_lengths = []
+        user_lengths = []
+        user_text = ""
+        for msg in messages or []:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role") or "unknown")
+            role_counts[role] = role_counts.get(role, 0) + 1
+            text = self._message_content_text_for_payload_analysis(msg.get("content"))
+            if role == "system":
+                system_lengths.append(len(text))
+            elif role == "user":
+                user_lengths.append(len(text))
+                if not user_text and text:
+                    user_text = text
+
+        has_system_role = bool(system_lengths)
+        system_to_user_env = os.getenv('SYSTEM_PROMPT_TO_USER', '0') == '1'
+        retry_text = str(retry_reason or "")
+        try:
+            tls = self._get_thread_local_client()
+            local_merge_info = getattr(tls, 'last_system_to_user_merge', None)
+        except Exception:
+            local_merge_info = None
+        local_merge_recent = False
+        if isinstance(local_merge_info, dict):
+            try:
+                merge_ts = datetime.fromisoformat(str(local_merge_info.get("timestamp", "")))
+                local_merge_recent = (datetime.now() - merge_ts).total_seconds() < 30
+            except Exception:
+                local_merge_recent = True
+
+        markers = (
+            "[Translation Prompt]",
+            "[Glossary Prompt]",
+            "[Final Single-Pass Override]",
+            "[Single-Pass Output Reminder]",
+            "You have two tasks for this request.",
+            "You are ",
+            "Rules:",
+        )
+        user_has_system_markers = (not has_system_role) and any(marker in user_text for marker in markers)
+        local_merge_likely = (not has_system_role) and (
+            system_to_user_env
+            or "preflight_gemma_no_system" in retry_text
+            or local_merge_recent
+            or user_has_system_markers
+        )
+
+        reason = None
+        if system_to_user_env:
+            reason = "SYSTEM_PROMPT_TO_USER=1"
+        elif "preflight_gemma_no_system" in retry_text:
+            reason = "preflight_gemma_no_system"
+        elif local_merge_recent and isinstance(local_merge_info, dict):
+            reason = local_merge_info.get("reason") or "local _merge_system_into_user call"
+        elif user_has_system_markers:
+            reason = "heuristic: system-like instruction markers found in user content"
+
+        return {
+            "sent_system_role": has_system_role,
+            "role_counts": role_counts,
+            "system_prompt_lengths": system_lengths,
+            "user_message_lengths": user_lengths,
+            "local_system_to_user_merge_likely": bool(local_merge_likely),
+            "local_system_to_user_merge_reason": reason,
+            "system_like_markers_found_in_user": bool(user_has_system_markers),
+            "system_like_user_preview": user_text[:240] if user_has_system_markers else "",
+            "remote_downgrade_detectable_from_payload": False,
+            "remote_downgrade_note": (
+                "Payloads show what Glossarion sent. If sent_system_role is true, a router/model may still "
+                "internally down-rank or rewrite the system role, but that cannot be confirmed from the local payload."
+            ),
+        }
+
     def _merge_system_into_user(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Convert all system prompts into a user message by prepending them to the first
         user message, separated by a line break. If no user message exists, one is created.
@@ -9953,6 +10056,17 @@ class UnifiedClient:
                 # Skip adding this system message
                 continue
             pruned.append(msg)
+        if system_texts:
+            try:
+                tls = self._get_thread_local_client()
+                tls.last_system_to_user_merge = {
+                    "timestamp": datetime.now().isoformat(),
+                    "reason": "local _merge_system_into_user call",
+                    "system_message_count": len(system_texts),
+                    "system_text_lengths": [len(t) for t in system_texts],
+                }
+            except Exception:
+                pass
         # Nothing to merge: still ensure we don't return an empty list
         if not system_texts:
             if not pruned:
@@ -10974,9 +11088,11 @@ class UnifiedClient:
                 # (_save_gemini_safety_config) to avoid duplicates and ensure consistency
                 
                 # Include debug info with retry reason
+                system_role_analysis = self._analyze_system_prompt_role_payload(messages, retry_reason=retry_reason)
                 debug_info = {
                     'system_prompt_present': any(msg.get('role') == 'system' for msg in messages),
                     'system_prompt_length': 0,
+                    'system_prompt_role_analysis': system_role_analysis,
                     'request_hash': request_hash,
                     'thread_name': thread_name,
                     'thread_id': thread_id,
@@ -11147,6 +11263,7 @@ class UnifiedClient:
                         'messages': cleaned_messages,
                         'timestamp': datetime.now().isoformat(),
                         'debug': debug_info,
+                        'system_prompt_role_analysis': system_role_analysis,
                         'request_params': request_params,
                         'key_identifier': getattr(self, 'key_identifier', None),
                         'retry_info': {
@@ -11155,6 +11272,12 @@ class UnifiedClient:
                             'max_retries': getattr(self, '_max_retries', 7)
                         } if retry_reason else None
                     }, f, indent=2, ensure_ascii=False)
+                try:
+                    tls = self._get_thread_local_client()
+                    if hasattr(tls, 'last_system_to_user_merge'):
+                        tls.last_system_to_user_merge = None
+                except Exception:
+                    pass
                 
                 if has_images:
                     logger.debug(f"[{thread_name}] Saved IMAGE payload to: {filepath}")
