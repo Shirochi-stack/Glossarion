@@ -18,9 +18,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, Iterable, List, Optional
 
-from bs4 import BeautifulSoup
-
-
 DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT = """You are refining an already extracted translation glossary.
 
 Your job is cleanup, not broad re-extraction. Preserve useful entries and return only the refined glossary entries for the provided entry type or entry types.
@@ -365,8 +362,8 @@ def refine_glossary_entries(
         system_prompt = DEFAULT_GLOSSARY_REFINEMENT_SYSTEM_PROMPT
     user_prompt = os.getenv("GLOSSARY_REFINEMENT_USER_PROMPT", DEFAULT_GLOSSARY_REFINEMENT_USER_PROMPT)
     chunking_mode = os.getenv("GLOSSARY_REFINEMENT_CHUNKING_MODE", "separate").strip().lower()
-    send_all_types = chunking_mode in ("all", "all_types", "all_in_one")
-    canonical_mode = "all" if send_all_types else "separate"
+    send_all_types = True
+    canonical_mode = "all"
     skip_dedupe = os.getenv("GLOSSARY_REFINEMENT_SKIP_DEDUPE", "0").strip().lower() in ("1", "true", "yes", "on")
     payload_delimiter = "\x1F" if _prompt_requests_unit_separator(system_prompt, user_prompt) else ","
     payload_delimiter_name = "unit_separator" if payload_delimiter == "\x1F" else "comma"
@@ -377,17 +374,17 @@ def refine_glossary_entries(
     progress = load_refinement_progress(progress_file)
     selected_lc = {t.lower() for t in selected_types}
 
-    if send_all_types:
-        all_selected_entries = [
-            dict(e) for e in glossary
-            if str(e.get("type", "")).strip().lower() in selected_lc
-        ]
-        groups = [("all selected entry types", all_selected_entries, f"all::{','.join(selected_types)}", selected_lc)]
-    else:
-        groups = []
-        for entry_type in selected_types:
-            entries = [dict(e) for e in glossary if str(e.get("type", "")).strip().lower() == entry_type.lower()]
-            groups.append((entry_type, entries, f"type::{entry_type}", {entry_type.lower()}))
+    def _count_payload_tokens(text: str) -> int:
+        try:
+            return chapter_splitter.count_tokens(text)
+        except Exception:
+            return len(text) // 3
+
+    all_selected_entries = [
+        dict(e) for e in glossary
+        if str(e.get("type", "")).strip().lower() in selected_lc
+    ]
+    groups = [("selected glossary entries", all_selected_entries, f"all::{','.join(selected_types)}", selected_lc)]
 
     for entry_type, entries, type_key, _allowed_types_lc in groups:
         if not entries:
@@ -435,22 +432,55 @@ def refine_glossary_entries(
             return "skipped", entry_type, _original_mapping_for_group(entry_type, entries)
 
         payload_columns = _entry_columns(entries)
-        payload = _entry_payload(entries, payload_columns, payload_delimiter)
-        chunks = [(payload, 1, 1)]
-        try:
-            token_count = chapter_splitter.count_tokens(payload)
-        except Exception:
-            token_count = len(payload) // 3
-        if not send_all_types and token_count > available_tokens:
-            wrapped = f"<html><body><p>{payload.replace(chr(10), '</p><p>')}</p></body></html>"
-            chunks = [
-                (BeautifulSoup(chunk_html, "html.parser").get_text("\n", strip=True), chunk_idx, total_chunks)
-                for chunk_html, chunk_idx, total_chunks in chapter_splitter.split_chapter(
-                    wrapped,
+        planned_chunks = []
+        oversized_entries = []
+        oversized_types = []
+        for selected_type in selected_types:
+            type_entries = [
+                e for e in entries
+                if str(e.get("type", "")).strip().lower() == selected_type.lower()
+            ]
+            if not type_entries:
+                continue
+            type_payload = _entry_payload(type_entries, payload_columns, payload_delimiter)
+            token_count = _count_payload_tokens(type_payload)
+            if token_count <= available_tokens:
+                log(f"Glossary refinement keeping {selected_type} entries as one fitted type chunk ({token_count:,} tokens, budget {available_tokens:,}).")
+                planned_chunks.append((type_payload, selected_type, True))
+                continue
+
+            oversized_entries.extend(type_entries)
+            oversized_types.append(selected_type)
+
+        if oversized_entries:
+            oversized_payload = _entry_payload(oversized_entries, payload_columns, payload_delimiter)
+            token_count = _count_payload_tokens(oversized_payload)
+            split_chunks = [
+                chunk_text
+                for chunk_html, _local_idx, _local_total in chapter_splitter.split_chapter(
+                    oversized_payload,
                     available_tokens,
                     filename="glossary_refinement.txt",
                 )
+                for chunk_text in [str(chunk_html or "").strip()]
+                if chunk_text
             ]
+            if not split_chunks:
+                split_chunks = [oversized_payload]
+            type_label = ", ".join(oversized_types)
+            log(f"🪓 Glossary refinement split oversized entries ({type_label}) into {len(split_chunks)} token-budgeted chunk(s) ({token_count:,} tokens, budget {available_tokens:,}).")
+            planned_chunks.extend((chunk_text, "selected glossary entries", False) for chunk_text in split_chunks)
+
+        if not planned_chunks:
+            payload = _entry_payload(entries, payload_columns, payload_delimiter)
+            planned_chunks = [(payload, entry_type, True)]
+        total_chunks = len(planned_chunks)
+        chunks = [
+            (chunk_text, chunk_idx, total_chunks, chunk_entry_type, whole_type_chunk)
+            for chunk_idx, (chunk_text, chunk_entry_type, whole_type_chunk) in enumerate(planned_chunks, 1)
+        ]
+        if total_chunks > 1:
+            log(f"🧮 Glossary refinement will process {total_chunks} total chunk(s) across selected entry types.")
 
         update_refinement_progress(progress_file, type_key, {
             "entry_type": entry_type,
@@ -463,9 +493,9 @@ def refine_glossary_entries(
         }, atomic_replace_fn=atomic_replace_fn)
 
         refined_entries = []
-        for chunk_text, chunk_idx, total_chunks in chunks:
+        for chunk_text, chunk_idx, total_chunks, chunk_entry_type, whole_type_chunk in chunks:
             if check_stop():
-                log(f"Glossary refinement stopped during {entry_type} chunk {chunk_idx}/{total_chunks}")
+                log(f"Glossary refinement stopped during chunk {chunk_idx}/{total_chunks}")
                 update_refinement_progress(
                     progress_file,
                     type_key,
@@ -474,10 +504,13 @@ def refine_glossary_entries(
                 )
                 return "stopped", entry_type, {}
 
-            log(f"✨ Refining {entry_type} entries ({chunk_idx}/{total_chunks})...")
-            msgs = _build_messages(system_prompt, user_prompt, entry_type, chunk_text, payload_columns, chunk_idx, total_chunks, selected_types)
+            if whole_type_chunk:
+                log(f"✨ Refining {chunk_entry_type} entries ({chunk_idx}/{total_chunks})...")
+            else:
+                log(f"✨ Refining glossary chunks ({chunk_idx}/{total_chunks})...")
+            msgs = _build_messages(system_prompt, user_prompt, chunk_entry_type, chunk_text, payload_columns, chunk_idx, total_chunks, selected_types)
             msgs = _sanitize_messages_for_api(msgs, chunk_text)
-            context_label = f"glossary refinement ({entry_type} {chunk_idx}/{total_chunks})"
+            context_label = f"glossary refinement chunk {chunk_idx}/{total_chunks}"
             try:
                 raw, finish_reason, _raw_obj = _call_send(
                     send_fn,
@@ -492,7 +525,7 @@ def refine_glossary_entries(
                     context_label,
                 )
             except Exception as e:
-                log(f"Refinement failed for {entry_type} chunk {chunk_idx}: {e}")
+                log(f"Refinement failed for chunk {chunk_idx}: {e}")
                 update_refinement_progress(
                     progress_file,
                     type_key,
@@ -511,7 +544,7 @@ def refine_glossary_entries(
             ]
             parsed = _strip_inactive_description(parsed)
             if not parsed:
-                log(f"⚠️ Refinement returned no valid {entry_type} entries for chunk {chunk_idx}; keeping original entries for this type.")
+                log(f"⚠️ Refinement returned no valid entries for chunk {chunk_idx}; keeping original selected entries.")
                 update_refinement_progress(
                     progress_file,
                     type_key,
@@ -529,7 +562,7 @@ def refine_glossary_entries(
                 atomic_replace_fn=atomic_replace_fn,
             )
             if _issue_from_finish_reason(finish_reason, None) == "TRUNCATED":
-                log(f"Refinement for {entry_type} chunk {chunk_idx} was truncated; keeping original entries for this type.")
+                log(f"Refinement chunk {chunk_idx} was truncated; keeping original selected entries.")
                 update_refinement_progress(
                     progress_file,
                     type_key,
@@ -563,7 +596,7 @@ def refine_glossary_entries(
                 "entry_count_after": len(refined_entries),
                 "completed_chunks": len(chunks),
             }, atomic_replace_fn=atomic_replace_fn)
-            log(f"✅ Refined {entry_type}: {len(entries)} -> {len(refined_entries)} entries")
+            log(f"✅ Refined selected entries: {len(entries)} -> {len(refined_entries)} entries")
             return "ok", entry_type, result_mapping
 
         return "failed", entry_type, _original_mapping_for_group(entry_type, entries)
