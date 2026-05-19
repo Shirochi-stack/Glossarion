@@ -6240,6 +6240,8 @@ class EpubLibraryDialog(QDialog):
         through so normal grid scrolling keeps working.
         """
         from PySide6.QtCore import QEvent
+        if event.type() in (QEvent.DragEnter, QEvent.DragMove, QEvent.Drop, QEvent.DragLeave):
+            return self._handle_library_drop_filter_event(event)
         if event.type() == QEvent.Wheel and (event.modifiers() & Qt.ControlModifier):
             try:
                 self._handle_ctrl_wheel(event.angleDelta().y())
@@ -6705,6 +6707,8 @@ class EpubLibraryDialog(QDialog):
         self._comp_empty_label.hide()
         comp_layout.addWidget(self._comp_empty_label)
 
+        self._install_library_drop_targets()
+
         self._tabs.addTab(self._ip_tab, "\u23f3  In Progress")
         self._tabs.addTab(self._comp_tab, "\u2705  Completed")
         # "Scan for Raw" needs to read as a real third tab after
@@ -6714,6 +6718,7 @@ class EpubLibraryDialog(QDialog):
         # opens the dialog instead.
         self._scan_tab = QWidget()
         self._scan_tab.setStyleSheet("background: #12121e;")
+        self._install_library_drop_target(self._scan_tab)
         self._scan_tab_index = self._tabs.addTab(
             self._scan_tab, "\U0001f50d  Scan for Raw")
         try:
@@ -9045,6 +9050,7 @@ class EpubLibraryDialog(QDialog):
                 card.clicked.connect(self._on_card_clicked)
                 card.context_menu_requested.connect(self._show_context_menu)
                 card.select_requested.connect(self._on_card_select_requested)
+                self._install_library_drop_target(card, recursive=True)
                 cached_cover = self._cover_path_cache.get(path)
                 run_loader = False
                 if cached_cover is not None:
@@ -10772,6 +10778,60 @@ class EpubLibraryDialog(QDialog):
                 if self._drop_target_kind() == "translated"
                 else self._DND_RAW_EXTS)
 
+    def _install_library_drop_target(self, widget, recursive: bool = False) -> None:
+        """Make a child widget participate in the library-level drop zone."""
+        if widget is None:
+            return
+        try:
+            widget.setAcceptDrops(True)
+        except Exception:
+            pass
+        try:
+            widget.installEventFilter(self)
+        except Exception:
+            pass
+        if not recursive:
+            return
+        try:
+            for child in widget.findChildren(QWidget):
+                try:
+                    child.setAcceptDrops(True)
+                except Exception:
+                    pass
+                try:
+                    child.installEventFilter(self)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _install_library_drop_targets(self) -> None:
+        """Register the visible library canvas as a drop target.
+
+        Relying only on the top-level dialog works on some systems, but
+        QScrollArea viewports/cards can own the cursor area during drag
+        negotiation on others, producing a forbidden cursor before the
+        dialog-level handler sees the event.
+        """
+        for widget in (
+            getattr(self, "_tabs", None),
+            getattr(self, "_ip_tab", None),
+            getattr(self, "_comp_tab", None),
+            getattr(self, "_scan_tab", None),
+            getattr(self, "_ip_scroll", None),
+            getattr(self, "_comp_scroll", None),
+            getattr(self, "_ip_grid_container", None),
+            getattr(self, "_comp_grid_container", None),
+            getattr(self, "_ip_empty_label", None),
+            getattr(self, "_comp_empty_label", None),
+        ):
+            self._install_library_drop_target(widget)
+        for scroll in (getattr(self, "_ip_scroll", None), getattr(self, "_comp_scroll", None)):
+            try:
+                self._install_library_drop_target(scroll.viewport())
+            except Exception:
+                pass
+
     def _dnd_accept_event(self, event) -> bool:
         """Return True iff the drag payload contains at least one file accepted
         by the currently active tab (EPUB-only on Completed, EPUB/TXT/PDF/HTML
@@ -10786,6 +10846,25 @@ class EpubLibraryDialog(QDialog):
             path = url.toLocalFile()
             if path and path.lower().endswith(allowed):
                 return True
+        return False
+
+    def _handle_library_drop_filter_event(self, event) -> bool:
+        from PySide6.QtCore import QEvent
+        etype = event.type()
+        if etype in (QEvent.DragEnter, QEvent.DragMove):
+            if self._dnd_accept_event(event):
+                event.setDropAction(Qt.CopyAction)
+                event.acceptProposedAction()
+                if etype == QEvent.DragEnter:
+                    self._show_drop_overlay(True)
+                return True
+            return False
+        if etype == QEvent.DragLeave:
+            self._show_drop_overlay(False)
+            return False
+        if etype == QEvent.Drop:
+            self.dropEvent(event)
+            return event.isAccepted()
         return False
 
     def dragEnterEvent(self, event):
