@@ -13561,7 +13561,7 @@ class UnifiedClient:
             'openai', 'deepseek', 'together', 'mistral', 'yi', 'qwen',
             'moonshot', 'groq', 'electronhub', 'openrouter', 'fireworks',
             'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu',
-            'nanogpt', 'sambanova',
+            'nanogpt', 'sambanova', 'custom_openai',
         }
         _is_sdk_provider = False
         try:
