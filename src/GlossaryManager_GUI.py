@@ -1276,7 +1276,7 @@ class GlossaryManagerMixin:
                 
                 # Save auto glossary mode from combo box
                 if hasattr(self, 'auto_glossary_mode_combo'):
-                    mode = self.auto_glossary_mode_combo.currentText().lower()
+                    mode = self.auto_glossary_mode_combo.currentText().lower().replace(' ', '_')
                     self.config['auto_glossary_mode'] = mode
                     setattr(self, 'auto_glossary_mode_var', mode)
                     # Backward compat: derive old boolean
