@@ -7786,11 +7786,11 @@ def find_glossary_file(output_dir):
 
 def _single_pass_glossary_mode():
     """Return the requested single-pass glossary depth, or None when disabled."""
-    mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower()
-    explicit = (os.getenv("SINGLE_PASS_GLOSSARY_MODE") or "").strip().lower()
-    if explicit in ("1", "true", "yes", "single_pass", "single-pass", "single"):
+    mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower().replace(" ", "_").replace("-", "_")
+    explicit = (os.getenv("SINGLE_PASS_GLOSSARY_MODE") or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if explicit in ("1", "true", "yes", "single_pass", "singlepass", "single"):
         return "single_pass"
-    if mode in ("single_pass", "single-pass"):
+    if mode in ("single_pass", "singlepass"):
         return "single_pass"
     return None
 
@@ -14355,6 +14355,15 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
             ])
             
             if has_markdown or preserve_structure:
+                from collections import Counter
+                import html as _html_mod
+
+                atx_heading_counts = Counter()
+                for _line in plain_text.splitlines():
+                    _atx = re.match(r'^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$', _line)
+                    if _atx:
+                        atx_heading_counts[(len(_atx.group(1)), _atx.group(2).strip())] += 1
+
                 html = markdown2.markdown(plain_text, extras=[
                     'cuddled-lists',
                     'fenced-code-blocks',
@@ -14366,8 +14375,21 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
                 # Post-process: Fix setext headers that were created from separator lines.
                 # These are NOT real headers—just text followed by ==== or ----.
                 # Restore both the text AND the underline so nothing is lost.
-                html = re.sub(r'<h1>(.*?)</h1>', r'<p>\1</p>\n<p>====</p>', html)
-                html = re.sub(r'<h2>(.*?)</h2>', r'<p>\1</p>\n<p>----</p>', html)
+                def _restore_non_atx_setext_header(m):
+                    level = int(m.group(1))
+                    body = m.group(2)
+                    text = re.sub(r'<[^>]+>', '', _html_mod.unescape(body)).strip()
+                    key = (level, text)
+                    if atx_heading_counts.get(key, 0) > 0:
+                        atx_heading_counts[key] -= 1
+                        return m.group(0)
+                    if level == 1:
+                        return f'<p>{body}</p>\n<p>====</p>'
+                    if level == 2:
+                        return f'<p>{body}</p>\n<p>----</p>'
+                    return m.group(0)
+
+                html = re.sub(r'<h([1-6])>(.*?)</h\1>', _restore_non_atx_setext_header, html, flags=re.DOTALL)
                 
                 if not '<p>' in html:
                     lines = html.split('\n')
