@@ -2067,6 +2067,7 @@ def _create_danger_zone_section(self, parent):
             for _pool_key in (
                 'glossary_keys',
                 'glossary_refinement_keys',
+                'metadata_keys',
                 'qa_scan_keys',
                 'ai_truncation_detection_keys',
                 'truncation_retry_keys',
@@ -2115,6 +2116,7 @@ def _create_danger_zone_section(self, parent):
             for _toggle_key in (
                 'use_glossary_keys',
                 'use_glossary_refinement_keys',
+                'use_metadata_keys',
                 'use_qa_scan_keys',
                 'use_ai_truncation_detection_keys',
                 'use_truncation_retry_keys',

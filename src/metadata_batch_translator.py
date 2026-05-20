@@ -1845,6 +1845,7 @@ class BatchHeaderTranslator:
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                context=context,
             )
         
         # Extract content from response - handle both object and tuple formats

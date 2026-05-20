@@ -1911,6 +1911,8 @@ class UnifiedClient:
     # QA scan-dedicated key pool (separate from main and glossary pools)
     _qa_scan_key_pool: Optional[APIKeyPool] = None
     _qa_scan_pool_lock = threading.Lock()
+    _metadata_key_pool: Optional[APIKeyPool] = None
+    _metadata_pool_lock = threading.Lock()
     _ai_truncation_detection_key_pool: Optional[APIKeyPool] = None
     _ai_truncation_detection_pool_lock = threading.Lock()
 
@@ -5729,9 +5731,32 @@ class UnifiedClient:
             # Multi-key retry wrapper
             # CONTEXT-SPECIFIC KEY OVERRIDES: When context matches a dedicated pool,
             # use that pool for full multi-key rotation (mirrors main multi-key mode).
+
+            # METADATA KEY OVERRIDE: book title, metadata, TOC, and header translation.
+            context_norm = str(context or '').strip().lower()
+            if context_norm in ('book_title', 'metadata', 'batch_toc_translation', 'batch_header_translation') and os.getenv('USE_METADATA_KEYS', '0') == '1':
+                try:
+                    metadata_keys = json.loads(os.getenv('METADATA_API_KEYS', '[]') or '[]')
+                    if metadata_keys:
+                        with self.__class__._metadata_pool_lock:
+                            if self.__class__._metadata_key_pool is None:
+                                self.__class__._metadata_key_pool = APIKeyPool()
+                            self.__class__._metadata_key_pool.load_from_list(metadata_keys)
+                            metadata_pool = self.__class__._metadata_key_pool
+                        pool_state = self._apply_dedicated_key_pool_override(
+                            metadata_pool, metadata_keys, 'Metadata', 'MetadataKey'
+                        )
+                        if pool_state:
+                            _qa_scan_overridden = True
+                            _original_api_key = pool_state['api_key']
+                            _original_model = pool_state['model']
+                            _original_multi_key_mode = pool_state['multi_key_mode']
+                            _had_instance_pool = pool_state['had_instance_pool']
+                            _original_instance_pool = pool_state['instance_pool']
+                except Exception as e:
+                    print(f"[METADATA KEYS] Failed to apply override: {e}")
             
             # AI TRUNCATION DETECTION KEY OVERRIDE: qa_truncation can use its own pool before normal fallback.
-            context_norm = str(context or '').strip().lower()
             if context_norm == 'qa_truncation' and os.getenv('USE_AI_TRUNCATION_DETECTION_KEYS', '0') == '1':
                 try:
                     ai_keys = json.loads(os.getenv('AI_TRUNCATION_DETECTION_API_KEYS', '[]') or '[]')
@@ -6955,7 +6980,7 @@ class UnifiedClient:
                 # pool can otherwise win the cosmetic log line.
                 try:
                     key_identifier = str(getattr(self, 'key_identifier', '') or '')
-                    if key_identifier.startswith(('VisionKey#', 'AITruncationDetectionKey#', 'GlossaryKey#', 'GlossaryRefinementKey#', 'TruncationRetryKey#')):
+                    if key_identifier.startswith(('VisionKey#', 'AITruncationDetectionKey#', 'MetadataKey#', 'GlossaryKey#', 'GlossaryRefinementKey#', 'TruncationRetryKey#')):
                         current_model = getattr(self, 'model', None)
                         if current_model:
                             log_model = current_model
@@ -16543,7 +16568,7 @@ class UnifiedClient:
         explicit = getattr(self, 'context', None)
         if self._is_manga_ocr_context(explicit):
             return self._get_payload_context_thread_directory("Manga_OCR")
-        if explicit in ('translation', 'glossary', 'glossary_refinement', 'summary', 'review', 'metadata', 'book_title', 'qa_truncation', 'Truncation'):
+        if explicit in ('translation', 'glossary', 'glossary_refinement', 'summary', 'review', 'metadata', 'book_title', 'batch_toc_translation', 'batch_header_translation', 'qa_truncation', 'Truncation'):
             context = explicit
         else:
             if 'Translation' in thread_name:

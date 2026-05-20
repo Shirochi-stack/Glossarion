@@ -1702,6 +1702,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.use_fallback_keys_var = self.config.get('use_fallback_keys', False)
         self.use_glossary_keys_var = self.config.get('use_glossary_keys', False)
         self.use_glossary_refinement_keys_var = self.config.get('use_glossary_refinement_keys', False)
+        self.use_metadata_keys_var = self.config.get('use_metadata_keys', False)
         self.use_qa_scan_keys_var = self.config.get('use_qa_scan_keys', False)
         self.use_ai_truncation_detection_keys_var = self.config.get('use_ai_truncation_detection_keys', False)
         self.use_truncation_retry_keys_var = self.config.get('use_truncation_retry_keys', False)
@@ -14841,6 +14842,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['USE_GLOSSARY_KEYS'] = '1' if self.config.get('use_glossary_keys', False) else '0'
                 refinement_keys_enabled = self.config.get('use_glossary_refinement_keys', False)
                 refinement_keys = self.config.get('glossary_refinement_keys', [])
+                metadata_keys_enabled = self.config.get('use_metadata_keys', False)
+                metadata_keys = self.config.get('metadata_keys', [])
                 vision_keys_enabled = self.config.get('use_qa_scan_keys', False)
                 vision_keys = self.config.get('qa_scan_keys', [])
                 truncation_retry_keys_enabled = self.config.get('use_truncation_retry_keys', False)
@@ -14855,6 +14858,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['GLOSSARY_API_KEYS'] = json.dumps(self.config.get('glossary_keys', []))
                 os.environ['USE_GLOSSARY_REFINEMENT_KEYS'] = '1' if refinement_keys_enabled else '0'
                 os.environ['GLOSSARY_REFINEMENT_API_KEYS'] = json.dumps(refinement_keys)
+                os.environ['USE_METADATA_KEYS'] = '1' if metadata_keys_enabled else '0'
+                os.environ['METADATA_API_KEYS'] = json.dumps(metadata_keys)
                 os.environ['VISION_API_KEYS'] = json.dumps(vision_keys)
                 os.environ['QA_SCAN_API_KEYS'] = os.environ['VISION_API_KEYS']
                 os.environ['TRUNCATION_RETRY_API_KEYS'] = json.dumps(truncation_retry_keys)
@@ -15533,6 +15538,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['USE_GLOSSARY_KEYS'] = '0'
             os.environ['USE_GLOSSARY_REFINEMENT_KEYS'] = '1' if self.config.get('use_glossary_refinement_keys', False) else '0'
             os.environ['GLOSSARY_REFINEMENT_API_KEYS'] = json.dumps(self.config.get('glossary_refinement_keys', []))
+            os.environ['USE_METADATA_KEYS'] = '1' if self.config.get('use_metadata_keys', False) else '0'
+            os.environ['METADATA_API_KEYS'] = json.dumps(self.config.get('metadata_keys', []))
             if self.config.get('use_qa_scan_keys', False):
                 os.environ['USE_VISION_KEYS'] = '1'
                 os.environ['USE_QA_SCAN_KEYS'] = '1'
@@ -15826,6 +15833,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_API_KEYS': json.dumps(self.config.get('glossary_keys', [])),
             'USE_GLOSSARY_REFINEMENT_KEYS': '1' if self.config.get('use_glossary_refinement_keys', False) else '0',
             'GLOSSARY_REFINEMENT_API_KEYS': json.dumps(self.config.get('glossary_refinement_keys', [])),
+            'USE_METADATA_KEYS': '1' if self.config.get('use_metadata_keys', False) else '0',
+            'METADATA_API_KEYS': json.dumps(self.config.get('metadata_keys', [])),
             'USE_VISION_KEYS': '1' if self.config.get('use_qa_scan_keys', False) else '0',
             'VISION_API_KEYS': json.dumps(self.config.get('qa_scan_keys', [])),
             'USE_QA_SCAN_KEYS': '1' if self.config.get('use_qa_scan_keys', False) else '0',
@@ -16001,6 +16010,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'INPAINTER_API_KEYS': json.dumps(self.config.get('inpainter_keys', []) or []),
             'USE_TRUNCATION_RETRY_KEYS': "1" if self.config.get('use_truncation_retry_keys', False) else "0",
             'TRUNCATION_RETRY_API_KEYS': json.dumps(self.config.get('truncation_retry_keys', []) or []),
+            'USE_METADATA_KEYS': "1" if self.config.get('use_metadata_keys', False) else "0",
+            'METADATA_API_KEYS': json.dumps(self.config.get('metadata_keys', []) or []),
            
             # Glossary-specific overrides
             'GLOSSARY_COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', self.compression_factor_var)),
@@ -17331,6 +17342,8 @@ Important rules:
                     'GLOSSARY_API_KEYS': json.dumps(self.config.get('glossary_keys', [])),
                     'USE_GLOSSARY_REFINEMENT_KEYS': '1' if getattr(self, 'use_glossary_refinement_keys_var', False) else '0',
                     'GLOSSARY_REFINEMENT_API_KEYS': json.dumps(self.config.get('glossary_refinement_keys', [])),
+                    'USE_METADATA_KEYS': '1' if getattr(self, 'use_metadata_keys_var', False) else '0',
+                    'METADATA_API_KEYS': json.dumps(self.config.get('metadata_keys', [])),
                     
                     # Glossary-specific overrides (with fallback to global settings)
                     # Check os.environ first to respect balanced mode hardcoded overrides
@@ -23782,6 +23795,7 @@ Important rules:
                 ('use_fallback_keys', ['use_fallback_keys_var'], False, bool),
                 ('use_glossary_keys', ['use_glossary_keys_var'], False, bool),
                 ('use_glossary_refinement_keys', ['use_glossary_refinement_keys_var'], False, bool),
+                ('use_metadata_keys', ['use_metadata_keys_var'], False, bool),
                 ('use_qa_scan_keys', ['use_qa_scan_keys_var'], False, bool),
                 ('use_ai_truncation_detection_keys', ['use_ai_truncation_detection_keys_var'], False, bool),
                 ('use_truncation_retry_keys', ['use_truncation_retry_keys_var'], False, bool),
@@ -25059,6 +25073,8 @@ Important rules:
                 ('GLOSSARY_API_KEYS', _json.dumps(self.config.get('glossary_keys', []))),
                 ('USE_GLOSSARY_REFINEMENT_KEYS', '1' if self.config.get('use_glossary_refinement_keys', False) else '0'),
                 ('GLOSSARY_REFINEMENT_API_KEYS', _json.dumps(self.config.get('glossary_refinement_keys', []))),
+                ('USE_METADATA_KEYS', '1' if self.config.get('use_metadata_keys', False) else '0'),
+                ('METADATA_API_KEYS', _json.dumps(self.config.get('metadata_keys', []))),
                 ('USE_TRUNCATION_RETRY_KEYS', '1' if self.config.get('use_truncation_retry_keys', False) else '0'),
                 ('TRUNCATION_RETRY_API_KEYS', _json.dumps(self.config.get('truncation_retry_keys', []))),
                 ('IMAGE_CHUNK_OVERLAP_PERCENT', str(getattr(self, 'image_chunk_overlap_var', '3'))),

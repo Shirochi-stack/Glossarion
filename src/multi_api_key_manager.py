@@ -1628,6 +1628,14 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui.config['use_glossary_refinement_keys'] = use_glossary_refinement
             self.translator_gui.use_glossary_refinement_keys_var = use_glossary_refinement
 
+            use_metadata = (
+                self.use_metadata_keys_checkbox.isChecked()
+                if hasattr(self, 'use_metadata_keys_checkbox')
+                else bool(self.translator_gui.config.get('use_metadata_keys', False))
+            )
+            self.translator_gui.config['use_metadata_keys'] = use_metadata
+            self.translator_gui.use_metadata_keys_var = use_metadata
+
             # Save Vision keys toggle (stored under the legacy qa_scan config key)
             use_qa_scan = (
                 self.use_qa_scan_keys_checkbox.isChecked()
@@ -1979,6 +1987,7 @@ class MultiAPIKeyDialog(QDialog):
         self._queue_key_pool_section_render(scrollable_layout, self._create_truncation_retry_section)
         self._queue_key_pool_section_render(scrollable_layout, self._create_glossary_section)
         self._queue_key_pool_section_render(scrollable_layout, self._create_glossary_refinement_section)
+        self._queue_key_pool_section_render(scrollable_layout, self._create_metadata_section)
         self._queue_key_pool_section_render(scrollable_layout, self._create_ai_truncation_detection_section)
         self._queue_key_pool_section_render(scrollable_layout, self._create_qa_scan_section)
         self._queue_key_pool_section_render(scrollable_layout, self._create_inpainter_section)
@@ -7701,9 +7710,23 @@ class MultiAPIKeyDialog(QDialog):
                     "If no Vision keys are configured or the pool is disabled, the main key pool is used instead."
                 ),
             },
+            'metadata': {
+                'title': 'Metadata Keys',
+                'label': 'metadata',
+                'config_key': 'metadata_keys',
+                'toggle_key': 'use_metadata_keys',
+                'set_method': '_unused_metadata_pool_set',
+                'clear_method': '_unused_metadata_pool_clear',
+                'use_envs': ['USE_METADATA_KEYS'],
+                'keys_envs': ['METADATA_API_KEYS'],
+                'description': (
+                    "Configure dedicated keys for book title, metadata, TOC, and header translation.\n"
+                    "If this pool is disabled or empty, the normal main/multi-key path is used."
+                ),
+            },
             'ai_truncation_detection': {
-                'title': 'AI Truncation Detection Keys',
-                'label': 'AI truncation detection',
+                'title': 'QA Scan Keys (for AI Truncation detection)',
+                'label': 'QA scan AI truncation detection',
                 'config_key': 'ai_truncation_detection_keys',
                 'toggle_key': 'use_ai_truncation_detection_keys',
                 'set_method': '_unused_ai_truncation_detection_pool_set',
@@ -7711,7 +7734,7 @@ class MultiAPIKeyDialog(QDialog):
                 'use_envs': ['USE_AI_TRUNCATION_DETECTION_KEYS'],
                 'keys_envs': ['AI_TRUNCATION_DETECTION_API_KEYS'],
                 'description': (
-                    "Configure dedicated keys for qa_truncation AI checks.\n"
+                    "Configure dedicated QA scan keys for qa_truncation AI checks.\n"
                     "If this pool is disabled or empty, the normal main/multi-key path is used."
                 ),
             },
@@ -8595,6 +8618,9 @@ class MultiAPIKeyDialog(QDialog):
 
     def _create_glossary_refinement_section(self, parent_layout):
         self._create_dedicated_key_pool_section(parent_layout, 'glossary_refinement')
+
+    def _create_metadata_section(self, parent_layout):
+        self._create_dedicated_key_pool_section(parent_layout, 'metadata')
 
     def _create_qa_scan_section(self, parent_layout):
         self._create_dedicated_key_pool_section(parent_layout, 'qa_scan')
