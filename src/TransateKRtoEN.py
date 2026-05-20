@@ -695,6 +695,21 @@ class TranslationConfig:
 
         return effective
 
+    def get_effective_compression_factor(self) -> float:
+        """Return a non-zero compression factor for token-budget math.
+
+        A stored value of 0 means "do not constrain chunking by compression
+        factor"; use a tiny divisor so the compression factor effectively drops
+        out without causing division by zero.
+        """
+        try:
+            compression_factor = float(getattr(self, 'COMPRESSION_FACTOR', 1.0))
+        except Exception:
+            compression_factor = 1.0
+        if compression_factor <= 0:
+            return 0.000000000001
+        return compression_factor
+
     def get_system_prompt(self, actual_merge_count: int = 1) -> str:
         """Return the system prompt, optionally with split marker instruction.
         
@@ -5414,7 +5429,7 @@ class BatchTranslationProcessor:
             # Use output token limit with compression factor, not input limit
             max_output_tokens = self.config.get_effective_output_limit()
             safety_margin_output = 500
-            compression_factor = self.config.COMPRESSION_FACTOR
+            compression_factor = self.config.get_effective_compression_factor()
             available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
             available_tokens = max(available_tokens, 1000)  # Ensure minimum
             
@@ -16853,7 +16868,7 @@ def main(log_callback=None, stop_callback=None):
         safety_margin_output = 500
         
         # Korean to English typically compresses to 0.7-0.9x
-        compression_factor = config.COMPRESSION_FACTOR
+        compression_factor = config.get_effective_compression_factor()
         available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
         
         # Ensure minimum
@@ -17792,7 +17807,7 @@ def main(log_callback=None, stop_callback=None):
 
             max_output_tokens = config.get_effective_output_limit()
             safety_margin_output = 500
-            compression_factor = getattr(config, 'COMPRESSION_FACTOR', 1.0) or 1.0
+            compression_factor = config.get_effective_compression_factor()
             available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
             available_tokens = max(available_tokens, 1000)
 
@@ -18505,7 +18520,7 @@ def main(log_callback=None, stop_callback=None):
             # then pack each run under the token budget (repacking avoids 2+1,2+1 patterns).
             max_output_tokens = config.get_effective_output_limit()
             safety_margin_output = 500
-            compression_factor = getattr(config, 'COMPRESSION_FACTOR', 1.0) or 1.0
+            compression_factor = config.get_effective_compression_factor()
             available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
             available_tokens = max(available_tokens, 1000)
 
@@ -19095,7 +19110,7 @@ def main(log_callback=None, stop_callback=None):
                     safety_margin_output = 500
                     
                     # CJK to English typically compresses to 0.7-0.9x
-                    compression_factor = config.COMPRESSION_FACTOR
+                    compression_factor = config.get_effective_compression_factor()
                     available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
                     
                     # Ensure minimum
@@ -19122,7 +19137,7 @@ def main(log_callback=None, stop_callback=None):
                     safety_margin_output = 500
                     
                     # CJK to English typically compresses to 0.7-0.9x
-                    compression_factor = config.COMPRESSION_FACTOR
+                    compression_factor = config.get_effective_compression_factor()
                     available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
                     
                     # Ensure minimum

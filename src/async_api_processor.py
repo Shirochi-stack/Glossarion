@@ -3629,7 +3629,12 @@ class AsyncProcessingDialog:
                 # If chunking needed, split instead of skipping
                 if needs_chunking and output_limit != float('inf'):
                     try:
-                        compression_factor = float(env_vars.get('COMPRESSION_FACTOR', 1.0) or 1.0)
+                        try:
+                            compression_factor = float(env_vars.get('COMPRESSION_FACTOR', 1.0) or 1.0)
+                        except Exception:
+                            compression_factor = 1.0
+                        if compression_factor <= 0:
+                            compression_factor = 0.000000000001
                         if splitter is None:
                             chunk_target = max(1024, int(output_limit / compression_factor))
                             splitter = ChapterSplitter(model_name=env_vars.get('MODEL', 'gpt-4'), target_tokens=chunk_target, compression_factor=compression_factor)

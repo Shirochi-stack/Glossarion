@@ -682,7 +682,7 @@ def _compute_safe_input_tokens(max_output_tokens: int, compression_factor: float
     try:
         cf = float(compression_factor)
         if cf <= 0:
-            cf = 1.0
+            cf = 0.000000000001
     except Exception:
         cf = 1.0
     budget = int((effective - safety_margin) / cf)
