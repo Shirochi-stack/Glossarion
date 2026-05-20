@@ -12,7 +12,7 @@ try:
         QTextEdit, QScrollArea, QFileDialog, QMessageBox, QComboBox, QCheckBox,
         QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QSpinBox, QDoubleSpinBox,
         QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
-        QCompleter, QDialogButtonBox
+        QCompleter, QDialogButtonBox, QGraphicsOpacityEffect
     )
     from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, Slot
     from PySide6.QtGui import QIcon, QFont, QPixmap, QShortcut, QKeySequence, QTransform
@@ -1958,6 +1958,7 @@ class MultiAPIKeyDialog(QDialog):
 
         # Key list section
         self._create_key_list_section(scrollable_layout)
+        self._apply_initial_multi_key_render_guard()
 
         # Add stretch before fallback that only appears when multi-key is enabled
         # This will be removed when multi-key is disabled to bring fallback closer
@@ -1991,6 +1992,43 @@ class MultiAPIKeyDialog(QDialog):
         # Apply the initial toggle state after deferred sections finish rendering.
         if not self._deferred_render_count:
             self._finish_deferred_key_pool_render()
+
+    def _multi_key_mode_widgets(self):
+        return [
+            getattr(self, 'rotation_frame', None),
+            getattr(self, 'add_key_frame', None),
+            getattr(self, 'multikey_separator', None),
+            getattr(self, 'key_list_frame', None),
+        ]
+
+    def _apply_initial_multi_key_render_guard(self):
+        """Prevent disabled multi-key widgets from flashing before deferred init finishes."""
+        if bool(self.translator_gui.config.get('use_multi_api_keys', False)):
+            return
+        guarded_widgets = [widget for widget in self._multi_key_mode_widgets() if widget is not None]
+        if not guarded_widgets:
+            return
+        self._initial_multi_key_opacity_effects = []
+        for widget in guarded_widgets:
+            widget.hide()
+            widget.setMaximumHeight(0)
+            try:
+                effect = QGraphicsOpacityEffect(widget)
+                effect.setOpacity(0.0)
+                widget.setGraphicsEffect(effect)
+                self._initial_multi_key_opacity_effects.append((widget, effect))
+            except Exception:
+                pass
+        QTimer.singleShot(25, self._clear_initial_multi_key_render_guard)
+
+    def _clear_initial_multi_key_render_guard(self):
+        for widget, effect in getattr(self, '_initial_multi_key_opacity_effects', []):
+            try:
+                if widget.graphicsEffect() is effect:
+                    widget.setGraphicsEffect(None)
+            except Exception:
+                pass
+        self._initial_multi_key_opacity_effects = []
 
     def _queue_key_pool_section_render(self, parent_layout, render_callback):
         """Render one key-pool section in its own queued GUI event."""
