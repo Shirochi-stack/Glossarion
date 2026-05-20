@@ -2062,6 +2062,17 @@ def _create_danger_zone_section(self, parent):
             # 3. Fallback Keys
             if 'fallback_keys' in current_config:
                 keys_to_preserve['fallback_keys'] = current_config['fallback_keys']
+
+            # 3b. Dedicated key pools managed by the Multi API Key Manager
+            for _pool_key in (
+                'glossary_keys',
+                'glossary_refinement_keys',
+                'qa_scan_keys',
+                'truncation_retry_keys',
+                'inpainter_keys',
+            ):
+                if _pool_key in current_config:
+                    keys_to_preserve[_pool_key] = current_config[_pool_key]
                 
             # 4. Replicate API Key
             if 'replicate_api_key' in current_config:
@@ -2100,6 +2111,15 @@ def _create_danger_zone_section(self, parent):
                 keys_to_preserve['use_multi_api_keys'] = current_config['use_multi_api_keys']
             if 'use_fallback_keys' in current_config:
                 keys_to_preserve['use_fallback_keys'] = current_config['use_fallback_keys']
+            for _toggle_key in (
+                'use_glossary_keys',
+                'use_glossary_refinement_keys',
+                'use_qa_scan_keys',
+                'use_truncation_retry_keys',
+                'use_inpainter_keys',
+            ):
+                if _toggle_key in current_config:
+                    keys_to_preserve[_toggle_key] = current_config[_toggle_key]
             
             # 11. QA Scanner Excluded Characters
             if 'qa_scanner_settings' in current_config:

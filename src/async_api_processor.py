@@ -3354,6 +3354,11 @@ class AsyncProcessingDialog:
 
         # Truncation and silent-truncation retries
         env_vars['TRUNCATION_RETRY_ATTEMPTS'] = str(_val(getattr(self.gui, 'truncation_retry_attempts_var', '3'), '3'))
+        env_vars['USE_TRUNCATION_RETRY_KEYS'] = "1" if _val(getattr(self.gui, 'use_truncation_retry_keys_var', False), False) else "0"
+        try:
+            env_vars['TRUNCATION_RETRY_API_KEYS'] = json.dumps(getattr(self.gui, 'config', {}).get('truncation_retry_keys', []))
+        except Exception:
+            env_vars['TRUNCATION_RETRY_API_KEYS'] = "[]"
         env_vars['CHAR_RATIO_TRUNCATION_ENABLED'] = "1" if _val(getattr(self.gui, 'char_ratio_truncation_var', True), True) else "0"
         env_vars['CHAR_RATIO_TRUNCATION_PERCENT'] = str(_val(getattr(self.gui, 'char_ratio_truncation_percent_var', '50'), '50'))
         env_vars['CHAR_RATIO_TRUNCATION_ATTEMPTS'] = str(_val(getattr(self.gui, 'char_ratio_truncation_attempts_var', '1'), '1'))

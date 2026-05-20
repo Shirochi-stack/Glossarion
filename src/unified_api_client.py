@@ -1915,6 +1915,10 @@ class UnifiedClient:
     # Image gen/edit-dedicated key pool (manga custom-image-edit + image output requests)
     _inpainter_key_pool: Optional[APIKeyPool] = None
     _inpainter_pool_lock = threading.Lock()
+
+    # Truncation-retry-dedicated key pool (used only for RETRY_TRUNCATED retry attempts)
+    _truncation_retry_key_pool: Optional[APIKeyPool] = None
+    _truncation_retry_pool_lock = threading.Lock()
     
     # Request tracking
     _global_request_counter = 0
@@ -2726,6 +2730,86 @@ class UnifiedClient:
                     print(f"🔑 Image gen/edit key pool: {len(validated_keys)} keys loaded")
 
             return True
+
+    # In-memory truncation-retry key configuration.
+    _in_memory_truncation_retry_keys = None
+    _in_memory_truncation_retry_keys_lock = RLock()
+
+    @classmethod
+    def set_in_memory_truncation_retry_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
+        """Configure truncation-retry key mode without storing the full key list in environment variables."""
+        try:
+            with cls._in_memory_truncation_retry_keys_lock:
+                cls._in_memory_truncation_retry_keys = keys_list
+        except Exception:
+            pass
+        try:
+            cls.setup_truncation_retry_key_pool(
+                keys_list,
+                force_rotation=force_rotation,
+                rotation_frequency=rotation_frequency,
+            )
+        except Exception:
+            return False
+        return True
+
+    @classmethod
+    def clear_in_memory_truncation_retry_keys(cls):
+        """Clear in-memory truncation-retry key configuration."""
+        with cls._in_memory_truncation_retry_keys_lock:
+            cls._in_memory_truncation_retry_keys = None
+        with cls._truncation_retry_pool_lock:
+            cls._truncation_retry_key_pool = None
+
+    @classmethod
+    def setup_truncation_retry_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
+        """Setup the shared truncation-retry API key pool (mirrors setup_glossary_key_pool)."""
+        with cls._truncation_retry_pool_lock:
+            if cls._truncation_retry_key_pool is None:
+                cls._truncation_retry_key_pool = APIKeyPool()
+            cls._truncation_retry_pool_logged = False
+
+            if cls._rate_limit_cache is None:
+                cls._rate_limit_cache = RateLimitCache()
+
+            validated_keys = []
+            encrypted_keys_fixed = 0
+
+            for key_data in keys_list:
+                if not isinstance(key_data, dict):
+                    continue
+                api_key = key_data.get('api_key', '')
+                model = key_data.get('model', '')
+                if not api_key and cls._key_data_needs_api_key(key_data, model):
+                    continue
+                if api_key and api_key.startswith('ENC:'):
+                    try:
+                        from api_key_encryption import get_handler
+                        handler = get_handler()
+                        decrypted_key = handler.decrypt_value(api_key)
+                        if decrypted_key != api_key and not decrypted_key.startswith('ENC:'):
+                            fixed_key_data = key_data.copy()
+                            fixed_key_data['api_key'] = decrypted_key
+                            validated_keys.append(fixed_key_data)
+                            encrypted_keys_fixed += 1
+                    except Exception:
+                        continue
+                else:
+                    validated_keys.append(key_data)
+
+            if not validated_keys:
+                return False
+
+            cls._truncation_retry_key_pool.load_from_list(validated_keys)
+
+            existing_count = len(getattr(cls._truncation_retry_key_pool, 'keys', [])) if cls._truncation_retry_key_pool else 0
+            if existing_count != len(validated_keys):
+                if encrypted_keys_fixed > 0:
+                    print(f"🔑 Truncation retry key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
+                else:
+                    print(f"🔑 Truncation retry key pool: {len(validated_keys)} keys loaded")
+
+            return True
     
     @classmethod
     def initialize_key_pool(cls, key_list: list):
@@ -3385,7 +3469,8 @@ class UnifiedClient:
                     
                     # Generate key identifier — use GlossaryKey# prefix when using glossary pool
                     _is_glossary_pool = (self._api_key_pool is getattr(self.__class__, '_glossary_key_pool', None))
-                    _prefix = "GlossaryKey" if _is_glossary_pool else "Key"
+                    _is_truncation_retry_pool = (self._api_key_pool is getattr(self.__class__, '_truncation_retry_key_pool', None))
+                    _prefix = "TruncationRetryKey" if _is_truncation_retry_pool else "GlossaryKey" if _is_glossary_pool else "Key"
                     key_id = f"{_prefix}#{key_index+1} ({key.model})"
                     if hasattr(key, 'identifier') and key.identifier:
                         key_id = key.identifier
@@ -5475,6 +5560,85 @@ class UnifiedClient:
             self._multi_key_mode = state['multi_key_mode']
             return None
 
+    def _apply_truncation_retry_key_pool_override(self):
+        """Temporarily route a RETRY_TRUNCATED attempt through the truncation-retry pool."""
+        try:
+            if os.getenv('USE_TRUNCATION_RETRY_KEYS', '0') != '1':
+                return None, None
+
+            truncation_pool = self.__class__._truncation_retry_key_pool
+            if not truncation_pool or not getattr(truncation_pool, 'keys', []):
+                truncation_keys_json = os.getenv('TRUNCATION_RETRY_API_KEYS', '[]')
+                if truncation_keys_json != '[]':
+                    try:
+                        truncation_keys_list = json.loads(truncation_keys_json)
+                        if truncation_keys_list:
+                            self.__class__.setup_truncation_retry_key_pool(truncation_keys_list)
+                            truncation_pool = self.__class__._truncation_retry_key_pool
+                    except Exception:
+                        pass
+
+            try:
+                with self.__class__._in_memory_truncation_retry_keys_lock:
+                    tr_list = self.__class__._in_memory_truncation_retry_keys or []
+            except Exception:
+                tr_list = []
+
+            state = self._apply_dedicated_key_pool_override(
+                truncation_pool,
+                tr_list,
+                'TruncationRetry',
+                'TruncationRetryKey',
+            )
+            if state and truncation_pool and not getattr(self.__class__, '_truncation_retry_pool_logged', False):
+                print(f"[TRUNCATION RETRY KEYS] Using truncation retry key pool ({len(truncation_pool.keys)} keys)")
+                self.__class__._truncation_retry_pool_logged = True
+            return state, truncation_pool
+        except Exception as exc:
+            print(f"[TRUNCATION RETRY KEYS] Failed to apply truncation retry key override: {exc}")
+            return None, None
+
+    def _restore_dedicated_key_pool_override(self, state):
+        """Restore state saved by _apply_dedicated_key_pool_override."""
+        if not state:
+            return
+        try:
+            self.api_key = state.get('api_key')
+            self.model = state.get('model')
+            self._multi_key_mode = state.get('multi_key_mode')
+            if state.get('had_instance_pool'):
+                self._api_key_pool = state.get('instance_pool')
+            elif '_api_key_pool' in self.__dict__:
+                del self._api_key_pool
+            self._per_key_api_delay = None
+            self._skip_next_ensure_thread = False
+            self._individual_endpoint_applied = False
+            self._skip_global_custom_endpoint = False
+            for _attr in ('_original_client_type', '_custom_prefix_route'):
+                if hasattr(self, _attr):
+                    try:
+                        delattr(self, _attr)
+                    except Exception:
+                        pass
+            self.current_key_azure_endpoint = None
+            self.current_key_azure_api_version = None
+            self.current_key_use_individual_endpoint = False
+            self.current_key_google_creds = None
+            self.current_key_google_region = None
+            try:
+                tls = self._get_thread_local_client()
+                tls.active_api_delay_override = None
+                tls.api_call_delay = 0.0
+            except Exception:
+                pass
+            self._restoring_dedicated_key_override = True
+            try:
+                self._setup_client()
+            finally:
+                self._restoring_dedicated_key_override = False
+        except Exception:
+            pass
+
     def _send_core(self,
                    messages,
                    temperature: Optional[float] = None,
@@ -6765,7 +6929,7 @@ class UnifiedClient:
                 # pool can otherwise win the cosmetic log line.
                 try:
                     key_identifier = str(getattr(self, 'key_identifier', '') or '')
-                    if key_identifier.startswith(('VisionKey#', 'GlossaryKey#')):
+                    if key_identifier.startswith(('VisionKey#', 'GlossaryKey#', 'GlossaryRefinementKey#', 'TruncationRetryKey#')):
                         current_model = getattr(self, 'model', None)
                         if current_model:
                             log_model = current_model
@@ -6786,11 +6950,19 @@ class UnifiedClient:
                     active_pool is getattr(self.__class__, '_glossary_key_pool', None)
                     or _key_identifier.startswith('GlossaryKey#')
                 )
+                _is_glossary_refinement_pool = (
+                    active_pool is getattr(self.__class__, '_glossary_refinement_key_pool', None)
+                    or _key_identifier.startswith('GlossaryRefinementKey#')
+                )
                 _is_qa_pool = (
                     active_pool is getattr(self.__class__, '_qa_scan_key_pool', None)
                     or _key_identifier.startswith('VisionKey#')
                 )
-                _pool_label = "(glossary-key)" if _is_glossary_pool else "(vision-key)" if _is_qa_pool else "(multi-key)"
+                _is_truncation_retry_pool = (
+                    active_pool is getattr(self.__class__, '_truncation_retry_key_pool', None)
+                    or _key_identifier.startswith('TruncationRetryKey#')
+                )
+                _pool_label = "(truncation-retry-key)" if _is_truncation_retry_pool else "(glossary-refinement-key)" if _is_glossary_refinement_pool else "(glossary-key)" if _is_glossary_pool else "(vision-key)" if _is_qa_pool else "(multi-key)"
                 defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model} {_pool_label}")
             elif log_model != model_snapshot and not self._is_stop_requested():
                 defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model}")
@@ -7881,13 +8053,20 @@ class UnifiedClient:
                         else:
                             allowed_attempts = min(truncation_retry_attempts, attempts_remaining)
 
-                            def _run_truncation_retry(new_tokens: int, reason_suffix: str):
+                            def _run_truncation_retry(new_tokens: int, reason_suffix: str, retry_attempt: int):
                                 tls = self._get_thread_local_client()
                                 prev_override = getattr(tls, 'max_retries_override', None)
                                 tls.max_retries_override = max(1, attempts_remaining)
+                                pool_state = None
                                 # Set flag to prevent nested truncation retries
                                 tls._in_truncation_retry = True
                                 try:
+                                    pool_state, _ = self._apply_truncation_retry_key_pool_override()
+                                    _api_watchdog_record_retry(
+                                        request_id,
+                                        retry_attempt,
+                                        reason="truncation_retry_keypool" if pool_state else "truncation_retry",
+                                    )
                                     retry_content, retry_finish_reason = self._send_internal(
                                         messages=messages,
                                         temperature=temperature,
@@ -7900,6 +8079,7 @@ class UnifiedClient:
                                     )
                                     return retry_content, retry_finish_reason
                                 finally:
+                                    self._restore_dedicated_key_pool_override(pool_state)
                                     # Clear the flag after retry completes
                                     tls._in_truncation_retry = False
                                     tls.max_retries_override = prev_override
@@ -7928,7 +8108,7 @@ class UnifiedClient:
                                         print(f"  🛑 Truncation retry #{attempt_idx+1}/{allowed_attempts} cancelled before starting")
                                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                                     
-                                    retry_content, retry_finish_reason = _run_truncation_retry(new_max_tokens, f"{finish_reason}_{attempt_idx+1}")
+                                    retry_content, retry_finish_reason = _run_truncation_retry(new_max_tokens, f"{finish_reason}_{attempt_idx+1}", attempt_idx + 1)
                                     if retry_finish_reason not in ['length', 'max_tokens']:
                                         if not trunc_success_logged:
                                             print(f"  ✅ Truncation retry #{attempt_idx+1}/{allowed_attempts} succeeded: {len(retry_content)} chars")
