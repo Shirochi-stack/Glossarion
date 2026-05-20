@@ -8904,20 +8904,6 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             _model = _dedicated_model or qa_settings.get('_live_model', '') or _ai_config.get('model', '') or os.getenv('MODEL', 'gemini-2.0-flash')
             _output_dir = folder_path
 
-            # AI truncation detection has its own pool; Vision remains the fallback below.
-            if _ai_config.get('use_ai_truncation_detection_keys', False):
-                os.environ['USE_AI_TRUNCATION_DETECTION_KEYS'] = '1'
-                ai_keys = _ai_config.get('ai_truncation_detection_keys', [])
-                if ai_keys:
-                    os.environ['AI_TRUNCATION_DETECTION_API_KEYS'] = json.dumps(ai_keys)
-                    UnifiedClient.set_in_memory_ai_truncation_detection_keys(
-                        ai_keys,
-                        force_rotation=_ai_config.get('force_key_rotation', True),
-                        rotation_frequency=_ai_config.get('rotation_frequency', 1)
-                    )
-            else:
-                os.environ['USE_AI_TRUNCATION_DETECTION_KEYS'] = '0'
-
             # Apply QA scan key environment variables if enabled in config
             if _ai_config.get('use_qa_scan_keys', False):
                 os.environ['USE_QA_SCAN_KEYS'] = '1'

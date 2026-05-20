@@ -1703,7 +1703,6 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.use_glossary_keys_var = self.config.get('use_glossary_keys', False)
         self.use_glossary_refinement_keys_var = self.config.get('use_glossary_refinement_keys', False)
         self.use_qa_scan_keys_var = self.config.get('use_qa_scan_keys', False)
-        self.use_ai_truncation_detection_keys_var = self.config.get('use_ai_truncation_detection_keys', False)
         self.use_truncation_retry_keys_var = self.config.get('use_truncation_retry_keys', False)
         self.use_inpainter_keys_var = self.config.get('use_inpainter_keys', False)
 
@@ -4380,7 +4379,6 @@ Recent translations to summarize:
                 'fallback_keys': 'use_fallback_keys',
                 'glossary_keys': 'use_glossary_keys',
                 'glossary_refinement_keys': 'use_glossary_refinement_keys',
-                'ai_truncation_detection_keys': 'use_ai_truncation_detection_keys',
                 'truncation_retry_keys': 'use_truncation_retry_keys',
             }
             for pool_key, toggle_key in pool_map.items():
@@ -4407,7 +4405,6 @@ Recent translations to summarize:
                 'fallback_keys': 'use_fallback_keys',
                 'glossary_keys': 'use_glossary_keys',
                 'glossary_refinement_keys': 'use_glossary_refinement_keys',
-                'ai_truncation_detection_keys': 'use_ai_truncation_detection_keys',
                 'truncation_retry_keys': 'use_truncation_retry_keys',
             }
             for pool_key, toggle_key in pool_map.items():
@@ -4433,7 +4430,6 @@ Recent translations to summarize:
                 'fallback_keys': 'use_fallback_keys',
                 'glossary_keys': 'use_glossary_keys',
                 'glossary_refinement_keys': 'use_glossary_refinement_keys',
-                'ai_truncation_detection_keys': 'use_ai_truncation_detection_keys',
                 'truncation_retry_keys': 'use_truncation_retry_keys',
             }
             for pool_key, toggle_key in pool_map.items():
@@ -4461,7 +4457,6 @@ Recent translations to summarize:
                 'fallback_keys': 'use_fallback_keys',
                 'glossary_keys': 'use_glossary_keys',
                 'glossary_refinement_keys': 'use_glossary_refinement_keys',
-                'ai_truncation_detection_keys': 'use_ai_truncation_detection_keys',
                 'truncation_retry_keys': 'use_truncation_retry_keys',
             }
             for pool_key, toggle_key in pool_map.items():
@@ -4502,7 +4497,6 @@ Recent translations to summarize:
                 'fallback_keys': 'use_fallback_keys',
                 'glossary_keys': 'use_glossary_keys',
                 'glossary_refinement_keys': 'use_glossary_refinement_keys',
-                'ai_truncation_detection_keys': 'use_ai_truncation_detection_keys',
                 'truncation_retry_keys': 'use_truncation_retry_keys',
             }
             for pool_key, toggle_key in pool_map.items():
@@ -14848,15 +14842,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 refinement_keys = self.config.get('glossary_refinement_keys', [])
                 vision_keys_enabled = self.config.get('use_qa_scan_keys', False)
                 vision_keys = self.config.get('qa_scan_keys', [])
-                ai_truncation_detection_keys_enabled = self.config.get('use_ai_truncation_detection_keys', False)
-                ai_truncation_detection_keys = self.config.get('ai_truncation_detection_keys', [])
                 truncation_retry_keys_enabled = self.config.get('use_truncation_retry_keys', False)
                 truncation_retry_keys = self.config.get('truncation_retry_keys', [])
                 inpainter_keys_enabled = self.config.get('use_inpainter_keys', False)
                 inpainter_keys = self.config.get('inpainter_keys', [])
                 os.environ['USE_VISION_KEYS'] = '1' if vision_keys_enabled else '0'
                 os.environ['USE_QA_SCAN_KEYS'] = os.environ['USE_VISION_KEYS']
-                os.environ['USE_AI_TRUNCATION_DETECTION_KEYS'] = '1' if ai_truncation_detection_keys_enabled else '0'
                 os.environ['USE_TRUNCATION_RETRY_KEYS'] = '1' if truncation_retry_keys_enabled else '0'
                 os.environ['USE_INPAINTER_KEYS'] = '1' if inpainter_keys_enabled else '0'
                 os.environ['FALLBACK_KEYS'] = json.dumps(self.config.get('fallback_keys', []))
@@ -14865,7 +14856,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['GLOSSARY_REFINEMENT_API_KEYS'] = json.dumps(refinement_keys)
                 os.environ['VISION_API_KEYS'] = json.dumps(vision_keys)
                 os.environ['QA_SCAN_API_KEYS'] = os.environ['VISION_API_KEYS']
-                os.environ['AI_TRUNCATION_DETECTION_API_KEYS'] = json.dumps(ai_truncation_detection_keys)
                 os.environ['TRUNCATION_RETRY_API_KEYS'] = json.dumps(truncation_retry_keys)
                 os.environ['INPAINTER_API_KEYS'] = json.dumps(inpainter_keys)
 
@@ -14900,17 +14890,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 else:
                     if vision_keys_enabled:
                         self.append_log("[GTool] Vision Keys enabled but no keys configured")
-                if ai_truncation_detection_keys_enabled and ai_truncation_detection_keys:
-                    ok = UnifiedClient.set_in_memory_ai_truncation_detection_keys(
-                        ai_truncation_detection_keys,
-                        force_rotation=self.config.get('force_key_rotation', True),
-                        rotation_frequency=self.config.get('rotation_frequency', 1),
-                    )
-                    pool = getattr(UnifiedClient, '_ai_truncation_detection_key_pool', None)
-                    pool_count = len(getattr(pool, 'keys', [])) if pool else 0
-                    self.append_log(f"[GTool] AI truncation detection key pool: {pool_count} keys loaded (setup={'OK' if ok else 'FAILED'})")
-                elif ai_truncation_detection_keys_enabled:
-                    self.append_log("[GTool] AI Truncation Detection Keys enabled but no keys configured")
                 if truncation_retry_keys_enabled and truncation_retry_keys:
                     ok = UnifiedClient.set_in_memory_truncation_retry_keys(
                         truncation_retry_keys,
@@ -15561,8 +15540,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['USE_QA_SCAN_KEYS'] = '0'
             os.environ['VISION_API_KEYS'] = json.dumps(self.config.get('qa_scan_keys', []))
             os.environ['QA_SCAN_API_KEYS'] = os.environ['VISION_API_KEYS']
-            os.environ['USE_AI_TRUNCATION_DETECTION_KEYS'] = '1' if self.config.get('use_ai_truncation_detection_keys', False) else '0'
-            os.environ['AI_TRUNCATION_DETECTION_API_KEYS'] = json.dumps(self.config.get('ai_truncation_detection_keys', []))
             os.environ['USE_TRUNCATION_RETRY_KEYS'] = '1' if self.config.get('use_truncation_retry_keys', False) else '0'
             os.environ['TRUNCATION_RETRY_API_KEYS'] = json.dumps(self.config.get('truncation_retry_keys', []))
         except Exception:
@@ -15607,15 +15584,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 )
             else:
                 UnifiedClient.clear_in_memory_vision_keys()
-
-            if self.config.get('use_ai_truncation_detection_keys', False) and self.config.get('ai_truncation_detection_keys', []):
-                UnifiedClient.set_in_memory_ai_truncation_detection_keys(
-                    self.config.get('ai_truncation_detection_keys', []),
-                    force_rotation=self.config.get('force_key_rotation', True),
-                    rotation_frequency=self.config.get('rotation_frequency', 1),
-                )
-            else:
-                UnifiedClient.clear_in_memory_ai_truncation_detection_keys()
 
             # Configure truncation retry key pool in memory (used by RETRY_TRUNCATED attempts)
             if self.config.get('use_truncation_retry_keys', False) and self.config.get('truncation_retry_keys', []):
@@ -15861,8 +15829,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'VISION_API_KEYS': json.dumps(self.config.get('qa_scan_keys', [])),
             'USE_QA_SCAN_KEYS': '1' if self.config.get('use_qa_scan_keys', False) else '0',
             'QA_SCAN_API_KEYS': json.dumps(self.config.get('qa_scan_keys', [])),
-            'USE_AI_TRUNCATION_DETECTION_KEYS': '1' if self.config.get('use_ai_truncation_detection_keys', False) else '0',
-            'AI_TRUNCATION_DETECTION_API_KEYS': json.dumps(self.config.get('ai_truncation_detection_keys', [])),
             'USE_TRUNCATION_RETRY_KEYS': '1' if self.config.get('use_truncation_retry_keys', False) else '0',
             'TRUNCATION_RETRY_API_KEYS': json.dumps(self.config.get('truncation_retry_keys', [])),
 
@@ -16032,8 +15998,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ROTATION_FREQUENCY': str(self.config.get('rotation_frequency', 1)),
             'USE_INPAINTER_KEYS': "1" if self.config.get('use_inpainter_keys', False) else "0",
             'INPAINTER_API_KEYS': json.dumps(self.config.get('inpainter_keys', []) or []),
-            'USE_AI_TRUNCATION_DETECTION_KEYS': "1" if self.config.get('use_ai_truncation_detection_keys', False) else "0",
-            'AI_TRUNCATION_DETECTION_API_KEYS': json.dumps(self.config.get('ai_truncation_detection_keys', []) or []),
             'USE_TRUNCATION_RETRY_KEYS': "1" if self.config.get('use_truncation_retry_keys', False) else "0",
             'TRUNCATION_RETRY_API_KEYS': json.dumps(self.config.get('truncation_retry_keys', []) or []),
            
@@ -23818,7 +23782,6 @@ Important rules:
                 ('use_glossary_keys', ['use_glossary_keys_var'], False, bool),
                 ('use_glossary_refinement_keys', ['use_glossary_refinement_keys_var'], False, bool),
                 ('use_qa_scan_keys', ['use_qa_scan_keys_var'], False, bool),
-                ('use_ai_truncation_detection_keys', ['use_ai_truncation_detection_keys_var'], False, bool),
                 ('use_truncation_retry_keys', ['use_truncation_retry_keys_var'], False, bool),
                 ('auto_update_check', ['auto_update_check_var'], True, bool),
                 ('auto_dpi_scale', ['auto_dpi_scale_var'], True, bool),
@@ -23851,7 +23814,6 @@ Important rules:
                 ('custom_image_edit_system_prompt', ['custom_image_edit_system_prompt_var'], '', str),
                 ('custom_image_edit_user_prompt', ['custom_image_edit_user_prompt_var'], '', str),
                 ('inpainter_keys', ['inpainter_keys_var'], [], list),
-                ('ai_truncation_detection_keys', ['ai_truncation_detection_keys_var'], [], list),
                 ('truncation_retry_keys', ['truncation_retry_keys_var'], [], list),
                 ('openai_tts_endpoint', ['openai_tts_endpoint_var'], '', str),
                 ('tts_voice', ['tts_voice_var'], '', str),
@@ -25095,8 +25057,6 @@ Important rules:
                 ('GLOSSARY_API_KEYS', _json.dumps(self.config.get('glossary_keys', []))),
                 ('USE_GLOSSARY_REFINEMENT_KEYS', '1' if self.config.get('use_glossary_refinement_keys', False) else '0'),
                 ('GLOSSARY_REFINEMENT_API_KEYS', _json.dumps(self.config.get('glossary_refinement_keys', []))),
-                ('USE_AI_TRUNCATION_DETECTION_KEYS', '1' if self.config.get('use_ai_truncation_detection_keys', False) else '0'),
-                ('AI_TRUNCATION_DETECTION_API_KEYS', _json.dumps(self.config.get('ai_truncation_detection_keys', []))),
                 ('USE_TRUNCATION_RETRY_KEYS', '1' if self.config.get('use_truncation_retry_keys', False) else '0'),
                 ('TRUNCATION_RETRY_API_KEYS', _json.dumps(self.config.get('truncation_retry_keys', []))),
                 ('IMAGE_CHUNK_OVERLAP_PERCENT', str(getattr(self, 'image_chunk_overlap_var', '3'))),

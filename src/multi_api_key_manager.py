@@ -1636,14 +1636,6 @@ class MultiAPIKeyDialog(QDialog):
             )
             self.translator_gui.config['use_qa_scan_keys'] = use_qa_scan
 
-            use_ai_truncation_detection = (
-                self.use_ai_truncation_detection_keys_checkbox.isChecked()
-                if hasattr(self, 'use_ai_truncation_detection_keys_checkbox')
-                else bool(self.translator_gui.config.get('use_ai_truncation_detection_keys', False))
-            )
-            self.translator_gui.config['use_ai_truncation_detection_keys'] = use_ai_truncation_detection
-            self.translator_gui.use_ai_truncation_detection_keys_var = use_ai_truncation_detection
-
             # Save Truncation Retry keys toggle
             use_truncation_retry = (
                 self.use_truncation_retry_keys_checkbox.isChecked()
@@ -1980,7 +1972,6 @@ class MultiAPIKeyDialog(QDialog):
         self._queue_key_pool_section_render(scrollable_layout, self._create_glossary_section)
         self._queue_key_pool_section_render(scrollable_layout, self._create_glossary_refinement_section)
         self._queue_key_pool_section_render(scrollable_layout, self._create_qa_scan_section)
-        self._queue_key_pool_section_render(scrollable_layout, self._create_ai_truncation_detection_section)
         self._queue_key_pool_section_render(scrollable_layout, self._create_inpainter_section)
 
         # Add stretch to fill remaining space in scroll area
@@ -7701,20 +7692,6 @@ class MultiAPIKeyDialog(QDialog):
                     "If no Vision keys are configured or the pool is disabled, the main key pool is used instead."
                 ),
             },
-            'ai_truncation_detection': {
-                'title': 'AI Truncation Detection Keys',
-                'label': 'AI truncation detection',
-                'config_key': 'ai_truncation_detection_keys',
-                'toggle_key': 'use_ai_truncation_detection_keys',
-                'set_method': 'set_in_memory_ai_truncation_detection_keys',
-                'clear_method': 'clear_in_memory_ai_truncation_detection_keys',
-                'use_envs': ['USE_AI_TRUNCATION_DETECTION_KEYS'],
-                'keys_envs': ['AI_TRUNCATION_DETECTION_API_KEYS'],
-                'description': (
-                    "Configure dedicated keys for AI truncation detection checks.\n"
-                    "This pool is used for qa_truncation requests before falling back to Vision Keys."
-                ),
-            },
             'truncation_retry': {
                 'title': 'Truncation Retry Keys',
                 'label': 'Truncation retry',
@@ -8598,9 +8575,6 @@ class MultiAPIKeyDialog(QDialog):
 
     def _create_qa_scan_section(self, parent_layout):
         self._create_dedicated_key_pool_section(parent_layout, 'qa_scan')
-
-    def _create_ai_truncation_detection_section(self, parent_layout):
-        self._create_dedicated_key_pool_section(parent_layout, 'ai_truncation_detection')
 
     def _create_truncation_retry_section(self, parent_layout):
         self._create_dedicated_key_pool_section(parent_layout, 'truncation_retry')

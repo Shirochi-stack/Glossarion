@@ -1912,10 +1912,6 @@ class UnifiedClient:
     _qa_scan_key_pool: Optional[APIKeyPool] = None
     _qa_scan_pool_lock = threading.Lock()
 
-    # AI truncation detection-dedicated key pool (preferred for qa_truncation checks)
-    _ai_truncation_detection_key_pool: Optional[APIKeyPool] = None
-    _ai_truncation_detection_pool_lock = threading.Lock()
-
     # Image gen/edit-dedicated key pool (manga custom-image-edit + image output requests)
     _inpainter_key_pool: Optional[APIKeyPool] = None
     _inpainter_pool_lock = threading.Lock()
@@ -2309,48 +2305,6 @@ class UnifiedClient:
         return cls._model_needs_api_key(model)
 
     @classmethod
-    def _load_dedicated_key_pool(cls, keys_list, pool_attr: str, pool_lock, logged_attr: str, label: str):
-        """Load a dedicated APIKeyPool with the same validation used by the other pools."""
-        with pool_lock:
-            pool = getattr(cls, pool_attr, None)
-            if pool is None:
-                pool = APIKeyPool()
-                setattr(cls, pool_attr, pool)
-            setattr(cls, logged_attr, False)
-            if cls._rate_limit_cache is None:
-                cls._rate_limit_cache = RateLimitCache()
-
-            validated_keys = []
-            encrypted_keys_fixed = 0
-            for key_data in keys_list:
-                if not isinstance(key_data, dict):
-                    continue
-                api_key = key_data.get('api_key', '')
-                model = key_data.get('model', '')
-                if not api_key and cls._key_data_needs_api_key(key_data, model):
-                    continue
-                if api_key and api_key.startswith('ENC:'):
-                    try:
-                        from api_key_encryption import get_handler
-                        decrypted_key = get_handler().decrypt_value(api_key)
-                        if decrypted_key != api_key and not decrypted_key.startswith('ENC:'):
-                            fixed_key_data = key_data.copy()
-                            fixed_key_data['api_key'] = decrypted_key
-                            validated_keys.append(fixed_key_data)
-                            encrypted_keys_fixed += 1
-                    except Exception:
-                        continue
-                else:
-                    validated_keys.append(key_data)
-
-            if not validated_keys:
-                return False
-            pool.load_from_list(validated_keys)
-            if encrypted_keys_fixed > 0:
-                print(f"{label} key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
-            return True
-
-    @classmethod
     def setup_multi_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
         """Setup the shared API key pool"""
         with cls._pool_lock:
@@ -2647,40 +2601,6 @@ class UnifiedClient:
     def clear_in_memory_vision_keys(cls):
         """Alias for clearing the Vision-key pool."""
         cls.clear_in_memory_qa_scan_keys()
-
-    # In-memory AI truncation detection-key configuration.
-    _in_memory_ai_truncation_detection_keys = None
-    _in_memory_ai_truncation_detection_keys_lock = RLock()
-
-    @classmethod
-    def set_in_memory_ai_truncation_detection_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
-        """Configure the dedicated AI truncation detection pool."""
-        with cls._in_memory_ai_truncation_detection_keys_lock:
-            cls._in_memory_ai_truncation_detection_keys = keys_list
-        return cls.setup_ai_truncation_detection_key_pool(
-            keys_list,
-            force_rotation=force_rotation,
-            rotation_frequency=rotation_frequency,
-        )
-
-    @classmethod
-    def clear_in_memory_ai_truncation_detection_keys(cls):
-        """Clear in-memory AI truncation detection-key configuration."""
-        with cls._in_memory_ai_truncation_detection_keys_lock:
-            cls._in_memory_ai_truncation_detection_keys = None
-        with cls._ai_truncation_detection_pool_lock:
-            cls._ai_truncation_detection_key_pool = None
-
-    @classmethod
-    def setup_ai_truncation_detection_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
-        """Setup the shared AI truncation detection API key pool."""
-        return cls._load_dedicated_key_pool(
-            keys_list,
-            '_ai_truncation_detection_key_pool',
-            cls._ai_truncation_detection_pool_lock,
-            '_ai_truncation_detection_pool_logged',
-            'AI truncation detection',
-        )
 
     @classmethod
     def setup_qa_scan_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
@@ -5808,44 +5728,10 @@ class UnifiedClient:
             # CONTEXT-SPECIFIC KEY OVERRIDES: When context matches a dedicated pool,
             # use that pool for full multi-key rotation (mirrors main multi-key mode).
             
-            # AI TRUNCATION DETECTION KEY OVERRIDE: qa_truncation gets its own pool before Vision fallback.
-            context_norm = str(context or '').strip().lower()
-            if context_norm in ('qa_truncation', 'truncation'):
-                try:
-                    if os.getenv('USE_AI_TRUNCATION_DETECTION_KEYS', '0') == '1':
-                        ai_truncation_pool = self.__class__._ai_truncation_detection_key_pool
-                        if not ai_truncation_pool or not getattr(ai_truncation_pool, 'keys', []):
-                            ai_truncation_keys_json = os.getenv('AI_TRUNCATION_DETECTION_API_KEYS', '[]')
-                            if ai_truncation_keys_json != '[]':
-                                try:
-                                    ai_truncation_keys_list = json.loads(ai_truncation_keys_json)
-                                    if ai_truncation_keys_list:
-                                        self.__class__.setup_ai_truncation_detection_key_pool(ai_truncation_keys_list)
-                                        ai_truncation_pool = self.__class__._ai_truncation_detection_key_pool
-                                except Exception:
-                                    pass
-                        with self.__class__._in_memory_ai_truncation_detection_keys_lock:
-                            atk_list = self.__class__._in_memory_ai_truncation_detection_keys or []
-                        pool_state = self._apply_dedicated_key_pool_override(
-                            ai_truncation_pool,
-                            atk_list,
-                            'AITruncationDetection',
-                            'AITruncationDetectionKey',
-                        )
-                        if pool_state:
-                            _qa_scan_overridden = True
-                            _original_api_key = pool_state['api_key']
-                            _original_model = pool_state['model']
-                            _original_multi_key_mode = pool_state['multi_key_mode']
-                            _had_instance_pool = pool_state['had_instance_pool']
-                            _original_instance_pool = pool_state['instance_pool']
-                except Exception as e:
-                    print(f"[AI TRUNCATION DETECTION KEYS] Failed to apply override: {e}")
-
-            # VISION KEY OVERRIDE: shared pool for QA truncation fallback and vision OCR/image scans.
+            # VISION KEY OVERRIDE: shared pool for QA truncation checks and vision OCR/image scans.
             _vision_key_contexts = ('Truncation', 'qa_truncation', 'image_scan', 'image_ocr', 'vision_ocr', 'manga_ocr')
             _is_qa_scan_context = context in _vision_key_contexts or (not context and 'Truncation' in threading.current_thread().name)
-            if not _qa_scan_overridden and _is_qa_scan_context:
+            if _is_qa_scan_context:
                 try:
                     vision_keys_flag = os.getenv('USE_VISION_KEYS', '0')
                     legacy_qa_keys_flag = os.getenv('USE_QA_SCAN_KEYS', '0')
@@ -7043,7 +6929,7 @@ class UnifiedClient:
                 # pool can otherwise win the cosmetic log line.
                 try:
                     key_identifier = str(getattr(self, 'key_identifier', '') or '')
-                    if key_identifier.startswith(('VisionKey#', 'AITruncationDetectionKey#', 'GlossaryKey#', 'GlossaryRefinementKey#', 'TruncationRetryKey#')):
+                    if key_identifier.startswith(('VisionKey#', 'GlossaryKey#', 'GlossaryRefinementKey#', 'TruncationRetryKey#')):
                         current_model = getattr(self, 'model', None)
                         if current_model:
                             log_model = current_model
@@ -7072,15 +6958,11 @@ class UnifiedClient:
                     active_pool is getattr(self.__class__, '_qa_scan_key_pool', None)
                     or _key_identifier.startswith('VisionKey#')
                 )
-                _is_ai_truncation_pool = (
-                    active_pool is getattr(self.__class__, '_ai_truncation_detection_key_pool', None)
-                    or _key_identifier.startswith('AITruncationDetectionKey#')
-                )
                 _is_truncation_retry_pool = (
                     active_pool is getattr(self.__class__, '_truncation_retry_key_pool', None)
                     or _key_identifier.startswith('TruncationRetryKey#')
                 )
-                _pool_label = "(truncation-retry-key)" if _is_truncation_retry_pool else "(ai-truncation-detection-key)" if _is_ai_truncation_pool else "(glossary-refinement-key)" if _is_glossary_refinement_pool else "(glossary-key)" if _is_glossary_pool else "(vision-key)" if _is_qa_pool else "(multi-key)"
+                _pool_label = "(truncation-retry-key)" if _is_truncation_retry_pool else "(glossary-refinement-key)" if _is_glossary_refinement_pool else "(glossary-key)" if _is_glossary_pool else "(vision-key)" if _is_qa_pool else "(multi-key)"
                 defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model} {_pool_label}")
             elif log_model != model_snapshot and not self._is_stop_requested():
                 defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model}")
