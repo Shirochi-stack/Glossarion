@@ -5694,1436 +5694,40 @@ class MultiAPIKeyDialog(QDialog):
         except Exception:
             pass
 
-    def _create_glossary_refinement_section(self, parent_layout):
-        """Create the Glossary refinement keys section below glossary."""
-        # Container that can be hidden
-        self.glossary_refinement_container = QWidget()
-        glossary_refinement_container_layout = QVBoxLayout(self.glossary_refinement_container)
-        glossary_refinement_container_layout.setContentsMargins(0, 5, 0, 0)
-
-        # Separator
-        self.glossary_refinement_separator = QFrame()
-        self.glossary_refinement_separator.setFrameShape(QFrame.HLine)
-        self.glossary_refinement_separator.setFrameShadow(QFrame.Sunken)
-        glossary_refinement_container_layout.addWidget(self.glossary_refinement_separator)
-
-        # Main Glossary refinement keys frame
-        glossary_refinement_frame = QGroupBox("Glossary Refinement Keys")
-        glossary_refinement_frame_layout = QVBoxLayout(glossary_refinement_frame)
-        glossary_refinement_frame_layout.setContentsMargins(15, 15, 15, 15)
-
-        # Description
-        desc_label = QLabel(
-                "Configure dedicated keys for glossary_refinement API calls.\n"
-                "When enabled, this pool is tried before the regular Glossary Keys pool.\n"
-                "If no Glossary Refinement keys are configured or the pool is disabled, the regular Glossary Keys pool is used instead.")
-        desc_label.setStyleSheet("color: gray;")
-        desc_label.setWordWrap(True)
-        glossary_refinement_frame_layout.addWidget(desc_label)
-
-        # Enable checkbox with spinning icon
-        glossary_refinement_checkbox_container = QWidget()
-        glossary_refinement_checkbox_layout = QHBoxLayout(glossary_refinement_checkbox_container)
-        glossary_refinement_checkbox_layout.setContentsMargins(0, 0, 0, 0)
-        glossary_refinement_checkbox_layout.setSpacing(8)
-
-        self.use_glossary_refinement_keys_var = self.translator_gui.config.get('use_glossary_refinement_keys', False)
-        self.use_glossary_refinement_keys_checkbox = self._create_styled_checkbox("Enable Glossary Refinement Keys")
-        self.use_glossary_refinement_keys_checkbox.setChecked(self.use_glossary_refinement_keys_var)
-        self.use_glossary_refinement_keys_checkbox.toggled.connect(self._toggle_glossary_refinement_section)
-
-        # spinning icon
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
-        self.glossary_refinement_icon = QLabel()
-        self.glossary_refinement_icon.setStyleSheet("background-color: transparent;")
-        if os.path.exists(icon_path):
-            from PySide6.QtGui import QIcon, QPixmap
-            from PySide6.QtCore import QSize
-            icon = QIcon(icon_path)
-            try:
-                dpr = self.devicePixelRatioF()
-            except Exception:
-                dpr = 1.0
-            logical_px = 16
-            dev_px = int(logical_px * max(1.0, dpr))
-            pm = icon.pixmap(QSize(dev_px, dev_px))
-            if pm.isNull():
-                raw = QPixmap(icon_path)
-                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                pm = QPixmap.fromImage(img)
-            try:
-                pm.setDevicePixelRatio(dpr)
-            except Exception:
-                pass
-            self.glossary_refinement_icon.setPixmap(pm)
-        self.glossary_refinement_icon.setFixedSize(36, 36)
-        self.glossary_refinement_icon.setAlignment(Qt.AlignCenter)
-        self.use_glossary_refinement_keys_checkbox.toggled.connect(lambda: animate_icon(self.glossary_refinement_icon))
-
-        glossary_refinement_checkbox_layout.addWidget(self.glossary_refinement_icon)
-        glossary_refinement_checkbox_layout.addWidget(self.use_glossary_refinement_keys_checkbox)
-        glossary_refinement_checkbox_layout.addStretch()
-
-        glossary_refinement_frame_layout.addWidget(glossary_refinement_checkbox_container)
-
-        # Add Glossary refinement key section
-        self.add_glossary_refinement_frame = QWidget()
-        add_glossary_refinement_grid = QGridLayout(self.add_glossary_refinement_frame)
-        add_glossary_refinement_grid.setContentsMargins(0, 0, 0, 10)
-
-        # Row 0: API Key and Model
-        add_glossary_refinement_grid.addWidget(QLabel("Glossary Refinement API Key:"), 0, 0, Qt.AlignLeft)
-        self.glossary_refinement_key_entry = QLineEdit()
-        self.glossary_refinement_key_entry.setEchoMode(QLineEdit.Password)
-        add_glossary_refinement_grid.addWidget(self.glossary_refinement_key_entry, 0, 1)
-
-        # Toggle visibility
-        self.show_glossary_refinement_btn = QPushButton("👁")
-        self.show_glossary_refinement_btn.setFixedWidth(40)
-        self.show_glossary_refinement_btn.clicked.connect(self._toggle_glossary_refinement_visibility)
-        add_glossary_refinement_grid.addWidget(self.show_glossary_refinement_btn, 0, 2)
-
-        # Model
-        add_glossary_refinement_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
-        glossary_refinement_models = get_model_options()
-        self.glossary_refinement_model_combo = QComboBox()
-        self.glossary_refinement_model_combo.addItems(glossary_refinement_models)
-        self.glossary_refinement_model_combo.setEditable(True)
-        self._disable_combobox_mousewheel(self.glossary_refinement_model_combo)
-        add_glossary_refinement_grid.addWidget(self.glossary_refinement_model_combo, 0, 4)
-
-        # Add button
-        add_glossary_refinement_btn = QPushButton("Add Glossary Refinement Key")
-        add_glossary_refinement_btn.clicked.connect(self._add_glossary_refinement_key)
-        add_glossary_refinement_grid.addWidget(add_glossary_refinement_btn, 0, 5, Qt.AlignRight)
-
-        add_glossary_refinement_grid.setColumnStretch(1, 1)
-        add_glossary_refinement_grid.setColumnStretch(4, 1)
-
-        glossary_refinement_frame_layout.addWidget(self.add_glossary_refinement_frame)
-
-        # Row 1: Google Credentials
-        google_creds_label = QLabel("Google Creds:")
-        google_creds_label.setStyleSheet("color: gray; font-size: 8pt;")
-        add_glossary_refinement_grid.addWidget(google_creds_label, 1, 0, Qt.AlignLeft)
-        self.glossary_refinement_google_creds_entry = QLineEdit()
-        self.glossary_refinement_google_creds_entry.setStyleSheet("font-size: 7pt;")
-        add_glossary_refinement_grid.addWidget(self.glossary_refinement_google_creds_entry, 1, 1)
-
-        browse_google_btn = QPushButton("📁")
-        browse_google_btn.setFixedWidth(40)
-        browse_google_btn.clicked.connect(self._browse_glossary_refinement_google_credentials)
-        add_glossary_refinement_grid.addWidget(browse_google_btn, 1, 2)
-
-        region_label = QLabel("Region:")
-        region_label.setStyleSheet("color: gray;")
-        add_glossary_refinement_grid.addWidget(region_label, 1, 3, Qt.AlignLeft)
-        self.glossary_refinement_google_region_entry = QLineEdit("us-east5")
-        self.glossary_refinement_google_region_entry.setStyleSheet("font-size: 7pt;")
-        self.glossary_refinement_google_region_entry.setMaximumWidth(100)
-        add_glossary_refinement_grid.addWidget(self.glossary_refinement_google_region_entry, 1, 4, 1, 1, Qt.AlignLeft)
-
-        # Row 2: Individual Endpoint Toggle
-        self.glossary_refinement_use_individual_endpoint_var = False
-        self.glossary_refinement_individual_endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
-        self.glossary_refinement_individual_endpoint_toggle.setChecked(False)
-        self.glossary_refinement_individual_endpoint_toggle.toggled.connect(self._toggle_glossary_refinement_individual_endpoint_fields)
-        add_glossary_refinement_grid.addWidget(self.glossary_refinement_individual_endpoint_toggle, 2, 0, 1, 2, Qt.AlignLeft)
-
-        # Row 3: Individual Endpoint (initially hidden)
-        self.glossary_refinement_individual_endpoint_label = QLabel("Individual Endpoint:")
-        self.glossary_refinement_individual_endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
-        add_glossary_refinement_grid.addWidget(self.glossary_refinement_individual_endpoint_label, 3, 0, Qt.AlignLeft)
-        self.glossary_refinement_azure_endpoint_entry = QLineEdit()
-        self.glossary_refinement_azure_endpoint_entry.setStyleSheet("font-size: 8pt;")
-        add_glossary_refinement_grid.addWidget(self.glossary_refinement_azure_endpoint_entry, 3, 1, 1, 2)
-
-        self.glossary_refinement_individual_api_version_label = QLabel("API Ver:")
-        self.glossary_refinement_individual_api_version_label.setStyleSheet("color: gray;")
-        add_glossary_refinement_grid.addWidget(self.glossary_refinement_individual_api_version_label, 3, 3, Qt.AlignLeft)
-        glossary_refinement_azure_versions = [
-            '2025-01-01-preview',
-            '2024-12-01-preview',
-            '2024-10-01-preview',
-            '2024-08-01-preview',
-            '2024-06-01',
-            '2024-02-01',
-            '2023-12-01-preview'
-        ]
-        self.glossary_refinement_azure_api_version_combo = QComboBox()
-        self.glossary_refinement_azure_api_version_combo.addItems(glossary_refinement_azure_versions)
-        self.glossary_refinement_azure_api_version_combo.setCurrentText('2025-01-01-preview')
-        self.glossary_refinement_azure_api_version_combo.setStyleSheet("font-size: 7pt;")
-        self.glossary_refinement_azure_api_version_combo.setMaximumWidth(180)
-        self._disable_combobox_mousewheel(self.glossary_refinement_azure_api_version_combo)
-        add_glossary_refinement_grid.addWidget(self.glossary_refinement_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
-
-        # Initially hide endpoint fields
-        self._toggle_glossary_refinement_individual_endpoint_fields()
-
-        # Glossary refinement keys list
-        self._create_glossary_refinement_list(glossary_refinement_frame_layout)
-
-        # Add container to parent
-        glossary_refinement_container_layout.addWidget(glossary_refinement_frame)
-        parent_layout.addWidget(self.glossary_refinement_container)
-
-        # Initially disable if checkbox is unchecked
-        self._toggle_glossary_refinement_section()
-
-    def _create_glossary_refinement_list(self, parent_layout):
-        """Create the Glossary refinement keys list."""
-        self.glossary_refinement_list_label = QLabel("Glossary Refinement Keys (tried in order):")
-        list_label_font = QFont()
-        list_label_font.setBold(True)
-        self.glossary_refinement_list_label.setFont(list_label_font)
-        parent_layout.addWidget(self.glossary_refinement_list_label)
-
-        # Container for tree and buttons
-        self.glossary_refinement_tree_container = QWidget()
-        container_layout = QHBoxLayout(self.glossary_refinement_tree_container)
-        container_layout.setContentsMargins(0, 0, 0, 0)
-
-        # Left side: Move buttons
-        self.glossary_refinement_move_frame = QWidget()
-        move_layout = QVBoxLayout(self.glossary_refinement_move_frame)
-        move_layout.setContentsMargins(0, 0, 5, 0)
-
-        order_label = QLabel("Reorder")
-        order_font = QFont()
-        order_font.setBold(True)
-        order_label.setFont(order_font)
-        move_layout.addWidget(order_label)
-
-        top_btn = QPushButton("↑ ↑")
-        top_btn.setFixedSize(55, 32)
-        top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
-        top_btn.clicked.connect(lambda: self._move_glossary_refinement_key('top'))
-        move_layout.addWidget(top_btn)
-
-        up_btn = QPushButton("↑")
-        up_btn.setFixedSize(55, 32)
-        up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
-        up_btn.clicked.connect(lambda: self._move_glossary_refinement_key('up'))
-        move_layout.addWidget(up_btn)
-
-        down_btn = QPushButton("↓")
-        down_btn.setFixedSize(55, 32)
-        down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
-        down_btn.clicked.connect(lambda: self._move_glossary_refinement_key('down'))
-        move_layout.addWidget(down_btn)
-
-        bottom_btn = QPushButton("↓ ↓")
-        bottom_btn.setFixedSize(55, 32)
-        bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
-        bottom_btn.clicked.connect(lambda: self._move_glossary_refinement_key('bottom'))
-        move_layout.addWidget(bottom_btn)
-
-        move_layout.addSpacing(10)
-
-        self.glossary_refinement_position_label = QLabel()
-        self.glossary_refinement_position_label.setStyleSheet("color: gray;")
-        move_layout.addWidget(self.glossary_refinement_position_label)
-        move_layout.addStretch()
-        container_layout.addWidget(self.glossary_refinement_move_frame)
-
-        # Right side: TreeWidget with drag and drop
-        self.glossary_refinement_tree = QTreeWidget()
-        self.glossary_refinement_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', 'Success', 'Errors', 'Times Used'])
-        self.glossary_refinement_tree.setColumnWidth(0, 125)
-        self.glossary_refinement_tree.setColumnWidth(1, 220)
-        self.glossary_refinement_tree.setColumnWidth(2, 105)
-        self.glossary_refinement_tree.setColumnWidth(3, 100)
-        self.glossary_refinement_tree.setColumnWidth(4, 90)
-        self.glossary_refinement_tree.setColumnWidth(5, 100)
-        self.glossary_refinement_tree.setColumnWidth(6, 75)
-        self.glossary_refinement_tree.setColumnWidth(7, 55)
-        self.glossary_refinement_tree.setColumnWidth(8, 80)
-
-        qs_header = self.glossary_refinement_tree.header()
-        qs_header_font = QFont()
-        qs_header_font.setBold(True)
-        qs_header_font.setPointSize(11)
-        qs_header.setFont(qs_header_font)
-
-        self.glossary_refinement_tree.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.glossary_refinement_tree.customContextMenuRequested.connect(self._show_glossary_refinement_context_menu)
-        self.glossary_refinement_tree.setMinimumHeight(150)
-
-        self.glossary_refinement_tree.setDragDropMode(QAbstractItemView.InternalMove)
-        self.glossary_refinement_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-
-        self.glossary_refinement_tree.model().rowsMoved.connect(self._on_glossary_refinement_rows_moved)
-        self.glossary_refinement_tree.itemSelectionChanged.connect(self._on_glossary_refinement_selection_change)
-        self.glossary_refinement_tree.itemDoubleClicked.connect(self._on_glossary_refinement_click)
-
-        container_layout.addWidget(self.glossary_refinement_tree)
-        parent_layout.addWidget(self.glossary_refinement_tree_container)
-
-        # Action buttons
-        self.glossary_refinement_action_frame = QWidget()
-        glossary_refinement_action_layout = QHBoxLayout(self.glossary_refinement_action_frame)
-        glossary_refinement_action_layout.setContentsMargins(0, 10, 0, 0)
-
-        test_selected_btn = QPushButton("Test Selected")
-        test_selected_btn.clicked.connect(self._test_selected_glossary_refinement)
-        glossary_refinement_action_layout.addWidget(test_selected_btn)
-
-        test_all_btn = QPushButton("Test All")
-        test_all_btn.clicked.connect(self._test_all_glossary_refinement)
-        glossary_refinement_action_layout.addWidget(test_all_btn)
-
-        enable_selected_btn = QPushButton("Enable Selected")
-        enable_selected_btn.clicked.connect(self._enable_selected_glossary_refinement)
-        glossary_refinement_action_layout.addWidget(enable_selected_btn)
-
-        disable_selected_btn = QPushButton("Disable Selected")
-        disable_selected_btn.clicked.connect(self._disable_selected_glossary_refinement)
-        glossary_refinement_action_layout.addWidget(disable_selected_btn)
-
-        remove_selected_btn = QPushButton("Remove Selected")
-        remove_selected_btn.clicked.connect(self._remove_selected_glossary_refinement)
-        glossary_refinement_action_layout.addWidget(remove_selected_btn)
-
-        clear_all_btn = QPushButton("Clear All")
-        clear_all_btn.clicked.connect(self._clear_all_glossary_refinement)
-        glossary_refinement_action_layout.addWidget(clear_all_btn)
-
-        glossary_refinement_action_layout.addStretch()
-        self.glossary_refinement_status_label = QLabel()
-        self.glossary_refinement_status_label.setStyleSheet("color: gray;")
-        glossary_refinement_action_layout.addWidget(self.glossary_refinement_status_label)
-        parent_layout.addWidget(self.glossary_refinement_action_frame)
-
-        # Load existing Glossary refinement keys
-        self._load_glossary_refinement_keys()
-
-    def _load_glossary_refinement_keys(self):
-        """Load Glossary refinement keys from config."""
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-
-        v_scroll = self.glossary_refinement_tree.verticalScrollBar().value()
-        h_scroll = self.glossary_refinement_tree.horizontalScrollBar().value()
-
-        selected_indices = []
-        for item in self.glossary_refinement_tree.selectedItems():
-            selected_indices.append(self.glossary_refinement_tree.indexOfTopLevelItem(item))
-
-        self.glossary_refinement_tree.clear()
-
-        for key_data in glossary_refinement_keys:
-            api_key = key_data.get('api_key', '')
-            model = key_data.get('model', '')
-            times_used = int(key_data.get('times_used', 0))
-
-            masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
-
-            try:
-                raw_limit = key_data.get('individual_output_token_limit')
-                per_key_limit = int(raw_limit) if raw_limit not in (None, "") else None
-            except Exception:
-                per_key_limit = None
-            if per_key_limit and per_key_limit > 0:
-                output_limit_str = str(per_key_limit)
-            else:
-                output_limit_str = "global"
-
-            # Determine per-key temperature display value
-            try:
-                raw_temp = key_data.get('individual_key_temperature')
-                per_key_temp = float(raw_temp) if raw_temp not in (None, "") else None
-            except Exception:
-                per_key_temp = None
-            if per_key_temp is not None:
-                temp_str = str(per_key_temp)
-            else:
-                temp_str = "global"
-
-            enabled = key_data.get('enabled', True)
-            test_result = key_data.get('last_test_result')
-            if not enabled:
-                status = "Disabled"
-                color = Qt.gray
-            elif test_result == 'passed':
-                status = "✅ Passed"
-                color = Qt.darkGreen
-            elif test_result == 'failed':
-                status = "❌ Failed"
-                color = Qt.red
-            elif test_result == 'timeout':
-                status = "⏱️ Timed Out"
-                color = Qt.darkYellow
-            elif test_result == 'error':
-                status = "❌ Error"
-                color = Qt.darkRed
-            else:
-                status = "Enabled"
-                color = Qt.gray
-
-            # Determine per-key API call delay display value
-            try:
-                raw_delay = key_data.get('api_call_delay')
-                per_key_delay = float(raw_delay) if raw_delay not in (None, "") else 0.0
-            except Exception:
-                per_key_delay = 0.0
-            delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
-
-            success_count = int(key_data.get('success_count', 0))
-            error_count = int(key_data.get('error_count', 0))
-            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
-            for col in range(item.columnCount()):
-                item.setForeground(col, color)
-
-            # Tooltip for per-key settings
-            tooltip_parts = []
-            if per_key_limit and per_key_limit > 0:
-                tooltip_parts.append(f"Individual Output Token Limit: {per_key_limit}")
-            else:
-                tooltip_parts.append("Using global output token limit")
-            if per_key_temp is not None:
-                tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
-            else:
-                tooltip_parts.append("Using global temperature")
-            if per_key_delay > 0:
-                tooltip_parts.append(f"API Call Delay: {per_key_delay}s (overrides global SEND_INTERVAL_SECONDS)")
-            else:
-                tooltip_parts.append("Using global API call delay (SEND_INTERVAL_SECONDS)")
-            tooltip = "\n".join(tooltip_parts)
-            for col in range(item.columnCount()):
-                item.setToolTip(col, tooltip)
-
-            item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
-            self.glossary_refinement_tree.addTopLevelItem(item)
-
-        for index in selected_indices:
-            if index < self.glossary_refinement_tree.topLevelItemCount():
-                item = self.glossary_refinement_tree.topLevelItem(index)
-                item.setSelected(True)
-
-        self.glossary_refinement_tree.verticalScrollBar().setValue(v_scroll)
-        self.glossary_refinement_tree.horizontalScrollBar().setValue(h_scroll)
-
-        # Auto-refresh the in-memory pool so changes take effect immediately
-        if not getattr(self, '_initializing', False):
-            self._refresh_glossary_refinement_pool()
-
-    def _add_glossary_refinement_key(self):
-        """Add a new glossary refinement key"""
-        api_key = self.glossary_refinement_key_entry.text().strip()
-        model = self.glossary_refinement_model_combo.currentText().strip()
-        google_credentials = self.glossary_refinement_google_creds_entry.text().strip() or None
-        google_region = self.glossary_refinement_google_region_entry.text().strip() or None
-
-        use_individual_endpoint = self.glossary_refinement_individual_endpoint_toggle.isChecked()
-        azure_endpoint = self.glossary_refinement_azure_endpoint_entry.text().strip() if use_individual_endpoint else None
-        azure_api_version = self.glossary_refinement_azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
-
-        if not model:
-            QMessageBox.critical(self, "Error", "Please enter a model name")
-            return
-
-
-
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-
-        individual_output_token_limit = None
-        individual_key_temperature = None
-
-        glossary_refinement_keys.append({
-            'api_key': api_key,
-            'model': model,
-            'google_credentials': google_credentials,
-            'azure_endpoint': azure_endpoint,
-            'google_region': google_region,
-            'azure_api_version': azure_api_version,
-            'use_individual_endpoint': use_individual_endpoint,
-            'individual_output_token_limit': individual_output_token_limit,
-            'individual_key_temperature': individual_key_temperature,
-            'api_call_delay': 0.0,
-            'enabled': True,
-            'times_used': 0
-        })
-
-        self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-        self.translator_gui.save_config(show_message=False)
-
-        # Clear inputs
-        self.glossary_refinement_key_entry.clear()
-        self.glossary_refinement_model_combo.setCurrentText("")
-        self.glossary_refinement_google_creds_entry.clear()
-        self.glossary_refinement_azure_endpoint_entry.clear()
-        self.glossary_refinement_google_region_entry.setText("us-east5")
-        self.glossary_refinement_azure_api_version_combo.setCurrentText('2025-01-01-preview')
-        self.glossary_refinement_individual_endpoint_toggle.setChecked(False)
-
-        self._toggle_glossary_refinement_individual_endpoint_fields()
-
-        self._load_glossary_refinement_keys()
-
-        extras = []
-        if google_credentials:
-            extras.append(f"Google: {os.path.basename(google_credentials)}")
-        if azure_endpoint:
-            extras.append(f"Azure: {azure_endpoint[:30]}...")
-        extra_info = f" ({', '.join(extras)})" if extras else ""
-        self._show_glossary_refinement_status(f"Added Glossary refinement key for model: {model}{extra_info}")
-
-        self._notify_authgpt_visibility()
-
-    def _move_glossary_refinement_key(self, direction):
-        """Move selected glossary refinement key up or down"""
-        selected = self.glossary_refinement_tree.selectedItems()
-        if not selected:
-            return
-
-        item = selected[0]
-        index = self.glossary_refinement_tree.indexOfTopLevelItem(item)
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-
-        if index >= len(glossary_refinement_keys):
-            return
-
-        new_index = index
-        if direction == 'top' and index > 0:
-            new_index = 0
-        elif direction == 'up' and index > 0:
-            new_index = index - 1
-        elif direction == 'down' and index < len(glossary_refinement_keys) - 1:
-            new_index = index + 1
-        elif direction == 'bottom' and index < len(glossary_refinement_keys) - 1:
-            new_index = len(glossary_refinement_keys) - 1
-
-        if new_index != index:
-            key = glossary_refinement_keys.pop(index)
-            glossary_refinement_keys.insert(new_index, key)
-
-            self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-            self.translator_gui.save_config(show_message=False)
-
-            self._load_glossary_refinement_keys()
-
-            if new_index < self.glossary_refinement_tree.topLevelItemCount():
-                item = self.glossary_refinement_tree.topLevelItem(new_index)
-                if item:
-                    self.glossary_refinement_tree.setCurrentItem(item)
-                    item.setSelected(True)
-
-    def _test_selected_glossary_refinement(self):
-        """Test selected glossary refinement key"""
-        selected = self.glossary_refinement_tree.selectedItems()
-        if not selected:
-            QMessageBox.warning(self, "Warning", "Please select a Glossary refinement key to test")
-            return
-
-        index = self.glossary_refinement_tree.indexOfTopLevelItem(selected[0])
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-
-        if index >= len(glossary_refinement_keys):
-            return
-
-        if index < self.glossary_refinement_tree.topLevelItemCount():
-            item = self.glossary_refinement_tree.topLevelItem(index)
-            if item:
-                item.setText(3, "⏳ Testing...")
-
-        key_data = glossary_refinement_keys[index]
-
-        try:
-            from unified_api_client import UnifiedClient
-            UnifiedClient._api_key_pool = self.key_pool
-        except Exception:
-            pass
-
-        QTimer.singleShot(100, lambda: self._test_single_glossary_refinement_key(key_data, index))
-
-    def _test_all_glossary_refinement(self):
-        """Test all Glossary refinement keys in parallel."""
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-
-        if not glossary_refinement_keys:
-            QMessageBox.warning(self, "Warning", "No Glossary refinement keys to test")
-            return
-
-        for i in range(self.glossary_refinement_tree.topLevelItemCount()):
-            item = self.glossary_refinement_tree.topLevelItem(i)
-            if item:
-                item.setText(3, "⏳ Testing...")
-
-        try:
-            from unified_api_client import UnifiedClient
-            UnifiedClient._api_key_pool = self.key_pool
-        except Exception:
-            pass
-
-        for i, key_data in enumerate(glossary_refinement_keys):
-            self._test_single_glossary_refinement_key(key_data, i)
-
-    @Slot(int, bool) if HAS_GUI else lambda x: x
-    def _update_glossary_refinement_test_result(self, index, success):
-        """Update glossary refinement tree item with test result"""
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-        if index < len(glossary_refinement_keys):
-            try:
-                glossary_refinement_keys[index]['times_used'] = int(glossary_refinement_keys[index].get('times_used', 0)) + 1
-                if success:
-                    glossary_refinement_keys[index]['success_count'] = int(glossary_refinement_keys[index].get('success_count', 0)) + 1
-                else:
-                    glossary_refinement_keys[index]['error_count'] = int(glossary_refinement_keys[index].get('error_count', 0)) + 1
-                self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-                self.translator_gui.save_config(show_message=False)
-            except Exception:
-                pass
-
-        if index < self.glossary_refinement_tree.topLevelItemCount():
-            item = self.glossary_refinement_tree.topLevelItem(index)
-            if item:
-                if success:
-                    item.setText(3, "✅ Passed")
-                    color = Qt.darkGreen
-                else:
-                    item.setText(3, "❌ Failed")
-                    color = Qt.red
-                for col in range(item.columnCount()):
-                    item.setForeground(col, color)
-                try:
-                    if success:
-                        current = int(item.text(4))
-                        item.setText(4, str(current + 1))
-                    else:
-                        current = int(item.text(5))
-                        item.setText(5, str(current + 1))
-                except Exception:
-                    pass
-                try:
-                    current_times = int(item.text(6))
-                    item.setText(6, str(current_times + 1))
-                except Exception:
-                    item.setText(6, "1")
-
-    @Slot(int) if HAS_GUI else lambda x: x
-    def _update_glossary_refinement_timeout_status(self, index):
-        """Update glossary refinement tree item with timeout status"""
-        if index < self.glossary_refinement_tree.topLevelItemCount():
-            item = self.glossary_refinement_tree.topLevelItem(index)
-            if item:
-                item.setText(3, "⏱️ Timed Out")
-                for col in range(item.columnCount()):
-                    item.setForeground(col, Qt.darkYellow)
-
-    def _test_single_glossary_refinement_key(self, key_data, index):
-        """Test a single glossary refinement key — REAL API TEST"""
-        api_key = key_data.get('api_key', '')
-        model = key_data.get('model', '')
-
-        print(f"[DEBUG] Starting REAL Glossary refinement key test for {model}")
-
-        from concurrent.futures import ThreadPoolExecutor
-        from unified_api_client import UnifiedClient
-
-        if hasattr(self.translator_gui, '_ensure_executor'):
-            self.translator_gui._ensure_executor()
-        executor = getattr(self.translator_gui, 'executor', None)
-
-        client_ref = [None]
-        timed_out = [False]
-
-        def run_api_test():
-            try:
-                client = UnifiedClient(
-                    api_key=api_key,
-                    model=model,
-                    output_dir=None
-                )
-                client_ref[0] = client
-
-                try:
-                    tls = client._get_thread_local_client()
-                    tls.max_retries_override = 1
-                except Exception:
-                    pass
-
-                google_credentials = key_data.get('google_credentials')
-                if google_credentials:
-                    client.current_key_google_creds = google_credentials
-                    client.google_creds_path = google_credentials
-
-                google_region = key_data.get('google_region')
-                if google_region:
-                    client.current_key_google_region = google_region
-
-                use_individual_endpoint = key_data.get('use_individual_endpoint', False)
-                if use_individual_endpoint:
-                    azure_endpoint = key_data.get('azure_endpoint')
-                    if azure_endpoint:
-                        client.current_key_azure_endpoint = azure_endpoint
-                        client.current_key_use_individual_endpoint = True
-                    azure_api_version = key_data.get('azure_api_version')
-                    if azure_api_version:
-                        client.current_key_azure_api_version = azure_api_version
-
-                messages = [
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "Say 'API test successful' and nothing else."}
-                ]
-
-                response = client.send(messages, temperature=0.7, max_tokens=1000)
-
-                if response and isinstance(response, tuple):
-                    content, _ = response
-                    if content and "test successful" in content.lower():
-                        print(f"[DEBUG] Glossary refinement key test completed for {model}: PASSED")
-                        if not timed_out[0]:
-                            if HAS_GUI:
-                                QMetaObject.invokeMethod(self, "_update_glossary_refinement_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
-                            else:
-                                self._update_glossary_refinement_test_result(index, True)
-                        return
-
-                print(f"[DEBUG] Glossary refinement key test completed for {model}: FAILED")
-                if not timed_out[0]:
-                    if HAS_GUI:
-                        QMetaObject.invokeMethod(self, "_update_glossary_refinement_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
-                    else:
-                        self._update_glossary_refinement_test_result(index, False)
-            except Exception as e:
-                print(f"[DEBUG] Glossary refinement key test error for {model}: {e}")
-                if not timed_out[0]:
-                    if HAS_GUI:
-                        QMetaObject.invokeMethod(self, "_update_glossary_refinement_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
-                    else:
-                        self._update_glossary_refinement_test_result(index, False)
-
-        def run_with_timeout():
-            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-            with ThreadPoolExecutor(max_workers=1) as timeout_pool:
-                future = timeout_pool.submit(run_api_test)
-                try:
-                    future.result(timeout=30)
-                except FuturesTimeout:
-                    timed_out[0] = True
-                    print(f"[DEBUG] Glossary refinement key test TIMED OUT for {model} (30s)")
-                    _client = client_ref[0]
-                    if _client:
-                        try:
-                            _client._cancelled = True
-                            oc = getattr(_client, 'openai_client', None)
-                            if oc and hasattr(oc, 'close'):
-                                oc.close()
-                            elif oc and hasattr(oc, '_client') and hasattr(oc._client, 'close'):
-                                oc._client.close()
-                        except Exception:
-                            pass
-                    try:
-                        from unified_api_client import _api_watchdog_reset
-                        _api_watchdog_reset()
-                    except Exception:
-                        pass
-                    if HAS_GUI:
-                        QMetaObject.invokeMethod(self, "_update_glossary_refinement_timeout_status", Qt.QueuedConnection, Q_ARG(int, index))
-                    else:
-                        self._update_glossary_refinement_timeout_status(index)
-                except Exception:
-                    pass
-
-        if executor:
-            executor.submit(run_with_timeout)
-        else:
-            thread = threading.Thread(target=run_with_timeout, daemon=True)
-            thread.start()
-
-    def _remove_selected_glossary_refinement(self):
-        """Remove selected Glossary refinement keys."""
-        selected = self.glossary_refinement_tree.selectedItems()
-        if not selected:
-            return
-
-        reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected Glossary refinement key(s)?",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            indices = sorted([self.glossary_refinement_tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
-
-            glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-
-            for index in indices:
-                if index < len(glossary_refinement_keys):
-                    del glossary_refinement_keys[index]
-
-            self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-            self.translator_gui.save_config(show_message=False)
-            self._load_glossary_refinement_keys()
-            self._show_glossary_refinement_status(f"Removed {len(selected)} Glossary refinement key(s)")
-            self._notify_authgpt_visibility()
-
-
-    def _enable_selected_glossary_refinement(self):
-        """Enable selected Glossary refinement keys."""
-        selected = self.glossary_refinement_tree.selectedItems()
-        if not selected:
-            return
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-        for item in selected:
-            index = self.glossary_refinement_tree.indexOfTopLevelItem(item)
-            if index < len(glossary_refinement_keys):
-                glossary_refinement_keys[index]['enabled'] = True
-        self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_glossary_refinement_keys()
-        self._show_glossary_refinement_status(f"Enabled {len(selected)} Glossary refinement key(s)")
-        self._notify_authgpt_visibility()
-
-    def _disable_selected_glossary_refinement(self):
-        """Disable selected Glossary refinement keys."""
-        selected = self.glossary_refinement_tree.selectedItems()
-        if not selected:
-            return
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-        for item in selected:
-            index = self.glossary_refinement_tree.indexOfTopLevelItem(item)
-            if index < len(glossary_refinement_keys):
-                glossary_refinement_keys[index]['enabled'] = False
-        self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_glossary_refinement_keys()
-        self._show_glossary_refinement_status(f"Disabled {len(selected)} Glossary refinement key(s)")
-        self._notify_authgpt_visibility()
-
-    def _clear_all_glossary_refinement(self):
-        """Clear all Glossary refinement keys."""
-        if self.glossary_refinement_tree.topLevelItemCount() == 0:
-            return
-
-        reply = QMessageBox.question(self, "Confirm", "Remove ALL Glossary refinement keys?",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            self.translator_gui.config['glossary_refinement_keys'] = []
-            self.translator_gui.save_config(show_message=False)
-            self._load_glossary_refinement_keys()
-            self._show_glossary_refinement_status("Cleared all Glossary refinement keys")
-            self._notify_authgpt_visibility()
-
-    def _toggle_glossary_refinement_section(self):
-        """Toggle glossary refinement section visibility"""
-        enabled = self.use_glossary_refinement_keys_checkbox.isChecked()
-
-        if hasattr(self, 'add_glossary_refinement_frame'):
-            self.add_glossary_refinement_frame.setVisible(enabled)
-        if hasattr(self, 'glossary_refinement_list_label'):
-            self.glossary_refinement_list_label.setVisible(enabled)
-        if hasattr(self, 'glossary_refinement_tree_container'):
-            self.glossary_refinement_tree_container.setVisible(enabled)
-        if hasattr(self, 'glossary_refinement_action_frame'):
-            self.glossary_refinement_action_frame.setVisible(enabled)
-        if hasattr(self, 'glossary_refinement_tree') and not enabled:
-            self.glossary_refinement_tree.clearSelection()
-
-        self._show_glossary_refinement_status(f"Glossary Refinement Keys {'enabled' if enabled else 'disabled'}")
-
-        # Update in-memory config immediately
-        self.translator_gui.config['use_glossary_refinement_keys'] = enabled
-        if hasattr(self.translator_gui, 'use_glossary_refinement_keys_var'):
-            self.translator_gui.use_glossary_refinement_keys_var = enabled
-
-        if not getattr(self, '_initializing', False):
-            glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-            if enabled:
-                msg = f"🔑 Glossary refinement key pool: {len(glossary_refinement_keys)} keys loaded"
-            else:
-                msg = f"🔑 Glossary refinement key pool: disabled"
-            if hasattr(self.translator_gui, 'append_log'):
-                try:
-                    self.translator_gui.append_log(msg)
-                except Exception:
-                    print(msg)
-            else:
-                print(msg)
-
-        try:
-            import os as _os
-            import json as _json
-            qk_list = self.translator_gui.config.get('glossary_refinement_keys', []) or []
-            _os.environ['USE_GLOSSARY_REFINEMENT_KEYS'] = '1' if enabled else '0'
-            _os.environ['GLOSSARY_REFINEMENT_API_KEYS'] = _json.dumps(qk_list)
-        except Exception:
-            pass
-
-        if enabled:
-            try:
-                from unified_api_client import UnifiedClient
-                qk_list = self.translator_gui.config.get('glossary_refinement_keys', []) or []
-                if qk_list:
-                    UnifiedClient.set_in_memory_glossary_refinement_keys(qk_list)
-            except Exception:
-                pass
-        else:
-            try:
-                from unified_api_client import UnifiedClient
-                UnifiedClient.clear_in_memory_glossary_refinement_keys()
-            except Exception:
-                pass
-
-        self._notify_authgpt_visibility()
-
-    def _refresh_glossary_refinement_pool(self):
-        """Refresh the in-memory Glossary refinement key pool after any change."""
-        try:
-            use_glossary_refinement = self.use_glossary_refinement_keys_checkbox.isChecked() if hasattr(self, 'use_glossary_refinement_keys_checkbox') else False
-            if not use_glossary_refinement:
-                return
-            from unified_api_client import UnifiedClient
-            qk_list = self.translator_gui.config.get('glossary_refinement_keys', []) or []
-            try:
-                import os as _os
-                import json as _json
-                _os.environ['USE_GLOSSARY_REFINEMENT_KEYS'] = '1'
-                _os.environ['GLOSSARY_REFINEMENT_API_KEYS'] = _json.dumps(qk_list)
-            except Exception:
-                pass
-            if qk_list:
-                UnifiedClient.set_in_memory_glossary_refinement_keys(qk_list)
-            else:
-                UnifiedClient.clear_in_memory_glossary_refinement_keys()
-        except Exception:
-            pass
-
-    def _toggle_glossary_refinement_visibility(self):
-        """Toggle glossary refinement key field visibility"""
-        if self.glossary_refinement_key_entry.echoMode() == QLineEdit.Password:
-            self.glossary_refinement_key_entry.setEchoMode(QLineEdit.Normal)
-            self.show_glossary_refinement_btn.setText('🔒')
-        else:
-            self.glossary_refinement_key_entry.setEchoMode(QLineEdit.Password)
-            self.show_glossary_refinement_btn.setText('👁')
-
-    def _toggle_glossary_refinement_individual_endpoint_fields(self):
-        """Toggle visibility of glossary refinement individual endpoint fields"""
-        enabled = self.glossary_refinement_individual_endpoint_toggle.isChecked()
-
-        self.glossary_refinement_individual_endpoint_label.setVisible(enabled)
-        self.glossary_refinement_azure_endpoint_entry.setVisible(enabled)
-        self.glossary_refinement_individual_api_version_label.setVisible(enabled)
-        self.glossary_refinement_azure_api_version_combo.setVisible(enabled)
-
-        self.glossary_refinement_azure_endpoint_entry.setEnabled(enabled)
-        self.glossary_refinement_azure_api_version_combo.setEnabled(enabled)
-
-        if not enabled:
-            self.glossary_refinement_azure_endpoint_entry.clear()
-            self.glossary_refinement_azure_api_version_combo.setCurrentText('2025-01-01-preview')
-
-    def _show_glossary_refinement_context_menu(self, position):
-        """Show context menu for Glossary refinement keys."""
-        item = self.glossary_refinement_tree.itemAt(position)
-        if not item:
-            return
-
-        if item not in self.glossary_refinement_tree.selectedItems():
-            self.glossary_refinement_tree.setCurrentItem(item)
-
-        menu = QMenu(self)
-
-        index = self.glossary_refinement_tree.indexOfTopLevelItem(item)
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-        total = len(glossary_refinement_keys)
-
-        # Reorder submenu
-        if total > 1:
-            reorder_menu = menu.addMenu("Reorder")
-            if index > 0:
-                up_action = reorder_menu.addAction("Move Up")
-                up_action.triggered.connect(lambda: self._move_glossary_refinement_key('up'))
-            if index < total - 1:
-                down_action = reorder_menu.addAction("Move Down")
-                down_action.triggered.connect(lambda: self._move_glossary_refinement_key('down'))
-            menu.addSeparator()
-
-        # Change Model
-        selected_count = len(self.glossary_refinement_tree.selectedItems())
-        if selected_count > 1:
-            change_model_action = menu.addAction(f"Change Model ({selected_count} selected)")
-        else:
-            change_model_action = menu.addAction("Change Model")
-        change_model_action.triggered.connect(self._change_glossary_refinement_model_for_selected)
-
-        menu.addSeparator()
-
-        # Individual Endpoint options
-        if index < len(glossary_refinement_keys):
-            key_data = glossary_refinement_keys[index]
-            endpoint_enabled = key_data.get('use_individual_endpoint', False)
-            endpoint_url = key_data.get('azure_endpoint', '')
-
-            if endpoint_enabled and endpoint_url:
-                config_action = menu.addAction("✅ Individual Endpoint")
-                config_action.triggered.connect(lambda: self._configure_glossary_refinement_individual_endpoint(index))
-                disable_action = menu.addAction("Disable Individual Endpoint")
-                disable_action.triggered.connect(lambda: self._toggle_glossary_refinement_individual_endpoint(index, False))
-            else:
-                config_action = menu.addAction("🔧 Configure Individual Endpoint")
-                config_action.triggered.connect(lambda: self._configure_glossary_refinement_individual_endpoint(index))
-
-        menu.addSeparator()
-
-        # Per-key output token limit options
-        selected_items = self.glossary_refinement_tree.selectedItems()
-        selected_count = len(selected_items)
-        if selected_count > 1:
-            set_limit_action = menu.addAction(f"Set Output Token Limit ({selected_count} selected)")
-        else:
-            set_limit_action = menu.addAction("Set Output Token Limit")
-        set_limit_action.triggered.connect(self._set_glossary_refinement_output_token_limit_for_selected)
-        clear_limit_action = menu.addAction("Clear Output Token Limit")
-        clear_limit_action.triggered.connect(self._clear_glossary_refinement_output_token_limit_for_selected)
-
-        # Per-key temperature options
-        if selected_count > 1:
-            set_temp_action = menu.addAction(f"Set Key Temperature ({selected_count} selected)")
-        else:
-            set_temp_action = menu.addAction("Set Key Temperature")
-        set_temp_action.triggered.connect(self._set_glossary_refinement_key_temperature_for_selected)
-        clear_temp_action = menu.addAction("Clear Key Temperature")
-        clear_temp_action.triggered.connect(self._clear_glossary_refinement_key_temperature_for_selected)
-
-        # Per-key API call delay options for Glossary refinement keys
-        if selected_count > 1:
-            set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
-        else:
-            set_delay_action = menu.addAction("Set API Call Delay")
-        set_delay_action.triggered.connect(self._set_glossary_refinement_api_call_delay_for_selected)
-        clear_delay_action = menu.addAction("Clear API Call Delay")
-        clear_delay_action.triggered.connect(self._clear_glossary_refinement_api_call_delay_for_selected)
-
-        menu.addSeparator()
-
-        test_action = menu.addAction("Test")
-        test_action.triggered.connect(self._test_selected_glossary_refinement)
-        enable_action = menu.addAction("Enable")
-        enable_action.triggered.connect(self._enable_selected_glossary_refinement)
-        disable_action = menu.addAction("Disable")
-        disable_action.triggered.connect(self._disable_selected_glossary_refinement)
-        menu.addSeparator()
-        remove_action = menu.addAction("Remove")
-        remove_action.triggered.connect(self._remove_selected_glossary_refinement)
-
-        if total > 1:
-            clear_action = menu.addAction("Clear All")
-            clear_action.triggered.connect(self._clear_all_glossary_refinement)
-
-        menu.exec_(self.glossary_refinement_tree.viewport().mapToGlobal(position))
-
-    def _change_glossary_refinement_model_for_selected(self):
-        """Change model name for selected Glossary refinement keys."""
-        selected = self.glossary_refinement_tree.selectedItems()
-        if not selected:
-            return
-
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Change Model for {len(selected)} Glossary Refinement Keys")
-        screen = QApplication.primaryScreen().geometry()
-        width = int(screen.width() * 0.21)
-        height = int(screen.height() * 0.13)
-        dialog.resize(width, height)
-        self._set_icon(dialog)
-
-        main_layout = QVBoxLayout(dialog)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-
-        label = QLabel("Enter new model name (press Enter to apply):")
-        main_layout.addWidget(label)
-
-        all_models = get_model_options()
-        model_combo = QComboBox()
-        model_combo.addItems(all_models)
-        model_combo.setEditable(True)
-        main_layout.addWidget(model_combo)
-
-        selected_indices = [self.glossary_refinement_tree.indexOfTopLevelItem(item) for item in selected]
-        if selected_indices and selected_indices[0] < len(glossary_refinement_keys):
-            current_model = glossary_refinement_keys[selected_indices[0]].get('model', '')
-            model_combo.setCurrentText(current_model)
-            model_combo.lineEdit().selectAll()
-
-        def apply_change():
-            new_model = model_combo.currentText().strip()
-            if new_model:
-                for item in selected:
-                    idx = self.glossary_refinement_tree.indexOfTopLevelItem(item)
-                    if idx < len(glossary_refinement_keys):
-                        glossary_refinement_keys[idx]['model'] = new_model
-                self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_glossary_refinement_keys()
-                self._show_glossary_refinement_status(f"Changed model to '{new_model}' for {len(selected)} Glossary refinement keys")
-                dialog.accept()
-
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-        apply_btn = QPushButton("Apply")
-        apply_btn.clicked.connect(apply_change)
-        apply_btn.setDefault(True)
-        button_layout.addWidget(apply_btn)
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(dialog.reject)
-        button_layout.addWidget(cancel_btn)
-        main_layout.addLayout(button_layout)
-
-        model_combo.setFocus()
-        dialog.exec_()
-
-    def _on_glossary_refinement_rows_moved(self):
-        """Sync glossary_refinement_keys config with tree order after drag-drop"""
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-
-        new_order = []
-        for i in range(self.glossary_refinement_tree.topLevelItemCount()):
-            item = self.glossary_refinement_tree.topLevelItem(i)
-            if item:
-                masked_key = item.text(0)
-                model = item.text(1)
-                for key_data in glossary_refinement_keys:
-                    api_key = key_data.get('api_key', '')
-                    key_masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
-                    if key_masked == masked_key and key_data.get('model', '') == model and key_data not in new_order:
-                        new_order.append(key_data)
-                        break
-
-        if len(new_order) == len(glossary_refinement_keys):
-            self.translator_gui.config['glossary_refinement_keys'] = new_order
-            self.translator_gui.save_config(show_message=False)
-            self._show_glossary_refinement_status("Reordered Glossary refinement keys")
-
-    def _on_glossary_refinement_selection_change(self):
-        """Update position label when glossary refinement selection changes"""
-        selected = self.glossary_refinement_tree.selectedItems()
-        if selected:
-            index = self.glossary_refinement_tree.indexOfTopLevelItem(selected[0])
-            total = self.glossary_refinement_tree.topLevelItemCount()
-            self.glossary_refinement_position_label.setText(f"#{index + 1}/{total}")
-        else:
-            self.glossary_refinement_position_label.setText("")
-
-    def _on_glossary_refinement_click(self, item, column):
-        """Handle double-click on glossary refinement tree item for inline editing"""
-        if not item:
-            return
-
-        index = self.glossary_refinement_tree.indexOfTopLevelItem(item)
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-        if index >= len(glossary_refinement_keys):
-            return
-
-        if column == 1:
-            old_value = item.text(1)
-            new_value, ok = self._show_model_edit_dialog(old_value)
-            if ok and new_value and new_value != old_value:
-                glossary_refinement_keys[index]['model'] = new_value
-                self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_glossary_refinement_keys()
-                self._show_glossary_refinement_status(f"Updated model to: {new_value}")
-        elif column == 2:
-            from PySide6.QtWidgets import QInputDialog
-            current = glossary_refinement_keys[index].get('individual_output_token_limit') or 0
-            try:
-                current = int(current)
-            except (ValueError, TypeError):
-                current = 0
-            value, ok = QInputDialog.getInt(
-                self, "Edit Output Token Limit",
-                "Output token limit (0 = use global):",
-                current, 0, 1000000, 100
-            )
-            if ok:
-                glossary_refinement_keys[index]['individual_output_token_limit'] = value if value > 0 else None
-                self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_glossary_refinement_keys()
-                self._show_glossary_refinement_status(f"Updated output limit to: {value if value > 0 else 'global'}")
-        elif column == 3:
-            from PySide6.QtWidgets import QInputDialog
-            current = glossary_refinement_keys[index].get('individual_key_temperature')
-            default = float(current) if current not in (None, "") else -1.0
-            value, ok = QInputDialog.getDouble(
-                self, "Edit Key Temperature",
-                "Temperature (-1 = use global, 0.0 - 1.0):",
-                default, -1.0, 1.0, 2
-            )
-            if ok:
-                if value < 0:
-                    if 'individual_key_temperature' in glossary_refinement_keys[index]:
-                        del glossary_refinement_keys[index]['individual_key_temperature']
-                else:
-                    glossary_refinement_keys[index]['individual_key_temperature'] = value
-                self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_glossary_refinement_keys()
-                self._show_glossary_refinement_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
-        elif column == 4:  # API Delay column
-            from PySide6.QtWidgets import QInputDialog
-            current = glossary_refinement_keys[index].get('api_call_delay') or 0.0
-            try:
-                current = float(current)
-            except (ValueError, TypeError):
-                current = 0.0
-            value, ok = QInputDialog.getDouble(
-                self, "Edit API Call Delay",
-                "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
-                current, 0.0, 3600.0, 1
-            )
-            if ok:
-                glossary_refinement_keys[index]['api_call_delay'] = value if value > 0 else 0.0
-                self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_glossary_refinement_keys()
-                self._show_glossary_refinement_status(f"Updated API delay to: {value if value > 0 else 'global'}")
-
-
-    def _show_glossary_refinement_status(self, message: str):
-        """Show status message in the glossary refinement section."""
-        if hasattr(self, 'glossary_refinement_status_label'):
-            self.glossary_refinement_status_label.setText(message)
-
-    def _configure_glossary_refinement_individual_endpoint(self, glossary_refinement_index):
-        """Configure individual endpoint for a glossary refinement key"""
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-        if glossary_refinement_index >= len(glossary_refinement_keys):
-            return
-
-        key_data = glossary_refinement_keys[glossary_refinement_index]
-
-        temp_key = APIKeyEntry(
-            api_key=key_data.get('api_key', ''),
-            model=key_data.get('model', ''),
-            cooldown=60,
-            enabled=True,
-            google_credentials=key_data.get('google_credentials'),
-            azure_endpoint=key_data.get('azure_endpoint'),
-            google_region=key_data.get('google_region'),
-            azure_api_version=key_data.get('azure_api_version'),
-            use_individual_endpoint=key_data.get('use_individual_endpoint', False)
-        )
-
-        def on_endpoint_configured():
-            glossary_refinement_keys[glossary_refinement_index]['azure_endpoint'] = temp_key.azure_endpoint
-            glossary_refinement_keys[glossary_refinement_index]['azure_api_version'] = temp_key.azure_api_version
-            glossary_refinement_keys[glossary_refinement_index]['use_individual_endpoint'] = temp_key.use_individual_endpoint
-            self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-            self.translator_gui.save_config(show_message=False)
-            self._load_glossary_refinement_keys()
-            status = "configured" if temp_key.use_individual_endpoint else "disabled"
-            self._show_glossary_refinement_status(f"Individual endpoint {status} for Glossary refinement key")
-
-        if IndividualEndpointDialog is None:
-            QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
-            return
-        dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_glossary_refinement_status)
-        dialog.exec_()
-
-    def _set_glossary_refinement_output_token_limit_for_selected(self):
-        """Set per-key output token limit for selected Glossary refinement keys."""
-        from PySide6.QtWidgets import QInputDialog
-        selected = self.glossary_refinement_tree.selectedItems()
-        if not selected:
-            return
-
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-        selected_indices = [self.glossary_refinement_tree.indexOfTopLevelItem(item) for item in selected]
-        if not selected_indices:
-            return
-
-        default_val = None
-        first_idx = selected_indices[0]
-        if 0 <= first_idx < len(glossary_refinement_keys):
-            try:
-                raw = glossary_refinement_keys[first_idx].get('individual_output_token_limit')
-                if raw not in (None, ""):
-                    iv = int(raw)
-                    if iv > 0:
-                        default_val = iv
-            except Exception:
-                default_val = None
-        if default_val is None:
-            try:
-                default_val = int(getattr(self.translator_gui, 'max_output_tokens', 8192))
-            except Exception:
-                default_val = 8192
-
-        value, ok = QInputDialog.getInt(
-            self, "Set Glossary Refinement Key Output Token Limit",
-            "Max output tokens for selected Glossary refinement key(s):",
-            default_val, 1, 2000000, 512,
-        )
-        if not ok or value <= 0:
-            return
-
-        for idx in selected_indices:
-            if 0 <= idx < len(glossary_refinement_keys):
-                glossary_refinement_keys[idx]['individual_output_token_limit'] = int(value)
-        self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_glossary_refinement_keys()
-        self._show_glossary_refinement_status(f"Set Glossary refinement key output token limit to {value} for {len(selected_indices)} key(s)")
-
-    def _clear_glossary_refinement_output_token_limit_for_selected(self):
-        """Clear per-key output token limit for selected Glossary refinement keys."""
-        selected = self.glossary_refinement_tree.selectedItems()
-        if not selected:
-            return
-
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-        selected_indices = [self.glossary_refinement_tree.indexOfTopLevelItem(item) for item in selected]
-        for idx in selected_indices:
-            if 0 <= idx < len(glossary_refinement_keys):
-                if 'individual_output_token_limit' in glossary_refinement_keys[idx]:
-                    del glossary_refinement_keys[idx]['individual_output_token_limit']
-        self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_glossary_refinement_keys()
-        self._show_glossary_refinement_status(f"Cleared Glossary refinement key output token limit for {len(selected_indices)} key(s)")
-
-    def _set_glossary_refinement_key_temperature_for_selected(self):
-        """Set per-key temperature for selected Glossary refinement keys."""
-        from PySide6.QtWidgets import QInputDialog
-        selected = self.glossary_refinement_tree.selectedItems()
-        if not selected:
-            return
-
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-        selected_indices = [self.glossary_refinement_tree.indexOfTopLevelItem(item) for item in selected]
-        if not selected_indices:
-            return
-
-        default_val = 0.7
-        first_idx = selected_indices[0]
-        if 0 <= first_idx < len(glossary_refinement_keys):
-            try:
-                raw = glossary_refinement_keys[first_idx].get('individual_key_temperature')
-                if raw not in (None, ""):
-                    default_val = float(raw)
-            except Exception:
-                pass
-
-        value, ok = QInputDialog.getDouble(
-            self,
-            "Set Glossary Refinement Key Temperature",
-            "Temperature for selected Glossary refinement key(s) (0.0 - 1.0):",
-            default_val,
-            0.0,
-            1.0,
-            2,
-        )
-        if not ok:
-            return
-
-        for idx in selected_indices:
-            if 0 <= idx < len(glossary_refinement_keys):
-                glossary_refinement_keys[idx]['individual_key_temperature'] = value
-        self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_glossary_refinement_keys()
-        self._show_glossary_refinement_status(f"Set Glossary refinement key temperature to {value} for {len(selected_indices)} key(s)")
-
-    def _clear_glossary_refinement_key_temperature_for_selected(self):
-        """Clear per-key temperature for selected Glossary refinement keys."""
-        selected = self.glossary_refinement_tree.selectedItems()
-        if not selected:
-            return
-
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-        selected_indices = [self.glossary_refinement_tree.indexOfTopLevelItem(item) for item in selected]
-        for idx in selected_indices:
-            if 0 <= idx < len(glossary_refinement_keys):
-                if 'individual_key_temperature' in glossary_refinement_keys[idx]:
-                    del glossary_refinement_keys[idx]['individual_key_temperature']
-        self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_glossary_refinement_keys()
-        self._show_glossary_refinement_status(f"Cleared Glossary refinement key temperature for {len(selected_indices)} key(s)")
-
-    def _set_glossary_refinement_api_call_delay_for_selected(self):
-        """Set per-key API call delay for selected Glossary refinement keys."""
-        from PySide6.QtWidgets import QInputDialog
-        selected = self.glossary_refinement_tree.selectedItems()
-        if not selected:
-            return
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-        selected_indices = [self.glossary_refinement_tree.indexOfTopLevelItem(item) for item in selected]
-        default_val = 0.0
-        for idx in selected_indices:
-            if 0 <= idx < len(glossary_refinement_keys):
-                v = glossary_refinement_keys[idx].get('api_call_delay', 0.0) or 0.0
-                if v > 0:
-                    default_val = float(v)
-                    break
-        value, ok = QInputDialog.getDouble(
-            self, "Set API Call Delay",
-            "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
-            default_val, 0.0, 3600.0, 1
-        )
-        if ok:
-            for idx in selected_indices:
-                if 0 <= idx < len(glossary_refinement_keys):
-                    glossary_refinement_keys[idx]['api_call_delay'] = value if value > 0 else 0.0
-            self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-            self.translator_gui.save_config(show_message=False)
-            self._load_glossary_refinement_keys()
-            self._show_glossary_refinement_status(f"Set API call delay to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
-
-    def _clear_glossary_refinement_api_call_delay_for_selected(self):
-        """Clear per-key API call delay for selected Glossary refinement keys."""
-        selected = self.glossary_refinement_tree.selectedItems()
-        if not selected:
-            return
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-        selected_indices = [self.glossary_refinement_tree.indexOfTopLevelItem(item) for item in selected]
-        for idx in selected_indices:
-            if 0 <= idx < len(glossary_refinement_keys):
-                glossary_refinement_keys[idx]['api_call_delay'] = 0.0
-        self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_glossary_refinement_keys()
-        self._show_glossary_refinement_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
-
-    def _toggle_glossary_refinement_individual_endpoint(self, glossary_refinement_index, enabled):
-        """Quick toggle individual endpoint on/off for glossary refinement key"""
-        glossary_refinement_keys = self.translator_gui.config.get('glossary_refinement_keys', [])
-        if glossary_refinement_index >= len(glossary_refinement_keys):
-            return
-
-        glossary_refinement_keys[glossary_refinement_index]['use_individual_endpoint'] = enabled
-        self.translator_gui.config['glossary_refinement_keys'] = glossary_refinement_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_glossary_refinement_keys()
-
-        status = "enabled" if enabled else "disabled"
-        model = glossary_refinement_keys[glossary_refinement_index].get('model', 'unknown')
-        self._show_glossary_refinement_status(f"Individual endpoint {status} for Glossary refinement key ({model})")
-
-    def _browse_glossary_refinement_google_credentials(self):
-        """Browse for Google Cloud credentials JSON file for Glossary refinement keys."""
-        filename, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Google Cloud Credentials JSON for Glossary Refinement",
-            "",
-            "JSON files (*.json);;All files (*.*)"
-        )
-
-        if filename:
-            try:
-                with open(filename, 'r') as f:
-                    creds_data = json.load(f)
-                    if 'type' in creds_data and 'project_id' in creds_data:
-                        self.glossary_refinement_google_creds_entry.setText(filename)
-                        self._show_glossary_refinement_status(f"Selected Glossary refinement key Google credentials: {os.path.basename(filename)}")
-                    else:
-                        QMessageBox.critical(
-                            self,
-                            "Error",
-                            "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
-                        )
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
     def _toggle_glossary_visibility(self):
@@ -7675,1440 +6279,40 @@ class MultiAPIKeyDialog(QDialog):
     # VISION KEYS SECTION
     # ===================================================================
 
-    def _create_qa_scan_section(self, parent_layout):
-        """Create the Vision keys section below glossary."""
-        # Container that can be hidden
-        self.qa_scan_container = QWidget()
-        qa_scan_container_layout = QVBoxLayout(self.qa_scan_container)
-        qa_scan_container_layout.setContentsMargins(0, 5, 0, 0)
-
-        # Separator
-        self.qa_scan_separator = QFrame()
-        self.qa_scan_separator.setFrameShape(QFrame.HLine)
-        self.qa_scan_separator.setFrameShadow(QFrame.Sunken)
-        qa_scan_container_layout.addWidget(self.qa_scan_separator)
-
-        # Main Vision keys frame
-        qa_scan_frame = QGroupBox("Vision Keys")
-        qa_scan_frame_layout = QVBoxLayout(qa_scan_frame)
-        qa_scan_frame_layout.setContentsMargins(15, 15, 15, 15)
-
-        # Description
-        desc_label = QLabel(
-                "Configure dedicated keys for vision OCR and image scan calls.\n"
-                "AI truncation detection uses text requests, but currently shares this key pool.\n"
-                "If no Vision keys are configured or the pool is disabled, the main key pool is used instead.")
-        desc_label.setStyleSheet("color: gray;")
-        desc_label.setWordWrap(True)
-        qa_scan_frame_layout.addWidget(desc_label)
-
-        # Enable checkbox with spinning icon
-        qa_scan_checkbox_container = QWidget()
-        qa_scan_checkbox_layout = QHBoxLayout(qa_scan_checkbox_container)
-        qa_scan_checkbox_layout.setContentsMargins(0, 0, 0, 0)
-        qa_scan_checkbox_layout.setSpacing(8)
-
-        self.use_qa_scan_keys_var = self.translator_gui.config.get('use_qa_scan_keys', False)
-        self.use_qa_scan_keys_checkbox = self._create_styled_checkbox("Enable Vision Keys")
-        self.use_qa_scan_keys_checkbox.setChecked(self.use_qa_scan_keys_var)
-        self.use_qa_scan_keys_checkbox.toggled.connect(self._toggle_qa_scan_section)
-
-        # spinning icon
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
-        self.qa_scan_icon = QLabel()
-        self.qa_scan_icon.setStyleSheet("background-color: transparent;")
-        if os.path.exists(icon_path):
-            from PySide6.QtGui import QIcon, QPixmap
-            from PySide6.QtCore import QSize
-            icon = QIcon(icon_path)
-            try:
-                dpr = self.devicePixelRatioF()
-            except Exception:
-                dpr = 1.0
-            logical_px = 16
-            dev_px = int(logical_px * max(1.0, dpr))
-            pm = icon.pixmap(QSize(dev_px, dev_px))
-            if pm.isNull():
-                raw = QPixmap(icon_path)
-                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                pm = QPixmap.fromImage(img)
-            try:
-                pm.setDevicePixelRatio(dpr)
-            except Exception:
-                pass
-            self.qa_scan_icon.setPixmap(pm)
-        self.qa_scan_icon.setFixedSize(36, 36)
-        self.qa_scan_icon.setAlignment(Qt.AlignCenter)
-        self.use_qa_scan_keys_checkbox.toggled.connect(lambda: animate_icon(self.qa_scan_icon))
-
-        qa_scan_checkbox_layout.addWidget(self.qa_scan_icon)
-        qa_scan_checkbox_layout.addWidget(self.use_qa_scan_keys_checkbox)
-        qa_scan_checkbox_layout.addStretch()
-
-        qa_scan_frame_layout.addWidget(qa_scan_checkbox_container)
-
-        # Add Vision key section
-        self.add_qa_scan_frame = QWidget()
-        add_qa_scan_grid = QGridLayout(self.add_qa_scan_frame)
-        add_qa_scan_grid.setContentsMargins(0, 0, 0, 10)
-
-        # Row 0: API Key and Model
-        add_qa_scan_grid.addWidget(QLabel("Vision API Key:"), 0, 0, Qt.AlignLeft)
-        self.qa_scan_key_entry = QLineEdit()
-        self.qa_scan_key_entry.setEchoMode(QLineEdit.Password)
-        add_qa_scan_grid.addWidget(self.qa_scan_key_entry, 0, 1)
-
-        # Toggle visibility
-        self.show_qa_scan_btn = QPushButton("👁")
-        self.show_qa_scan_btn.setFixedWidth(40)
-        self.show_qa_scan_btn.clicked.connect(self._toggle_qa_scan_visibility)
-        add_qa_scan_grid.addWidget(self.show_qa_scan_btn, 0, 2)
-
-        # Model
-        add_qa_scan_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
-        qa_scan_models = get_model_options()
-        self.qa_scan_model_combo = QComboBox()
-        self.qa_scan_model_combo.addItems(qa_scan_models)
-        self.qa_scan_model_combo.setEditable(True)
-        self._disable_combobox_mousewheel(self.qa_scan_model_combo)
-        add_qa_scan_grid.addWidget(self.qa_scan_model_combo, 0, 4)
-
-        # Add button
-        add_qa_scan_btn = QPushButton("Add Vision Key")
-        add_qa_scan_btn.clicked.connect(self._add_qa_scan_key)
-        add_qa_scan_grid.addWidget(add_qa_scan_btn, 0, 5, Qt.AlignRight)
-
-        add_qa_scan_grid.setColumnStretch(1, 1)
-        add_qa_scan_grid.setColumnStretch(4, 1)
-
-        qa_scan_frame_layout.addWidget(self.add_qa_scan_frame)
-
-        # Row 1: Google Credentials
-        google_creds_label = QLabel("Google Creds:")
-        google_creds_label.setStyleSheet("color: gray; font-size: 8pt;")
-        add_qa_scan_grid.addWidget(google_creds_label, 1, 0, Qt.AlignLeft)
-        self.qa_scan_google_creds_entry = QLineEdit()
-        self.qa_scan_google_creds_entry.setStyleSheet("font-size: 7pt;")
-        add_qa_scan_grid.addWidget(self.qa_scan_google_creds_entry, 1, 1)
-
-        browse_google_btn = QPushButton("📁")
-        browse_google_btn.setFixedWidth(40)
-        browse_google_btn.clicked.connect(self._browse_qa_scan_google_credentials)
-        add_qa_scan_grid.addWidget(browse_google_btn, 1, 2)
-
-        region_label = QLabel("Region:")
-        region_label.setStyleSheet("color: gray;")
-        add_qa_scan_grid.addWidget(region_label, 1, 3, Qt.AlignLeft)
-        self.qa_scan_google_region_entry = QLineEdit("us-east5")
-        self.qa_scan_google_region_entry.setStyleSheet("font-size: 7pt;")
-        self.qa_scan_google_region_entry.setMaximumWidth(100)
-        add_qa_scan_grid.addWidget(self.qa_scan_google_region_entry, 1, 4, 1, 1, Qt.AlignLeft)
-
-        # Row 2: Individual Endpoint Toggle
-        self.qa_scan_use_individual_endpoint_var = False
-        self.qa_scan_individual_endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
-        self.qa_scan_individual_endpoint_toggle.setChecked(False)
-        self.qa_scan_individual_endpoint_toggle.toggled.connect(self._toggle_qa_scan_individual_endpoint_fields)
-        add_qa_scan_grid.addWidget(self.qa_scan_individual_endpoint_toggle, 2, 0, 1, 2, Qt.AlignLeft)
-
-        # Row 3: Individual Endpoint (initially hidden)
-        self.qa_scan_individual_endpoint_label = QLabel("Individual Endpoint:")
-        self.qa_scan_individual_endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
-        add_qa_scan_grid.addWidget(self.qa_scan_individual_endpoint_label, 3, 0, Qt.AlignLeft)
-        self.qa_scan_azure_endpoint_entry = QLineEdit()
-        self.qa_scan_azure_endpoint_entry.setStyleSheet("font-size: 8pt;")
-        add_qa_scan_grid.addWidget(self.qa_scan_azure_endpoint_entry, 3, 1, 1, 2)
-
-        self.qa_scan_individual_api_version_label = QLabel("API Ver:")
-        self.qa_scan_individual_api_version_label.setStyleSheet("color: gray;")
-        add_qa_scan_grid.addWidget(self.qa_scan_individual_api_version_label, 3, 3, Qt.AlignLeft)
-        qa_scan_azure_versions = [
-            '2025-01-01-preview',
-            '2024-12-01-preview',
-            '2024-10-01-preview',
-            '2024-08-01-preview',
-            '2024-06-01',
-            '2024-02-01',
-            '2023-12-01-preview'
-        ]
-        self.qa_scan_azure_api_version_combo = QComboBox()
-        self.qa_scan_azure_api_version_combo.addItems(qa_scan_azure_versions)
-        self.qa_scan_azure_api_version_combo.setCurrentText('2025-01-01-preview')
-        self.qa_scan_azure_api_version_combo.setStyleSheet("font-size: 7pt;")
-        self.qa_scan_azure_api_version_combo.setMaximumWidth(180)
-        self._disable_combobox_mousewheel(self.qa_scan_azure_api_version_combo)
-        add_qa_scan_grid.addWidget(self.qa_scan_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
-
-        # Initially hide endpoint fields
-        self._toggle_qa_scan_individual_endpoint_fields()
-
-        # Vision keys list
-        self._create_qa_scan_list(qa_scan_frame_layout)
-
-        # Add container to parent
-        qa_scan_container_layout.addWidget(qa_scan_frame)
-        parent_layout.addWidget(self.qa_scan_container)
-
-        # Initially disable if checkbox is unchecked
-        self._toggle_qa_scan_section()
-
-    def _create_qa_scan_list(self, parent_layout):
-        """Create the Vision keys list."""
-        self.qa_scan_list_label = QLabel("Vision Keys (tried in order):")
-        list_label_font = QFont()
-        list_label_font.setBold(True)
-        self.qa_scan_list_label.setFont(list_label_font)
-        parent_layout.addWidget(self.qa_scan_list_label)
-
-        # Container for tree and buttons
-        self.qa_scan_tree_container = QWidget()
-        container_layout = QHBoxLayout(self.qa_scan_tree_container)
-        container_layout.setContentsMargins(0, 0, 0, 0)
-
-        # Left side: Move buttons
-        self.qa_scan_move_frame = QWidget()
-        move_layout = QVBoxLayout(self.qa_scan_move_frame)
-        move_layout.setContentsMargins(0, 0, 5, 0)
-
-        order_label = QLabel("Reorder")
-        order_font = QFont()
-        order_font.setBold(True)
-        order_label.setFont(order_font)
-        move_layout.addWidget(order_label)
-
-        top_btn = QPushButton("↑ ↑")
-        top_btn.setFixedSize(55, 32)
-        top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
-        top_btn.clicked.connect(lambda: self._move_qa_scan_key('top'))
-        move_layout.addWidget(top_btn)
-
-        up_btn = QPushButton("↑")
-        up_btn.setFixedSize(55, 32)
-        up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
-        up_btn.clicked.connect(lambda: self._move_qa_scan_key('up'))
-        move_layout.addWidget(up_btn)
-
-        down_btn = QPushButton("↓")
-        down_btn.setFixedSize(55, 32)
-        down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
-        down_btn.clicked.connect(lambda: self._move_qa_scan_key('down'))
-        move_layout.addWidget(down_btn)
-
-        bottom_btn = QPushButton("↓ ↓")
-        bottom_btn.setFixedSize(55, 32)
-        bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
-        bottom_btn.clicked.connect(lambda: self._move_qa_scan_key('bottom'))
-        move_layout.addWidget(bottom_btn)
-
-        move_layout.addSpacing(10)
-
-        self.qa_scan_position_label = QLabel()
-        self.qa_scan_position_label.setStyleSheet("color: gray;")
-        move_layout.addWidget(self.qa_scan_position_label)
-        move_layout.addStretch()
-        container_layout.addWidget(self.qa_scan_move_frame)
-
-        # Right side: TreeWidget with drag and drop
-        self.qa_scan_tree = QTreeWidget()
-        self.qa_scan_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', 'Success', 'Errors', 'Times Used'])
-        self.qa_scan_tree.setColumnWidth(0, 125)
-        self.qa_scan_tree.setColumnWidth(1, 220)
-        self.qa_scan_tree.setColumnWidth(2, 105)
-        self.qa_scan_tree.setColumnWidth(3, 100)
-        self.qa_scan_tree.setColumnWidth(4, 90)
-        self.qa_scan_tree.setColumnWidth(5, 100)
-        self.qa_scan_tree.setColumnWidth(6, 75)
-        self.qa_scan_tree.setColumnWidth(7, 55)
-        self.qa_scan_tree.setColumnWidth(8, 80)
-
-        qs_header = self.qa_scan_tree.header()
-        qs_header_font = QFont()
-        qs_header_font.setBold(True)
-        qs_header_font.setPointSize(11)
-        qs_header.setFont(qs_header_font)
-
-        self.qa_scan_tree.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.qa_scan_tree.customContextMenuRequested.connect(self._show_qa_scan_context_menu)
-        self.qa_scan_tree.setMinimumHeight(150)
-
-        self.qa_scan_tree.setDragDropMode(QAbstractItemView.InternalMove)
-        self.qa_scan_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-
-        self.qa_scan_tree.model().rowsMoved.connect(self._on_qa_scan_rows_moved)
-        self.qa_scan_tree.itemSelectionChanged.connect(self._on_qa_scan_selection_change)
-        self.qa_scan_tree.itemDoubleClicked.connect(self._on_qa_scan_click)
-
-        container_layout.addWidget(self.qa_scan_tree)
-        parent_layout.addWidget(self.qa_scan_tree_container)
-
-        # Action buttons
-        self.qa_scan_action_frame = QWidget()
-        qa_scan_action_layout = QHBoxLayout(self.qa_scan_action_frame)
-        qa_scan_action_layout.setContentsMargins(0, 10, 0, 0)
-
-        test_selected_btn = QPushButton("Test Selected")
-        test_selected_btn.clicked.connect(self._test_selected_qa_scan)
-        qa_scan_action_layout.addWidget(test_selected_btn)
-
-        test_all_btn = QPushButton("Test All")
-        test_all_btn.clicked.connect(self._test_all_qa_scan)
-        qa_scan_action_layout.addWidget(test_all_btn)
-
-        enable_selected_btn = QPushButton("Enable Selected")
-        enable_selected_btn.clicked.connect(self._enable_selected_qa_scan)
-        qa_scan_action_layout.addWidget(enable_selected_btn)
-
-        disable_selected_btn = QPushButton("Disable Selected")
-        disable_selected_btn.clicked.connect(self._disable_selected_qa_scan)
-        qa_scan_action_layout.addWidget(disable_selected_btn)
-
-        remove_selected_btn = QPushButton("Remove Selected")
-        remove_selected_btn.clicked.connect(self._remove_selected_qa_scan)
-        qa_scan_action_layout.addWidget(remove_selected_btn)
-
-        clear_all_btn = QPushButton("Clear All")
-        clear_all_btn.clicked.connect(self._clear_all_qa_scan)
-        qa_scan_action_layout.addWidget(clear_all_btn)
-
-        qa_scan_action_layout.addStretch()
-        self.qa_scan_status_label = QLabel()
-        self.qa_scan_status_label.setStyleSheet("color: gray;")
-        qa_scan_action_layout.addWidget(self.qa_scan_status_label)
-        parent_layout.addWidget(self.qa_scan_action_frame)
-
-        # Load existing Vision keys
-        self._load_qa_scan_keys()
-
-    def _load_qa_scan_keys(self):
-        """Load Vision keys from config."""
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-
-        v_scroll = self.qa_scan_tree.verticalScrollBar().value()
-        h_scroll = self.qa_scan_tree.horizontalScrollBar().value()
-
-        selected_indices = []
-        for item in self.qa_scan_tree.selectedItems():
-            selected_indices.append(self.qa_scan_tree.indexOfTopLevelItem(item))
-
-        self.qa_scan_tree.clear()
-
-        for key_data in qa_scan_keys:
-            api_key = key_data.get('api_key', '')
-            model = key_data.get('model', '')
-            times_used = int(key_data.get('times_used', 0))
-
-            masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
-
-            try:
-                raw_limit = key_data.get('individual_output_token_limit')
-                per_key_limit = int(raw_limit) if raw_limit not in (None, "") else None
-            except Exception:
-                per_key_limit = None
-            if per_key_limit and per_key_limit > 0:
-                output_limit_str = str(per_key_limit)
-            else:
-                output_limit_str = "global"
-
-            # Determine per-key temperature display value
-            try:
-                raw_temp = key_data.get('individual_key_temperature')
-                per_key_temp = float(raw_temp) if raw_temp not in (None, "") else None
-            except Exception:
-                per_key_temp = None
-            if per_key_temp is not None:
-                temp_str = str(per_key_temp)
-            else:
-                temp_str = "global"
-
-            enabled = key_data.get('enabled', True)
-            test_result = key_data.get('last_test_result')
-            if not enabled:
-                status = "Disabled"
-                color = Qt.gray
-            elif test_result == 'passed':
-                status = "✅ Passed"
-                color = Qt.darkGreen
-            elif test_result == 'failed':
-                status = "❌ Failed"
-                color = Qt.red
-            elif test_result == 'timeout':
-                status = "⏱️ Timed Out"
-                color = Qt.darkYellow
-            elif test_result == 'error':
-                status = "❌ Error"
-                color = Qt.darkRed
-            else:
-                status = "Enabled"
-                color = Qt.gray
-
-            # Determine per-key API call delay display value
-            try:
-                raw_delay = key_data.get('api_call_delay')
-                per_key_delay = float(raw_delay) if raw_delay not in (None, "") else 0.0
-            except Exception:
-                per_key_delay = 0.0
-            delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
-
-            success_count = int(key_data.get('success_count', 0))
-            error_count = int(key_data.get('error_count', 0))
-            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
-            for col in range(item.columnCount()):
-                item.setForeground(col, color)
-
-            # Tooltip for per-key settings
-            tooltip_parts = []
-            if per_key_limit and per_key_limit > 0:
-                tooltip_parts.append(f"Individual Output Token Limit: {per_key_limit}")
-            else:
-                tooltip_parts.append("Using global output token limit")
-            if per_key_temp is not None:
-                tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
-            else:
-                tooltip_parts.append("Using global temperature")
-            if per_key_delay > 0:
-                tooltip_parts.append(f"API Call Delay: {per_key_delay}s (overrides global SEND_INTERVAL_SECONDS)")
-            else:
-                tooltip_parts.append("Using global API call delay (SEND_INTERVAL_SECONDS)")
-            tooltip = "\n".join(tooltip_parts)
-            for col in range(item.columnCount()):
-                item.setToolTip(col, tooltip)
-
-            item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
-            self.qa_scan_tree.addTopLevelItem(item)
-
-        for index in selected_indices:
-            if index < self.qa_scan_tree.topLevelItemCount():
-                item = self.qa_scan_tree.topLevelItem(index)
-                item.setSelected(True)
-
-        self.qa_scan_tree.verticalScrollBar().setValue(v_scroll)
-        self.qa_scan_tree.horizontalScrollBar().setValue(h_scroll)
-
-        # Auto-refresh the in-memory pool so changes take effect immediately
-        if not getattr(self, '_initializing', False):
-            self._refresh_qa_scan_pool()
-
-    def _add_qa_scan_key(self):
-        """Add a new QA scan key"""
-        api_key = self.qa_scan_key_entry.text().strip()
-        model = self.qa_scan_model_combo.currentText().strip()
-        google_credentials = self.qa_scan_google_creds_entry.text().strip() or None
-        google_region = self.qa_scan_google_region_entry.text().strip() or None
-
-        use_individual_endpoint = self.qa_scan_individual_endpoint_toggle.isChecked()
-        azure_endpoint = self.qa_scan_azure_endpoint_entry.text().strip() if use_individual_endpoint else None
-        azure_api_version = self.qa_scan_azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
-
-        if not model:
-            QMessageBox.critical(self, "Error", "Please enter a model name")
-            return
-
-
-
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-
-        individual_output_token_limit = None
-        individual_key_temperature = None
-
-        qa_scan_keys.append({
-            'api_key': api_key,
-            'model': model,
-            'google_credentials': google_credentials,
-            'azure_endpoint': azure_endpoint,
-            'google_region': google_region,
-            'azure_api_version': azure_api_version,
-            'use_individual_endpoint': use_individual_endpoint,
-            'individual_output_token_limit': individual_output_token_limit,
-            'individual_key_temperature': individual_key_temperature,
-            'api_call_delay': 0.0,
-            'enabled': True,
-            'times_used': 0
-        })
-
-        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-        self.translator_gui.save_config(show_message=False)
-
-        # Clear inputs
-        self.qa_scan_key_entry.clear()
-        self.qa_scan_model_combo.setCurrentText("")
-        self.qa_scan_google_creds_entry.clear()
-        self.qa_scan_azure_endpoint_entry.clear()
-        self.qa_scan_google_region_entry.setText("us-east5")
-        self.qa_scan_azure_api_version_combo.setCurrentText('2025-01-01-preview')
-        self.qa_scan_individual_endpoint_toggle.setChecked(False)
-
-        self._toggle_qa_scan_individual_endpoint_fields()
-
-        self._load_qa_scan_keys()
-
-        extras = []
-        if google_credentials:
-            extras.append(f"Google: {os.path.basename(google_credentials)}")
-        if azure_endpoint:
-            extras.append(f"Azure: {azure_endpoint[:30]}...")
-        extra_info = f" ({', '.join(extras)})" if extras else ""
-        self._show_qa_scan_status(f"Added Vision key for model: {model}{extra_info}")
-
-        self._notify_authgpt_visibility()
-
-    def _move_qa_scan_key(self, direction):
-        """Move selected QA scan key up or down"""
-        selected = self.qa_scan_tree.selectedItems()
-        if not selected:
-            return
-
-        item = selected[0]
-        index = self.qa_scan_tree.indexOfTopLevelItem(item)
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-
-        if index >= len(qa_scan_keys):
-            return
-
-        new_index = index
-        if direction == 'top' and index > 0:
-            new_index = 0
-        elif direction == 'up' and index > 0:
-            new_index = index - 1
-        elif direction == 'down' and index < len(qa_scan_keys) - 1:
-            new_index = index + 1
-        elif direction == 'bottom' and index < len(qa_scan_keys) - 1:
-            new_index = len(qa_scan_keys) - 1
-
-        if new_index != index:
-            key = qa_scan_keys.pop(index)
-            qa_scan_keys.insert(new_index, key)
-
-            self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-            self.translator_gui.save_config(show_message=False)
-
-            self._load_qa_scan_keys()
-
-            if new_index < self.qa_scan_tree.topLevelItemCount():
-                item = self.qa_scan_tree.topLevelItem(new_index)
-                if item:
-                    self.qa_scan_tree.setCurrentItem(item)
-                    item.setSelected(True)
-
-    def _test_selected_qa_scan(self):
-        """Test selected QA scan key"""
-        selected = self.qa_scan_tree.selectedItems()
-        if not selected:
-            QMessageBox.warning(self, "Warning", "Please select a Vision key to test")
-            return
-
-        index = self.qa_scan_tree.indexOfTopLevelItem(selected[0])
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-
-        if index >= len(qa_scan_keys):
-            return
-
-        if index < self.qa_scan_tree.topLevelItemCount():
-            item = self.qa_scan_tree.topLevelItem(index)
-            if item:
-                item.setText(3, "⏳ Testing...")
-
-        key_data = qa_scan_keys[index]
-
-        try:
-            from unified_api_client import UnifiedClient
-            UnifiedClient._api_key_pool = self.key_pool
-        except Exception:
-            pass
-
-        QTimer.singleShot(100, lambda: self._test_single_qa_scan_key(key_data, index))
-
-    def _test_all_qa_scan(self):
-        """Test all Vision keys in parallel."""
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-
-        if not qa_scan_keys:
-            QMessageBox.warning(self, "Warning", "No Vision keys to test")
-            return
-
-        for i in range(self.qa_scan_tree.topLevelItemCount()):
-            item = self.qa_scan_tree.topLevelItem(i)
-            if item:
-                item.setText(3, "⏳ Testing...")
-
-        try:
-            from unified_api_client import UnifiedClient
-            UnifiedClient._api_key_pool = self.key_pool
-        except Exception:
-            pass
-
-        for i, key_data in enumerate(qa_scan_keys):
-            self._test_single_qa_scan_key(key_data, i)
-
-    @Slot(int, bool) if HAS_GUI else lambda x: x
-    def _update_qa_scan_test_result(self, index, success):
-        """Update QA scan tree item with test result"""
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        if index < len(qa_scan_keys):
-            try:
-                qa_scan_keys[index]['times_used'] = int(qa_scan_keys[index].get('times_used', 0)) + 1
-                if success:
-                    qa_scan_keys[index]['success_count'] = int(qa_scan_keys[index].get('success_count', 0)) + 1
-                else:
-                    qa_scan_keys[index]['error_count'] = int(qa_scan_keys[index].get('error_count', 0)) + 1
-                self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-                self.translator_gui.save_config(show_message=False)
-            except Exception:
-                pass
-
-        if index < self.qa_scan_tree.topLevelItemCount():
-            item = self.qa_scan_tree.topLevelItem(index)
-            if item:
-                if success:
-                    item.setText(3, "✅ Passed")
-                    color = Qt.darkGreen
-                else:
-                    item.setText(3, "❌ Failed")
-                    color = Qt.red
-                for col in range(item.columnCount()):
-                    item.setForeground(col, color)
-                try:
-                    if success:
-                        current = int(item.text(4))
-                        item.setText(4, str(current + 1))
-                    else:
-                        current = int(item.text(5))
-                        item.setText(5, str(current + 1))
-                except Exception:
-                    pass
-                try:
-                    current_times = int(item.text(6))
-                    item.setText(6, str(current_times + 1))
-                except Exception:
-                    item.setText(6, "1")
-
-    @Slot(int) if HAS_GUI else lambda x: x
-    def _update_qa_scan_timeout_status(self, index):
-        """Update QA scan tree item with timeout status"""
-        if index < self.qa_scan_tree.topLevelItemCount():
-            item = self.qa_scan_tree.topLevelItem(index)
-            if item:
-                item.setText(3, "⏱️ Timed Out")
-                for col in range(item.columnCount()):
-                    item.setForeground(col, Qt.darkYellow)
-
-    def _test_single_qa_scan_key(self, key_data, index):
-        """Test a single QA scan key — REAL API TEST"""
-        api_key = key_data.get('api_key', '')
-        model = key_data.get('model', '')
-
-        print(f"[DEBUG] Starting REAL Vision key test for {model}")
-
-        from concurrent.futures import ThreadPoolExecutor
-        from unified_api_client import UnifiedClient
-
-        if hasattr(self.translator_gui, '_ensure_executor'):
-            self.translator_gui._ensure_executor()
-        executor = getattr(self.translator_gui, 'executor', None)
-
-        client_ref = [None]
-        timed_out = [False]
-
-        def run_api_test():
-            try:
-                client = UnifiedClient(
-                    api_key=api_key,
-                    model=model,
-                    output_dir=None
-                )
-                client_ref[0] = client
-
-                try:
-                    tls = client._get_thread_local_client()
-                    tls.max_retries_override = 1
-                except Exception:
-                    pass
-
-                google_credentials = key_data.get('google_credentials')
-                if google_credentials:
-                    client.current_key_google_creds = google_credentials
-                    client.google_creds_path = google_credentials
-
-                google_region = key_data.get('google_region')
-                if google_region:
-                    client.current_key_google_region = google_region
-
-                use_individual_endpoint = key_data.get('use_individual_endpoint', False)
-                if use_individual_endpoint:
-                    azure_endpoint = key_data.get('azure_endpoint')
-                    if azure_endpoint:
-                        client.current_key_azure_endpoint = azure_endpoint
-                        client.current_key_use_individual_endpoint = True
-                    azure_api_version = key_data.get('azure_api_version')
-                    if azure_api_version:
-                        client.current_key_azure_api_version = azure_api_version
-
-                messages = [
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "Say 'API test successful' and nothing else."}
-                ]
-
-                response = client.send(messages, temperature=0.7, max_tokens=1000)
-
-                if response and isinstance(response, tuple):
-                    content, _ = response
-                    if content and "test successful" in content.lower():
-                        print(f"[DEBUG] Vision key test completed for {model}: PASSED")
-                        if not timed_out[0]:
-                            if HAS_GUI:
-                                QMetaObject.invokeMethod(self, "_update_qa_scan_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
-                            else:
-                                self._update_qa_scan_test_result(index, True)
-                        return
-
-                print(f"[DEBUG] Vision key test completed for {model}: FAILED")
-                if not timed_out[0]:
-                    if HAS_GUI:
-                        QMetaObject.invokeMethod(self, "_update_qa_scan_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
-                    else:
-                        self._update_qa_scan_test_result(index, False)
-            except Exception as e:
-                print(f"[DEBUG] Vision key test error for {model}: {e}")
-                if not timed_out[0]:
-                    if HAS_GUI:
-                        QMetaObject.invokeMethod(self, "_update_qa_scan_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
-                    else:
-                        self._update_qa_scan_test_result(index, False)
-
-        def run_with_timeout():
-            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-            with ThreadPoolExecutor(max_workers=1) as timeout_pool:
-                future = timeout_pool.submit(run_api_test)
-                try:
-                    future.result(timeout=30)
-                except FuturesTimeout:
-                    timed_out[0] = True
-                    print(f"[DEBUG] Vision key test TIMED OUT for {model} (30s)")
-                    _client = client_ref[0]
-                    if _client:
-                        try:
-                            _client._cancelled = True
-                            oc = getattr(_client, 'openai_client', None)
-                            if oc and hasattr(oc, 'close'):
-                                oc.close()
-                            elif oc and hasattr(oc, '_client') and hasattr(oc._client, 'close'):
-                                oc._client.close()
-                        except Exception:
-                            pass
-                    try:
-                        from unified_api_client import _api_watchdog_reset
-                        _api_watchdog_reset()
-                    except Exception:
-                        pass
-                    if HAS_GUI:
-                        QMetaObject.invokeMethod(self, "_update_qa_scan_timeout_status", Qt.QueuedConnection, Q_ARG(int, index))
-                    else:
-                        self._update_qa_scan_timeout_status(index)
-                except Exception:
-                    pass
-
-        if executor:
-            executor.submit(run_with_timeout)
-        else:
-            thread = threading.Thread(target=run_with_timeout, daemon=True)
-            thread.start()
-
-    def _remove_selected_qa_scan(self):
-        """Remove selected Vision keys."""
-        selected = self.qa_scan_tree.selectedItems()
-        if not selected:
-            return
-
-        reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected Vision key(s)?",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            indices = sorted([self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
-
-            qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-
-            for index in indices:
-                if index < len(qa_scan_keys):
-                    del qa_scan_keys[index]
-
-            self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-            self.translator_gui.save_config(show_message=False)
-            self._load_qa_scan_keys()
-            self._show_qa_scan_status(f"Removed {len(selected)} Vision key(s)")
-            self._notify_authgpt_visibility()
-
-
-    def _enable_selected_qa_scan(self):
-        """Enable selected Vision keys."""
-        selected = self.qa_scan_tree.selectedItems()
-        if not selected:
-            return
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        for item in selected:
-            index = self.qa_scan_tree.indexOfTopLevelItem(item)
-            if index < len(qa_scan_keys):
-                qa_scan_keys[index]['enabled'] = True
-        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_qa_scan_keys()
-        self._show_qa_scan_status(f"Enabled {len(selected)} Vision key(s)")
-        self._notify_authgpt_visibility()
-
-    def _disable_selected_qa_scan(self):
-        """Disable selected Vision keys."""
-        selected = self.qa_scan_tree.selectedItems()
-        if not selected:
-            return
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        for item in selected:
-            index = self.qa_scan_tree.indexOfTopLevelItem(item)
-            if index < len(qa_scan_keys):
-                qa_scan_keys[index]['enabled'] = False
-        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_qa_scan_keys()
-        self._show_qa_scan_status(f"Disabled {len(selected)} Vision key(s)")
-        self._notify_authgpt_visibility()
-
-    def _clear_all_qa_scan(self):
-        """Clear all Vision keys."""
-        if self.qa_scan_tree.topLevelItemCount() == 0:
-            return
-
-        reply = QMessageBox.question(self, "Confirm", "Remove ALL Vision keys?",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            self.translator_gui.config['qa_scan_keys'] = []
-            self.translator_gui.save_config(show_message=False)
-            self._load_qa_scan_keys()
-            self._show_qa_scan_status("Cleared all Vision keys")
-            self._notify_authgpt_visibility()
-
-    def _toggle_qa_scan_section(self):
-        """Toggle QA scan section visibility"""
-        enabled = self.use_qa_scan_keys_checkbox.isChecked()
-
-        if hasattr(self, 'add_qa_scan_frame'):
-            self.add_qa_scan_frame.setVisible(enabled)
-        if hasattr(self, 'qa_scan_list_label'):
-            self.qa_scan_list_label.setVisible(enabled)
-        if hasattr(self, 'qa_scan_tree_container'):
-            self.qa_scan_tree_container.setVisible(enabled)
-        if hasattr(self, 'qa_scan_action_frame'):
-            self.qa_scan_action_frame.setVisible(enabled)
-        if hasattr(self, 'qa_scan_tree') and not enabled:
-            self.qa_scan_tree.clearSelection()
-
-        self._show_qa_scan_status(f"Vision Keys {'enabled' if enabled else 'disabled'}")
-
-        # Update in-memory config immediately
-        self.translator_gui.config['use_qa_scan_keys'] = enabled
-        if hasattr(self.translator_gui, 'use_qa_scan_keys_var'):
-            self.translator_gui.use_qa_scan_keys_var = enabled
-
-        if not getattr(self, '_initializing', False):
-            qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-            if enabled:
-                msg = f"🔑 Vision key pool: {len(qa_scan_keys)} keys loaded"
-            else:
-                msg = f"🔑 Vision key pool: disabled"
-            if hasattr(self.translator_gui, 'append_log'):
-                try:
-                    self.translator_gui.append_log(msg)
-                except Exception:
-                    print(msg)
-            else:
-                print(msg)
-
-        try:
-            import os as _os
-            import json as _json
-            qk_list = self.translator_gui.config.get('qa_scan_keys', []) or []
-            _os.environ['USE_VISION_KEYS'] = '1' if enabled else '0'
-            _os.environ['USE_QA_SCAN_KEYS'] = _os.environ['USE_VISION_KEYS']
-            _os.environ['VISION_API_KEYS'] = _json.dumps(qk_list)
-            _os.environ['QA_SCAN_API_KEYS'] = _os.environ['VISION_API_KEYS']
-        except Exception:
-            pass
-
-        if enabled:
-            try:
-                from unified_api_client import UnifiedClient
-                qk_list = self.translator_gui.config.get('qa_scan_keys', []) or []
-                if qk_list:
-                    UnifiedClient.set_in_memory_vision_keys(qk_list)
-            except Exception:
-                pass
-        else:
-            try:
-                from unified_api_client import UnifiedClient
-                UnifiedClient.clear_in_memory_vision_keys()
-            except Exception:
-                pass
-
-        self._notify_authgpt_visibility()
-
-    def _refresh_qa_scan_pool(self):
-        """Refresh the in-memory Vision key pool after any change."""
-        try:
-            use_qa_scan = self.use_qa_scan_keys_checkbox.isChecked() if hasattr(self, 'use_qa_scan_keys_checkbox') else False
-            if not use_qa_scan:
-                return
-            from unified_api_client import UnifiedClient
-            qk_list = self.translator_gui.config.get('qa_scan_keys', []) or []
-            try:
-                import os as _os
-                import json as _json
-                _os.environ['USE_VISION_KEYS'] = '1'
-                _os.environ['USE_QA_SCAN_KEYS'] = '1'
-                _os.environ['VISION_API_KEYS'] = _json.dumps(qk_list)
-                _os.environ['QA_SCAN_API_KEYS'] = _os.environ['VISION_API_KEYS']
-            except Exception:
-                pass
-            if qk_list:
-                UnifiedClient.set_in_memory_vision_keys(qk_list)
-            else:
-                UnifiedClient.clear_in_memory_vision_keys()
-        except Exception:
-            pass
-
-    def _toggle_qa_scan_visibility(self):
-        """Toggle QA scan key field visibility"""
-        if self.qa_scan_key_entry.echoMode() == QLineEdit.Password:
-            self.qa_scan_key_entry.setEchoMode(QLineEdit.Normal)
-            self.show_qa_scan_btn.setText('🔒')
-        else:
-            self.qa_scan_key_entry.setEchoMode(QLineEdit.Password)
-            self.show_qa_scan_btn.setText('👁')
-
-    def _toggle_qa_scan_individual_endpoint_fields(self):
-        """Toggle visibility of QA scan individual endpoint fields"""
-        enabled = self.qa_scan_individual_endpoint_toggle.isChecked()
-
-        self.qa_scan_individual_endpoint_label.setVisible(enabled)
-        self.qa_scan_azure_endpoint_entry.setVisible(enabled)
-        self.qa_scan_individual_api_version_label.setVisible(enabled)
-        self.qa_scan_azure_api_version_combo.setVisible(enabled)
-
-        self.qa_scan_azure_endpoint_entry.setEnabled(enabled)
-        self.qa_scan_azure_api_version_combo.setEnabled(enabled)
-
-        if not enabled:
-            self.qa_scan_azure_endpoint_entry.clear()
-            self.qa_scan_azure_api_version_combo.setCurrentText('2025-01-01-preview')
-
-    def _show_qa_scan_context_menu(self, position):
-        """Show context menu for Vision keys."""
-        item = self.qa_scan_tree.itemAt(position)
-        if not item:
-            return
-
-        if item not in self.qa_scan_tree.selectedItems():
-            self.qa_scan_tree.setCurrentItem(item)
-
-        menu = QMenu(self)
-
-        index = self.qa_scan_tree.indexOfTopLevelItem(item)
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        total = len(qa_scan_keys)
-
-        # Reorder submenu
-        if total > 1:
-            reorder_menu = menu.addMenu("Reorder")
-            if index > 0:
-                up_action = reorder_menu.addAction("Move Up")
-                up_action.triggered.connect(lambda: self._move_qa_scan_key('up'))
-            if index < total - 1:
-                down_action = reorder_menu.addAction("Move Down")
-                down_action.triggered.connect(lambda: self._move_qa_scan_key('down'))
-            menu.addSeparator()
-
-        # Change Model
-        selected_count = len(self.qa_scan_tree.selectedItems())
-        if selected_count > 1:
-            change_model_action = menu.addAction(f"Change Model ({selected_count} selected)")
-        else:
-            change_model_action = menu.addAction("Change Model")
-        change_model_action.triggered.connect(self._change_qa_scan_model_for_selected)
-
-        menu.addSeparator()
-
-        # Individual Endpoint options
-        if index < len(qa_scan_keys):
-            key_data = qa_scan_keys[index]
-            endpoint_enabled = key_data.get('use_individual_endpoint', False)
-            endpoint_url = key_data.get('azure_endpoint', '')
-
-            if endpoint_enabled and endpoint_url:
-                config_action = menu.addAction("✅ Individual Endpoint")
-                config_action.triggered.connect(lambda: self._configure_qa_scan_individual_endpoint(index))
-                disable_action = menu.addAction("Disable Individual Endpoint")
-                disable_action.triggered.connect(lambda: self._toggle_qa_scan_individual_endpoint(index, False))
-            else:
-                config_action = menu.addAction("🔧 Configure Individual Endpoint")
-                config_action.triggered.connect(lambda: self._configure_qa_scan_individual_endpoint(index))
-
-        menu.addSeparator()
-
-        # Per-key output token limit options
-        selected_items = self.qa_scan_tree.selectedItems()
-        selected_count = len(selected_items)
-        if selected_count > 1:
-            set_limit_action = menu.addAction(f"Set Output Token Limit ({selected_count} selected)")
-        else:
-            set_limit_action = menu.addAction("Set Output Token Limit")
-        set_limit_action.triggered.connect(self._set_qa_scan_output_token_limit_for_selected)
-        clear_limit_action = menu.addAction("Clear Output Token Limit")
-        clear_limit_action.triggered.connect(self._clear_qa_scan_output_token_limit_for_selected)
-
-        # Per-key temperature options
-        if selected_count > 1:
-            set_temp_action = menu.addAction(f"Set Key Temperature ({selected_count} selected)")
-        else:
-            set_temp_action = menu.addAction("Set Key Temperature")
-        set_temp_action.triggered.connect(self._set_qa_scan_key_temperature_for_selected)
-        clear_temp_action = menu.addAction("Clear Key Temperature")
-        clear_temp_action.triggered.connect(self._clear_qa_scan_key_temperature_for_selected)
-
-        # Per-key API call delay options for Vision keys
-        if selected_count > 1:
-            set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
-        else:
-            set_delay_action = menu.addAction("Set API Call Delay")
-        set_delay_action.triggered.connect(self._set_qa_scan_api_call_delay_for_selected)
-        clear_delay_action = menu.addAction("Clear API Call Delay")
-        clear_delay_action.triggered.connect(self._clear_qa_scan_api_call_delay_for_selected)
-
-        menu.addSeparator()
-
-        test_action = menu.addAction("Test")
-        test_action.triggered.connect(self._test_selected_qa_scan)
-        enable_action = menu.addAction("Enable")
-        enable_action.triggered.connect(self._enable_selected_qa_scan)
-        disable_action = menu.addAction("Disable")
-        disable_action.triggered.connect(self._disable_selected_qa_scan)
-        menu.addSeparator()
-        remove_action = menu.addAction("Remove")
-        remove_action.triggered.connect(self._remove_selected_qa_scan)
-
-        if total > 1:
-            clear_action = menu.addAction("Clear All")
-            clear_action.triggered.connect(self._clear_all_qa_scan)
-
-        menu.exec_(self.qa_scan_tree.viewport().mapToGlobal(position))
-
-    def _change_qa_scan_model_for_selected(self):
-        """Change model name for selected Vision keys."""
-        selected = self.qa_scan_tree.selectedItems()
-        if not selected:
-            return
-
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Change Model for {len(selected)} Vision Keys")
-        screen = QApplication.primaryScreen().geometry()
-        width = int(screen.width() * 0.21)
-        height = int(screen.height() * 0.13)
-        dialog.resize(width, height)
-        self._set_icon(dialog)
-
-        main_layout = QVBoxLayout(dialog)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-
-        label = QLabel("Enter new model name (press Enter to apply):")
-        main_layout.addWidget(label)
-
-        all_models = get_model_options()
-        model_combo = QComboBox()
-        model_combo.addItems(all_models)
-        model_combo.setEditable(True)
-        main_layout.addWidget(model_combo)
-
-        selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
-        if selected_indices and selected_indices[0] < len(qa_scan_keys):
-            current_model = qa_scan_keys[selected_indices[0]].get('model', '')
-            model_combo.setCurrentText(current_model)
-            model_combo.lineEdit().selectAll()
-
-        def apply_change():
-            new_model = model_combo.currentText().strip()
-            if new_model:
-                for item in selected:
-                    idx = self.qa_scan_tree.indexOfTopLevelItem(item)
-                    if idx < len(qa_scan_keys):
-                        qa_scan_keys[idx]['model'] = new_model
-                self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_qa_scan_keys()
-                self._show_qa_scan_status(f"Changed model to '{new_model}' for {len(selected)} Vision keys")
-                dialog.accept()
-
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-        apply_btn = QPushButton("Apply")
-        apply_btn.clicked.connect(apply_change)
-        apply_btn.setDefault(True)
-        button_layout.addWidget(apply_btn)
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(dialog.reject)
-        button_layout.addWidget(cancel_btn)
-        main_layout.addLayout(button_layout)
-
-        model_combo.setFocus()
-        dialog.exec_()
-
-    def _on_qa_scan_rows_moved(self):
-        """Sync qa_scan_keys config with tree order after drag-drop"""
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-
-        new_order = []
-        for i in range(self.qa_scan_tree.topLevelItemCount()):
-            item = self.qa_scan_tree.topLevelItem(i)
-            if item:
-                masked_key = item.text(0)
-                model = item.text(1)
-                for key_data in qa_scan_keys:
-                    api_key = key_data.get('api_key', '')
-                    key_masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
-                    if key_masked == masked_key and key_data.get('model', '') == model and key_data not in new_order:
-                        new_order.append(key_data)
-                        break
-
-        if len(new_order) == len(qa_scan_keys):
-            self.translator_gui.config['qa_scan_keys'] = new_order
-            self.translator_gui.save_config(show_message=False)
-            self._show_qa_scan_status("Reordered Vision keys")
-
-    def _on_qa_scan_selection_change(self):
-        """Update position label when QA scan selection changes"""
-        selected = self.qa_scan_tree.selectedItems()
-        if selected:
-            index = self.qa_scan_tree.indexOfTopLevelItem(selected[0])
-            total = self.qa_scan_tree.topLevelItemCount()
-            self.qa_scan_position_label.setText(f"#{index + 1}/{total}")
-        else:
-            self.qa_scan_position_label.setText("")
-
-    def _on_qa_scan_click(self, item, column):
-        """Handle double-click on QA scan tree item for inline editing"""
-        if not item:
-            return
-
-        index = self.qa_scan_tree.indexOfTopLevelItem(item)
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        if index >= len(qa_scan_keys):
-            return
-
-        if column == 1:
-            old_value = item.text(1)
-            new_value, ok = self._show_model_edit_dialog(old_value)
-            if ok and new_value and new_value != old_value:
-                qa_scan_keys[index]['model'] = new_value
-                self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_qa_scan_keys()
-                self._show_qa_scan_status(f"Updated model to: {new_value}")
-        elif column == 2:
-            from PySide6.QtWidgets import QInputDialog
-            current = qa_scan_keys[index].get('individual_output_token_limit') or 0
-            try:
-                current = int(current)
-            except (ValueError, TypeError):
-                current = 0
-            value, ok = QInputDialog.getInt(
-                self, "Edit Output Token Limit",
-                "Output token limit (0 = use global):",
-                current, 0, 1000000, 100
-            )
-            if ok:
-                qa_scan_keys[index]['individual_output_token_limit'] = value if value > 0 else None
-                self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_qa_scan_keys()
-                self._show_qa_scan_status(f"Updated output limit to: {value if value > 0 else 'global'}")
-        elif column == 3:
-            from PySide6.QtWidgets import QInputDialog
-            current = qa_scan_keys[index].get('individual_key_temperature')
-            default = float(current) if current not in (None, "") else -1.0
-            value, ok = QInputDialog.getDouble(
-                self, "Edit Key Temperature",
-                "Temperature (-1 = use global, 0.0 - 1.0):",
-                default, -1.0, 1.0, 2
-            )
-            if ok:
-                if value < 0:
-                    if 'individual_key_temperature' in qa_scan_keys[index]:
-                        del qa_scan_keys[index]['individual_key_temperature']
-                else:
-                    qa_scan_keys[index]['individual_key_temperature'] = value
-                self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_qa_scan_keys()
-                self._show_qa_scan_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
-        elif column == 4:  # API Delay column
-            from PySide6.QtWidgets import QInputDialog
-            current = qa_scan_keys[index].get('api_call_delay') or 0.0
-            try:
-                current = float(current)
-            except (ValueError, TypeError):
-                current = 0.0
-            value, ok = QInputDialog.getDouble(
-                self, "Edit API Call Delay",
-                "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
-                current, 0.0, 3600.0, 1
-            )
-            if ok:
-                qa_scan_keys[index]['api_call_delay'] = value if value > 0 else 0.0
-                self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_qa_scan_keys()
-                self._show_qa_scan_status(f"Updated API delay to: {value if value > 0 else 'global'}")
-
-
-    def _show_qa_scan_status(self, message: str):
-        """Show status message in the QA scan section."""
-        if hasattr(self, 'qa_scan_status_label'):
-            self.qa_scan_status_label.setText(message)
-
-    def _configure_qa_scan_individual_endpoint(self, qa_scan_index):
-        """Configure individual endpoint for a QA scan key"""
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        if qa_scan_index >= len(qa_scan_keys):
-            return
-
-        key_data = qa_scan_keys[qa_scan_index]
-
-        temp_key = APIKeyEntry(
-            api_key=key_data.get('api_key', ''),
-            model=key_data.get('model', ''),
-            cooldown=60,
-            enabled=True,
-            google_credentials=key_data.get('google_credentials'),
-            azure_endpoint=key_data.get('azure_endpoint'),
-            google_region=key_data.get('google_region'),
-            azure_api_version=key_data.get('azure_api_version'),
-            use_individual_endpoint=key_data.get('use_individual_endpoint', False)
-        )
-
-        def on_endpoint_configured():
-            qa_scan_keys[qa_scan_index]['azure_endpoint'] = temp_key.azure_endpoint
-            qa_scan_keys[qa_scan_index]['azure_api_version'] = temp_key.azure_api_version
-            qa_scan_keys[qa_scan_index]['use_individual_endpoint'] = temp_key.use_individual_endpoint
-            self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-            self.translator_gui.save_config(show_message=False)
-            self._load_qa_scan_keys()
-            status = "configured" if temp_key.use_individual_endpoint else "disabled"
-            self._show_qa_scan_status(f"Individual endpoint {status} for Vision key")
-
-        if IndividualEndpointDialog is None:
-            QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
-            return
-        dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_qa_scan_status)
-        dialog.exec_()
-
-    def _set_qa_scan_output_token_limit_for_selected(self):
-        """Set per-key output token limit for selected Vision keys."""
-        from PySide6.QtWidgets import QInputDialog
-        selected = self.qa_scan_tree.selectedItems()
-        if not selected:
-            return
-
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
-        if not selected_indices:
-            return
-
-        default_val = None
-        first_idx = selected_indices[0]
-        if 0 <= first_idx < len(qa_scan_keys):
-            try:
-                raw = qa_scan_keys[first_idx].get('individual_output_token_limit')
-                if raw not in (None, ""):
-                    iv = int(raw)
-                    if iv > 0:
-                        default_val = iv
-            except Exception:
-                default_val = None
-        if default_val is None:
-            try:
-                default_val = int(getattr(self.translator_gui, 'max_output_tokens', 8192))
-            except Exception:
-                default_val = 8192
-
-        value, ok = QInputDialog.getInt(
-            self, "Set Vision Key Output Token Limit",
-            "Max output tokens for selected Vision key(s):",
-            default_val, 1, 2000000, 512,
-        )
-        if not ok or value <= 0:
-            return
-
-        for idx in selected_indices:
-            if 0 <= idx < len(qa_scan_keys):
-                qa_scan_keys[idx]['individual_output_token_limit'] = int(value)
-        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_qa_scan_keys()
-        self._show_qa_scan_status(f"Set Vision key output token limit to {value} for {len(selected_indices)} key(s)")
-
-    def _clear_qa_scan_output_token_limit_for_selected(self):
-        """Clear per-key output token limit for selected Vision keys."""
-        selected = self.qa_scan_tree.selectedItems()
-        if not selected:
-            return
-
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
-        for idx in selected_indices:
-            if 0 <= idx < len(qa_scan_keys):
-                if 'individual_output_token_limit' in qa_scan_keys[idx]:
-                    del qa_scan_keys[idx]['individual_output_token_limit']
-        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_qa_scan_keys()
-        self._show_qa_scan_status(f"Cleared Vision key output token limit for {len(selected_indices)} key(s)")
-
-    def _set_qa_scan_key_temperature_for_selected(self):
-        """Set per-key temperature for selected Vision keys."""
-        from PySide6.QtWidgets import QInputDialog
-        selected = self.qa_scan_tree.selectedItems()
-        if not selected:
-            return
-
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
-        if not selected_indices:
-            return
-
-        default_val = 0.7
-        first_idx = selected_indices[0]
-        if 0 <= first_idx < len(qa_scan_keys):
-            try:
-                raw = qa_scan_keys[first_idx].get('individual_key_temperature')
-                if raw not in (None, ""):
-                    default_val = float(raw)
-            except Exception:
-                pass
-
-        value, ok = QInputDialog.getDouble(
-            self,
-            "Set Vision Key Temperature",
-            "Temperature for selected Vision key(s) (0.0 - 1.0):",
-            default_val,
-            0.0,
-            1.0,
-            2,
-        )
-        if not ok:
-            return
-
-        for idx in selected_indices:
-            if 0 <= idx < len(qa_scan_keys):
-                qa_scan_keys[idx]['individual_key_temperature'] = value
-        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_qa_scan_keys()
-        self._show_qa_scan_status(f"Set Vision key temperature to {value} for {len(selected_indices)} key(s)")
-
-    def _clear_qa_scan_key_temperature_for_selected(self):
-        """Clear per-key temperature for selected Vision keys."""
-        selected = self.qa_scan_tree.selectedItems()
-        if not selected:
-            return
-
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
-        for idx in selected_indices:
-            if 0 <= idx < len(qa_scan_keys):
-                if 'individual_key_temperature' in qa_scan_keys[idx]:
-                    del qa_scan_keys[idx]['individual_key_temperature']
-        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_qa_scan_keys()
-        self._show_qa_scan_status(f"Cleared Vision key temperature for {len(selected_indices)} key(s)")
-
-    def _set_qa_scan_api_call_delay_for_selected(self):
-        """Set per-key API call delay for selected Vision keys."""
-        from PySide6.QtWidgets import QInputDialog
-        selected = self.qa_scan_tree.selectedItems()
-        if not selected:
-            return
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
-        default_val = 0.0
-        for idx in selected_indices:
-            if 0 <= idx < len(qa_scan_keys):
-                v = qa_scan_keys[idx].get('api_call_delay', 0.0) or 0.0
-                if v > 0:
-                    default_val = float(v)
-                    break
-        value, ok = QInputDialog.getDouble(
-            self, "Set API Call Delay",
-            "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
-            default_val, 0.0, 3600.0, 1
-        )
-        if ok:
-            for idx in selected_indices:
-                if 0 <= idx < len(qa_scan_keys):
-                    qa_scan_keys[idx]['api_call_delay'] = value if value > 0 else 0.0
-            self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-            self.translator_gui.save_config(show_message=False)
-            self._load_qa_scan_keys()
-            self._show_qa_scan_status(f"Set API call delay to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
-
-    def _clear_qa_scan_api_call_delay_for_selected(self):
-        """Clear per-key API call delay for selected Vision keys."""
-        selected = self.qa_scan_tree.selectedItems()
-        if not selected:
-            return
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        selected_indices = [self.qa_scan_tree.indexOfTopLevelItem(item) for item in selected]
-        for idx in selected_indices:
-            if 0 <= idx < len(qa_scan_keys):
-                qa_scan_keys[idx]['api_call_delay'] = 0.0
-        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_qa_scan_keys()
-        self._show_qa_scan_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
-
-    def _toggle_qa_scan_individual_endpoint(self, qa_scan_index, enabled):
-        """Quick toggle individual endpoint on/off for QA scan key"""
-        qa_scan_keys = self.translator_gui.config.get('qa_scan_keys', [])
-        if qa_scan_index >= len(qa_scan_keys):
-            return
-
-        qa_scan_keys[qa_scan_index]['use_individual_endpoint'] = enabled
-        self.translator_gui.config['qa_scan_keys'] = qa_scan_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_qa_scan_keys()
-
-        status = "enabled" if enabled else "disabled"
-        model = qa_scan_keys[qa_scan_index].get('model', 'unknown')
-        self._show_qa_scan_status(f"Individual endpoint {status} for Vision key ({model})")
-
-    def _browse_qa_scan_google_credentials(self):
-        """Browse for Google Cloud credentials JSON file for Vision keys."""
-        filename, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Google Cloud Credentials JSON for QA Scan",
-            "",
-            "JSON files (*.json);;All files (*.*)"
-        )
-
-        if filename:
-            try:
-                with open(filename, 'r') as f:
-                    creds_data = json.load(f)
-                    if 'type' in creds_data and 'project_id' in creds_data:
-                        self.qa_scan_google_creds_entry.setText(filename)
-                        self._show_qa_scan_status(f"Selected Vision key Google credentials: {os.path.basename(filename)}")
-                    else:
-                        QMessageBox.critical(
-                            self,
-                            "Error",
-                            "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
-                        )
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     # ===================================================================
     # END QA SCAN KEYS SECTION
@@ -9118,1436 +6322,40 @@ class MultiAPIKeyDialog(QDialog):
     # TRUNCATION RETRY KEYS SECTION
     # ===================================================================
 
-    def _create_truncation_retry_section(self, parent_layout):
-        """Create the Truncation retry keys section below glossary."""
-        # Container that can be hidden
-        self.truncation_retry_container = QWidget()
-        truncation_retry_container_layout = QVBoxLayout(self.truncation_retry_container)
-        truncation_retry_container_layout.setContentsMargins(0, 5, 0, 0)
-
-        # Separator
-        self.truncation_retry_separator = QFrame()
-        self.truncation_retry_separator.setFrameShape(QFrame.HLine)
-        self.truncation_retry_separator.setFrameShadow(QFrame.Sunken)
-        truncation_retry_container_layout.addWidget(self.truncation_retry_separator)
-
-        # Main Truncation retry keys frame
-        truncation_retry_frame = QGroupBox("Truncation Retry Keys")
-        truncation_retry_frame_layout = QVBoxLayout(truncation_retry_frame)
-        truncation_retry_frame_layout.setContentsMargins(15, 15, 15, 15)
-
-        # Description
-        desc_label = QLabel(
-                "Configure dedicated keys used only when RETRY_TRUNCATED schedules a retry.\n"
-                "These keys are separate from Vision/QA truncation scan keys.\n"
-                "If no Truncation Retry keys are configured or the pool is disabled, retries use the current request key pool.")
-        desc_label.setStyleSheet("color: gray;")
-        desc_label.setWordWrap(True)
-        truncation_retry_frame_layout.addWidget(desc_label)
-
-        # Enable checkbox with spinning icon
-        truncation_retry_checkbox_container = QWidget()
-        truncation_retry_checkbox_layout = QHBoxLayout(truncation_retry_checkbox_container)
-        truncation_retry_checkbox_layout.setContentsMargins(0, 0, 0, 0)
-        truncation_retry_checkbox_layout.setSpacing(8)
-
-        self.use_truncation_retry_keys_var = self.translator_gui.config.get('use_truncation_retry_keys', False)
-        self.use_truncation_retry_keys_checkbox = self._create_styled_checkbox("Enable Truncation Retry Keys")
-        self.use_truncation_retry_keys_checkbox.setChecked(self.use_truncation_retry_keys_var)
-        self.use_truncation_retry_keys_checkbox.toggled.connect(self._toggle_truncation_retry_section)
-
-        # spinning icon
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
-        self.truncation_retry_icon = QLabel()
-        self.truncation_retry_icon.setStyleSheet("background-color: transparent;")
-        if os.path.exists(icon_path):
-            from PySide6.QtGui import QIcon, QPixmap
-            from PySide6.QtCore import QSize
-            icon = QIcon(icon_path)
-            try:
-                dpr = self.devicePixelRatioF()
-            except Exception:
-                dpr = 1.0
-            logical_px = 16
-            dev_px = int(logical_px * max(1.0, dpr))
-            pm = icon.pixmap(QSize(dev_px, dev_px))
-            if pm.isNull():
-                raw = QPixmap(icon_path)
-                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                pm = QPixmap.fromImage(img)
-            try:
-                pm.setDevicePixelRatio(dpr)
-            except Exception:
-                pass
-            self.truncation_retry_icon.setPixmap(pm)
-        self.truncation_retry_icon.setFixedSize(36, 36)
-        self.truncation_retry_icon.setAlignment(Qt.AlignCenter)
-        self.use_truncation_retry_keys_checkbox.toggled.connect(lambda: animate_icon(self.truncation_retry_icon))
-
-        truncation_retry_checkbox_layout.addWidget(self.truncation_retry_icon)
-        truncation_retry_checkbox_layout.addWidget(self.use_truncation_retry_keys_checkbox)
-        truncation_retry_checkbox_layout.addStretch()
-
-        truncation_retry_frame_layout.addWidget(truncation_retry_checkbox_container)
-
-        # Add Truncation retry key section
-        self.add_truncation_retry_frame = QWidget()
-        add_truncation_retry_grid = QGridLayout(self.add_truncation_retry_frame)
-        add_truncation_retry_grid.setContentsMargins(0, 0, 0, 10)
-
-        # Row 0: API Key and Model
-        add_truncation_retry_grid.addWidget(QLabel("Truncation Retry API Key:"), 0, 0, Qt.AlignLeft)
-        self.truncation_retry_key_entry = QLineEdit()
-        self.truncation_retry_key_entry.setEchoMode(QLineEdit.Password)
-        add_truncation_retry_grid.addWidget(self.truncation_retry_key_entry, 0, 1)
-
-        # Toggle visibility
-        self.show_truncation_retry_btn = QPushButton("👁")
-        self.show_truncation_retry_btn.setFixedWidth(40)
-        self.show_truncation_retry_btn.clicked.connect(self._toggle_truncation_retry_visibility)
-        add_truncation_retry_grid.addWidget(self.show_truncation_retry_btn, 0, 2)
-
-        # Model
-        add_truncation_retry_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
-        truncation_retry_models = get_model_options()
-        self.truncation_retry_model_combo = QComboBox()
-        self.truncation_retry_model_combo.addItems(truncation_retry_models)
-        self.truncation_retry_model_combo.setEditable(True)
-        self._disable_combobox_mousewheel(self.truncation_retry_model_combo)
-        add_truncation_retry_grid.addWidget(self.truncation_retry_model_combo, 0, 4)
-
-        # Add button
-        add_truncation_retry_btn = QPushButton("Add Truncation Retry Key")
-        add_truncation_retry_btn.clicked.connect(self._add_truncation_retry_key)
-        add_truncation_retry_grid.addWidget(add_truncation_retry_btn, 0, 5, Qt.AlignRight)
-
-        add_truncation_retry_grid.setColumnStretch(1, 1)
-        add_truncation_retry_grid.setColumnStretch(4, 1)
-
-        truncation_retry_frame_layout.addWidget(self.add_truncation_retry_frame)
-
-        # Row 1: Google Credentials
-        google_creds_label = QLabel("Google Creds:")
-        google_creds_label.setStyleSheet("color: gray; font-size: 8pt;")
-        add_truncation_retry_grid.addWidget(google_creds_label, 1, 0, Qt.AlignLeft)
-        self.truncation_retry_google_creds_entry = QLineEdit()
-        self.truncation_retry_google_creds_entry.setStyleSheet("font-size: 7pt;")
-        add_truncation_retry_grid.addWidget(self.truncation_retry_google_creds_entry, 1, 1)
-
-        browse_google_btn = QPushButton("📁")
-        browse_google_btn.setFixedWidth(40)
-        browse_google_btn.clicked.connect(self._browse_truncation_retry_google_credentials)
-        add_truncation_retry_grid.addWidget(browse_google_btn, 1, 2)
-
-        region_label = QLabel("Region:")
-        region_label.setStyleSheet("color: gray;")
-        add_truncation_retry_grid.addWidget(region_label, 1, 3, Qt.AlignLeft)
-        self.truncation_retry_google_region_entry = QLineEdit("us-east5")
-        self.truncation_retry_google_region_entry.setStyleSheet("font-size: 7pt;")
-        self.truncation_retry_google_region_entry.setMaximumWidth(100)
-        add_truncation_retry_grid.addWidget(self.truncation_retry_google_region_entry, 1, 4, 1, 1, Qt.AlignLeft)
-
-        # Row 2: Individual Endpoint Toggle
-        self.truncation_retry_use_individual_endpoint_var = False
-        self.truncation_retry_individual_endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
-        self.truncation_retry_individual_endpoint_toggle.setChecked(False)
-        self.truncation_retry_individual_endpoint_toggle.toggled.connect(self._toggle_truncation_retry_individual_endpoint_fields)
-        add_truncation_retry_grid.addWidget(self.truncation_retry_individual_endpoint_toggle, 2, 0, 1, 2, Qt.AlignLeft)
-
-        # Row 3: Individual Endpoint (initially hidden)
-        self.truncation_retry_individual_endpoint_label = QLabel("Individual Endpoint:")
-        self.truncation_retry_individual_endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
-        add_truncation_retry_grid.addWidget(self.truncation_retry_individual_endpoint_label, 3, 0, Qt.AlignLeft)
-        self.truncation_retry_azure_endpoint_entry = QLineEdit()
-        self.truncation_retry_azure_endpoint_entry.setStyleSheet("font-size: 8pt;")
-        add_truncation_retry_grid.addWidget(self.truncation_retry_azure_endpoint_entry, 3, 1, 1, 2)
-
-        self.truncation_retry_individual_api_version_label = QLabel("API Ver:")
-        self.truncation_retry_individual_api_version_label.setStyleSheet("color: gray;")
-        add_truncation_retry_grid.addWidget(self.truncation_retry_individual_api_version_label, 3, 3, Qt.AlignLeft)
-        truncation_retry_azure_versions = [
-            '2025-01-01-preview',
-            '2024-12-01-preview',
-            '2024-10-01-preview',
-            '2024-08-01-preview',
-            '2024-06-01',
-            '2024-02-01',
-            '2023-12-01-preview'
-        ]
-        self.truncation_retry_azure_api_version_combo = QComboBox()
-        self.truncation_retry_azure_api_version_combo.addItems(truncation_retry_azure_versions)
-        self.truncation_retry_azure_api_version_combo.setCurrentText('2025-01-01-preview')
-        self.truncation_retry_azure_api_version_combo.setStyleSheet("font-size: 7pt;")
-        self.truncation_retry_azure_api_version_combo.setMaximumWidth(180)
-        self._disable_combobox_mousewheel(self.truncation_retry_azure_api_version_combo)
-        add_truncation_retry_grid.addWidget(self.truncation_retry_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
-
-        # Initially hide endpoint fields
-        self._toggle_truncation_retry_individual_endpoint_fields()
-
-        # Truncation retry keys list
-        self._create_truncation_retry_list(truncation_retry_frame_layout)
-
-        # Add container to parent
-        truncation_retry_container_layout.addWidget(truncation_retry_frame)
-        parent_layout.addWidget(self.truncation_retry_container)
-
-        # Initially disable if checkbox is unchecked
-        self._toggle_truncation_retry_section()
-
-    def _create_truncation_retry_list(self, parent_layout):
-        """Create the Truncation retry keys list."""
-        self.truncation_retry_list_label = QLabel("Truncation Retry Keys (tried in order):")
-        list_label_font = QFont()
-        list_label_font.setBold(True)
-        self.truncation_retry_list_label.setFont(list_label_font)
-        parent_layout.addWidget(self.truncation_retry_list_label)
-
-        # Container for tree and buttons
-        self.truncation_retry_tree_container = QWidget()
-        container_layout = QHBoxLayout(self.truncation_retry_tree_container)
-        container_layout.setContentsMargins(0, 0, 0, 0)
-
-        # Left side: Move buttons
-        self.truncation_retry_move_frame = QWidget()
-        move_layout = QVBoxLayout(self.truncation_retry_move_frame)
-        move_layout.setContentsMargins(0, 0, 5, 0)
-
-        order_label = QLabel("Reorder")
-        order_font = QFont()
-        order_font.setBold(True)
-        order_label.setFont(order_font)
-        move_layout.addWidget(order_label)
-
-        top_btn = QPushButton("↑ ↑")
-        top_btn.setFixedSize(55, 32)
-        top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
-        top_btn.clicked.connect(lambda: self._move_truncation_retry_key('top'))
-        move_layout.addWidget(top_btn)
-
-        up_btn = QPushButton("↑")
-        up_btn.setFixedSize(55, 32)
-        up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
-        up_btn.clicked.connect(lambda: self._move_truncation_retry_key('up'))
-        move_layout.addWidget(up_btn)
-
-        down_btn = QPushButton("↓")
-        down_btn.setFixedSize(55, 32)
-        down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
-        down_btn.clicked.connect(lambda: self._move_truncation_retry_key('down'))
-        move_layout.addWidget(down_btn)
-
-        bottom_btn = QPushButton("↓ ↓")
-        bottom_btn.setFixedSize(55, 32)
-        bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
-        bottom_btn.clicked.connect(lambda: self._move_truncation_retry_key('bottom'))
-        move_layout.addWidget(bottom_btn)
-
-        move_layout.addSpacing(10)
-
-        self.truncation_retry_position_label = QLabel()
-        self.truncation_retry_position_label.setStyleSheet("color: gray;")
-        move_layout.addWidget(self.truncation_retry_position_label)
-        move_layout.addStretch()
-        container_layout.addWidget(self.truncation_retry_move_frame)
-
-        # Right side: TreeWidget with drag and drop
-        self.truncation_retry_tree = QTreeWidget()
-        self.truncation_retry_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', 'Success', 'Errors', 'Times Used'])
-        self.truncation_retry_tree.setColumnWidth(0, 125)
-        self.truncation_retry_tree.setColumnWidth(1, 220)
-        self.truncation_retry_tree.setColumnWidth(2, 105)
-        self.truncation_retry_tree.setColumnWidth(3, 100)
-        self.truncation_retry_tree.setColumnWidth(4, 90)
-        self.truncation_retry_tree.setColumnWidth(5, 100)
-        self.truncation_retry_tree.setColumnWidth(6, 75)
-        self.truncation_retry_tree.setColumnWidth(7, 55)
-        self.truncation_retry_tree.setColumnWidth(8, 80)
-
-        qs_header = self.truncation_retry_tree.header()
-        qs_header_font = QFont()
-        qs_header_font.setBold(True)
-        qs_header_font.setPointSize(11)
-        qs_header.setFont(qs_header_font)
-
-        self.truncation_retry_tree.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.truncation_retry_tree.customContextMenuRequested.connect(self._show_truncation_retry_context_menu)
-        self.truncation_retry_tree.setMinimumHeight(150)
-
-        self.truncation_retry_tree.setDragDropMode(QAbstractItemView.InternalMove)
-        self.truncation_retry_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-
-        self.truncation_retry_tree.model().rowsMoved.connect(self._on_truncation_retry_rows_moved)
-        self.truncation_retry_tree.itemSelectionChanged.connect(self._on_truncation_retry_selection_change)
-        self.truncation_retry_tree.itemDoubleClicked.connect(self._on_truncation_retry_click)
-
-        container_layout.addWidget(self.truncation_retry_tree)
-        parent_layout.addWidget(self.truncation_retry_tree_container)
-
-        # Action buttons
-        self.truncation_retry_action_frame = QWidget()
-        truncation_retry_action_layout = QHBoxLayout(self.truncation_retry_action_frame)
-        truncation_retry_action_layout.setContentsMargins(0, 10, 0, 0)
-
-        test_selected_btn = QPushButton("Test Selected")
-        test_selected_btn.clicked.connect(self._test_selected_truncation_retry)
-        truncation_retry_action_layout.addWidget(test_selected_btn)
-
-        test_all_btn = QPushButton("Test All")
-        test_all_btn.clicked.connect(self._test_all_truncation_retry)
-        truncation_retry_action_layout.addWidget(test_all_btn)
-
-        enable_selected_btn = QPushButton("Enable Selected")
-        enable_selected_btn.clicked.connect(self._enable_selected_truncation_retry)
-        truncation_retry_action_layout.addWidget(enable_selected_btn)
-
-        disable_selected_btn = QPushButton("Disable Selected")
-        disable_selected_btn.clicked.connect(self._disable_selected_truncation_retry)
-        truncation_retry_action_layout.addWidget(disable_selected_btn)
-
-        remove_selected_btn = QPushButton("Remove Selected")
-        remove_selected_btn.clicked.connect(self._remove_selected_truncation_retry)
-        truncation_retry_action_layout.addWidget(remove_selected_btn)
-
-        clear_all_btn = QPushButton("Clear All")
-        clear_all_btn.clicked.connect(self._clear_all_truncation_retry)
-        truncation_retry_action_layout.addWidget(clear_all_btn)
-
-        truncation_retry_action_layout.addStretch()
-        self.truncation_retry_status_label = QLabel()
-        self.truncation_retry_status_label.setStyleSheet("color: gray;")
-        truncation_retry_action_layout.addWidget(self.truncation_retry_status_label)
-        parent_layout.addWidget(self.truncation_retry_action_frame)
-
-        # Load existing Truncation retry keys
-        self._load_truncation_retry_keys()
-
-    def _load_truncation_retry_keys(self):
-        """Load Truncation retry keys from config."""
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-
-        v_scroll = self.truncation_retry_tree.verticalScrollBar().value()
-        h_scroll = self.truncation_retry_tree.horizontalScrollBar().value()
-
-        selected_indices = []
-        for item in self.truncation_retry_tree.selectedItems():
-            selected_indices.append(self.truncation_retry_tree.indexOfTopLevelItem(item))
-
-        self.truncation_retry_tree.clear()
-
-        for key_data in truncation_retry_keys:
-            api_key = key_data.get('api_key', '')
-            model = key_data.get('model', '')
-            times_used = int(key_data.get('times_used', 0))
-
-            masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
-
-            try:
-                raw_limit = key_data.get('individual_output_token_limit')
-                per_key_limit = int(raw_limit) if raw_limit not in (None, "") else None
-            except Exception:
-                per_key_limit = None
-            if per_key_limit and per_key_limit > 0:
-                output_limit_str = str(per_key_limit)
-            else:
-                output_limit_str = "global"
-
-            # Determine per-key temperature display value
-            try:
-                raw_temp = key_data.get('individual_key_temperature')
-                per_key_temp = float(raw_temp) if raw_temp not in (None, "") else None
-            except Exception:
-                per_key_temp = None
-            if per_key_temp is not None:
-                temp_str = str(per_key_temp)
-            else:
-                temp_str = "global"
-
-            enabled = key_data.get('enabled', True)
-            test_result = key_data.get('last_test_result')
-            if not enabled:
-                status = "Disabled"
-                color = Qt.gray
-            elif test_result == 'passed':
-                status = "✅ Passed"
-                color = Qt.darkGreen
-            elif test_result == 'failed':
-                status = "❌ Failed"
-                color = Qt.red
-            elif test_result == 'timeout':
-                status = "⏱️ Timed Out"
-                color = Qt.darkYellow
-            elif test_result == 'error':
-                status = "❌ Error"
-                color = Qt.darkRed
-            else:
-                status = "Enabled"
-                color = Qt.gray
-
-            # Determine per-key API call delay display value
-            try:
-                raw_delay = key_data.get('api_call_delay')
-                per_key_delay = float(raw_delay) if raw_delay not in (None, "") else 0.0
-            except Exception:
-                per_key_delay = 0.0
-            delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
-
-            success_count = int(key_data.get('success_count', 0))
-            error_count = int(key_data.get('error_count', 0))
-            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
-            for col in range(item.columnCount()):
-                item.setForeground(col, color)
-
-            # Tooltip for per-key settings
-            tooltip_parts = []
-            if per_key_limit and per_key_limit > 0:
-                tooltip_parts.append(f"Individual Output Token Limit: {per_key_limit}")
-            else:
-                tooltip_parts.append("Using global output token limit")
-            if per_key_temp is not None:
-                tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
-            else:
-                tooltip_parts.append("Using global temperature")
-            if per_key_delay > 0:
-                tooltip_parts.append(f"API Call Delay: {per_key_delay}s (overrides global SEND_INTERVAL_SECONDS)")
-            else:
-                tooltip_parts.append("Using global API call delay (SEND_INTERVAL_SECONDS)")
-            tooltip = "\n".join(tooltip_parts)
-            for col in range(item.columnCount()):
-                item.setToolTip(col, tooltip)
-
-            item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
-            self.truncation_retry_tree.addTopLevelItem(item)
-
-        for index in selected_indices:
-            if index < self.truncation_retry_tree.topLevelItemCount():
-                item = self.truncation_retry_tree.topLevelItem(index)
-                item.setSelected(True)
-
-        self.truncation_retry_tree.verticalScrollBar().setValue(v_scroll)
-        self.truncation_retry_tree.horizontalScrollBar().setValue(h_scroll)
-
-        # Auto-refresh the in-memory pool so changes take effect immediately
-        if not getattr(self, '_initializing', False):
-            self._refresh_truncation_retry_pool()
-
-    def _add_truncation_retry_key(self):
-        """Add a new truncation retry key"""
-        api_key = self.truncation_retry_key_entry.text().strip()
-        model = self.truncation_retry_model_combo.currentText().strip()
-        google_credentials = self.truncation_retry_google_creds_entry.text().strip() or None
-        google_region = self.truncation_retry_google_region_entry.text().strip() or None
-
-        use_individual_endpoint = self.truncation_retry_individual_endpoint_toggle.isChecked()
-        azure_endpoint = self.truncation_retry_azure_endpoint_entry.text().strip() if use_individual_endpoint else None
-        azure_api_version = self.truncation_retry_azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
-
-        if not model:
-            QMessageBox.critical(self, "Error", "Please enter a model name")
-            return
-
-
-
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-
-        individual_output_token_limit = None
-        individual_key_temperature = None
-
-        truncation_retry_keys.append({
-            'api_key': api_key,
-            'model': model,
-            'google_credentials': google_credentials,
-            'azure_endpoint': azure_endpoint,
-            'google_region': google_region,
-            'azure_api_version': azure_api_version,
-            'use_individual_endpoint': use_individual_endpoint,
-            'individual_output_token_limit': individual_output_token_limit,
-            'individual_key_temperature': individual_key_temperature,
-            'api_call_delay': 0.0,
-            'enabled': True,
-            'times_used': 0
-        })
-
-        self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-        self.translator_gui.save_config(show_message=False)
-
-        # Clear inputs
-        self.truncation_retry_key_entry.clear()
-        self.truncation_retry_model_combo.setCurrentText("")
-        self.truncation_retry_google_creds_entry.clear()
-        self.truncation_retry_azure_endpoint_entry.clear()
-        self.truncation_retry_google_region_entry.setText("us-east5")
-        self.truncation_retry_azure_api_version_combo.setCurrentText('2025-01-01-preview')
-        self.truncation_retry_individual_endpoint_toggle.setChecked(False)
-
-        self._toggle_truncation_retry_individual_endpoint_fields()
-
-        self._load_truncation_retry_keys()
-
-        extras = []
-        if google_credentials:
-            extras.append(f"Google: {os.path.basename(google_credentials)}")
-        if azure_endpoint:
-            extras.append(f"Azure: {azure_endpoint[:30]}...")
-        extra_info = f" ({', '.join(extras)})" if extras else ""
-        self._show_truncation_retry_status(f"Added Truncation retry key for model: {model}{extra_info}")
-
-        self._notify_authgpt_visibility()
-
-    def _move_truncation_retry_key(self, direction):
-        """Move selected truncation retry key up or down"""
-        selected = self.truncation_retry_tree.selectedItems()
-        if not selected:
-            return
-
-        item = selected[0]
-        index = self.truncation_retry_tree.indexOfTopLevelItem(item)
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-
-        if index >= len(truncation_retry_keys):
-            return
-
-        new_index = index
-        if direction == 'top' and index > 0:
-            new_index = 0
-        elif direction == 'up' and index > 0:
-            new_index = index - 1
-        elif direction == 'down' and index < len(truncation_retry_keys) - 1:
-            new_index = index + 1
-        elif direction == 'bottom' and index < len(truncation_retry_keys) - 1:
-            new_index = len(truncation_retry_keys) - 1
-
-        if new_index != index:
-            key = truncation_retry_keys.pop(index)
-            truncation_retry_keys.insert(new_index, key)
-
-            self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-            self.translator_gui.save_config(show_message=False)
-
-            self._load_truncation_retry_keys()
-
-            if new_index < self.truncation_retry_tree.topLevelItemCount():
-                item = self.truncation_retry_tree.topLevelItem(new_index)
-                if item:
-                    self.truncation_retry_tree.setCurrentItem(item)
-                    item.setSelected(True)
-
-    def _test_selected_truncation_retry(self):
-        """Test selected truncation retry key"""
-        selected = self.truncation_retry_tree.selectedItems()
-        if not selected:
-            QMessageBox.warning(self, "Warning", "Please select a Truncation retry key to test")
-            return
-
-        index = self.truncation_retry_tree.indexOfTopLevelItem(selected[0])
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-
-        if index >= len(truncation_retry_keys):
-            return
-
-        if index < self.truncation_retry_tree.topLevelItemCount():
-            item = self.truncation_retry_tree.topLevelItem(index)
-            if item:
-                item.setText(3, "⏳ Testing...")
-
-        key_data = truncation_retry_keys[index]
-
-        try:
-            from unified_api_client import UnifiedClient
-            UnifiedClient._api_key_pool = self.key_pool
-        except Exception:
-            pass
-
-        QTimer.singleShot(100, lambda: self._test_single_truncation_retry_key(key_data, index))
-
-    def _test_all_truncation_retry(self):
-        """Test all Truncation retry keys in parallel."""
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-
-        if not truncation_retry_keys:
-            QMessageBox.warning(self, "Warning", "No Truncation retry keys to test")
-            return
-
-        for i in range(self.truncation_retry_tree.topLevelItemCount()):
-            item = self.truncation_retry_tree.topLevelItem(i)
-            if item:
-                item.setText(3, "⏳ Testing...")
-
-        try:
-            from unified_api_client import UnifiedClient
-            UnifiedClient._api_key_pool = self.key_pool
-        except Exception:
-            pass
-
-        for i, key_data in enumerate(truncation_retry_keys):
-            self._test_single_truncation_retry_key(key_data, i)
-
-    @Slot(int, bool) if HAS_GUI else lambda x: x
-    def _update_truncation_retry_test_result(self, index, success):
-        """Update truncation retry tree item with test result"""
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-        if index < len(truncation_retry_keys):
-            try:
-                truncation_retry_keys[index]['times_used'] = int(truncation_retry_keys[index].get('times_used', 0)) + 1
-                if success:
-                    truncation_retry_keys[index]['success_count'] = int(truncation_retry_keys[index].get('success_count', 0)) + 1
-                else:
-                    truncation_retry_keys[index]['error_count'] = int(truncation_retry_keys[index].get('error_count', 0)) + 1
-                self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-                self.translator_gui.save_config(show_message=False)
-            except Exception:
-                pass
-
-        if index < self.truncation_retry_tree.topLevelItemCount():
-            item = self.truncation_retry_tree.topLevelItem(index)
-            if item:
-                if success:
-                    item.setText(3, "✅ Passed")
-                    color = Qt.darkGreen
-                else:
-                    item.setText(3, "❌ Failed")
-                    color = Qt.red
-                for col in range(item.columnCount()):
-                    item.setForeground(col, color)
-                try:
-                    if success:
-                        current = int(item.text(4))
-                        item.setText(4, str(current + 1))
-                    else:
-                        current = int(item.text(5))
-                        item.setText(5, str(current + 1))
-                except Exception:
-                    pass
-                try:
-                    current_times = int(item.text(6))
-                    item.setText(6, str(current_times + 1))
-                except Exception:
-                    item.setText(6, "1")
-
-    @Slot(int) if HAS_GUI else lambda x: x
-    def _update_truncation_retry_timeout_status(self, index):
-        """Update truncation retry tree item with timeout status"""
-        if index < self.truncation_retry_tree.topLevelItemCount():
-            item = self.truncation_retry_tree.topLevelItem(index)
-            if item:
-                item.setText(3, "⏱️ Timed Out")
-                for col in range(item.columnCount()):
-                    item.setForeground(col, Qt.darkYellow)
-
-    def _test_single_truncation_retry_key(self, key_data, index):
-        """Test a single truncation retry key — REAL API TEST"""
-        api_key = key_data.get('api_key', '')
-        model = key_data.get('model', '')
-
-        print(f"[DEBUG] Starting REAL Truncation retry key test for {model}")
-
-        from concurrent.futures import ThreadPoolExecutor
-        from unified_api_client import UnifiedClient
-
-        if hasattr(self.translator_gui, '_ensure_executor'):
-            self.translator_gui._ensure_executor()
-        executor = getattr(self.translator_gui, 'executor', None)
-
-        client_ref = [None]
-        timed_out = [False]
-
-        def run_api_test():
-            try:
-                client = UnifiedClient(
-                    api_key=api_key,
-                    model=model,
-                    output_dir=None
-                )
-                client_ref[0] = client
-
-                try:
-                    tls = client._get_thread_local_client()
-                    tls.max_retries_override = 1
-                except Exception:
-                    pass
-
-                google_credentials = key_data.get('google_credentials')
-                if google_credentials:
-                    client.current_key_google_creds = google_credentials
-                    client.google_creds_path = google_credentials
-
-                google_region = key_data.get('google_region')
-                if google_region:
-                    client.current_key_google_region = google_region
-
-                use_individual_endpoint = key_data.get('use_individual_endpoint', False)
-                if use_individual_endpoint:
-                    azure_endpoint = key_data.get('azure_endpoint')
-                    if azure_endpoint:
-                        client.current_key_azure_endpoint = azure_endpoint
-                        client.current_key_use_individual_endpoint = True
-                    azure_api_version = key_data.get('azure_api_version')
-                    if azure_api_version:
-                        client.current_key_azure_api_version = azure_api_version
-
-                messages = [
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "Say 'API test successful' and nothing else."}
-                ]
-
-                response = client.send(messages, temperature=0.7, max_tokens=1000)
-
-                if response and isinstance(response, tuple):
-                    content, _ = response
-                    if content and "test successful" in content.lower():
-                        print(f"[DEBUG] Truncation retry key test completed for {model}: PASSED")
-                        if not timed_out[0]:
-                            if HAS_GUI:
-                                QMetaObject.invokeMethod(self, "_update_truncation_retry_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
-                            else:
-                                self._update_truncation_retry_test_result(index, True)
-                        return
-
-                print(f"[DEBUG] Truncation retry key test completed for {model}: FAILED")
-                if not timed_out[0]:
-                    if HAS_GUI:
-                        QMetaObject.invokeMethod(self, "_update_truncation_retry_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
-                    else:
-                        self._update_truncation_retry_test_result(index, False)
-            except Exception as e:
-                print(f"[DEBUG] Truncation retry key test error for {model}: {e}")
-                if not timed_out[0]:
-                    if HAS_GUI:
-                        QMetaObject.invokeMethod(self, "_update_truncation_retry_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
-                    else:
-                        self._update_truncation_retry_test_result(index, False)
-
-        def run_with_timeout():
-            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-            with ThreadPoolExecutor(max_workers=1) as timeout_pool:
-                future = timeout_pool.submit(run_api_test)
-                try:
-                    future.result(timeout=30)
-                except FuturesTimeout:
-                    timed_out[0] = True
-                    print(f"[DEBUG] Truncation retry key test TIMED OUT for {model} (30s)")
-                    _client = client_ref[0]
-                    if _client:
-                        try:
-                            _client._cancelled = True
-                            oc = getattr(_client, 'openai_client', None)
-                            if oc and hasattr(oc, 'close'):
-                                oc.close()
-                            elif oc and hasattr(oc, '_client') and hasattr(oc._client, 'close'):
-                                oc._client.close()
-                        except Exception:
-                            pass
-                    try:
-                        from unified_api_client import _api_watchdog_reset
-                        _api_watchdog_reset()
-                    except Exception:
-                        pass
-                    if HAS_GUI:
-                        QMetaObject.invokeMethod(self, "_update_truncation_retry_timeout_status", Qt.QueuedConnection, Q_ARG(int, index))
-                    else:
-                        self._update_truncation_retry_timeout_status(index)
-                except Exception:
-                    pass
-
-        if executor:
-            executor.submit(run_with_timeout)
-        else:
-            thread = threading.Thread(target=run_with_timeout, daemon=True)
-            thread.start()
-
-    def _remove_selected_truncation_retry(self):
-        """Remove selected Truncation retry keys."""
-        selected = self.truncation_retry_tree.selectedItems()
-        if not selected:
-            return
-
-        reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected Truncation retry key(s)?",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            indices = sorted([self.truncation_retry_tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
-
-            truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-
-            for index in indices:
-                if index < len(truncation_retry_keys):
-                    del truncation_retry_keys[index]
-
-            self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-            self.translator_gui.save_config(show_message=False)
-            self._load_truncation_retry_keys()
-            self._show_truncation_retry_status(f"Removed {len(selected)} Truncation retry key(s)")
-            self._notify_authgpt_visibility()
-
-
-    def _enable_selected_truncation_retry(self):
-        """Enable selected Truncation retry keys."""
-        selected = self.truncation_retry_tree.selectedItems()
-        if not selected:
-            return
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-        for item in selected:
-            index = self.truncation_retry_tree.indexOfTopLevelItem(item)
-            if index < len(truncation_retry_keys):
-                truncation_retry_keys[index]['enabled'] = True
-        self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_truncation_retry_keys()
-        self._show_truncation_retry_status(f"Enabled {len(selected)} Truncation retry key(s)")
-        self._notify_authgpt_visibility()
-
-    def _disable_selected_truncation_retry(self):
-        """Disable selected Truncation retry keys."""
-        selected = self.truncation_retry_tree.selectedItems()
-        if not selected:
-            return
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-        for item in selected:
-            index = self.truncation_retry_tree.indexOfTopLevelItem(item)
-            if index < len(truncation_retry_keys):
-                truncation_retry_keys[index]['enabled'] = False
-        self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_truncation_retry_keys()
-        self._show_truncation_retry_status(f"Disabled {len(selected)} Truncation retry key(s)")
-        self._notify_authgpt_visibility()
-
-    def _clear_all_truncation_retry(self):
-        """Clear all Truncation retry keys."""
-        if self.truncation_retry_tree.topLevelItemCount() == 0:
-            return
-
-        reply = QMessageBox.question(self, "Confirm", "Remove ALL Truncation retry keys?",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            self.translator_gui.config['truncation_retry_keys'] = []
-            self.translator_gui.save_config(show_message=False)
-            self._load_truncation_retry_keys()
-            self._show_truncation_retry_status("Cleared all Truncation retry keys")
-            self._notify_authgpt_visibility()
-
-    def _toggle_truncation_retry_section(self):
-        """Toggle truncation retry section visibility"""
-        enabled = self.use_truncation_retry_keys_checkbox.isChecked()
-
-        if hasattr(self, 'add_truncation_retry_frame'):
-            self.add_truncation_retry_frame.setVisible(enabled)
-        if hasattr(self, 'truncation_retry_list_label'):
-            self.truncation_retry_list_label.setVisible(enabled)
-        if hasattr(self, 'truncation_retry_tree_container'):
-            self.truncation_retry_tree_container.setVisible(enabled)
-        if hasattr(self, 'truncation_retry_action_frame'):
-            self.truncation_retry_action_frame.setVisible(enabled)
-        if hasattr(self, 'truncation_retry_tree') and not enabled:
-            self.truncation_retry_tree.clearSelection()
-
-        self._show_truncation_retry_status(f"Truncation Retry Keys {'enabled' if enabled else 'disabled'}")
-
-        # Update in-memory config immediately
-        self.translator_gui.config['use_truncation_retry_keys'] = enabled
-        if hasattr(self.translator_gui, 'use_truncation_retry_keys_var'):
-            self.translator_gui.use_truncation_retry_keys_var = enabled
-
-        if not getattr(self, '_initializing', False):
-            truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-            if enabled:
-                msg = f"🔑 Truncation retry key pool: {len(truncation_retry_keys)} keys loaded"
-            else:
-                msg = f"🔑 Truncation retry key pool: disabled"
-            if hasattr(self.translator_gui, 'append_log'):
-                try:
-                    self.translator_gui.append_log(msg)
-                except Exception:
-                    print(msg)
-            else:
-                print(msg)
-
-        try:
-            import os as _os
-            import json as _json
-            qk_list = self.translator_gui.config.get('truncation_retry_keys', []) or []
-            _os.environ['USE_TRUNCATION_RETRY_KEYS'] = '1' if enabled else '0'
-            _os.environ['TRUNCATION_RETRY_API_KEYS'] = _json.dumps(qk_list)
-        except Exception:
-            pass
-
-        if enabled:
-            try:
-                from unified_api_client import UnifiedClient
-                qk_list = self.translator_gui.config.get('truncation_retry_keys', []) or []
-                if qk_list:
-                    UnifiedClient.set_in_memory_truncation_retry_keys(qk_list)
-            except Exception:
-                pass
-        else:
-            try:
-                from unified_api_client import UnifiedClient
-                UnifiedClient.clear_in_memory_truncation_retry_keys()
-            except Exception:
-                pass
-
-        self._notify_authgpt_visibility()
-
-    def _refresh_truncation_retry_pool(self):
-        """Refresh the in-memory Truncation retry key pool after any change."""
-        try:
-            use_truncation_retry = self.use_truncation_retry_keys_checkbox.isChecked() if hasattr(self, 'use_truncation_retry_keys_checkbox') else False
-            if not use_truncation_retry:
-                return
-            from unified_api_client import UnifiedClient
-            qk_list = self.translator_gui.config.get('truncation_retry_keys', []) or []
-            try:
-                import os as _os
-                import json as _json
-                _os.environ['USE_TRUNCATION_RETRY_KEYS'] = '1'
-                _os.environ['TRUNCATION_RETRY_API_KEYS'] = _json.dumps(qk_list)
-            except Exception:
-                pass
-            if qk_list:
-                UnifiedClient.set_in_memory_truncation_retry_keys(qk_list)
-            else:
-                UnifiedClient.clear_in_memory_truncation_retry_keys()
-        except Exception:
-            pass
-
-    def _toggle_truncation_retry_visibility(self):
-        """Toggle truncation retry key field visibility"""
-        if self.truncation_retry_key_entry.echoMode() == QLineEdit.Password:
-            self.truncation_retry_key_entry.setEchoMode(QLineEdit.Normal)
-            self.show_truncation_retry_btn.setText('🔒')
-        else:
-            self.truncation_retry_key_entry.setEchoMode(QLineEdit.Password)
-            self.show_truncation_retry_btn.setText('👁')
-
-    def _toggle_truncation_retry_individual_endpoint_fields(self):
-        """Toggle visibility of truncation retry individual endpoint fields"""
-        enabled = self.truncation_retry_individual_endpoint_toggle.isChecked()
-
-        self.truncation_retry_individual_endpoint_label.setVisible(enabled)
-        self.truncation_retry_azure_endpoint_entry.setVisible(enabled)
-        self.truncation_retry_individual_api_version_label.setVisible(enabled)
-        self.truncation_retry_azure_api_version_combo.setVisible(enabled)
-
-        self.truncation_retry_azure_endpoint_entry.setEnabled(enabled)
-        self.truncation_retry_azure_api_version_combo.setEnabled(enabled)
-
-        if not enabled:
-            self.truncation_retry_azure_endpoint_entry.clear()
-            self.truncation_retry_azure_api_version_combo.setCurrentText('2025-01-01-preview')
-
-    def _show_truncation_retry_context_menu(self, position):
-        """Show context menu for Truncation retry keys."""
-        item = self.truncation_retry_tree.itemAt(position)
-        if not item:
-            return
-
-        if item not in self.truncation_retry_tree.selectedItems():
-            self.truncation_retry_tree.setCurrentItem(item)
-
-        menu = QMenu(self)
-
-        index = self.truncation_retry_tree.indexOfTopLevelItem(item)
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-        total = len(truncation_retry_keys)
-
-        # Reorder submenu
-        if total > 1:
-            reorder_menu = menu.addMenu("Reorder")
-            if index > 0:
-                up_action = reorder_menu.addAction("Move Up")
-                up_action.triggered.connect(lambda: self._move_truncation_retry_key('up'))
-            if index < total - 1:
-                down_action = reorder_menu.addAction("Move Down")
-                down_action.triggered.connect(lambda: self._move_truncation_retry_key('down'))
-            menu.addSeparator()
-
-        # Change Model
-        selected_count = len(self.truncation_retry_tree.selectedItems())
-        if selected_count > 1:
-            change_model_action = menu.addAction(f"Change Model ({selected_count} selected)")
-        else:
-            change_model_action = menu.addAction("Change Model")
-        change_model_action.triggered.connect(self._change_truncation_retry_model_for_selected)
-
-        menu.addSeparator()
-
-        # Individual Endpoint options
-        if index < len(truncation_retry_keys):
-            key_data = truncation_retry_keys[index]
-            endpoint_enabled = key_data.get('use_individual_endpoint', False)
-            endpoint_url = key_data.get('azure_endpoint', '')
-
-            if endpoint_enabled and endpoint_url:
-                config_action = menu.addAction("✅ Individual Endpoint")
-                config_action.triggered.connect(lambda: self._configure_truncation_retry_individual_endpoint(index))
-                disable_action = menu.addAction("Disable Individual Endpoint")
-                disable_action.triggered.connect(lambda: self._toggle_truncation_retry_individual_endpoint(index, False))
-            else:
-                config_action = menu.addAction("🔧 Configure Individual Endpoint")
-                config_action.triggered.connect(lambda: self._configure_truncation_retry_individual_endpoint(index))
-
-        menu.addSeparator()
-
-        # Per-key output token limit options
-        selected_items = self.truncation_retry_tree.selectedItems()
-        selected_count = len(selected_items)
-        if selected_count > 1:
-            set_limit_action = menu.addAction(f"Set Output Token Limit ({selected_count} selected)")
-        else:
-            set_limit_action = menu.addAction("Set Output Token Limit")
-        set_limit_action.triggered.connect(self._set_truncation_retry_output_token_limit_for_selected)
-        clear_limit_action = menu.addAction("Clear Output Token Limit")
-        clear_limit_action.triggered.connect(self._clear_truncation_retry_output_token_limit_for_selected)
-
-        # Per-key temperature options
-        if selected_count > 1:
-            set_temp_action = menu.addAction(f"Set Key Temperature ({selected_count} selected)")
-        else:
-            set_temp_action = menu.addAction("Set Key Temperature")
-        set_temp_action.triggered.connect(self._set_truncation_retry_key_temperature_for_selected)
-        clear_temp_action = menu.addAction("Clear Key Temperature")
-        clear_temp_action.triggered.connect(self._clear_truncation_retry_key_temperature_for_selected)
-
-        # Per-key API call delay options for Truncation retry keys
-        if selected_count > 1:
-            set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
-        else:
-            set_delay_action = menu.addAction("Set API Call Delay")
-        set_delay_action.triggered.connect(self._set_truncation_retry_api_call_delay_for_selected)
-        clear_delay_action = menu.addAction("Clear API Call Delay")
-        clear_delay_action.triggered.connect(self._clear_truncation_retry_api_call_delay_for_selected)
-
-        menu.addSeparator()
-
-        test_action = menu.addAction("Test")
-        test_action.triggered.connect(self._test_selected_truncation_retry)
-        enable_action = menu.addAction("Enable")
-        enable_action.triggered.connect(self._enable_selected_truncation_retry)
-        disable_action = menu.addAction("Disable")
-        disable_action.triggered.connect(self._disable_selected_truncation_retry)
-        menu.addSeparator()
-        remove_action = menu.addAction("Remove")
-        remove_action.triggered.connect(self._remove_selected_truncation_retry)
-
-        if total > 1:
-            clear_action = menu.addAction("Clear All")
-            clear_action.triggered.connect(self._clear_all_truncation_retry)
-
-        menu.exec_(self.truncation_retry_tree.viewport().mapToGlobal(position))
-
-    def _change_truncation_retry_model_for_selected(self):
-        """Change model name for selected Truncation retry keys."""
-        selected = self.truncation_retry_tree.selectedItems()
-        if not selected:
-            return
-
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Change Model for {len(selected)} Truncation Retry Keys")
-        screen = QApplication.primaryScreen().geometry()
-        width = int(screen.width() * 0.21)
-        height = int(screen.height() * 0.13)
-        dialog.resize(width, height)
-        self._set_icon(dialog)
-
-        main_layout = QVBoxLayout(dialog)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-
-        label = QLabel("Enter new model name (press Enter to apply):")
-        main_layout.addWidget(label)
-
-        all_models = get_model_options()
-        model_combo = QComboBox()
-        model_combo.addItems(all_models)
-        model_combo.setEditable(True)
-        main_layout.addWidget(model_combo)
-
-        selected_indices = [self.truncation_retry_tree.indexOfTopLevelItem(item) for item in selected]
-        if selected_indices and selected_indices[0] < len(truncation_retry_keys):
-            current_model = truncation_retry_keys[selected_indices[0]].get('model', '')
-            model_combo.setCurrentText(current_model)
-            model_combo.lineEdit().selectAll()
-
-        def apply_change():
-            new_model = model_combo.currentText().strip()
-            if new_model:
-                for item in selected:
-                    idx = self.truncation_retry_tree.indexOfTopLevelItem(item)
-                    if idx < len(truncation_retry_keys):
-                        truncation_retry_keys[idx]['model'] = new_model
-                self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_truncation_retry_keys()
-                self._show_truncation_retry_status(f"Changed model to '{new_model}' for {len(selected)} Truncation retry keys")
-                dialog.accept()
-
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-        apply_btn = QPushButton("Apply")
-        apply_btn.clicked.connect(apply_change)
-        apply_btn.setDefault(True)
-        button_layout.addWidget(apply_btn)
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(dialog.reject)
-        button_layout.addWidget(cancel_btn)
-        main_layout.addLayout(button_layout)
-
-        model_combo.setFocus()
-        dialog.exec_()
-
-    def _on_truncation_retry_rows_moved(self):
-        """Sync truncation_retry_keys config with tree order after drag-drop"""
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-
-        new_order = []
-        for i in range(self.truncation_retry_tree.topLevelItemCount()):
-            item = self.truncation_retry_tree.topLevelItem(i)
-            if item:
-                masked_key = item.text(0)
-                model = item.text(1)
-                for key_data in truncation_retry_keys:
-                    api_key = key_data.get('api_key', '')
-                    key_masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
-                    if key_masked == masked_key and key_data.get('model', '') == model and key_data not in new_order:
-                        new_order.append(key_data)
-                        break
-
-        if len(new_order) == len(truncation_retry_keys):
-            self.translator_gui.config['truncation_retry_keys'] = new_order
-            self.translator_gui.save_config(show_message=False)
-            self._show_truncation_retry_status("Reordered Truncation retry keys")
-
-    def _on_truncation_retry_selection_change(self):
-        """Update position label when truncation retry selection changes"""
-        selected = self.truncation_retry_tree.selectedItems()
-        if selected:
-            index = self.truncation_retry_tree.indexOfTopLevelItem(selected[0])
-            total = self.truncation_retry_tree.topLevelItemCount()
-            self.truncation_retry_position_label.setText(f"#{index + 1}/{total}")
-        else:
-            self.truncation_retry_position_label.setText("")
-
-    def _on_truncation_retry_click(self, item, column):
-        """Handle double-click on truncation retry tree item for inline editing"""
-        if not item:
-            return
-
-        index = self.truncation_retry_tree.indexOfTopLevelItem(item)
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-        if index >= len(truncation_retry_keys):
-            return
-
-        if column == 1:
-            old_value = item.text(1)
-            new_value, ok = self._show_model_edit_dialog(old_value)
-            if ok and new_value and new_value != old_value:
-                truncation_retry_keys[index]['model'] = new_value
-                self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_truncation_retry_keys()
-                self._show_truncation_retry_status(f"Updated model to: {new_value}")
-        elif column == 2:
-            from PySide6.QtWidgets import QInputDialog
-            current = truncation_retry_keys[index].get('individual_output_token_limit') or 0
-            try:
-                current = int(current)
-            except (ValueError, TypeError):
-                current = 0
-            value, ok = QInputDialog.getInt(
-                self, "Edit Output Token Limit",
-                "Output token limit (0 = use global):",
-                current, 0, 1000000, 100
-            )
-            if ok:
-                truncation_retry_keys[index]['individual_output_token_limit'] = value if value > 0 else None
-                self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_truncation_retry_keys()
-                self._show_truncation_retry_status(f"Updated output limit to: {value if value > 0 else 'global'}")
-        elif column == 3:
-            from PySide6.QtWidgets import QInputDialog
-            current = truncation_retry_keys[index].get('individual_key_temperature')
-            default = float(current) if current not in (None, "") else -1.0
-            value, ok = QInputDialog.getDouble(
-                self, "Edit Key Temperature",
-                "Temperature (-1 = use global, 0.0 - 1.0):",
-                default, -1.0, 1.0, 2
-            )
-            if ok:
-                if value < 0:
-                    if 'individual_key_temperature' in truncation_retry_keys[index]:
-                        del truncation_retry_keys[index]['individual_key_temperature']
-                else:
-                    truncation_retry_keys[index]['individual_key_temperature'] = value
-                self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_truncation_retry_keys()
-                self._show_truncation_retry_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
-        elif column == 4:  # API Delay column
-            from PySide6.QtWidgets import QInputDialog
-            current = truncation_retry_keys[index].get('api_call_delay') or 0.0
-            try:
-                current = float(current)
-            except (ValueError, TypeError):
-                current = 0.0
-            value, ok = QInputDialog.getDouble(
-                self, "Edit API Call Delay",
-                "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
-                current, 0.0, 3600.0, 1
-            )
-            if ok:
-                truncation_retry_keys[index]['api_call_delay'] = value if value > 0 else 0.0
-                self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_truncation_retry_keys()
-                self._show_truncation_retry_status(f"Updated API delay to: {value if value > 0 else 'global'}")
-
-
-    def _show_truncation_retry_status(self, message: str):
-        """Show status message in the truncation retry section."""
-        if hasattr(self, 'truncation_retry_status_label'):
-            self.truncation_retry_status_label.setText(message)
-
-    def _configure_truncation_retry_individual_endpoint(self, truncation_retry_index):
-        """Configure individual endpoint for a truncation retry key"""
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-        if truncation_retry_index >= len(truncation_retry_keys):
-            return
-
-        key_data = truncation_retry_keys[truncation_retry_index]
-
-        temp_key = APIKeyEntry(
-            api_key=key_data.get('api_key', ''),
-            model=key_data.get('model', ''),
-            cooldown=60,
-            enabled=True,
-            google_credentials=key_data.get('google_credentials'),
-            azure_endpoint=key_data.get('azure_endpoint'),
-            google_region=key_data.get('google_region'),
-            azure_api_version=key_data.get('azure_api_version'),
-            use_individual_endpoint=key_data.get('use_individual_endpoint', False)
-        )
-
-        def on_endpoint_configured():
-            truncation_retry_keys[truncation_retry_index]['azure_endpoint'] = temp_key.azure_endpoint
-            truncation_retry_keys[truncation_retry_index]['azure_api_version'] = temp_key.azure_api_version
-            truncation_retry_keys[truncation_retry_index]['use_individual_endpoint'] = temp_key.use_individual_endpoint
-            self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-            self.translator_gui.save_config(show_message=False)
-            self._load_truncation_retry_keys()
-            status = "configured" if temp_key.use_individual_endpoint else "disabled"
-            self._show_truncation_retry_status(f"Individual endpoint {status} for Truncation retry key")
-
-        if IndividualEndpointDialog is None:
-            QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
-            return
-        dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_truncation_retry_status)
-        dialog.exec_()
-
-    def _set_truncation_retry_output_token_limit_for_selected(self):
-        """Set per-key output token limit for selected Truncation retry keys."""
-        from PySide6.QtWidgets import QInputDialog
-        selected = self.truncation_retry_tree.selectedItems()
-        if not selected:
-            return
-
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-        selected_indices = [self.truncation_retry_tree.indexOfTopLevelItem(item) for item in selected]
-        if not selected_indices:
-            return
-
-        default_val = None
-        first_idx = selected_indices[0]
-        if 0 <= first_idx < len(truncation_retry_keys):
-            try:
-                raw = truncation_retry_keys[first_idx].get('individual_output_token_limit')
-                if raw not in (None, ""):
-                    iv = int(raw)
-                    if iv > 0:
-                        default_val = iv
-            except Exception:
-                default_val = None
-        if default_val is None:
-            try:
-                default_val = int(getattr(self.translator_gui, 'max_output_tokens', 8192))
-            except Exception:
-                default_val = 8192
-
-        value, ok = QInputDialog.getInt(
-            self, "Set Truncation Retry Key Output Token Limit",
-            "Max output tokens for selected Truncation retry key(s):",
-            default_val, 1, 2000000, 512,
-        )
-        if not ok or value <= 0:
-            return
-
-        for idx in selected_indices:
-            if 0 <= idx < len(truncation_retry_keys):
-                truncation_retry_keys[idx]['individual_output_token_limit'] = int(value)
-        self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_truncation_retry_keys()
-        self._show_truncation_retry_status(f"Set Truncation retry key output token limit to {value} for {len(selected_indices)} key(s)")
-
-    def _clear_truncation_retry_output_token_limit_for_selected(self):
-        """Clear per-key output token limit for selected Truncation retry keys."""
-        selected = self.truncation_retry_tree.selectedItems()
-        if not selected:
-            return
-
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-        selected_indices = [self.truncation_retry_tree.indexOfTopLevelItem(item) for item in selected]
-        for idx in selected_indices:
-            if 0 <= idx < len(truncation_retry_keys):
-                if 'individual_output_token_limit' in truncation_retry_keys[idx]:
-                    del truncation_retry_keys[idx]['individual_output_token_limit']
-        self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_truncation_retry_keys()
-        self._show_truncation_retry_status(f"Cleared Truncation retry key output token limit for {len(selected_indices)} key(s)")
-
-    def _set_truncation_retry_key_temperature_for_selected(self):
-        """Set per-key temperature for selected Truncation retry keys."""
-        from PySide6.QtWidgets import QInputDialog
-        selected = self.truncation_retry_tree.selectedItems()
-        if not selected:
-            return
-
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-        selected_indices = [self.truncation_retry_tree.indexOfTopLevelItem(item) for item in selected]
-        if not selected_indices:
-            return
-
-        default_val = 0.7
-        first_idx = selected_indices[0]
-        if 0 <= first_idx < len(truncation_retry_keys):
-            try:
-                raw = truncation_retry_keys[first_idx].get('individual_key_temperature')
-                if raw not in (None, ""):
-                    default_val = float(raw)
-            except Exception:
-                pass
-
-        value, ok = QInputDialog.getDouble(
-            self,
-            "Set Truncation Retry Key Temperature",
-            "Temperature for selected Truncation retry key(s) (0.0 - 1.0):",
-            default_val,
-            0.0,
-            1.0,
-            2,
-        )
-        if not ok:
-            return
-
-        for idx in selected_indices:
-            if 0 <= idx < len(truncation_retry_keys):
-                truncation_retry_keys[idx]['individual_key_temperature'] = value
-        self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_truncation_retry_keys()
-        self._show_truncation_retry_status(f"Set Truncation retry key temperature to {value} for {len(selected_indices)} key(s)")
-
-    def _clear_truncation_retry_key_temperature_for_selected(self):
-        """Clear per-key temperature for selected Truncation retry keys."""
-        selected = self.truncation_retry_tree.selectedItems()
-        if not selected:
-            return
-
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-        selected_indices = [self.truncation_retry_tree.indexOfTopLevelItem(item) for item in selected]
-        for idx in selected_indices:
-            if 0 <= idx < len(truncation_retry_keys):
-                if 'individual_key_temperature' in truncation_retry_keys[idx]:
-                    del truncation_retry_keys[idx]['individual_key_temperature']
-        self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_truncation_retry_keys()
-        self._show_truncation_retry_status(f"Cleared Truncation retry key temperature for {len(selected_indices)} key(s)")
-
-    def _set_truncation_retry_api_call_delay_for_selected(self):
-        """Set per-key API call delay for selected Truncation retry keys."""
-        from PySide6.QtWidgets import QInputDialog
-        selected = self.truncation_retry_tree.selectedItems()
-        if not selected:
-            return
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-        selected_indices = [self.truncation_retry_tree.indexOfTopLevelItem(item) for item in selected]
-        default_val = 0.0
-        for idx in selected_indices:
-            if 0 <= idx < len(truncation_retry_keys):
-                v = truncation_retry_keys[idx].get('api_call_delay', 0.0) or 0.0
-                if v > 0:
-                    default_val = float(v)
-                    break
-        value, ok = QInputDialog.getDouble(
-            self, "Set API Call Delay",
-            "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
-            default_val, 0.0, 3600.0, 1
-        )
-        if ok:
-            for idx in selected_indices:
-                if 0 <= idx < len(truncation_retry_keys):
-                    truncation_retry_keys[idx]['api_call_delay'] = value if value > 0 else 0.0
-            self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-            self.translator_gui.save_config(show_message=False)
-            self._load_truncation_retry_keys()
-            self._show_truncation_retry_status(f"Set API call delay to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
-
-    def _clear_truncation_retry_api_call_delay_for_selected(self):
-        """Clear per-key API call delay for selected Truncation retry keys."""
-        selected = self.truncation_retry_tree.selectedItems()
-        if not selected:
-            return
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-        selected_indices = [self.truncation_retry_tree.indexOfTopLevelItem(item) for item in selected]
-        for idx in selected_indices:
-            if 0 <= idx < len(truncation_retry_keys):
-                truncation_retry_keys[idx]['api_call_delay'] = 0.0
-        self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_truncation_retry_keys()
-        self._show_truncation_retry_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
-
-    def _toggle_truncation_retry_individual_endpoint(self, truncation_retry_index, enabled):
-        """Quick toggle individual endpoint on/off for truncation retry key"""
-        truncation_retry_keys = self.translator_gui.config.get('truncation_retry_keys', [])
-        if truncation_retry_index >= len(truncation_retry_keys):
-            return
-
-        truncation_retry_keys[truncation_retry_index]['use_individual_endpoint'] = enabled
-        self.translator_gui.config['truncation_retry_keys'] = truncation_retry_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_truncation_retry_keys()
-
-        status = "enabled" if enabled else "disabled"
-        model = truncation_retry_keys[truncation_retry_index].get('model', 'unknown')
-        self._show_truncation_retry_status(f"Individual endpoint {status} for Truncation retry key ({model})")
-
-    def _browse_truncation_retry_google_credentials(self):
-        """Browse for Google Cloud credentials JSON file for Truncation retry keys."""
-        filename, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Google Cloud Credentials JSON for Truncation Retry",
-            "",
-            "JSON files (*.json);;All files (*.*)"
-        )
-
-        if filename:
-            try:
-                with open(filename, 'r') as f:
-                    creds_data = json.load(f)
-                    if 'type' in creds_data and 'project_id' in creds_data:
-                        self.truncation_retry_google_creds_entry.setText(filename)
-                        self._show_truncation_retry_status(f"Selected Truncation retry key Google credentials: {os.path.basename(filename)}")
-                    else:
-                        QMessageBox.critical(
-                            self,
-                            "Error",
-                            "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
-                        )
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     # ===================================================================
     # END TRUNCATION RETRY KEYS SECTION
@@ -10558,1435 +6366,40 @@ class MultiAPIKeyDialog(QDialog):
     # IMAGE GEN / EDIT KEYS SECTION
     # ===================================================================
 
-    def _create_inpainter_section(self, parent_layout):
-        """Create the Image gen / edit keys section below glossary."""
-        # Container that can be hidden
-        self.inpainter_container = QWidget()
-        inpainter_container_layout = QVBoxLayout(self.inpainter_container)
-        inpainter_container_layout.setContentsMargins(0, 5, 0, 0)
-
-        # Separator
-        self.inpainter_separator = QFrame()
-        self.inpainter_separator.setFrameShape(QFrame.HLine)
-        self.inpainter_separator.setFrameShadow(QFrame.Sunken)
-        inpainter_container_layout.addWidget(self.inpainter_separator)
-
-        # Main Image gen / edit keys frame
-        inpainter_frame = QGroupBox("Image Gen / Edit Keys")
-        inpainter_frame_layout = QVBoxLayout(inpainter_frame)
-        inpainter_frame_layout.setContentsMargins(15, 15, 15, 15)
-
-        # Description
-        desc_label = QLabel(
-                "Configure dedicated keys for image generation/edit calls.\n"
-                "Used by image output mode requests and manga custom-image-edit requests.\n"
-                "If no Image gen / edit keys are configured or the pool is disabled, the main key pool/current provider is used instead.")
-        desc_label.setStyleSheet("color: gray;")
-        desc_label.setWordWrap(True)
-        inpainter_frame_layout.addWidget(desc_label)
-
-        # Enable checkbox with spinning icon
-        inpainter_checkbox_container = QWidget()
-        inpainter_checkbox_layout = QHBoxLayout(inpainter_checkbox_container)
-        inpainter_checkbox_layout.setContentsMargins(0, 0, 0, 0)
-        inpainter_checkbox_layout.setSpacing(8)
-
-        self.use_inpainter_keys_var = self._read_persisted_bool('use_inpainter_keys', False)
-        self.use_inpainter_keys_checkbox = self._create_styled_checkbox("Enable Image Gen / Edit Keys")
-        self.use_inpainter_keys_checkbox.setChecked(self.use_inpainter_keys_var)
-        self.use_inpainter_keys_checkbox.toggled.connect(self._toggle_inpainter_section)
-
-        # spinning icon
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
-        self.inpainter_icon = QLabel()
-        self.inpainter_icon.setStyleSheet("background-color: transparent;")
-        if os.path.exists(icon_path):
-            from PySide6.QtGui import QIcon, QPixmap
-            from PySide6.QtCore import QSize
-            icon = QIcon(icon_path)
-            try:
-                dpr = self.devicePixelRatioF()
-            except Exception:
-                dpr = 1.0
-            logical_px = 16
-            dev_px = int(logical_px * max(1.0, dpr))
-            pm = icon.pixmap(QSize(dev_px, dev_px))
-            if pm.isNull():
-                raw = QPixmap(icon_path)
-                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                pm = QPixmap.fromImage(img)
-            try:
-                pm.setDevicePixelRatio(dpr)
-            except Exception:
-                pass
-            self.inpainter_icon.setPixmap(pm)
-        self.inpainter_icon.setFixedSize(36, 36)
-        self.inpainter_icon.setAlignment(Qt.AlignCenter)
-        self.use_inpainter_keys_checkbox.toggled.connect(lambda: animate_icon(self.inpainter_icon))
-
-        inpainter_checkbox_layout.addWidget(self.inpainter_icon)
-        inpainter_checkbox_layout.addWidget(self.use_inpainter_keys_checkbox)
-        inpainter_checkbox_layout.addStretch()
-
-        inpainter_frame_layout.addWidget(inpainter_checkbox_container)
-
-        # Add Image gen / edit key section
-        self.add_inpainter_frame = QWidget()
-        add_inpainter_grid = QGridLayout(self.add_inpainter_frame)
-        add_inpainter_grid.setContentsMargins(0, 0, 0, 10)
-
-        # Row 0: API Key and Model
-        add_inpainter_grid.addWidget(QLabel("Image Gen/Edit API Key:"), 0, 0, Qt.AlignLeft)
-        self.inpainter_key_entry = QLineEdit()
-        self.inpainter_key_entry.setEchoMode(QLineEdit.Password)
-        add_inpainter_grid.addWidget(self.inpainter_key_entry, 0, 1)
-
-        # Toggle visibility
-        self.show_inpainter_btn = QPushButton("👁")
-        self.show_inpainter_btn.setFixedWidth(40)
-        self.show_inpainter_btn.clicked.connect(self._toggle_inpainter_visibility)
-        add_inpainter_grid.addWidget(self.show_inpainter_btn, 0, 2)
-
-        # Model
-        add_inpainter_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
-        inpainter_models = get_model_options()
-        self.inpainter_model_combo = QComboBox()
-        self.inpainter_model_combo.addItems(inpainter_models)
-        self.inpainter_model_combo.setEditable(True)
-        self._disable_combobox_mousewheel(self.inpainter_model_combo)
-        add_inpainter_grid.addWidget(self.inpainter_model_combo, 0, 4)
-
-        # Add button
-        add_inpainter_btn = QPushButton("Add Image Gen/Edit Key")
-        add_inpainter_btn.clicked.connect(self._add_inpainter_key)
-        add_inpainter_grid.addWidget(add_inpainter_btn, 0, 5, Qt.AlignRight)
-
-        add_inpainter_grid.setColumnStretch(1, 1)
-        add_inpainter_grid.setColumnStretch(4, 1)
-
-        inpainter_frame_layout.addWidget(self.add_inpainter_frame)
-
-        # Row 1: Google Credentials
-        google_creds_label = QLabel("Google Creds:")
-        google_creds_label.setStyleSheet("color: gray; font-size: 8pt;")
-        add_inpainter_grid.addWidget(google_creds_label, 1, 0, Qt.AlignLeft)
-        self.inpainter_google_creds_entry = QLineEdit()
-        self.inpainter_google_creds_entry.setStyleSheet("font-size: 7pt;")
-        add_inpainter_grid.addWidget(self.inpainter_google_creds_entry, 1, 1)
-
-        browse_google_btn = QPushButton("📁")
-        browse_google_btn.setFixedWidth(40)
-        browse_google_btn.clicked.connect(self._browse_inpainter_google_credentials)
-        add_inpainter_grid.addWidget(browse_google_btn, 1, 2)
-
-        region_label = QLabel("Region:")
-        region_label.setStyleSheet("color: gray;")
-        add_inpainter_grid.addWidget(region_label, 1, 3, Qt.AlignLeft)
-        self.inpainter_google_region_entry = QLineEdit("us-east5")
-        self.inpainter_google_region_entry.setStyleSheet("font-size: 7pt;")
-        self.inpainter_google_region_entry.setMaximumWidth(100)
-        add_inpainter_grid.addWidget(self.inpainter_google_region_entry, 1, 4, 1, 1, Qt.AlignLeft)
-
-        # Row 2: Individual Endpoint Toggle
-        self.inpainter_use_individual_endpoint_var = False
-        self.inpainter_individual_endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
-        self.inpainter_individual_endpoint_toggle.setChecked(False)
-        self.inpainter_individual_endpoint_toggle.toggled.connect(self._toggle_inpainter_individual_endpoint_fields)
-        add_inpainter_grid.addWidget(self.inpainter_individual_endpoint_toggle, 2, 0, 1, 2, Qt.AlignLeft)
-
-        # Row 3: Individual Endpoint (initially hidden)
-        self.inpainter_individual_endpoint_label = QLabel("Individual Endpoint:")
-        self.inpainter_individual_endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
-        add_inpainter_grid.addWidget(self.inpainter_individual_endpoint_label, 3, 0, Qt.AlignLeft)
-        self.inpainter_azure_endpoint_entry = QLineEdit()
-        self.inpainter_azure_endpoint_entry.setStyleSheet("font-size: 8pt;")
-        add_inpainter_grid.addWidget(self.inpainter_azure_endpoint_entry, 3, 1, 1, 2)
-
-        self.inpainter_individual_api_version_label = QLabel("API Ver:")
-        self.inpainter_individual_api_version_label.setStyleSheet("color: gray;")
-        add_inpainter_grid.addWidget(self.inpainter_individual_api_version_label, 3, 3, Qt.AlignLeft)
-        inpainter_azure_versions = [
-            '2025-01-01-preview',
-            '2024-12-01-preview',
-            '2024-10-01-preview',
-            '2024-08-01-preview',
-            '2024-06-01',
-            '2024-02-01',
-            '2023-12-01-preview'
-        ]
-        self.inpainter_azure_api_version_combo = QComboBox()
-        self.inpainter_azure_api_version_combo.addItems(inpainter_azure_versions)
-        self.inpainter_azure_api_version_combo.setCurrentText('2025-01-01-preview')
-        self.inpainter_azure_api_version_combo.setStyleSheet("font-size: 7pt;")
-        self.inpainter_azure_api_version_combo.setMaximumWidth(180)
-        self._disable_combobox_mousewheel(self.inpainter_azure_api_version_combo)
-        add_inpainter_grid.addWidget(self.inpainter_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
-
-        # Initially hide endpoint fields
-        self._toggle_inpainter_individual_endpoint_fields()
-
-        # Image gen / edit keys list
-        self._create_inpainter_list(inpainter_frame_layout)
-
-        # Add container to parent
-        inpainter_container_layout.addWidget(inpainter_frame)
-        parent_layout.addWidget(self.inpainter_container)
-
-        # Initially disable if checkbox is unchecked
-        self._toggle_inpainter_section()
-
-    def _create_inpainter_list(self, parent_layout):
-        """Create the Image gen / edit keys list."""
-        self.inpainter_list_label = QLabel("Image Gen / Edit Keys (tried in order):")
-        list_label_font = QFont()
-        list_label_font.setBold(True)
-        self.inpainter_list_label.setFont(list_label_font)
-        parent_layout.addWidget(self.inpainter_list_label)
-
-        # Container for tree and buttons
-        self.inpainter_tree_container = QWidget()
-        container_layout = QHBoxLayout(self.inpainter_tree_container)
-        container_layout.setContentsMargins(0, 0, 0, 0)
-
-        # Left side: Move buttons
-        self.inpainter_move_frame = QWidget()
-        move_layout = QVBoxLayout(self.inpainter_move_frame)
-        move_layout.setContentsMargins(0, 0, 5, 0)
-
-        order_label = QLabel("Reorder")
-        order_font = QFont()
-        order_font.setBold(True)
-        order_label.setFont(order_font)
-        move_layout.addWidget(order_label)
-
-        top_btn = QPushButton("↑ ↑")
-        top_btn.setFixedSize(55, 32)
-        top_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
-        top_btn.clicked.connect(lambda: self._move_inpainter_key('top'))
-        move_layout.addWidget(top_btn)
-
-        up_btn = QPushButton("↑")
-        up_btn.setFixedSize(55, 32)
-        up_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
-        up_btn.clicked.connect(lambda: self._move_inpainter_key('up'))
-        move_layout.addWidget(up_btn)
-
-        down_btn = QPushButton("↓")
-        down_btn.setFixedSize(55, 32)
-        down_btn.setStyleSheet("QPushButton { font-size: 16pt; padding: 2px; }")
-        down_btn.clicked.connect(lambda: self._move_inpainter_key('down'))
-        move_layout.addWidget(down_btn)
-
-        bottom_btn = QPushButton("↓ ↓")
-        bottom_btn.setFixedSize(55, 32)
-        bottom_btn.setStyleSheet("QPushButton { font-size: 14pt; padding: 2px; }")
-        bottom_btn.clicked.connect(lambda: self._move_inpainter_key('bottom'))
-        move_layout.addWidget(bottom_btn)
-
-        move_layout.addSpacing(10)
-
-        self.inpainter_position_label = QLabel()
-        self.inpainter_position_label.setStyleSheet("color: gray;")
-        move_layout.addWidget(self.inpainter_position_label)
-        move_layout.addStretch()
-        container_layout.addWidget(self.inpainter_move_frame)
-
-        # Right side: TreeWidget with drag and drop
-        self.inpainter_tree = QTreeWidget()
-        self.inpainter_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', 'Success', 'Errors', 'Times Used'])
-        self.inpainter_tree.setColumnWidth(0, 125)
-        self.inpainter_tree.setColumnWidth(1, 220)
-        self.inpainter_tree.setColumnWidth(2, 105)
-        self.inpainter_tree.setColumnWidth(3, 100)
-        self.inpainter_tree.setColumnWidth(4, 90)
-        self.inpainter_tree.setColumnWidth(5, 100)
-        self.inpainter_tree.setColumnWidth(6, 75)
-        self.inpainter_tree.setColumnWidth(7, 55)
-        self.inpainter_tree.setColumnWidth(8, 80)
-
-        qs_header = self.inpainter_tree.header()
-        qs_header_font = QFont()
-        qs_header_font.setBold(True)
-        qs_header_font.setPointSize(11)
-        qs_header.setFont(qs_header_font)
-
-        self.inpainter_tree.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.inpainter_tree.customContextMenuRequested.connect(self._show_inpainter_context_menu)
-        self.inpainter_tree.setMinimumHeight(150)
-
-        self.inpainter_tree.setDragDropMode(QAbstractItemView.InternalMove)
-        self.inpainter_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-
-        self.inpainter_tree.model().rowsMoved.connect(self._on_inpainter_rows_moved)
-        self.inpainter_tree.itemSelectionChanged.connect(self._on_inpainter_selection_change)
-        self.inpainter_tree.itemDoubleClicked.connect(self._on_inpainter_click)
-
-        container_layout.addWidget(self.inpainter_tree)
-        parent_layout.addWidget(self.inpainter_tree_container)
-
-        # Action buttons
-        self.inpainter_action_frame = QWidget()
-        inpainter_action_layout = QHBoxLayout(self.inpainter_action_frame)
-        inpainter_action_layout.setContentsMargins(0, 10, 0, 0)
-
-        test_selected_btn = QPushButton("Test Selected")
-        test_selected_btn.clicked.connect(self._test_selected_inpainter)
-        inpainter_action_layout.addWidget(test_selected_btn)
-
-        test_all_btn = QPushButton("Test All")
-        test_all_btn.clicked.connect(self._test_all_inpainter)
-        inpainter_action_layout.addWidget(test_all_btn)
-
-        enable_selected_btn = QPushButton("Enable Selected")
-        enable_selected_btn.clicked.connect(self._enable_selected_inpainter)
-        inpainter_action_layout.addWidget(enable_selected_btn)
-
-        disable_selected_btn = QPushButton("Disable Selected")
-        disable_selected_btn.clicked.connect(self._disable_selected_inpainter)
-        inpainter_action_layout.addWidget(disable_selected_btn)
-
-        remove_selected_btn = QPushButton("Remove Selected")
-        remove_selected_btn.clicked.connect(self._remove_selected_inpainter)
-        inpainter_action_layout.addWidget(remove_selected_btn)
-
-        clear_all_btn = QPushButton("Clear All")
-        clear_all_btn.clicked.connect(self._clear_all_inpainter)
-        inpainter_action_layout.addWidget(clear_all_btn)
-
-        inpainter_action_layout.addStretch()
-        self.inpainter_status_label = QLabel()
-        self.inpainter_status_label.setStyleSheet("color: gray;")
-        inpainter_action_layout.addWidget(self.inpainter_status_label)
-        parent_layout.addWidget(self.inpainter_action_frame)
-
-        # Load existing Image gen/edit keys
-        self._load_inpainter_keys()
-
-    def _load_inpainter_keys(self):
-        """Load Image gen/edit keys from config."""
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-
-        v_scroll = self.inpainter_tree.verticalScrollBar().value()
-        h_scroll = self.inpainter_tree.horizontalScrollBar().value()
-
-        selected_indices = []
-        for item in self.inpainter_tree.selectedItems():
-            selected_indices.append(self.inpainter_tree.indexOfTopLevelItem(item))
-
-        self.inpainter_tree.clear()
-
-        for key_data in inpainter_keys:
-            api_key = key_data.get('api_key', '')
-            model = key_data.get('model', '')
-            times_used = int(key_data.get('times_used', 0))
-
-            masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
-
-            try:
-                raw_limit = key_data.get('individual_output_token_limit')
-                per_key_limit = int(raw_limit) if raw_limit not in (None, "") else None
-            except Exception:
-                per_key_limit = None
-            if per_key_limit and per_key_limit > 0:
-                output_limit_str = str(per_key_limit)
-            else:
-                output_limit_str = "global"
-
-            # Determine per-key temperature display value
-            try:
-                raw_temp = key_data.get('individual_key_temperature')
-                per_key_temp = float(raw_temp) if raw_temp not in (None, "") else None
-            except Exception:
-                per_key_temp = None
-            if per_key_temp is not None:
-                temp_str = str(per_key_temp)
-            else:
-                temp_str = "global"
-
-            enabled = key_data.get('enabled', True)
-            test_result = key_data.get('last_test_result')
-            if not enabled:
-                status = "Disabled"
-                color = Qt.gray
-            elif test_result == 'passed':
-                status = "✅ Passed"
-                color = Qt.darkGreen
-            elif test_result == 'failed':
-                status = "❌ Failed"
-                color = Qt.red
-            elif test_result == 'timeout':
-                status = "⏱️ Timed Out"
-                color = Qt.darkYellow
-            elif test_result == 'error':
-                status = "❌ Error"
-                color = Qt.darkRed
-            else:
-                status = "Enabled"
-                color = Qt.gray
-
-            # Determine per-key API call delay display value
-            try:
-                raw_delay = key_data.get('api_call_delay')
-                per_key_delay = float(raw_delay) if raw_delay not in (None, "") else 0.0
-            except Exception:
-                per_key_delay = 0.0
-            delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
-
-            success_count = int(key_data.get('success_count', 0))
-            error_count = int(key_data.get('error_count', 0))
-            item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
-            for col in range(item.columnCount()):
-                item.setForeground(col, color)
-
-            # Tooltip for per-key settings
-            tooltip_parts = []
-            if per_key_limit and per_key_limit > 0:
-                tooltip_parts.append(f"Individual Output Token Limit: {per_key_limit}")
-            else:
-                tooltip_parts.append("Using global output token limit")
-            if per_key_temp is not None:
-                tooltip_parts.append(f"Individual Key Temperature: {per_key_temp}")
-            else:
-                tooltip_parts.append("Using global temperature")
-            if per_key_delay > 0:
-                tooltip_parts.append(f"API Call Delay: {per_key_delay}s (overrides global SEND_INTERVAL_SECONDS)")
-            else:
-                tooltip_parts.append("Using global API call delay (SEND_INTERVAL_SECONDS)")
-            tooltip = "\n".join(tooltip_parts)
-            for col in range(item.columnCount()):
-                item.setToolTip(col, tooltip)
-
-            item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
-            self.inpainter_tree.addTopLevelItem(item)
-
-        for index in selected_indices:
-            if index < self.inpainter_tree.topLevelItemCount():
-                item = self.inpainter_tree.topLevelItem(index)
-                item.setSelected(True)
-
-        self.inpainter_tree.verticalScrollBar().setValue(v_scroll)
-        self.inpainter_tree.horizontalScrollBar().setValue(h_scroll)
-
-        # Auto-refresh the in-memory pool so changes take effect immediately
-        if not getattr(self, '_initializing', False):
-            self._refresh_inpainter_pool()
-
-    def _add_inpainter_key(self):
-        """Add a new Image gen/edit key"""
-        api_key = self.inpainter_key_entry.text().strip()
-        model = self.inpainter_model_combo.currentText().strip()
-        google_credentials = self.inpainter_google_creds_entry.text().strip() or None
-        google_region = self.inpainter_google_region_entry.text().strip() or None
-
-        use_individual_endpoint = self.inpainter_individual_endpoint_toggle.isChecked()
-        azure_endpoint = self.inpainter_azure_endpoint_entry.text().strip() if use_individual_endpoint else None
-        azure_api_version = self.inpainter_azure_api_version_combo.currentText().strip() if use_individual_endpoint else None
-
-        if not model:
-            QMessageBox.critical(self, "Error", "Please enter a model name")
-            return
-
-
-
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-
-        individual_output_token_limit = None
-        individual_key_temperature = None
-
-        inpainter_keys.append({
-            'api_key': api_key,
-            'model': model,
-            'google_credentials': google_credentials,
-            'azure_endpoint': azure_endpoint,
-            'google_region': google_region,
-            'azure_api_version': azure_api_version,
-            'use_individual_endpoint': use_individual_endpoint,
-            'individual_output_token_limit': individual_output_token_limit,
-            'individual_key_temperature': individual_key_temperature,
-            'api_call_delay': 0.0,
-            'enabled': True,
-            'times_used': 0
-        })
-
-        self.translator_gui.config['inpainter_keys'] = inpainter_keys
-        self.translator_gui.save_config(show_message=False)
-
-        # Clear inputs
-        self.inpainter_key_entry.clear()
-        self.inpainter_model_combo.setCurrentText("")
-        self.inpainter_google_creds_entry.clear()
-        self.inpainter_azure_endpoint_entry.clear()
-        self.inpainter_google_region_entry.setText("us-east5")
-        self.inpainter_azure_api_version_combo.setCurrentText('2025-01-01-preview')
-        self.inpainter_individual_endpoint_toggle.setChecked(False)
-
-        self._toggle_inpainter_individual_endpoint_fields()
-
-        self._load_inpainter_keys()
-
-        extras = []
-        if google_credentials:
-            extras.append(f"Google: {os.path.basename(google_credentials)}")
-        if azure_endpoint:
-            extras.append(f"Azure: {azure_endpoint[:30]}...")
-        extra_info = f" ({', '.join(extras)})" if extras else ""
-        self._show_inpainter_status(f"Added Image gen/edit key for model: {model}{extra_info}")
-
-        self._notify_authgpt_visibility()
-
-    def _move_inpainter_key(self, direction):
-        """Move selected Image gen/edit key up or down"""
-        selected = self.inpainter_tree.selectedItems()
-        if not selected:
-            return
-
-        item = selected[0]
-        index = self.inpainter_tree.indexOfTopLevelItem(item)
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-
-        if index >= len(inpainter_keys):
-            return
-
-        new_index = index
-        if direction == 'top' and index > 0:
-            new_index = 0
-        elif direction == 'up' and index > 0:
-            new_index = index - 1
-        elif direction == 'down' and index < len(inpainter_keys) - 1:
-            new_index = index + 1
-        elif direction == 'bottom' and index < len(inpainter_keys) - 1:
-            new_index = len(inpainter_keys) - 1
-
-        if new_index != index:
-            key = inpainter_keys.pop(index)
-            inpainter_keys.insert(new_index, key)
-
-            self.translator_gui.config['inpainter_keys'] = inpainter_keys
-            self.translator_gui.save_config(show_message=False)
-
-            self._load_inpainter_keys()
-
-            if new_index < self.inpainter_tree.topLevelItemCount():
-                item = self.inpainter_tree.topLevelItem(new_index)
-                if item:
-                    self.inpainter_tree.setCurrentItem(item)
-                    item.setSelected(True)
-
-    def _test_selected_inpainter(self):
-        """Test selected Image gen/edit key"""
-        selected = self.inpainter_tree.selectedItems()
-        if not selected:
-            QMessageBox.warning(self, "Warning", "Please select an Image gen/edit key to test")
-            return
-
-        index = self.inpainter_tree.indexOfTopLevelItem(selected[0])
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-
-        if index >= len(inpainter_keys):
-            return
-
-        if index < self.inpainter_tree.topLevelItemCount():
-            item = self.inpainter_tree.topLevelItem(index)
-            if item:
-                item.setText(3, "⏳ Testing...")
-
-        key_data = inpainter_keys[index]
-
-        try:
-            from unified_api_client import UnifiedClient
-            UnifiedClient._api_key_pool = self.key_pool
-        except Exception:
-            pass
-
-        QTimer.singleShot(100, lambda: self._test_single_inpainter_key(key_data, index))
-
-    def _test_all_inpainter(self):
-        """Test all Image gen/edit keys in parallel."""
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-
-        if not inpainter_keys:
-            QMessageBox.warning(self, "Warning", "No Image gen/edit keys to test")
-            return
-
-        for i in range(self.inpainter_tree.topLevelItemCount()):
-            item = self.inpainter_tree.topLevelItem(i)
-            if item:
-                item.setText(3, "⏳ Testing...")
-
-        try:
-            from unified_api_client import UnifiedClient
-            UnifiedClient._api_key_pool = self.key_pool
-        except Exception:
-            pass
-
-        for i, key_data in enumerate(inpainter_keys):
-            self._test_single_inpainter_key(key_data, i)
-
-    @Slot(int, bool) if HAS_GUI else lambda x: x
-    def _update_inpainter_test_result(self, index, success):
-        """Update Inpainter tree item with test result"""
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-        if index < len(inpainter_keys):
-            try:
-                inpainter_keys[index]['times_used'] = int(inpainter_keys[index].get('times_used', 0)) + 1
-                if success:
-                    inpainter_keys[index]['success_count'] = int(inpainter_keys[index].get('success_count', 0)) + 1
-                else:
-                    inpainter_keys[index]['error_count'] = int(inpainter_keys[index].get('error_count', 0)) + 1
-                self.translator_gui.config['inpainter_keys'] = inpainter_keys
-                self.translator_gui.save_config(show_message=False)
-            except Exception:
-                pass
-
-        if index < self.inpainter_tree.topLevelItemCount():
-            item = self.inpainter_tree.topLevelItem(index)
-            if item:
-                if success:
-                    item.setText(3, "✅ Passed")
-                    color = Qt.darkGreen
-                else:
-                    item.setText(3, "❌ Failed")
-                    color = Qt.red
-                for col in range(item.columnCount()):
-                    item.setForeground(col, color)
-                try:
-                    if success:
-                        current = int(item.text(4))
-                        item.setText(4, str(current + 1))
-                    else:
-                        current = int(item.text(5))
-                        item.setText(5, str(current + 1))
-                except Exception:
-                    pass
-                try:
-                    current_times = int(item.text(6))
-                    item.setText(6, str(current_times + 1))
-                except Exception:
-                    item.setText(6, "1")
-
-    @Slot(int) if HAS_GUI else lambda x: x
-    def _update_inpainter_timeout_status(self, index):
-        """Update Inpainter tree item with timeout status"""
-        if index < self.inpainter_tree.topLevelItemCount():
-            item = self.inpainter_tree.topLevelItem(index)
-            if item:
-                item.setText(3, "⏱️ Timed Out")
-                for col in range(item.columnCount()):
-                    item.setForeground(col, Qt.darkYellow)
-
-    def _test_single_inpainter_key(self, key_data, index):
-        """Test a single Image gen/edit key — REAL API TEST"""
-        api_key = key_data.get('api_key', '')
-        model = key_data.get('model', '')
-
-        print(f"[DEBUG] Starting REAL Image gen/edit key test for {model}")
-
-        from concurrent.futures import ThreadPoolExecutor
-        from unified_api_client import UnifiedClient
-
-        if hasattr(self.translator_gui, '_ensure_executor'):
-            self.translator_gui._ensure_executor()
-        executor = getattr(self.translator_gui, 'executor', None)
-
-        client_ref = [None]
-        timed_out = [False]
-
-        def run_api_test():
-            try:
-                client = UnifiedClient(
-                    api_key=api_key,
-                    model=model,
-                    output_dir=None
-                )
-                client_ref[0] = client
-
-                try:
-                    tls = client._get_thread_local_client()
-                    tls.max_retries_override = 1
-                except Exception:
-                    pass
-
-                google_credentials = key_data.get('google_credentials')
-                if google_credentials:
-                    client.current_key_google_creds = google_credentials
-                    client.google_creds_path = google_credentials
-
-                google_region = key_data.get('google_region')
-                if google_region:
-                    client.current_key_google_region = google_region
-
-                use_individual_endpoint = key_data.get('use_individual_endpoint', False)
-                if use_individual_endpoint:
-                    azure_endpoint = key_data.get('azure_endpoint')
-                    if azure_endpoint:
-                        client.current_key_azure_endpoint = azure_endpoint
-                        client.current_key_use_individual_endpoint = True
-                    azure_api_version = key_data.get('azure_api_version')
-                    if azure_api_version:
-                        client.current_key_azure_api_version = azure_api_version
-
-                messages = [
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "Say 'API test successful' and nothing else."}
-                ]
-
-                response = client.send(messages, temperature=0.7, max_tokens=1000, context='Inpainter')
-
-                if response and isinstance(response, tuple):
-                    content, _ = response
-                    if content and "test successful" in content.lower():
-                        print(f"[DEBUG] Image gen/edit key test completed for {model}: PASSED")
-                        if not timed_out[0]:
-                            if HAS_GUI:
-                                QMetaObject.invokeMethod(self, "_update_inpainter_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
-                            else:
-                                self._update_inpainter_test_result(index, True)
-                        return
-
-                print(f"[DEBUG] Image gen/edit key test completed for {model}: FAILED")
-                if not timed_out[0]:
-                    if HAS_GUI:
-                        QMetaObject.invokeMethod(self, "_update_inpainter_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
-                    else:
-                        self._update_inpainter_test_result(index, False)
-            except Exception as e:
-                print(f"[DEBUG] Image gen/edit key test error for {model}: {e}")
-                if not timed_out[0]:
-                    if HAS_GUI:
-                        QMetaObject.invokeMethod(self, "_update_inpainter_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
-                    else:
-                        self._update_inpainter_test_result(index, False)
-
-        def run_with_timeout():
-            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-            with ThreadPoolExecutor(max_workers=1) as timeout_pool:
-                future = timeout_pool.submit(run_api_test)
-                try:
-                    future.result(timeout=30)
-                except FuturesTimeout:
-                    timed_out[0] = True
-                    print(f"[DEBUG] Image gen/edit key test TIMED OUT for {model} (30s)")
-                    _client = client_ref[0]
-                    if _client:
-                        try:
-                            _client._cancelled = True
-                            oc = getattr(_client, 'openai_client', None)
-                            if oc and hasattr(oc, 'close'):
-                                oc.close()
-                            elif oc and hasattr(oc, '_client') and hasattr(oc._client, 'close'):
-                                oc._client.close()
-                        except Exception:
-                            pass
-                    try:
-                        from unified_api_client import _api_watchdog_reset
-                        _api_watchdog_reset()
-                    except Exception:
-                        pass
-                    if HAS_GUI:
-                        QMetaObject.invokeMethod(self, "_update_inpainter_timeout_status", Qt.QueuedConnection, Q_ARG(int, index))
-                    else:
-                        self._update_inpainter_timeout_status(index)
-                except Exception:
-                    pass
-
-        if executor:
-            executor.submit(run_with_timeout)
-        else:
-            thread = threading.Thread(target=run_with_timeout, daemon=True)
-            thread.start()
-
-    def _remove_selected_inpainter(self):
-        """Remove selected Image gen/edit keys."""
-        selected = self.inpainter_tree.selectedItems()
-        if not selected:
-            return
-
-        reply = QMessageBox.question(self, "Confirm", f"Remove {len(selected)} selected Image gen/edit key(s)?",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            indices = sorted([self.inpainter_tree.indexOfTopLevelItem(item) for item in selected], reverse=True)
-
-            inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-
-            for index in indices:
-                if index < len(inpainter_keys):
-                    del inpainter_keys[index]
-
-            self.translator_gui.config['inpainter_keys'] = inpainter_keys
-            self.translator_gui.save_config(show_message=False)
-            self._load_inpainter_keys()
-            self._show_inpainter_status(f"Removed {len(selected)} Image gen/edit key(s)")
-            self._notify_authgpt_visibility()
-
-
-    def _enable_selected_inpainter(self):
-        """Enable selected Image gen/edit keys."""
-        selected = self.inpainter_tree.selectedItems()
-        if not selected:
-            return
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-        for item in selected:
-            index = self.inpainter_tree.indexOfTopLevelItem(item)
-            if index < len(inpainter_keys):
-                inpainter_keys[index]['enabled'] = True
-        self.translator_gui.config['inpainter_keys'] = inpainter_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_inpainter_keys()
-        self._show_inpainter_status(f"Enabled {len(selected)} Image gen/edit key(s)")
-        self._notify_authgpt_visibility()
-
-    def _disable_selected_inpainter(self):
-        """Disable selected Image gen/edit keys."""
-        selected = self.inpainter_tree.selectedItems()
-        if not selected:
-            return
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-        for item in selected:
-            index = self.inpainter_tree.indexOfTopLevelItem(item)
-            if index < len(inpainter_keys):
-                inpainter_keys[index]['enabled'] = False
-        self.translator_gui.config['inpainter_keys'] = inpainter_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_inpainter_keys()
-        self._show_inpainter_status(f"Disabled {len(selected)} Image gen/edit key(s)")
-        self._notify_authgpt_visibility()
-
-    def _clear_all_inpainter(self):
-        """Clear all Image gen/edit keys."""
-        if self.inpainter_tree.topLevelItemCount() == 0:
-            return
-
-        reply = QMessageBox.question(self, "Confirm", "Remove ALL Image gen/edit keys?",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            self.translator_gui.config['inpainter_keys'] = []
-            self.translator_gui.save_config(show_message=False)
-            self._load_inpainter_keys()
-            self._show_inpainter_status("Cleared all Image gen/edit keys")
-            self._notify_authgpt_visibility()
-
-    def _toggle_inpainter_section(self):
-        """Toggle Inpainter section visibility"""
-        enabled = self.use_inpainter_keys_checkbox.isChecked()
-
-        if hasattr(self, 'add_inpainter_frame'):
-            self.add_inpainter_frame.setVisible(enabled)
-        if hasattr(self, 'inpainter_list_label'):
-            self.inpainter_list_label.setVisible(enabled)
-        if hasattr(self, 'inpainter_tree_container'):
-            self.inpainter_tree_container.setVisible(enabled)
-        if hasattr(self, 'inpainter_action_frame'):
-            self.inpainter_action_frame.setVisible(enabled)
-        if hasattr(self, 'inpainter_tree') and not enabled:
-            self.inpainter_tree.clearSelection()
-
-        self._show_inpainter_status(f"Image Gen / Edit Keys {'enabled' if enabled else 'disabled'}")
-
-        # Update in-memory config immediately
-        self.translator_gui.config['use_inpainter_keys'] = enabled
-        self.translator_gui.use_inpainter_keys_var = enabled
-
-        if not getattr(self, '_initializing', False):
-            inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-            if enabled:
-                msg = f"🔑 Image gen/edit key pool: {len(inpainter_keys)} keys loaded"
-            else:
-                msg = f"🔑 Image gen/edit key pool: disabled"
-            if hasattr(self.translator_gui, 'append_log'):
-                try:
-                    self.translator_gui.append_log(msg)
-                except Exception:
-                    print(msg)
-            else:
-                print(msg)
-
-        try:
-            import os as _os
-            import json as _json
-            ik_list = self.translator_gui.config.get('inpainter_keys', []) or []
-            _os.environ['USE_INPAINTER_KEYS'] = '1' if enabled else '0'
-            _os.environ['INPAINTER_API_KEYS'] = _json.dumps(ik_list)
-        except Exception:
-            pass
-
-        if enabled:
-            try:
-                from unified_api_client import UnifiedClient
-                ik_list = self.translator_gui.config.get('inpainter_keys', []) or []
-                if ik_list:
-                    UnifiedClient.set_in_memory_inpainter_keys(ik_list)
-            except Exception:
-                pass
-        else:
-            try:
-                from unified_api_client import UnifiedClient
-                UnifiedClient.clear_in_memory_inpainter_keys()
-            except Exception:
-                pass
-
-        if not getattr(self, '_initializing', False):
-            self._notify_authgpt_visibility()
-
-    def _refresh_inpainter_pool(self):
-        """Refresh the in-memory Image gen/edit key pool after any change."""
-        try:
-            use_inpainter = self.use_inpainter_keys_checkbox.isChecked() if hasattr(self, 'use_inpainter_keys_checkbox') else False
-            if not use_inpainter:
-                return
-            from unified_api_client import UnifiedClient
-            ik_list = self.translator_gui.config.get('inpainter_keys', []) or []
-            try:
-                import os as _os
-                import json as _json
-                _os.environ['INPAINTER_API_KEYS'] = _json.dumps(ik_list)
-            except Exception:
-                pass
-            if ik_list:
-                UnifiedClient.set_in_memory_inpainter_keys(ik_list)
-            else:
-                UnifiedClient.clear_in_memory_inpainter_keys()
-        except Exception:
-            pass
-
-    def _toggle_inpainter_visibility(self):
-        """Toggle Image gen/edit key field visibility"""
-        if self.inpainter_key_entry.echoMode() == QLineEdit.Password:
-            self.inpainter_key_entry.setEchoMode(QLineEdit.Normal)
-            self.show_inpainter_btn.setText('🔒')
-        else:
-            self.inpainter_key_entry.setEchoMode(QLineEdit.Password)
-            self.show_inpainter_btn.setText('👁')
-
-    def _toggle_inpainter_individual_endpoint_fields(self):
-        """Toggle visibility of Image gen/edit individual endpoint fields"""
-        enabled = self.inpainter_individual_endpoint_toggle.isChecked()
-
-        self.inpainter_individual_endpoint_label.setVisible(enabled)
-        self.inpainter_azure_endpoint_entry.setVisible(enabled)
-        self.inpainter_individual_api_version_label.setVisible(enabled)
-        self.inpainter_azure_api_version_combo.setVisible(enabled)
-
-        self.inpainter_azure_endpoint_entry.setEnabled(enabled)
-        self.inpainter_azure_api_version_combo.setEnabled(enabled)
-
-        if not enabled:
-            self.inpainter_azure_endpoint_entry.clear()
-            self.inpainter_azure_api_version_combo.setCurrentText('2025-01-01-preview')
-
-    def _show_inpainter_context_menu(self, position):
-        """Show context menu for Image gen/edit keys."""
-        item = self.inpainter_tree.itemAt(position)
-        if not item:
-            return
-
-        if item not in self.inpainter_tree.selectedItems():
-            self.inpainter_tree.setCurrentItem(item)
-
-        menu = QMenu(self)
-
-        index = self.inpainter_tree.indexOfTopLevelItem(item)
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-        total = len(inpainter_keys)
-
-        # Reorder submenu
-        if total > 1:
-            reorder_menu = menu.addMenu("Reorder")
-            if index > 0:
-                up_action = reorder_menu.addAction("Move Up")
-                up_action.triggered.connect(lambda: self._move_inpainter_key('up'))
-            if index < total - 1:
-                down_action = reorder_menu.addAction("Move Down")
-                down_action.triggered.connect(lambda: self._move_inpainter_key('down'))
-            menu.addSeparator()
-
-        # Change Model
-        selected_count = len(self.inpainter_tree.selectedItems())
-        if selected_count > 1:
-            change_model_action = menu.addAction(f"Change Model ({selected_count} selected)")
-        else:
-            change_model_action = menu.addAction("Change Model")
-        change_model_action.triggered.connect(self._change_inpainter_model_for_selected)
-
-        menu.addSeparator()
-
-        # Individual Endpoint options
-        if index < len(inpainter_keys):
-            key_data = inpainter_keys[index]
-            endpoint_enabled = key_data.get('use_individual_endpoint', False)
-            endpoint_url = key_data.get('azure_endpoint', '')
-
-            if endpoint_enabled and endpoint_url:
-                config_action = menu.addAction("✅ Individual Endpoint")
-                config_action.triggered.connect(lambda: self._configure_inpainter_individual_endpoint(index))
-                disable_action = menu.addAction("Disable Individual Endpoint")
-                disable_action.triggered.connect(lambda: self._toggle_inpainter_individual_endpoint(index, False))
-            else:
-                config_action = menu.addAction("🔧 Configure Individual Endpoint")
-                config_action.triggered.connect(lambda: self._configure_inpainter_individual_endpoint(index))
-
-        menu.addSeparator()
-
-        # Per-key output token limit options
-        selected_items = self.inpainter_tree.selectedItems()
-        selected_count = len(selected_items)
-        if selected_count > 1:
-            set_limit_action = menu.addAction(f"Set Output Token Limit ({selected_count} selected)")
-        else:
-            set_limit_action = menu.addAction("Set Output Token Limit")
-        set_limit_action.triggered.connect(self._set_inpainter_output_token_limit_for_selected)
-        clear_limit_action = menu.addAction("Clear Output Token Limit")
-        clear_limit_action.triggered.connect(self._clear_inpainter_output_token_limit_for_selected)
-
-        # Per-key temperature options
-        if selected_count > 1:
-            set_temp_action = menu.addAction(f"Set Key Temperature ({selected_count} selected)")
-        else:
-            set_temp_action = menu.addAction("Set Key Temperature")
-        set_temp_action.triggered.connect(self._set_inpainter_key_temperature_for_selected)
-        clear_temp_action = menu.addAction("Clear Key Temperature")
-        clear_temp_action.triggered.connect(self._clear_inpainter_key_temperature_for_selected)
-
-        # Per-key API call delay options for Image gen/edit keys
-        if selected_count > 1:
-            set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
-        else:
-            set_delay_action = menu.addAction("Set API Call Delay")
-        set_delay_action.triggered.connect(self._set_inpainter_api_call_delay_for_selected)
-        clear_delay_action = menu.addAction("Clear API Call Delay")
-        clear_delay_action.triggered.connect(self._clear_inpainter_api_call_delay_for_selected)
-
-        menu.addSeparator()
-
-        test_action = menu.addAction("Test")
-        test_action.triggered.connect(self._test_selected_inpainter)
-        enable_action = menu.addAction("Enable")
-        enable_action.triggered.connect(self._enable_selected_inpainter)
-        disable_action = menu.addAction("Disable")
-        disable_action.triggered.connect(self._disable_selected_inpainter)
-        menu.addSeparator()
-        remove_action = menu.addAction("Remove")
-        remove_action.triggered.connect(self._remove_selected_inpainter)
-
-        if total > 1:
-            clear_action = menu.addAction("Clear All")
-            clear_action.triggered.connect(self._clear_all_inpainter)
-
-        menu.exec_(self.inpainter_tree.viewport().mapToGlobal(position))
-
-    def _change_inpainter_model_for_selected(self):
-        """Change model name for selected Image gen/edit keys."""
-        selected = self.inpainter_tree.selectedItems()
-        if not selected:
-            return
-
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Change Model for {len(selected)} Image Gen/Edit Keys")
-        screen = QApplication.primaryScreen().geometry()
-        width = int(screen.width() * 0.21)
-        height = int(screen.height() * 0.13)
-        dialog.resize(width, height)
-        self._set_icon(dialog)
-
-        main_layout = QVBoxLayout(dialog)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-
-        label = QLabel("Enter new model name (press Enter to apply):")
-        main_layout.addWidget(label)
-
-        all_models = get_model_options()
-        model_combo = QComboBox()
-        model_combo.addItems(all_models)
-        model_combo.setEditable(True)
-        main_layout.addWidget(model_combo)
-
-        selected_indices = [self.inpainter_tree.indexOfTopLevelItem(item) for item in selected]
-        if selected_indices and selected_indices[0] < len(inpainter_keys):
-            current_model = inpainter_keys[selected_indices[0]].get('model', '')
-            model_combo.setCurrentText(current_model)
-            model_combo.lineEdit().selectAll()
-
-        def apply_change():
-            new_model = model_combo.currentText().strip()
-            if new_model:
-                for item in selected:
-                    idx = self.inpainter_tree.indexOfTopLevelItem(item)
-                    if idx < len(inpainter_keys):
-                        inpainter_keys[idx]['model'] = new_model
-                self.translator_gui.config['inpainter_keys'] = inpainter_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_inpainter_keys()
-                self._show_inpainter_status(f"Changed model to '{new_model}' for {len(selected)} Image gen/edit keys")
-                dialog.accept()
-
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-        apply_btn = QPushButton("Apply")
-        apply_btn.clicked.connect(apply_change)
-        apply_btn.setDefault(True)
-        button_layout.addWidget(apply_btn)
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(dialog.reject)
-        button_layout.addWidget(cancel_btn)
-        main_layout.addLayout(button_layout)
-
-        model_combo.setFocus()
-        dialog.exec_()
-
-    def _on_inpainter_rows_moved(self):
-        """Sync inpainter_keys config with tree order after drag-drop"""
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-
-        new_order = []
-        for i in range(self.inpainter_tree.topLevelItemCount()):
-            item = self.inpainter_tree.topLevelItem(i)
-            if item:
-                masked_key = item.text(0)
-                model = item.text(1)
-                for key_data in inpainter_keys:
-                    api_key = key_data.get('api_key', '')
-                    key_masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
-                    if key_masked == masked_key and key_data.get('model', '') == model and key_data not in new_order:
-                        new_order.append(key_data)
-                        break
-
-        if len(new_order) == len(inpainter_keys):
-            self.translator_gui.config['inpainter_keys'] = new_order
-            self.translator_gui.save_config(show_message=False)
-            self._show_inpainter_status("Reordered Image gen/edit keys")
-
-    def _on_inpainter_selection_change(self):
-        """Update position label when Image gen/edit selection changes"""
-        selected = self.inpainter_tree.selectedItems()
-        if selected:
-            index = self.inpainter_tree.indexOfTopLevelItem(selected[0])
-            total = self.inpainter_tree.topLevelItemCount()
-            self.inpainter_position_label.setText(f"#{index + 1}/{total}")
-        else:
-            self.inpainter_position_label.setText("")
-
-    def _on_inpainter_click(self, item, column):
-        """Handle double-click on Image gen/edit tree item for inline editing"""
-        if not item:
-            return
-
-        index = self.inpainter_tree.indexOfTopLevelItem(item)
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-        if index >= len(inpainter_keys):
-            return
-
-        if column == 1:
-            old_value = item.text(1)
-            new_value, ok = self._show_model_edit_dialog(old_value)
-            if ok and new_value and new_value != old_value:
-                inpainter_keys[index]['model'] = new_value
-                self.translator_gui.config['inpainter_keys'] = inpainter_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_inpainter_keys()
-                self._show_inpainter_status(f"Updated model to: {new_value}")
-        elif column == 2:
-            from PySide6.QtWidgets import QInputDialog
-            current = inpainter_keys[index].get('individual_output_token_limit') or 0
-            try:
-                current = int(current)
-            except (ValueError, TypeError):
-                current = 0
-            value, ok = QInputDialog.getInt(
-                self, "Edit Output Token Limit",
-                "Output token limit (0 = use global):",
-                current, 0, 1000000, 100
-            )
-            if ok:
-                inpainter_keys[index]['individual_output_token_limit'] = value if value > 0 else None
-                self.translator_gui.config['inpainter_keys'] = inpainter_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_inpainter_keys()
-                self._show_inpainter_status(f"Updated output limit to: {value if value > 0 else 'global'}")
-        elif column == 3:
-            from PySide6.QtWidgets import QInputDialog
-            current = inpainter_keys[index].get('individual_key_temperature')
-            default = float(current) if current not in (None, "") else -1.0
-            value, ok = QInputDialog.getDouble(
-                self, "Edit Key Temperature",
-                "Temperature (-1 = use global, 0.0 - 1.0):",
-                default, -1.0, 1.0, 2
-            )
-            if ok:
-                if value < 0:
-                    if 'individual_key_temperature' in inpainter_keys[index]:
-                        del inpainter_keys[index]['individual_key_temperature']
-                else:
-                    inpainter_keys[index]['individual_key_temperature'] = value
-                self.translator_gui.config['inpainter_keys'] = inpainter_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_inpainter_keys()
-                self._show_inpainter_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
-        elif column == 4:  # API Delay column
-            from PySide6.QtWidgets import QInputDialog
-            current = inpainter_keys[index].get('api_call_delay') or 0.0
-            try:
-                current = float(current)
-            except (ValueError, TypeError):
-                current = 0.0
-            value, ok = QInputDialog.getDouble(
-                self, "Edit API Call Delay",
-                "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
-                current, 0.0, 3600.0, 1
-            )
-            if ok:
-                inpainter_keys[index]['api_call_delay'] = value if value > 0 else 0.0
-                self.translator_gui.config['inpainter_keys'] = inpainter_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_inpainter_keys()
-                self._show_inpainter_status(f"Updated API delay to: {value if value > 0 else 'global'}")
-
-
-    def _show_inpainter_status(self, message: str):
-        """Show status message in the Image gen/edit section."""
-        if hasattr(self, 'inpainter_status_label'):
-            self.inpainter_status_label.setText(message)
-
-    def _configure_inpainter_individual_endpoint(self, inpainter_index):
-        """Configure individual endpoint for an Image gen/edit key"""
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-        if inpainter_index >= len(inpainter_keys):
-            return
-
-        key_data = inpainter_keys[inpainter_index]
-
-        temp_key = APIKeyEntry(
-            api_key=key_data.get('api_key', ''),
-            model=key_data.get('model', ''),
-            cooldown=60,
-            enabled=True,
-            google_credentials=key_data.get('google_credentials'),
-            azure_endpoint=key_data.get('azure_endpoint'),
-            google_region=key_data.get('google_region'),
-            azure_api_version=key_data.get('azure_api_version'),
-            use_individual_endpoint=key_data.get('use_individual_endpoint', False)
-        )
-
-        def on_endpoint_configured():
-            inpainter_keys[inpainter_index]['azure_endpoint'] = temp_key.azure_endpoint
-            inpainter_keys[inpainter_index]['azure_api_version'] = temp_key.azure_api_version
-            inpainter_keys[inpainter_index]['use_individual_endpoint'] = temp_key.use_individual_endpoint
-            self.translator_gui.config['inpainter_keys'] = inpainter_keys
-            self.translator_gui.save_config(show_message=False)
-            self._load_inpainter_keys()
-            status = "configured" if temp_key.use_individual_endpoint else "disabled"
-            self._show_inpainter_status(f"Individual endpoint {status} for Image gen/edit key")
-
-        if IndividualEndpointDialog is None:
-            QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
-            return
-        dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_inpainter_status)
-        dialog.exec_()
-
-    def _set_inpainter_output_token_limit_for_selected(self):
-        """Set per-key output token limit for selected Image gen/edit keys."""
-        from PySide6.QtWidgets import QInputDialog
-        selected = self.inpainter_tree.selectedItems()
-        if not selected:
-            return
-
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-        selected_indices = [self.inpainter_tree.indexOfTopLevelItem(item) for item in selected]
-        if not selected_indices:
-            return
-
-        default_val = None
-        first_idx = selected_indices[0]
-        if 0 <= first_idx < len(inpainter_keys):
-            try:
-                raw = inpainter_keys[first_idx].get('individual_output_token_limit')
-                if raw not in (None, ""):
-                    iv = int(raw)
-                    if iv > 0:
-                        default_val = iv
-            except Exception:
-                default_val = None
-        if default_val is None:
-            try:
-                default_val = int(getattr(self.translator_gui, 'max_output_tokens', 8192))
-            except Exception:
-                default_val = 8192
-
-        value, ok = QInputDialog.getInt(
-            self, "Set Image Gen/Edit Key Output Token Limit",
-            "Max output tokens for selected Image gen/edit key(s):",
-            default_val, 1, 2000000, 512,
-        )
-        if not ok or value <= 0:
-            return
-
-        for idx in selected_indices:
-            if 0 <= idx < len(inpainter_keys):
-                inpainter_keys[idx]['individual_output_token_limit'] = int(value)
-        self.translator_gui.config['inpainter_keys'] = inpainter_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_inpainter_keys()
-        self._show_inpainter_status(f"Set Image gen/edit key output token limit to {value} for {len(selected_indices)} key(s)")
-
-    def _clear_inpainter_output_token_limit_for_selected(self):
-        """Clear per-key output token limit for selected Image gen/edit keys."""
-        selected = self.inpainter_tree.selectedItems()
-        if not selected:
-            return
-
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-        selected_indices = [self.inpainter_tree.indexOfTopLevelItem(item) for item in selected]
-        for idx in selected_indices:
-            if 0 <= idx < len(inpainter_keys):
-                if 'individual_output_token_limit' in inpainter_keys[idx]:
-                    del inpainter_keys[idx]['individual_output_token_limit']
-        self.translator_gui.config['inpainter_keys'] = inpainter_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_inpainter_keys()
-        self._show_inpainter_status(f"Cleared Image gen/edit key output token limit for {len(selected_indices)} key(s)")
-
-    def _set_inpainter_key_temperature_for_selected(self):
-        """Set per-key temperature for selected Image gen/edit keys."""
-        from PySide6.QtWidgets import QInputDialog
-        selected = self.inpainter_tree.selectedItems()
-        if not selected:
-            return
-
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-        selected_indices = [self.inpainter_tree.indexOfTopLevelItem(item) for item in selected]
-        if not selected_indices:
-            return
-
-        default_val = 0.7
-        first_idx = selected_indices[0]
-        if 0 <= first_idx < len(inpainter_keys):
-            try:
-                raw = inpainter_keys[first_idx].get('individual_key_temperature')
-                if raw not in (None, ""):
-                    default_val = float(raw)
-            except Exception:
-                pass
-
-        value, ok = QInputDialog.getDouble(
-            self,
-            "Set Image Gen/Edit Key Temperature",
-            "Temperature for selected Image gen/edit key(s) (0.0 - 1.0):",
-            default_val,
-            0.0,
-            1.0,
-            2,
-        )
-        if not ok:
-            return
-
-        for idx in selected_indices:
-            if 0 <= idx < len(inpainter_keys):
-                inpainter_keys[idx]['individual_key_temperature'] = value
-        self.translator_gui.config['inpainter_keys'] = inpainter_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_inpainter_keys()
-        self._show_inpainter_status(f"Set Image gen/edit key temperature to {value} for {len(selected_indices)} key(s)")
-
-    def _clear_inpainter_key_temperature_for_selected(self):
-        """Clear per-key temperature for selected Image gen/edit keys."""
-        selected = self.inpainter_tree.selectedItems()
-        if not selected:
-            return
-
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-        selected_indices = [self.inpainter_tree.indexOfTopLevelItem(item) for item in selected]
-        for idx in selected_indices:
-            if 0 <= idx < len(inpainter_keys):
-                if 'individual_key_temperature' in inpainter_keys[idx]:
-                    del inpainter_keys[idx]['individual_key_temperature']
-        self.translator_gui.config['inpainter_keys'] = inpainter_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_inpainter_keys()
-        self._show_inpainter_status(f"Cleared Image gen/edit key temperature for {len(selected_indices)} key(s)")
-
-    def _set_inpainter_api_call_delay_for_selected(self):
-        """Set per-key API call delay for selected Image gen/edit keys."""
-        from PySide6.QtWidgets import QInputDialog
-        selected = self.inpainter_tree.selectedItems()
-        if not selected:
-            return
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-        selected_indices = [self.inpainter_tree.indexOfTopLevelItem(item) for item in selected]
-        default_val = 0.0
-        for idx in selected_indices:
-            if 0 <= idx < len(inpainter_keys):
-                v = inpainter_keys[idx].get('api_call_delay', 0.0) or 0.0
-                if v > 0:
-                    default_val = float(v)
-                    break
-        value, ok = QInputDialog.getDouble(
-            self, "Set API Call Delay",
-            "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
-            default_val, 0.0, 3600.0, 1
-        )
-        if ok:
-            for idx in selected_indices:
-                if 0 <= idx < len(inpainter_keys):
-                    inpainter_keys[idx]['api_call_delay'] = value if value > 0 else 0.0
-            self.translator_gui.config['inpainter_keys'] = inpainter_keys
-            self.translator_gui.save_config(show_message=False)
-            self._load_inpainter_keys()
-            self._show_inpainter_status(f"Set API call delay to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
-
-    def _clear_inpainter_api_call_delay_for_selected(self):
-        """Clear per-key API call delay for selected Image gen/edit keys."""
-        selected = self.inpainter_tree.selectedItems()
-        if not selected:
-            return
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-        selected_indices = [self.inpainter_tree.indexOfTopLevelItem(item) for item in selected]
-        for idx in selected_indices:
-            if 0 <= idx < len(inpainter_keys):
-                inpainter_keys[idx]['api_call_delay'] = 0.0
-        self.translator_gui.config['inpainter_keys'] = inpainter_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_inpainter_keys()
-        self._show_inpainter_status(f"Cleared API call delay for {len(selected_indices)} key(s)")
-
-    def _toggle_inpainter_individual_endpoint(self, inpainter_index, enabled):
-        """Quick toggle individual endpoint on/off for Image gen/edit key"""
-        inpainter_keys = self.translator_gui.config.get('inpainter_keys', [])
-        if inpainter_index >= len(inpainter_keys):
-            return
-
-        inpainter_keys[inpainter_index]['use_individual_endpoint'] = enabled
-        self.translator_gui.config['inpainter_keys'] = inpainter_keys
-        self.translator_gui.save_config(show_message=False)
-        self._load_inpainter_keys()
-
-        status = "enabled" if enabled else "disabled"
-        model = inpainter_keys[inpainter_index].get('model', 'unknown')
-        self._show_inpainter_status(f"Individual endpoint {status} for Image gen/edit key ({model})")
-
-    def _browse_inpainter_google_credentials(self):
-        """Browse for Google Cloud credentials JSON file for Image gen/edit keys."""
-        filename, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Google Cloud Credentials JSON for Image Gen/Edit",
-            "",
-            "JSON files (*.json);;All files (*.*)"
-        )
-
-        if filename:
-            try:
-                with open(filename, 'r') as f:
-                    creds_data = json.load(f)
-                    if 'type' in creds_data and 'project_id' in creds_data:
-                        self.inpainter_google_creds_entry.setText(filename)
-                        self._show_inpainter_status(f"Selected Image gen/edit key Google credentials: {os.path.basename(filename)}")
-                    else:
-                        QMessageBox.critical(
-                            self,
-                            "Error",
-                            "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
-                        )
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load credentials: {str(e)}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     # ===================================================================
     # END IMAGE GEN / EDIT KEYS SECTION
@@ -13179,6 +7592,934 @@ class MultiAPIKeyDialog(QDialog):
         """Show status message"""
         if hasattr(self, 'stats_label'):
             self.stats_label.setText(message)
+
+    def _dedicated_pool_specs(self):
+        """Specs for full-parity dedicated key-pool UI sections.
+
+        Adding another section should be a spec-only change when it uses the
+        standard key shape: api key, model, per-key limits, temp, delay, Google
+        creds, individual endpoint, test/reorder/enable/disable.
+        """
+        return {
+            'glossary_refinement': {
+                'title': 'Glossary Refinement Keys',
+                'label': 'Glossary refinement',
+                'config_key': 'glossary_refinement_keys',
+                'toggle_key': 'use_glossary_refinement_keys',
+                'set_method': 'set_in_memory_glossary_refinement_keys',
+                'clear_method': 'clear_in_memory_glossary_refinement_keys',
+                'use_envs': ['USE_GLOSSARY_REFINEMENT_KEYS'],
+                'keys_envs': ['GLOSSARY_REFINEMENT_API_KEYS'],
+                'description': (
+                    "Configure dedicated keys for glossary_refinement API calls.\n"
+                    "When enabled, this pool is tried before the regular Glossary Keys pool.\n"
+                    "If no Glossary Refinement keys are configured or the pool is disabled, "
+                    "the regular Glossary Keys pool is used instead."
+                ),
+            },
+            'qa_scan': {
+                'title': 'Vision Keys',
+                'label': 'Vision',
+                'config_key': 'qa_scan_keys',
+                'toggle_key': 'use_qa_scan_keys',
+                'set_method': 'set_in_memory_vision_keys',
+                'clear_method': 'clear_in_memory_vision_keys',
+                'use_envs': ['USE_VISION_KEYS', 'USE_QA_SCAN_KEYS'],
+                'keys_envs': ['VISION_API_KEYS', 'QA_SCAN_API_KEYS'],
+                'description': (
+                    "Configure dedicated keys for vision OCR and image scan calls.\n"
+                    "If no Vision keys are configured or the pool is disabled, the main key pool is used instead."
+                ),
+            },
+            'truncation_retry': {
+                'title': 'Truncation Retry Keys',
+                'label': 'Truncation retry',
+                'config_key': 'truncation_retry_keys',
+                'toggle_key': 'use_truncation_retry_keys',
+                'set_method': 'set_in_memory_truncation_retry_keys',
+                'clear_method': 'clear_in_memory_truncation_retry_keys',
+                'use_envs': ['USE_TRUNCATION_RETRY_KEYS'],
+                'keys_envs': ['TRUNCATION_RETRY_API_KEYS'],
+                'description': (
+                    "Configure dedicated keys used only when RETRY_TRUNCATED schedules a retry.\n"
+                    "These keys are separate from Vision/QA truncation scan keys.\n"
+                    "If no Truncation Retry keys are configured or the pool is disabled, "
+                    "retries use the current request key pool."
+                ),
+            },
+            'inpainter': {
+                'title': 'Image Gen / Edit Keys',
+                'label': 'Image gen/edit',
+                'config_key': 'inpainter_keys',
+                'toggle_key': 'use_inpainter_keys',
+                'set_method': 'set_in_memory_inpainter_keys',
+                'clear_method': 'clear_in_memory_inpainter_keys',
+                'use_envs': ['USE_INPAINTER_KEYS'],
+                'keys_envs': ['INPAINTER_API_KEYS'],
+                'description': (
+                    "Configure dedicated keys for image output and custom image-edit calls.\n"
+                    "If no Image Gen / Edit keys are configured or the pool is disabled, "
+                    "the main key pool/current provider is used instead."
+                ),
+            },
+        }
+
+    def _dedicated_pool_spec(self, pool_name: str):
+        try:
+            return self._dedicated_pool_specs()[pool_name]
+        except KeyError:
+            raise ValueError(f"Unknown dedicated key pool: {pool_name}")
+
+    def _dedicated_attr(self, pool_name: str, suffix: str) -> str:
+        return f"{pool_name}_{suffix}"
+
+    def _dedicated_widget(self, pool_name: str, suffix: str):
+        return getattr(self, self._dedicated_attr(pool_name, suffix), None)
+
+    def _dedicated_keys(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        return self.translator_gui.config.get(spec['config_key'], []) or []
+
+    def _dedicated_set_keys(self, pool_name: str, keys):
+        spec = self._dedicated_pool_spec(pool_name)
+        self.translator_gui.config[spec['config_key']] = keys
+        self.translator_gui.save_config(show_message=False)
+
+    def _dedicated_status(self, pool_name: str, message: str):
+        label = self._dedicated_widget(pool_name, 'status_label')
+        if label is not None:
+            label.setText(message)
+
+    def _dedicated_set_env(self, pool_name: str, enabled: Optional[bool] = None):
+        spec = self._dedicated_pool_spec(pool_name)
+        if enabled is None:
+            enabled = bool(self.translator_gui.config.get(spec['toggle_key'], False))
+        keys_json = json.dumps(self._dedicated_keys(pool_name))
+        for env_name in spec.get('use_envs', []):
+            os.environ[env_name] = '1' if enabled else '0'
+        for env_name in spec.get('keys_envs', []):
+            os.environ[env_name] = keys_json
+
+    def _dedicated_refresh_pool(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        enabled = bool(self.translator_gui.config.get(spec['toggle_key'], False))
+        keys = self._dedicated_keys(pool_name)
+        self._dedicated_set_env(pool_name, enabled)
+        try:
+            from unified_api_client import UnifiedClient
+            if enabled and keys:
+                force_rotation = bool(self.translator_gui.config.get('force_key_rotation', True))
+                rotation_frequency = int(self.translator_gui.config.get('rotation_frequency', 1))
+                getattr(UnifiedClient, spec['set_method'])(
+                    keys,
+                    force_rotation=force_rotation,
+                    rotation_frequency=rotation_frequency,
+                )
+            else:
+                getattr(UnifiedClient, spec['clear_method'])()
+        except Exception:
+            pass
+
+    def _create_dedicated_key_pool_section(self, parent_layout, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        container = QWidget()
+        setattr(self, self._dedicated_attr(pool_name, 'container'), container)
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 5, 0, 0)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        container_layout.addWidget(separator)
+
+        frame = QGroupBox(spec['title'])
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(15, 15, 15, 15)
+
+        desc_label = QLabel(spec['description'])
+        desc_label.setStyleSheet("color: gray;")
+        desc_label.setWordWrap(True)
+        frame_layout.addWidget(desc_label)
+
+        toggle_container = QWidget()
+        toggle_layout = QHBoxLayout(toggle_container)
+        toggle_layout.setContentsMargins(0, 0, 0, 0)
+        toggle_layout.setSpacing(8)
+
+        checkbox = self._create_styled_checkbox(f"Enable {spec['title']}")
+        checkbox.setChecked(bool(self.translator_gui.config.get(spec['toggle_key'], False)))
+        checkbox.toggled.connect(lambda _checked=False, p=pool_name: self._dedicated_toggle_section(p))
+        setattr(self, self._dedicated_attr(pool_name, 'keys_checkbox'), checkbox)
+        setattr(self, f"use_{pool_name}_keys_checkbox", checkbox)
+        setattr(self, f"use_{pool_name}_keys_var", checkbox.isChecked())
+
+        icon = QLabel()
+        icon.setStyleSheet("background-color: transparent;")
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        if os.path.exists(icon_path):
+            icon_obj = QIcon(icon_path)
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            logical_px = 16
+            dev_px = int(logical_px * max(1.0, dpr))
+            pm = icon_obj.pixmap(dev_px, dev_px)
+            if not pm.isNull():
+                try:
+                    pm.setDevicePixelRatio(dpr)
+                except Exception:
+                    pass
+                icon.setPixmap(pm)
+        icon.setFixedSize(36, 36)
+        icon.setAlignment(Qt.AlignCenter)
+        checkbox.toggled.connect(lambda _checked=False, icon=icon: animate_icon(icon))
+        toggle_layout.addWidget(icon)
+        toggle_layout.addWidget(checkbox)
+        toggle_layout.addStretch()
+        frame_layout.addWidget(toggle_container)
+
+        add_frame = QWidget()
+        setattr(self, self._dedicated_attr(pool_name, 'add_frame'), add_frame)
+        setattr(self, f"add_{pool_name}_frame", add_frame)
+        add_grid = QGridLayout(add_frame)
+        add_grid.setContentsMargins(0, 0, 0, 10)
+
+        add_grid.addWidget(QLabel(f"{spec['label']} API Key:"), 0, 0, Qt.AlignLeft)
+        key_entry = QLineEdit()
+        key_entry.setEchoMode(QLineEdit.Password)
+        setattr(self, self._dedicated_attr(pool_name, 'key_entry'), key_entry)
+        add_grid.addWidget(key_entry, 0, 1)
+
+        show_btn = QPushButton("👁")
+        show_btn.setFixedWidth(40)
+        show_btn.clicked.connect(lambda _checked=False, p=pool_name: self._dedicated_toggle_key_visibility(p))
+        setattr(self, self._dedicated_attr(pool_name, 'show_btn'), show_btn)
+        add_grid.addWidget(show_btn, 0, 2)
+
+        add_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
+        model_combo = QComboBox()
+        model_combo.addItems(get_model_options())
+        model_combo.setEditable(True)
+        self._disable_combobox_mousewheel(model_combo)
+        setattr(self, self._dedicated_attr(pool_name, 'model_combo'), model_combo)
+        add_grid.addWidget(model_combo, 0, 4)
+
+        add_btn = QPushButton(f"Add {spec['label']} Key")
+        add_btn.clicked.connect(lambda _checked=False, p=pool_name: self._dedicated_add_key(p))
+        add_grid.addWidget(add_btn, 0, 5, Qt.AlignRight)
+        add_grid.setColumnStretch(1, 1)
+        add_grid.setColumnStretch(4, 1)
+        frame_layout.addWidget(add_frame)
+
+        add_grid.addWidget(QLabel("Google Creds:"), 1, 0, Qt.AlignLeft)
+        google_entry = QLineEdit()
+        google_entry.setStyleSheet("font-size: 7pt;")
+        setattr(self, self._dedicated_attr(pool_name, 'google_creds_entry'), google_entry)
+        add_grid.addWidget(google_entry, 1, 1)
+        browse_btn = QPushButton("📁")
+        browse_btn.setFixedWidth(40)
+        browse_btn.clicked.connect(lambda _checked=False, p=pool_name: self._dedicated_browse_google_credentials(p))
+        add_grid.addWidget(browse_btn, 1, 2)
+
+        add_grid.addWidget(QLabel("Region:"), 1, 3, Qt.AlignLeft)
+        region_entry = QLineEdit("us-east5")
+        region_entry.setStyleSheet("font-size: 7pt;")
+        region_entry.setMaximumWidth(100)
+        setattr(self, self._dedicated_attr(pool_name, 'google_region_entry'), region_entry)
+        add_grid.addWidget(region_entry, 1, 4, 1, 1, Qt.AlignLeft)
+
+        endpoint_toggle = self._create_styled_checkbox("Use Individual Endpoint")
+        endpoint_toggle.toggled.connect(lambda _checked=False, p=pool_name: self._dedicated_toggle_endpoint_fields(p))
+        setattr(self, self._dedicated_attr(pool_name, 'individual_endpoint_toggle'), endpoint_toggle)
+        add_grid.addWidget(endpoint_toggle, 2, 0, 1, 2, Qt.AlignLeft)
+
+        endpoint_label = QLabel("Individual Endpoint:")
+        endpoint_label.setStyleSheet("color: gray; font-size: 9pt;")
+        setattr(self, self._dedicated_attr(pool_name, 'individual_endpoint_label'), endpoint_label)
+        add_grid.addWidget(endpoint_label, 3, 0, Qt.AlignLeft)
+        endpoint_entry = QLineEdit()
+        endpoint_entry.setStyleSheet("font-size: 8pt;")
+        setattr(self, self._dedicated_attr(pool_name, 'azure_endpoint_entry'), endpoint_entry)
+        add_grid.addWidget(endpoint_entry, 3, 1, 1, 2)
+
+        api_version_label = QLabel("API Ver:")
+        api_version_label.setStyleSheet("color: gray;")
+        setattr(self, self._dedicated_attr(pool_name, 'individual_api_version_label'), api_version_label)
+        add_grid.addWidget(api_version_label, 3, 3, Qt.AlignLeft)
+        api_version_combo = QComboBox()
+        api_version_combo.addItems([
+            '2025-01-01-preview', '2024-12-01-preview', '2024-10-01-preview',
+            '2024-08-01-preview', '2024-06-01', '2024-02-01', '2023-12-01-preview'
+        ])
+        api_version_combo.setCurrentText('2025-01-01-preview')
+        api_version_combo.setStyleSheet("font-size: 7pt;")
+        api_version_combo.setMaximumWidth(180)
+        self._disable_combobox_mousewheel(api_version_combo)
+        setattr(self, self._dedicated_attr(pool_name, 'azure_api_version_combo'), api_version_combo)
+        add_grid.addWidget(api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
+        self._dedicated_toggle_endpoint_fields(pool_name)
+
+        self._create_dedicated_key_pool_list(frame_layout, pool_name)
+        container_layout.addWidget(frame)
+        parent_layout.addWidget(container)
+        self._dedicated_load_keys(pool_name)
+        self._dedicated_toggle_section(pool_name)
+
+    def _create_dedicated_key_pool_list(self, parent_layout, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        label = QLabel(f"{spec['title']} (tried in order):")
+        font = QFont()
+        font.setBold(True)
+        label.setFont(font)
+        setattr(self, self._dedicated_attr(pool_name, 'list_label'), label)
+        parent_layout.addWidget(label)
+
+        tree_container = QWidget()
+        setattr(self, self._dedicated_attr(pool_name, 'tree_container'), tree_container)
+        layout = QHBoxLayout(tree_container)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        move_frame = QWidget()
+        move_layout = QVBoxLayout(move_frame)
+        move_layout.setContentsMargins(0, 0, 5, 0)
+        order_label = QLabel("Reorder")
+        order_font = QFont()
+        order_font.setBold(True)
+        order_label.setFont(order_font)
+        move_layout.addWidget(order_label)
+        for text, direction, size in (("↑ ↑", "top", 14), ("↑", "up", 16), ("↓", "down", 16), ("↓ ↓", "bottom", 14)):
+            btn = QPushButton(text)
+            btn.setFixedSize(55, 32)
+            btn.setStyleSheet(f"QPushButton {{ font-size: {size}pt; padding: 2px; }}")
+            btn.clicked.connect(lambda _checked=False, p=pool_name, d=direction: self._dedicated_move_key(p, d))
+            move_layout.addWidget(btn)
+        move_layout.addSpacing(10)
+        position_label = QLabel()
+        position_label.setStyleSheet("color: gray;")
+        setattr(self, self._dedicated_attr(pool_name, 'position_label'), position_label)
+        move_layout.addWidget(position_label)
+        move_layout.addStretch()
+        layout.addWidget(move_frame)
+
+        tree = QTreeWidget()
+        tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', 'Success', 'Errors', 'Times Used'])
+        for col, width in enumerate((125, 220, 105, 100, 90, 100, 75, 55, 80)):
+            tree.setColumnWidth(col, width)
+        header = tree.header()
+        header_font = QFont()
+        header_font.setBold(True)
+        header_font.setPointSize(11)
+        header.setFont(header_font)
+        tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        tree.customContextMenuRequested.connect(lambda pos, p=pool_name: self._dedicated_show_context_menu(p, pos))
+        tree.setMinimumHeight(150)
+        tree.setDragDropMode(QAbstractItemView.InternalMove)
+        tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        tree.model().rowsMoved.connect(lambda *args, p=pool_name: self._dedicated_on_rows_moved(p))
+        tree.itemSelectionChanged.connect(lambda p=pool_name: self._dedicated_on_selection_change(p))
+        tree.itemDoubleClicked.connect(lambda item, column, p=pool_name: self._dedicated_on_click(p, item, column))
+        setattr(self, self._dedicated_attr(pool_name, 'tree'), tree)
+        setattr(self, f"{pool_name}_tree", tree)
+        layout.addWidget(tree)
+        parent_layout.addWidget(tree_container)
+
+        action_frame = QWidget()
+        setattr(self, self._dedicated_attr(pool_name, 'action_frame'), action_frame)
+        action_layout = QHBoxLayout(action_frame)
+        action_layout.setContentsMargins(0, 10, 0, 0)
+        for text, handler in (
+            ("Test Selected", self._dedicated_test_selected),
+            ("Test All", self._dedicated_test_all),
+            ("Enable Selected", self._dedicated_enable_selected),
+            ("Disable Selected", self._dedicated_disable_selected),
+            ("Remove Selected", self._dedicated_remove_selected),
+            ("Clear All", self._dedicated_clear_all),
+        ):
+            btn = QPushButton(text)
+            btn.clicked.connect(lambda _checked=False, p=pool_name, h=handler: h(p))
+            action_layout.addWidget(btn)
+        action_layout.addStretch()
+        status_label = QLabel()
+        status_label.setStyleSheet("color: gray;")
+        setattr(self, self._dedicated_attr(pool_name, 'status_label'), status_label)
+        action_layout.addWidget(status_label)
+        parent_layout.addWidget(action_frame)
+
+    def _dedicated_load_keys(self, pool_name: str):
+        tree = self._dedicated_widget(pool_name, 'tree')
+        if tree is None:
+            return
+        keys = self._dedicated_keys(pool_name)
+        v_scroll = tree.verticalScrollBar().value()
+        h_scroll = tree.horizontalScrollBar().value()
+        selected_indices = [tree.indexOfTopLevelItem(item) for item in tree.selectedItems()]
+        tree.clear()
+        for key_data in keys:
+            api_key = key_data.get('api_key', '')
+            model = key_data.get('model', '')
+            masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+            per_key_limit = key_data.get('individual_output_token_limit') or None
+            output_limit_str = str(per_key_limit) if per_key_limit else "global"
+            key_temp = key_data.get('individual_key_temperature')
+            temp_str = str(key_temp) if key_temp not in (None, "") else "global"
+            raw_delay = key_data.get('api_call_delay', 0.0) or 0.0
+            try:
+                per_key_delay = float(raw_delay)
+            except Exception:
+                per_key_delay = 0.0
+            delay_str = str(per_key_delay) if per_key_delay > 0 else "global"
+            enabled = key_data.get('enabled', True)
+            test_result = key_data.get('last_test_result')
+            if not enabled:
+                status, color = "Disabled", Qt.gray
+            elif test_result == 'passed':
+                status, color = "✅ Passed", Qt.darkGreen
+            elif test_result == 'failed':
+                status, color = "❌ Failed", Qt.red
+            elif test_result == 'timeout':
+                status, color = "⏱️ Timed Out", Qt.darkYellow
+            elif test_result == 'error':
+                status, color = "❌ Error", Qt.darkRed
+            else:
+                status, color = "Enabled", Qt.gray
+            item = QTreeWidgetItem([
+                masked_key, model, output_limit_str, temp_str, delay_str, status,
+                str(int(key_data.get('success_count', 0))),
+                str(int(key_data.get('error_count', 0))),
+                str(int(key_data.get('times_used', 0))),
+            ])
+            for col in range(item.columnCount()):
+                item.setForeground(col, color)
+            item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
+            tree.addTopLevelItem(item)
+        for index in selected_indices:
+            if index < tree.topLevelItemCount():
+                tree.topLevelItem(index).setSelected(True)
+        tree.verticalScrollBar().setValue(v_scroll)
+        tree.horizontalScrollBar().setValue(h_scroll)
+        if not getattr(self, '_initializing', False):
+            self._dedicated_refresh_pool(pool_name)
+
+    def _dedicated_add_key(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        key_entry = self._dedicated_widget(pool_name, 'key_entry')
+        model_combo = self._dedicated_widget(pool_name, 'model_combo')
+        api_key = key_entry.text().strip()
+        model = model_combo.currentText().strip()
+        if not model:
+            QMessageBox.critical(self, "Error", "Please enter a model name")
+            return
+        google_credentials = self._dedicated_widget(pool_name, 'google_creds_entry').text().strip() or None
+        google_region = self._dedicated_widget(pool_name, 'google_region_entry').text().strip() or None
+        use_endpoint = self._dedicated_widget(pool_name, 'individual_endpoint_toggle').isChecked()
+        azure_endpoint = self._dedicated_widget(pool_name, 'azure_endpoint_entry').text().strip() if use_endpoint else None
+        azure_api_version = self._dedicated_widget(pool_name, 'azure_api_version_combo').currentText().strip() if use_endpoint else None
+        keys = self._dedicated_keys(pool_name)
+        keys.append({
+            'api_key': api_key,
+            'model': model,
+            'google_credentials': google_credentials,
+            'azure_endpoint': azure_endpoint,
+            'google_region': google_region,
+            'azure_api_version': azure_api_version,
+            'use_individual_endpoint': use_endpoint,
+            'individual_output_token_limit': None,
+            'individual_key_temperature': None,
+            'api_call_delay': 0.0,
+            'enabled': True,
+            'times_used': 0,
+        })
+        self._dedicated_set_keys(pool_name, keys)
+        key_entry.clear()
+        model_combo.setCurrentText("")
+        self._dedicated_widget(pool_name, 'google_creds_entry').clear()
+        self._dedicated_widget(pool_name, 'azure_endpoint_entry').clear()
+        self._dedicated_widget(pool_name, 'google_region_entry').setText("us-east5")
+        self._dedicated_widget(pool_name, 'azure_api_version_combo').setCurrentText('2025-01-01-preview')
+        self._dedicated_widget(pool_name, 'individual_endpoint_toggle').setChecked(False)
+        self._dedicated_load_keys(pool_name)
+        self._dedicated_status(pool_name, f"Added {spec['label']} key for model: {model}")
+        self._notify_authgpt_visibility()
+
+    def _dedicated_move_key(self, pool_name: str, direction: str):
+        tree = self._dedicated_widget(pool_name, 'tree')
+        selected = tree.selectedItems()
+        if not selected:
+            return
+        index = tree.indexOfTopLevelItem(selected[0])
+        keys = self._dedicated_keys(pool_name)
+        if not (0 <= index < len(keys)):
+            return
+        new_index = index
+        if direction == 'top':
+            new_index = 0
+        elif direction == 'up' and index > 0:
+            new_index = index - 1
+        elif direction == 'down' and index < len(keys) - 1:
+            new_index = index + 1
+        elif direction == 'bottom':
+            new_index = len(keys) - 1
+        if new_index != index:
+            key = keys.pop(index)
+            keys.insert(new_index, key)
+            self._dedicated_set_keys(pool_name, keys)
+            self._dedicated_load_keys(pool_name)
+            if new_index < tree.topLevelItemCount():
+                item = tree.topLevelItem(new_index)
+                tree.setCurrentItem(item)
+                item.setSelected(True)
+
+    def _dedicated_selected_indices(self, pool_name: str):
+        tree = self._dedicated_widget(pool_name, 'tree')
+        return [tree.indexOfTopLevelItem(item) for item in tree.selectedItems()]
+
+    def _dedicated_test_selected(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        indices = self._dedicated_selected_indices(pool_name)
+        if not indices:
+            QMessageBox.warning(self, "Warning", f"Please select a {spec['label']} key to test")
+            return
+        index = indices[0]
+        keys = self._dedicated_keys(pool_name)
+        if 0 <= index < len(keys):
+            self._dedicated_set_status_column(pool_name, index, "⏳ Testing...", Qt.gray)
+            QTimer.singleShot(100, lambda p=pool_name, kd=keys[index], i=index: self._dedicated_test_single_key(p, kd, i))
+
+    def _dedicated_test_all(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        keys = self._dedicated_keys(pool_name)
+        if not keys:
+            QMessageBox.warning(self, "Warning", f"No {spec['title']} to test")
+            return
+        for i, key_data in enumerate(keys):
+            self._dedicated_set_status_column(pool_name, i, "⏳ Testing...", Qt.gray)
+            self._dedicated_test_single_key(pool_name, key_data, i)
+
+    def _dedicated_test_single_key(self, pool_name: str, key_data: dict, index: int):
+        spec = self._dedicated_pool_spec(pool_name)
+        api_key = key_data.get('api_key', '')
+        model = key_data.get('model', '')
+
+        def finish(success=None, timeout=False):
+            if timeout:
+                if HAS_GUI:
+                    QMetaObject.invokeMethod(self, "_dedicated_update_timeout_queued", Qt.QueuedConnection, Q_ARG(str, pool_name), Q_ARG(int, index))
+                else:
+                    self._dedicated_update_timeout(pool_name, index)
+            else:
+                if HAS_GUI:
+                    QMetaObject.invokeMethod(self, "_dedicated_update_test_result_queued", Qt.QueuedConnection, Q_ARG(str, pool_name), Q_ARG(int, index), Q_ARG(bool, bool(success)))
+                else:
+                    self._dedicated_update_test_result(pool_name, index, bool(success))
+
+        def run_api_test():
+            client_ref = None
+            try:
+                from unified_api_client import UnifiedClient
+                client_ref = UnifiedClient(api_key=api_key, model=model, output_dir=None)
+                try:
+                    tls = client_ref._get_thread_local_client()
+                    tls.max_retries_override = 1
+                except Exception:
+                    pass
+                for source, target in (
+                    ('google_credentials', 'current_key_google_creds'),
+                    ('google_region', 'current_key_google_region'),
+                    ('azure_endpoint', 'current_key_azure_endpoint'),
+                    ('azure_api_version', 'current_key_azure_api_version'),
+                ):
+                    value = key_data.get(source)
+                    if value:
+                        setattr(client_ref, target, value)
+                if key_data.get('use_individual_endpoint'):
+                    client_ref.current_key_use_individual_endpoint = True
+                response = client_ref.send([
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Say 'API test successful' and nothing else."},
+                ], temperature=0.7, max_tokens=1000)
+                content = response[0] if isinstance(response, tuple) else response
+                finish(success=bool(content and "test successful" in str(content).lower()))
+            except Exception as exc:
+                print(f"[DEBUG] {spec['label']} key test error for {model}: {exc}")
+                finish(success=False)
+
+        def run_with_timeout():
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+            with ThreadPoolExecutor(max_workers=1) as timeout_pool:
+                future = timeout_pool.submit(run_api_test)
+                try:
+                    future.result(timeout=30)
+                except FuturesTimeout:
+                    finish(timeout=True)
+                    try:
+                        from unified_api_client import _api_watchdog_reset
+                        _api_watchdog_reset()
+                    except Exception:
+                        pass
+
+        executor = getattr(self.translator_gui, 'executor', None)
+        if hasattr(self.translator_gui, '_ensure_executor'):
+            self.translator_gui._ensure_executor()
+            executor = getattr(self.translator_gui, 'executor', executor)
+        if executor:
+            executor.submit(run_with_timeout)
+        else:
+            threading.Thread(target=run_with_timeout, daemon=True).start()
+
+    def _dedicated_set_status_column(self, pool_name: str, index: int, status: str, color):
+        tree = self._dedicated_widget(pool_name, 'tree')
+        if tree is not None and 0 <= index < tree.topLevelItemCount():
+            item = tree.topLevelItem(index)
+            item.setText(5, status)
+            for col in range(item.columnCount()):
+                item.setForeground(col, color)
+
+    @Slot(str, int, bool) if HAS_GUI else lambda x: x
+    def _dedicated_update_test_result_queued(self, pool_name: str, index: int, success: bool):
+        self._dedicated_update_test_result(pool_name, index, success)
+
+    @Slot(str, int) if HAS_GUI else lambda x: x
+    def _dedicated_update_timeout_queued(self, pool_name: str, index: int):
+        self._dedicated_update_timeout(pool_name, index)
+
+    def _dedicated_update_test_result(self, pool_name: str, index: int, success: bool):
+        keys = self._dedicated_keys(pool_name)
+        if 0 <= index < len(keys):
+            keys[index]['last_test_result'] = 'passed' if success else 'failed'
+            keys[index]['times_used'] = int(keys[index].get('times_used', 0)) + 1
+            counter = 'success_count' if success else 'error_count'
+            keys[index][counter] = int(keys[index].get(counter, 0)) + 1
+            self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_load_keys(pool_name)
+
+    def _dedicated_update_timeout(self, pool_name: str, index: int):
+        keys = self._dedicated_keys(pool_name)
+        if 0 <= index < len(keys):
+            keys[index]['last_test_result'] = 'timeout'
+            keys[index]['error_count'] = int(keys[index].get('error_count', 0)) + 1
+            self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_load_keys(pool_name)
+
+    def _dedicated_remove_selected(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        indices = sorted(self._dedicated_selected_indices(pool_name), reverse=True)
+        if not indices:
+            return
+        reply = QMessageBox.question(self, "Confirm", f"Remove {len(indices)} selected {spec['label']} key(s)?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        keys = self._dedicated_keys(pool_name)
+        for index in indices:
+            if 0 <= index < len(keys):
+                del keys[index]
+        self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_load_keys(pool_name)
+        self._dedicated_status(pool_name, f"Removed {len(indices)} {spec['label']} key(s)")
+        self._notify_authgpt_visibility()
+
+    def _dedicated_enable_selected(self, pool_name: str):
+        self._dedicated_set_selected_enabled(pool_name, True)
+
+    def _dedicated_disable_selected(self, pool_name: str):
+        self._dedicated_set_selected_enabled(pool_name, False)
+
+    def _dedicated_set_selected_enabled(self, pool_name: str, enabled: bool):
+        spec = self._dedicated_pool_spec(pool_name)
+        indices = self._dedicated_selected_indices(pool_name)
+        keys = self._dedicated_keys(pool_name)
+        for index in indices:
+            if 0 <= index < len(keys):
+                keys[index]['enabled'] = enabled
+        self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_load_keys(pool_name)
+        self._dedicated_status(pool_name, f"{'Enabled' if enabled else 'Disabled'} {len(indices)} {spec['label']} key(s)")
+        self._notify_authgpt_visibility()
+
+    def _dedicated_clear_all(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        if not self._dedicated_keys(pool_name):
+            return
+        reply = QMessageBox.question(self, "Confirm", f"Remove ALL {spec['title']}?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self._dedicated_set_keys(pool_name, [])
+            self._dedicated_load_keys(pool_name)
+            self._dedicated_status(pool_name, f"Cleared all {spec['title']}")
+            self._notify_authgpt_visibility()
+
+    def _dedicated_toggle_section(self, pool_name: str):
+        spec = self._dedicated_pool_spec(pool_name)
+        checkbox = self._dedicated_widget(pool_name, 'keys_checkbox')
+        enabled = checkbox.isChecked() if checkbox is not None else False
+        for suffix in ('add_frame', 'list_label', 'tree_container', 'action_frame'):
+            widget = self._dedicated_widget(pool_name, suffix)
+            if widget is not None:
+                widget.setVisible(enabled)
+        tree = self._dedicated_widget(pool_name, 'tree')
+        if tree is not None and not enabled:
+            tree.clearSelection()
+        self.translator_gui.config[spec['toggle_key']] = enabled
+        setattr(self.translator_gui, f"use_{pool_name}_keys_var", enabled)
+        self._dedicated_set_env(pool_name, enabled)
+        self._dedicated_refresh_pool(pool_name)
+        self._dedicated_status(pool_name, f"{spec['title']} {'enabled' if enabled else 'disabled'}")
+        if not getattr(self, '_initializing', False):
+            msg = f"🔑 {spec['label']} key pool: {len(self._dedicated_keys(pool_name)) if enabled else 'disabled'}"
+            try:
+                self.translator_gui.append_log(msg)
+            except Exception:
+                print(msg)
+        self._notify_authgpt_visibility()
+
+    def _dedicated_toggle_key_visibility(self, pool_name: str):
+        entry = self._dedicated_widget(pool_name, 'key_entry')
+        btn = self._dedicated_widget(pool_name, 'show_btn')
+        if entry.echoMode() == QLineEdit.Password:
+            entry.setEchoMode(QLineEdit.Normal)
+            btn.setText('🔒')
+        else:
+            entry.setEchoMode(QLineEdit.Password)
+            btn.setText('👁')
+
+    def _dedicated_toggle_endpoint_fields(self, pool_name: str):
+        toggle = self._dedicated_widget(pool_name, 'individual_endpoint_toggle')
+        enabled = toggle.isChecked() if toggle is not None else False
+        for suffix in ('individual_endpoint_label', 'azure_endpoint_entry', 'individual_api_version_label', 'azure_api_version_combo'):
+            widget = self._dedicated_widget(pool_name, suffix)
+            if widget is not None:
+                widget.setVisible(enabled)
+                widget.setEnabled(enabled)
+        if not enabled:
+            endpoint = self._dedicated_widget(pool_name, 'azure_endpoint_entry')
+            version = self._dedicated_widget(pool_name, 'azure_api_version_combo')
+            if endpoint is not None:
+                endpoint.clear()
+            if version is not None:
+                version.setCurrentText('2025-01-01-preview')
+
+    def _dedicated_show_context_menu(self, pool_name: str, position):
+        tree = self._dedicated_widget(pool_name, 'tree')
+        item = tree.itemAt(position)
+        if not item:
+            return
+        if item not in tree.selectedItems():
+            tree.setCurrentItem(item)
+        index = tree.indexOfTopLevelItem(item)
+        keys = self._dedicated_keys(pool_name)
+        menu = QMenu(self)
+        if len(keys) > 1:
+            menu.addAction("Move to Top").triggered.connect(lambda p=pool_name: self._dedicated_move_key(p, 'top'))
+            menu.addAction("Move Up").triggered.connect(lambda p=pool_name: self._dedicated_move_key(p, 'up'))
+            menu.addAction("Move Down").triggered.connect(lambda p=pool_name: self._dedicated_move_key(p, 'down'))
+            menu.addAction("Move to Bottom").triggered.connect(lambda p=pool_name: self._dedicated_move_key(p, 'bottom'))
+            menu.addSeparator()
+        menu.addAction("Change Model for Selected").triggered.connect(lambda p=pool_name: self._dedicated_change_model_for_selected(p))
+        if 0 <= index < len(keys):
+            key_data = keys[index]
+            if key_data.get('use_individual_endpoint'):
+                menu.addAction("Configure Individual Endpoint").triggered.connect(lambda p=pool_name, i=index: self._dedicated_configure_endpoint(p, i))
+                menu.addAction("Disable Individual Endpoint").triggered.connect(lambda p=pool_name, i=index: self._dedicated_toggle_individual_endpoint(p, i, False))
+            else:
+                menu.addAction("Configure Individual Endpoint").triggered.connect(lambda p=pool_name, i=index: self._dedicated_configure_endpoint(p, i))
+            menu.addSeparator()
+        menu.addAction("Set Output Token Limit").triggered.connect(lambda p=pool_name: self._dedicated_set_output_token_limit_for_selected(p))
+        menu.addAction("Clear Output Token Limit").triggered.connect(lambda p=pool_name: self._dedicated_clear_output_token_limit_for_selected(p))
+        menu.addSeparator()
+        menu.addAction("Set Key Temperature").triggered.connect(lambda p=pool_name: self._dedicated_set_temperature_for_selected(p))
+        menu.addAction("Clear Key Temperature").triggered.connect(lambda p=pool_name: self._dedicated_clear_temperature_for_selected(p))
+        menu.addSeparator()
+        menu.addAction("Set API Call Delay").triggered.connect(lambda p=pool_name: self._dedicated_set_api_call_delay_for_selected(p))
+        menu.addAction("Clear API Call Delay").triggered.connect(lambda p=pool_name: self._dedicated_clear_api_call_delay_for_selected(p))
+        menu.addSeparator()
+        menu.addAction("Test Selected").triggered.connect(lambda p=pool_name: self._dedicated_test_selected(p))
+        menu.addAction("Enable Selected").triggered.connect(lambda p=pool_name: self._dedicated_enable_selected(p))
+        menu.addAction("Disable Selected").triggered.connect(lambda p=pool_name: self._dedicated_disable_selected(p))
+        menu.addAction("Remove Selected").triggered.connect(lambda p=pool_name: self._dedicated_remove_selected(p))
+        if keys:
+            menu.addAction("Clear All").triggered.connect(lambda p=pool_name: self._dedicated_clear_all(p))
+        menu.exec_(tree.viewport().mapToGlobal(position))
+
+    def _dedicated_change_model_for_selected(self, pool_name: str):
+        from PySide6.QtWidgets import QInputDialog
+        spec = self._dedicated_pool_spec(pool_name)
+        indices = self._dedicated_selected_indices(pool_name)
+        if not indices:
+            return
+        keys = self._dedicated_keys(pool_name)
+        current = keys[indices[0]].get('model', '') if indices[0] < len(keys) else ''
+        new_model, ok = QInputDialog.getText(self, f"Change Model for {len(indices)} {spec['title']}", "Model:", text=current)
+        if ok and new_model.strip():
+            for idx in indices:
+                if 0 <= idx < len(keys):
+                    keys[idx]['model'] = new_model.strip()
+            self._dedicated_set_keys(pool_name, keys)
+            self._dedicated_load_keys(pool_name)
+            self._dedicated_status(pool_name, f"Changed model to '{new_model.strip()}' for {len(indices)} key(s)")
+
+    def _dedicated_on_rows_moved(self, pool_name: str):
+        tree = self._dedicated_widget(pool_name, 'tree')
+        keys = self._dedicated_keys(pool_name)
+        new_order = []
+        for i in range(tree.topLevelItemCount()):
+            item = tree.topLevelItem(i)
+            masked_key = item.text(0)
+            model = item.text(1)
+            for key_data in keys:
+                api_key = key_data.get('api_key', '')
+                key_masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+                if key_masked == masked_key and key_data.get('model', '') == model and key_data not in new_order:
+                    new_order.append(key_data)
+                    break
+        if len(new_order) == len(keys):
+            self._dedicated_set_keys(pool_name, new_order)
+            self._dedicated_status(pool_name, f"Reordered {self._dedicated_pool_spec(pool_name)['title']}")
+
+    def _dedicated_on_selection_change(self, pool_name: str):
+        tree = self._dedicated_widget(pool_name, 'tree')
+        label = self._dedicated_widget(pool_name, 'position_label')
+        selected = tree.selectedItems()
+        label.setText(f"#{tree.indexOfTopLevelItem(selected[0]) + 1}/{tree.topLevelItemCount()}" if selected else "")
+
+    def _dedicated_on_click(self, pool_name: str, item, column: int):
+        if column == 1:
+            self._dedicated_change_model_for_selected(pool_name)
+        elif column == 2:
+            self._dedicated_set_output_token_limit_for_selected(pool_name)
+        elif column == 3:
+            self._dedicated_set_temperature_for_selected(pool_name)
+        elif column == 4:
+            self._dedicated_set_api_call_delay_for_selected(pool_name)
+
+    def _dedicated_configure_endpoint(self, pool_name: str, key_index: int):
+        keys = self._dedicated_keys(pool_name)
+        if key_index >= len(keys):
+            return
+        key_data = keys[key_index]
+        temp_key = APIKeyEntry(
+            api_key=key_data.get('api_key', ''),
+            model=key_data.get('model', ''),
+            cooldown=60,
+            enabled=True,
+            google_credentials=key_data.get('google_credentials'),
+            azure_endpoint=key_data.get('azure_endpoint'),
+            google_region=key_data.get('google_region'),
+            azure_api_version=key_data.get('azure_api_version'),
+            use_individual_endpoint=key_data.get('use_individual_endpoint', False),
+        )
+
+        def on_endpoint_configured():
+            keys[key_index]['azure_endpoint'] = temp_key.azure_endpoint
+            keys[key_index]['azure_api_version'] = temp_key.azure_api_version
+            keys[key_index]['use_individual_endpoint'] = temp_key.use_individual_endpoint
+            self._dedicated_set_keys(pool_name, keys)
+            self._dedicated_load_keys(pool_name)
+            self._dedicated_status(pool_name, f"Individual endpoint {'configured' if temp_key.use_individual_endpoint else 'disabled'}")
+
+        if IndividualEndpointDialog is None:
+            QMessageBox.critical(self, "Error", "IndividualEndpointDialog is not available.")
+            return
+        IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, lambda msg: self._dedicated_status(pool_name, msg)).exec_()
+
+    def _dedicated_toggle_individual_endpoint(self, pool_name: str, key_index: int, enabled: bool):
+        keys = self._dedicated_keys(pool_name)
+        if key_index < len(keys):
+            keys[key_index]['use_individual_endpoint'] = enabled
+            self._dedicated_set_keys(pool_name, keys)
+            self._dedicated_load_keys(pool_name)
+
+    def _dedicated_set_output_token_limit_for_selected(self, pool_name: str):
+        from PySide6.QtWidgets import QInputDialog
+        indices = self._dedicated_selected_indices(pool_name)
+        if not indices:
+            return
+        value, ok = QInputDialog.getInt(self, "Set Output Token Limit", "Max output tokens:", 8192, 1, 2000000, 512)
+        if ok:
+            keys = self._dedicated_keys(pool_name)
+            for idx in indices:
+                if 0 <= idx < len(keys):
+                    keys[idx]['individual_output_token_limit'] = int(value)
+            self._dedicated_set_keys(pool_name, keys)
+            self._dedicated_load_keys(pool_name)
+
+    def _dedicated_clear_output_token_limit_for_selected(self, pool_name: str):
+        self._dedicated_clear_selected_key(pool_name, 'individual_output_token_limit')
+
+    def _dedicated_set_temperature_for_selected(self, pool_name: str):
+        from PySide6.QtWidgets import QInputDialog
+        indices = self._dedicated_selected_indices(pool_name)
+        if not indices:
+            return
+        value, ok = QInputDialog.getDouble(self, "Set Key Temperature", "Temperature (0.0 - 1.0):", 0.7, 0.0, 1.0, 2)
+        if ok:
+            keys = self._dedicated_keys(pool_name)
+            for idx in indices:
+                if 0 <= idx < len(keys):
+                    keys[idx]['individual_key_temperature'] = value
+            self._dedicated_set_keys(pool_name, keys)
+            self._dedicated_load_keys(pool_name)
+
+    def _dedicated_clear_temperature_for_selected(self, pool_name: str):
+        self._dedicated_clear_selected_key(pool_name, 'individual_key_temperature')
+
+    def _dedicated_set_api_call_delay_for_selected(self, pool_name: str):
+        from PySide6.QtWidgets import QInputDialog
+        indices = self._dedicated_selected_indices(pool_name)
+        if not indices:
+            return
+        value, ok = QInputDialog.getDouble(self, "Set API Call Delay", "API call delay in seconds (0 = global):", 0.0, 0.0, 3600.0, 1)
+        if ok:
+            keys = self._dedicated_keys(pool_name)
+            for idx in indices:
+                if 0 <= idx < len(keys):
+                    keys[idx]['api_call_delay'] = value if value > 0 else 0.0
+            self._dedicated_set_keys(pool_name, keys)
+            self._dedicated_load_keys(pool_name)
+
+    def _dedicated_clear_api_call_delay_for_selected(self, pool_name: str):
+        keys = self._dedicated_keys(pool_name)
+        for idx in self._dedicated_selected_indices(pool_name):
+            if 0 <= idx < len(keys):
+                keys[idx]['api_call_delay'] = 0.0
+        self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_load_keys(pool_name)
+
+    def _dedicated_clear_selected_key(self, pool_name: str, key: str):
+        keys = self._dedicated_keys(pool_name)
+        for idx in self._dedicated_selected_indices(pool_name):
+            if 0 <= idx < len(keys):
+                keys[idx].pop(key, None)
+        self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_load_keys(pool_name)
+
+    def _dedicated_browse_google_credentials(self, pool_name: str):
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Select Google Cloud Credentials JSON", "", "JSON files (*.json);;All files (*.*)"
+        )
+        if filename:
+            try:
+                with open(filename, 'r') as f:
+                    creds_data = json.load(f)
+                if 'type' in creds_data and 'project_id' in creds_data:
+                    self._dedicated_widget(pool_name, 'google_creds_entry').setText(filename)
+                    self._dedicated_status(pool_name, f"Selected Google credentials: {os.path.basename(filename)}")
+                else:
+                    QMessageBox.critical(self, "Error", "Invalid Google Cloud credentials file.")
+            except Exception as exc:
+                QMessageBox.critical(self, "Error", f"Failed to load credentials: {exc}")
+
+    def _create_glossary_refinement_section(self, parent_layout):
+        self._create_dedicated_key_pool_section(parent_layout, 'glossary_refinement')
+
+    def _create_qa_scan_section(self, parent_layout):
+        self._create_dedicated_key_pool_section(parent_layout, 'qa_scan')
+
+    def _create_truncation_retry_section(self, parent_layout):
+        self._create_dedicated_key_pool_section(parent_layout, 'truncation_retry')
+
+    def _create_inpainter_section(self, parent_layout):
+        self._create_dedicated_key_pool_section(parent_layout, 'inpainter')
 
     def _save_and_close(self):
         """Save configuration"""
