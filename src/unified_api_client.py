@@ -1911,6 +1911,8 @@ class UnifiedClient:
     # QA scan-dedicated key pool (separate from main and glossary pools)
     _qa_scan_key_pool: Optional[APIKeyPool] = None
     _qa_scan_pool_lock = threading.Lock()
+    _ai_truncation_detection_key_pool: Optional[APIKeyPool] = None
+    _ai_truncation_detection_pool_lock = threading.Lock()
 
     # Image gen/edit-dedicated key pool (manga custom-image-edit + image output requests)
     _inpainter_key_pool: Optional[APIKeyPool] = None
@@ -5728,10 +5730,34 @@ class UnifiedClient:
             # CONTEXT-SPECIFIC KEY OVERRIDES: When context matches a dedicated pool,
             # use that pool for full multi-key rotation (mirrors main multi-key mode).
             
-            # VISION KEY OVERRIDE: shared pool for QA truncation checks and vision OCR/image scans.
-            _vision_key_contexts = ('Truncation', 'qa_truncation', 'image_scan', 'image_ocr', 'vision_ocr', 'manga_ocr')
+            # AI TRUNCATION DETECTION KEY OVERRIDE: qa_truncation can use its own pool before normal fallback.
+            context_norm = str(context or '').strip().lower()
+            if context_norm == 'qa_truncation' and os.getenv('USE_AI_TRUNCATION_DETECTION_KEYS', '0') == '1':
+                try:
+                    ai_keys = json.loads(os.getenv('AI_TRUNCATION_DETECTION_API_KEYS', '[]') or '[]')
+                    if ai_keys:
+                        with self.__class__._ai_truncation_detection_pool_lock:
+                            if self.__class__._ai_truncation_detection_key_pool is None:
+                                self.__class__._ai_truncation_detection_key_pool = APIKeyPool()
+                            self.__class__._ai_truncation_detection_key_pool.load_from_list(ai_keys)
+                            ai_pool = self.__class__._ai_truncation_detection_key_pool
+                        pool_state = self._apply_dedicated_key_pool_override(
+                            ai_pool, ai_keys, 'AITruncationDetection', 'AITruncationDetectionKey'
+                        )
+                        if pool_state:
+                            _qa_scan_overridden = True
+                            _original_api_key = pool_state['api_key']
+                            _original_model = pool_state['model']
+                            _original_multi_key_mode = pool_state['multi_key_mode']
+                            _had_instance_pool = pool_state['had_instance_pool']
+                            _original_instance_pool = pool_state['instance_pool']
+                except Exception as e:
+                    print(f"[AI TRUNCATION DETECTION KEYS] Failed to apply override: {e}")
+
+            # VISION KEY OVERRIDE: shared pool for vision OCR/image scans.
+            _vision_key_contexts = ('Truncation', 'image_scan', 'image_ocr', 'vision_ocr', 'manga_ocr')
             _is_qa_scan_context = context in _vision_key_contexts or (not context and 'Truncation' in threading.current_thread().name)
-            if _is_qa_scan_context:
+            if not _qa_scan_overridden and _is_qa_scan_context:
                 try:
                     vision_keys_flag = os.getenv('USE_VISION_KEYS', '0')
                     legacy_qa_keys_flag = os.getenv('USE_QA_SCAN_KEYS', '0')
@@ -6929,7 +6955,7 @@ class UnifiedClient:
                 # pool can otherwise win the cosmetic log line.
                 try:
                     key_identifier = str(getattr(self, 'key_identifier', '') or '')
-                    if key_identifier.startswith(('VisionKey#', 'GlossaryKey#', 'GlossaryRefinementKey#', 'TruncationRetryKey#')):
+                    if key_identifier.startswith(('VisionKey#', 'AITruncationDetectionKey#', 'GlossaryKey#', 'GlossaryRefinementKey#', 'TruncationRetryKey#')):
                         current_model = getattr(self, 'model', None)
                         if current_model:
                             log_model = current_model

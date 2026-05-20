@@ -1703,6 +1703,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.use_glossary_keys_var = self.config.get('use_glossary_keys', False)
         self.use_glossary_refinement_keys_var = self.config.get('use_glossary_refinement_keys', False)
         self.use_qa_scan_keys_var = self.config.get('use_qa_scan_keys', False)
+        self.use_ai_truncation_detection_keys_var = self.config.get('use_ai_truncation_detection_keys', False)
         self.use_truncation_retry_keys_var = self.config.get('use_truncation_retry_keys', False)
         self.use_inpainter_keys_var = self.config.get('use_inpainter_keys', False)
 
@@ -23782,6 +23783,7 @@ Important rules:
                 ('use_glossary_keys', ['use_glossary_keys_var'], False, bool),
                 ('use_glossary_refinement_keys', ['use_glossary_refinement_keys_var'], False, bool),
                 ('use_qa_scan_keys', ['use_qa_scan_keys_var'], False, bool),
+                ('use_ai_truncation_detection_keys', ['use_ai_truncation_detection_keys_var'], False, bool),
                 ('use_truncation_retry_keys', ['use_truncation_retry_keys_var'], False, bool),
                 ('auto_update_check', ['auto_update_check_var'], True, bool),
                 ('auto_dpi_scale', ['auto_dpi_scale_var'], True, bool),

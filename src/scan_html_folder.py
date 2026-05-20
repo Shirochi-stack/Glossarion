@@ -5640,7 +5640,7 @@ def run_ai_truncation_check(source_html, trans_html, client, tail_chars=400, log
         _max_tokens = int(max_tokens) if max_tokens is not None and int(max_tokens) > 0 else 50
         
         with _qa_api_overrides_env(disable_thinking=disable_thinking, delay_override=api_call_delay):
-            response = client.send(messages, temperature=_temp, max_tokens=_max_tokens, context='Truncation')
+            response = client.send(messages, temperature=_temp, max_tokens=_max_tokens, context='qa_truncation')
 
         # Parse response
         if isinstance(response, tuple):
@@ -8903,6 +8903,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             _api_key = _dedicated_key or qa_settings.get('_live_api_key', '') or _ai_config.get('api_key', '') or os.getenv('API_KEY', os.getenv('GEMINI_API_KEY', ''))
             _model = _dedicated_model or qa_settings.get('_live_model', '') or _ai_config.get('model', '') or os.getenv('MODEL', 'gemini-2.0-flash')
             _output_dir = folder_path
+
+            os.environ['USE_AI_TRUNCATION_DETECTION_KEYS'] = '1' if _ai_config.get('use_ai_truncation_detection_keys', False) else '0'
+            os.environ['AI_TRUNCATION_DETECTION_API_KEYS'] = json.dumps(_ai_config.get('ai_truncation_detection_keys', []))
 
             # Apply QA scan key environment variables if enabled in config
             if _ai_config.get('use_qa_scan_keys', False):
