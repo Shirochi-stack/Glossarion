@@ -1142,6 +1142,18 @@ except ImportError:
     _authza_reset_cancel = None
     AUTHZA_AVAILABLE = False
 
+# AuthND - NVIDIA Build browser-backed route (optional, no API key)
+try:
+    from authnd_auth import send_chat_completion as _authnd_send
+    from authnd_auth import cancel_stream as _authnd_cancel_stream
+    from authnd_auth import reset_cancel as _authnd_reset_cancel
+    AUTHND_AVAILABLE = True
+except ImportError:
+    _authnd_send = None
+    _authnd_cancel_stream = None
+    _authnd_reset_cancel = None
+    AUTHND_AVAILABLE = False
+
 # AuthCD - Claude subscription via OAuth (optional)
 try:
     from authcd_auth import get_default_store as _authcd_get_store
@@ -2063,6 +2075,8 @@ class UnifiedClient:
         'lr': 'literouter',
         'fireworks': 'fireworks',
         'nd/': 'nvidia',
+        'authnd/': 'authnd',
+        'authnd': 'authnd',
         'eh/': 'electronhub',
         'electronhub/': 'electronhub',
         'electron/': 'electronhub',
@@ -2112,7 +2126,7 @@ class UnifiedClient:
         return False
     
     # Models/prefixes that authenticate without a traditional API key
-    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgem', 'authgem-vertex', 'vertex/', 'antigravity/', 'antigravity', 'authza/', 'authza', 'authcd/', 'authcd')
+    _NO_API_KEY_PREFIXES = ('authgpt/', 'authgpt', 'authgem', 'authgem-vertex', 'vertex/', 'antigravity/', 'antigravity', 'authza/', 'authza', 'authnd/', 'authnd', 'authcd/', 'authcd')
     # NOTE: 'authgem' (without /) intentionally matches authgem/, authgem-key/, authgem-vertex/,
     # AND all numbered variants (authgem1/, authgem2/, authgem-vertex3/, etc.)
     _NO_API_KEY_MODELS = ('google-translate', 'google-translate-free', 'deepl')
@@ -2996,6 +3010,13 @@ class UnifiedClient:
                 _authcd_cancel_stream()
         except Exception:
             pass
+
+        # Cancel any in-flight AuthND browser-backed streams
+        try:
+            if _authnd_cancel_stream is not None:
+                _authnd_cancel_stream()
+        except Exception:
+            pass
     
     @classmethod
     def is_globally_cancelled(cls) -> bool:
@@ -3035,6 +3056,12 @@ class UnifiedClient:
         try:
             if _authcd_reset_cancel is not None:
                 _authcd_reset_cancel()
+        except Exception:
+            pass
+        # Reset AuthND cancel event
+        try:
+            if _authnd_reset_cancel is not None:
+                _authnd_reset_cancel()
         except Exception:
             pass
         
@@ -6331,6 +6358,13 @@ class UnifiedClient:
                 self.client_type = 'authza'
                 self._authza_account_id = int(_m.group(1))
 
+        # Dynamic fallback: match numbered authnd variants (authnd1/, authnd2/, etc.)
+        if self.client_type is None:
+            import re as _re
+            _m = _re.match(r'^authnd(\d{1,4})(?:/|$)', model_lower)
+            if _m:
+                self.client_type = 'authnd'
+
         # Dynamic fallback: match numbered authcd variants (authcd1/, authcd2/, etc.)
         if self.client_type is None:
             import re as _re
@@ -6798,6 +6832,14 @@ class UnifiedClient:
             account_id = getattr(self, '_authza_account_id', None)
             if account_id:
                 print(f"🔐 AuthZA: Using account slot #{account_id}")
+
+        elif self.client_type == 'authnd':
+            # AuthND uses NVIDIA Build in a browser for captcha, then direct HTTP.
+            if not AUTHND_AVAILABLE:
+                raise ImportError(
+                    "AuthND package not found. Make sure 'authnd_auth.py' exists under src/."
+                )
+            logger.info("AuthND will use NVIDIA Build browser-backed routing")
 
         elif self.client_type == 'authcd':
             # AuthCD uses Anthropic Messages API via OAuth – no persistent SDK client
@@ -11886,6 +11928,12 @@ class UnifiedClient:
                     _authcd_reset_cancel()
             except Exception:
                 pass
+            # Reset AuthND cancel event
+            try:
+                if _authnd_reset_cancel is not None:
+                    _authnd_reset_cancel()
+            except Exception:
+                pass
             # Reset logging levels for new operations
             self._reset_http_logs()
 
@@ -13546,7 +13594,7 @@ class UnifiedClient:
         )
 
         # Non-Gemini wrapper-auth prefixes: suppress thinking info entirely.
-        _suppress_prefixes = ('authgpt', 'authza', 'authcd', 'antigravity', 'za/')
+        _suppress_prefixes = ('authgpt', 'authza', 'authnd', 'authcd', 'antigravity', 'za/')
         if not _is_gemini_wrapper:
             for p in _suppress_prefixes:
                 if model_lower.startswith(p):
@@ -15330,6 +15378,7 @@ class UnifiedClient:
             'antigravity': self._send_antigravity,  # Antigravity Cloud Code proxy
             'za': self._send_openai_provider_router,  # Z.AI via API key
             'authza': self._send_authza,  # Z.AI via pseudo-OAuth key capture
+            'authnd': self._send_authnd,  # NVIDIA Build browser-backed route
             'nanogpt': self._send_nanogpt,  # NanoGPT (nano-gpt.com) – chat/image/video
             'sambanova': self._send_openai_provider_router,  # SambaNova Cloud API
         }
@@ -15656,7 +15705,7 @@ class UnifiedClient:
         # Apply parameters based on provider capabilities
         params = {}
         
-        if self.client_type in ['openai', 'custom_openai', 'deepseek', 'groq', 'electronhub', 'openrouter']:
+        if self.client_type in ['openai', 'custom_openai', 'deepseek', 'groq', 'electronhub', 'openrouter', 'authnd']:
             # OpenAI-compatible providers
             if frequency_penalty > 0:
                 params["frequency_penalty"] = frequency_penalty
@@ -22753,6 +22802,134 @@ class UnifiedClient:
 
         raise UnifiedClientError(
             f"Antigravity request failed after {max_retries} attempts: {last_error}",
+            error_type="api_error"
+        )
+
+    def _send_authnd(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request through NVIDIA Build's browser-backed public route.
+
+        Model names should be prefixed with 'authnd/' (for example
+        authnd/z-ai/glm-5.1). This route does not use NVIDIA API keys; it asks
+        authnd_auth.py to obtain a browser hCaptcha token and then performs the
+        hidden NVIDIA Build prediction request directly.
+        """
+        if not AUTHND_AVAILABLE or _authnd_send is None:
+            raise UnifiedClientError(
+                "AuthND is not available. Ensure 'authnd_auth.py' exists under src/.",
+                error_type="config_error"
+            )
+
+        actual_model = self.model
+        import re as _re
+        _m = _re.match(r'^authnd\d{0,4}/', actual_model, _re.IGNORECASE)
+        if _m:
+            actual_model = actual_model[_m.end():]
+        elif actual_model.lower().startswith('authnd'):
+            actual_model = actual_model[len('authnd'):].lstrip('/')
+        if not actual_model:
+            actual_model = 'z-ai/glm-5.1'
+
+        max_retries = self._get_max_retries()
+        last_error = None
+        print(f"AuthND: Sending request via NVIDIA Build browser route (model={actual_model})")
+
+        for attempt in range(max_retries):
+            if self._is_stop_requested():
+                raise UnifiedClientError(
+                    "AuthND: Translation stopped by user",
+                    error_type="cancelled"
+                )
+
+            try:
+                if _authnd_reset_cancel is not None:
+                    _authnd_reset_cancel()
+
+                _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
+                _connect_timeout = float(os.getenv("CONNECT_TIMEOUT", "30")) if _http_tuning_on else None
+                _read_timeout = self.request_timeout
+                if _http_tuning_on:
+                    try:
+                        _read_timeout = int(float(os.getenv("READ_TIMEOUT", str(self.request_timeout))))
+                    except (ValueError, TypeError):
+                        pass
+
+                anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
+
+                result = _authnd_send(
+                    messages=messages,
+                    model=actual_model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=_read_timeout,
+                    log_fn=print,
+                    connect_timeout=_connect_timeout,
+                    top_p=anti_dupe_params.get("top_p"),
+                    frequency_penalty=anti_dupe_params.get("frequency_penalty"),
+                    presence_penalty=anti_dupe_params.get("presence_penalty"),
+                )
+
+                content = result.get("content", "")
+                finish_reason = result.get("finish_reason", "stop")
+                usage = result.get("usage")
+
+                return UnifiedResponse(
+                    content=content,
+                    finish_reason=finish_reason,
+                    usage=usage,
+                    raw_response=result,
+                )
+
+            except RuntimeError as exc:
+                error_str = str(exc)
+                if "stream cancelled" in error_str.lower():
+                    self._log_once("AuthND: Stream cancelled by user")
+                    raise UnifiedClientError(
+                        "AuthND: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+
+                if self._should_abort_retry():
+                    raise UnifiedClientError(
+                        "AuthND: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+
+                if "429" in error_str or "rate limit" in error_str.lower():
+                    raise UnifiedClientError(
+                        f"AuthND rate limit reached: {error_str}",
+                        error_type="rate_limit"
+                    )
+
+                if "captcha" in error_str.lower() and attempt < max_retries - 1:
+                    delay = max(1.0, self._get_send_interval())
+                    print(f"AuthND: captcha retry in {delay:.1f}s (attempt {attempt+1}/{max_retries})")
+                    if not self._sleep_with_cancel(delay, 0.5):
+                        raise UnifiedClientError("AuthND: Translation stopped by user", error_type="cancelled")
+                    last_error = exc
+                    continue
+
+                last_error = exc
+                if attempt < max_retries - 1:
+                    print(f"AuthND error (attempt {attempt+1}/{max_retries}): {error_str}")
+                    if not self._sleep_with_cancel(self._get_send_interval(), 0.5):
+                        raise UnifiedClientError("AuthND: Translation stopped by user", error_type="cancelled")
+                    continue
+
+            except Exception as exc:
+                if self._should_abort_retry():
+                    raise UnifiedClientError(
+                        "AuthND: Translation stopped by user",
+                        error_type="cancelled"
+                    )
+                last_error = exc
+                if attempt < max_retries - 1:
+                    print(f"AuthND error (attempt {attempt+1}/{max_retries}): {exc}")
+                    if not self._sleep_with_cancel(self._get_send_interval(), 0.5):
+                        raise UnifiedClientError("AuthND: Translation stopped by user", error_type="cancelled")
+                    continue
+
+        raise UnifiedClientError(
+            f"AuthND request failed after {max_retries} attempts: {last_error}",
             error_type="api_error"
         )
 

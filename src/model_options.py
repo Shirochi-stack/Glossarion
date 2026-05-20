@@ -262,6 +262,7 @@ def get_model_options() -> List[str]:
         # AuthCD – Claude subscription via OAuth (Anthropic Messages API)
         "authcd/claude-sonnet-4-6", "authcd/claude-sonnet-4-5",
         "authcd/claude-opus-4-7", "authcd/claude-opus-4-6", "authcd/claude-haiku-4-5",
+        "authnd/z-ai/glm-5.1",
 
         # AuthGem – Gemini-cli via Google OAuth (no API key needed)
         "authgem/gemini-2.5-flash", "authgem/gemini-2.5-flash-lite",
