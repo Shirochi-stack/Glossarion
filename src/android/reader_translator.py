@@ -225,6 +225,7 @@ def translate_chapter_streaming(
         needs_key = not (model_lower.startswith('authgpt/') or
                          model_lower.startswith('authgem/') or
                          model_lower.startswith('authgem-vertex/') or
+                         model_lower.startswith('authnd/') or
                          model_lower.startswith('vertex/') or
                          model_lower.startswith('antigravity/') or
                          model_lower == 'google-translate-free' or
