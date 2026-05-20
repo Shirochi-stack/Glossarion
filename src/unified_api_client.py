@@ -1178,7 +1178,12 @@ class UnifiedResponse:
         
         IMPORTANT: This is used by retry logic to detect when to retry with more tokens
         """
-        return self.finish_reason in ['length', 'max_tokens', 'stop_sequence_limit', 'truncated', 'incomplete']
+        finish_reason = str(self.finish_reason or "").strip().lower()
+        return (
+            finish_reason in {'length', 'max_tokens', 'max_length', 'stop_sequence_limit', 'truncated', 'incomplete'}
+            or ('max' in finish_reason and 'token' in finish_reason)
+            or ('finish' in finish_reason and 'length' in finish_reason)
+        )
     
     @property
     def is_complete(self) -> bool:
@@ -1779,8 +1784,7 @@ class UnifiedClient:
         else:
             fb_reason = "empty_image" if request_type == 'image' else "empty"
         fallback = self._handle_empty_result(messages, context, getattr(response, 'error_details', fb_reason) if response else fb_reason)
-        normalized_finish = str(finish_reason or "").strip().lower()
-        if normalized_finish in {'length', 'max_tokens', 'max_length', 'truncated', 'incomplete', 'stop_sequence_limit'}:
+        if self._is_truncation_finish_reason(finish_reason):
             return "", 'length'
         return fallback, ('content_filter' if is_safety else 'error')
 
@@ -1793,6 +1797,30 @@ class UnifiedClient:
     def _compute_backoff(self, attempt: int, base: float, cap: float) -> float:
         delay = (base * (2 ** attempt)) + random.uniform(0, 1)
         return min(delay, cap)
+
+    @staticmethod
+    def _normalize_finish_reason(finish_reason: Optional[Any]) -> Optional[str]:
+        """Normalize provider finish reasons used by retry/truncation handling."""
+        if finish_reason is None:
+            return None
+        reason = str(finish_reason).strip().lower()
+        if not reason:
+            return None
+        if reason in {
+            'length',
+            'max_tokens',
+            'max_length',
+            'truncated',
+            'incomplete',
+            'stop_sequence_limit',
+        }:
+            return 'length'
+        if ('max' in reason and 'token' in reason) or ('finish' in reason and 'length' in reason):
+            return 'length'
+        return reason
+
+    def _is_truncation_finish_reason(self, finish_reason: Optional[Any]) -> bool:
+        return self._normalize_finish_reason(finish_reason) == 'length'
 
     def _active_per_key_output_token_limit(self) -> Optional[int]:
         per_key_limit = getattr(self, 'current_key_output_token_limit', None)
@@ -7929,8 +7957,10 @@ class UnifiedClient:
                 # Attach usage info to the last payload for this thread
                 self._attach_usage_to_last_payload(usage)
                 
+                finish_reason = self._normalize_finish_reason(finish_reason) or finish_reason
+
                 # Check for truncation and handle retry if enabled
-                if finish_reason in ['length', 'max_tokens']:
+                if self._is_truncation_finish_reason(finish_reason):
                     print(f"Response was truncated: {finish_reason}")
                     print(f"⚠️ Response truncated (finish_reason: {finish_reason})")
                     # Record last truncated content for callers that need to save partial output
@@ -8052,7 +8082,8 @@ class UnifiedClient:
                                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                                     
                                     retry_content, retry_finish_reason = _run_truncation_retry(new_max_tokens, f"{finish_reason}_{attempt_idx+1}", attempt_idx + 1)
-                                    if retry_finish_reason not in ['length', 'max_tokens']:
+                                    retry_finish_reason = self._normalize_finish_reason(retry_finish_reason) or retry_finish_reason
+                                    if not self._is_truncation_finish_reason(retry_finish_reason):
                                         if not trunc_success_logged:
                                             print(f"  ✅ Truncation retry #{attempt_idx+1}/{allowed_attempts} succeeded: {len(retry_content)} chars")
                                             trunc_success_logged = True
@@ -10423,10 +10454,12 @@ class UnifiedClient:
                         print(f"   ✅ Received response ({len(response.content):,} chars)")
                 else:
                     self._debug_log(f"   ⚠️ Model returned no text (finish_reason: {response.finish_reason})")
-                return response.content, response.finish_reason or 'stop'
+                finish_reason = self._normalize_finish_reason(response.finish_reason) or 'stop'
+                return response.content, finish_reason
             elif response.error_details:
                 self._debug_log(f"   ⚠️ UnifiedResponse has error_details: {response.error_details}")
-                return "", response.finish_reason or 'error'
+                finish_reason = self._normalize_finish_reason(response.finish_reason) or 'error'
+                return "", finish_reason
             else:
                 # Only try to extract from raw_response if content is actually None
                 self._debug_log(f"   ⚠️ UnifiedResponse.content is None, checking raw_response...")
@@ -10596,11 +10629,7 @@ class UnifiedClient:
                         finish_reason = choice.finish_reason
                         print(f"   🔍 [{provider}] Finish reason: {finish_reason}")
                         
-                        # Normalize finish reasons
-                        if finish_reason == 'max_tokens':
-                            finish_reason = 'length'
-                        elif finish_reason == 'content_filter':
-                            finish_reason = 'content_filter'
+                        finish_reason = self._normalize_finish_reason(finish_reason) or 'stop'
                     
                     # Extract message content
                     if hasattr(choice, 'message'):
@@ -14301,9 +14330,7 @@ class UnifiedClient:
             else:
                 # As a fallback, try 'text' field directly on choice
                 content = choice.get('text', "")
-        # Normalize finish reasons
-        if finish_reason in ['max_tokens', 'max_length']:
-            finish_reason = 'length'
+        finish_reason = self._normalize_finish_reason(finish_reason) or 'stop'
         usage = None
         if 'usage' in json_resp:
             u = json_resp['usage'] or {}
@@ -14385,6 +14412,7 @@ class UnifiedClient:
         except Exception:
             usage = None
 
+        finish_reason = self._normalize_finish_reason(finish_reason) or 'stop'
         return content, finish_reason, usage
 
     def _with_sdk_retries(self, provider_name: str, max_retries: int, call):
@@ -18501,6 +18529,7 @@ class UnifiedClient:
                         content = ''.join(text_parts)
                         if finish_reason is None:
                             finish_reason = 'incomplete'
+                        finish_reason = self._normalize_finish_reason(finish_reason) or 'stop'
                         if log_stream and not self._is_stop_requested():
                             _flush_mistral_log_buffer(force=True)
                         if usage is not None and hasattr(usage, 'model_dump'):
@@ -18910,6 +18939,7 @@ class UnifiedClient:
                             # Extract response
                             content = response.choices[0].message.content if response.choices else ""
                             finish_reason = response.choices[0].finish_reason if response.choices else "stop"
+                            finish_reason = self._normalize_finish_reason(finish_reason) or "stop"
                             
                             return UnifiedResponse(
                                 content=content,
@@ -20327,6 +20357,7 @@ class UnifiedClient:
                         content = "".join(text_parts)
                         if finish_reason is None:
                             finish_reason = 'incomplete'
+                        finish_reason = self._normalize_finish_reason(finish_reason) or 'stop'
                         
                         # Clean up streaming response after completion
                         try:
@@ -20534,9 +20565,7 @@ class UnifiedClient:
                     else:
                         content = ""
                     
-                    # Normalize finish reasons
-                    if finish_reason in ["max_tokens", "max_length"]:
-                        finish_reason = "length"
+                    finish_reason = self._normalize_finish_reason(finish_reason) or 'stop'
                     
                     usage = None
                     if hasattr(resp, 'usage') and resp.usage is not None:
