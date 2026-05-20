@@ -50,6 +50,65 @@ if sys.platform.startswith("win"):
 
 MODEL = os.getenv("MODEL", "gemini-2.0-flash")
 
+def _positive_int(value):
+    try:
+        if value in (None, ""):
+            return None
+        value = int(value)
+        return value if value > 0 else None
+    except Exception:
+        return None
+
+def _load_key_pool_from_env_or_config(env_name, config_key, config):
+    keys_json = os.getenv(env_name, "[]")
+    try:
+        if keys_json and keys_json.strip() not in ("", "[]", "null", "None"):
+            parsed = json.loads(keys_json)
+            if isinstance(parsed, list):
+                return parsed
+    except Exception:
+        pass
+    keys = config.get(config_key, []) if isinstance(config, dict) else []
+    return keys if isinstance(keys, list) else []
+
+def _pool_output_limit_override(keys, global_limit):
+    """Return the safe effective output limit for a rotating key pool."""
+    enabled_keys = [k for k in (keys or []) if isinstance(k, dict) and k.get("enabled", True)]
+    if not enabled_keys:
+        return None
+    limits = []
+    for key_data in enabled_keys:
+        limit = _positive_int(key_data.get("individual_output_token_limit"))
+        limits.append(limit if limit is not None else global_limit)
+    return min(limits) if limits else None
+
+def _effective_glossary_output_limit(config, model_name=None):
+    raw_output_env = os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", os.getenv("MAX_OUTPUT_TOKENS", "0"))
+    effective = _positive_int(str(raw_output_env).strip())
+    if effective is None:
+        effective = _positive_int(os.getenv("MAX_OUTPUT_TOKENS", str(config.get("max_tokens", 65536)))) or 65536
+
+    if os.getenv("USE_GLOSSARY_KEYS", "0") == "1" or config.get("use_glossary_keys", False):
+        glossary_keys = _load_key_pool_from_env_or_config("GLOSSARY_API_KEYS", "glossary_keys", config)
+        pool_limit = _pool_output_limit_override(glossary_keys, effective)
+        if pool_limit is not None:
+            effective = pool_limit
+    elif config.get("use_multi_api_keys", False) or os.getenv("USE_MULTI_API_KEYS", "0") == "1":
+        multi_keys = _load_key_pool_from_env_or_config("MULTI_API_KEYS", "multi_api_keys", config)
+        pool_limit = _pool_output_limit_override(multi_keys, effective)
+        if pool_limit is not None:
+            effective = pool_limit
+
+    try:
+        with UnifiedClient._model_limits_lock:
+            cached_limit = getattr(UnifiedClient, "_model_token_limits", {}).get(model_name or MODEL)
+        if cached_limit and cached_limit > 0:
+            effective = min(effective, cached_limit)
+    except Exception:
+        pass
+
+    return effective
+
 def interruptible_sleep(duration, check_stop_fn, interval=0.1):
     """Sleep that can be interrupted by stop request or graceful stop"""
     elapsed = 0
@@ -5677,31 +5736,8 @@ def main(log_callback=None, stop_callback=None):
     if chapter_split_enabled or os.getenv("DEBUG_CHAPTER_SPLIT_LOG", "0") == "1":
         print(f"✂️  Chapter Split Enabled: {'✅' if chapter_split_enabled else '❌'}")
 
-    # Resolve effective output token limit (honor -1 as inherit)
-    raw_output_env = os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", os.getenv("MAX_OUTPUT_TOKENS", "0"))
-    effective_output_tokens = None
-    try:
-        raw_val = int(str(raw_output_env).strip())
-        if raw_val > 0:
-            effective_output_tokens = raw_val
-    except Exception:
-        effective_output_tokens = None
-
-    if effective_output_tokens is None or effective_output_tokens <= 0:
-        try:
-            fallback_val = int(os.getenv("MAX_OUTPUT_TOKENS", str(config.get('max_tokens', 65536))))
-            effective_output_tokens = fallback_val if fallback_val > 0 else 65536
-        except Exception:
-            effective_output_tokens = 65536
-
-    # Honor discovered per-model limits from UnifiedClient (if available)
-    try:
-        with UnifiedClient._model_limits_lock:
-            cached_limit = getattr(UnifiedClient, "_model_token_limits", {}).get(model)
-        if cached_limit and cached_limit > 0:
-            effective_output_tokens = min(effective_output_tokens, cached_limit)
-    except Exception:
-        pass
+    # Resolve effective output token limit, including active per-key pool overrides.
+    effective_output_tokens = _effective_glossary_output_limit(config, model)
 
     # Budget for chunking, matching TransateKRtoEN safe limit logic
     available_tokens = _compute_safe_input_tokens(effective_output_tokens, compression_factor)

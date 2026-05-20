@@ -3410,11 +3410,7 @@ class MultiAPIKeyDialog(QDialog):
                 if v > 0:
                     default_val = float(v)
                     break
-        value, ok = QInputDialog.getDouble(
-            self, "Set API Call Delay",
-            "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
-            default_val, 0.0, 3600.0, 1
-        )
+        value, ok = self._show_api_call_delay_dialog(default_val)
         if ok:
             for idx in selected_indices:
                 if 0 <= idx < len(fallback_keys):
@@ -4086,11 +4082,7 @@ class MultiAPIKeyDialog(QDialog):
                 current = float(current)
             except (ValueError, TypeError):
                 current = 0.0
-            value, ok = QInputDialog.getDouble(
-                self, "Edit API Call Delay",
-                "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
-                current, 0.0, 3600.0, 1
-            )
+            value, ok = self._show_api_call_delay_dialog(current, "Edit API Call Delay")
             if ok:
                 fallback_keys[index]['api_call_delay'] = value if value > 0 else 0.0
                 self.translator_gui.config['fallback_keys'] = fallback_keys
@@ -4337,11 +4329,7 @@ class MultiAPIKeyDialog(QDialog):
         elif column == 5:  # API Delay column
             from PySide6.QtWidgets import QInputDialog
             current = getattr(key, 'api_call_delay', 0.0) or 0.0
-            value, ok = QInputDialog.getDouble(
-                self, "Edit API Call Delay",
-                "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
-                current, 0.0, 3600.0, 1
-            )
+            value, ok = self._show_api_call_delay_dialog(current, "Edit API Call Delay")
             if ok:
                 key.api_call_delay = value if value > 0 else 0.0
                 self._refresh_key_list()
@@ -4395,6 +4383,23 @@ class MultiAPIKeyDialog(QDialog):
             current_value, 10, 3600, 10
         )
         return (value, ok)
+
+    def _show_api_call_delay_dialog(self, current_value=0.0, title="Set API Call Delay"):
+        """Shared editor for per-key API call delay values."""
+        from PySide6.QtWidgets import QInputDialog
+        try:
+            current_value = float(current_value or 0.0)
+        except (TypeError, ValueError):
+            current_value = 0.0
+        return QInputDialog.getDouble(
+            self,
+            title,
+            "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+            current_value,
+            0.0,
+            3600.0,
+            2,
+        )
 
     def _show_shared_key_context_menu(
         self, *, tree, position, total_keys, key_at_index, move_callback,
@@ -4601,11 +4606,7 @@ class MultiAPIKeyDialog(QDialog):
                 if v and v > 0:
                     default_val = v
                     break
-        value, ok = QInputDialog.getDouble(
-            self, "Set API Call Delay",
-            "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
-            default_val, 0.0, 3600.0, 1
-        )
+        value, ok = self._show_api_call_delay_dialog(default_val)
         if ok:
             for idx in selected_indices:
                 if 0 <= idx < len(self.key_pool.keys):
@@ -5963,11 +5964,7 @@ class MultiAPIKeyDialog(QDialog):
                 current = float(current)
             except (ValueError, TypeError):
                 current = 0.0
-            value, ok = QInputDialog.getDouble(
-                self, "Edit API Call Delay",
-                "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
-                current, 0.0, 3600.0, 1
-            )
+            value, ok = self._show_api_call_delay_dialog(current, "Edit API Call Delay")
             if ok:
                 glossary_keys[index]['api_call_delay'] = value if value > 0 else 0.0
                 self.translator_gui.config['glossary_keys'] = glossary_keys
@@ -6153,11 +6150,7 @@ class MultiAPIKeyDialog(QDialog):
                 if v > 0:
                     default_val = float(v)
                     break
-        value, ok = QInputDialog.getDouble(
-            self, "Set API Call Delay",
-            "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
-            default_val, 0.0, 3600.0, 1
-        )
+        value, ok = self._show_api_call_delay_dialog(default_val)
         if ok:
             for idx in selected_indices:
                 if 0 <= idx < len(glossary_keys):
@@ -8426,13 +8419,22 @@ class MultiAPIKeyDialog(QDialog):
         self._dedicated_clear_selected_key(pool_name, 'individual_key_temperature')
 
     def _dedicated_set_api_call_delay_for_selected(self, pool_name: str):
-        from PySide6.QtWidgets import QInputDialog
         indices = self._dedicated_selected_indices(pool_name)
         if not indices:
             return
-        value, ok = QInputDialog.getDouble(self, "Set API Call Delay", "API call delay in seconds (0 = global):", 0.0, 0.0, 3600.0, 1)
+        keys = self._dedicated_keys(pool_name)
+        default_val = 0.0
+        for idx in indices:
+            if 0 <= idx < len(keys):
+                try:
+                    current = float(keys[idx].get('api_call_delay', 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    current = 0.0
+                if current > 0:
+                    default_val = current
+                    break
+        value, ok = self._show_api_call_delay_dialog(default_val)
         if ok:
-            keys = self._dedicated_keys(pool_name)
             for idx in indices:
                 if 0 <= idx < len(keys):
                     keys[idx]['api_call_delay'] = value if value > 0 else 0.0

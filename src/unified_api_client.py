@@ -1794,14 +1794,7 @@ class UnifiedClient:
         delay = (base * (2 ** attempt)) + random.uniform(0, 1)
         return min(delay, cap)
 
-    def _normalize_token_params(self, max_tokens: Optional[int], max_completion_tokens: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
-        """Normalize token parameters and apply per-key output token limit if configured.
-
-        - For o-series models, prefer max_completion_tokens.
-        - For others, prefer max_tokens.
-        - If current_key_output_token_limit is set (>0), treat it as an upper bound that can lower but not raise
-          the effective limit relative to the caller's requested value.
-        """
+    def _active_per_key_output_token_limit(self) -> Optional[int]:
         per_key_limit = getattr(self, 'current_key_output_token_limit', None)
         if per_key_limit is None:
             try:
@@ -1819,22 +1812,21 @@ class UnifiedClient:
                 per_key_limit = None
         if per_key_limit is not None and per_key_limit <= 0:
             per_key_limit = None
+        return per_key_limit
+
+    def _normalize_token_params(self, max_tokens: Optional[int], max_completion_tokens: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
+        """Normalize token parameters and apply the active key's output token override."""
+        per_key_limit = self._active_per_key_output_token_limit()
 
         if self._is_o_series_model():
             mct = max_completion_tokens if max_completion_tokens is not None else (max_tokens or int(os.getenv('MAX_OUTPUT_TOKENS', '8192')))
             if per_key_limit is not None:
-                if mct is None or mct <= 0:
-                    mct = per_key_limit
-                else:
-                    mct = min(mct, per_key_limit)
+                mct = per_key_limit
             return None, mct
         else:
             mt = max_tokens if max_tokens is not None else (max_completion_tokens or int(os.getenv('MAX_OUTPUT_TOKENS', '8192')))
             if per_key_limit is not None:
-                if mt is None or mt <= 0:
-                    mt = per_key_limit
-                else:
-                    mt = min(mt, per_key_limit)
+                mt = per_key_limit
             return mt, None
 
     def _set_idempotency_context(self, request_id: str, attempt: int) -> None:
@@ -1861,42 +1853,6 @@ class UnifiedClient:
         delay = (base * (2 ** attempt)) + random.uniform(0, 1)
         return min(delay, cap)
 
-    def _normalize_token_params(self, max_tokens: Optional[int], max_completion_tokens: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
-        """Duplicate helper for normalizing token params with per-key cap (kept for backward compatibility)."""
-        per_key_limit = getattr(self, 'current_key_output_token_limit', None)
-        if per_key_limit is None:
-            try:
-                tls = self._get_thread_local_client()
-                per_key_limit = (
-                    getattr(tls, 'output_token_limit', None)
-                    or getattr(tls, 'per_key_max_output_tokens', None)
-                )
-            except Exception:
-                per_key_limit = None
-        if isinstance(per_key_limit, str):
-            try:
-                per_key_limit = int(per_key_limit)
-            except Exception:
-                per_key_limit = None
-        if per_key_limit is not None and per_key_limit <= 0:
-            per_key_limit = None
-
-        if self._is_o_series_model():
-            mct = max_completion_tokens if max_completion_tokens is not None else (max_tokens or int(os.getenv('MAX_OUTPUT_TOKENS', '8192')))
-            if per_key_limit is not None:
-                if mct is None or mct <= 0:
-                    mct = per_key_limit
-                else:
-                    mct = min(mct, per_key_limit)
-            return None, mct
-        else:
-            mt = max_tokens if max_tokens is not None else (max_completion_tokens or int(os.getenv('MAX_OUTPUT_TOKENS', '8192')))
-            if per_key_limit is not None:
-                if mt is None or mt <= 0:
-                    mt = per_key_limit
-                else:
-                    mt = min(mt, per_key_limit)
-            return mt, None
     """
     Unified client with fixed thread-safe multi-key support
     
@@ -3410,6 +3366,74 @@ class UnifiedClient:
             self._thread_local.max_retries_override = None
         
         return self._thread_local
+
+    def _key_setting(self, key_entry=None, key_data=None, name=None, default=None):
+        if key_data and isinstance(key_data, dict) and name in key_data:
+            return key_data.get(name)
+        if key_entry is not None:
+            return getattr(key_entry, name, default)
+        return default
+
+    def _positive_int_or_none(self, value):
+        try:
+            if value in (None, ""):
+                return None
+            value = int(value)
+            return value if value > 0 else None
+        except Exception:
+            return None
+
+    def _float_or_none(self, value):
+        try:
+            if value in (None, ""):
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    def _apply_key_runtime_overrides(self, key_entry=None, key_data=None, tls=None, apply_delay=True):
+        """Apply shared per-key runtime settings for every multi-key pool."""
+        if tls is None:
+            tls = self._get_thread_local_client()
+
+        google_creds = self._key_setting(key_entry, key_data, 'google_credentials')
+        google_region = self._key_setting(key_entry, key_data, 'google_region')
+        azure_endpoint = self._key_setting(key_entry, key_data, 'azure_endpoint')
+        azure_api_version = self._key_setting(key_entry, key_data, 'azure_api_version')
+        use_individual_endpoint = bool(self._key_setting(key_entry, key_data, 'use_individual_endpoint', False))
+        output_limit = self._positive_int_or_none(self._key_setting(key_entry, key_data, 'individual_output_token_limit'))
+        key_temperature = self._float_or_none(self._key_setting(key_entry, key_data, 'individual_key_temperature'))
+        api_delay = self._float_or_none(self._key_setting(key_entry, key_data, 'api_call_delay', 0.0)) or 0.0
+        active_delay = api_delay if apply_delay else 0.0
+
+        if google_creds:
+            self.current_key_google_creds = google_creds
+            self.google_creds_path = google_creds
+        else:
+            self.current_key_google_creds = getattr(key_entry, 'google_credentials', None) if key_entry is not None else None
+
+        self.current_key_google_region = google_region
+        self.current_key_azure_endpoint = azure_endpoint
+        self.current_key_azure_api_version = azure_api_version
+        self.current_key_use_individual_endpoint = use_individual_endpoint
+        self.current_key_output_token_limit = output_limit
+        self._per_key_api_delay = active_delay if active_delay > 0 else None
+
+        tls.google_credentials = self.current_key_google_creds
+        tls.google_region = self.current_key_google_region
+        tls.azure_endpoint = self.current_key_azure_endpoint
+        tls.azure_api_version = self.current_key_azure_api_version
+        tls.use_individual_endpoint = self.current_key_use_individual_endpoint
+        tls.output_token_limit = output_limit
+        tls.per_key_max_output_tokens = output_limit
+        tls.individual_key_temperature = key_temperature
+        tls.api_call_delay = active_delay
+        tls.active_api_delay_override = active_delay if active_delay > 0 else None
+        return {
+            'output_token_limit': output_limit,
+            'individual_key_temperature': key_temperature,
+            'api_call_delay': api_delay,
+        }
     
     def _ensure_thread_client(self):
         """Ensure the current thread has a properly initialized client with thread safety"""
@@ -3502,19 +3526,7 @@ class UnifiedClient:
                     tls.model = key.model
                     tls.key_index = key_index
                     tls.key_identifier = key_id
-                    tls.google_credentials = getattr(key, 'google_credentials', None)
-                    tls.azure_endpoint = getattr(key, 'azure_endpoint', None)
-                    tls.azure_api_version = getattr(key, 'azure_api_version', None)
-                    tls.google_region = getattr(key, 'google_region', None)
-                    tls.use_individual_endpoint = getattr(key, 'use_individual_endpoint', False)
-                    tls.output_token_limit = getattr(key, 'individual_output_token_limit', None)
-                    tls.individual_key_temperature = getattr(key, 'individual_key_temperature', None)
-                    tls.api_call_delay = getattr(key, 'api_call_delay', 0.0)
-                    try:
-                        _active_delay = float(tls.api_call_delay) if tls.api_call_delay not in (None, '') else 0.0
-                        tls.active_api_delay_override = _active_delay if _active_delay > 0 else None
-                    except Exception:
-                        tls.active_api_delay_override = None
+                    self._apply_key_runtime_overrides(key_entry=key, tls=tls)
                     tls.initialized = True
                     tls.last_rotation = time.time()
                     
@@ -3525,15 +3537,12 @@ class UnifiedClient:
                         self.model = tls.model
                         self.key_identifier = tls.key_identifier
                         self.current_key_index = key_index
-                        self.current_key_google_creds = tls.google_credentials
-                        self.current_key_azure_endpoint = tls.azure_endpoint
-                        self.current_key_azure_api_version = tls.azure_api_version
-                        self.current_key_google_region = tls.google_region
-                        self.current_key_use_individual_endpoint = tls.use_individual_endpoint
+                        self.current_key_google_creds = getattr(tls, 'google_credentials', None)
+                        self.current_key_azure_endpoint = getattr(tls, 'azure_endpoint', None)
+                        self.current_key_azure_api_version = getattr(tls, 'azure_api_version', None)
+                        self.current_key_google_region = getattr(tls, 'google_region', None)
+                        self.current_key_use_individual_endpoint = getattr(tls, 'use_individual_endpoint', False)
                         self.current_key_output_token_limit = getattr(tls, 'output_token_limit', None)
-                    # Apply per-key delay: > 0 overrides global, 0 means use global
-                    _key_delay = getattr(tls, 'api_call_delay', 0.0) or 0.0
-                    self._per_key_api_delay = _key_delay if _key_delay > 0 else None
                     
                     # Log key assignment - FIX: Add None check for api_key
                     if self.api_key and len(self.api_key) > 12:
@@ -5489,56 +5498,14 @@ class UnifiedClient:
             self.model = key_entry.model
             self.current_key_index = key_idx
             self.key_identifier = f"{key_prefix}#{key_idx + 1} ({key_entry.model})"
-            self.current_key_google_creds = getattr(key_entry, 'google_credentials', None)
-            self.current_key_google_region = getattr(key_entry, 'google_region', None)
-            self.current_key_azure_endpoint = getattr(key_entry, 'azure_endpoint', None)
-            self.current_key_azure_api_version = getattr(key_entry, 'azure_api_version', None)
-            self.current_key_use_individual_endpoint = bool(getattr(key_entry, 'use_individual_endpoint', False))
-
             key_data = None
             try:
                 if key_idx < len(key_data_list or []):
                     key_data = key_data_list[key_idx]
             except Exception:
                 key_data = None
-
-            if key_data:
-                google_creds = key_data.get('google_credentials')
-                if google_creds:
-                    self.current_key_google_creds = google_creds
-                    self.google_creds_path = google_creds
-                google_region = key_data.get('google_region')
-                if google_region:
-                    self.current_key_google_region = google_region
-                if key_data.get('use_individual_endpoint'):
-                    endpoint = key_data.get('azure_endpoint')
-                    if endpoint:
-                        self.current_key_azure_endpoint = endpoint
-                        self.current_key_use_individual_endpoint = True
-                    api_version = key_data.get('azure_api_version')
-                    if api_version:
-                        self.current_key_azure_api_version = api_version
-                output_limit = key_data.get('individual_output_token_limit')
-                if output_limit and int(output_limit) > 0:
-                    try:
-                        tls = self._get_thread_local_client()
-                        tls.per_key_max_output_tokens = int(output_limit)
-                    except Exception:
-                        pass
-                key_temp = key_data.get('individual_key_temperature')
-                if key_temp not in (None, ""):
-                    try:
-                        tls = self._get_thread_local_client()
-                        tls.individual_key_temperature = float(key_temp)
-                    except Exception:
-                        pass
-                try:
-                    raw_delay = key_data.get('api_call_delay', 0.0)
-                    delay = float(raw_delay) if raw_delay not in (None, '') else 0.0
-                    self._per_key_api_delay = delay if delay > 0 else None
-                except Exception:
-                    self._per_key_api_delay = None
-            self.current_key_output_token_limit = getattr(key_entry, 'individual_output_token_limit', None)
+            tls = self._get_thread_local_client()
+            self._apply_key_runtime_overrides(key_entry=key_entry, key_data=key_data, tls=tls)
 
             if getattr(self, 'current_key_use_individual_endpoint', False) and getattr(self, 'current_key_azure_endpoint', None):
                 self.client_type = 'openai'
@@ -5552,23 +5519,8 @@ class UnifiedClient:
                 tls.model = key_entry.model
                 tls.key_index = key_idx
                 tls.key_identifier = self.key_identifier
-                tls.google_credentials = getattr(self, 'current_key_google_creds', None)
-                tls.azure_endpoint = getattr(self, 'current_key_azure_endpoint', None)
-                tls.azure_api_version = getattr(self, 'current_key_azure_api_version', None)
-                tls.google_region = getattr(self, 'current_key_google_region', None)
-                tls.use_individual_endpoint = getattr(self, 'current_key_use_individual_endpoint', False)
                 tls.client_type = getattr(self, 'client_type', None)
                 tls.openai_client = getattr(self, 'openai_client', None)
-                tls.api_call_delay = getattr(key_entry, 'api_call_delay', 0.0)
-                tls.output_token_limit = getattr(key_entry, 'individual_output_token_limit', None)
-                try:
-                    _active_delay = getattr(self, '_per_key_api_delay', None)
-                    if _active_delay is None:
-                        _raw_delay = getattr(key_entry, 'api_call_delay', 0.0)
-                        _active_delay = float(_raw_delay) if _raw_delay not in (None, '') else 0.0
-                    tls.active_api_delay_override = float(_active_delay) if float(_active_delay) > 0 else None
-                except Exception:
-                    tls.active_api_delay_override = None
                 tls.initialized = True
                 tls.last_rotation = time.time()
                 tls.request_count = 0
@@ -5889,43 +5841,8 @@ class UnifiedClient:
                                             qk_data = qk_list[key_idx]
                                     except Exception:
                                         pass
-                                    if qk_data:
-                                        qk_google_creds = qk_data.get('google_credentials')
-                                        if qk_google_creds:
-                                            self.current_key_google_creds = qk_google_creds
-                                            self.google_creds_path = qk_google_creds
-                                        qk_google_region = qk_data.get('google_region')
-                                        if qk_google_region:
-                                            self.current_key_google_region = qk_google_region
-                                        if qk_data.get('use_individual_endpoint'):
-                                            qk_endpoint = qk_data.get('azure_endpoint')
-                                            if qk_endpoint:
-                                                self.current_key_azure_endpoint = qk_endpoint
-                                                self.current_key_use_individual_endpoint = True
-                                            qk_api_version = qk_data.get('azure_api_version')
-                                            if qk_api_version:
-                                                self.current_key_azure_api_version = qk_api_version
-                                        qk_output_limit = qk_data.get('individual_output_token_limit')
-                                        if qk_output_limit and int(qk_output_limit) > 0:
-                                            try:
-                                                tls = self._get_thread_local_client()
-                                                tls.per_key_max_output_tokens = int(qk_output_limit)
-                                            except Exception:
-                                                pass
-                                        qk_temp = qk_data.get('individual_key_temperature')
-                                        if qk_temp not in (None, ""):
-                                            try:
-                                                tls = self._get_thread_local_client()
-                                                tls.individual_key_temperature = float(qk_temp)
-                                            except Exception:
-                                                pass
-                                        # Apply per-key API call delay
-                                        try:
-                                            qk_raw_delay = qk_data.get('api_call_delay', 0.0)
-                                            qk_delay = float(qk_raw_delay) if qk_raw_delay not in (None, '') else 0.0
-                                            self._per_key_api_delay = qk_delay if qk_delay > 0 else None
-                                        except Exception:
-                                            self._per_key_api_delay = None
+                                    tls = self._get_thread_local_client()
+                                    self._apply_key_runtime_overrides(key_entry=key_entry, key_data=qk_data, tls=tls)
                                     if getattr(self, 'current_key_use_individual_endpoint', False) and getattr(self, 'current_key_azure_endpoint', None):
                                         self.client_type = 'openai'
                                         self._apply_individual_key_endpoint_if_needed()
@@ -5941,22 +5858,8 @@ class UnifiedClient:
                                         tls.model = key_entry.model
                                         tls.key_index = key_idx
                                         tls.key_identifier = self.key_identifier
-                                        tls.google_credentials = getattr(self, 'current_key_google_creds', None)
-                                        tls.azure_endpoint = getattr(self, 'current_key_azure_endpoint', None)
-                                        tls.azure_api_version = getattr(self, 'current_key_azure_api_version', None)
-                                        tls.google_region = getattr(self, 'current_key_google_region', None)
-                                        tls.use_individual_endpoint = getattr(self, 'current_key_use_individual_endpoint', False)
                                         tls.client_type = getattr(self, 'client_type', None)
                                         tls.openai_client = getattr(self, 'openai_client', None)
-                                        tls.api_call_delay = getattr(key_entry, 'api_call_delay', 0.0)
-                                        try:
-                                            _active_delay = getattr(self, '_per_key_api_delay', None)
-                                            if _active_delay is None:
-                                                _raw_delay = getattr(key_entry, 'api_call_delay', 0.0)
-                                                _active_delay = float(_raw_delay) if _raw_delay not in (None, '') else 0.0
-                                            tls.active_api_delay_override = float(_active_delay) if float(_active_delay) > 0 else None
-                                        except Exception:
-                                            tls.active_api_delay_override = None
                                         tls.initialized = True
                                         tls.last_rotation = time.time()
                                         tls.request_count = 0
@@ -6129,44 +6032,8 @@ class UnifiedClient:
                                             gk_data = gk_list[key_idx]
                                     except Exception:
                                         pass
-                                    if gk_data:
-                                        gk_google_creds = gk_data.get('google_credentials')
-                                        if gk_google_creds:
-                                            self.current_key_google_creds = gk_google_creds
-                                            self.google_creds_path = gk_google_creds
-                                        gk_google_region = gk_data.get('google_region')
-                                        if gk_google_region:
-                                            self.current_key_google_region = gk_google_region
-                                        if gk_data.get('use_individual_endpoint'):
-                                            gk_endpoint = gk_data.get('azure_endpoint')
-                                            if gk_endpoint:
-                                                self.current_key_azure_endpoint = gk_endpoint
-                                                self.current_key_use_individual_endpoint = True
-                                            gk_api_version = gk_data.get('azure_api_version')
-                                            if gk_api_version:
-                                                self.current_key_azure_api_version = gk_api_version
-                                        gk_output_limit = gk_data.get('individual_output_token_limit')
-                                        if gk_output_limit and int(gk_output_limit) > 0:
-                                            try:
-                                                tls = self._get_thread_local_client()
-                                                tls.per_key_max_output_tokens = int(gk_output_limit)
-                                            except Exception:
-                                                pass
-                                        # Apply per-key temperature from glossary pool key
-                                        gk_temp = gk_data.get('individual_key_temperature')
-                                        if gk_temp not in (None, ""):
-                                            try:
-                                                tls = self._get_thread_local_client()
-                                                tls.individual_key_temperature = float(gk_temp)
-                                            except Exception:
-                                                pass
-                                        # Apply per-key API call delay
-                                        try:
-                                            gk_raw_delay = gk_data.get('api_call_delay', 0.0)
-                                            gk_delay = float(gk_raw_delay) if gk_raw_delay not in (None, '') else 0.0
-                                            self._per_key_api_delay = gk_delay if gk_delay > 0 else None
-                                        except Exception:
-                                            self._per_key_api_delay = None
+                                    tls = self._get_thread_local_client()
+                                    self._apply_key_runtime_overrides(key_entry=key_entry, key_data=gk_data, tls=tls)
                                     # Re-initialize client for new model/key
                                     self._setup_client()
                                     _glossary_overridden = True
@@ -6181,20 +6048,6 @@ class UnifiedClient:
                                         tls.model = key_entry.model
                                         tls.key_index = key_idx
                                         tls.key_identifier = self.key_identifier
-                                        tls.google_credentials = getattr(self, 'current_key_google_creds', None)
-                                        tls.azure_endpoint = getattr(self, 'current_key_azure_endpoint', None)
-                                        tls.azure_api_version = getattr(self, 'current_key_azure_api_version', None)
-                                        tls.google_region = getattr(self, 'current_key_google_region', None)
-                                        tls.use_individual_endpoint = getattr(self, 'current_key_use_individual_endpoint', False)
-                                        tls.api_call_delay = getattr(key_entry, 'api_call_delay', 0.0)
-                                        try:
-                                            _active_delay = getattr(self, '_per_key_api_delay', None)
-                                            if _active_delay is None:
-                                                _raw_delay = getattr(key_entry, 'api_call_delay', 0.0)
-                                                _active_delay = float(_raw_delay) if _raw_delay not in (None, '') else 0.0
-                                            tls.active_api_delay_override = float(_active_delay) if float(_active_delay) > 0 else None
-                                        except Exception:
-                                            tls.active_api_delay_override = None
                                         tls.initialized = True
                                         tls.last_rotation = time.time()
                                         tls.request_count = 0
@@ -8922,6 +8775,8 @@ class UnifiedClient:
                             'google_region': fb.get('google_region'),
                             'azure_api_version': fb.get('azure_api_version'),
                             'use_individual_endpoint': fb.get('use_individual_endpoint', False),
+                            'individual_output_token_limit': fb.get('individual_output_token_limit'),
+                            'individual_key_temperature': fb.get('individual_key_temperature'),
                             'api_call_delay': fb.get('api_call_delay', 0.0),
                             'label': 'FALLBACK KEY'
                         })
@@ -9033,6 +8888,7 @@ class UnifiedClient:
                         model=fallback_model,   
                         output_dir=self.output_dir
                     )
+                    temp_client._apply_key_runtime_overrides(key_data=fallback_data, apply_delay=False)
 
                     # Mark this client as a retry client to prevent recursive fallbacks
                     temp_client._is_retry_client = True
@@ -9420,25 +9276,7 @@ class UnifiedClient:
                         model=fallback_model,   
                         output_dir=self.output_dir
                     )
-                    
-                    # Apply per-key output token limit for this fallback key, if configured
-                    try:
-                        raw_limit = fb.get('individual_output_token_limit')
-                        if raw_limit not in (None, ""):
-                            iv = int(raw_limit)
-                            if iv > 0:
-                                temp_client.current_key_output_token_limit = iv
-                    except Exception:
-                        pass
-                    
-                    # Apply per-key temperature for this fallback key, if configured
-                    try:
-                        raw_temp = fb.get('individual_key_temperature')
-                        if raw_temp not in (None, ""):
-                            temp_tls = temp_client._get_thread_local_client()
-                            temp_tls.individual_key_temperature = float(raw_temp)
-                    except Exception:
-                        pass
+                    temp_client._apply_key_runtime_overrides(key_data=fb, apply_delay=False)
                     
                     # CRITICAL: Mark this client as a retry client BEFORE setup to prevent recursive fallback
                     # This flag tells _send_internal to NOT attempt fallback keys if it hits prohibited content
@@ -9725,37 +9563,10 @@ class UnifiedClient:
                         model=gk_model,   
                         output_dir=self.output_dir
                     )
-                    
-                    # Apply per-key output token limit for this glossary key, if configured
-                    try:
-                        gk_output_limit = gk.get('individual_output_token_limit')
-                        if gk_output_limit and int(gk_output_limit) > 0:
-                            temp_tls = temp_client._get_thread_local_client()
-                            temp_tls.per_key_max_output_tokens = int(gk_output_limit)
-                    except Exception:
-                        pass
-                    
-                    # Apply per-key temperature for this glossary key, if configured
-                    try:
-                        gk_temp = gk.get('individual_key_temperature')
-                        if gk_temp not in (None, ""):
-                            temp_tls = temp_client._get_thread_local_client()
-                            temp_tls.individual_key_temperature = float(gk_temp)
-                    except Exception:
-                        pass
+                    temp_client._apply_key_runtime_overrides(key_data=gk)
                     
                     # CRITICAL: Mark this client as a retry client BEFORE setup to prevent recursive fallback
                     temp_client._is_retry_client = True
-                    
-                    # Propagate per-key delay so _apply_api_call_stagger / _get_send_interval
-                    # use it instead of the global SEND_INTERVAL_SECONDS env var.
-                    try:
-                        _gk_raw_delay = gk.get('api_call_delay', 0.0)
-                        _gk_api_delay = float(_gk_raw_delay) if _gk_raw_delay not in (None, '') else 0.0
-                    except Exception:
-                        _gk_api_delay = 0.0
-                    if _gk_api_delay > 0:
-                        temp_client._per_key_api_delay = _gk_api_delay
                     
                     # CRITICAL: Disable retries for glossary keys - they should only try once
                     temp_client._max_retries = 1
@@ -12157,18 +11968,10 @@ class UnifiedClient:
                 if max_tokens is None:
                     max_tokens = int(os.getenv('MAX_OUTPUT_TOKENS', '8192'))
                 
-                # Apply per-key output token limit for Vertex/Anthropic path as well
-                per_key_limit = getattr(self, 'current_key_output_token_limit', None)
-                try:
-                    if isinstance(per_key_limit, str):
-                        per_key_limit = int(per_key_limit)
-                except Exception:
-                    per_key_limit = None
+                # Apply per-key output token limit for Vertex/Anthropic path as well.
+                per_key_limit = self._active_per_key_output_token_limit()
                 if per_key_limit is not None and per_key_limit > 0:
-                    if max_tokens is None or max_tokens <= 0:
-                        max_tokens = per_key_limit
-                    else:
-                        max_tokens = min(max_tokens, per_key_limit)
+                    max_tokens = per_key_limit
                 
                 kwargs = {
                     "model": model_name,

@@ -639,11 +639,9 @@ class TranslationConfig:
         """Return the effective output token limit, considering per-key overrides.
 
         - Start from the global MAX_OUTPUT_TOKENS.
-        - Check if the model has a discovered limit (from auto-adjustment)
-        - If multi-key mode is enabled, intersect with any per-key
-          individual_output_token_limit values (min of all >0 limits).
-        - If fallback keys are enabled, also intersect with their per-key
-          individual_output_token_limit values.
+        - Check if the model has a discovered limit (from auto-adjustment).
+        - If an active key pool has per-key limits, use the safe pool limit:
+          configured per-key limits override global, while unset keys keep global.
         """
         effective = self.MAX_OUTPUT_TOKENS
         
@@ -657,49 +655,45 @@ class TranslationConfig:
         except Exception:
             pass
 
-        # Collect per-key limits from multi-key pool (only from enabled keys)
-        per_key_limits = []
-        try:
-            for idx, key_data in enumerate(self.multi_api_keys or []):
-                if not isinstance(key_data, dict):
-                    continue
-                # Skip disabled keys
-                if not key_data.get('enabled', True):
-                    continue
-                raw = key_data.get('individual_output_token_limit')
-                if raw in (None, "", 0):
-                    continue
-                try:
-                    val = int(raw)
-                    if val > 0:
-                        per_key_limits.append(val)
-                except Exception:
-                    continue
-        except Exception:
-            pass
+        def _positive_int(value):
+            try:
+                if value in (None, ""):
+                    return None
+                value = int(value)
+                return value if value > 0 else None
+            except Exception:
+                return None
 
-        # Collect per-key limits from fallback keys (only from enabled keys)
-        try:
-            for idx, fb in enumerate(self.fallback_keys or []):
-                if not isinstance(fb, dict):
-                    continue
-                # Skip disabled keys
-                if not fb.get('enabled', True):
-                    continue
-                raw = fb.get('individual_output_token_limit')
-                if raw in (None, "", 0):
-                    continue
-                try:
-                    val = int(raw)
-                    if val > 0:
-                        per_key_limits.append(val)
-                except Exception:
-                    continue
-        except Exception:
-            pass
+        def _load_key_list(env_name, existing):
+            raw = os.getenv(env_name, "[]")
+            try:
+                if raw and raw.strip() not in ("", "[]", "null", "None"):
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, list):
+                        return parsed
+            except Exception:
+                pass
+            return existing or []
 
-        if per_key_limits:
-            effective = min(effective, min(per_key_limits))
+        def _pool_effective_limit(keys):
+            enabled = [k for k in (keys or []) if isinstance(k, dict) and k.get('enabled', True)]
+            if not enabled:
+                return None
+            limits = []
+            for key_data in enabled:
+                # Unset per-key values still use the current global limit for that key.
+                limits.append(_positive_int(key_data.get('individual_output_token_limit')) or effective)
+            return min(limits) if limits else None
+
+        pool_limit = None
+        if os.getenv('USE_GLOSSARY_KEYS', '0') == '1':
+            pool_limit = _pool_effective_limit(_load_key_list('GLOSSARY_API_KEYS', []))
+        if pool_limit is None and self.use_multi_api_keys:
+            pool_limit = _pool_effective_limit(_load_key_list('MULTI_API_KEYS', self.multi_api_keys))
+        if pool_limit is None and self.use_fallback_keys:
+            pool_limit = _pool_effective_limit(_load_key_list('FALLBACK_KEYS', self.fallback_keys))
+        if pool_limit is not None:
+            effective = pool_limit
 
         return effective
 
