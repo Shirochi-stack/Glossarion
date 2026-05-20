@@ -640,7 +640,7 @@ class TranslationConfig:
 
         - Start from the global MAX_OUTPUT_TOKENS.
         - Check if the model has a discovered limit (from auto-adjustment).
-        - If an active key pool has per-key limits, use the safe pool limit:
+        - If the active translation key pool has per-key limits, use the safe pool limit:
           configured per-key limits override global, while unset keys keep global.
         """
         effective = self.MAX_OUTPUT_TOKENS
@@ -686,9 +686,7 @@ class TranslationConfig:
             return min(limits) if limits else None
 
         pool_limit = None
-        if os.getenv('USE_GLOSSARY_KEYS', '0') == '1':
-            pool_limit = _pool_effective_limit(_load_key_list('GLOSSARY_API_KEYS', []))
-        if pool_limit is None and self.use_multi_api_keys:
+        if self.use_multi_api_keys:
             pool_limit = _pool_effective_limit(_load_key_list('MULTI_API_KEYS', self.multi_api_keys))
         if pool_limit is None and self.use_fallback_keys:
             pool_limit = _pool_effective_limit(_load_key_list('FALLBACK_KEYS', self.fallback_keys))
