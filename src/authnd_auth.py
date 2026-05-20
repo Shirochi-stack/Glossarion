@@ -631,7 +631,7 @@ def send_chat_completion(
         use_stream = os.getenv("AUTHND_STREAM", "1").lower() not in ("0", "false", "no")
 
     if log_fn:
-        log_fn(f"AuthND: opening browser token flow for {page_url}")
+        log_fn(f"🌐 AuthND: opening browser token flow for {page_url}")
 
     normalized_messages = _normalize_messages(messages)
     last_error: Optional[Exception] = None

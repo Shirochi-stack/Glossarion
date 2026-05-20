@@ -6839,7 +6839,7 @@ class UnifiedClient:
                 raise ImportError(
                     "AuthND package not found. Make sure 'authnd_auth.py' exists under src/."
                 )
-            logger.info("AuthND will use NVIDIA Build browser-backed routing")
+            logger.info("🟢 AuthND will use NVIDIA Build browser-backed routing")
 
         elif self.client_type == 'authcd':
             # AuthCD uses Anthropic Messages API via OAuth – no persistent SDK client
@@ -15705,7 +15705,7 @@ class UnifiedClient:
         # Apply parameters based on provider capabilities
         params = {}
         
-        if self.client_type in ['openai', 'custom_openai', 'deepseek', 'groq', 'electronhub', 'openrouter', 'authnd']:
+        if self.client_type in ['openai', 'custom_openai', 'deepseek', 'groq', 'electronhub', 'openrouter', 'nvidia', 'authnd']:
             # OpenAI-compatible providers
             if frequency_penalty > 0:
                 params["frequency_penalty"] = frequency_penalty
@@ -22831,7 +22831,7 @@ class UnifiedClient:
 
         max_retries = self._get_max_retries()
         last_error = None
-        print(f"AuthND: Sending request via NVIDIA Build browser route (model={actual_model})")
+        print(f"🚀 AuthND: Sending request via NVIDIA Build browser route (model={actual_model})")
 
         for attempt in range(max_retries):
             if self._is_stop_requested():
