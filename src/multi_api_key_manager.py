@@ -1415,8 +1415,10 @@ class MultiAPIKeyDialog(QDialog):
 
         # Create and show dialog (suppress toggle logs during init)
         self._initializing = True
+        self._deferred_render_count = 0
         self._create_dialog()
-        self._initializing = False
+        if not self._deferred_render_count:
+            self._initializing = False
 
         # Make it a window (not just a dialog)
         self.setWindowFlags(self.windowFlags() | Qt.Window)
@@ -1961,22 +1963,15 @@ class MultiAPIKeyDialog(QDialog):
         # This will be removed when multi-key is disabled to bring fallback closer
         scrollable_layout.addStretch(0)
 
-        # Create fallback container (hidden by default)
-        self._create_fallback_section(scrollable_layout)
-
-        # Create glossary keys container (hidden by default)
-        self._create_glossary_section(scrollable_layout)
-
-        self._create_glossary_refinement_section(scrollable_layout)
-
-        # Create Vision keys container (hidden by default)
-        self._create_qa_scan_section(scrollable_layout)
-
-        # Create Truncation Retry keys container (hidden by default)
-        self._create_truncation_retry_section(scrollable_layout)
-
-        # Create Image gen/edit keys container (hidden by default)
-        self._create_inpainter_section(scrollable_layout)
+        # Queue the lower pool sections so the dialog shell paints immediately.
+        # Qt widgets must still be created on the GUI thread, so these render in
+        # independent event-loop tasks instead of one long blocking constructor.
+        self._queue_key_pool_section_render(scrollable_layout, self._create_fallback_section)
+        self._queue_key_pool_section_render(scrollable_layout, self._create_truncation_retry_section)
+        self._queue_key_pool_section_render(scrollable_layout, self._create_glossary_section)
+        self._queue_key_pool_section_render(scrollable_layout, self._create_glossary_refinement_section)
+        self._queue_key_pool_section_render(scrollable_layout, self._create_qa_scan_section)
+        self._queue_key_pool_section_render(scrollable_layout, self._create_inpainter_section)
 
         # Add stretch to fill remaining space in scroll area
         scrollable_layout.addStretch(1)
@@ -1993,8 +1988,36 @@ class MultiAPIKeyDialog(QDialog):
         # Set icon
         self._set_icon(self)
 
-        # Apply initial state for multi-key mode toggle
+        # Apply the initial toggle state after deferred sections finish rendering.
+        if not self._deferred_render_count:
+            self._finish_deferred_key_pool_render()
+
+    def _queue_key_pool_section_render(self, parent_layout, render_callback):
+        """Render one key-pool section in its own queued GUI event."""
+        host = QWidget()
+        host_layout = QVBoxLayout(host)
+        host_layout.setContentsMargins(0, 0, 0, 0)
+        host_layout.setSpacing(0)
+        parent_layout.addWidget(host)
+        self._deferred_render_count = getattr(self, '_deferred_render_count', 0) + 1
+        QTimer.singleShot(0, lambda cb=render_callback, layout=host_layout: self._render_key_pool_section(cb, layout))
+
+    def _render_key_pool_section(self, render_callback, host_layout):
+        try:
+            render_callback(host_layout)
+        except Exception as exc:
+            print(f"[MULTI_KEY_RENDER] Failed to render key-pool section: {exc}")
+        finally:
+            self._deferred_render_count = max(0, getattr(self, '_deferred_render_count', 1) - 1)
+            if self._deferred_render_count == 0:
+                self._finish_deferred_key_pool_render()
+
+    def _finish_deferred_key_pool_render(self):
+        if getattr(self, '_deferred_render_finished', False):
+            return
+        self._deferred_render_finished = True
         self._toggle_multi_key_mode()
+        self._initializing = False
 
     def _create_fallback_section(self, parent_layout):
         """Create the fallback keys section at the bottom"""
