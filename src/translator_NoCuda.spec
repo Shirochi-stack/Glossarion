@@ -239,6 +239,7 @@ app_files = [
 	('authgem_auth.py', '.'),
 	('authcd_auth.py', '.'),  # Claude subscription OAuth
 	('authza_auth.py', '.'),
+	('authnd_auth.py', '.'),  # NVIDIA Build browser-backed auth
 	('token_encryption.py', '.'),
 
 	# Antigravity Cloud Code proxy
@@ -473,6 +474,7 @@ app_modules = [
 	'authgem_auth',  # Gemini subscription OAuth
 	'authcd_auth',  # Claude subscription OAuth
 	'authza_auth',  # Azure/Additional auth
+	'authnd_auth',  # NVIDIA Build browser-backed auth
 	'token_encryption',  # Encrypted token storage
 	'antigravity_proxy',  # Antigravity Cloud Code proxy
 	'grpc_gemini_client',  # gRPC Gemini client
