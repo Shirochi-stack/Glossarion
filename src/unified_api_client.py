@@ -1803,6 +1803,15 @@ class UnifiedClient:
           the effective limit relative to the caller's requested value.
         """
         per_key_limit = getattr(self, 'current_key_output_token_limit', None)
+        if per_key_limit is None:
+            try:
+                tls = self._get_thread_local_client()
+                per_key_limit = (
+                    getattr(tls, 'output_token_limit', None)
+                    or getattr(tls, 'per_key_max_output_tokens', None)
+                )
+            except Exception:
+                per_key_limit = None
         if isinstance(per_key_limit, str):
             try:
                 per_key_limit = int(per_key_limit)
@@ -1855,6 +1864,15 @@ class UnifiedClient:
     def _normalize_token_params(self, max_tokens: Optional[int], max_completion_tokens: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
         """Duplicate helper for normalizing token params with per-key cap (kept for backward compatibility)."""
         per_key_limit = getattr(self, 'current_key_output_token_limit', None)
+        if per_key_limit is None:
+            try:
+                tls = self._get_thread_local_client()
+                per_key_limit = (
+                    getattr(tls, 'output_token_limit', None)
+                    or getattr(tls, 'per_key_max_output_tokens', None)
+                )
+            except Exception:
+                per_key_limit = None
         if isinstance(per_key_limit, str):
             try:
                 per_key_limit = int(per_key_limit)
@@ -5520,6 +5538,7 @@ class UnifiedClient:
                     self._per_key_api_delay = delay if delay > 0 else None
                 except Exception:
                     self._per_key_api_delay = None
+            self.current_key_output_token_limit = getattr(key_entry, 'individual_output_token_limit', None)
 
             if getattr(self, 'current_key_use_individual_endpoint', False) and getattr(self, 'current_key_azure_endpoint', None):
                 self.client_type = 'openai'
@@ -5541,6 +5560,7 @@ class UnifiedClient:
                 tls.client_type = getattr(self, 'client_type', None)
                 tls.openai_client = getattr(self, 'openai_client', None)
                 tls.api_call_delay = getattr(key_entry, 'api_call_delay', 0.0)
+                tls.output_token_limit = getattr(key_entry, 'individual_output_token_limit', None)
                 try:
                     _active_delay = getattr(self, '_per_key_api_delay', None)
                     if _active_delay is None:
@@ -5633,8 +5653,11 @@ class UnifiedClient:
                 tls = self._get_thread_local_client()
                 tls.active_api_delay_override = None
                 tls.api_call_delay = 0.0
+                tls.output_token_limit = None
+                tls.per_key_max_output_tokens = None
             except Exception:
                 pass
+            self.current_key_output_token_limit = None
             self._restoring_dedicated_key_override = True
             try:
                 self._setup_client()
@@ -6313,8 +6336,11 @@ class UnifiedClient:
                     tls = self._get_thread_local_client()
                     tls.active_api_delay_override = None
                     tls.api_call_delay = 0.0
+                    tls.output_token_limit = None
+                    tls.per_key_max_output_tokens = None
                 except Exception:
                     pass
+                self.current_key_output_token_limit = None
                 self._restoring_dedicated_key_override = True
                 try:
                     self._setup_client()
@@ -8113,6 +8139,19 @@ class UnifiedClient:
                                 tls._in_truncation_retry = True
                                 try:
                                     pool_state, _ = self._apply_truncation_retry_key_pool_override()
+                                    retry_tokens = new_tokens
+                                    try:
+                                        per_key_limit = (
+                                            getattr(tls, 'output_token_limit', None)
+                                            or getattr(tls, 'per_key_max_output_tokens', None)
+                                            or getattr(self, 'current_key_output_token_limit', None)
+                                        )
+                                        per_key_limit = int(per_key_limit) if per_key_limit not in (None, '') else None
+                                        if per_key_limit and per_key_limit > retry_tokens:
+                                            print(f"  📊 Truncation retry key output limit override: {retry_tokens} → {per_key_limit}")
+                                            retry_tokens = per_key_limit
+                                    except Exception:
+                                        pass
                                     _api_watchdog_record_retry(
                                         request_id,
                                         retry_attempt,
@@ -8121,7 +8160,7 @@ class UnifiedClient:
                                     retry_content, retry_finish_reason = self._send_internal(
                                         messages=messages,
                                         temperature=temperature,
-                                        max_tokens=new_tokens,
+                                        max_tokens=retry_tokens,
                                         max_completion_tokens=max_completion_tokens,
                                         context=context,
                                         retry_reason=f"truncation_retry_{reason_suffix}",
@@ -8135,7 +8174,7 @@ class UnifiedClient:
                                     tls._in_truncation_retry = False
                                     tls.max_retries_override = prev_override
 
-                            print(f"  📊 Truncation retries: {allowed_attempts} attempt(s) at max_tokens={new_max_tokens}")
+                            print(f"  📊 Truncation retries: {allowed_attempts} attempt(s) at base max_tokens={new_max_tokens}")
                             # Abort retry if graceful stop or user stop is active
                             graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
                             if graceful_stop_active or self._is_stop_requested():

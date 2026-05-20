@@ -2436,111 +2436,30 @@ class MultiAPIKeyDialog(QDialog):
             self._test_single_fallback_key(key_data, i)
 
     def _show_fallback_context_menu(self, position):
-        """Show context menu for fallback keys - includes model name editing"""
-        # Get item at position
-        item = self.fallback_tree.itemAt(position)
-        if not item:
-            return
-
-        # Select item if not already selected
-        if item not in self.fallback_tree.selectedItems():
-            self.fallback_tree.setCurrentItem(item)
-
-        # Create context menu
-        menu = QMenu(self)
-
-        # Get index for position info
-        index = self.fallback_tree.indexOfTopLevelItem(item)
+        """Show context menu for fallback keys."""
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
-        total = len(fallback_keys)
-
-        # Reorder submenu
-        if total > 1:  # Only show reorder if there's more than one key
-            reorder_menu = menu.addMenu("Reorder")
-            if index > 0:
-                up_action = reorder_menu.addAction("Move Up")
-                up_action.triggered.connect(lambda: self._move_fallback_key('up'))
-            if index < total - 1:
-                down_action = reorder_menu.addAction("Move Down")
-                down_action.triggered.connect(lambda: self._move_fallback_key('down'))
-            menu.addSeparator()
-
-        # Add Change Model option
-        selected_count = len(self.fallback_tree.selectedItems())
-        if selected_count > 1:
-            change_model_action = menu.addAction(f"Change Model ({selected_count} selected)")
-        else:
-            change_model_action = menu.addAction("Change Model")
-        change_model_action.triggered.connect(self._change_fallback_model_for_selected)
-
-        menu.addSeparator()
-
-        # Individual Endpoint options for fallback keys
-        if index < len(fallback_keys):
-            key_data = fallback_keys[index]
-            endpoint_enabled = key_data.get('use_individual_endpoint', False)
-            endpoint_url = key_data.get('azure_endpoint', '')
-
-            if endpoint_enabled and endpoint_url:
-                config_action = menu.addAction("✅ Individual Endpoint")
-                config_action.triggered.connect(lambda: self._configure_fallback_individual_endpoint(index))
-                disable_action = menu.addAction("Disable Individual Endpoint")
-                disable_action.triggered.connect(lambda: self._toggle_fallback_individual_endpoint(index, False))
-            else:
-                config_action = menu.addAction("🔧 Configure Individual Endpoint")
-                config_action.triggered.connect(lambda: self._configure_fallback_individual_endpoint(index))
-
-        menu.addSeparator()
-
-        # Per-key output token limit options for fallback keys
-        selected_items = self.fallback_tree.selectedItems()
-        selected_count = len(selected_items)
-        if selected_count > 1:
-            set_limit_action = menu.addAction(f"Set Output Token Limit ({selected_count} selected)")
-        else:
-            set_limit_action = menu.addAction("Set Output Token Limit")
-        set_limit_action.triggered.connect(self._set_fallback_output_token_limit_for_selected)
-        clear_limit_action = menu.addAction("Clear Output Token Limit")
-        clear_limit_action.triggered.connect(self._clear_fallback_output_token_limit_for_selected)
-
-        # Per-key temperature options for fallback keys
-        if selected_count > 1:
-            set_temp_action = menu.addAction(f"Set Key Temperature ({selected_count} selected)")
-        else:
-            set_temp_action = menu.addAction("Set Key Temperature")
-        set_temp_action.triggered.connect(self._set_fallback_key_temperature_for_selected)
-        clear_temp_action = menu.addAction("Clear Key Temperature")
-        clear_temp_action.triggered.connect(self._clear_fallback_key_temperature_for_selected)
-
-        # Per-key API call delay options for fallback keys
-        if selected_count > 1:
-            set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
-        else:
-            set_delay_action = menu.addAction("Set API Call Delay")
-        set_delay_action.triggered.connect(self._set_fallback_api_call_delay_for_selected)
-        clear_delay_action = menu.addAction("Clear API Call Delay")
-        clear_delay_action.triggered.connect(self._clear_fallback_api_call_delay_for_selected)
-
-        menu.addSeparator()
-
-        # Test, Enable/Disable, and Remove options
-        test_action = menu.addAction("Test")
-        test_action.triggered.connect(self._test_selected_fallback)
-        enable_action = menu.addAction("Enable")
-        enable_action.triggered.connect(self._enable_selected_fallback)
-        disable_action = menu.addAction("Disable")
-        disable_action.triggered.connect(self._disable_selected_fallback)
-        menu.addSeparator()
-        remove_action = menu.addAction("Remove")
-        remove_action.triggered.connect(self._remove_selected_fallback)
-
-        if total > 1:
-            clear_action = menu.addAction("Clear All")
-            clear_action.triggered.connect(self._clear_all_fallbacks)
-
-        # Show menu
-        menu.exec_(self.fallback_tree.viewport().mapToGlobal(position))
-
+        self._show_shared_key_context_menu(
+            tree=self.fallback_tree,
+            position=position,
+            total_keys=len(fallback_keys),
+            key_at_index=lambda i: fallback_keys[i],
+            move_callback=self._move_fallback_key,
+            change_model_callback=self._change_fallback_model_for_selected,
+            configure_endpoint_callback=self._configure_fallback_individual_endpoint,
+            disable_endpoint_callback=lambda i: self._toggle_fallback_individual_endpoint(i, False),
+            set_limit_callback=self._set_fallback_output_token_limit_for_selected,
+            clear_limit_callback=self._clear_fallback_output_token_limit_for_selected,
+            set_temp_callback=self._set_fallback_key_temperature_for_selected,
+            clear_temp_callback=self._clear_fallback_key_temperature_for_selected,
+            set_delay_callback=self._set_fallback_api_call_delay_for_selected,
+            clear_delay_callback=self._clear_fallback_api_call_delay_for_selected,
+            test_callback=self._test_selected_fallback,
+            enable_callback=self._enable_selected_fallback,
+            disable_callback=self._disable_selected_fallback,
+            remove_callback=self._remove_selected_fallback,
+            clear_all_callback=self._clear_all_fallbacks,
+            index_resolver=lambda item, _visual: self._fallback_config_index_for_item(item),
+        )
 
     def _change_fallback_model_for_selected(self):
         """Change model name for selected fallback keys"""
@@ -2643,7 +2562,7 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_tree.clear()
 
         # Add keys to tree
-        for key_data in fallback_keys:
+        for config_index, key_data in enumerate(fallback_keys):
             api_key = key_data.get('api_key', '')
             model = key_data.get('model', '')
             times_used = int(key_data.get('times_used', 0))
@@ -2707,6 +2626,7 @@ class MultiAPIKeyDialog(QDialog):
             success_count = int(key_data.get('success_count', 0))
             error_count = int(key_data.get('error_count', 0))
             item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
+            item.setData(0, Qt.UserRole, config_index)
             # Apply status-based coloring (consistent with multi-key tree)
             for col in range(item.columnCount()):
                 item.setForeground(col, color)
@@ -2742,6 +2662,37 @@ class MultiAPIKeyDialog(QDialog):
         # Restore scroll position
         self.fallback_tree.verticalScrollBar().setValue(v_scroll)
         self.fallback_tree.horizontalScrollBar().setValue(h_scroll)
+
+    def _fallback_config_index_for_item(self, item):
+        if item is None:
+            return -1
+        try:
+            index = item.data(0, Qt.UserRole)
+            if index is not None:
+                return int(index)
+        except Exception:
+            pass
+        return self.fallback_tree.indexOfTopLevelItem(item)
+
+    def _set_fallback_item_enabled_display(self, item, enabled: bool, key_data=None):
+        if item is None:
+            return
+        test_result = (key_data or {}).get('last_test_result')
+        if not enabled:
+            status, color = "Disabled", Qt.gray
+        elif test_result == 'passed':
+            status, color = "Passed", Qt.darkGreen
+        elif test_result == 'failed':
+            status, color = "Failed", Qt.red
+        elif test_result == 'timeout':
+            status, color = "Timed Out", Qt.darkYellow
+        elif test_result == 'error':
+            status, color = "Error", Qt.darkRed
+        else:
+            status, color = "Enabled", Qt.gray
+        item.setText(5, status)
+        for col in range(item.columnCount()):
+            item.setForeground(col, color)
 
     def _add_fallback_key(self):
         """Add a new fallback key with optional Google credentials and Azure endpoint"""
@@ -3122,12 +3073,12 @@ class MultiAPIKeyDialog(QDialog):
             return
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         for item in selected:
-            index = self.fallback_tree.indexOfTopLevelItem(item)
-            if index < len(fallback_keys):
+            index = self._fallback_config_index_for_item(item)
+            if 0 <= index < len(fallback_keys):
                 fallback_keys[index]['enabled'] = True
+                self._set_fallback_item_enabled_display(item, True, fallback_keys[index])
         self.translator_gui.config['fallback_keys'] = fallback_keys
         self.translator_gui.save_config(show_message=False)
-        self._load_fallback_keys()
         self._show_fallback_status(f"Enabled {len(selected)} fallback key(s)")
         self._notify_authgpt_visibility()
 
@@ -3138,12 +3089,12 @@ class MultiAPIKeyDialog(QDialog):
             return
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         for item in selected:
-            index = self.fallback_tree.indexOfTopLevelItem(item)
-            if index < len(fallback_keys):
+            index = self._fallback_config_index_for_item(item)
+            if 0 <= index < len(fallback_keys):
                 fallback_keys[index]['enabled'] = False
+                self._set_fallback_item_enabled_display(item, False, fallback_keys[index])
         self.translator_gui.config['fallback_keys'] = fallback_keys
         self.translator_gui.save_config(show_message=False)
-        self._load_fallback_keys()
         self._show_fallback_status(f"Disabled {len(selected)} fallback key(s)")
         self._notify_authgpt_visibility()
 
@@ -4445,100 +4396,96 @@ class MultiAPIKeyDialog(QDialog):
         )
         return (value, ok)
 
-    def _show_context_menu(self, position):
-        """Show context menu with reorder and per-key settings"""
-        # Get item at position
-        item = self.tree.itemAt(position)
+    def _show_shared_key_context_menu(
+        self, *, tree, position, total_keys, key_at_index, move_callback,
+        change_model_callback, configure_endpoint_callback,
+        disable_endpoint_callback, set_limit_callback, clear_limit_callback,
+        set_temp_callback, clear_temp_callback, set_delay_callback,
+        clear_delay_callback, test_callback, enable_callback, disable_callback,
+        remove_callback, clear_all_callback=None, index_resolver=None
+    ):
+        """Shared context menu for every API key tree."""
+        item = tree.itemAt(position)
         if not item:
             return
+        if item not in tree.selectedItems():
+            tree.setCurrentItem(item)
 
-        # Select item if not already selected
-        if item not in self.tree.selectedItems():
-            self.tree.setCurrentItem(item)
+        visual_index = tree.indexOfTopLevelItem(item)
+        key_index = index_resolver(item, visual_index) if index_resolver else visual_index
+        selected_count = len(tree.selectedItems())
 
-        # Create context menu
+        def selected_label(base):
+            return f"{base} ({selected_count} selected)" if selected_count > 1 else base
+
         menu = QMenu(self)
 
-        # Reorder submenu
-        reorder_menu = menu.addMenu("Reorder")
-        top_action = reorder_menu.addAction("Move to Top")
-        top_action.triggered.connect(lambda: self._move_key('top'))
-        up_action = reorder_menu.addAction("Move Up")
-        up_action.triggered.connect(lambda: self._move_key('up'))
-        down_action = reorder_menu.addAction("Move Down")
-        down_action.triggered.connect(lambda: self._move_key('down'))
-        bottom_action = reorder_menu.addAction("Move to Bottom")
-        bottom_action.triggered.connect(lambda: self._move_key('bottom'))
+        if total_keys > 1:
+            reorder_menu = menu.addMenu("🔀 Reorder")
+            reorder_menu.addAction("⏫ Move to Top").triggered.connect(lambda: move_callback('top'))
+            reorder_menu.addAction("⬆️ Move Up").triggered.connect(lambda: move_callback('up'))
+            reorder_menu.addAction("⬇️ Move Down").triggered.connect(lambda: move_callback('down'))
+            reorder_menu.addAction("⏬ Move to Bottom").triggered.connect(lambda: move_callback('bottom'))
+            menu.addSeparator()
 
+        menu.addAction(selected_label("📝 Change Model")).triggered.connect(change_model_callback)
         menu.addSeparator()
 
-        # Add change model option
-        selected_items = self.tree.selectedItems()
-        selected_count = len(selected_items)
-        if selected_count > 1:
-            change_action = menu.addAction(f"Change Model ({selected_count} selected)")
-        else:
-            change_action = menu.addAction("Change Model")
-        change_action.triggered.connect(self._change_model_for_selected)
-
-        # Per-key output token limit options
-        if selected_count > 1:
-            set_limit_action = menu.addAction(f"Set Output Token Limit ({selected_count} selected)")
-        else:
-            set_limit_action = menu.addAction("Set Output Token Limit")
-        set_limit_action.triggered.connect(self._set_output_token_limit_for_selected)
-        clear_limit_action = menu.addAction("Clear Output Token Limit")
-        clear_limit_action.triggered.connect(self._clear_output_token_limit_for_selected)
-
-        # Per-key temperature options
-        if selected_count > 1:
-            set_temp_action = menu.addAction(f"Set Key Temperature ({selected_count} selected)")
-        else:
-            set_temp_action = menu.addAction("Set Key Temperature")
-        set_temp_action.triggered.connect(self._set_key_temperature_for_selected)
-        clear_temp_action = menu.addAction("Clear Key Temperature")
-        clear_temp_action.triggered.connect(self._clear_key_temperature_for_selected)
-
-        # Per-key API call delay options
-        if selected_count > 1:
-            set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
-        else:
-            set_delay_action = menu.addAction("Set API Call Delay")
-        set_delay_action.triggered.connect(self._set_api_call_delay_for_selected)
-        clear_delay_action = menu.addAction("Clear API Call Delay")
-        clear_delay_action.triggered.connect(self._clear_api_call_delay_for_selected)
-
-        menu.addSeparator()
-
-        # Individual Endpoint options
-        index = self.tree.indexOfTopLevelItem(item)
-        if index < len(self.key_pool.keys):
-            key = self.key_pool.keys[index]
-            endpoint_enabled = getattr(key, 'use_individual_endpoint', False)
-            endpoint_url = getattr(key, 'azure_endpoint', '')
-
-            if endpoint_enabled and endpoint_url:
-                config_action = menu.addAction("✅ Individual Endpoint")
-                config_action.triggered.connect(lambda: self._configure_individual_endpoint(index))
-                disable_endpoint_action = menu.addAction("Disable Individual Endpoint")
-                disable_endpoint_action.triggered.connect(lambda: self._toggle_individual_endpoint(index, False))
+        key_data = key_at_index(key_index) if 0 <= key_index < total_keys else None
+        if key_data is not None:
+            if isinstance(key_data, dict):
+                endpoint_enabled = key_data.get('use_individual_endpoint', False)
+                endpoint_url = key_data.get('azure_endpoint', '')
             else:
-                config_action = menu.addAction("🔧 Configure Individual Endpoint")
-                config_action.triggered.connect(lambda: self._configure_individual_endpoint(index))
+                endpoint_enabled = getattr(key_data, 'use_individual_endpoint', False)
+                endpoint_url = getattr(key_data, 'azure_endpoint', '')
+            if endpoint_enabled and endpoint_url:
+                menu.addAction("✅ Individual Endpoint").triggered.connect(lambda i=key_index: configure_endpoint_callback(i))
+                menu.addAction("🚫 Disable Individual Endpoint").triggered.connect(lambda i=key_index: disable_endpoint_callback(i))
+            else:
+                menu.addAction("🔧 Configure Individual Endpoint").triggered.connect(lambda i=key_index: configure_endpoint_callback(i))
+            menu.addSeparator()
 
+        menu.addAction(selected_label("🎯 Set Output Token Limit")).triggered.connect(set_limit_callback)
+        menu.addAction("🧹 Clear Output Token Limit").triggered.connect(clear_limit_callback)
         menu.addSeparator()
-        test_action = menu.addAction("Test")
-        test_action.triggered.connect(self._test_selected)
-        enable_action = menu.addAction("Enable")
-        enable_action.triggered.connect(self._enable_selected)
-        disable_action = menu.addAction("Disable")
-        disable_action.triggered.connect(self._disable_selected)
+        menu.addAction(selected_label("🌡️ Set Key Temperature")).triggered.connect(set_temp_callback)
+        menu.addAction("🧹 Clear Key Temperature").triggered.connect(clear_temp_callback)
         menu.addSeparator()
-        remove_action = menu.addAction("Remove")
-        remove_action.triggered.connect(self._remove_selected)
+        menu.addAction(selected_label("⏱️ Set API Call Delay")).triggered.connect(set_delay_callback)
+        menu.addAction("🧹 Clear API Call Delay").triggered.connect(clear_delay_callback)
+        menu.addSeparator()
+        menu.addAction("🧪 Test Selected").triggered.connect(test_callback)
+        menu.addAction("✅ Enable Selected").triggered.connect(enable_callback)
+        menu.addAction("🚫 Disable Selected").triggered.connect(disable_callback)
+        menu.addAction("🗑️ Remove Selected").triggered.connect(remove_callback)
+        if clear_all_callback and total_keys:
+            menu.addAction("🧨 Clear All").triggered.connect(clear_all_callback)
 
-        # Show menu
-        menu.exec_(self.tree.viewport().mapToGlobal(position))
+        menu.exec_(tree.viewport().mapToGlobal(position))
+
+    def _show_context_menu(self, position):
+        """Show context menu with reorder and per-key settings"""
+        self._show_shared_key_context_menu(
+            tree=self.tree,
+            position=position,
+            total_keys=len(self.key_pool.keys),
+            key_at_index=lambda i: self.key_pool.keys[i],
+            move_callback=self._move_key,
+            change_model_callback=self._change_model_for_selected,
+            configure_endpoint_callback=self._configure_individual_endpoint,
+            disable_endpoint_callback=lambda i: self._toggle_individual_endpoint(i, False),
+            set_limit_callback=self._set_output_token_limit_for_selected,
+            clear_limit_callback=self._clear_output_token_limit_for_selected,
+            set_temp_callback=self._set_key_temperature_for_selected,
+            clear_temp_callback=self._clear_key_temperature_for_selected,
+            set_delay_callback=self._set_api_call_delay_for_selected,
+            clear_delay_callback=self._clear_api_call_delay_for_selected,
+            test_callback=self._test_selected,
+            enable_callback=self._enable_selected,
+            disable_callback=self._disable_selected,
+            remove_callback=self._remove_selected,
+        )
 
     def _set_output_token_limit_for_selected(self):
         """Set per-key output token limit for selected multi-key entries"""
@@ -5835,104 +5782,29 @@ class MultiAPIKeyDialog(QDialog):
             self.glossary_azure_api_version_combo.setCurrentText('2025-01-01-preview')
 
     def _show_glossary_context_menu(self, position):
-        """Show context menu for glossary keys"""
-        item = self.glossary_tree.itemAt(position)
-        if not item:
-            return
-
-        if item not in self.glossary_tree.selectedItems():
-            self.glossary_tree.setCurrentItem(item)
-
-        menu = QMenu(self)
-
-        index = self.glossary_tree.indexOfTopLevelItem(item)
+        """Show context menu for glossary keys."""
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
-        total = len(glossary_keys)
-
-        # Reorder submenu
-        if total > 1:
-            reorder_menu = menu.addMenu("Reorder")
-            if index > 0:
-                up_action = reorder_menu.addAction("Move Up")
-                up_action.triggered.connect(lambda: self._move_glossary_key('up'))
-            if index < total - 1:
-                down_action = reorder_menu.addAction("Move Down")
-                down_action.triggered.connect(lambda: self._move_glossary_key('down'))
-            menu.addSeparator()
-
-        # Change Model
-        selected_count = len(self.glossary_tree.selectedItems())
-        if selected_count > 1:
-            change_model_action = menu.addAction(f"Change Model ({selected_count} selected)")
-        else:
-            change_model_action = menu.addAction("Change Model")
-        change_model_action.triggered.connect(self._change_glossary_model_for_selected)
-
-        menu.addSeparator()
-
-        # Individual Endpoint options
-        if index < len(glossary_keys):
-            key_data = glossary_keys[index]
-            endpoint_enabled = key_data.get('use_individual_endpoint', False)
-            endpoint_url = key_data.get('azure_endpoint', '')
-
-            if endpoint_enabled and endpoint_url:
-                config_action = menu.addAction("✅ Individual Endpoint")
-                config_action.triggered.connect(lambda: self._configure_glossary_individual_endpoint(index))
-                disable_action = menu.addAction("Disable Individual Endpoint")
-                disable_action.triggered.connect(lambda: self._toggle_glossary_individual_endpoint(index, False))
-            else:
-                config_action = menu.addAction("🔧 Configure Individual Endpoint")
-                config_action.triggered.connect(lambda: self._configure_glossary_individual_endpoint(index))
-
-        menu.addSeparator()
-
-        # Per-key output token limit options
-        selected_items = self.glossary_tree.selectedItems()
-        selected_count = len(selected_items)
-        if selected_count > 1:
-            set_limit_action = menu.addAction(f"Set Output Token Limit ({selected_count} selected)")
-        else:
-            set_limit_action = menu.addAction("Set Output Token Limit")
-        set_limit_action.triggered.connect(self._set_glossary_output_token_limit_for_selected)
-        clear_limit_action = menu.addAction("Clear Output Token Limit")
-        clear_limit_action.triggered.connect(self._clear_glossary_output_token_limit_for_selected)
-
-        # Per-key temperature options for glossary keys
-        if selected_count > 1:
-            set_temp_action = menu.addAction(f"Set Key Temperature ({selected_count} selected)")
-        else:
-            set_temp_action = menu.addAction("Set Key Temperature")
-        set_temp_action.triggered.connect(self._set_glossary_key_temperature_for_selected)
-        clear_temp_action = menu.addAction("Clear Key Temperature")
-        clear_temp_action.triggered.connect(self._clear_glossary_key_temperature_for_selected)
-
-        # Per-key API call delay options for glossary keys
-        if selected_count > 1:
-            set_delay_action = menu.addAction(f"Set API Call Delay ({selected_count} selected)")
-        else:
-            set_delay_action = menu.addAction("Set API Call Delay")
-        set_delay_action.triggered.connect(self._set_glossary_api_call_delay_for_selected)
-        clear_delay_action = menu.addAction("Clear API Call Delay")
-        clear_delay_action.triggered.connect(self._clear_glossary_api_call_delay_for_selected)
-
-        menu.addSeparator()
-
-        test_action = menu.addAction("Test")
-        test_action.triggered.connect(self._test_selected_glossary)
-        enable_action = menu.addAction("Enable")
-        enable_action.triggered.connect(self._enable_selected_glossary)
-        disable_action = menu.addAction("Disable")
-        disable_action.triggered.connect(self._disable_selected_glossary)
-        menu.addSeparator()
-        remove_action = menu.addAction("Remove")
-        remove_action.triggered.connect(self._remove_selected_glossary)
-
-        if total > 1:
-            clear_action = menu.addAction("Clear All")
-            clear_action.triggered.connect(self._clear_all_glossary)
-
-        menu.exec_(self.glossary_tree.viewport().mapToGlobal(position))
+        self._show_shared_key_context_menu(
+            tree=self.glossary_tree,
+            position=position,
+            total_keys=len(glossary_keys),
+            key_at_index=lambda i: glossary_keys[i],
+            move_callback=self._move_glossary_key,
+            change_model_callback=self._change_glossary_model_for_selected,
+            configure_endpoint_callback=self._configure_glossary_individual_endpoint,
+            disable_endpoint_callback=lambda i: self._toggle_glossary_individual_endpoint(i, False),
+            set_limit_callback=self._set_glossary_output_token_limit_for_selected,
+            clear_limit_callback=self._clear_glossary_output_token_limit_for_selected,
+            set_temp_callback=self._set_glossary_key_temperature_for_selected,
+            clear_temp_callback=self._clear_glossary_key_temperature_for_selected,
+            set_delay_callback=self._set_glossary_api_call_delay_for_selected,
+            clear_delay_callback=self._clear_glossary_api_call_delay_for_selected,
+            test_callback=self._test_selected_glossary,
+            enable_callback=self._enable_selected_glossary,
+            disable_callback=self._disable_selected_glossary,
+            remove_callback=self._remove_selected_glossary,
+            clear_all_callback=self._clear_all_glossary,
+        )
 
     def _change_glossary_model_for_selected(self):
         """Change model name for selected glossary keys"""
@@ -7726,7 +7598,7 @@ class MultiAPIKeyDialog(QDialog):
             },
             'ai_truncation_detection': {
                 'title': 'QA Scan Keys (for AI Truncation detection)',
-                'label': 'QA scan AI truncation detection',
+                'label': 'QA scan',
                 'config_key': 'ai_truncation_detection_keys',
                 'toggle_key': 'use_ai_truncation_detection_keys',
                 'set_method': '_unused_ai_truncation_detection_pool_set',
@@ -8408,45 +8280,28 @@ class MultiAPIKeyDialog(QDialog):
 
     def _dedicated_show_context_menu(self, pool_name: str, position):
         tree = self._dedicated_widget(pool_name, 'tree')
-        item = tree.itemAt(position)
-        if not item:
-            return
-        if item not in tree.selectedItems():
-            tree.setCurrentItem(item)
-        index = tree.indexOfTopLevelItem(item)
         keys = self._dedicated_keys(pool_name)
-        menu = QMenu(self)
-        if len(keys) > 1:
-            menu.addAction("Move to Top").triggered.connect(lambda p=pool_name: self._dedicated_move_key(p, 'top'))
-            menu.addAction("Move Up").triggered.connect(lambda p=pool_name: self._dedicated_move_key(p, 'up'))
-            menu.addAction("Move Down").triggered.connect(lambda p=pool_name: self._dedicated_move_key(p, 'down'))
-            menu.addAction("Move to Bottom").triggered.connect(lambda p=pool_name: self._dedicated_move_key(p, 'bottom'))
-            menu.addSeparator()
-        menu.addAction("Change Model for Selected").triggered.connect(lambda p=pool_name: self._dedicated_change_model_for_selected(p))
-        if 0 <= index < len(keys):
-            key_data = keys[index]
-            if key_data.get('use_individual_endpoint'):
-                menu.addAction("Configure Individual Endpoint").triggered.connect(lambda p=pool_name, i=index: self._dedicated_configure_endpoint(p, i))
-                menu.addAction("Disable Individual Endpoint").triggered.connect(lambda p=pool_name, i=index: self._dedicated_toggle_individual_endpoint(p, i, False))
-            else:
-                menu.addAction("Configure Individual Endpoint").triggered.connect(lambda p=pool_name, i=index: self._dedicated_configure_endpoint(p, i))
-            menu.addSeparator()
-        menu.addAction("Set Output Token Limit").triggered.connect(lambda p=pool_name: self._dedicated_set_output_token_limit_for_selected(p))
-        menu.addAction("Clear Output Token Limit").triggered.connect(lambda p=pool_name: self._dedicated_clear_output_token_limit_for_selected(p))
-        menu.addSeparator()
-        menu.addAction("Set Key Temperature").triggered.connect(lambda p=pool_name: self._dedicated_set_temperature_for_selected(p))
-        menu.addAction("Clear Key Temperature").triggered.connect(lambda p=pool_name: self._dedicated_clear_temperature_for_selected(p))
-        menu.addSeparator()
-        menu.addAction("Set API Call Delay").triggered.connect(lambda p=pool_name: self._dedicated_set_api_call_delay_for_selected(p))
-        menu.addAction("Clear API Call Delay").triggered.connect(lambda p=pool_name: self._dedicated_clear_api_call_delay_for_selected(p))
-        menu.addSeparator()
-        menu.addAction("Test Selected").triggered.connect(lambda p=pool_name: self._dedicated_test_selected(p))
-        menu.addAction("Enable Selected").triggered.connect(lambda p=pool_name: self._dedicated_enable_selected(p))
-        menu.addAction("Disable Selected").triggered.connect(lambda p=pool_name: self._dedicated_disable_selected(p))
-        menu.addAction("Remove Selected").triggered.connect(lambda p=pool_name: self._dedicated_remove_selected(p))
-        if keys:
-            menu.addAction("Clear All").triggered.connect(lambda p=pool_name: self._dedicated_clear_all(p))
-        menu.exec_(tree.viewport().mapToGlobal(position))
+        self._show_shared_key_context_menu(
+            tree=tree,
+            position=position,
+            total_keys=len(keys),
+            key_at_index=lambda i: keys[i],
+            move_callback=lambda direction: self._dedicated_move_key(pool_name, direction),
+            change_model_callback=lambda: self._dedicated_change_model_for_selected(pool_name),
+            configure_endpoint_callback=lambda i: self._dedicated_configure_endpoint(pool_name, i),
+            disable_endpoint_callback=lambda i: self._dedicated_toggle_individual_endpoint(pool_name, i, False),
+            set_limit_callback=lambda: self._dedicated_set_output_token_limit_for_selected(pool_name),
+            clear_limit_callback=lambda: self._dedicated_clear_output_token_limit_for_selected(pool_name),
+            set_temp_callback=lambda: self._dedicated_set_temperature_for_selected(pool_name),
+            clear_temp_callback=lambda: self._dedicated_clear_temperature_for_selected(pool_name),
+            set_delay_callback=lambda: self._dedicated_set_api_call_delay_for_selected(pool_name),
+            clear_delay_callback=lambda: self._dedicated_clear_api_call_delay_for_selected(pool_name),
+            test_callback=lambda: self._dedicated_test_selected(pool_name),
+            enable_callback=lambda: self._dedicated_enable_selected(pool_name),
+            disable_callback=lambda: self._dedicated_disable_selected(pool_name),
+            remove_callback=lambda: self._dedicated_remove_selected(pool_name),
+            clear_all_callback=lambda: self._dedicated_clear_all(pool_name),
+        )
 
     def _dedicated_change_model_for_selected(self, pool_name: str):
         from PySide6.QtWidgets import QInputDialog
