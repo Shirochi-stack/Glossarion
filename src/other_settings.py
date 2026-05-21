@@ -6292,7 +6292,7 @@ def _create_prompt_management_section(self, parent):
 
     # Use & Translate source toc.ncx (combined toggle)
     if not hasattr(self, 'use_toc_ncx_var'):
-        self.use_toc_ncx_var = self.config.get('use_toc_ncx', False)
+        self.use_toc_ncx_var = self.config.get('use_toc_ncx', True)
 
     # Sync translate_toc_ncx_var to match use_toc_ncx_var (they're now unified)
     if not hasattr(self, 'translate_toc_ncx_var'):
@@ -6520,6 +6520,9 @@ def _create_prompt_management_section(self, parent):
     header_h1.setContentsMargins(0, 0, 0, 0)
     
     # Master toggle for batch header translation
+    if not hasattr(self, 'batch_translate_headers_var'):
+        self.batch_translate_headers_var = self.config.get('batch_translate_headers', True)
+
     batch_toggle_cb = self._create_styled_checkbox("Batch Translate Headers")
     try:
         batch_toggle_cb.setChecked(bool(self.batch_translate_headers_var))

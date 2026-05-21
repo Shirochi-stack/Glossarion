@@ -2041,7 +2041,7 @@ Text to analyze:
             # This ensures default prompts are in config
         except ImportError:
             print("Metadata translation UI not available")
-        self.batch_translate_headers_var = self.config.get('batch_translate_headers', False)
+        self.batch_translate_headers_var = self.config.get('batch_translate_headers', True)
         self.headers_per_batch_var = self.config.get('headers_per_batch', '-1')
         self.toc_ncx_per_batch_var = self.config.get('toc_ncx_per_batch', '-1')
         self.update_html_headers_var = self.config.get('update_html_headers', True)
@@ -13055,7 +13055,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         pass
                 
                 # Set essential environment variables from current config before translation
-                os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if self.config.get('batch_translate_headers', False) else '0'
+                os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if self.config.get('batch_translate_headers', True) else '0'
                 os.environ['IGNORE_HEADER'] = '1' if self.config.get('ignore_header', False) else '0'
                 os.environ['USE_TITLE'] = '1' if self.config.get('use_title', False) else '0'
                 os.environ['REMOVE_DUPLICATE_H1_P'] = '1' if self.config.get('remove_duplicate_h1_p', False) else '0'
@@ -17773,7 +17773,7 @@ Important rules:
                 _epub_layout = 'auto'
             os.environ['EPUB_LAYOUT_MODE'] = _epub_layout
             os.environ['LEGACY_EPUB_STRUCTURE'] = '1' if _epub_layout == 'epub2' else '0'
-            os.environ['USE_TOC_NCX'] = '1' if getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', False)) else '0'
+            os.environ['USE_TOC_NCX'] = '1' if getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', True)) else '0'
             os.environ['TRANSLATE_TOC_NCX'] = os.environ['USE_TOC_NCX']  # Unified: translate always mirrors use
             os.environ['SKIP_DUPLICATE_TOC_TRANSLATION'] = '1' if getattr(self, 'skip_duplicate_toc_translation_var', self.config.get('skip_duplicate_toc_translation', False)) else '0'
             os.environ['DEDUPLICATE_TOC'] = '1' if getattr(self, 'deduplicate_toc_var', self.config.get('deduplicate_toc', False)) else '0'
@@ -21724,7 +21724,7 @@ Important rules:
                 {
                     "key": "translate_toc", "emoji": "📑", "title": "Translate Table of Contents",
                     "desc": "Translate chapter titles in the NCX/NAV table of contents.",
-                    "default": False,
+                    "default": True,
                     "bg": "#162820", "accent": "#40e8b0",
                 },
                 {
@@ -21736,7 +21736,7 @@ Important rules:
                 {
                     "key": "batch_translate_headers", "emoji": "📝", "title": "Translate Header Tags",
                     "desc": "Translate h1-h6 headings in a separate batch pass.\nUpdates all HTML files containing header tags across the entire book.",
-                    "default": False,
+                    "default": True,
                     "bg": "#2c2414", "accent": "#ffc830",
                 },
                 {
@@ -22172,14 +22172,14 @@ Important rules:
                     tb_title = toggle_states.get('translate_book_title', True)
                     self.config['translate_book_title'] = tb_title
                     self.translate_book_title_var = tb_title
-                    tb_toc = toggle_states.get('translate_toc', False)
+                    tb_toc = toggle_states.get('translate_toc', True)
                     self.config['use_toc_ncx'] = tb_toc
                     self.config['translate_toc_ncx'] = tb_toc
                     if hasattr(self, 'use_toc_ncx_var'):
                         self.use_toc_ncx_var = tb_toc
                     if hasattr(self, 'translate_toc_ncx_var'):
                         self.translate_toc_ncx_var = tb_toc
-                    tb_headers = toggle_states.get('batch_translate_headers', False)
+                    tb_headers = toggle_states.get('batch_translate_headers', True)
                     self.config['batch_translate_headers'] = tb_headers
                     self.batch_translate_headers_var = tb_headers
                     # Save additional toggles from page 3
@@ -23787,8 +23787,8 @@ Important rules:
                 ('translation_history_rolling', ['rolling_checkbox', 'translation_history_rolling_var'], False, bool),
                 ('disable_epub_gallery', ['disable_epub_gallery_var'], False, bool),
                 ('disable_automatic_cover_creation', ['disable_automatic_cover_creation_var'], False, bool),
-                ('use_toc_ncx', ['use_toc_ncx_var'], False, bool),
-                ('translate_toc_ncx', ['translate_toc_ncx_var'], False, bool),
+                ('use_toc_ncx', ['use_toc_ncx_var'], True, bool),
+                ('translate_toc_ncx', ['translate_toc_ncx_var'], True, bool),
                 ('use_p_tag_toc_fallback', ['use_p_tag_toc_fallback_var'], False, bool),
                 ('deduplicate_toc', ['deduplicate_toc_var'], False, bool),
                 ('deduplicate_toc_use_translated', ['deduplicate_toc_use_translated_var'], False, bool),
@@ -23797,7 +23797,7 @@ Important rules:
                 ('use_header_as_output', ['use_header_as_output_var'], False, bool),
                 ('enable_decimal_chapters', ['enable_decimal_chapters_var'], False, bool),
                 ('force_ncx_only', ['force_ncx_only_var'], False, bool),
-                ('batch_translate_headers', ['batch_translate_headers_var'], False, bool),
+                ('batch_translate_headers', ['batch_translate_headers_var'], True, bool),
                 ('update_html_headers', ['update_html_headers_var'], False, bool),
                 ('save_header_translations', ['save_header_translations_var'], False, bool),
                 ('use_sorted_fallback', ['use_sorted_fallback_var'], False, bool),
@@ -24983,8 +24983,8 @@ Important rules:
                 ('EPUB_LAYOUT_MODE', getattr(self, 'epub_layout_mode_var', self.config.get('epub_layout_mode', 'auto')) or 'auto'),
                 ('LEGACY_EPUB_STRUCTURE', '1' if getattr(self, 'epub_layout_mode_var', self.config.get('epub_layout_mode', 'auto')) == 'epub2' else '0'),
                 # New: Use/translate source toc.ncx
-                ('USE_TOC_NCX', '1' if getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', False)) else '0'),
-                ('TRANSLATE_TOC_NCX', '1' if getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', False)) else '0'),  # Unified: mirrors USE_TOC_NCX
+                ('USE_TOC_NCX', '1' if getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', True)) else '0'),
+                ('TRANSLATE_TOC_NCX', '1' if getattr(self, 'use_toc_ncx_var', self.config.get('use_toc_ncx', True)) else '0'),  # Unified: mirrors USE_TOC_NCX
                 ('SKIP_DUPLICATE_TOC_TRANSLATION', '1' if getattr(self, 'skip_duplicate_toc_translation_var', self.config.get('skip_duplicate_toc_translation', False)) else '0'),
                 ('USE_P_TAG_TOC_FALLBACK', '1' if getattr(self, 'use_p_tag_toc_fallback_var', self.config.get('use_p_tag_toc_fallback', False)) else '0'),
                 # New: Translate special files (cover, nav, toc, message, etc.)
@@ -25112,7 +25112,7 @@ Important rules:
                 # Metadata and batch header settings
                 ('TRANSLATE_METADATA_FIELDS', _json.dumps(getattr(self, 'translate_metadata_fields', {}))),
                 ('METADATA_TRANSLATION_MODE', self.config.get('metadata_translation_mode', 'together')),
-                ('BATCH_TRANSLATE_HEADERS', '1' if getattr(self, 'batch_translate_headers_var', False) else '0'),
+                ('BATCH_TRANSLATE_HEADERS', '1' if getattr(self, 'batch_translate_headers_var', True) else '0'),
                 ('HEADERS_PER_BATCH', str(getattr(self, 'headers_per_batch_var', '-1'))),
                 ('UPDATE_HTML_HEADERS', '1' if getattr(self, 'update_html_headers_var', True) else '0'),
                 ('SAVE_HEADER_TRANSLATIONS', '1' if getattr(self, 'save_header_translations_var', True) else '0'),

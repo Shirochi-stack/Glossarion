@@ -7853,8 +7853,18 @@ class UnifiedClient:
                         # else:
                         #     print(f"   Consider checking response extraction for this provider")
                         
-                        # Log the response structure for debugging
-                        self._save_failed_request(messages, "Extraction failed", context, response)
+                        # Empty UnifiedResponse objects already carry a normalized finish_reason.
+                        # Let the empty-response handler below decide whether to retry/finalize it;
+                        # saving it here as "Extraction failed" is misleading for transient provider empties.
+                        _empty_unified_response = (
+                            isinstance(response, UnifiedResponse)
+                            and isinstance(getattr(response, "content", None), str)
+                            and not getattr(response, "content", "").strip()
+                            and self._normalize_finish_reason(getattr(response, "finish_reason", None)) in ("error", "incomplete", "length")
+                        )
+                        if not _empty_unified_response:
+                            # Log the response structure for debugging
+                            self._save_failed_request(messages, "Extraction failed", context, response)
                         
                         # Check if response has any common attributes we missed
                         if hasattr(response, 'content') and response.content:
