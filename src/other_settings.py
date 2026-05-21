@@ -4561,14 +4561,17 @@ def _create_response_handling_section(self, parent):
     disable_empty_safety_desc.setContentsMargins(20, 2, 0, 10)
     section_v.addWidget(disable_empty_safety_desc)
 
-    # Force unknown finish_reason => prohibited content
+    # Force missing finish_reason => prohibited content
     if not hasattr(self, 'unknown_finish_as_prohibited_var'):
-        self.unknown_finish_as_prohibited_var = self.config.get('unknown_finish_as_prohibited', False)
+        self.unknown_finish_as_prohibited_var = self.config.get(
+            'missing_finish_as_prohibited',
+            self.config.get('unknown_finish_as_prohibited', False)
+        )
 
-    self.unknown_finish_as_prohibited_checkbox = self._create_styled_checkbox("Treat unknown finish reason as prohibited content")
+    self.unknown_finish_as_prohibited_checkbox = self._create_styled_checkbox("Treat missing finish reason as prohibited content")
     self.unknown_finish_as_prohibited_checkbox.setContentsMargins(20, 0, 0, 0)
     self.unknown_finish_as_prohibited_checkbox.setToolTip(
-        "When enabled, responses with finish_reason='unknown' are forced\n"
+        "When enabled, responses with no finish_reason are forced\n"
         "to prohibited_content so the prohibited-content fallback path runs."
     )
     try:
@@ -4584,8 +4587,8 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(self.unknown_finish_as_prohibited_checkbox)
 
     unknown_finish_as_prohibited_desc = QLabel(
-        "Forces ambiguous provider finish_reason='unknown' responses into the prohibited-content retry path.\n"
-        "Missing finish reasons are not affected."
+        "Forces missing or blank provider finish reasons into the prohibited-content retry path.\n"
+        "Explicit finish_reason='unknown' responses are not affected."
     )
     unknown_finish_as_prohibited_desc.setStyleSheet("color: gray; font-size: 10pt;")
     unknown_finish_as_prohibited_desc.setContentsMargins(20, 2, 0, 10)

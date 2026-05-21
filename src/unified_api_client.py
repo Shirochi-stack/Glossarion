@@ -1539,7 +1539,7 @@ class UnifiedClient:
         # Heuristic patterns consolidated from previous branches
         # 1) Suspicious finish reasons that explicitly indicate content filtering
         normalized_finish = str(finish_reason or "").strip().lower()
-        if self._force_unknown_finish_as_prohibited(finish_reason):
+        if self._force_missing_finish_as_prohibited(finish_reason):
             return True
         if normalized_finish in ['content_filter', 'prohibited_content', 'blocked', 'censorship_blocked']:
             return True
@@ -1840,11 +1840,20 @@ class UnifiedClient:
             return 'length'
         return reason
 
-    def _force_unknown_finish_as_prohibited(self, finish_reason: Optional[Any]) -> bool:
-        """Return True when configured to treat explicit unknown finish reasons as blocked."""
-        if os.getenv("UNKNOWN_FINISH_AS_PROHIBITED", "0").strip().lower() not in ("1", "true", "yes", "on"):
+    def _force_missing_finish_as_prohibited(self, finish_reason: Optional[Any]) -> bool:
+        """Return True when configured to treat missing finish reasons as blocked."""
+        enabled = (
+            os.getenv("MISSING_FINISH_AS_PROHIBITED", os.getenv("UNKNOWN_FINISH_AS_PROHIBITED", "0"))
+            .strip()
+            .lower()
+        )
+        if enabled not in ("1", "true", "yes", "on"):
             return False
-        return self._normalize_finish_reason(finish_reason) == "unknown"
+        return self._normalize_finish_reason(finish_reason) is None
+
+    def _force_unknown_finish_as_prohibited(self, finish_reason: Optional[Any]) -> bool:
+        """Compatibility alias for the old setting name."""
+        return self._force_missing_finish_as_prohibited(finish_reason)
 
     def _is_truncation_finish_reason(self, finish_reason: Optional[Any]) -> bool:
         return self._normalize_finish_reason(finish_reason) == 'length'
@@ -8054,8 +8063,8 @@ class UnifiedClient:
                 
                 # Capture original finish_reason from provider if available
                 original_finish = getattr(response, "finish_reason", finish_reason)
-                if self._force_unknown_finish_as_prohibited(original_finish):
-                    print("⚠️ Unknown finish_reason forced to prohibited_content by setting")
+                if self._force_missing_finish_as_prohibited(original_finish):
+                    print("⚠️ Missing finish_reason forced to prohibited_content by setting")
                     finish_reason = "prohibited_content"
                     original_finish = "prohibited_content"
                     try:
