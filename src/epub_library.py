@@ -14271,9 +14271,14 @@ class EpubReaderDialog(QDialog):
 
         # ── Main content (hidden until loaded) ──
         self._content_widget = QWidget()
-        content_layout = QVBoxLayout(self._content_widget)
+        content_layout = QHBoxLayout(self._content_widget)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
+
+        self._reader_column = QWidget()
+        reader_layout = QVBoxLayout(self._reader_column)
+        reader_layout.setContentsMargins(0, 0, 0, 0)
+        reader_layout.setSpacing(0)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(2)
@@ -14356,7 +14361,7 @@ class EpubReaderDialog(QDialog):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([220, 680])
         self._splitter = splitter  # keep ref for styling
-        content_layout.addWidget(splitter, 1)
+        reader_layout.addWidget(splitter, 1)
 
         # Bottom nav bar for single-page mode
         self._nav_bar = QWidget()
@@ -14389,21 +14394,23 @@ class EpubReaderDialog(QDialog):
         self._next_btn.clicked.connect(self._next_chapter)
         nav_layout.addWidget(self._next_btn)
         self._nav_bar.hide()
-        content_layout.addWidget(self._nav_bar)
-
-        self._content_widget.hide()
-        root.addWidget(self._content_widget, 1)
+        reader_layout.addWidget(self._nav_bar)
+        content_layout.addWidget(self._reader_column, 1)
 
         self._search_detached = bool(
             self._config.get('epub_reader_search_detached', False))
         self._search_panel = QFrame()
         self._search_panel.setObjectName("readerSearchPanel")
-        self._search_panel.setMaximumHeight(178)
+        self._search_panel.setMinimumWidth(300)
+        self._search_panel.setMaximumWidth(360)
         self._search_panel_layout = QVBoxLayout(self._search_panel)
         self._search_panel_layout.setContentsMargins(0, 0, 0, 0)
         self._search_panel_layout.setSpacing(0)
         self._search_panel.hide()
-        root.addWidget(self._search_panel)
+        content_layout.addWidget(self._search_panel)
+
+        self._content_widget.hide()
+        root.addWidget(self._content_widget, 1)
 
         # Search bar (hidden by default)
         self._search_bar = QLineEdit()
@@ -15175,7 +15182,7 @@ class EpubReaderDialog(QDialog):
         if panel is not None:
             search_style = f"""
                 QFrame#readerSearchPanel, QFrame#readerSearchContent {{
-                    background: {bg}; border-top: 1px solid {border};
+                    background: {bg}; border-left: 1px solid {border};
                 }}
                 QLabel#readerSearchTitle {{
                     color: {fg}; font-weight: 600; font-size: 9pt;
