@@ -572,7 +572,7 @@ def _infer_finish_reason(
 
     if not (content or "").strip():
         if saw_done or saw_event or not stream:
-            return "content_filter", False, "empty_content_without_finish_reason"
+            return "error", False, "empty_content_without_finish_reason"
         return "incomplete", False, "no_content_no_done"
 
     if stream and not saw_done:
