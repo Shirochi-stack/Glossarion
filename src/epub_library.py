@@ -15180,16 +15180,25 @@ class EpubReaderDialog(QDialog):
         """Live highlight in current chapter as user types."""
         if not _HAS_WEBENGINE:
             return
-        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            return
         self._search_chapter_idx = self._current_row
         self._search_last_row = self._current_row
-        self._search_match_index = 0
         if not text:
+            self._search_current_text = ""
+            self._search_match_index = -1
             for w in [self._reader, self._reader_left, self._reader_right]:
                 if hasattr(w, 'findText'):
                     w.findText("")
             return
+        self._search_current_text = text
+        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            count = self._count_chapter_matches(self._current_row, text)
+            if count <= 0:
+                self._search_match_index = -1
+                self._search_match_count = 0
+                return
+            self._select_match_in_chapter(self._current_row, text, 0)
+            return
+        self._search_match_index = 0
         self._reader.findText(text)
 
     def _show_search_dialog(self):
@@ -15423,6 +15432,12 @@ class EpubReaderDialog(QDialog):
             results.scrollToItem(item)
             self._activate_search_result(item)
 
+    def _active_search_browser(self):
+        """Return the visible pane that should drive in-chapter search."""
+        if self._layout_mode == LAYOUT_DOUBLE:
+            return self._reader_left
+        return self._reader
+
     def _activate_search_result(self, item):
         data = item.data(Qt.UserRole) if item is not None else None
         if not isinstance(data, dict):
@@ -15434,6 +15449,11 @@ class EpubReaderDialog(QDialog):
         if self._layout_mode == LAYOUT_ALL:
             self._select_text_occurrence(self._reader, text, global_occurrence)
             return
+        self._search_chapter_idx = chapter_idx
+        self._search_last_row = chapter_idx
+        self._search_match_index = local_occurrence
+        self._search_match_count = self._count_chapter_matches(
+            chapter_idx, text)
         if chapter_idx != self._current_row:
             self._pending_search_text = text
             self._pending_search_index = local_occurrence
@@ -15442,7 +15462,8 @@ class EpubReaderDialog(QDialog):
             self._toc_list.blockSignals(False)
             self._on_chapter_selected(chapter_idx)
         else:
-            self._select_text_occurrence(self._reader, text, local_occurrence)
+            self._select_text_occurrence(
+                self._active_search_browser(), text, local_occurrence)
 
     def _select_text_occurrence(self, browser, text: str, occurrence: int = 0):
         """Select a concrete text occurrence and align the active layout."""
@@ -15522,9 +15543,7 @@ class EpubReaderDialog(QDialog):
                 page_num = int(page)
             except (TypeError, ValueError):
                 return
-            if self._layout_mode == LAYOUT_DOUBLE:
-                page_num = max(0, page_num - (page_num % 2))
-            self._current_page = max(0, page_num)
+            self._current_page = self._clamp_page_for_layout(page_num)
             if self._layout_mode == LAYOUT_SINGLE:
                 self._js_scroll_to(self._reader, self._current_page, animate=False)
             else:
@@ -15548,6 +15567,29 @@ class EpubReaderDialog(QDialog):
         plain = self._plain_chapter_text(self._chapters[chapter_idx][1])
         return plain.lower().count(text.lower())
 
+    def _select_match_in_chapter(self, chapter_idx: int, text: str,
+                                 occurrence: int = 0) -> None:
+        """Select *occurrence* of *text*, loading the chapter if needed."""
+        occurrence = max(0, int(occurrence or 0))
+        count = self._count_chapter_matches(chapter_idx, text)
+        if count <= 0:
+            return
+        occurrence = min(occurrence, count - 1)
+        self._search_chapter_idx = chapter_idx
+        self._search_last_row = chapter_idx
+        self._search_match_index = occurrence
+        self._search_match_count = count
+        if chapter_idx != self._current_row:
+            self._pending_search_text = text
+            self._pending_search_index = occurrence
+            self._toc_list.blockSignals(True)
+            self._toc_list.setCurrentRow(chapter_idx)
+            self._toc_list.blockSignals(False)
+            self._on_chapter_selected(chapter_idx)
+        else:
+            self._select_text_occurrence(
+                self._active_search_browser(), text, occurrence)
+
     def _on_search_next(self):
         """Enter pressed: find next match across all chapters."""
         text = self._search_bar.text().strip()
@@ -15560,10 +15602,36 @@ class EpubReaderDialog(QDialog):
             # the browser's own in-document search.
             self._reader.findText(text)
             return
-        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
-            return
         n = len(self._chapters)
-        browser = self._reader_left if self._layout_mode == LAYOUT_DOUBLE else self._reader
+        browser = self._active_search_browser()
+
+        # In paginated layouts QWebEngine's native find can select text
+        # in an off-screen CSS column without turning the page. Drive the
+        # same explicit occurrence -> page jump path used by the search
+        # results dialog instead, like Calibre's viewer does.
+        if self._layout_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            if getattr(self, "_search_current_text", "") != text:
+                self._search_current_text = text
+                self._search_match_index = -1
+                self._search_last_row = self._current_row
+            current_count = self._count_chapter_matches(
+                self._current_row, text)
+            next_occurrence = int(
+                getattr(self, "_search_match_index", -1) or -1) + 1
+            if next_occurrence < current_count:
+                self._select_match_in_chapter(
+                    self._current_row, text, next_occurrence)
+                return
+            start = (self._current_row + 1) % n
+            for offset in range(n):
+                idx = (start + offset) % n
+                if self._count_chapter_matches(idx, text) > 0:
+                    self._select_match_in_chapter(idx, text, 0)
+                    return
+            self._search_bar.setStyleSheet(
+                self._search_bar.styleSheet() + " QLineEdit { border-color: #c04040; }")
+            QTimer.singleShot(800, lambda: self._apply_reader_style())
+            return
 
         # Enter means "next matching HTML/chapter", not "next occurrence
         # inside this same file". Live typing already selects the first
@@ -15625,10 +15693,10 @@ class EpubReaderDialog(QDialog):
             self._chapter_page_cache[self._current_row] = count
             # Clamp if the current page is now past the end (e.g. column
             # count shrank) and silently jump to the clamped position.
-            step = 2 if self._layout_mode == LAYOUT_DOUBLE else 1
-            max_page = max(0, count - step)
-            if self._current_page > max_page:
-                self._current_page = max_page
+            clamped_page = self._clamp_page_for_layout(
+                self._current_page, count)
+            if self._current_page != clamped_page:
+                self._current_page = clamped_page
                 if self._layout_mode == LAYOUT_SINGLE:
                     self._js_scroll_to(self._reader, self._current_page, animate=False)
                 else:
@@ -15775,8 +15843,15 @@ class EpubReaderDialog(QDialog):
 
     def _on_layout_changed(self, index):
         modes = [LAYOUT_SINGLE, LAYOUT_DOUBLE, LAYOUT_SCROLL, LAYOUT_ALL]
-        self._layout_mode = modes[index] if index < len(modes) else LAYOUT_SINGLE
-        self._current_page = 0
+        old_mode = self._layout_mode
+        old_page = self._current_page
+        old_count = self._chapter_page_cache.get(self._current_row, 0)
+        new_mode = modes[index] if index < len(modes) else LAYOUT_SINGLE
+        self._layout_mode = new_mode
+        if old_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE) and new_mode in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            self._current_page = self._clamp_page_for_layout(old_page, old_count)
+        else:
+            self._current_page = 0
         self._loaded_chapter = -1  # force re-render on layout change
         self._chapter_page_cache.clear()
         self._render_current()
@@ -16023,6 +16098,26 @@ class EpubReaderDialog(QDialog):
             self._double_loads_pending = 0
             self._finalize_double_page()
 
+    def _clamp_page_for_layout(self, page_num, page_count=None) -> int:
+        """Clamp a paginated target to a valid single page or spread start."""
+        try:
+            page = int(page_num)
+        except (TypeError, ValueError):
+            page = 0
+        if page_count is None:
+            page_count = self._chapter_page_cache.get(self._current_row, 0)
+        try:
+            count = int(page_count)
+        except (TypeError, ValueError):
+            count = 0
+        count = max(1, count)
+        if self._layout_mode == LAYOUT_DOUBLE:
+            page = max(0, page - (page % 2))
+            last_start = max(0, count - 1)
+            last_start -= last_start % 2
+            return max(0, min(page, last_start))
+        return max(0, min(page, count - 1))
+
     def _js_scroll_to(self, browser, page_num, animate: bool = True):
         """Navigate to a CSS column page by translating the #columns wrapper.
 
@@ -16108,6 +16203,7 @@ class EpubReaderDialog(QDialog):
             prop = float(hint.get("proportion") or 0.0)
             target = round(prop * (c - 1))
             self._current_page = max(0, min(int(target), c - 1))
+        self._current_page = self._clamp_page_for_layout(self._current_page, c)
         self._pending_page_hint = None
 
     def _consume_pending_search(self, browser):
@@ -16131,6 +16227,8 @@ class EpubReaderDialog(QDialog):
             # Restore the pre-swap reading position when a Show-raw
             # toggle (or equivalent reload) staged a hint.
             self._apply_pending_page_hint(count)
+            self._current_page = self._clamp_page_for_layout(
+                self._current_page, count)
             # animate=False: jump instantly so the reader doesn't visibly
             # slide from page 1 to the current page on theme/chapter change.
             self._js_scroll_to(self._reader, self._current_page, animate=False)
@@ -16146,6 +16244,8 @@ class EpubReaderDialog(QDialog):
             count = int(count)
             self._chapter_page_cache[self._current_row] = count
             self._apply_pending_page_hint(count)
+            self._current_page = self._clamp_page_for_layout(
+                self._current_page, count)
             self._js_scroll_to(self._reader_left, self._current_page, animate=False)
             self._js_scroll_to(self._reader_right, self._current_page + 1, animate=False)
             self._js_reveal(self._reader_left)
@@ -16222,7 +16322,8 @@ class EpubReaderDialog(QDialog):
                 def on_count(count):
                     count = int(count)
                     self._chapter_page_cache[self._current_row] = count
-                    self._current_page = min(max(0, round(proportion * count)), count - 1)
+                    self._current_page = self._clamp_page_for_layout(
+                        round(proportion * count), count)
                     self._js_scroll_to(self._reader, self._current_page)
                     # Reveal after scroll
                     QTimer.singleShot(30, lambda: self._reader.page().runJavaScript(_reveal_js))
@@ -16232,7 +16333,8 @@ class EpubReaderDialog(QDialog):
                 def on_count(count):
                     count = int(count)
                     self._chapter_page_cache[self._current_row] = count
-                    self._current_page = min(max(0, round(proportion * count)), count - 1)
+                    self._current_page = self._clamp_page_for_layout(
+                        round(proportion * count), count)
                     self._js_scroll_to(self._reader_left, self._current_page)
                     self._js_scroll_to(self._reader_right, self._current_page + 1)
                     QTimer.singleShot(30, lambda: [br.page().runJavaScript(_reveal_js)
@@ -16274,7 +16376,8 @@ class EpubReaderDialog(QDialog):
                 self._toc_list.setCurrentRow(self._current_row)
                 self._toc_list.blockSignals(False)
                 # Set page to last page of previous chapter (will be clamped in finalize)
-                self._current_page = max(0, self._get_chapter_pages(self._current_row) - 1)
+                pages = self._get_chapter_pages(self._current_row)
+                self._current_page = self._clamp_page_for_layout(pages - 1, pages)
                 self._render_current()
         else:
             new_row = max(0, self._current_row - 1)
