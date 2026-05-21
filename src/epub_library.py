@@ -15873,8 +15873,6 @@ class EpubReaderDialog(QDialog):
 
     def _active_search_browser(self):
         """Return the visible pane that should drive in-chapter search."""
-        if self._layout_mode == LAYOUT_DOUBLE:
-            return self._reader_left
         return self._reader
 
     def _schedule_search_selection_retry(self, chapter_idx: int, text: str,
@@ -16100,21 +16098,7 @@ class EpubReaderDialog(QDialog):
                     page_count = None
             self._current_page = self._clamp_page_for_layout(
                 page_num, page_count)
-            if self._layout_mode == LAYOUT_SINGLE:
-                self._js_scroll_to(self._reader, self._current_page, animate=False)
-            else:
-                self._js_scroll_to(self._reader_left, self._current_page, animate=False)
-                self._js_scroll_to(self._reader_right, self._current_page + 1, animate=False)
-                try:
-                    raw_page = int(result.get("rawPage", self._current_page))
-                except (TypeError, ValueError):
-                    raw_page = self._current_page
-                if raw_page % 2 == 1 and browser is self._reader_left:
-                    QTimer.singleShot(
-                        40,
-                        lambda: self._select_text_occurrence(
-                            self._reader_right, text, occurrence,
-                            update_reader=False))
+            self._js_scroll_to(self._reader, self._current_page, animate=False)
             self._update_nav_buttons()
 
         if update_reader:
@@ -16266,8 +16250,7 @@ class EpubReaderDialog(QDialog):
                 if self._layout_mode == LAYOUT_SINGLE:
                     self._js_scroll_to(self._reader, self._current_page, animate=False)
                 else:
-                    self._js_scroll_to(self._reader_left, self._current_page, animate=False)
-                    self._js_scroll_to(self._reader_right, self._current_page + 1, animate=False)
+                    self._js_scroll_to(self._reader, self._current_page, animate=False)
             self._update_nav_buttons()
             self._schedule_search_realign()
 
@@ -16277,7 +16260,7 @@ class EpubReaderDialog(QDialog):
             if self._layout_mode == LAYOUT_SINGLE:
                 self._js_page_count(self._reader, on_count)
             else:
-                self._js_page_count(self._reader_left, on_count)
+                self._js_page_count(self._reader, on_count)
         QTimer.singleShot(60, _do)
 
     def _change_font_size(self, delta):
@@ -16289,11 +16272,7 @@ class EpubReaderDialog(QDialog):
         # Hide content before re-render to prevent flash
         _hide = "var c = document.getElementById('columns'); if (c) c.style.opacity = '0';"
         if _HAS_WEBENGINE:
-            if self._layout_mode == LAYOUT_DOUBLE:
-                self._reader_left.page().runJavaScript(_hide)
-                self._reader_right.page().runJavaScript(_hide)
-            else:
-                self._reader.page().runJavaScript(_hide)
+            self._reader.page().runJavaScript(_hide)
         self._render_current()
 
     def _on_reader_wheel_scrolled(self, delta_y: int, modifiers) -> None:
@@ -16341,11 +16320,7 @@ class EpubReaderDialog(QDialog):
         pixels = int(-delta_y)
         js = f"window.scrollBy({{top: {pixels}, left: 0, behavior: 'auto'}});"
         try:
-            if self._layout_mode == LAYOUT_DOUBLE:
-                self._reader_left.page().runJavaScript(js)
-                self._reader_right.page().runJavaScript(js)
-            else:
-                self._reader.page().runJavaScript(js)
+            self._reader.page().runJavaScript(js)
         except Exception:
             logger.debug("Wheel scroll passthrough failed: %s",
                          traceback.format_exc())
@@ -16367,11 +16342,7 @@ class EpubReaderDialog(QDialog):
         # Hide content before re-render to prevent flash
         _hide = "var c = document.getElementById('columns'); if (c) c.style.opacity = '0';"
         if _HAS_WEBENGINE:
-            if self._layout_mode == LAYOUT_DOUBLE:
-                self._reader_left.page().runJavaScript(_hide)
-                self._reader_right.page().runJavaScript(_hide)
-            else:
-                self._reader.page().runJavaScript(_hide)
+            self._reader.page().runJavaScript(_hide)
         self._render_current()
 
     def _on_spacing_changed(self, text):
@@ -16385,11 +16356,7 @@ class EpubReaderDialog(QDialog):
         # Hide content before re-render to prevent flash
         _hide = "var c = document.getElementById('columns'); if (c) c.style.opacity = '0';"
         if _HAS_WEBENGINE:
-            if self._layout_mode == LAYOUT_DOUBLE:
-                self._reader_left.page().runJavaScript(_hide)
-                self._reader_right.page().runJavaScript(_hide)
-            else:
-                self._reader.page().runJavaScript(_hide)
+            self._reader.page().runJavaScript(_hide)
         self._render_current()
 
     def _on_theme_changed(self, index):
@@ -16464,19 +16431,14 @@ class EpubReaderDialog(QDialog):
             self._toc_list.blockSignals(False)
 
         elif self._layout_mode == LAYOUT_DOUBLE:
-            self._reader_stack.setCurrentIndex(1)
+            self._reader_stack.setCurrentIndex(0)
             self._nav_bar.show()
-            self._double_loads_pending = 2  # track both panes
             if row < len(self._chapters):
                 html = self._process_html(self._chapters[row][1])
-                full = self._wrap_html(html, paginated=True)
-                _set_html(self._reader_left, full)
-                _set_html(self._reader_right, full)
+                _set_html(self._reader, self._wrap_html(
+                    html, paginated=True, spread_pages=2))
                 self._loaded_chapter = row
                 # finalization happens via loadFinished signal
-            else:
-                _set_html(self._reader_left, self._wrap_html("", paginated=True))
-                _set_html(self._reader_right, self._wrap_html("", paginated=True))
             self._update_nav_buttons()
 
         elif self._layout_mode == LAYOUT_SINGLE:
@@ -16655,14 +16617,8 @@ class EpubReaderDialog(QDialog):
             if sender is self._reader:
                 self._finalize_single_page()
         elif self._layout_mode == LAYOUT_DOUBLE:
-            if sender not in (self._reader_left, self._reader_right):
+            if sender is not self._reader:
                 return
-            # Wait for both panes to finish loading
-            pending = getattr(self, '_double_loads_pending', 0)
-            if pending > 1:
-                self._double_loads_pending = pending - 1
-                return
-            self._double_loads_pending = 0
             self._finalize_double_page()
 
     def _clamp_page_for_layout(self, page_num, page_count=None) -> int:
@@ -16826,14 +16782,12 @@ class EpubReaderDialog(QDialog):
             self._apply_pending_page_hint(count)
             self._current_page = self._clamp_page_for_layout(
                 self._current_page, count)
-            self._js_scroll_to(self._reader_left, self._current_page, animate=False)
-            self._js_scroll_to(self._reader_right, self._current_page + 1, animate=False)
-            self._js_reveal(self._reader_left)
-            self._js_reveal(self._reader_right)
+            self._js_scroll_to(self._reader, self._current_page, animate=False)
+            self._js_reveal(self._reader)
             self._update_nav_buttons()
             self._reveal_reader_stack_after_prime()
-            self._consume_pending_search(self._reader_left)
-        self._js_page_count(self._reader_left, on_count)
+            self._consume_pending_search(self._reader)
+        self._js_page_count(self._reader, on_count)
 
     def _reveal_reader_stack_after_prime(self):
         """Reveal the reader stack after the post-prime paginated render
@@ -16854,8 +16808,7 @@ class EpubReaderDialog(QDialog):
 
     def _scroll_to_page_double(self):
         """Navigate double-page panes to current page."""
-        self._js_scroll_to(self._reader_left, self._current_page)
-        self._js_scroll_to(self._reader_right, self._current_page + 1)
+        self._js_scroll_to(self._reader, self._current_page)
         self._update_nav_buttons()
 
     def _js_reveal(self, browser):
@@ -16891,11 +16844,7 @@ class EpubReaderDialog(QDialog):
         # Hide content immediately to prevent image flash during resize
         _hide_js = "var c = document.getElementById('columns'); if (c) { c.style.transition = 'none'; c.style.opacity = '0'; }"
         _reveal_js = "var c = document.getElementById('columns'); if (c) { c.style.transition = 'transform 0.25s ease'; c.style.opacity = '1'; }"
-        if self._layout_mode == LAYOUT_SINGLE:
-            self._reader.page().runJavaScript(_hide_js)
-        else:
-            self._reader_left.page().runJavaScript(_hide_js)
-            self._reader_right.page().runJavaScript(_hide_js)
+        self._reader.page().runJavaScript(_hide_js)
 
         def _on_resize_recount():
             if self._layout_mode == LAYOUT_SINGLE:
@@ -16916,13 +16865,11 @@ class EpubReaderDialog(QDialog):
                     self._chapter_page_cache[self._current_row] = count
                     self._current_page = self._clamp_page_for_layout(
                         round(proportion * count), count)
-                    self._js_scroll_to(self._reader_left, self._current_page)
-                    self._js_scroll_to(self._reader_right, self._current_page + 1)
-                    QTimer.singleShot(30, lambda: [br.page().runJavaScript(_reveal_js)
-                        for br in (self._reader_left, self._reader_right)])
+                    self._js_scroll_to(self._reader, self._current_page)
+                    QTimer.singleShot(30, lambda: self._reader.page().runJavaScript(_reveal_js))
                     self._update_nav_buttons()
                     self._schedule_search_realign()
-                self._js_page_count(self._reader_left, on_count)
+                self._js_page_count(self._reader, on_count)
         QTimer.singleShot(delay, _on_resize_recount)
 
     def _update_nav_buttons(self):
@@ -17171,11 +17118,7 @@ class EpubReaderDialog(QDialog):
             # finalizer will set opacity back to 1 after positioning.
             _hide = "var c = document.getElementById('columns'); if (c) c.style.opacity = '0';"
             if _HAS_WEBENGINE:
-                if self._layout_mode == LAYOUT_DOUBLE:
-                    self._reader_left.page().runJavaScript(_hide)
-                    self._reader_right.page().runJavaScript(_hide)
-                else:
-                    self._reader.page().runJavaScript(_hide)
+                self._reader.page().runJavaScript(_hide)
             self._render_current()
 
     def _capture_position_hint(self) -> dict:
@@ -17618,7 +17561,8 @@ class EpubReaderDialog(QDialog):
             return False
         return bool(self._config.get("attach_css_to_chapters", False))
 
-    def _wrap_html(self, body_html: str, paginated: bool = False) -> str:
+    def _wrap_html(self, body_html: str, paginated: bool = False,
+                   spread_pages: int = 1) -> str:
         """Wrap processed HTML in a full styled document.
 
         When *paginated* is True, a proper CSS multi-column layout is used:
@@ -17651,6 +17595,7 @@ class EpubReaderDialog(QDialog):
         _font_px = int(round(self._font_size * 96 / 72))
         _has_embedded_css = bool(_use_embedded and _embedded_css_block)
         if paginated:
+            _spread_pages = max(1, int(spread_pages or 1))
             return (
                 f"<html><head><style>"
                 f"{_embedded_css_block}"
@@ -17699,6 +17644,7 @@ class EpubReaderDialog(QDialog):
                 f"<script>"
                 f"var _PAGE_W = 0;"
                 f"var _PAGE_GAP = 1;"
+                f"var _SPREAD_PAGES = {_spread_pages};"
                 # _CURRENT_PAGE is maintained by _js_scroll_to so that
                 # _setupColumns() can re-anchor the transform whenever the
                 # viewport width changes (window resize, TOC toggle). Without
@@ -17711,7 +17657,8 @@ class EpubReaderDialog(QDialog):
                 # Floor to integer pixels so column boundaries and the
                 # translate offset (page * _PAGE_W) always land on whole
                 # pixels — prevents subpixel text rendering shifts.
-                f"  _PAGE_W = Math.floor(window.innerWidth);"
+                f"  var visible = Math.max(1, _SPREAD_PAGES || 1);"
+                f"  _PAGE_W = Math.max(1, Math.floor((window.innerWidth - ((visible - 1) * _PAGE_GAP)) / visible));"
                 f"  c.style.columnWidth = _PAGE_W + 'px';"
                 f"  c.style.columnGap = _PAGE_GAP + 'px';"
                 f"  c.style.height = (window.innerHeight - 20) + 'px';"
