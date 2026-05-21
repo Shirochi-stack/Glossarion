@@ -1627,12 +1627,13 @@ class RetranslationMixin:
                 border-color: #52b788;
             }
         """)
-        # Start hidden; periodic timer will show when file exists
-        # In multi-file mode, always show since dialog now lists all EPUBs
-        _is_multi_file_mode = bool(parent_dialog and hasattr(parent_dialog, '_epub_files_in_dialog') and len(getattr(parent_dialog, '_epub_files_in_dialog', [])) > 1)
-        glossary_progress_btn.setVisible(bool(_find_glossary_progress_file()) or _is_multi_file_mode)
-        if _find_glossary_progress_file():
-            glossary_progress_btn.setToolTip(f"View glossary extraction progress\n{_find_glossary_progress_file()}")
+        # Always show; the dialog has an empty-state panel until progress exists.
+        _initial_glossary_progress_file = _find_glossary_progress_file()
+        glossary_progress_btn.setVisible(True)
+        if _initial_glossary_progress_file:
+            glossary_progress_btn.setToolTip(f"View glossary extraction progress\n{_initial_glossary_progress_file}")
+        else:
+            glossary_progress_btn.setToolTip("View glossary extraction progress")
         def _find_gp_for_file(fp):
             """Locate the glossary progress file for a given EPUB path."""
             try:
@@ -2950,12 +2951,6 @@ class RetranslationMixin:
                     else:
                         all_file_entries.append((fp, None))
                 
-                # Hide button only when no EPUB has progress at all AND it's single-file mode
-                has_any_progress = any(gp is not None for _, gp in all_file_entries)
-                if not has_any_progress and len(all_file_entries) <= 1 and not _glossary_refinement_settings_enabled():
-                    glossary_progress_btn.setVisible(False)
-                    return
-                
                 # Create dialog
                 gp_dialog = QDialog(dialog)
                 gp_dialog.setAttribute(Qt.WA_DeleteOnClose, False)
@@ -3249,9 +3244,7 @@ class RetranslationMixin:
                 found_paths = {fp: gp for fp, gp in gp_results.items() if gp}
                 any_exists = bool(found_paths)
                 refinement_expected = _glossary_refinement_settings_enabled()
-                # In multi-file mode, always show button (dialog shows all EPUBs);
-                # in single-file mode, show when a progress file exists or refinement is enabled.
-                glossary_progress_btn.setVisible(any_exists or is_multi or refinement_expected)
+                glossary_progress_btn.setVisible(True)
                 if any_exists:
                     count = len(found_paths)
                     if count == 1:
@@ -3263,6 +3256,8 @@ class RetranslationMixin:
                     glossary_progress_btn.setToolTip("View glossary extraction and refinement progress")
                 elif is_multi:
                     glossary_progress_btn.setToolTip(f"View glossary extraction progress ({len(all_epubs)} files)")
+                else:
+                    glossary_progress_btn.setToolTip("View glossary extraction progress")
             except RuntimeError:
                 # Widget was deleted
                 _gp_vis_timer.stop()
