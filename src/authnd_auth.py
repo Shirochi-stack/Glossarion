@@ -1409,7 +1409,7 @@ def send_chat_completion(
             f"🔎 AuthND debug: captcha token acquired (length={len(captcha_token)})",
             debug_only=True,
         )
-        _log(log_fn, "💬 AuthND: captcha token acquired; sending NVIDIA request")
+        _log(log_fn, "📨 AuthND: captcha token acquired; sending NVIDIA request")
         if progress_label:
             _log(log_fn, progress_label)
         else:
