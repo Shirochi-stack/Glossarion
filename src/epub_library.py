@@ -152,9 +152,9 @@ def _epub_plain_chapter_text(html: str) -> str:
     try:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, "html.parser")
-        for node in soup(["script", "style", "noscript"]):
+        for node in soup(["script", "style", "noscript", "img"]):
             node.decompose()
-        return soup.get_text(" ", strip=False)
+        return soup.get_text("", strip=False)
     except Exception:
         import html as html_lib
         cleaned = re.sub(
@@ -14000,6 +14000,7 @@ class EpubReaderDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+        self._root_layout = root
 
         # ── Toolbar ──
         toolbar = QHBoxLayout()
@@ -14392,6 +14393,17 @@ class EpubReaderDialog(QDialog):
 
         self._content_widget.hide()
         root.addWidget(self._content_widget, 1)
+
+        self._search_detached = bool(
+            self._config.get('epub_reader_search_detached', False))
+        self._search_panel = QFrame()
+        self._search_panel.setObjectName("readerSearchPanel")
+        self._search_panel.setMaximumHeight(178)
+        self._search_panel_layout = QVBoxLayout(self._search_panel)
+        self._search_panel_layout.setContentsMargins(0, 0, 0, 0)
+        self._search_panel_layout.setSpacing(0)
+        self._search_panel.hide()
+        root.addWidget(self._search_panel)
 
         # Search bar (hidden by default)
         self._search_bar = QLineEdit()
@@ -15082,6 +15094,10 @@ class EpubReaderDialog(QDialog):
         bg = t['bg']
         fg = t['fg']
         border = t['border']
+        muted = t.get('muted', '#888888')
+        selection = t.get('selection', border)
+        button_bg = t.get('button_bg', t['code_bg'])
+        button_hover = t.get('button_hover', border)
         if _HAS_WEBENGINE:
             # For QWebEngineView, styling is done via CSS in _wrap_html.
             # We style surrounding containers only.
@@ -15155,6 +15171,47 @@ class EpubReaderDialog(QDialog):
                 margin: 4px 40px;
             }}
         """)
+        panel = getattr(self, "_search_panel", None)
+        if panel is not None:
+            search_style = f"""
+                QFrame#readerSearchPanel, QFrame#readerSearchContent {{
+                    background: {bg}; border-top: 1px solid {border};
+                }}
+                QLabel#readerSearchTitle {{
+                    color: {fg}; font-weight: 600; font-size: 9pt;
+                }}
+                QLabel#readerSearchCount {{
+                    color: {muted}; font-size: 8pt;
+                }}
+                QLineEdit#readerSearchQuery {{
+                    background: {t['code_bg']}; color: {fg}; border: 1px solid {border};
+                    border-radius: 4px; padding: 3px 8px; font-size: 9pt;
+                }}
+                QListWidget#readerSearchResults {{
+                    background: {t['bg']}; color: {fg}; border: 1px solid {border};
+                    border-radius: 4px; outline: none;
+                }}
+                QListWidget#readerSearchResults::item {{
+                    border-bottom: 1px solid {border}; padding: 0;
+                }}
+                QListWidget#readerSearchResults::item:selected {{
+                    background: {selection}; color: {fg};
+                }}
+                QToolButton#readerSearchTool {{
+                    background: {button_bg}; color: {fg}; border: 1px solid {border};
+                    border-radius: 4px; padding: 2px 8px; font-size: 8.5pt;
+                }}
+                QToolButton#readerSearchTool:hover {{
+                    background: {button_hover};
+                }}
+            """
+            panel.setStyleSheet(search_style)
+            content = getattr(self, "_search_content", None)
+            if content is not None:
+                content.setStyleSheet(search_style)
+            dlg = getattr(self, "_search_dialog", None)
+            if dlg is not None:
+                dlg.setStyleSheet(search_style)
 
     def _toggle_search(self):
         self._show_search_dialog()
@@ -15165,6 +15222,9 @@ class EpubReaderDialog(QDialog):
         self._search_dialog_generation = (
             int(getattr(self, "_search_dialog_generation", 0) or 0) + 1)
         self._cancel_search_dialog_workers()
+        panel = getattr(self, "_search_panel", None)
+        if panel is not None:
+            panel.hide()
         dlg = getattr(self, "_search_dialog", None)
         if dlg is not None:
             try:
@@ -15172,9 +15232,25 @@ class EpubReaderDialog(QDialog):
             except Exception:
                 pass
         if _HAS_WEBENGINE:
+            self._clear_reader_find_highlights()
             for w in [self._reader, self._reader_left, self._reader_right]:
                 if hasattr(w, 'findText'):
                     w.findText("")
+
+    def _clear_reader_find_highlights(self):
+        if not _HAS_WEBENGINE:
+            return
+        js = (
+            "try { if (window.CSS && CSS.highlights) "
+            "CSS.highlights.delete('glossarion-find'); } catch (e) {}"
+            "try { window.getSelection().removeAllRanges(); } catch (e) {}"
+        )
+        for w in [self._reader, self._reader_left, self._reader_right]:
+            try:
+                if hasattr(w, 'page'):
+                    w.page().runJavaScript(js)
+            except Exception:
+                pass
 
     def _on_search_text_changed(self, text):
         """Live highlight in current chapter as user types."""
@@ -15185,6 +15261,7 @@ class EpubReaderDialog(QDialog):
         if not text:
             self._search_current_text = ""
             self._search_match_index = -1
+            self._clear_reader_find_highlights()
             for w in [self._reader, self._reader_left, self._reader_right]:
                 if hasattr(w, 'findText'):
                     w.findText("")
@@ -15201,47 +15278,133 @@ class EpubReaderDialog(QDialog):
         self._search_match_index = 0
         self._reader.findText(text)
 
-    def _show_search_dialog(self):
-        """Open the search dialog with all EPUB matches."""
+    def _ensure_search_content(self):
+        """Create the reusable search widget shared by docked/detached modes."""
+        content = getattr(self, "_search_content", None)
+        if content is not None:
+            return content
+
+        content = QFrame()
+        content.setObjectName("readerSearchContent")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(8, 4, 8, 6)
+        layout.setSpacing(4)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(6)
+        title = QLabel("Search EPUB")
+        title.setObjectName("readerSearchTitle")
+        header.addWidget(title)
+        count_label = QLabel("Type to search")
+        count_label.setObjectName("readerSearchCount")
+        header.addWidget(count_label)
+        header.addStretch()
+
+        detach_btn = QToolButton()
+        detach_btn.setObjectName("readerSearchTool")
+        detach_btn.setAutoRaise(False)
+        detach_btn.setText("Detach")
+        detach_btn.setToolTip("Detach search into a floating window")
+        detach_btn.setFixedHeight(24)
+        detach_btn.clicked.connect(self._toggle_search_detached)
+        header.addWidget(detach_btn)
+
+        close_btn = QToolButton()
+        close_btn.setObjectName("readerSearchTool")
+        close_btn.setAutoRaise(False)
+        close_btn.setText("Close")
+        close_btn.setToolTip("Close search")
+        close_btn.setFixedHeight(24)
+        close_btn.clicked.connect(self._close_search)
+        header.addWidget(close_btn)
+        layout.addLayout(header)
+
+        query = QLineEdit()
+        query.setObjectName("readerSearchQuery")
+        query.setPlaceholderText("Search text... (Enter = next)")
+        query.setFixedHeight(28)
+        query.textChanged.connect(self._populate_search_results)
+        query.returnPressed.connect(self._find_next_from_search_dialog)
+        layout.addWidget(query)
+
+        results = QListWidget()
+        results.setObjectName("readerSearchResults")
+        results.setWordWrap(False)
+        results.setUniformItemSizes(True)
+        results.setSpacing(0)
+        results.setMinimumHeight(80)
+        results.itemActivated.connect(self._activate_search_result)
+        results.itemClicked.connect(self._activate_search_result)
+        layout.addWidget(results, 1)
+
+        self._search_content = content
+        self._search_dialog_query = query
+        self._search_dialog_count = count_label
+        self._search_dialog_results = results
+        self._search_detach_btn = detach_btn
+        self._apply_reader_style()
+        return content
+
+    def _set_search_content_parent(self, detached: bool) -> None:
+        content = self._ensure_search_content()
+        self._search_detached = bool(detached)
+        self._config['epub_reader_search_detached'] = self._search_detached
+        _persist_config_via_parent(self)
+
+        if self._search_detached:
+            panel = getattr(self, "_search_panel", None)
+            if panel is not None:
+                panel.hide()
+            dlg = getattr(self, "_search_dialog", None)
+            if dlg is None:
+                dlg = QDialog(self)
+                dlg.setWindowTitle("Search EPUB")
+                dlg.resize(620, 320)
+                dlg.setModal(False)
+                dlg_layout = QVBoxLayout(dlg)
+                dlg_layout.setContentsMargins(0, 0, 0, 0)
+                dlg_layout.setSpacing(0)
+                try:
+                    dlg.rejected.connect(self._close_search)
+                except Exception:
+                    pass
+                self._search_dialog = dlg
+            if content.parent() is not dlg:
+                dlg.layout().addWidget(content)
+            btn = getattr(self, "_search_detach_btn", None)
+            if btn is not None:
+                btn.setText("Attach")
+                btn.setToolTip("Attach search to the reader")
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+            return
+
         dlg = getattr(self, "_search_dialog", None)
-        if dlg is None:
-            dlg = QDialog(self)
-            dlg.setWindowTitle("Search EPUB")
-            dlg.resize(620, 460)
-            layout = QVBoxLayout(dlg)
-            layout.setContentsMargins(10, 10, 10, 10)
-            layout.setSpacing(8)
+        if dlg is not None:
+            try:
+                dlg.hide()
+            except Exception:
+                pass
+        panel = getattr(self, "_search_panel", None)
+        if panel is not None:
+            if content.parent() is not panel:
+                self._search_panel_layout.addWidget(content)
+            panel.show()
+        btn = getattr(self, "_search_detach_btn", None)
+        if btn is not None:
+            btn.setText("Detach")
+            btn.setToolTip("Detach search into a floating window")
 
-            query = QLineEdit()
-            query.setPlaceholderText("Search text...")
-            layout.addWidget(query)
+    def _toggle_search_detached(self):
+        self._set_search_content_parent(
+            not bool(getattr(self, "_search_detached", False)))
 
-            count_label = QLabel("Type to search")
-            layout.addWidget(count_label)
-
-            results = QListWidget()
-            results.setWordWrap(True)
-            results.itemActivated.connect(self._activate_search_result)
-            results.itemClicked.connect(self._activate_search_result)
-            layout.addWidget(results, 1)
-
-            close_btn = QPushButton("Close")
-            close_btn.setDefault(False)
-            close_btn.setAutoDefault(False)
-            close_btn.clicked.connect(self._close_search)
-            layout.addWidget(close_btn)
-
-            query.textChanged.connect(self._populate_search_results)
-            query.returnPressed.connect(self._find_next_from_search_dialog)
-
-            self._search_dialog = dlg
-            self._search_dialog_query = query
-            self._search_dialog_count = count_label
-            self._search_dialog_results = results
-
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
+    def _show_search_dialog(self):
+        """Open the EPUB search UI docked to the reader or detached."""
+        self._set_search_content_parent(
+            bool(getattr(self, "_search_detached", False)))
         query = getattr(self, "_search_dialog_query", None)
         if query is not None:
             query.setFocus()
@@ -15273,22 +15436,22 @@ class EpubReaderDialog(QDialog):
             return
         label = QLabel()
         label.setTextFormat(Qt.RichText)
-        label.setWordWrap(True)
+        label.setWordWrap(False)
         label.setTextInteractionFlags(Qt.NoTextInteraction)
         try:
             label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         except Exception:
             pass
         import html as html_lib
+        t = self._get_theme()
         safe_title = html_lib.escape(title or "")
         highlighted = self._highlight_search_excerpt(excerpt, query)
         label.setText(
-            f"<div style='color:#ffffff; font-size:10pt;'>{safe_title}</div>"
-            f"<div style='color:#f0f0f0; font-size:10pt;'>{highlighted}</div>"
+            f"<div style='color:{t['fg']}; font-size:8.8pt; line-height:1.05;'>{safe_title}</div>"
+            f"<div style='color:{t['fg']}; font-size:8.8pt; line-height:1.05;'>{highlighted}</div>"
         )
-        label.setContentsMargins(4, 4, 4, 4)
-        label.adjustSize()
-        item.setSizeHint(label.sizeHint())
+        label.setContentsMargins(6, 2, 6, 2)
+        item.setSizeHint(QSize(0, 42))
         results.setItemWidget(item, label)
 
     def _cancel_search_dialog_workers(self) -> None:
@@ -15473,36 +15636,101 @@ class EpubReaderDialog(QDialog):
             import json
             needle = json.dumps(text)
             wanted = max(0, int(occurrence or 0))
+            visible_pages = 2 if self._layout_mode == LAYOUT_DOUBLE else 1
         except Exception:
             return
         js = f"""(function() {{
   var query = {needle};
   var wanted = {wanted};
+  var visiblePages = {visible_pages};
   var root = document.getElementById('content') || document.body;
   if (!query || !root) return {{found: false}};
   var lowerQuery = query.toLocaleLowerCase();
-  var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {{
-    acceptNode: function(node) {{
-      var parent = node.parentElement;
-      if (!parent) return NodeFilter.FILTER_REJECT;
-      var tag = parent.tagName ? parent.tagName.toLowerCase() : '';
-      if (tag === 'script' || tag === 'style' || tag === 'noscript') {{
-        return NodeFilter.FILTER_REJECT;
+  var ignored = {{script: true, style: true, noscript: true, img: true}};
+  var nodeList = [];
+  var flat = '';
+  function addNode(node) {{
+    if (node.nodeType === Node.TEXT_NODE) {{
+      var value = node.nodeValue || '';
+      if (value.length) {{
+        nodeList.push({{node: node, offset: flat.length, length: value.length}});
+        flat += value;
       }}
-      return node.nodeValue ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      return;
     }}
-  }});
+    if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return;
+    var tag = node.tagName ? node.tagName.toLowerCase() : '';
+    if (ignored[tag]) return;
+    var children = node.childNodes || [];
+    for (var i = 0; i < children.length; i++) addNode(children[i]);
+  }}
+  function endpointForIndex(idx, isEnd) {{
+    if (!nodeList.length) return null;
+    idx = Math.max(0, Math.min(idx, flat.length));
+    for (var i = 0; i < nodeList.length; i++) {{
+      var item = nodeList[i];
+      var start = item.offset;
+      var end = item.offset + item.length;
+      if ((isEnd && idx >= start && idx <= end) || (!isEnd && idx >= start && idx < end)) {{
+        return {{node: item.node, offset: idx - start}};
+      }}
+    }}
+    var last = nodeList[nodeList.length - 1];
+    return {{node: last.node, offset: last.length}};
+  }}
+  addNode(root);
+  function clearFindHighlights() {{
+    try {{
+      if (window.CSS && CSS.highlights) CSS.highlights.delete('glossarion-find');
+    }} catch (e) {{}}
+  }}
+  function ensureFindHighlightStyle() {{
+    if (document.getElementById('glossarion-find-highlight-style')) return;
+    var style = document.createElement('style');
+    style.id = 'glossarion-find-highlight-style';
+    style.textContent = '::highlight(glossarion-find) {{ background: #ffd966; color: #101010; }}';
+    document.head.appendChild(style);
+  }}
+  function rangeForIndex(idx) {{
+    var startPoint = endpointForIndex(idx, false);
+    var endPoint = endpointForIndex(idx + query.length, true);
+    if (!startPoint || !endPoint) return null;
+    var r = document.createRange();
+    r.setStart(startPoint.node, startPoint.offset);
+    r.setEnd(endPoint.node, endPoint.offset);
+    return r;
+  }}
+  function installFindHighlights(targetPage, columns, colRect, w, gap, span, pageCount) {{
+    clearFindHighlights();
+    if (!(window.CSS && CSS.highlights && window.Highlight)) return;
+    ensureFindHighlightStyle();
+    var ranges = [];
+    var p = 0;
+    while ((p = lowerFlat.indexOf(lowerQuery, p)) !== -1) {{
+      var r = rangeForIndex(p);
+      if (r) {{
+        var rr = r.getBoundingClientRect();
+        var inlinePos = rr.left - colRect.left;
+        if (inlinePos >= columns.scrollWidth - span) {{
+          inlinePos = columns.scrollWidth - w + 10;
+        }}
+        var rp = Math.min(pageCount - 1, Math.max(0, Math.floor((inlinePos + gap - 1) / span)));
+        if (rp >= targetPage && rp < targetPage + visiblePages) ranges.push(r);
+      }}
+      p += Math.max(1, query.length);
+    }}
+    var highlight = new Highlight();
+    ranges.forEach(function(r) {{ highlight.add(r); }});
+    CSS.highlights.set('glossarion-find', highlight);
+  }}
+  var lowerFlat = flat.toLocaleLowerCase();
+  clearFindHighlights();
   var seen = 0;
-  var node;
-  while ((node = walker.nextNode())) {{
-    var hay = node.nodeValue || '';
-    var lowerHay = hay.toLocaleLowerCase();
-    var pos = 0;
-    while ((pos = lowerHay.indexOf(lowerQuery, pos)) !== -1) {{
+  var pos = 0;
+  while ((pos = lowerFlat.indexOf(lowerQuery, pos)) !== -1) {{
       if (seen === wanted) {{
-        var range = document.createRange();
-        range.setStart(node, pos);
-        range.setEnd(node, pos + query.length);
+        var range = rangeForIndex(pos);
+        if (!range) return {{found: false}};
         var sel = window.getSelection();
         sel.removeAllRanges();
         sel.addRange(range);
@@ -15510,6 +15738,8 @@ class EpubReaderDialog(QDialog):
         var columns = document.getElementById('columns');
         if (columns) {{
           var w = (typeof _PAGE_W !== 'undefined' && _PAGE_W) ? _PAGE_W : Math.floor(window.innerWidth);
+          var gap = (typeof _PAGE_GAP !== 'undefined') ? _PAGE_GAP : 0;
+          var span = Math.max(1, w + gap);
           var oldTransform = columns.style.transform;
           var oldTransition = columns.style.transition;
           columns.style.transition = 'none';
@@ -15517,11 +15747,20 @@ class EpubReaderDialog(QDialog):
           void columns.offsetHeight;
           rect = range.getBoundingClientRect();
           var colRect = columns.getBoundingClientRect();
+          var inlinePos = rect.left - colRect.left;
+          var pageCount = Math.max(1, Math.floor((columns.scrollWidth + gap + 1) / span));
+          if (inlinePos >= columns.scrollWidth - span) {{
+            inlinePos = columns.scrollWidth - w + 10;
+          }}
+          var targetPage = Math.min(pageCount - 1, Math.max(0, Math.floor((inlinePos + gap - 1) / span)));
+          var highlightPage = visiblePages > 1 ? Math.max(0, targetPage - (targetPage % visiblePages)) : targetPage;
+          installFindHighlights(highlightPage, columns, colRect, w, gap, span, pageCount);
           columns.style.transform = oldTransform;
           columns.style.transition = oldTransition || 'none';
           return {{
             found: true,
-            page: Math.max(0, Math.floor((rect.left - colRect.left) / Math.max(1, w)))
+            page: targetPage,
+            pageCount: pageCount
           }};
         }}
         window.scrollBy({{ top: rect.top - Math.floor(window.innerHeight * 0.25), left: 0, behavior: 'smooth' }});
@@ -15529,7 +15768,6 @@ class EpubReaderDialog(QDialog):
       }}
       seen += 1;
       pos += Math.max(1, query.length);
-    }}
   }}
   return {{found: false}};
 }})();"""
@@ -15543,7 +15781,14 @@ class EpubReaderDialog(QDialog):
                 page_num = int(page)
             except (TypeError, ValueError):
                 return
-            self._current_page = self._clamp_page_for_layout(page_num)
+            page_count = result.get("pageCount", None)
+            if page_count is not None:
+                try:
+                    self._chapter_page_cache[self._current_row] = int(page_count)
+                except (TypeError, ValueError):
+                    page_count = None
+            self._current_page = self._clamp_page_for_layout(
+                page_num, page_count)
             if self._layout_mode == LAYOUT_SINGLE:
                 self._js_scroll_to(self._reader, self._current_page, animate=False)
             else:
@@ -16134,11 +16379,13 @@ class EpubReaderDialog(QDialog):
                     "var c = document.getElementById('columns');"
                     "if (c) {"
                     "  var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:Math.floor(window.innerWidth);"
+                    "  var gap = (typeof _PAGE_GAP!=='undefined')?_PAGE_GAP:0;"
+                    "  var span = Math.max(1, w + gap);"
                     # Record the target page so _setupColumns can re-anchor
                     # the transform on the next viewport-width change.
                     f"  _CURRENT_PAGE = {page_num};"
                     "  c.style.transition = 'transform 0.3s ease';"
-                    f"  c.style.transform = 'translate3d(' + Math.round(-{page_num} * w) + 'px, 0, 0)';"
+                    f"  c.style.transform = 'translate3d(' + Math.round(-{page_num} * span) + 'px, 0, 0)';"
                     "}"
                 )
             else:
@@ -16146,9 +16393,11 @@ class EpubReaderDialog(QDialog):
                     "var c = document.getElementById('columns');"
                     "if (c) {"
                     "  var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:Math.floor(window.innerWidth);"
+                    "  var gap = (typeof _PAGE_GAP!=='undefined')?_PAGE_GAP:0;"
+                    "  var span = Math.max(1, w + gap);"
                     f"  _CURRENT_PAGE = {page_num};"
                     "  c.style.transition = 'none';"
-                    f"  c.style.transform = 'translate3d(' + Math.round(-{page_num} * w) + 'px, 0, 0)';"
+                    f"  c.style.transform = 'translate3d(' + Math.round(-{page_num} * span) + 'px, 0, 0)';"
                     "  void c.offsetHeight;"  # force reflow so the jump is committed w/o transition
                     "}"
                 )
@@ -16165,7 +16414,9 @@ class EpubReaderDialog(QDialog):
             js = (
                 "var c = document.getElementById('columns');"
                 "var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:window.innerWidth;"
-                "c ? Math.max(1, Math.ceil(c.scrollWidth / Math.max(1, w))) : 1;"
+                "var gap = (typeof _PAGE_GAP!=='undefined')?_PAGE_GAP:0;"
+                "var span = Math.max(1, w + gap);"
+                "c ? Math.max(1, Math.floor((c.scrollWidth + gap + 1) / span)) : 1;"
             )
             browser.page().runJavaScript(js, callback)
         else:
@@ -17078,7 +17329,7 @@ class EpubReaderDialog(QDialog):
                 f"-moz-osx-font-smoothing: grayscale; "
                 f"text-rendering: geometricPrecision; "
                 f"-webkit-text-size-adjust: 100%; }}"
-                f"#columns {{ column-fill: auto; column-gap: 0; "
+                f"#columns {{ column-fill: auto; column-gap: 1px; "
                 f"transition: none; opacity: 0; "
                 # will-change + backface-visibility stabilize the compositor
                 # layer so text isn't re-rasterized at fractional offsets.
@@ -17087,14 +17338,20 @@ class EpubReaderDialog(QDialog):
                 f"font-family: {_font_stack}; "
                 f"font-size: {_font_px}px; line-height: {self._line_spacing}; }}"
                 f"#content {{ padding: 0 40px; overflow-wrap: anywhere; word-break: normal; }}"
+                # Calibre explicitly suppresses leading page/column breaks
+                # because EPUB CSS often puts break-before on the first
+                # block, which Chromium turns into a blank first page.
+                f"#content > :first-child, #content > div:first-child > :first-child "
+                f"{{ break-before: avoid !important; page-break-before: avoid !important; }}"
                 f"h1, h2, h3, h4, h5, h6 {{ color: {t['heading']}; margin: 0; padding: 0; }}"
                 f"img {{ display: block; max-width: 100%; max-height: calc(100vh - 60px); "
                 f"height: auto; object-fit: contain; "
                 f"border-radius: 4px; margin: 12px auto; break-inside: avoid; }}"
-                f".full-page-img {{ break-inside: avoid; break-after: column; "
+                f".full-page-img {{ break-inside: avoid; break-before: column; "
                 f"display: flex; flex-direction: column; align-items: center; justify-content: center; "
                 f"min-height: calc(100vh - 40px); overflow: hidden; "
                 f"padding: 0; margin: 0; }}"
+                f"#content > .full-page-img:first-child {{ break-before: avoid !important; }}"
                 f".full-page-img + .full-page-img {{ margin-top: 0; break-before: column; }}"
                 f".full-page-img img {{ margin: 0 auto; max-height: calc(100vh - 100px); }}"
                 f".full-page-img h1, .full-page-img h2, .full-page-img h3, "
@@ -17108,6 +17365,7 @@ class EpubReaderDialog(QDialog):
                 f"</style>"
                 f"<script>"
                 f"var _PAGE_W = 0;"
+                f"var _PAGE_GAP = 1;"
                 # _CURRENT_PAGE is maintained by _js_scroll_to so that
                 # _setupColumns() can re-anchor the transform whenever the
                 # viewport width changes (window resize, TOC toggle). Without
@@ -17122,13 +17380,14 @@ class EpubReaderDialog(QDialog):
                 # pixels — prevents subpixel text rendering shifts.
                 f"  _PAGE_W = Math.floor(window.innerWidth);"
                 f"  c.style.columnWidth = _PAGE_W + 'px';"
+                f"  c.style.columnGap = _PAGE_GAP + 'px';"
                 f"  c.style.height = (window.innerHeight - 20) + 'px';"
                 # Re-apply the current page offset to the new column width
                 # atomically (with transition suppressed) so the user never
                 # sees a stale/mis-aligned frame.
                 f"  var _t = c.style.transition;"
                 f"  c.style.transition = 'none';"
-                f"  c.style.transform = 'translate3d(' + Math.round(-_CURRENT_PAGE * _PAGE_W) + 'px, 0, 0)';"
+                f"  c.style.transform = 'translate3d(' + Math.round(-_CURRENT_PAGE * (_PAGE_W + _PAGE_GAP)) + 'px, 0, 0)';"
                 f"  void c.offsetHeight;"
                 f"  c.style.transition = _t || 'none';"
                 f"  /* Clean up whitespace between consecutive full-page images */"
