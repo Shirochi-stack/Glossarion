@@ -196,6 +196,12 @@ def _set_thread_run_id_from_env() -> None:
     except Exception:
         pass
 
+_ACTUAL_REQUEST_MODEL_TLS = threading.local()
+
+def get_current_thread_actual_request_model():
+    """Return the concrete model selected for the API request on this thread."""
+    return getattr(_ACTUAL_REQUEST_MODEL_TLS, "model", None)
+
 class _RunIdFilter(logging.Filter):
     """Allow transport logs only for the currently-active run id (when configured)."""
     def filter(self, record: logging.LogRecord) -> bool:
@@ -7120,6 +7126,42 @@ class UnifiedClient:
         """Backwards-compatible public API; now delegates to unified _send_core."""
         return self._send_core(messages, temperature, max_tokens, max_completion_tokens, context, image_data=None)
 
+    def _remember_actual_request_model(self, model=None, key_identifier=None):
+        """Record the concrete model selected for the current request."""
+        model_name = str(model or getattr(self, "model", "") or "").strip()
+        key_id = str(key_identifier or getattr(self, "key_identifier", "") or "").strip()
+        if not model_name:
+            return None
+        try:
+            _ACTUAL_REQUEST_MODEL_TLS.model = model_name
+            _ACTUAL_REQUEST_MODEL_TLS.key_identifier = key_id
+        except Exception:
+            pass
+        try:
+            tls = self._get_thread_local_client()
+            tls.last_actual_request_model = model_name
+            tls.last_actual_key_identifier = key_id
+        except Exception:
+            pass
+        try:
+            with self._model_lock:
+                self.last_actual_request_model = model_name
+                self.last_actual_key_identifier = key_id
+        except Exception:
+            self.last_actual_request_model = model_name
+            self.last_actual_key_identifier = key_id
+        return model_name
+
+    def get_last_actual_request_model(self):
+        """Return the last concrete per-key model used by this client instance."""
+        try:
+            tls_model = getattr(self._get_thread_local_client(), "last_actual_request_model", None)
+            if tls_model:
+                return tls_model
+        except Exception:
+            pass
+        return getattr(self, "last_actual_request_model", None) or getattr(self, "model", None)
+
     def text_to_speech(self, text: str, output_path: str, voice: Optional[str] = None, audio_format: Optional[str] = None) -> str:
         """Generate speech audio from text and write it to output_path.
 
@@ -9217,6 +9259,7 @@ class UnifiedClient:
                         if content and self._safe_len(content, "main_key_retry_content") > 0:
                             print(f"{log_prefix} ✅ SUCCESS! Got content of length: {len(content)}, finish_reason={finish_reason}")
                             self._save_response(content, response_name)
+                            self._remember_actual_request_model(fallback_model, f"{label} ({fallback_model})")
                             # Release in-use claim (last_used already stamped before use)
                             if _api_call_delay > 0:
                                 with _fallback_key_lock:
@@ -9580,6 +9623,7 @@ class UnifiedClient:
                             print(f"✅ Fallback key {idx+1} succeeded! Got {len(content)} chars")
                             # Mark that a fallback key was used
                             self._used_fallback_key = True
+                            self._remember_actual_request_model(fallback_model, f"FALLBACK KEY ({fallback_model})")
                             # Release in-use claim and update last_used timestamp
                             if _api_call_delay > 0:
                                 with _fallback_key_lock:
@@ -9806,6 +9850,7 @@ class UnifiedClient:
                             
                             if len(content.strip()) >= min_len:
                                 print(f"✅ [GLOSSARY DIRECT {idx+1}] Success with {gk_model}")
+                                self._remember_actual_request_model(gk_model, f"GLOSSARY KEY ({gk_model})")
                                 return content, finish_reason
                             else:
                                 print(f"⚠️ [GLOSSARY DIRECT {idx+1}] Response too short ({len(content.strip())} chars), trying next key")
@@ -15346,6 +15391,7 @@ class UnifiedClient:
         # Mark queued watchdog entry as in-flight now that we're about to send
         try:
             tls = self._get_thread_local_client()
+            self._remember_actual_request_model()
             cb = getattr(tls, 'pre_api_call_callback', None)
             if callable(cb):
                 cb()

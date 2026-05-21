@@ -1013,6 +1013,23 @@ _GLOSSARY_CHAPTER_FILENAMES = {}
 _GLOSSARY_TOTAL_CHAPTERS = 0
 _GLOSSARY_OUTPUT_FILE = ""
 
+def _current_glossary_model_name(existing_info=None):
+    existing_model = ""
+    if isinstance(existing_info, dict):
+        existing_model = str(existing_info.get("model_name") or existing_info.get("model") or "").strip()
+    thread_model = ""
+    try:
+        from unified_api_client import get_current_thread_actual_request_model
+        thread_model = str(get_current_thread_actual_request_model() or "").strip()
+    except Exception:
+        thread_model = ""
+    return (
+        thread_model
+        or existing_model
+        or str(os.getenv("MODEL") or "").strip()
+        or str(MODEL or "").strip()
+    )
+
 class GlossaryProgressContext:
     """Per-run glossary progress state.
 
@@ -7854,6 +7871,9 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 "status": status,
                 "last_updated": time.time(),
             }
+            model_name = _current_glossary_model_name(existing_info)
+            if model_name:
+                chapter_info["model_name"] = model_name
             if chapter_file:
                 # Match TransateKRtoEN.py's progress shape: every chapter gets
                 # a stable filename anchor so OPF offsets do not shift rows.
@@ -7895,8 +7915,16 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             if existing_status == "in_progress":
                 restored = hard_stop_restored_entries.get(idx) or _glossary_restore_in_progress_entry(existing_info)
                 if restored:
+                    model_name = _current_glossary_model_name(existing_info)
+                    if model_name and not (restored.get("model_name") or restored.get("model")):
+                        restored = dict(restored)
+                        restored["model_name"] = model_name
                     chapters[_glossary_chapter_key(idx)] = restored
             elif existing_status in ("qa_failed", "failed", "error", "pending", "merged", "completed"):
+                model_name = _current_glossary_model_name(existing_info)
+                if model_name and not (existing_info.get("model_name") or existing_info.get("model")):
+                    existing_info = dict(existing_info)
+                    existing_info["model_name"] = model_name
                 chapters[_glossary_chapter_key(idx)] = existing_info
 
         progress_data = {
@@ -7914,6 +7942,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             "chapter_filenames": {str(k): v for k, v in sorted((filenames or {}).items())},
             "chapter_count": total_chapters,
             "glossary_output_file": output_file,
+            "model_name": _current_glossary_model_name(),
             "progress_schema_version": "2.0",
             "indexing": "chapter_index_zero_based",
             "qa_issues_found": {str(idx): issues for idx, issues in sorted(qa_issues_clean.items())},

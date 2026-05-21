@@ -595,8 +595,16 @@ class RetranslationMixin:
         # PARSE CONTENT.OPF FOR CHAPTER MANIFEST
         # =====================================================
         
-        # State variable for special files toggle (will be set later by checkbox)
-        show_special_files = [show_special_files_state]  # Use list to allow modification in nested function
+        # State variables for title-row toggles (lists allow nested handlers to mutate them)
+        show_special_files = [show_special_files_state]
+        show_model_info_state = False
+        try:
+            _cache = getattr(self, '_retranslation_dialog_cache', {}) or {}
+            _cached_entry = _cache.get(os.path.abspath(file_path), {}) or {}
+            show_model_info_state = bool(_cached_entry.get('show_model_info_state', False))
+        except Exception:
+            show_model_info_state = False
+        show_model_info = [show_model_info_state]
         
         spine_chapters = []
         opf_chapter_order = {}
@@ -1526,6 +1534,12 @@ class RetranslationMixin:
                     parent_dialog._all_checkmark_labels[idx] = checkmark
         
         title_layout.addWidget(show_special_files_cb)
+
+        show_model_info_cb = QCheckBox("Show Model Info")
+        show_model_info_cb.setChecked(show_model_info[0])
+        show_model_info_cb.setToolTip("When enabled, replaces the output-file column with the model used for each request.")
+        show_model_info_cb.setStyleSheet(show_special_files_cb.styleSheet())
+        title_layout.addWidget(show_model_info_cb)
         
         # ── Glossary Progress button ──
         # Find the glossary progress file based on automapping settings
@@ -2042,10 +2056,26 @@ class RetranslationMixin:
                     return 'in_progress', []
                 return 'not_completed', []
 
+            def _gp_model_for(ci, _d):
+                if not isinstance(_d, dict):
+                    _d = {}
+                chapters = _d.get('chapters', {})
+                if isinstance(chapters, dict):
+                    for key, info in chapters.items():
+                        if not isinstance(info, dict):
+                            continue
+                        if _gp_index_for_entry(info, key, _d) != ci:
+                            continue
+                        model_name = str(info.get('model_name') or info.get('model') or '').strip()
+                        if model_name:
+                            return model_name
+                return str(_d.get('model_name') or _d.get('model') or '(model unknown)').strip() or '(model unknown)'
+
             def _gp_display_for(ci, fname, _d, cache=None):
                 opf_pos = (panel_state.get('spine_index_map') or {}).get(ci, ci + 1)
                 ch_num = _gp_display_chapter_num(ci, fname)
                 status, issues = _gp_status_for(ci, _d, cache)
+                model_name = _gp_model_for(ci, _d)
                 icons = {
                     'completed': '\u2705',
                     'failed': '\u274c',
@@ -2055,7 +2085,7 @@ class RetranslationMixin:
                     'not_completed': '\u2b1c',
                 }
                 icon = icons.get(status) or '\u2b1c'
-                display = f"[{opf_pos:03d}] Ch.{ch_num:03d} | {icon} {status.replace('_', ' ').title():14s} | {fname}"
+                display = f"[{opf_pos:03d}] Ch.{ch_num:03d} | {icon} {status.replace('_', ' ').title():14s} | {fname} -> {model_name}"
                 if issues:
                     issues_display = ', '.join(issues[:2])
                     if len(issues) > 2:
@@ -3347,6 +3377,29 @@ class RetranslationMixin:
         
         # Connect the checkbox to the handler
         show_special_files_cb.stateChanged.connect(on_toggle_special_files)
+
+        def on_toggle_model_info(state):
+            show_model_info[0] = show_model_info_cb.isChecked()
+            file_key = os.path.abspath(file_path)
+            if not hasattr(self, '_retranslation_dialog_cache'):
+                self._retranslation_dialog_cache = {}
+            if file_key not in self._retranslation_dialog_cache:
+                self._retranslation_dialog_cache[file_key] = {}
+            self._retranslation_dialog_cache[file_key]['show_model_info_state'] = show_model_info[0]
+
+            if tab_frame and parent_dialog and hasattr(parent_dialog, '_epub_files_in_dialog'):
+                for f_path in parent_dialog._epub_files_in_dialog:
+                    f_key = os.path.abspath(f_path)
+                    if f_key not in self._retranslation_dialog_cache:
+                        self._retranslation_dialog_cache[f_key] = {}
+                    self._retranslation_dialog_cache[f_key]['show_model_info_state'] = show_model_info[0]
+
+            data = getattr(show_model_info_cb, '_progress_data_ref', None)
+            if isinstance(data, dict):
+                data['show_model_info_state'] = show_model_info[0]
+                self._update_listbox_display(data)
+
+        show_model_info_cb.stateChanged.connect(on_toggle_model_info)
         
         # Statistics - always show for both OPF and non-OPF files
         stats_frame = QWidget()
@@ -3532,11 +3585,12 @@ class RetranslationMixin:
         # Calculate maximum widths for dynamic column sizing
         max_original_len = 0
         max_output_len = 0
+        _display_data = {'prog': prog, 'show_model_info_state': show_model_info[0]}
         
         for info in chapter_display_info:
             if 'opf_position' in info:
                 original_file = info.get('original_filename', '')
-                output_file = info['output_file']
+                output_file = self._progress_model_column_text(info, _display_data, info['output_file'])
                 max_original_len = max(max_original_len, len(original_file))
                 max_output_len = max(max_output_len, len(output_file))
         
@@ -3548,6 +3602,7 @@ class RetranslationMixin:
             chapter_num = info['num']
             status = self._progress_display_status(info, {'prog': prog})
             output_file = info['output_file']
+            output_display = self._progress_model_column_text(info, _display_data, output_file)
             icon = status_icons.get(status, '❓')
             status_label = status_labels.get(status, status)
             chapter_info = info.get('info') or info.get('progress_entry') or {}
@@ -3570,17 +3625,17 @@ class RetranslationMixin:
                 
                 # Format: [OPF Position] Chapter Number | Status | Original File -> Response File
                 if isinstance(chapter_num, float) and chapter_num.is_integer():
-                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
+                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
                 else:
-                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
+                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
             else:
                 # Original format
                 if isinstance(chapter_num, float) and chapter_num.is_integer():
-                    display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s} | {output_file}"
+                    display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s} | {output_display}"
                 elif isinstance(chapter_num, float):
-                    display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:11s} | {output_file}"
+                    display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:11s} | {output_display}"
                 else:
-                    display = f"Chapter {chapter_num:03d} | {icon} {status_label:11s} | {output_file}"
+                    display = f"Chapter {chapter_num:03d} | {icon} {status_label:11s} | {output_display}"
             
             # Add QA issues if status is qa_failed
             if status == 'qa_failed':
@@ -3661,8 +3716,11 @@ class RetranslationMixin:
             'dialog': dialog,
             'container': container,
             'show_special_files_state': show_special_files[0],  # Store current toggle state
-            'show_special_files_cb': show_special_files_cb  # Store checkbox reference
+            'show_special_files_cb': show_special_files_cb,  # Store checkbox reference
+            'show_model_info_state': show_model_info[0],
+            'show_model_info_cb': show_model_info_cb
         }
+        show_model_info_cb._progress_data_ref = result
         
         # If standalone (no parent), add buttons and show dialog
         if not parent_dialog and not tab_frame:
@@ -6177,6 +6235,38 @@ class RetranslationMixin:
                 info['status'] = 'not_translated'
                 info.pop('info', None)
                 info.pop('progress_entry', None)
+
+    def _progress_entry_model_name(self, info, data=None):
+        """Return the model name attached to a progress row, with old-file fallbacks."""
+        candidates = []
+        if isinstance(info, dict):
+            candidates.append(info)
+            for key in ('info', 'progress_entry'):
+                value = info.get(key)
+                if isinstance(value, dict):
+                    candidates.append(value)
+                    previous = value.get('previous_progress_entry')
+                    if isinstance(previous, dict):
+                        candidates.append(previous)
+        if isinstance(data, dict):
+            prog = data.get('prog')
+            if isinstance(prog, dict):
+                candidates.append(prog)
+                progress_key = info.get('progress_key') if isinstance(info, dict) else None
+                chapters = prog.get('chapters', {})
+                if progress_key and isinstance(chapters, dict) and isinstance(chapters.get(progress_key), dict):
+                    candidates.append(chapters[progress_key])
+
+        for candidate in candidates:
+            model_name = str(candidate.get('model_name') or candidate.get('model') or '').strip()
+            if model_name:
+                return model_name
+        return "(model unknown)"
+
+    def _progress_model_column_text(self, info, data, fallback_output):
+        if isinstance(data, dict) and data.get('show_model_info_state'):
+            return self._progress_entry_model_name(info, data)
+        return fallback_output
     
     def _update_listbox_display(self, data):
         """Update the listbox display with current chapter information"""
@@ -6241,6 +6331,7 @@ class RetranslationMixin:
             chapter_num = info['num']
             status = self._progress_display_status(info, data)
             output_file = info['output_file']
+            output_display = self._progress_model_column_text(info, data, output_file)
             icon = status_icons.get(status, '❓')
             status_label = status_labels.get(status, status)
             chapter_info = info.get('info') or info.get('progress_entry') or {}
@@ -6255,24 +6346,24 @@ class RetranslationMixin:
                 if ocr_total > 0:
                     status_label = f"{status_label} ({min(ocr_done, ocr_total)}/{ocr_total})"
             if info.get('pdf_ocr'):
-                return f"PDF OCR | {icon} {status_label:18s} | {output_file}"
+                return f"PDF OCR | {icon} {status_label:18s} | {output_display}"
             if 'opf_position' in info:
                 original_file = info.get('original_filename', '')
                 opf_pos = info['opf_position'] + 1
                 if isinstance(chapter_num, float):
                     if chapter_num.is_integer():
-                        display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
+                        display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
                     else:
-                        display = f"[{opf_pos:03d}] Ch.{chapter_num:06.1f} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
+                        display = f"[{opf_pos:03d}] Ch.{chapter_num:06.1f} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
                 else:
-                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
+                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_display}"
             else:
                 if isinstance(chapter_num, float) and chapter_num.is_integer():
-                    display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s} | {output_file}"
+                    display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s} | {output_display}"
                 elif isinstance(chapter_num, float):
-                    display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:11s} | {output_file}"
+                    display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:11s} | {output_display}"
                 else:
-                    display = f"Chapter {chapter_num:03d} | {icon} {status_label:11s} | {output_file}"
+                    display = f"Chapter {chapter_num:03d} | {icon} {status_label:11s} | {output_display}"
             if status == 'qa_failed':
                 chapter_info = info.get('info', {})
                 qa_issues = chapter_info.get('qa_issues_found', [])
@@ -6309,6 +6400,11 @@ class RetranslationMixin:
         if 'show_special_files_cb' in data and data['show_special_files_cb']:
             try:
                 show_special_files = data['show_special_files_cb'].isChecked()
+            except RuntimeError:
+                pass
+        if 'show_model_info_cb' in data and data['show_model_info_cb']:
+            try:
+                data['show_model_info_state'] = data['show_model_info_cb'].isChecked()
             except RuntimeError:
                 pass
 

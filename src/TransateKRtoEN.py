@@ -1872,6 +1872,35 @@ class ProgressManager:
         
         return prog
 
+    @staticmethod
+    def _clean_model_name(value):
+        model_name = str(value or "").strip()
+        return model_name or None
+
+    def _current_model_name(self, existing_info=None):
+        if isinstance(existing_info, dict):
+            existing_model = self._clean_model_name(existing_info.get("model_name") or existing_info.get("model"))
+        else:
+            existing_model = None
+        thread_model = None
+        try:
+            from unified_api_client import get_current_thread_actual_request_model
+            thread_model = self._clean_model_name(get_current_thread_actual_request_model())
+        except Exception:
+            thread_model = None
+        return (
+            thread_model
+            or existing_model
+            or self._clean_model_name(self.prog.get("model_name") or self.prog.get("model"))
+            or self._clean_model_name(os.getenv("MODEL"))
+        )
+
+    def _apply_model_info(self, chapter_info, existing_info=None):
+        model_name = self._current_model_name(existing_info)
+        if model_name:
+            chapter_info["model_name"] = model_name
+        return chapter_info
+
     def _dedup_by_output(self):
         """Keep a single entry per normalized output filename; priority: qa_failed > pending > failed > in_progress > completed."""
         def _norm_out(fname: str):
@@ -2056,7 +2085,12 @@ class ProgressManager:
                     self.restore_all_in_progress_for_hard_stop()
 
                 self.prog["completed_list"] = []
+                current_model_name = self._current_model_name()
+                if current_model_name:
+                    self.prog["model_name"] = current_model_name
                 for chapter_key, chapter_info in self.prog.get("chapters", {}).items():
+                    if isinstance(chapter_info, dict):
+                        self._apply_model_info(chapter_info, chapter_info)
                     if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
                         actual_num = chapter_info.get("actual_num", 0)
                         self.prog["completed_list"].append({
@@ -2270,6 +2304,7 @@ class ProgressManager:
             "status": status,
             "last_updated": time.time()
         }
+        self._apply_model_info(chapter_info, existing_info)
         if isinstance(existing_info, dict) and isinstance(existing_info.get("ocr_progress"), dict):
             chapter_info["ocr_progress"] = existing_info["ocr_progress"]
 
@@ -2572,6 +2607,7 @@ class ProgressManager:
             "refinement_status": refinement_status,
             "last_updated": time.time(),
         })
+        self._apply_model_info(info, info)
         if refinement_status in ("refined", "completed"):
             info["refinement_status"] = "refined"
             info["refined_at"] = time.time()
@@ -2615,6 +2651,7 @@ class ProgressManager:
             "tts_status": tts_status,
             "last_updated": time.time(),
         })
+        self._apply_model_info(info, info)
         if tts_file:
             info["tts_file"] = tts_file
         if tts_status in ("tts_completed", "completed"):
@@ -2642,6 +2679,7 @@ class ProgressManager:
             "merged_parent_chapter": parent_chapter_num,
             "last_updated": time.time()
         }
+        self._apply_model_info(merged_info, self.prog.get("chapters", {}).get(chapter_key, {}))
         
         # Add original_basename so GUI can match by source filename
         if chapter_obj and 'original_basename' in chapter_obj:
@@ -2853,6 +2891,7 @@ class ProgressManager:
                     "last_updated": os.path.getmtime(output_path),
                     "auto_discovered": True
                 }
+                self._apply_model_info(self.prog["chapters"][chapter_key])
                 
                 self.save()
                 return False, f"Chapter {actual_num} already exists: {output_filename}", output_filename
