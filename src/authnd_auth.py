@@ -967,6 +967,29 @@ def _parse_json_response(response: requests.Response, *, requested_max_tokens: O
     }
 
 
+def _log_non_stream_summary(
+    result: Dict[str, Any],
+    *,
+    log_fn: Optional[Callable[[str], None]],
+    started_at: float,
+) -> None:
+    if not log_fn:
+        return
+    content = str(result.get("content") or "")
+    reasoning = str(result.get("reasoning_content") or "")
+    usage = result.get("usage") if isinstance(result.get("usage"), dict) else None
+    elapsed = time.time() - started_at
+    _log(log_fn, f"📡 AuthND: Non-stream response finished in {elapsed:.1f}s ({len(content):,} chars)")
+    thinking_tokens = _usage_reasoning_tokens(usage)
+    if thinking_tokens:
+        _log(log_fn, f"   💭 Thinking tokens used: {thinking_tokens:,}")
+    elif reasoning:
+        estimated_tokens = max(1, len(reasoning) // 4)
+        _log(log_fn, f"   💭 Thinking tokens used: ~{estimated_tokens:,}")
+    else:
+        _log(log_fn, "   💭 Thinking tokens used: 0")
+
+
 def _raise_for_status(response: requests.Response) -> None:
     if response.status_code < 400:
         return
@@ -1152,7 +1175,9 @@ def _post_prediction(
             t_start=request_started,
             requested_max_tokens=max_tokens,
         )
-    return _parse_json_response(response, requested_max_tokens=max_tokens)
+    result = _parse_json_response(response, requested_max_tokens=max_tokens)
+    _log_non_stream_summary(result, log_fn=log_fn, started_at=request_started)
+    return result
 
 
 def send_chat_completion(

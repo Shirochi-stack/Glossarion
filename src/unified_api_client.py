@@ -1539,6 +1539,7 @@ class UnifiedClient:
         # contain safetyRatings/BLOCK_NONE metadata, so return before raw-response
         # safety-word heuristics can misclassify MAX_TOKENS as prohibited content.
         if normalized_finish in {
+            'error',
             'length',
             'max_tokens',
             'max_length',
