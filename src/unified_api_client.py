@@ -13822,6 +13822,7 @@ class UnifiedClient:
         # right before the actual HTTP POST.)
         _model_lower = getattr(self, 'model', '').lower()
         _is_authgem = _model_lower.startswith('authgem')
+        _is_authnd = _model_lower.startswith('authnd')
         _is_native_gemini = _model_lower.startswith('gemini')
         _is_vertex = (
             _model_lower.startswith('vertex/') or
@@ -13842,7 +13843,7 @@ class UnifiedClient:
                 _is_sdk_provider = True
         except Exception:
             pass
-        if not _is_authgem and not _is_native_gemini and not _is_vertex and not _is_sdk_provider and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+        if not _is_authgem and not _is_authnd and not _is_native_gemini and not _is_vertex and not _is_sdk_provider and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
             try:
                 tls = self._get_thread_local_client()
                 label = getattr(tls, 'current_request_label', None) or 'request'
@@ -22854,6 +22855,16 @@ class UnifiedClient:
                         pass
 
                 anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
+                try:
+                    tls = self._get_thread_local_client()
+                    _label = getattr(tls, 'current_request_label', None) or 'request'
+                    _ctx = getattr(tls, 'current_request_context', None) or 'translation'
+                except Exception:
+                    _label = 'request'
+                    _ctx = 'translation'
+                _thread_name = threading.current_thread().name
+                _think = self._get_thinking_status_label()
+                authnd_progress_label = f"📤 [{_thread_name}] {_label} ({_ctx}) API call in progress{_think}"
 
                 result = _authnd_send(
                     messages=messages,
@@ -22866,6 +22877,7 @@ class UnifiedClient:
                     top_p=anti_dupe_params.get("top_p"),
                     frequency_penalty=anti_dupe_params.get("frequency_penalty"),
                     presence_penalty=anti_dupe_params.get("presence_penalty"),
+                    progress_label=authnd_progress_label,
                 )
 
                 content = result.get("content", "")
@@ -22902,7 +22914,8 @@ class UnifiedClient:
 
                 if "captcha" in error_str.lower() and attempt < max_retries - 1:
                     delay = max(1.0, self._get_send_interval())
-                    print(f"AuthND: captcha retry in {delay:.1f}s (attempt {attempt+1}/{max_retries})")
+                    print(f"⚠️ AuthND captcha error (attempt {attempt+1}/{max_retries}): {error_str[:1200]}")
+                    print(f"🔁 AuthND: captcha retry in {delay:.1f}s (attempt {attempt+1}/{max_retries})")
                     if not self._sleep_with_cancel(delay, 0.5):
                         raise UnifiedClientError("AuthND: Translation stopped by user", error_type="cancelled")
                     last_error = exc

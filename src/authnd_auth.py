@@ -9,6 +9,7 @@ token the page uses, then sends the hidden /v2/predict request with requests.
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
 import os
 import re
@@ -38,6 +39,132 @@ _cancel_event = threading.Event()
 _thread_local = threading.local()
 _metadata_cache: Dict[str, Dict[str, str]] = {}
 _metadata_lock = threading.Lock()
+
+
+def _debug_enabled() -> bool:
+    value = os.getenv("AUTHND_DEBUG", "").strip().lower()
+    return value in ("1", "true", "yes", "on", "debug")
+
+
+def _log(log_fn: Optional[Callable[[str], None]], message: str, *, debug_only: bool = False) -> None:
+    if not log_fn:
+        return
+    if debug_only and not _debug_enabled():
+        return
+    log_fn(message)
+
+
+def _short_error(error: Any, limit: int = 1200) -> str:
+    text = str(error or "").replace("\r", " ").replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _message_summary(messages: List[Dict[str, str]]) -> Dict[str, Any]:
+    roles: Dict[str, int] = {}
+    chars = 0
+    for message in messages:
+        role = str(message.get("role") or "unknown")
+        roles[role] = roles.get(role, 0) + 1
+        chars += len(str(message.get("content") or ""))
+    return {"count": len(messages), "roles": roles, "chars": chars}
+
+
+def _payload_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
+    summary = {
+        "model": payload.get("model"),
+        "stream": payload.get("stream"),
+        "messages": _message_summary(payload.get("messages") or []),
+    }
+    for key in ("temperature", "max_tokens", "top_p", "frequency_penalty", "presence_penalty"):
+        if key in payload:
+            summary[key] = payload.get(key)
+    if "chat_template_kwargs" in payload:
+        summary["chat_template_kwargs"] = payload.get("chat_template_kwargs")
+    return summary
+
+
+def _stream_logging_enabled() -> bool:
+    value = os.getenv("AUTHND_LOG_STREAM_CHUNKS")
+    if value is None:
+        value = os.getenv("LOG_STREAM_CHUNKS", "1")
+    return str(value).strip().lower() not in ("0", "false", "no", "off")
+
+
+def _build_common_mojibake_replacements() -> Dict[str, str]:
+    replacements: Dict[str, str] = {}
+    for char in ("“", "”", "‘", "’", "–", "—", "…", "•", "«", "»"):
+        data = char.encode("utf-8")
+        for encoding in ("latin-1", "cp1252"):
+            bad = data.decode(encoding, errors="replace")
+            if bad != char:
+                replacements[bad] = char
+    replacements["Â\xa0"] = " "
+    replacements["Â "] = " "
+    return replacements
+
+
+_COMMON_MOJIBAKE_REPLACEMENTS = _build_common_mojibake_replacements()
+
+
+def _mojibake_score(text: str) -> int:
+    if not text:
+        return 0
+    score = 0
+    score += text.count("\ufffd") * 4
+    score += sum(2 for ch in text if 0x80 <= ord(ch) <= 0x9F)
+    for marker in ("â", "Â", "Ã"):
+        score += text.count(marker)
+    for sequence in ("â€", "â€™", "â€œ", "â€�", "â€“", "â€”", "Â ", "Ã©", "Ã¨", "Ãª"):
+        score += text.count(sequence) * 3
+    return score
+
+
+def _repair_mojibake_text(text: str) -> str:
+    if not isinstance(text, str) or not text:
+        return text
+    if os.getenv("AUTHND_FIX_UNICODE", "1").strip().lower() in ("0", "false", "no", "off"):
+        return text
+
+    best = text
+    best_score = _mojibake_score(text)
+    if best_score <= 0:
+        return text
+
+    mapped = text
+    for bad, good in _COMMON_MOJIBAKE_REPLACEMENTS.items():
+        mapped = mapped.replace(bad, good)
+    mapped_score = _mojibake_score(mapped)
+    if mapped_score < best_score:
+        best = mapped
+        best_score = mapped_score
+
+    # Common failure modes:
+    # - UTF-8 bytes decoded as latin-1: "â\x80\x9c"
+    # - UTF-8 bytes decoded as cp1252: "â€œ"
+    # Run a couple of passes for occasional double-decoding.
+    candidates = {text}
+    current = text
+    for _ in range(2):
+        next_candidates = set()
+        for candidate in candidates:
+            for encoding in ("latin-1", "cp1252"):
+                try:
+                    repaired = candidate.encode(encoding).decode("utf-8")
+                except (UnicodeEncodeError, UnicodeDecodeError):
+                    continue
+                next_candidates.add(repaired)
+                score = _mojibake_score(repaired)
+                if score < best_score:
+                    best = repaired
+                    best_score = score
+        if not next_candidates or current in next_candidates:
+            break
+        candidates = next_candidates
+        current = best
+
+    return best
 
 
 def cancel_stream() -> None:
@@ -88,9 +215,9 @@ def _payload_model_name(model_path: str) -> str:
     model = model_path.strip("/")
     if model.startswith("stg/"):
         return model
-    if os.getenv("AUTHND_DISABLE_STG_PREFIX", "0").lower() in ("1", "true", "yes"):
-        return model
-    return f"stg/{model}"
+    if os.getenv("AUTHND_ENABLE_STG_PREFIX", "0").lower() in ("1", "true", "yes"):
+        return f"stg/{model}"
+    return model
 
 
 def _resolve_model_metadata(page_url: str) -> Dict[str, str]:
@@ -444,11 +571,11 @@ def _extract_content_from_obj(obj: Any) -> str:
             choice.get("content"),
         ):
             if isinstance(candidate, str) and candidate:
-                return candidate
+                return _repair_mojibake_text(candidate)
     for key in ("output_text", "text", "content", "response"):
         value = obj.get(key)
         if isinstance(value, str) and value:
-            return value
+            return _repair_mojibake_text(value)
     return ""
 
 
@@ -464,16 +591,78 @@ def _extract_finish_reason(obj: Any) -> Optional[str]:
     return str(reason) if reason else None
 
 
-def _parse_sse_response(response: requests.Response) -> Dict[str, Any]:
+def _iter_utf8_lines(byte_iter: Iterable[Any]) -> Iterable[str]:
+    """Yield text lines from raw SSE bytes, decoded explicitly as UTF-8.
+
+    This avoids letting requests/httpx infer text encodings from platform or
+    headers, which is how UTF-8 punctuation can turn into mojibake like
+    ``â\x80\x9c`` before JSON parsing sees it.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    buffer = ""
+    for chunk in byte_iter:
+        if not chunk:
+            continue
+        if isinstance(chunk, str):
+            text = chunk
+        else:
+            text = decoder.decode(bytes(chunk), final=False)
+        buffer += text
+        while True:
+            newline = buffer.find("\n")
+            if newline < 0:
+                break
+            line = buffer[:newline]
+            buffer = buffer[newline + 1:]
+            yield line.rstrip("\r")
+
+    tail = decoder.decode(b"", final=True)
+    if tail:
+        buffer += tail
+    if buffer:
+        yield buffer.rstrip("\r")
+
+
+def _parse_sse_lines(
+    line_iter: Iterable[Any],
+    *,
+    close_fn: Optional[Callable[[], None]] = None,
+    log_fn: Optional[Callable[[str], None]] = None,
+    log_stream: bool = True,
+    t_start: Optional[float] = None,
+) -> Dict[str, Any]:
     parts: List[str] = []
     finish_reason: Optional[str] = None
     usage: Optional[Dict[str, Any]] = None
     raw_tail: List[Any] = []
+    text_log_buf: List[str] = []
+    first_text_ts: Optional[float] = None
+    stream_started_ts = t_start or time.time()
 
-    for raw_line in response.iter_lines(decode_unicode=True):
+    def _emit_stream_text(fragment: str) -> None:
+        if not log_fn or not log_stream or not fragment:
+            return
+        text_log_buf.append(fragment.replace("\x1f", "\\x1F"))
+        combined = "".join(text_log_buf)
+        for tag in ("</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>", "</p>"):
+            combined = combined.replace(tag, tag + "\n")
+        if "\n" in combined:
+            lines = combined.split("\n")
+            for line in lines[:-1]:
+                if line:
+                    log_fn(line)
+            text_log_buf[:] = [lines[-1]]
+        elif len(combined) >= 160:
+            log_fn(combined)
+            text_log_buf.clear()
+
+    for raw_line in line_iter:
         if _is_cancelled():
-            response.close()
+            if close_fn:
+                close_fn()
             raise RuntimeError("stream cancelled")
+        if isinstance(raw_line, bytes):
+            raw_line = raw_line.decode("utf-8", errors="replace")
         if not raw_line:
             continue
         line = raw_line.strip()
@@ -492,19 +681,45 @@ def _parse_sse_response(response: requests.Response) -> Dict[str, Any]:
             raw_tail.pop(0)
         text = _extract_content_from_obj(obj)
         if text:
+            if first_text_ts is None:
+                first_text_ts = time.time()
+                _log(log_fn, f"📡 AuthND: First token in {first_text_ts - stream_started_ts:.1f}s, streaming...")
             parts.append(text)
+            _emit_stream_text(text)
         reason = _extract_finish_reason(obj)
         if reason:
             finish_reason = reason
         if isinstance(obj, dict) and isinstance(obj.get("usage"), dict):
             usage = obj.get("usage")
 
+    if log_fn and log_stream and text_log_buf:
+        remainder = "".join(text_log_buf).strip()
+        if remainder:
+            log_fn(remainder)
+    _log(log_fn, f"📡 AuthND: Stream finished in {time.time() - stream_started_ts:.1f}s")
+
     return {
-        "content": "".join(parts),
+        "content": _repair_mojibake_text("".join(parts)),
         "finish_reason": finish_reason or "stop",
         "usage": usage,
         "raw_response": raw_tail,
     }
+
+
+def _parse_sse_response(
+    response: requests.Response,
+    *,
+    log_fn: Optional[Callable[[str], None]] = None,
+    log_stream: bool = True,
+    t_start: Optional[float] = None,
+) -> Dict[str, Any]:
+    return _parse_sse_lines(
+        _iter_utf8_lines(response.iter_content(chunk_size=1)),
+        close_fn=response.close,
+        log_fn=log_fn,
+        log_stream=log_stream,
+        t_start=t_start,
+    )
 
 
 def _parse_json_response(response: requests.Response) -> Dict[str, Any]:
@@ -512,7 +727,7 @@ def _parse_json_response(response: requests.Response) -> Dict[str, Any]:
         obj = response.json()
     except ValueError:
         text = response.text or ""
-        return {"content": text, "finish_reason": "stop", "usage": None, "raw_response": text}
+        return {"content": _repair_mojibake_text(text), "finish_reason": "stop", "usage": None, "raw_response": text}
 
     return {
         "content": _extract_content_from_obj(obj),
@@ -531,6 +746,18 @@ def _raise_for_status(response: requests.Response) -> None:
     raise RuntimeError(f"AuthND HTTP {response.status_code}: {detail or response.reason}")
 
 
+def _httpx_status_error(resp: Any) -> RuntimeError:
+    headers = getattr(resp, "headers", {}) or {}
+    nv_error = headers.get("x-nv-error-msg") or headers.get("x-nv-error-code") or ""
+    reason = getattr(resp, "reason_phrase", "") or ""
+    try:
+        body = resp.read().decode("utf-8", errors="replace").strip()
+    except Exception:
+        body = ""
+    detail = " ".join(part for part in (nv_error, body[:1000]) if part)
+    return RuntimeError(f"AuthND HTTP {resp.status_code}: {detail or reason or 'HTTP error'}")
+
+
 def _post_prediction(
     *,
     messages: List[Dict[str, str]],
@@ -546,6 +773,7 @@ def _post_prediction(
     timeout: int,
     connect_timeout: Optional[float],
     stream: bool,
+    log_fn: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     metadata = _resolve_model_metadata(page_url)
     org_id = metadata.get("namespace") or DEFAULT_ORG_ID
@@ -569,20 +797,95 @@ def _post_prediction(
     if _reasoning_enabled():
         payload.setdefault("chat_template_kwargs", {"enable_thinking": True, "clear_thinking": False})
 
+    _log(
+        log_fn,
+        "🔎 AuthND debug: "
+        + json.dumps(
+            {
+                "url": url,
+                "page_url": page_url,
+                "metadata": {
+                    "namespace": org_id,
+                    "endpoint_id": endpoint_id,
+                    "function_id": metadata.get("function_id") or "",
+                    "artifact_name": metadata.get("artifact_name") or "",
+                },
+                "payload": _payload_summary(payload),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        debug_only=True,
+    )
+
     request_id = str(uuid.uuid4())
     headers = {
         "accept": "text/event-stream" if stream else "application/json",
         "content-type": "application/json",
+        "accept-encoding": "identity",
         "origin": BUILD_BASE_URL,
         "referer": page_url,
         "host": "api.ngc.nvidia.com",
         "nv-captcha-token": captcha_token,
-        "nv-function-id": endpoint_id,
-        "nv-model-name": model_path,
-        "nv-session-id": str(uuid.uuid4()),
-        "nvcf-request-id": request_id,
         "user-agent": USER_AGENT,
     }
+    if os.getenv("AUTHND_LEGACY_EXTRA_HEADERS", "0").lower() in ("1", "true", "yes"):
+        headers.update({
+            "nv-function-id": endpoint_id,
+            "nv-model-name": model_path,
+            "nv-session-id": str(uuid.uuid4()),
+            "nvcf-request-id": request_id,
+        })
+    _log(
+        log_fn,
+        "🔎 AuthND debug headers: "
+        + json.dumps(
+            {
+                "accept": headers["accept"],
+                "origin": headers["origin"],
+                "referer": headers["referer"],
+                "legacy_extra_headers": "nv-function-id" in headers,
+                "nv-captcha-token-length": len(captcha_token or ""),
+                "local_request_id": request_id,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        debug_only=True,
+    )
+
+    request_started = time.time()
+    if stream:
+        try:
+            import httpx as _httpx
+
+            _timeout = _httpx.Timeout(timeout, connect=connect_timeout)
+            with _httpx.stream(
+                "POST",
+                url,
+                headers=headers,
+                json=payload,
+                timeout=_timeout,
+            ) as response:
+                _log(
+                    log_fn,
+                    f"🔎 AuthND debug response: status={response.status_code}, content_type={response.headers.get('content-type', '')}, transport=httpx",
+                    debug_only=True,
+                )
+                if response.status_code >= 400:
+                    exc = _httpx_status_error(response)
+                    _log(log_fn, f"⚠️ AuthND HTTP failure: {_short_error(exc)}")
+                    raise exc
+                _log(log_fn, f"📡 AuthND: Stream opened (status={response.status_code}, transport=httpx)")
+                return _parse_sse_lines(
+                    _iter_utf8_lines(response.iter_raw()),
+                    close_fn=response.close,
+                    log_fn=log_fn,
+                    log_stream=_stream_logging_enabled(),
+                    t_start=request_started,
+                )
+        except ImportError:
+            _log(log_fn, "⚠️ AuthND: httpx not installed, falling back to requests (streaming may be buffered)")
 
     request_timeout: Any = timeout
     if connect_timeout is not None:
@@ -596,10 +899,28 @@ def _post_prediction(
         timeout=request_timeout,
         stream=stream,
     )
+    _log(
+        log_fn,
+        f"🔎 AuthND debug response: status={response.status_code}, content_type={response.headers.get('content-type', '')}",
+        debug_only=True,
+    )
+    if response.status_code >= 400:
+        nv_error = response.headers.get("x-nv-error-msg") or response.headers.get("x-nv-error-code") or ""
+        body = (response.text or "").strip()
+        _log(
+            log_fn,
+            f"⚠️ AuthND HTTP failure: status={response.status_code}, nv_error={_short_error(nv_error, 300)}, body={_short_error(body, 900)}",
+        )
     _raise_for_status(response)
     content_type = (response.headers.get("content-type") or "").lower()
     if stream or "text/event-stream" in content_type:
-        return _parse_sse_response(response)
+        _log(log_fn, f"📡 AuthND: Stream opened (status={response.status_code})")
+        return _parse_sse_response(
+            response,
+            log_fn=log_fn,
+            log_stream=_stream_logging_enabled(),
+            t_start=request_started,
+        )
     return _parse_json_response(response)
 
 
@@ -617,6 +938,7 @@ def send_chat_completion(
     connect_timeout: Optional[float] = None,
     account_id: int = 0,
     stream: Optional[bool] = None,
+    progress_label: Optional[str] = None,
 ) -> Dict[str, Any]:
     del account_id  # AuthND has no account slots; kept for unified handler symmetry.
     if _is_cancelled():
@@ -634,14 +956,55 @@ def send_chat_completion(
         log_fn(f"🌐 AuthND: opening browser token flow for {page_url}")
 
     normalized_messages = _normalize_messages(messages)
+    _log(
+        log_fn,
+        "🔎 AuthND debug request: "
+        + json.dumps(
+            {
+                "model_path": model_path,
+                "page_url": page_url,
+                "timeouts": {"request": timeout_value, "token": token_timeout, "connect": connect_timeout},
+                "stream": bool(use_stream),
+                "params": {
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "top_p": top_p,
+                    "frequency_penalty": frequency_penalty,
+                    "presence_penalty": presence_penalty,
+                    "reasoning_enabled": _reasoning_enabled(),
+                },
+                "messages": _message_summary(normalized_messages),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        debug_only=True,
+    )
     last_error: Optional[Exception] = None
 
     for attempt in range(2):
         if _is_cancelled():
             raise RuntimeError("stream cancelled")
-        captcha_token = get_captcha_token(page_url, token_timeout)
+        try:
+            captcha_token = get_captcha_token(page_url, token_timeout)
+        except RuntimeError as exc:
+            _log(
+                log_fn,
+                f"⚠️ AuthND captcha token flow failed (attempt {attempt + 1}/2): {_short_error(exc)}",
+            )
+            raise
         if _is_cancelled():
             raise RuntimeError("stream cancelled")
+        _log(
+            log_fn,
+            f"🔎 AuthND debug: captcha token acquired (length={len(captcha_token)})",
+            debug_only=True,
+        )
+        _log(log_fn, "✅ AuthND: captcha token acquired; sending NVIDIA request")
+        if progress_label:
+            _log(log_fn, progress_label)
+        else:
+            _log(log_fn, f"📤 [{threading.current_thread().name}] API call in progress")
         try:
             result = _post_prediction(
                 messages=normalized_messages,
@@ -657,6 +1020,7 @@ def send_chat_completion(
                 timeout=timeout_value,
                 connect_timeout=connect_timeout,
                 stream=bool(use_stream),
+                log_fn=log_fn,
             )
             result["model"] = model_id
             result["page_url"] = page_url
@@ -666,7 +1030,7 @@ def send_chat_completion(
             message = str(exc).lower()
             if attempt == 0 and ("captcha" in message or "400" in message):
                 if log_fn:
-                    log_fn("AuthND: captcha token was rejected; retrying with a fresh browser token")
+                    log_fn(f"⚠️ AuthND: captcha token was rejected; retrying with a fresh browser token ({_short_error(exc)})")
                 continue
             raise
 
