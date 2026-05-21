@@ -962,17 +962,124 @@ def send_chat_completion(
     raise RuntimeError(f"AuthND request failed: {last_error}")
 
 
+def _read_cli_text(value: Optional[str]) -> str:
+    if value is None:
+        return ""
+    if value == "-":
+        return sys.stdin.read()
+    return value
+
+
+def _read_cli_file(path: Optional[str]) -> str:
+    if not path:
+        return ""
+    if path == "-":
+        return sys.stdin.read()
+    with open(path, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _load_cli_messages(args: argparse.Namespace) -> List[Dict[str, Any]]:
+    if args.messages:
+        with open(args.messages, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict) and isinstance(data.get("messages"), list):
+            data = data["messages"]
+        if not isinstance(data, list):
+            raise ValueError("--messages must contain a JSON list or an object with a messages list")
+        return data
+
+    prompt = _read_cli_text(args.prompt) or _read_cli_file(args.prompt_file)
+    if not prompt and not sys.stdin.isatty():
+        prompt = sys.stdin.read()
+    if not prompt:
+        raise ValueError("provide --prompt, --prompt-file, --messages, or pipe prompt text on stdin")
+
+    messages: List[Dict[str, Any]] = []
+    if args.system:
+        messages.append({"role": "system", "content": _read_cli_text(args.system)})
+    elif args.system_file:
+        messages.append({"role": "system", "content": _read_cli_file(args.system_file)})
+    messages.append({"role": "user", "content": prompt})
+    return messages
+
+
 def _main() -> int:
-    parser = argparse.ArgumentParser(description="AuthND token helper")
-    parser.add_argument("--mint-token", dest="page_url")
-    parser.add_argument("--timeout", type=int, default=90)
+    for stream_name in ("stdout", "stderr"):
+        stream_obj = getattr(sys, stream_name, None)
+        if hasattr(stream_obj, "reconfigure"):
+            try:
+                stream_obj.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+    parser = argparse.ArgumentParser(
+        description="Send chat requests through NVIDIA Build's browser-backed AuthND route.",
+    )
+    parser.add_argument("--mint-token", dest="page_url", help=argparse.SUPPRESS)
+    parser.add_argument("--model", default="z-ai/glm-5.1", help="Model path, e.g. deepseek-ai/deepseek-v4-flash")
+    parser.add_argument("--prompt", help="User prompt text. Use '-' to read stdin.")
+    parser.add_argument("--prompt-file", help="UTF-8 file containing the user prompt. Use '-' to read stdin.")
+    parser.add_argument("--system", help="Optional system prompt text. Use '-' to read stdin.")
+    parser.add_argument("--system-file", help="UTF-8 file containing the system prompt.")
+    parser.add_argument("--messages", help="JSON file containing messages list or {'messages': [...]}.")
+    parser.add_argument("--temperature", type=float)
+    parser.add_argument("--max-tokens", type=int)
+    parser.add_argument("--top-p", type=float)
+    parser.add_argument("--frequency-penalty", type=float)
+    parser.add_argument("--presence-penalty", type=float)
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument("--token-timeout", type=int, help="Browser captcha token timeout in seconds.")
+    parser.add_argument("--connect-timeout", type=float)
+    parser.add_argument("--stream", dest="stream", action="store_true", default=None, help="Force SSE streaming.")
+    parser.add_argument("--no-stream", dest="stream", action="store_false", help="Disable SSE streaming.")
+    parser.add_argument("--json", action="store_true", help="Print the full result object as JSON.")
+    parser.add_argument("--output", help="Write final content to a UTF-8 file.")
+    parser.add_argument("--quiet", action="store_true", help="Suppress progress logs.")
+    parser.add_argument("--debug", action="store_true", help="Enable sanitized AuthND debug logs.")
     args = parser.parse_args()
     if args.page_url:
         token = _mint_captcha_token_qt(args.page_url, args.timeout)
         print(json.dumps({"token": token}, separators=(",", ":")), flush=True)
         return 0
-    parser.error("nothing to do")
-    return 2
+
+    if args.debug:
+        os.environ["AUTHND_DEBUG"] = "1"
+    if args.token_timeout:
+        os.environ["AUTHND_TOKEN_TIMEOUT"] = str(args.token_timeout)
+
+    try:
+        messages = _load_cli_messages(args)
+        log_fn = None
+        if not args.quiet:
+            log_fn = lambda message: print(message, file=sys.stderr, flush=True)
+        result = send_chat_completion(
+            messages=messages,
+            model=args.model,
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+            top_p=args.top_p,
+            frequency_penalty=args.frequency_penalty,
+            presence_penalty=args.presence_penalty,
+            timeout=args.timeout,
+            connect_timeout=args.connect_timeout,
+            stream=args.stream,
+            log_fn=log_fn,
+        )
+    except Exception as exc:
+        print(f"AuthND error: {_short_error(exc)}", file=sys.stderr)
+        return 1
+
+    content = str(result.get("content") or "")
+    if args.output:
+        with open(args.output, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+    else:
+        print(content, flush=True)
+    return 0
 
 
 if __name__ == "__main__":

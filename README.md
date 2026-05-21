@@ -122,6 +122,7 @@
 | **AuthCD** | `authcd/*` | authcd/claude-sonnet-4-6, authcd/claude-haiku-4-5-20251001 |
 | **AuthGem** | `authgem/*`, `authgem-vertex/*` | authgem/gemini-3.1-pro-preview, authgem-vertex/gemini-3.1-pro-preview |
 | **Antigravity** | `antigravity/*` | antigravity/claude-opus-4-6-thinking, antigravity/gemini-3.1-pro |
+| **AuthND** | `authnd/*` | authnd/z-ai/glm-5.1 |
 | **NVIDIA** | `nd/*` | nd/deepseek-ai/deepseek-v3.2, nd/moonshotai/kimi-k2-thinking |
 | **Chutes** | `chutes/*` | chutes/deepseek-ai/DeepSeek-V3.2, chutes/openai/gpt-oss-120b |
 | **Zhipu Intl.** | `za/*` | za/glm-4.6, za/glm-4-plus |
