@@ -300,6 +300,34 @@ def _issue_from_finish_reason(finish_reason, default_issue=None):
     return default_issue
 
 
+def _actual_request_model_name(client=None) -> str:
+    try:
+        from unified_api_client import get_current_thread_actual_request_model
+        model_name = str(get_current_thread_actual_request_model() or "").strip()
+        if model_name:
+            return model_name
+    except Exception:
+        pass
+    try:
+        if client is not None and hasattr(client, "get_last_actual_request_model"):
+            model_name = str(client.get_last_actual_request_model() or "").strip()
+            if model_name:
+                return model_name
+    except Exception:
+        pass
+    try:
+        tls = client._get_thread_local_client() if client is not None and hasattr(client, "_get_thread_local_client") else None
+        model_name = str(getattr(tls, "model", "") or "").strip()
+        if model_name:
+            return model_name
+    except Exception:
+        pass
+    try:
+        return str(getattr(client, "model", "") or "").strip()
+    except Exception:
+        return ""
+
+
 def _call_send(send_fn, messages, client, temp, mtoks, check_stop, chunk_timeout, chunk_idx, total_chunks, context_label):
     try:
         client.context = context_label
@@ -533,16 +561,23 @@ def refine_glossary_entries(
                     context_label,
                 )
             except Exception as e:
+                model_name = _actual_request_model_name(client)
                 log(f"Refinement failed for chunk {chunk_idx}: {e}")
-                update_refinement_progress(
-                    progress_file,
-                    type_key,
-                    {"status": "failed", "error": str(e)},
-                    atomic_replace_fn=atomic_replace_fn,
-                )
+                failed_update = {"status": "failed", "error": str(e)}
+                if model_name:
+                    failed_update["model_name"] = model_name
+                update_refinement_progress(progress_file, type_key, failed_update, atomic_replace_fn=atomic_replace_fn)
                 refined_entries = []
                 break
 
+            model_name = _actual_request_model_name(client)
+            if model_name:
+                update_refinement_progress(
+                    progress_file,
+                    type_key,
+                    {"model_name": model_name},
+                    atomic_replace_fn=atomic_replace_fn,
+                )
             response_text = raw[0] if isinstance(raw, tuple) else raw
             response_text = response_text if isinstance(response_text, str) else str(response_text or "")
             parsed = parse_response_fn(response_text)
@@ -553,30 +588,24 @@ def refine_glossary_entries(
             parsed = _strip_inactive_description(parsed)
             if not parsed:
                 log(f"⚠️ Refinement returned no valid entries for chunk {chunk_idx}; keeping original selected entries.")
-                update_refinement_progress(
-                    progress_file,
-                    type_key,
-                    {"status": "failed", "error": "empty_or_invalid_response"},
-                    atomic_replace_fn=atomic_replace_fn,
-                )
+                failed_update = {"status": "failed", "error": "empty_or_invalid_response"}
+                if model_name:
+                    failed_update["model_name"] = model_name
+                update_refinement_progress(progress_file, type_key, failed_update, atomic_replace_fn=atomic_replace_fn)
                 refined_entries = []
                 break
 
             refined_entries.extend(parsed)
-            update_refinement_progress(
-                progress_file,
-                type_key,
-                {"status": "in_progress", "completed_chunks": chunk_idx},
-                atomic_replace_fn=atomic_replace_fn,
-            )
+            chunk_update = {"status": "in_progress", "completed_chunks": chunk_idx}
+            if model_name:
+                chunk_update["model_name"] = model_name
+            update_refinement_progress(progress_file, type_key, chunk_update, atomic_replace_fn=atomic_replace_fn)
             if _issue_from_finish_reason(finish_reason, None) == "TRUNCATED":
                 log(f"Refinement chunk {chunk_idx} was truncated; keeping original selected entries.")
-                update_refinement_progress(
-                    progress_file,
-                    type_key,
-                    {"status": "failed", "error": "TRUNCATED"},
-                    atomic_replace_fn=atomic_replace_fn,
-                )
+                failed_update = {"status": "failed", "error": "TRUNCATED"}
+                if model_name:
+                    failed_update["model_name"] = model_name
+                update_refinement_progress(progress_file, type_key, failed_update, atomic_replace_fn=atomic_replace_fn)
                 refined_entries = []
                 break
 
@@ -596,14 +625,18 @@ def refine_glossary_entries(
                     ]
             else:
                 result_mapping = {entry_type: refined_entries}
-            update_refinement_progress(progress_file, type_key, {
+            completed_update = {
                 "status": "completed",
                 "input_hash": type_hash,
                 "output_hash": _entry_hash(entry_type, refined_entries, hash_mode),
                 "entry_count_before": len(entries),
                 "entry_count_after": len(refined_entries),
                 "completed_chunks": len(chunks),
-            }, atomic_replace_fn=atomic_replace_fn)
+            }
+            model_name = _actual_request_model_name(client)
+            if model_name:
+                completed_update["model_name"] = model_name
+            update_refinement_progress(progress_file, type_key, completed_update, atomic_replace_fn=atomic_replace_fn)
             log(f"✅ Refined selected entries: {len(entries)} -> {len(refined_entries)} entries")
             return "ok", entry_type, result_mapping
 

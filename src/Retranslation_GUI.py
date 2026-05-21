@@ -2177,6 +2177,7 @@ class RetranslationMixin:
                     after = info.get('entry_count_after')
                     total_chunks = info.get('total_chunks')
                     completed_chunks = info.get('completed_chunks')
+                    model_name = str(info.get('model_name') or info.get('model') or '').strip() or '(model unknown)'
                     detail = ""
                     if before is not None and after is not None:
                         detail = f" | {before} -> {after} entries"
@@ -2190,7 +2191,7 @@ class RetranslationMixin:
                         'not_refined': '\u2728',
                     }
                     icon = icon_map.get(status, '\u2b1c')
-                    display = f"Refinement | {icon} {status.replace('_', ' ').title():14s} | {entry_type}{detail}"
+                    display = f"Refinement | {icon} {status.replace('_', ' ').title():14s} | {entry_type} -> {model_name}{detail}"
                     rows.append((key, display, status))
                 return rows
 
