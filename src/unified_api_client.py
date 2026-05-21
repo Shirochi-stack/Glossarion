@@ -26197,10 +26197,15 @@ def set_stop_flag(value: bool = True):
         UnifiedClient.set_global_cancellation(global_stop_flag)
     except Exception:
         pass
-    # Also signal the antigravity proxy cancel event so in-flight streams abort
+    # Also signal browser-backed cancel events so in-flight requests abort.
     if value and _antigravity_cancel_stream is not None:
         try:
             _antigravity_cancel_stream()
+        except Exception:
+            pass
+    if value and _authnd_cancel_stream is not None:
+        try:
+            _authnd_cancel_stream()
         except Exception:
             pass
 
@@ -26222,5 +26227,10 @@ def hard_cancel_all():
     if _antigravity_cancel_stream is not None:
         try:
             _antigravity_cancel_stream()
+        except Exception:
+            pass
+    if _authnd_cancel_stream is not None:
+        try:
+            _authnd_cancel_stream()
         except Exception:
             pass

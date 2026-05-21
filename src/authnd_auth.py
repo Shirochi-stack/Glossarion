@@ -12,6 +12,7 @@ import argparse
 import codecs
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -401,6 +402,57 @@ def _get_session() -> requests.Session:
         with _active_sessions_lock:
             _active_sessions.add(session)
     return session
+
+
+def _post_with_cancel(session: requests.Session, *args, **kwargs) -> requests.Response:
+    """Run requests.post in a helper thread so AuthND hard-stop can return immediately.
+
+    Closing a requests.Session from another thread does not reliably interrupt a
+    blocking POST before a response object exists, especially on Windows. This
+    wrapper lets the caller observe _cancel_event and raise while the socket is
+    being torn down in the background.
+    """
+    result_queue: "queue.Queue[Tuple[str, Any]]" = queue.Queue(maxsize=1)
+
+    def _run_post() -> None:
+        try:
+            response = session.post(*args, **kwargs)
+        except BaseException as exc:
+            try:
+                result_queue.put_nowait(("error", exc))
+            except Exception:
+                pass
+        else:
+            try:
+                result_queue.put_nowait(("response", response))
+            except Exception:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+
+    worker = threading.Thread(target=_run_post, name="AuthNDRequest", daemon=True)
+    worker.start()
+    while True:
+        try:
+            kind, value = result_queue.get(timeout=0.1)
+        except queue.Empty:
+            if _is_cancelled():
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                raise RuntimeError("stream cancelled")
+            continue
+        if kind == "error":
+            raise value
+        if _is_cancelled():
+            try:
+                value.close()
+            except Exception:
+                pass
+            raise RuntimeError("stream cancelled")
+        return value
 
 
 def _register_response_closer(closer: Callable[[], None]) -> Callable[[], None]:
@@ -1293,7 +1345,8 @@ def _post_prediction(
         request_timeout = (connect_timeout, timeout)
 
     session = _get_session()
-    response = session.post(
+    response = _post_with_cancel(
+        session,
         url,
         headers=headers,
         json=payload,
