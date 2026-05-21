@@ -511,7 +511,8 @@ class EnhancedTextExtractor:
         """Clean extracted text with CJK awareness"""
         if not preserve_structure and self.detected_language not in ['korean', 'japanese', 'chinese']:
             # Only do aggressive cleanup for non-CJK text
-            text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
+            # Keep source ATX headings h1-h3 so markdown->HTML can restore them.
+            text = re.sub(r'^#{4,}\s*', '', text, flags=re.MULTILINE)
             text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
             text = re.sub(r'\*(.*?)\*', r'\1', text)
             text = re.sub(r'__(.*?)__', r'\1', text)
