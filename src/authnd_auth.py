@@ -39,6 +39,13 @@ _cancel_event = threading.Event()
 _thread_local = threading.local()
 _metadata_cache: Dict[str, Dict[str, str]] = {}
 _metadata_lock = threading.Lock()
+_captcha_mint_lock = threading.Lock()
+_active_helper_processes: set = set()
+_active_helper_lock = threading.Lock()
+_active_sessions: set = set()
+_active_sessions_lock = threading.Lock()
+_active_response_closers: set = set()
+_active_response_lock = threading.Lock()
 
 
 def _debug_enabled() -> bool:
@@ -59,6 +66,30 @@ def _short_error(error: Any, limit: int = 1200) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 3] + "..."
+
+
+def _terminate_process_tree(proc: Any, *, kill: bool = False) -> None:
+    try:
+        if proc is None or proc.poll() is not None:
+            return
+    except Exception:
+        return
+    if os.name == "nt":
+        try:
+            args = ["taskkill", "/T", "/PID", str(proc.pid)]
+            if kill:
+                args.insert(1, "/F")
+            subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+            return
+        except Exception:
+            pass
+    try:
+        if kill:
+            proc.kill()
+        else:
+            proc.terminate()
+    except Exception:
+        pass
 
 
 def _message_summary(messages: List[Dict[str, str]]) -> Dict[str, Any]:
@@ -102,6 +133,24 @@ def _stream_thinking_logging_enabled() -> bool:
 def cancel_stream() -> None:
     """Signal any active AuthND stream/request to stop."""
     _cancel_event.set()
+    with _active_response_lock:
+        closers = list(_active_response_closers)
+    for closer in closers:
+        try:
+            closer()
+        except Exception:
+            pass
+    with _active_sessions_lock:
+        sessions = list(_active_sessions)
+    for session in sessions:
+        try:
+            session.close()
+        except Exception:
+            pass
+    with _active_helper_lock:
+        helpers = list(_active_helper_processes)
+    for proc in helpers:
+        _terminate_process_tree(proc, kill=True)
 
 
 def reset_cancel() -> None:
@@ -118,6 +167,13 @@ def _env_int(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() not in ("0", "false", "no", "off")
 
 
 def _normalize_model(model: str) -> Tuple[str, str, str]:
@@ -340,7 +396,20 @@ def _get_session() -> requests.Session:
         session = requests.Session()
         session.headers.update({"user-agent": USER_AGENT})
         _thread_local.session = session
+        with _active_sessions_lock:
+            _active_sessions.add(session)
     return session
+
+
+def _register_response_closer(closer: Callable[[], None]) -> Callable[[], None]:
+    with _active_response_lock:
+        _active_response_closers.add(closer)
+    return closer
+
+
+def _unregister_response_closer(closer: Callable[[], None]) -> None:
+    with _active_response_lock:
+        _active_response_closers.discard(closer)
 
 
 def _extract_json_from_process(stdout: str) -> Dict[str, Any]:
@@ -391,26 +460,47 @@ def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
     if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
         creationflags = subprocess.CREATE_NO_WINDOW
 
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         cmd,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         env=env,
-        timeout=helper_timeout + 20,
         creationflags=creationflags,
     )
+    with _active_helper_lock:
+        _active_helper_processes.add(proc)
+    deadline = time.time() + helper_timeout + 20
+    stdout = ""
+    stderr = ""
+    try:
+        while proc.poll() is None:
+            if _is_cancelled():
+                _terminate_process_tree(proc, kill=True)
+                raise RuntimeError("stream cancelled")
+            if time.time() >= deadline:
+                _terminate_process_tree(proc, kill=True)
+                raise RuntimeError(f"AuthND token helper timed out after {helper_timeout}s")
+            time.sleep(0.1)
+        try:
+            stdout, stderr = proc.communicate(timeout=1)
+        except Exception:
+            stdout, stderr = "", ""
+    finally:
+        with _active_helper_lock:
+            _active_helper_processes.discard(proc)
     if proc.returncode != 0:
         try:
-            result = _extract_json_from_process(proc.stdout)
+            result = _extract_json_from_process(stdout)
             error = str(result.get("error") or "").strip()
             if error:
                 raise RuntimeError(f"AuthND token helper failed ({proc.returncode}): {error}")
         except RuntimeError as exc:
             if str(exc).startswith("AuthND token helper failed"):
                 raise
-        detail = (proc.stderr or proc.stdout or "").strip()
+        detail = (stderr or stdout or "").strip()
         raise RuntimeError(f"AuthND token helper failed ({proc.returncode}): {detail[-1200:]}")
-    result = _extract_json_from_process(proc.stdout)
+    result = _extract_json_from_process(stdout)
     token = str(result.get("token") or "").strip()
     if not token:
         raise RuntimeError(f"AuthND token helper returned no token: {result}")
@@ -569,6 +659,27 @@ def get_captcha_token(page_url: str, timeout: int = 90) -> str:
     if mode == "inline":
         return _mint_captcha_token_qt(page_url, timeout)
     return _mint_captcha_token_subprocess(page_url, timeout)
+
+
+def _get_captcha_token_for_request(
+    page_url: str,
+    timeout: int = 90,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> str:
+    if not _env_bool("AUTHND_SERIALIZE_CAPTCHA_MINT", True):
+        return get_captcha_token(page_url, timeout)
+
+    waited = False
+    while not _captcha_mint_lock.acquire(timeout=0.1):
+        if _is_cancelled():
+            raise RuntimeError("stream cancelled")
+        if not waited:
+            _log(log_fn, "⏳ AuthND: waiting for browser token slot")
+            waited = True
+    try:
+        return get_captcha_token(page_url, timeout)
+    finally:
+        _captcha_mint_lock.release()
 
 
 def _extract_content_from_obj(obj: Any) -> str:
@@ -1119,6 +1230,7 @@ def _post_prediction(
                 json=payload,
                 timeout=_timeout,
             ) as response:
+                closer = _register_response_closer(response.close)
                 _log(
                     log_fn,
                     f"🔎 AuthND debug response: status={response.status_code}, content_type={response.headers.get('content-type', '')}, transport=httpx",
@@ -1127,16 +1239,20 @@ def _post_prediction(
                 if response.status_code >= 400:
                     exc = _httpx_status_error(response)
                     _log(log_fn, f"⚠️ AuthND HTTP failure: {_short_error(exc)}")
+                    _unregister_response_closer(closer)
                     raise exc
                 _log(log_fn, f"📡 AuthND: Stream opened (status={response.status_code}, transport=httpx)")
-                return _parse_sse_lines(
-                    _iter_utf8_lines(response.iter_raw()),
-                    close_fn=response.close,
-                    log_fn=log_fn,
-                    log_stream=_stream_logging_enabled(),
-                    t_start=request_started,
-                    requested_max_tokens=max_tokens,
-                )
+                try:
+                    return _parse_sse_lines(
+                        _iter_utf8_lines(response.iter_raw()),
+                        close_fn=response.close,
+                        log_fn=log_fn,
+                        log_stream=_stream_logging_enabled(),
+                        t_start=request_started,
+                        requested_max_tokens=max_tokens,
+                    )
+                finally:
+                    _unregister_response_closer(closer)
         except ImportError:
             _log(log_fn, "⚠️ AuthND: httpx not installed, falling back to requests (streaming may be buffered)")
 
@@ -1168,13 +1284,17 @@ def _post_prediction(
     content_type = (response.headers.get("content-type") or "").lower()
     if stream or "text/event-stream" in content_type:
         _log(log_fn, f"📡 AuthND: Stream opened (status={response.status_code})")
-        return _parse_sse_response(
-            response,
-            log_fn=log_fn,
-            log_stream=_stream_logging_enabled(),
-            t_start=request_started,
-            requested_max_tokens=max_tokens,
-        )
+        closer = _register_response_closer(response.close)
+        try:
+            return _parse_sse_response(
+                response,
+                log_fn=log_fn,
+                log_stream=_stream_logging_enabled(),
+                t_start=request_started,
+                requested_max_tokens=max_tokens,
+            )
+        finally:
+            _unregister_response_closer(closer)
     result = _parse_json_response(response, requested_max_tokens=max_tokens)
     _log_non_stream_summary(result, log_fn=log_fn, started_at=request_started)
     return result
@@ -1243,7 +1363,7 @@ def send_chat_completion(
         if _is_cancelled():
             raise RuntimeError("stream cancelled")
         try:
-            captcha_token = get_captcha_token(page_url, token_timeout)
+            captcha_token = _get_captcha_token_for_request(page_url, token_timeout, log_fn=log_fn)
         except RuntimeError as exc:
             _log(
                 log_fn,
