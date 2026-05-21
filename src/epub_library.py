@@ -13485,6 +13485,30 @@ class _EpubSearchThread(QThread):
             self.results_ready.emit(self._search_id, query, matches)
 
 
+class _EpubSearchLineEdit(QLineEdit):
+    """Search input that gives Return/Enter to the EPUB find panel."""
+    enterPressed = Signal()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.enterPressed.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class _EpubSearchResultsList(QListWidget):
+    """Search result list where Return/Enter means activate next result."""
+    enterPressed = Signal()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.enterPressed.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class _EpubLoaderThread(QThread):
     """Load the EPUB in a background thread and write result to cache.
 
@@ -14457,10 +14481,12 @@ class EpubReaderDialog(QDialog):
             key = event.key()
             if key in (Qt.Key_Return, Qt.Key_Enter):
                 if obj is getattr(self, "_search_dialog_query", None):
-                    self._find_next_from_search_dialog()
+                    self._search_enter_next()
                     return True
-                if obj is getattr(self, "_search_dialog_results", None):
-                    self._activate_current_search_result()
+                results = getattr(self, "_search_dialog_results", None)
+                results_viewport = results.viewport() if results is not None else None
+                if obj is results or obj is results_viewport:
+                    self._search_enter_next()
                     return True
         if event.type() == QEvent.Wheel:
             if isinstance(obj, QComboBox):
@@ -15233,7 +15259,10 @@ class EpubReaderDialog(QDialog):
                 dlg.setStyleSheet(search_style)
 
     def _toggle_search(self):
-        self._show_search_dialog()
+        if self._search_ui_is_open():
+            self._close_search()
+        else:
+            self._show_search_dialog()
 
     def _close_search(self):
         self._search_bar.hide()
@@ -15244,6 +15273,7 @@ class EpubReaderDialog(QDialog):
         panel = getattr(self, "_search_panel", None)
         if panel is not None:
             panel.hide()
+        self._restore_attached_search_geometry()
         dlg = getattr(self, "_search_dialog", None)
         if dlg is not None:
             try:
@@ -15339,22 +15369,21 @@ class EpubReaderDialog(QDialog):
         header.addWidget(close_btn)
         layout.addLayout(header)
 
-        query = QLineEdit()
+        query = _EpubSearchLineEdit()
         query.setObjectName("readerSearchQuery")
         query.setPlaceholderText("Search text... (Enter = next)")
         query.setFixedHeight(28)
         query.textChanged.connect(self._populate_search_results)
-        query.returnPressed.connect(self._find_next_from_search_dialog)
-        query.installEventFilter(self)
+        query.enterPressed.connect(self._search_enter_next)
         layout.addWidget(query)
 
-        results = QListWidget()
+        results = _EpubSearchResultsList()
         results.setObjectName("readerSearchResults")
         results.setWordWrap(False)
         results.setUniformItemSizes(True)
         results.setSpacing(0)
         results.setMinimumHeight(80)
-        results.installEventFilter(self)
+        results.enterPressed.connect(self._search_enter_next)
         results.itemActivated.connect(self._activate_search_result)
         results.itemClicked.connect(self._activate_search_result)
         layout.addWidget(results, 1)
@@ -15374,6 +15403,7 @@ class EpubReaderDialog(QDialog):
         _persist_config_via_parent(self)
 
         if self._search_detached:
+            self._restore_attached_search_geometry()
             panel = getattr(self, "_search_panel", None)
             if panel is not None:
                 panel.hide()
@@ -15417,6 +15447,8 @@ class EpubReaderDialog(QDialog):
         if btn is not None:
             btn.setText("Detach")
             btn.setToolTip("Detach search into a floating window")
+        self._expand_for_attached_search()
+        QTimer.singleShot(0, self._expand_for_attached_search)
         self._schedule_search_realign()
 
     def _toggle_search_detached(self):
@@ -15432,6 +15464,55 @@ class EpubReaderDialog(QDialog):
             query.setFocus()
             query.selectAll()
             self._populate_search_results(query.text())
+
+    def _available_reader_screen_geometry(self):
+        try:
+            screen = self.screen() or QApplication.primaryScreen()
+            if screen is not None:
+                return screen.availableGeometry()
+        except Exception:
+            pass
+        return None
+
+    def _expand_for_attached_search(self) -> None:
+        """Grow the reader window so the attached search panel adds space."""
+        if bool(getattr(self, "_search_detached", False)):
+            return
+        panel = getattr(self, "_search_panel", None)
+        if panel is None or not panel.isVisible():
+            return
+        target_panel_w = 360
+        if not bool(getattr(self, "_search_window_expanded", False)):
+            self._search_original_geometry = self.geometry()
+            extra = target_panel_w
+            self._search_window_expanded = True
+        else:
+            return
+        if extra <= 0:
+            return
+        geo = self.geometry()
+        avail = self._available_reader_screen_geometry()
+        if avail is None:
+            self.resize(self.width() + extra, self.height())
+            return
+        right_room = max(0, avail.right() - geo.right())
+        left_room = max(0, geo.left() - avail.left())
+        grow = min(extra, right_room + left_room)
+        if grow <= 0:
+            return
+        shift_left = min(left_room, max(0, grow - right_room))
+        if shift_left:
+            self.move(max(avail.left(), geo.left() - shift_left), geo.top())
+        self.resize(min(avail.width(), self.width() + grow), self.height())
+
+    def _restore_attached_search_geometry(self) -> None:
+        if not bool(getattr(self, "_search_window_expanded", False)):
+            return
+        original = getattr(self, "_search_original_geometry", None)
+        self._search_window_expanded = False
+        self._search_original_geometry = None
+        if isinstance(original, QRect):
+            self.setGeometry(original)
 
     def _search_excerpt(self, plain: str, start: int, end: int, radius: int = 60) -> str:
         return _epub_search_excerpt(plain, start, end, radius=radius)
@@ -15610,6 +15691,41 @@ class EpubReaderDialog(QDialog):
         else:
             count_label.setText(
                 f"{label_text} - showing {end}")
+
+    def _search_ui_is_open(self) -> bool:
+        panel = getattr(self, "_search_panel", None)
+        if panel is not None and panel.isVisible():
+            return True
+        dlg = getattr(self, "_search_dialog", None)
+        return bool(dlg is not None and dlg.isVisible())
+
+    def _focus_is_in_search_ui(self) -> bool:
+        content = getattr(self, "_search_content", None)
+        focus = QApplication.focusWidget()
+        while focus is not None:
+            if focus is content:
+                return True
+            focus = focus.parentWidget()
+        return False
+
+    def _search_enter_next(self) -> bool:
+        query = getattr(self, "_search_dialog_query", None)
+        results = getattr(self, "_search_dialog_results", None)
+        if query is None:
+            return False
+        if not query.text().strip():
+            return False
+        if results is not None and results.count() > 0:
+            row = results.currentRow()
+            row = 0 if row < 0 else (row + 1) % results.count()
+            results.setCurrentRow(row)
+            item = results.item(row)
+            if item is not None:
+                results.scrollToItem(item)
+                self._activate_search_result(item)
+                return True
+        self._find_next_from_search_dialog()
+        return True
 
     def _find_next_from_search_dialog(self):
         query = getattr(self, "_search_dialog_query", None)
@@ -16950,6 +17066,11 @@ class EpubReaderDialog(QDialog):
         """
         key = event.key()
         if key in (Qt.Key_Return, Qt.Key_Enter):
+            if (self._search_ui_is_open()
+                    and self._focus_is_in_search_ui()
+                    and self._search_enter_next()):
+                event.accept()
+                return
             from PySide6.QtWidgets import QLineEdit
             fw = self.focusWidget()
             if isinstance(fw, QLineEdit):
