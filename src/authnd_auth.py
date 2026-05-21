@@ -92,81 +92,6 @@ def _stream_logging_enabled() -> bool:
     return str(value).strip().lower() not in ("0", "false", "no", "off")
 
 
-def _build_common_mojibake_replacements() -> Dict[str, str]:
-    replacements: Dict[str, str] = {}
-    for char in ("“", "”", "‘", "’", "–", "—", "…", "•", "«", "»"):
-        data = char.encode("utf-8")
-        for encoding in ("latin-1", "cp1252"):
-            bad = data.decode(encoding, errors="replace")
-            if bad != char:
-                replacements[bad] = char
-    replacements["Â\xa0"] = " "
-    replacements["Â "] = " "
-    return replacements
-
-
-_COMMON_MOJIBAKE_REPLACEMENTS = _build_common_mojibake_replacements()
-
-
-def _mojibake_score(text: str) -> int:
-    if not text:
-        return 0
-    score = 0
-    score += text.count("\ufffd") * 4
-    score += sum(2 for ch in text if 0x80 <= ord(ch) <= 0x9F)
-    for marker in ("â", "Â", "Ã"):
-        score += text.count(marker)
-    for sequence in ("â€", "â€™", "â€œ", "â€�", "â€“", "â€”", "Â ", "Ã©", "Ã¨", "Ãª"):
-        score += text.count(sequence) * 3
-    return score
-
-
-def _repair_mojibake_text(text: str) -> str:
-    if not isinstance(text, str) or not text:
-        return text
-    if os.getenv("AUTHND_FIX_UNICODE", "1").strip().lower() in ("0", "false", "no", "off"):
-        return text
-
-    best = text
-    best_score = _mojibake_score(text)
-    if best_score <= 0:
-        return text
-
-    mapped = text
-    for bad, good in _COMMON_MOJIBAKE_REPLACEMENTS.items():
-        mapped = mapped.replace(bad, good)
-    mapped_score = _mojibake_score(mapped)
-    if mapped_score < best_score:
-        best = mapped
-        best_score = mapped_score
-
-    # Common failure modes:
-    # - UTF-8 bytes decoded as latin-1: "â\x80\x9c"
-    # - UTF-8 bytes decoded as cp1252: "â€œ"
-    # Run a couple of passes for occasional double-decoding.
-    candidates = {text}
-    current = text
-    for _ in range(2):
-        next_candidates = set()
-        for candidate in candidates:
-            for encoding in ("latin-1", "cp1252"):
-                try:
-                    repaired = candidate.encode(encoding).decode("utf-8")
-                except (UnicodeEncodeError, UnicodeDecodeError):
-                    continue
-                next_candidates.add(repaired)
-                score = _mojibake_score(repaired)
-                if score < best_score:
-                    best = repaired
-                    best_score = score
-        if not next_candidates or current in next_candidates:
-            break
-        candidates = next_candidates
-        current = best
-
-    return best
-
-
 def cancel_stream() -> None:
     """Signal any active AuthND stream/request to stop."""
     _cancel_event.set()
@@ -571,11 +496,11 @@ def _extract_content_from_obj(obj: Any) -> str:
             choice.get("content"),
         ):
             if isinstance(candidate, str) and candidate:
-                return _repair_mojibake_text(candidate)
+                return candidate
     for key in ("output_text", "text", "content", "response"):
         value = obj.get(key)
         if isinstance(value, str) and value:
-            return _repair_mojibake_text(value)
+            return value
     return ""
 
 
@@ -595,8 +520,8 @@ def _iter_utf8_lines(byte_iter: Iterable[Any]) -> Iterable[str]:
     """Yield text lines from raw SSE bytes, decoded explicitly as UTF-8.
 
     This avoids letting requests/httpx infer text encodings from platform or
-    headers, which is how UTF-8 punctuation can turn into mojibake like
-    ``â\x80\x9c`` before JSON parsing sees it.
+    headers, which is how UTF-8 punctuation can be decoded incorrectly before
+    JSON parsing sees it.
     """
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     buffer = ""
@@ -699,7 +624,7 @@ def _parse_sse_lines(
     _log(log_fn, f"📡 AuthND: Stream finished in {time.time() - stream_started_ts:.1f}s")
 
     return {
-        "content": _repair_mojibake_text("".join(parts)),
+        "content": "".join(parts),
         "finish_reason": finish_reason or "stop",
         "usage": usage,
         "raw_response": raw_tail,
@@ -727,7 +652,7 @@ def _parse_json_response(response: requests.Response) -> Dict[str, Any]:
         obj = response.json()
     except ValueError:
         text = response.text or ""
-        return {"content": _repair_mojibake_text(text), "finish_reason": "stop", "usage": None, "raw_response": text}
+        return {"content": text, "finish_reason": "stop", "usage": None, "raw_response": text}
 
     return {
         "content": _extract_content_from_obj(obj),
