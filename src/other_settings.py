@@ -534,6 +534,7 @@ def _add_combobox_arrow(self, combobox):
     """)
     arrow_label.setAlignment(Qt.AlignCenter)
     arrow_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+    combobox._custom_arrow_label = arrow_label
     
     def position_arrow():
         try:
@@ -554,6 +555,46 @@ def _add_combobox_arrow(self, combobox):
     
     # Initial position
     QTimer.singleShot(0, position_arrow)
+
+
+_THINKING_COMBO_STYLE = """
+    QComboBox:disabled {
+        color: #808080;
+        background-color: #242424;
+        border: 1px solid #3a4555;
+    }
+    QComboBox::drop-down:disabled {
+        border-left: 1px solid #3a4555;
+    }
+    QComboBox::down-arrow {
+        image: none;
+        width: 12px;
+        height: 12px;
+        border: none;
+    }
+"""
+
+_THINKING_ENTRY_STYLE = """
+    QLineEdit:disabled {
+        color: #808080;
+        background-color: #242424;
+        border: 1px solid #3a4555;
+    }
+"""
+
+
+def _set_thinking_widget_enabled(widget, enabled: bool):
+    widget.setEnabled(enabled)
+    arrow = getattr(widget, '_custom_arrow_label', None)
+    if arrow is not None:
+        arrow.setStyleSheet(f"""
+            QLabel {{
+                color: {'white' if enabled else '#808080'};
+                background: transparent;
+                font-size: 10pt;
+                border: none;
+            }}
+        """)
 
 
 class HeaderTranslationHelpDialog(QDialog):
@@ -898,7 +939,7 @@ def toggle_thinking_budget(self):
         enabled = bool(self.enable_gemini_thinking_var)
         
         if hasattr(self, 'thinking_budget_entry'):
-            self.thinking_budget_entry.setEnabled(enabled)
+            _set_thinking_widget_enabled(self.thinking_budget_entry, enabled)
             
         if hasattr(self, 'thinking_budget_label'):
             self.thinking_budget_label.setEnabled(enabled)
@@ -911,7 +952,7 @@ def toggle_thinking_budget(self):
             self.thinking_tokens_label.setStyleSheet(f"color: {color};")
             
         if hasattr(self, 'thinking_level_combo'):
-            self.thinking_level_combo.setEnabled(enabled)
+            _set_thinking_widget_enabled(self.thinking_level_combo, enabled)
             
         if hasattr(self, 'thinking_level_label'):
             self.thinking_level_label.setEnabled(enabled)
@@ -1011,7 +1052,7 @@ def toggle_anthropic_thinking_controls(self):
             color = "white" if enabled else "#808080"
             self.anthropic_budget_label.setStyleSheet(f"color: {color};")
         if hasattr(self, 'anthropic_budget_entry'):
-            self.anthropic_budget_entry.setEnabled(enabled and not getattr(self, 'anthropic_force_adaptive_var', False))
+            _set_thinking_widget_enabled(self.anthropic_budget_entry, enabled and not getattr(self, 'anthropic_force_adaptive_var', False))
         if hasattr(self, 'anthropic_budget_tokens_label'):
             self.anthropic_budget_tokens_label.setEnabled(enabled)
             color = "white" if enabled else "#808080"
@@ -1023,7 +1064,7 @@ def toggle_anthropic_thinking_controls(self):
             color = "white" if enabled else "#808080"
             self.anthropic_effort_label.setStyleSheet(f"color: {color};")
         if hasattr(self, 'anthropic_effort_combo'):
-            self.anthropic_effort_combo.setEnabled(enabled)
+            _set_thinking_widget_enabled(self.anthropic_effort_combo, enabled)
         if hasattr(self, 'anthropic_desc_label'):
             self.anthropic_desc_label.setEnabled(enabled)
             color = "gray" if enabled else "#606060"
@@ -1038,7 +1079,7 @@ def toggle_gpt_reasoning_controls(self):
         
         # Tokens entry and label
         if hasattr(self, 'gpt_reasoning_tokens_entry'):
-            self.gpt_reasoning_tokens_entry.setEnabled(enabled)
+            _set_thinking_widget_enabled(self.gpt_reasoning_tokens_entry, enabled)
         if hasattr(self, 'gpt_reasoning_tokens_label'):
             self.gpt_reasoning_tokens_label.setEnabled(enabled)
             color = "white" if enabled else "#808080"
@@ -1046,7 +1087,7 @@ def toggle_gpt_reasoning_controls(self):
             
         # Effort combo and label
         if hasattr(self, 'gpt_effort_combo'):
-            self.gpt_effort_combo.setEnabled(enabled)
+            _set_thinking_widget_enabled(self.gpt_effort_combo, enabled)
         if hasattr(self, 'gpt_effort_label'):
             self.gpt_effort_label.setEnabled(enabled)
             color = "white" if enabled else "#808080"
@@ -1062,7 +1103,7 @@ def toggle_gpt_reasoning_controls(self):
         if hasattr(self, 'gpt_desc_label'):
             self.gpt_desc_label.setEnabled(enabled)
             color = "gray" if enabled else "#606060"
-            self.gpt_desc_label.setStyleSheet(f"color: {color}; font-size: 10pt;")
+            self.gpt_desc_label.setStyleSheet(f"color: {color}; font-size: 9pt;")
     except Exception:
         pass
 
@@ -2989,7 +3030,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(sep_stream)
 
     # GPT-5/OpenAI Reasoning Toggle
-    gpt5_title = QLabel("GPT-5 (OpenRouter/OpenAI-style)")
+    gpt5_title = QLabel("GPT-5 / OpenRouter / NIM Thinking")
     gpt5_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
     section_v.addWidget(gpt5_title)
     
@@ -3018,15 +3059,7 @@ def _create_response_handling_section(self, parent):
     # GPT thinking effort now supports "none" (disable) and "xhigh" in addition to low/medium/high
     self.gpt_effort_combo.addItems(["none", "low", "medium", "high", "xhigh"])
     self.gpt_effort_combo.setFixedWidth(100)
-    # Add custom styling with unicode arrow
-    self.gpt_effort_combo.setStyleSheet("""
-        QComboBox::down-arrow {
-            image: none;
-            width: 12px;
-            height: 12px;
-            border: none;
-        }
-    """)
+    self.gpt_effort_combo.setStyleSheet(_THINKING_COMBO_STYLE)
     self._add_combobox_arrow(self.gpt_effort_combo)
     self._disable_combobox_mousewheel(self.gpt_effort_combo)
     try:
@@ -3054,6 +3087,7 @@ def _create_response_handling_section(self, parent):
     gpt_h2.addWidget(self.gpt_reasoning_tokens_label)
     self.gpt_reasoning_tokens_entry = QLineEdit()
     self.gpt_reasoning_tokens_entry.setFixedWidth(70)
+    self.gpt_reasoning_tokens_entry.setStyleSheet(_THINKING_ENTRY_STYLE)
     try:
         self.gpt_reasoning_tokens_entry.setText(str(self.gpt_reasoning_tokens_var))
     except Exception:
@@ -3106,6 +3140,7 @@ def _create_response_handling_section(self, parent):
     thinking_h_top.addWidget(self.thinking_budget_label)
     self.thinking_budget_entry = QLineEdit()
     self.thinking_budget_entry.setFixedWidth(70)
+    self.thinking_budget_entry.setStyleSheet(_THINKING_ENTRY_STYLE)
     try:
         self.thinking_budget_entry.setText(str(self.thinking_budget_var))
     except Exception:
@@ -3132,14 +3167,7 @@ def _create_response_handling_section(self, parent):
     self.thinking_level_combo = QComboBox()
     self.thinking_level_combo.addItems(["minimal", "low", "medium", "high"])
     self.thinking_level_combo.setFixedWidth(110)
-    self.thinking_level_combo.setStyleSheet("""
-        QComboBox::down-arrow {
-            image: none;
-            width: 12px;
-            height: 12px;
-            border: none;
-        }
-    """)
+    self.thinking_level_combo.setStyleSheet(_THINKING_COMBO_STYLE)
     self._add_combobox_arrow(self.thinking_level_combo)
     self._disable_combobox_mousewheel(self.thinking_level_combo)
     try:
@@ -3237,14 +3265,7 @@ def _create_response_handling_section(self, parent):
     self.deepseek_effort_combo = QComboBox()
     self.deepseek_effort_combo.addItems(["high", "max"])
     self.deepseek_effort_combo.setFixedWidth(90)
-    self.deepseek_effort_combo.setStyleSheet("""
-        QComboBox::down-arrow {
-            image: none;
-            width: 12px;
-            height: 12px;
-            border: none;
-        }
-    """)
+    self.deepseek_effort_combo.setStyleSheet(_THINKING_COMBO_STYLE)
     self._add_combobox_arrow(self.deepseek_effort_combo)
     self._disable_combobox_mousewheel(self.deepseek_effort_combo)
     try:
@@ -3274,7 +3295,7 @@ def _create_response_handling_section(self, parent):
             _color = "" if checked else "color: #808080;"
             self.deepseek_effort_label.setEnabled(checked)
             self.deepseek_effort_label.setStyleSheet(_color)
-            self.deepseek_effort_combo.setEnabled(checked)
+            _set_thinking_widget_enabled(self.deepseek_effort_combo, checked)
         except Exception:
             pass
 
@@ -3284,7 +3305,7 @@ def _create_response_handling_section(self, parent):
     _ds_initially_enabled = bool(getattr(self, 'enable_deepseek_thinking_var', True))
     self.deepseek_effort_label.setEnabled(_ds_initially_enabled)
     self.deepseek_effort_label.setStyleSheet("" if _ds_initially_enabled else "color: #808080;")
-    self.deepseek_effort_combo.setEnabled(_ds_initially_enabled)
+    _set_thinking_widget_enabled(self.deepseek_effort_combo, _ds_initially_enabled)
 
     deepseek_desc = QLabel("Adds thinking:{type:enabled} for DeepSeek OpenAI-compatible requests.\nEnables reasoning_content when supported.\nV4 models (deepseek-v4-flash/pro) also send reasoning_effort (high/max).")
     deepseek_desc.setStyleSheet("color: gray; font-size: 10pt;")
@@ -3321,6 +3342,7 @@ def _create_response_handling_section(self, parent):
     anthropic_h1.addWidget(self.anthropic_budget_label)
     self.anthropic_budget_entry = QLineEdit()
     self.anthropic_budget_entry.setFixedWidth(70)
+    self.anthropic_budget_entry.setStyleSheet(_THINKING_ENTRY_STYLE)
     try:
         self.anthropic_budget_entry.setText(str(getattr(self, 'anthropic_thinking_budget_var', '10000')))
     except Exception:
@@ -3371,7 +3393,7 @@ def _create_response_handling_section(self, parent):
             os.environ['ANTHROPIC_FORCE_ADAPTIVE'] = '1' if checked else '0'
             # Disable budget entry when adaptive is forced (no budget_tokens needed)
             if hasattr(self, 'anthropic_budget_entry'):
-                self.anthropic_budget_entry.setEnabled(not checked and bool(getattr(self, 'enable_anthropic_thinking_var', False)))
+                _set_thinking_widget_enabled(self.anthropic_budget_entry, not checked and bool(getattr(self, 'enable_anthropic_thinking_var', False)))
         except Exception:
             pass
     self.anthropic_force_adaptive_cb.toggled.connect(_on_anthropic_force_adaptive_toggle)
@@ -3383,14 +3405,7 @@ def _create_response_handling_section(self, parent):
     self.anthropic_effort_combo = QComboBox()
     self.anthropic_effort_combo.addItems(["low", "medium", "high", "xhigh", "max"])
     self.anthropic_effort_combo.setFixedWidth(100)
-    self.anthropic_effort_combo.setStyleSheet("""
-        QComboBox::down-arrow {
-            image: none;
-            width: 12px;
-            height: 12px;
-            border: none;
-        }
-    """)
+    self.anthropic_effort_combo.setStyleSheet(_THINKING_COMBO_STYLE)
     self._add_combobox_arrow(self.anthropic_effort_combo)
     self._disable_combobox_mousewheel(self.anthropic_effort_combo)
     try:
