@@ -14450,6 +14450,15 @@ class EpubReaderDialog(QDialog):
     def eventFilter(self, obj, event):
         """Block wheel on combos, handle Ctrl+Wheel for font zoom."""
         from PySide6.QtCore import QEvent
+        if event.type() == QEvent.KeyPress:
+            key = event.key()
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                if obj is getattr(self, "_search_dialog_query", None):
+                    self._find_next_from_search_dialog()
+                    return True
+                if obj is getattr(self, "_search_dialog_results", None):
+                    self._activate_current_search_result()
+                    return True
         if event.type() == QEvent.Wheel:
             if isinstance(obj, QComboBox):
                 return True  # block wheel on all toolbar combos
@@ -15333,6 +15342,7 @@ class EpubReaderDialog(QDialog):
         query.setFixedHeight(28)
         query.textChanged.connect(self._populate_search_results)
         query.returnPressed.connect(self._find_next_from_search_dialog)
+        query.installEventFilter(self)
         layout.addWidget(query)
 
         results = QListWidget()
@@ -15341,6 +15351,7 @@ class EpubReaderDialog(QDialog):
         results.setUniformItemSizes(True)
         results.setSpacing(0)
         results.setMinimumHeight(80)
+        results.installEventFilter(self)
         results.itemActivated.connect(self._activate_search_result)
         results.itemClicked.connect(self._activate_search_result)
         layout.addWidget(results, 1)
@@ -15596,11 +15607,29 @@ class EpubReaderDialog(QDialog):
             next_row = 0
         else:
             next_row = (current + 1) % results.count()
-        results.setCurrentRow(next_row)
-        item = results.item(next_row)
-        if item is not None:
-            results.scrollToItem(item)
-            self._activate_search_result(item)
+        self._activate_search_row(next_row)
+
+    def _activate_current_search_result(self):
+        results = getattr(self, "_search_dialog_results", None)
+        if results is None or results.count() <= 0:
+            return
+        row = results.currentRow()
+        if row < 0:
+            row = 0
+        self._activate_search_row(row)
+
+    def _activate_search_row(self, row: int):
+        results = getattr(self, "_search_dialog_results", None)
+        if results is None or results.count() <= 0:
+            return
+        row = max(0, min(int(row or 0), results.count() - 1))
+        results.setCurrentRow(row)
+        item = results.item(row)
+        if item is None:
+            return
+        results.scrollToItem(item)
+        self._search_dialog_active_row = row
+        self._activate_search_result(item)
 
     def _active_search_browser(self):
         """Return the visible pane that should drive in-chapter search."""
@@ -15612,6 +15641,11 @@ class EpubReaderDialog(QDialog):
         data = item.data(Qt.UserRole) if item is not None else None
         if not isinstance(data, dict):
             return
+        results = getattr(self, "_search_dialog_results", None)
+        if results is not None:
+            row = results.row(item)
+            if row >= 0:
+                self._search_dialog_active_row = row
         text = data.get("text", "")
         chapter_idx = int(data.get("chapter_idx", 0) or 0)
         local_occurrence = int(data.get("local_occurrence", 0) or 0)
