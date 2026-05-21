@@ -24,10 +24,17 @@ if __name__ == '__main__':
         _authnd_sys.argv = [_authnd_sys.argv[0], "--mint-token", _page_url, *_remaining]
         try:
             from authnd_auth import _main as _authnd_main
+            raise SystemExit(_authnd_main())
         except ImportError:
             print('{"token":"","error":"AuthND is not available in this build."}', flush=True)
             raise SystemExit(1)
-        raise SystemExit(_authnd_main())
+        except Exception as _authnd_exc:
+            import json as _authnd_json
+            print(_authnd_json.dumps({
+                "token": "",
+                "error": f"AuthND is not available in this build: {_authnd_exc}",
+            }, separators=(",", ":")), flush=True)
+            raise SystemExit(1)
 
 # Add MSYS2 DLLs to PATH for WeasyPrint (when bundled with PyInstaller)
 import sys

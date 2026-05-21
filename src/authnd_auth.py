@@ -331,6 +331,14 @@ def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
         creationflags=creationflags,
     )
     if proc.returncode != 0:
+        try:
+            result = _extract_json_from_process(proc.stdout)
+            error = str(result.get("error") or "").strip()
+            if error:
+                raise RuntimeError(f"AuthND token helper failed ({proc.returncode}): {error}")
+        except RuntimeError as exc:
+            if str(exc).startswith("AuthND token helper failed"):
+                raise
         detail = (proc.stderr or proc.stdout or "").strip()
         raise RuntimeError(f"AuthND token helper failed ({proc.returncode}): {detail[-1200:]}")
     result = _extract_json_from_process(proc.stdout)
