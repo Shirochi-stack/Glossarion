@@ -13471,13 +13471,16 @@ class _EpubSearchThread(QThread):
                     "chapter_idx": chapter_idx,
                     "local_occurrence": local_occurrence,
                     "global_occurrence": total,
+                    "match_count": 1,
                     "text": query,
                     "title": display_title,
                     "excerpt": _epub_search_excerpt(
-                        plain, match.start(), match.end()),
+                        plain, match.start(), match.end(), radius=34),
                 })
                 total += 1
                 local_occurrence += 1
+        for row in matches:
+            row["total_matches"] = total
         if not self._cancelled:
             self.results_ready.emit(self._search_id, query, matches)
 
@@ -15414,6 +15417,7 @@ class EpubReaderDialog(QDialog):
         if btn is not None:
             btn.setText("Detach")
             btn.setToolTip("Detach search into a floating window")
+        self._schedule_search_realign()
 
     def _toggle_search_detached(self):
         self._set_search_content_parent(
@@ -15549,13 +15553,20 @@ class EpubReaderDialog(QDialog):
         self._search_pending_render_rows = rows
         self._search_pending_render_query = query
         self._search_pending_render_index = 0
-        self._search_dialog_total_matches = len(rows)
+        total = int(rows[0].get("total_matches", len(rows)) or 0) if rows else 0
+        self._search_dialog_total_matches = total
+        self._search_dialog_total_results = len(rows)
         results.clear()
-        total = len(rows)
-        count_label.setText(
-            f"{total} match{'es' if total != 1 else ''}"
-            + (" - rendering..." if total else ""))
-        if total:
+        result_count = len(rows)
+        if total and result_count != total:
+            text = (
+                f"{total} match{'es' if total != 1 else ''} in "
+                f"{result_count} result{'s' if result_count != 1 else ''}"
+            )
+        else:
+            text = f"{total} match{'es' if total != 1 else ''}"
+        count_label.setText(text + (" - rendering..." if result_count else ""))
+        if result_count:
             self._search_render_timer.start()
 
     def _render_search_result_batch(self):
@@ -15573,6 +15584,7 @@ class EpubReaderDialog(QDialog):
                 "chapter_idx": int(row.get("chapter_idx", 0) or 0),
                 "local_occurrence": int(row.get("local_occurrence", 0) or 0),
                 "global_occurrence": int(row.get("global_occurrence", 0) or 0),
+                "match_count": int(row.get("match_count", 1) or 1),
                 "text": row.get("text", query),
             })
             results.addItem(item)
@@ -15584,13 +15596,20 @@ class EpubReaderDialog(QDialog):
             )
         self._search_pending_render_index = end
         total = int(getattr(self, "_search_dialog_total_matches", len(rows)) or 0)
+        result_count = int(getattr(self, "_search_dialog_total_results", len(rows)) or 0)
+        if total and result_count != total:
+            label_text = (
+                f"{total} match{'es' if total != 1 else ''} in "
+                f"{result_count} result{'s' if result_count != 1 else ''}"
+            )
+        else:
+            label_text = f"{total} match{'es' if total != 1 else ''}"
         if end >= len(rows):
             self._search_render_timer.stop()
-            count_label.setText(f"{total} match{'es' if total != 1 else ''}")
+            count_label.setText(label_text)
         else:
             count_label.setText(
-                f"{total} match{'es' if total != 1 else ''} - "
-                f"showing {end}")
+                f"{label_text} - showing {end}")
 
     def _find_next_from_search_dialog(self):
         query = getattr(self, "_search_dialog_query", None)
@@ -15599,15 +15618,20 @@ class EpubReaderDialog(QDialog):
         text = query.text().strip()
         if not text:
             return
-        results = getattr(self, "_search_dialog_results", None)
-        if results is None or results.count() <= 0:
+        targets = self._search_exact_targets()
+        if not targets:
             return
-        current = results.currentRow()
-        if current < 0:
-            next_row = 0
-        else:
-            next_row = (current + 1) % results.count()
-        self._activate_search_row(next_row)
+        active_text = str(getattr(self, "_search_dialog_active_text", "") or "")
+        active_chapter = int(getattr(self, "_search_dialog_active_chapter", -1) or -1)
+        active_occurrence = int(getattr(self, "_search_dialog_active_occurrence", -1) or -1)
+        next_target = targets[0]
+        if active_text == text and active_chapter >= 0 and active_occurrence >= 0:
+            for target in targets:
+                if (target["chapter_idx"], target["local_occurrence"]) > (
+                        active_chapter, active_occurrence):
+                    next_target = target
+                    break
+        self._activate_search_target(next_target)
 
     def _activate_current_search_result(self):
         results = getattr(self, "_search_dialog_results", None)
@@ -15631,11 +15655,143 @@ class EpubReaderDialog(QDialog):
         self._search_dialog_active_row = row
         self._activate_search_result(item)
 
+    def _search_exact_targets(self):
+        results = getattr(self, "_search_dialog_results", None)
+        targets = []
+
+        rows = getattr(self, "_search_pending_render_rows", None)
+        query = getattr(self, "_search_pending_render_query", "") or ""
+        if rows and query == self._active_search_text():
+            source = []
+            for row, data in enumerate(rows):
+                if isinstance(data, dict):
+                    source.append((row, data))
+        elif results is not None:
+            source = []
+            for row in range(results.count()):
+                item = results.item(row)
+                data = item.data(Qt.UserRole) if item is not None else None
+                if isinstance(data, dict):
+                    source.append((row, data))
+        else:
+            source = []
+
+        for row, data in source:
+            if not isinstance(data, dict):
+                continue
+            count = max(1, int(data.get("match_count", 1) or 1))
+            base_local = int(data.get("local_occurrence", 0) or 0)
+            base_global = int(data.get("global_occurrence", 0) or 0)
+            for offset in range(count):
+                targets.append({
+                    "row": row,
+                    "chapter_idx": int(data.get("chapter_idx", 0) or 0),
+                    "local_occurrence": base_local + offset,
+                    "global_occurrence": base_global + offset,
+                    "text": data.get("text", ""),
+                })
+        return targets
+
+    def _activate_search_target(self, target):
+        if not isinstance(target, dict):
+            return
+        results = getattr(self, "_search_dialog_results", None)
+        row = int(target.get("row", 0) or 0)
+        if results is not None and 0 <= row < results.count():
+            results.setCurrentRow(row)
+            item = results.item(row)
+            if item is not None:
+                results.scrollToItem(item)
+        text = target.get("text", "")
+        chapter_idx = int(target.get("chapter_idx", 0) or 0)
+        local_occurrence = int(target.get("local_occurrence", 0) or 0)
+        global_occurrence = int(target.get("global_occurrence", 0) or 0)
+        self._search_dialog_active_text = text
+        self._search_dialog_active_chapter = chapter_idx
+        self._search_dialog_active_occurrence = local_occurrence
+        self._search_dialog_active_row = row
+        if self._layout_mode == LAYOUT_ALL:
+            self._select_text_occurrence(self._reader, text, global_occurrence)
+            return
+        self._select_match_in_chapter(chapter_idx, text, local_occurrence)
+
+    def _active_search_text(self) -> str:
+        query = getattr(self, "_search_dialog_query", None)
+        if query is not None:
+            text = query.text().strip()
+            if text:
+                return text
+        return str(getattr(self, "_search_current_text", "") or "").strip()
+
+    def _schedule_search_realign(self) -> None:
+        """Re-select the active search result after column geometry settles."""
+        if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            return
+        if not self._active_search_text():
+            return
+        generation = int(getattr(self, "_search_realign_generation", 0) or 0) + 1
+        self._search_realign_generation = generation
+
+        def _run(expected=generation):
+            if expected != int(getattr(self, "_search_realign_generation", 0) or 0):
+                return
+            self._realign_active_search_result()
+
+        for delay in (80, 260, 620):
+            QTimer.singleShot(delay, _run)
+
+    def _realign_active_search_result(self) -> None:
+        if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            return
+        text = self._active_search_text()
+        if not text or not self._chapters:
+            return
+        occurrence = int(getattr(self, "_search_match_index", -1) or -1)
+        if occurrence < 0:
+            occurrence = 0
+        count = self._count_chapter_matches(self._current_row, text)
+        if count <= 0:
+            return
+        self._select_match_in_chapter(
+            self._current_row, text, min(occurrence, count - 1))
+
     def _active_search_browser(self):
         """Return the visible pane that should drive in-chapter search."""
         if self._layout_mode == LAYOUT_DOUBLE:
             return self._reader_left
         return self._reader
+
+    def _schedule_search_selection_retry(self, chapter_idx: int, text: str,
+                                         occurrence: int) -> None:
+        """Re-apply a paginated search jump as Chromium's columns settle."""
+        if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+            return
+        if not text:
+            return
+        generation = int(
+            getattr(self, "_search_selection_generation", 0) or 0) + 1
+        self._search_selection_generation = generation
+        chapter_idx = int(chapter_idx)
+        occurrence = max(0, int(occurrence or 0))
+        needle = text.casefold()
+
+        def _retry(expected=generation):
+            if expected != int(
+                    getattr(self, "_search_selection_generation", 0) or 0):
+                return
+            if self._layout_mode not in (LAYOUT_SINGLE, LAYOUT_DOUBLE):
+                return
+            if int(getattr(self, "_current_row", -1) or -1) != chapter_idx:
+                return
+            if int(getattr(self, "_search_match_index", -1) or -1) != occurrence:
+                return
+            if self._active_search_text().casefold() != needle:
+                return
+            self._select_text_occurrence(
+                self._active_search_browser(), text, occurrence)
+
+        for delay in (180, 520, 900):
+            QTimer.singleShot(delay, _retry)
 
     def _activate_search_result(self, item):
         data = item.data(Qt.UserRole) if item is not None else None
@@ -15646,6 +15802,9 @@ class EpubReaderDialog(QDialog):
             row = results.row(item)
             if row >= 0:
                 self._search_dialog_active_row = row
+        self._search_dialog_active_text = data.get("text", "")
+        self._search_dialog_active_chapter = int(data.get("chapter_idx", 0) or 0)
+        self._search_dialog_active_occurrence = int(data.get("local_occurrence", 0) or 0)
         text = data.get("text", "")
         chapter_idx = int(data.get("chapter_idx", 0) or 0)
         local_occurrence = int(data.get("local_occurrence", 0) or 0)
@@ -15653,21 +15812,7 @@ class EpubReaderDialog(QDialog):
         if self._layout_mode == LAYOUT_ALL:
             self._select_text_occurrence(self._reader, text, global_occurrence)
             return
-        self._search_chapter_idx = chapter_idx
-        self._search_last_row = chapter_idx
-        self._search_match_index = local_occurrence
-        self._search_match_count = self._count_chapter_matches(
-            chapter_idx, text)
-        if chapter_idx != self._current_row:
-            self._pending_search_text = text
-            self._pending_search_index = local_occurrence
-            self._toc_list.blockSignals(True)
-            self._toc_list.setCurrentRow(chapter_idx)
-            self._toc_list.blockSignals(False)
-            self._on_chapter_selected(chapter_idx)
-        else:
-            self._select_text_occurrence(
-                self._active_search_browser(), text, local_occurrence)
+        self._select_match_in_chapter(chapter_idx, text, local_occurrence)
 
     def _select_text_occurrence(self, browser, text: str, occurrence: int = 0):
         """Select a concrete text occurrence and align the active layout."""
@@ -15686,6 +15831,7 @@ class EpubReaderDialog(QDialog):
   var visiblePages = {visible_pages};
   var root = document.getElementById('content') || document.body;
   if (!query || !root) return {{found: false}};
+  if (typeof _setupColumns === 'function') _setupColumns();
   var lowerQuery = query.toLocaleLowerCase();
   var ignored = {{script: true, style: true, noscript: true, img: true}};
   var nodeList = [];
@@ -15741,7 +15887,38 @@ class EpubReaderDialog(QDialog):
     r.setEnd(endPoint.node, endPoint.offset);
     return r;
   }}
-  function installFindHighlights(targetPage, columns, colRect, w, gap, span, pageCount) {{
+  function rectForRangeStart(range) {{
+    // WebKit/Chromium column layout can report a stale or viewport-clipped
+    // rect for an off-screen Range. Calibre avoids trusting that directly
+    // and scrolls by the selection boundary. A zero-width marker at the
+    // boundary gives us a stable inline position in the same native scroll
+    // coordinate system used by the paginated reader.
+    var marker = document.createElement('span');
+    marker.setAttribute('data-glossarion-find-anchor', '1');
+    marker.style.cssText = 'display:inline-block;width:0;height:1em;line-height:1em;padding:0;margin:0;border:0;overflow:hidden;';
+    var probe = range.cloneRange();
+    probe.collapse(true);
+    probe.insertNode(marker);
+    var rect = marker.getBoundingClientRect();
+    marker.remove();
+    if (rect && (rect.width || rect.height || rect.left || rect.top)) return rect;
+    var rects = range.getClientRects();
+    for (var i = 0; i < rects.length; i++) {{
+      if (rects[i].width || rects[i].height) return rects[i];
+    }}
+    return range.getBoundingClientRect();
+  }}
+  function inlinePosForRangeStart(range, columns) {{
+    var oldLeft = columns.scrollLeft;
+    columns.scrollLeft = 0;
+    void columns.offsetHeight;
+    var rect = rectForRangeStart(range);
+    var colRect = columns.getBoundingClientRect();
+    var inlinePos = rect.left - colRect.left + columns.scrollLeft;
+    columns.scrollLeft = oldLeft;
+    return inlinePos;
+  }}
+  function installFindHighlights() {{
     clearFindHighlights();
     if (!(window.CSS && CSS.highlights && window.Highlight)) return;
     ensureFindHighlightStyle();
@@ -15749,15 +15926,7 @@ class EpubReaderDialog(QDialog):
     var p = 0;
     while ((p = lowerFlat.indexOf(lowerQuery, p)) !== -1) {{
       var r = rangeForIndex(p);
-      if (r) {{
-        var rr = r.getBoundingClientRect();
-        var inlinePos = rr.left - colRect.left;
-        if (inlinePos >= columns.scrollWidth - span) {{
-          inlinePos = columns.scrollWidth - w + 10;
-        }}
-        var rp = Math.min(pageCount - 1, Math.max(0, Math.floor((inlinePos + gap - 1) / span)));
-        if (rp >= targetPage && rp < targetPage + visiblePages) ranges.push(r);
-      }}
+      if (r) ranges.push(r);
       p += Math.max(1, query.length);
     }}
     var highlight = new Highlight();
@@ -15772,38 +15941,31 @@ class EpubReaderDialog(QDialog):
       if (seen === wanted) {{
         var range = rangeForIndex(pos);
         if (!range) return {{found: false}};
-        var sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-        var rect = range.getBoundingClientRect();
+        installFindHighlights();
         var columns = document.getElementById('columns');
         if (columns) {{
           var w = (typeof _PAGE_W !== 'undefined' && _PAGE_W) ? _PAGE_W : Math.floor(window.innerWidth);
           var gap = (typeof _PAGE_GAP !== 'undefined') ? _PAGE_GAP : 0;
           var span = Math.max(1, w + gap);
-          var oldTransform = columns.style.transform;
-          var oldTransition = columns.style.transition;
-          columns.style.transition = 'none';
-          columns.style.transform = 'translate3d(0, 0, 0)';
-          void columns.offsetHeight;
-          rect = range.getBoundingClientRect();
-          var colRect = columns.getBoundingClientRect();
-          var inlinePos = rect.left - colRect.left;
+          var inlinePos = inlinePosForRangeStart(range, columns);
           var pageCount = Math.max(1, Math.floor((columns.scrollWidth + gap + 1) / span));
           if (inlinePos >= columns.scrollWidth - span) {{
             inlinePos = columns.scrollWidth - w + 10;
           }}
           var targetPage = Math.min(pageCount - 1, Math.max(0, Math.floor((inlinePos + gap - 1) / span)));
-          var highlightPage = visiblePages > 1 ? Math.max(0, targetPage - (targetPage % visiblePages)) : targetPage;
-          installFindHighlights(highlightPage, columns, colRect, w, gap, span, pageCount);
-          columns.style.transform = oldTransform;
-          columns.style.transition = oldTransition || 'none';
+          var sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
           return {{
             found: true,
             page: targetPage,
             pageCount: pageCount
           }};
         }}
+        var sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        var rect = range.getBoundingClientRect();
         window.scrollBy({{ top: rect.top - Math.floor(window.innerHeight * 0.25), left: 0, behavior: 'smooth' }});
         return {{found: true}};
       }}
@@ -15875,6 +16037,8 @@ class EpubReaderDialog(QDialog):
         else:
             self._select_text_occurrence(
                 self._active_search_browser(), text, occurrence)
+            self._schedule_search_selection_retry(
+                chapter_idx, text, occurrence)
 
     def _on_search_next(self):
         """Enter pressed: find next match across all chapters."""
@@ -15989,6 +16153,7 @@ class EpubReaderDialog(QDialog):
                     self._js_scroll_to(self._reader_left, self._current_page, animate=False)
                     self._js_scroll_to(self._reader_right, self._current_page + 1, animate=False)
             self._update_nav_buttons()
+            self._schedule_search_realign()
 
         # Give the browser a tick to process the splitter-driven resize
         # before we query the new scrollWidth-based page count.
@@ -16405,7 +16570,7 @@ class EpubReaderDialog(QDialog):
         return max(0, min(page, count - 1))
 
     def _js_scroll_to(self, browser, page_num, animate: bool = True):
-        """Navigate to a CSS column page by translating the #columns wrapper.
+        """Navigate to a CSS column page using native inline scrolling.
 
         When *animate* is False, the CSS transition is suppressed for the
         jump (used right after a load so the page doesn't visibly slide in
@@ -16419,26 +16584,30 @@ class EpubReaderDialog(QDialog):
                 js = (
                     "var c = document.getElementById('columns');"
                     "if (c) {"
+                    "  if (typeof _setupColumns==='function') _setupColumns();"
                     "  var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:Math.floor(window.innerWidth);"
                     "  var gap = (typeof _PAGE_GAP!=='undefined')?_PAGE_GAP:0;"
                     "  var span = Math.max(1, w + gap);"
                     # Record the target page so _setupColumns can re-anchor
                     # the transform on the next viewport-width change.
                     f"  _CURRENT_PAGE = {page_num};"
-                    "  c.style.transition = 'transform 0.3s ease';"
-                    f"  c.style.transform = 'translate3d(' + Math.round(-{page_num} * span) + 'px, 0, 0)';"
+                    "  c.style.transition = 'none';"
+                    "  c.style.transform = 'none';"
+                    f"  c.scrollLeft = Math.round({page_num} * span);"
                     "}"
                 )
             else:
                 js = (
                     "var c = document.getElementById('columns');"
                     "if (c) {"
+                    "  if (typeof _setupColumns==='function') _setupColumns();"
                     "  var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:Math.floor(window.innerWidth);"
                     "  var gap = (typeof _PAGE_GAP!=='undefined')?_PAGE_GAP:0;"
                     "  var span = Math.max(1, w + gap);"
                     f"  _CURRENT_PAGE = {page_num};"
                     "  c.style.transition = 'none';"
-                    f"  c.style.transform = 'translate3d(' + Math.round(-{page_num} * span) + 'px, 0, 0)';"
+                    "  c.style.transform = 'none';"
+                    f"  c.scrollLeft = Math.round({page_num} * span);"
                     "  void c.offsetHeight;"  # force reflow so the jump is committed w/o transition
                     "}"
                 )
@@ -16454,6 +16623,7 @@ class EpubReaderDialog(QDialog):
         if _HAS_WEBENGINE:
             js = (
                 "var c = document.getElementById('columns');"
+                "if (typeof _setupColumns==='function') _setupColumns();"
                 "var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:window.innerWidth;"
                 "var gap = (typeof _PAGE_GAP!=='undefined')?_PAGE_GAP:0;"
                 "var span = Math.max(1, w + gap);"
@@ -16510,6 +16680,8 @@ class EpubReaderDialog(QDialog):
         self._pending_search_index = 0
         self._search_match_index = occurrence
         self._select_text_occurrence(browser, text, occurrence)
+        self._schedule_search_selection_retry(
+            self._current_row, text, occurrence)
 
     def _finalize_single_page(self):
         """After HTML load: get page count and scroll to current page."""
@@ -16620,6 +16792,7 @@ class EpubReaderDialog(QDialog):
                     # Reveal after scroll
                     QTimer.singleShot(30, lambda: self._reader.page().runJavaScript(_reveal_js))
                     self._update_nav_buttons()
+                    self._schedule_search_realign()
                 self._js_page_count(self._reader, on_count)
             else:
                 def on_count(count):
@@ -16632,6 +16805,7 @@ class EpubReaderDialog(QDialog):
                     QTimer.singleShot(30, lambda: [br.page().runJavaScript(_reveal_js)
                         for br in (self._reader_left, self._reader_right)])
                     self._update_nav_buttons()
+                    self._schedule_search_realign()
                 self._js_page_count(self._reader_left, on_count)
         QTimer.singleShot(delay, _on_resize_recount)
 
@@ -17372,10 +17546,7 @@ class EpubReaderDialog(QDialog):
                 f"-webkit-text-size-adjust: 100%; }}"
                 f"#columns {{ column-fill: auto; column-gap: 1px; "
                 f"transition: none; opacity: 0; "
-                # will-change + backface-visibility stabilize the compositor
-                # layer so text isn't re-rasterized at fractional offsets.
-                f"will-change: transform; backface-visibility: hidden; "
-                f"transform: translate3d(0, 0, 0); "
+                f"overflow: hidden; width: 100vw; transform: none; "
                 f"font-family: {_font_stack}; "
                 f"font-size: {_font_px}px; line-height: {self._line_spacing}; }}"
                 f"#content {{ padding: 0 40px; overflow-wrap: anywhere; word-break: normal; }}"
@@ -17423,12 +17594,15 @@ class EpubReaderDialog(QDialog):
                 f"  c.style.columnWidth = _PAGE_W + 'px';"
                 f"  c.style.columnGap = _PAGE_GAP + 'px';"
                 f"  c.style.height = (window.innerHeight - 20) + 'px';"
-                # Re-apply the current page offset to the new column width
-                # atomically (with transition suppressed) so the user never
-                # sees a stale/mis-aligned frame.
+                # Re-apply the current page offset to the new column width in
+                # the browser's native inline scroll coordinates. Calibre's
+                # paged mode does the same kind of native column scrolling;
+                # keeping search and paging in this coordinate system lets
+                # Ctrl+F jump to exact matches instead of only the spine item.
                 f"  var _t = c.style.transition;"
                 f"  c.style.transition = 'none';"
-                f"  c.style.transform = 'translate3d(' + Math.round(-_CURRENT_PAGE * (_PAGE_W + _PAGE_GAP)) + 'px, 0, 0)';"
+                f"  c.style.transform = 'none';"
+                f"  c.scrollLeft = Math.round(_CURRENT_PAGE * (_PAGE_W + _PAGE_GAP));"
                 f"  void c.offsetHeight;"
                 f"  c.style.transition = _t || 'none';"
                 f"  /* Clean up whitespace between consecutive full-page images */"
