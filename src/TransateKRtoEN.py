@@ -6014,7 +6014,7 @@ class BatchTranslationProcessor:
                 except Exception:
                     pass
 
-                if finish_reason in ["length", "max_tokens"] or truncation_exhausted or char_ratio_exhausted:
+                if finish_reason in ["length", "max_tokens", "max_length", "stop_sequence_limit", "truncated", "incomplete"] or truncation_exhausted or char_ratio_exhausted:
                     print(f"    ⚠️ Chunk {chunk_idx}/{total_chunks} response was TRUNCATED!")
                     # Track truncation status
                     is_truncated = True
@@ -7256,7 +7256,7 @@ class BatchTranslationProcessor:
                         break
                 
                 # Check for truncation (use preserved finish reason so retries/merges don't lose the flag)
-                merged_truncated = merged_finish_reason in ["length", "max_tokens"] or truncation_exhausted or char_ratio_exhausted
+                merged_truncated = merged_finish_reason in ["length", "max_tokens", "max_length", "stop_sequence_limit", "truncated", "incomplete"] or truncation_exhausted or char_ratio_exhausted
                 if merged_truncated:
                     print(f"   ⚠️ Merged response was TRUNCATED!")
                 
@@ -19678,7 +19678,7 @@ def main(log_callback=None, stop_callback=None):
                         else:
                             # Override finish_reason to trigger retry logic WITHIN translate_with_retry
                             # This will be caught by the internal retry loop if RETRY_TRUNCATED is enabled
-                            if finish_reason != "length" and finish_reason != "max_tokens" and finish_reason not in ["content_filter", "prohibited_content"]:
+                            if finish_reason not in ["length", "max_tokens", "max_length", "stop_sequence_limit", "truncated", "incomplete", "content_filter", "prohibited_content"]:
                                 retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
                                 if not retry_truncated_enabled:
                                     break
@@ -20343,7 +20343,7 @@ def main(log_callback=None, stop_callback=None):
             # Truncation / partial-result gate — check BEFORE writing to disk.
             # When "Save interrupted chapters" is OFF we must NOT create a file.
             # ------------------------------------------------------------------
-            is_truncated_result = chapter_truncated or finish_reason in ["length", "max_tokens"]
+            is_truncated_result = chapter_truncated or finish_reason in ["length", "max_tokens", "max_length", "stop_sequence_limit", "truncated", "incomplete"]
             if is_truncated_result or is_partial_result:
                 save_partial_results = (
                     os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1'
@@ -20413,7 +20413,7 @@ def main(log_callback=None, stop_callback=None):
                     chapter_status = "qa_failed"
                     failure_reason = get_failure_reason(cleaned)
                     print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
-                elif finish_reason in ["length", "max_tokens"]:
+                elif finish_reason in ["length", "max_tokens", "max_length", "stop_sequence_limit", "truncated", "incomplete"]:
                     chapter_status = "qa_failed"
                     qa_issues = ["TRUNCATED"]
                     print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
@@ -20456,7 +20456,7 @@ def main(log_callback=None, stop_callback=None):
                     chapter_status = "qa_failed"
                     failure_reason = get_failure_reason(cleaned)
                     print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
-                elif finish_reason in ["length", "max_tokens"]:
+                elif finish_reason in ["length", "max_tokens", "max_length", "stop_sequence_limit", "truncated", "incomplete"]:
                     chapter_status = "qa_failed"
                     qa_issues = ["TRUNCATED"]
                     print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")

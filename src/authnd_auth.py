@@ -516,6 +516,46 @@ def _extract_finish_reason(obj: Any) -> Optional[str]:
     return str(reason) if reason else None
 
 
+def _usage_completion_tokens(usage: Optional[Dict[str, Any]]) -> Optional[int]:
+    if not isinstance(usage, dict):
+        return None
+    for key in ("completion_tokens", "output_tokens", "generated_tokens"):
+        value = usage.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
+
+
+def _infer_finish_reason(
+    *,
+    explicit_finish_reason: Optional[str],
+    content: str,
+    usage: Optional[Dict[str, Any]],
+    requested_max_tokens: Optional[int],
+    saw_done: bool,
+    saw_event: bool,
+    stream: bool,
+) -> Tuple[str, bool, str]:
+    if explicit_finish_reason:
+        return explicit_finish_reason, True, "provider"
+
+    completion_tokens = _usage_completion_tokens(usage)
+    if requested_max_tokens and completion_tokens is not None and completion_tokens >= int(requested_max_tokens):
+        return "length", False, "completion_tokens_reached_max_tokens"
+
+    if not (content or "").strip():
+        if saw_done or saw_event or not stream:
+            return "content_filter", False, "empty_content_without_finish_reason"
+        return "incomplete", False, "no_content_no_done"
+
+    if stream and not saw_done:
+        return "incomplete", False, "stream_ended_without_done"
+
+    return "stop", False, "done_without_finish_reason"
+
+
 def _iter_utf8_lines(byte_iter: Iterable[Any]) -> Iterable[str]:
     """Yield text lines from raw SSE bytes, decoded explicitly as UTF-8.
 
@@ -555,6 +595,7 @@ def _parse_sse_lines(
     log_fn: Optional[Callable[[str], None]] = None,
     log_stream: bool = True,
     t_start: Optional[float] = None,
+    requested_max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     parts: List[str] = []
     finish_reason: Optional[str] = None
@@ -563,6 +604,8 @@ def _parse_sse_lines(
     text_log_buf: List[str] = []
     first_text_ts: Optional[float] = None
     stream_started_ts = t_start or time.time()
+    saw_done = False
+    saw_event = False
 
     def _emit_stream_text(fragment: str) -> None:
         if not log_fn or not log_stream or not fragment:
@@ -595,12 +638,14 @@ def _parse_sse_lines(
             line = line[5:].strip()
         if not line or line == "[DONE]":
             if line == "[DONE]":
+                saw_done = True
                 break
             continue
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
+        saw_event = True
         raw_tail.append(obj)
         if len(raw_tail) > 5:
             raw_tail.pop(0)
@@ -623,9 +668,22 @@ def _parse_sse_lines(
             log_fn(remainder)
     _log(log_fn, f"📡 AuthND: Stream finished in {time.time() - stream_started_ts:.1f}s")
 
+    content = "".join(parts)
+    final_finish_reason, finish_reason_explicit, finish_reason_inference = _infer_finish_reason(
+        explicit_finish_reason=finish_reason,
+        content=content,
+        usage=usage,
+        requested_max_tokens=requested_max_tokens,
+        saw_done=saw_done,
+        saw_event=saw_event,
+        stream=True,
+    )
+
     return {
-        "content": "".join(parts),
-        "finish_reason": finish_reason or "stop",
+        "content": content,
+        "finish_reason": final_finish_reason,
+        "finish_reason_explicit": finish_reason_explicit,
+        "finish_reason_inference": finish_reason_inference,
         "usage": usage,
         "raw_response": raw_tail,
     }
@@ -637,6 +695,7 @@ def _parse_sse_response(
     log_fn: Optional[Callable[[str], None]] = None,
     log_stream: bool = True,
     t_start: Optional[float] = None,
+    requested_max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     return _parse_sse_lines(
         _iter_utf8_lines(response.iter_content(chunk_size=1)),
@@ -644,20 +703,52 @@ def _parse_sse_response(
         log_fn=log_fn,
         log_stream=log_stream,
         t_start=t_start,
+        requested_max_tokens=requested_max_tokens,
     )
 
 
-def _parse_json_response(response: requests.Response) -> Dict[str, Any]:
+def _parse_json_response(response: requests.Response, *, requested_max_tokens: Optional[int] = None) -> Dict[str, Any]:
     try:
         obj = response.json()
     except ValueError:
         text = response.text or ""
-        return {"content": text, "finish_reason": "stop", "usage": None, "raw_response": text}
+        final_finish_reason, finish_reason_explicit, finish_reason_inference = _infer_finish_reason(
+            explicit_finish_reason=None,
+            content=text,
+            usage=None,
+            requested_max_tokens=requested_max_tokens,
+            saw_done=True,
+            saw_event=bool(text),
+            stream=False,
+        )
+        return {
+            "content": text,
+            "finish_reason": final_finish_reason,
+            "finish_reason_explicit": finish_reason_explicit,
+            "finish_reason_inference": finish_reason_inference,
+            "usage": None,
+            "raw_response": text,
+        }
+
+    finish_reason = _extract_finish_reason(obj)
+    content = _extract_content_from_obj(obj)
+    usage = obj.get("usage") if isinstance(obj, dict) else None
+    final_finish_reason, finish_reason_explicit, finish_reason_inference = _infer_finish_reason(
+        explicit_finish_reason=finish_reason,
+        content=content,
+        usage=usage,
+        requested_max_tokens=requested_max_tokens,
+        saw_done=True,
+        saw_event=True,
+        stream=False,
+    )
 
     return {
-        "content": _extract_content_from_obj(obj),
-        "finish_reason": _extract_finish_reason(obj) or "stop",
-        "usage": obj.get("usage") if isinstance(obj, dict) else None,
+        "content": content,
+        "finish_reason": final_finish_reason,
+        "finish_reason_explicit": finish_reason_explicit,
+        "finish_reason_inference": finish_reason_inference,
+        "usage": usage,
         "raw_response": obj,
     }
 
@@ -808,6 +899,7 @@ def _post_prediction(
                     log_fn=log_fn,
                     log_stream=_stream_logging_enabled(),
                     t_start=request_started,
+                    requested_max_tokens=max_tokens,
                 )
         except ImportError:
             _log(log_fn, "⚠️ AuthND: httpx not installed, falling back to requests (streaming may be buffered)")
@@ -845,8 +937,9 @@ def _post_prediction(
             log_fn=log_fn,
             log_stream=_stream_logging_enabled(),
             t_start=request_started,
+            requested_max_tokens=max_tokens,
         )
-    return _parse_json_response(response)
+    return _parse_json_response(response, requested_max_tokens=max_tokens)
 
 
 def send_chat_completion(

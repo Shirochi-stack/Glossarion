@@ -10484,6 +10484,7 @@ class UnifiedClient:
         if isinstance(response, UnifiedResponse):
             # Check if content is a string (even if empty)
             if response.content is not None and isinstance(response.content, str):
+                finish_reason = self._normalize_finish_reason(response.finish_reason) or 'stop'
                 # Always return the content from UnifiedResponse
                 if len(response.content) > 0:
                     # Extract chapter info for better logging
@@ -10491,12 +10492,11 @@ class UnifiedClient:
                     log_label = self._extract_chapter_label(chapter_info) if chapter_info else None
                     
                     if log_label and log_label != "request":
-                        print(f"   ✅ Received {log_label} response ({len(response.content):,} chars)")
+                        print(f"   ✅ Received {log_label} response ({len(response.content):,} chars, finish_reason: {finish_reason})")
                     else:
-                        print(f"   ✅ Received response ({len(response.content):,} chars)")
+                        print(f"   ✅ Received response ({len(response.content):,} chars, finish_reason: {finish_reason})")
                 else:
                     self._debug_log(f"   ⚠️ Model returned no text (finish_reason: {response.finish_reason})")
-                finish_reason = self._normalize_finish_reason(response.finish_reason) or 'stop'
                 return response.content, finish_reason
             elif response.error_details:
                 self._debug_log(f"   ⚠️ UnifiedResponse has error_details: {response.error_details}")
@@ -22855,6 +22855,7 @@ class UnifiedClient:
                         pass
 
                 anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
+                authnd_use_stream = self._streaming_enabled()
                 try:
                     tls = self._get_thread_local_client()
                     _label = getattr(tls, 'current_request_label', None) or 'request'
@@ -22878,11 +22879,15 @@ class UnifiedClient:
                     frequency_penalty=anti_dupe_params.get("frequency_penalty"),
                     presence_penalty=anti_dupe_params.get("presence_penalty"),
                     progress_label=authnd_progress_label,
+                    stream=authnd_use_stream,
                 )
 
                 content = result.get("content", "")
-                finish_reason = result.get("finish_reason", "stop")
+                finish_reason = result.get("finish_reason") or "incomplete"
                 usage = result.get("usage")
+                if not result.get("finish_reason_explicit"):
+                    inference = result.get("finish_reason_inference") or "inferred"
+                    print(f"⚠️ AuthND: NVIDIA did not provide a finish_reason; inferred {finish_reason} ({inference})")
 
                 return UnifiedResponse(
                     content=content,
