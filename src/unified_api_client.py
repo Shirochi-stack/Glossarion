@@ -2853,10 +2853,13 @@ class UnifiedClient:
         try:
             tls = self._get_thread_local_client()
             if hasattr(tls, 'max_retries_override') and tls.max_retries_override is not None:
-                return int(tls.max_retries_override)
+                return max(1, int(tls.max_retries_override))
         except Exception:
             pass
-        return int(os.getenv('MAX_RETRIES', '3'))
+        try:
+            return max(1, int(os.getenv('MAX_RETRIES', '7')))
+        except Exception:
+            return 7
 
     # -------------------------------------------------------------------------
     # Model-capability helpers
@@ -3513,7 +3516,14 @@ class UnifiedClient:
         if self._multi_key_mode:
             # Safety: if multi-key mode is enabled but no pool is available, skip rotation
             if not self._api_key_pool or not getattr(self._api_key_pool, 'keys', None):
+                scope = getattr(self, '_active_key_pool_scope', None)
+                if scope:
+                    raise UnifiedClientError(f"{scope} pool is active but has no keys", error_type="no_keys")
                 return
+            scope = getattr(self, '_active_key_pool_scope', None)
+            expected_pool = getattr(self, '_active_key_pool_expected_pool', None)
+            if scope and expected_pool is not None and self._api_key_pool is not expected_pool:
+                raise UnifiedClientError(f"{scope} pool boundary violation: refusing to use another key pool", error_type="no_keys")
             # Check if we need to rotate
             should_rotate = False
             
@@ -3631,6 +3641,9 @@ class UnifiedClient:
                     return
                 else:
                     # No pool keys available (all disabled/cooldown) — fall back to main GUI key
+                    scope = getattr(self, '_active_key_pool_scope', None)
+                    if scope:
+                        raise UnifiedClientError(f"{scope} pool has no available keys; refusing fallback to another pool", error_type="no_keys")
                     if hasattr(self, 'original_api_key') and self.original_api_key:
                         print(f"[Thread-{thread_name}] ⚠️ All pool keys unavailable, falling back to main GUI key")
                         tls.api_key = self.original_api_key
@@ -3779,16 +3792,19 @@ class UnifiedClient:
                     if i % 10 == 0 and i > 0:
                         print(f"[THREAD-{thread_name}] Still waiting... {wait_time - i}s remaining")
                 
-                # Clear expired entries before next attempt
-                if hasattr(self.__class__, '_rate_limit_cache') and self.__class__._rate_limit_cache:
-                    with self.__class__._rate_limit_cache_lock:
-                        self.__class__._rate_limit_cache.clear_expired()
+                # Clear expired entries on the active pool only.
+                pool_cache = self._get_active_pool_rate_limit_cache()
+                if pool_cache:
+                    pool_cache.clear_expired()
                 print(f"[THREAD-{thread_name}] 🔄 Cooldown wait: Cache cleared, attempting next key assignment...")
                 time.sleep(0.1)  # Brief pause after cooldown wait for retry stability
             
             retry_count += 1
         
         # If we've exhausted all retries, fall back to main GUI key
+        scope = getattr(self, '_active_key_pool_scope', None)
+        if scope:
+            raise UnifiedClientError(f"{scope} pool exhausted; refusing fallback to another pool", error_type="no_keys")
         if hasattr(self, 'original_api_key') and self.original_api_key:
             print(f"[THREAD-{thread_name}] ⚠️ All pool keys exhausted after {max_retries} retries, falling back to main GUI key")
             self.api_key = self.original_api_key
@@ -3887,12 +3903,10 @@ class UnifiedClient:
         if wait_time <= 0:
             # Keys should be available now
             with self.__class__._pool_lock:
+                pool_cache = self._get_active_pool_rate_limit_cache()
                 for i, key in enumerate(self._api_key_pool.keys):
                     key_id = f"Key#{i+1} ({key.model})"
-                    is_limited = False
-                    with self.__class__._rate_limit_cache_lock:
-                        if self.__class__._rate_limit_cache:
-                            is_limited = self.__class__._rate_limit_cache.is_rate_limited(key_id)
+                    is_limited = bool(pool_cache and pool_cache.is_rate_limited(key_id))
                     if key.is_available() and not is_limited:
                         return (key, i)
         
@@ -3911,12 +3925,10 @@ class UnifiedClient:
             
             # Check every second if a key became available early
             with self.__class__._pool_lock:
+                pool_cache = self._get_active_pool_rate_limit_cache()
                 for i, key in enumerate(self._api_key_pool.keys):
                     key_id = f"Key#{i+1} ({key.model})"
-                    is_limited = False
-                    with self.__class__._rate_limit_cache_lock:
-                        if self.__class__._rate_limit_cache:
-                            is_limited = self.__class__._rate_limit_cache.is_rate_limited(key_id)
+                    is_limited = bool(pool_cache and pool_cache.is_rate_limited(key_id))
                     if key.is_available() and not is_limited:
                         print(f"[Thread-{thread_name}] Key became available early: {key_id}")
                         print(f"[Thread-{thread_name}] 🔄 Early key availability: Key ready for immediate use...")
@@ -3931,20 +3943,18 @@ class UnifiedClient:
                 remaining = wait_time - elapsed
                 print(f"[Thread-{thread_name}] Still waiting... {remaining}s remaining")
         
-        # Clear expired entries from cache
-        with self.__class__._rate_limit_cache_lock:
-            if self.__class__._rate_limit_cache:
-                self.__class__._rate_limit_cache.clear_expired()
+        # Clear expired entries from the active pool's cache only.
+        pool_cache = self._get_active_pool_rate_limit_cache()
+        if pool_cache:
+            pool_cache.clear_expired()
         
         # Final attempt after wait
         with self.__class__._pool_lock:
             # Try to find an available key
+            pool_cache = self._get_active_pool_rate_limit_cache()
             for i, key in enumerate(self._api_key_pool.keys):
                 key_id = f"Key#{i+1} ({key.model})"
-                is_limited = False
-                with self.__class__._rate_limit_cache_lock:
-                    if self.__class__._rate_limit_cache:
-                        is_limited = self.__class__._rate_limit_cache.is_rate_limited(key_id)
+                is_limited = bool(pool_cache and pool_cache.is_rate_limited(key_id))
                 if key.is_available() and not is_limited:
                     return (key, i)
             
@@ -4016,10 +4026,7 @@ class UnifiedClient:
             
             print(f"[THREAD-{thread_name}] 🕐 Marking {current_key_identifier} for cooldown ({cooldown}s)")
             
-            # Add to rate limit cache with microsecond lock
-            if hasattr(self.__class__, '_rate_limit_cache') and self.__class__._rate_limit_cache:
-                with self.__class__._rate_limit_cache_lock:
-                    self.__class__._rate_limit_cache.add_rate_limit(current_key_identifier, cooldown)
+            # APIKeyPool.mark_key_error already updates this pool's cooldown cache.
         
         # Clear thread-local state to force new key assignment
         tls.initialized = False
@@ -4061,20 +4068,27 @@ class UnifiedClient:
             raise UnifiedClientError(f"Failed to rotate key after rate limit: {e}", error_type="no_keys")
     
     # Helper methods that need to check instance state
+    def _get_active_key_pool(self):
+        """Return the pool currently bound to this client instance."""
+        return getattr(self, '_api_key_pool', None)
+
+    def _get_active_pool_rate_limit_cache(self):
+        """Return the active pool's own cooldown cache, never another pool's cache."""
+        pool = self._get_active_key_pool()
+        return getattr(pool, '_rate_limit_cache', None) if pool is not None else None
+
     def _count_available_keys(self) -> int:
         """Count how many keys are currently available"""
-        if not self._multi_key_mode or not self.__class__._api_key_pool:
+        pool = self._get_active_key_pool()
+        if not self._multi_key_mode or not pool:
             return 0
         
         count = 0
-        for i, key in enumerate(self.__class__._api_key_pool.keys):
+        pool_cache = self._get_active_pool_rate_limit_cache()
+        for i, key in enumerate(pool.keys):
             if key.enabled:
                 key_id = f"Key#{i+1} ({key.model})"
-                # Check both rate limit cache AND key's own cooling status
-                is_rate_limited = False
-                with self.__class__._rate_limit_cache_lock:
-                    if self.__class__._rate_limit_cache:
-                        is_rate_limited = self.__class__._rate_limit_cache.is_rate_limited(key_id)
+                is_rate_limited = bool(pool_cache and pool_cache.is_rate_limited(key_id))
                 is_cooling = key.is_cooling_down  # Also check the key's own status
                 
                 if not is_rate_limited and not is_cooling:
@@ -4099,9 +4113,10 @@ class UnifiedClient:
         if key_index is None:
             key_index = getattr(self, 'current_key_index', None)
         
-        if key_index is not None and self.__class__._api_key_pool:
+        pool = self._get_active_key_pool()
+        if key_index is not None and pool:
             # Use the pool's thread-safe method
-            self.__class__._api_key_pool.mark_key_success(key_index)
+            pool.mark_key_success(key_index)
     
     def _mark_key_error(self, error_code: int = None):
         """Mark current key as having an error and apply cooldown if rate limited (thread-safe)"""
@@ -4121,24 +4136,10 @@ class UnifiedClient:
         if key_index is None:
             key_index = getattr(self, 'current_key_index', None)
         
-        if key_index is not None and self.__class__._api_key_pool:
+        pool = self._get_active_key_pool()
+        if key_index is not None and pool:
             # Use the pool's thread-safe method
-            self.__class__._api_key_pool.mark_key_error(key_index, error_code)
-            
-            # If it's a rate limit error, also add to rate limit cache
-            if error_code == 429:
-                # Get key identifier safely
-                with self.__class__._pool_lock:
-                    if key_index < len(self.__class__._api_key_pool.keys):
-                        key = self.__class__._api_key_pool.keys[key_index]
-                        key_id = f"Key#{key_index+1} ({key.model})"
-                        cooldown = getattr(key, 'cooldown', 60)
-                        
-                        # Add to rate limit cache with microsecond lock
-                        if hasattr(self.__class__, '_rate_limit_cache'):
-                            with self.__class__._rate_limit_cache_lock:
-                                if self.__class__._rate_limit_cache:
-                                    self.__class__._rate_limit_cache.add_rate_limit(key_id, cooldown)
+            pool.mark_key_error(key_index, error_code)
     
     @staticmethod
     def _should_override_gemma_to_custom_endpoint(model: str) -> bool:
@@ -4559,11 +4560,9 @@ class UnifiedClient:
                 attempts += 1
                 continue
             
-            # Check if this key is rate limited
-            is_limited = False
-            with self.__class__._rate_limit_cache_lock:
-                if self.__class__._rate_limit_cache:
-                    is_limited = self.__class__._rate_limit_cache.is_rate_limited(potential_key_id)
+            # Check this key against the active pool's own cooldown cache.
+            pool_cache = self._get_active_pool_rate_limit_cache()
+            is_limited = bool(pool_cache and pool_cache.is_rate_limited(potential_key_id))
             if not is_limited:
                 # This key is available, use it
                 self._apply_key_change(key_info, old_key_identifier)
@@ -4589,9 +4588,9 @@ class UnifiedClient:
                 print(f"[DEBUG] Still waiting... {wait_time - i}s remaining")
         
         # Clear expired entries and try again
-        with self.__class__._rate_limit_cache_lock:
-            if self.__class__._rate_limit_cache:
-                self.__class__._rate_limit_cache.clear_expired()
+        pool_cache = self._get_active_pool_rate_limit_cache()
+        if pool_cache:
+            pool_cache.clear_expired()
         
         # Try one more time to find an available key
         attempts = 0
@@ -4599,10 +4598,8 @@ class UnifiedClient:
             key_info = self._get_next_available_key()
             if key_info:
                 potential_key_id = f"Key#{key_info[1]+1} ({key_info[0].model})"
-                is_limited = False
-                with self.__class__._rate_limit_cache_lock:
-                    if self.__class__._rate_limit_cache:
-                        is_limited = self.__class__._rate_limit_cache.is_rate_limited(potential_key_id)
+                pool_cache = self._get_active_pool_rate_limit_cache()
+                is_limited = bool(pool_cache and pool_cache.is_rate_limited(potential_key_id))
                 if not is_limited:
                     self._apply_key_change(key_info, old_key_identifier)
                     return True
@@ -5462,21 +5459,19 @@ class UnifiedClient:
             self._cancelled = True
             return 0  # Return immediately if cancelled
             
-        if not self._multi_key_mode or not self.__class__._api_key_pool:
+        pool = self._get_active_key_pool()
+        if not self._multi_key_mode or not pool:
             return 60  # Default cooldown
             
         min_cooldown = float('inf')
         now = time.time()
+        pool_cache = self._get_active_pool_rate_limit_cache()
         
-        for i, key in enumerate(self.__class__._api_key_pool.keys):
+        for i, key in enumerate(pool.keys):
             if key.enabled:
                 key_id = f"Key#{i+1} ({key.model})"
                 
-                # Check rate limit cache with microsecond lock
-                cache_cooldown = 0
-                with self.__class__._rate_limit_cache_lock:
-                    if self.__class__._rate_limit_cache:
-                        cache_cooldown = self.__class__._rate_limit_cache.get_remaining_cooldown(key_id)
+                cache_cooldown = pool_cache.get_remaining_cooldown(key_id) if pool_cache else 0
                 if cache_cooldown > 0:
                     min_cooldown = min(min_cooldown, cache_cooldown)
                 
@@ -5523,10 +5518,14 @@ class UnifiedClient:
             'multi_key_mode': self._multi_key_mode,
             'had_instance_pool': '_api_key_pool' in self.__dict__,
             'instance_pool': self.__dict__.get('_api_key_pool', None),
+            'active_key_pool_scope': getattr(self, '_active_key_pool_scope', None),
+            'active_key_pool_expected_pool': getattr(self, '_active_key_pool_expected_pool', None),
         }
 
         self._multi_key_mode = True
         self._api_key_pool = pool
+        self._active_key_pool_scope = key_prefix
+        self._active_key_pool_expected_pool = pool
         try:
             pool.release_thread_assignment()
         except Exception:
@@ -5535,11 +5534,7 @@ class UnifiedClient:
         try:
             key_info = self._get_next_available_key()
             if not key_info:
-                if state['had_instance_pool']:
-                    self._api_key_pool = state['instance_pool']
-                elif '_api_key_pool' in self.__dict__:
-                    del self._api_key_pool
-                self._multi_key_mode = state['multi_key_mode']
+                self._restore_dedicated_key_pool_override(state)
                 return None
             key_entry, key_idx = key_info
             for _attr in ('_original_client_type', '_custom_prefix_route'):
@@ -5585,11 +5580,7 @@ class UnifiedClient:
             return state
         except Exception as exc:
             print(f"[{label.upper()} KEYS] Failed to get {label} key from pool: {exc}")
-            if state['had_instance_pool']:
-                self._api_key_pool = state['instance_pool']
-            elif '_api_key_pool' in self.__dict__:
-                del self._api_key_pool
-            self._multi_key_mode = state['multi_key_mode']
+            self._restore_dedicated_key_pool_override(state)
             return None
 
     def _apply_truncation_retry_key_pool_override(self):
@@ -5622,11 +5613,16 @@ class UnifiedClient:
                 'TruncationRetry',
                 'TruncationRetryKey',
             )
+            if not state:
+                print("[TRUNCATION RETRY KEYS] No available truncation retry key; using current request pool")
+                return None, truncation_pool
             if state and truncation_pool and not getattr(self.__class__, '_truncation_retry_pool_logged', False):
                 print(f"[TRUNCATION RETRY KEYS] Using truncation retry key pool ({len(truncation_pool.keys)} keys)")
                 self.__class__._truncation_retry_pool_logged = True
             return state, truncation_pool
         except Exception as exc:
+            if isinstance(exc, UnifiedClientError):
+                raise
             print(f"[TRUNCATION RETRY KEYS] Failed to apply truncation retry key override: {exc}")
             return None, None
 
@@ -5642,6 +5638,14 @@ class UnifiedClient:
                 self._api_key_pool = state.get('instance_pool')
             elif '_api_key_pool' in self.__dict__:
                 del self._api_key_pool
+            if state.get('active_key_pool_scope') is not None:
+                self._active_key_pool_scope = state.get('active_key_pool_scope')
+            elif hasattr(self, '_active_key_pool_scope'):
+                delattr(self, '_active_key_pool_scope')
+            if state.get('active_key_pool_expected_pool') is not None:
+                self._active_key_pool_expected_pool = state.get('active_key_pool_expected_pool')
+            elif hasattr(self, '_active_key_pool_expected_pool'):
+                delattr(self, '_active_key_pool_expected_pool')
             self._per_key_api_delay = None
             self._skip_next_ensure_thread = False
             self._individual_endpoint_applied = False
@@ -5768,46 +5772,54 @@ class UnifiedClient:
             if context_norm in ('book_title', 'metadata', 'batch_toc_translation', 'batch_header_translation') and os.getenv('USE_METADATA_KEYS', '0') == '1':
                 try:
                     metadata_keys = json.loads(os.getenv('METADATA_API_KEYS', '[]') or '[]')
-                    if metadata_keys:
-                        with self.__class__._metadata_pool_lock:
-                            if self.__class__._metadata_key_pool is None:
-                                self.__class__._metadata_key_pool = APIKeyPool()
-                            self.__class__._metadata_key_pool.load_from_list(metadata_keys)
-                            metadata_pool = self.__class__._metadata_key_pool
-                        pool_state = self._apply_dedicated_key_pool_override(
-                            metadata_pool, metadata_keys, 'Metadata', 'MetadataKey'
-                        )
-                        if pool_state:
-                            _qa_scan_overridden = True
-                            _original_api_key = pool_state['api_key']
-                            _original_model = pool_state['model']
-                            _original_multi_key_mode = pool_state['multi_key_mode']
-                            _had_instance_pool = pool_state['had_instance_pool']
-                            _original_instance_pool = pool_state['instance_pool']
+                    if not metadata_keys:
+                        raise UnifiedClientError("Metadata key pool is enabled for this context but has no keys; refusing fallback to another pool", error_type="no_keys")
+                    with self.__class__._metadata_pool_lock:
+                        if self.__class__._metadata_key_pool is None:
+                            self.__class__._metadata_key_pool = APIKeyPool()
+                        self.__class__._metadata_key_pool.load_from_list(metadata_keys)
+                        metadata_pool = self.__class__._metadata_key_pool
+                    pool_state = self._apply_dedicated_key_pool_override(
+                        metadata_pool, metadata_keys, 'Metadata', 'MetadataKey'
+                    )
+                    if not pool_state:
+                        raise UnifiedClientError("Metadata key pool is enabled but has no available keys; refusing fallback to another pool", error_type="no_keys")
+                    _qa_scan_overridden = True
+                    _original_api_key = pool_state['api_key']
+                    _original_model = pool_state['model']
+                    _original_multi_key_mode = pool_state['multi_key_mode']
+                    _had_instance_pool = pool_state['had_instance_pool']
+                    _original_instance_pool = pool_state['instance_pool']
                 except Exception as e:
+                    if isinstance(e, UnifiedClientError):
+                        raise
                     print(f"[METADATA KEYS] Failed to apply override: {e}")
             
             # AI TRUNCATION DETECTION KEY OVERRIDE: qa_truncation can use its own pool before normal fallback.
             if context_norm == 'qa_truncation' and os.getenv('USE_AI_TRUNCATION_DETECTION_KEYS', '0') == '1':
                 try:
                     ai_keys = json.loads(os.getenv('AI_TRUNCATION_DETECTION_API_KEYS', '[]') or '[]')
-                    if ai_keys:
-                        with self.__class__._ai_truncation_detection_pool_lock:
-                            if self.__class__._ai_truncation_detection_key_pool is None:
-                                self.__class__._ai_truncation_detection_key_pool = APIKeyPool()
-                            self.__class__._ai_truncation_detection_key_pool.load_from_list(ai_keys)
-                            ai_pool = self.__class__._ai_truncation_detection_key_pool
-                        pool_state = self._apply_dedicated_key_pool_override(
-                            ai_pool, ai_keys, 'AITruncationDetection', 'AITruncationDetectionKey'
-                        )
-                        if pool_state:
-                            _qa_scan_overridden = True
-                            _original_api_key = pool_state['api_key']
-                            _original_model = pool_state['model']
-                            _original_multi_key_mode = pool_state['multi_key_mode']
-                            _had_instance_pool = pool_state['had_instance_pool']
-                            _original_instance_pool = pool_state['instance_pool']
+                    if not ai_keys:
+                        raise UnifiedClientError("AI truncation detection key pool is enabled for this context but has no keys; refusing fallback to another pool", error_type="no_keys")
+                    with self.__class__._ai_truncation_detection_pool_lock:
+                        if self.__class__._ai_truncation_detection_key_pool is None:
+                            self.__class__._ai_truncation_detection_key_pool = APIKeyPool()
+                        self.__class__._ai_truncation_detection_key_pool.load_from_list(ai_keys)
+                        ai_pool = self.__class__._ai_truncation_detection_key_pool
+                    pool_state = self._apply_dedicated_key_pool_override(
+                        ai_pool, ai_keys, 'AITruncationDetection', 'AITruncationDetectionKey'
+                    )
+                    if not pool_state:
+                        raise UnifiedClientError("AI truncation detection key pool is enabled but has no available keys; refusing fallback to another pool", error_type="no_keys")
+                    _qa_scan_overridden = True
+                    _original_api_key = pool_state['api_key']
+                    _original_model = pool_state['model']
+                    _original_multi_key_mode = pool_state['multi_key_mode']
+                    _had_instance_pool = pool_state['had_instance_pool']
+                    _original_instance_pool = pool_state['instance_pool']
                 except Exception as e:
+                    if isinstance(e, UnifiedClientError):
+                        raise
                     print(f"[AI TRUNCATION DETECTION KEYS] Failed to apply override: {e}")
 
             # VISION KEY OVERRIDE: shared pool for vision OCR/image scans.
@@ -5848,6 +5860,8 @@ class UnifiedClient:
                             )
                             if not _has_enabled:
                                 qa_scan_pool = None
+                        if use_qa_scan_keys and not (qa_scan_pool and getattr(qa_scan_pool, 'keys', [])):
+                            raise UnifiedClientError("Vision key pool is enabled for this context but has no enabled keys; refusing fallback to another pool", error_type="no_keys")
                         
                         if qa_scan_pool and getattr(qa_scan_pool, 'keys', []):
                             _original_api_key = self.api_key
@@ -5858,6 +5872,8 @@ class UnifiedClient:
                             
                             self._multi_key_mode = True
                             self._api_key_pool = qa_scan_pool
+                            self._active_key_pool_scope = 'VisionKey'
+                            self._active_key_pool_expected_pool = qa_scan_pool
                             
                             try:
                                 qa_scan_pool.release_thread_assignment()
@@ -5924,6 +5940,8 @@ class UnifiedClient:
                                     if not getattr(self.__class__, '_qa_scan_pool_logged', False):
                                         print(f"[VISION KEYS] 🔑 Using Vision key pool ({len(qa_scan_pool.keys)} keys)")
                                         self.__class__._qa_scan_pool_logged = True
+                                else:
+                                    raise UnifiedClientError("Vision key pool has no available keys; refusing fallback to another pool", error_type="no_keys")
                             except Exception as e:
                                 if 'cancel' not in str(e).lower() and not self._is_stop_requested():
                                     print(f"[VISION KEYS] ⚠️ Failed to get Vision key from pool: {e}")
@@ -5932,7 +5950,17 @@ class UnifiedClient:
                                 elif '_api_key_pool' in self.__dict__:
                                     del self._api_key_pool
                                 self._multi_key_mode = _original_multi_key_mode
+                                for _attr in ('_active_key_pool_scope', '_active_key_pool_expected_pool'):
+                                    if hasattr(self, _attr):
+                                        try:
+                                            delattr(self, _attr)
+                                        except Exception:
+                                            pass
+                                if isinstance(e, UnifiedClientError):
+                                    raise
                 except Exception as e:
+                    if isinstance(e, UnifiedClientError):
+                        raise
                     print(f"[VISION KEYS] ⚠️ Failed to apply Vision key override: {e}")
             
             # IMAGE GEN / EDIT KEY OVERRIDE: dedicated pool for image output and manga custom-image-edit requests.
@@ -5961,6 +5989,8 @@ class UnifiedClient:
                             'ImageGenEdit',
                             'ImageGenEditKey',
                         )
+                        if not _dedicated_pool_state:
+                            raise UnifiedClientError("Image gen/edit key pool is enabled for this context but has no available keys; refusing fallback to another pool", error_type="no_keys")
                         if _dedicated_pool_state:
                             _inpainter_overridden = True
                             _original_api_key = _dedicated_pool_state['api_key']
@@ -5972,6 +6002,8 @@ class UnifiedClient:
                                 print(f"[IMAGE GEN/EDIT KEYS] Using image gen/edit key pool ({len(inpainter_pool.keys)} keys)")
                                 self.__class__._inpainter_pool_logged = True
                 except Exception as e:
+                    if isinstance(e, UnifiedClientError):
+                        raise
                     print(f"[IMAGE GEN/EDIT KEYS] Failed to apply image gen/edit key override: {e}")
 
             # GLOSSARY REFINEMENT KEY OVERRIDE: refinement keys are preferred over
@@ -6001,6 +6033,8 @@ class UnifiedClient:
                             'GlossaryRefinement',
                             'GlossaryRefinementKey',
                         )
+                        if not _dedicated_pool_state:
+                            raise UnifiedClientError("Glossary refinement key pool is enabled for this context but has no available keys; refusing fallback to another pool", error_type="no_keys")
                         if _dedicated_pool_state:
                             _glossary_refinement_overridden = True
                             _original_api_key = _dedicated_pool_state['api_key']
@@ -6012,6 +6046,8 @@ class UnifiedClient:
                                 print(f"[GLOSSARY REFINEMENT KEYS] Using glossary refinement key pool ({len(refinement_pool.keys)} keys)")
                                 self.__class__._glossary_refinement_pool_logged = True
                 except Exception as e:
+                    if isinstance(e, UnifiedClientError):
+                        raise
                     print(f"[GLOSSARY REFINEMENT KEYS] Failed to apply glossary refinement key override: {e}")
 
             # GLOSSARY KEY OVERRIDE: When context is 'glossary' and glossary keys are enabled,
@@ -6040,13 +6076,15 @@ class UnifiedClient:
                                     pass
                         
                         if glossary_pool and getattr(glossary_pool, 'keys', []):
-                            # Check if at least one glossary key is actually enabled
-                            # If all are disabled, skip the override and use the regular pool
+                            # Check if at least one glossary key is actually enabled.
+                            # If all are disabled, hard-fail instead of leaking to another pool.
                             _has_enabled = any(
                                 getattr(k, 'enabled', True) for k in glossary_pool.keys
                             )
                             if not _has_enabled:
-                                glossary_pool = None  # Fall through to regular multi-key/single-key path
+                                glossary_pool = None
+                        if use_glossary_keys and not (glossary_pool and getattr(glossary_pool, 'keys', [])):
+                            raise UnifiedClientError("Glossary key pool is enabled for this context but has no enabled keys; refusing fallback to another pool", error_type="no_keys")
                         
                         if glossary_pool and getattr(glossary_pool, 'keys', []):
                             # Save original state
@@ -6064,6 +6102,8 @@ class UnifiedClient:
                             # causing it to save glossary keys as multi_api_keys in config.
                             self._multi_key_mode = True
                             self._api_key_pool = glossary_pool
+                            self._active_key_pool_scope = 'GlossaryKey'
+                            self._active_key_pool_expected_pool = glossary_pool
                             
                             # Assign first available glossary key to this thread
                             # Release any previous assignment so the pool rotates properly
@@ -6113,6 +6153,8 @@ class UnifiedClient:
                                     if not getattr(self.__class__, '_glossary_pool_logged', False):
                                         print(f"[GLOSSARY KEYS] 🔑 Using glossary key pool ({len(glossary_pool.keys)} keys)")
                                         self.__class__._glossary_pool_logged = True
+                                else:
+                                    raise UnifiedClientError("Glossary key pool has no available keys; refusing fallback to another pool", error_type="no_keys")
                             except Exception as e:
                                 print(f"[GLOSSARY KEYS] ⚠️ Failed to get glossary key from pool: {e}")
                                 # Restore state on failure
@@ -6121,7 +6163,17 @@ class UnifiedClient:
                                 elif '_api_key_pool' in self.__dict__:
                                     del self._api_key_pool
                                 self._multi_key_mode = _original_multi_key_mode
+                                for _attr in ('_active_key_pool_scope', '_active_key_pool_expected_pool'):
+                                    if hasattr(self, _attr):
+                                        try:
+                                            delattr(self, _attr)
+                                        except Exception:
+                                            pass
+                                if isinstance(e, UnifiedClientError):
+                                    raise
                 except Exception as e:
+                    if isinstance(e, UnifiedClientError):
+                        raise
                     print(f"[GLOSSARY KEYS] ⚠️ Failed to apply glossary key override: {e}")
             
             if self._multi_key_mode:
@@ -6225,6 +6277,12 @@ class UnifiedClient:
                     self._api_key_pool = _original_instance_pool
                 elif '_api_key_pool' in self.__dict__:
                     del self._api_key_pool
+                for _attr in ('_active_key_pool_scope', '_active_key_pool_expected_pool'):
+                    if hasattr(self, _attr):
+                        try:
+                            delattr(self, _attr)
+                        except Exception:
+                            pass
                 # Clear per-key delay so it doesn't leak into subsequent non-pool calls
                 self._per_key_api_delay = None
                 self._skip_next_ensure_thread = False
@@ -8323,7 +8381,8 @@ class UnifiedClient:
                 # Check if it's a rate limit error - handle according to mode
                 error_str = str(e).lower()
                 if self._is_rate_limit_error(e):
-                    # In multi-key mode, always re-raise to let _send_core handle key rotation
+                    # In multi-key mode, always re-raise to let _send_core handle key rotation.
+                    # Dedicated pools rotate inside their own active pool.
                     if self._multi_key_mode:
                         print(f"🔄 Rate limit error - multi-key mode active, re-raising for key rotation")
                         raise
@@ -8637,7 +8696,12 @@ class UnifiedClient:
                     print(f"❌ Content prohibited in unexpected error: {error_str[:200]}")
                     
                     # If we're in multi-key mode and haven't tried the main key yet
-                    if (self._multi_key_mode and not main_key_attempted and getattr(self, 'original_api_key', None) and getattr(self, 'original_model', None)):
+                    if (
+                        self._multi_key_mode
+                        and not main_key_attempted
+                        and getattr(self, 'original_api_key', None)
+                        and getattr(self, 'original_model', None)
+                    ):
                         main_key_attempted = True
                         try:
                             retry_res = self._retry_with_main_key(messages, temperature, max_tokens, max_completion_tokens, context)
@@ -9610,18 +9674,17 @@ class UnifiedClient:
         # Load glossary keys from environment
         glossary_keys_json = os.getenv('GLOSSARY_REFINEMENT_API_KEYS', '[]') if use_refinement_keys else os.getenv('GLOSSARY_API_KEYS', '[]')
         pool_label = "glossary refinement" if use_refinement_keys else "glossary"
-        if use_refinement_keys and glossary_keys_json == '[]' and use_glossary_keys:
-            glossary_keys_json = os.getenv('GLOSSARY_API_KEYS', '[]')
-            pool_label = "glossary"
         if glossary_keys_json == '[]':
             print(f"[GLOSSARY DIRECT] No {pool_label} keys configured")
             del tls.tried_glossary_direct_per_request[request_id]
-            return None
+            raise UnifiedClientError(f"{pool_label.title()} key pool is enabled but has no keys; refusing fallback to another pool", error_type="no_keys")
         
         try:
             configured_glossary_keys = json.loads(glossary_keys_json)
             # Filter to only keys with valid data
             configured_glossary_keys = [gk for gk in configured_glossary_keys if gk.get('api_key') and gk.get('model')]
+            if not configured_glossary_keys:
+                raise UnifiedClientError(f"{pool_label.title()} key pool is enabled but has no usable keys; refusing fallback to another pool", error_type="no_keys")
             print(f"[GLOSSARY DIRECT] 🔑 Loaded {len(configured_glossary_keys)} {pool_label} key{'s' if len(configured_glossary_keys) != 1 else ''}")
             
             # Try each glossary key (all of them, no arbitrary limit)
@@ -9750,8 +9813,8 @@ class UnifiedClient:
             return None
             
         except UnifiedClientError as ue:
-            # Propagate cancellation up to the caller
-            if ue.error_type == "cancelled":
+            # Propagate cancellation and pool-boundary failures up to the caller.
+            if ue.error_type in ("cancelled", "no_keys"):
                 raise ue
             print(f"[GLOSSARY DIRECT] UnifiedClientError: {ue}")
             return None
@@ -15481,6 +15544,15 @@ class UnifiedClient:
         This is used for proper routing and detection.
         """
         client_type = getattr(self, 'client_type', 'openai')
+        model_lower = (getattr(self, 'model', '') or '').strip().lower()
+        if model_lower.startswith('vertex/') or '@' in model_lower:
+            return 'vertex_model_garden'
+        try:
+            for prefix, provider in sorted(self.MODEL_PROVIDERS.items(), key=lambda item: len(item[0]), reverse=True):
+                if model_lower.startswith(str(prefix).lower()):
+                    return provider
+        except Exception:
+            pass
         try:
             tls = self._get_thread_local_client()
             endpoint = getattr(tls, 'azure_endpoint', None)
@@ -15503,9 +15575,6 @@ class UnifiedClient:
         # the same UnifiedClient instance from Gemini/OpenAI mode to Vertex AI;
         # in that case a stale _original_client_type='gemini' must not reroute
         # vertex/gemini-* requests to the native AI Studio endpoint.
-        model_lower = (getattr(self, 'model', '') or '').strip().lower()
-        if model_lower.startswith('vertex/') or '@' in model_lower:
-            return 'vertex_model_garden'
         if client_type == 'openai' and getattr(self, '_original_client_type', None):
             return self._original_client_type
         return client_type

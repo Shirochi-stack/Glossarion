@@ -2424,13 +2424,6 @@ class MultiAPIKeyDialog(QDialog):
                 # Status column is index 3 (after Output Limit)
                 item.setText(3, "⏳ Testing...")
 
-        # Ensure UnifiedClient uses the same shared pool instance
-        try:
-            from unified_api_client import UnifiedClient
-            UnifiedClient._api_key_pool = self.key_pool
-        except Exception:
-            pass
-
         # Submit all tests to executor in parallel
         for i, key_data in enumerate(fallback_keys):
             self._test_single_fallback_key(key_data, i)
@@ -2833,13 +2826,6 @@ class MultiAPIKeyDialog(QDialog):
                 item.setText(3, "⏳ Testing...")
 
         key_data = fallback_keys[index]
-
-        # Ensure UnifiedClient uses the same shared pool instance
-        try:
-            from unified_api_client import UnifiedClient
-            UnifiedClient._api_key_pool = self.key_pool
-        except Exception:
-            pass
 
         # Run test on main thread using QTimer (non-blocking)
         QTimer.singleShot(100, lambda: self._test_single_fallback_key(key_data, index))
@@ -4856,7 +4842,7 @@ class MultiAPIKeyDialog(QDialog):
         desc_label = QLabel(
                 "Configure dedicated keys for glossary-context API calls.\n"
                 "These keys will be used exclusively when the translation context is 'Glossary'.\n"
-                "If no glossary keys are configured or the pool is disabled, the main key pool is used instead.")
+                "When enabled, this pool is isolated and will not fall back to the main key pool.")
         desc_label.setStyleSheet("color: gray;")
         desc_label.setWordWrap(True)
         glossary_frame_layout.addWidget(desc_label)
@@ -5373,7 +5359,7 @@ class MultiAPIKeyDialog(QDialog):
 
         try:
             from unified_api_client import UnifiedClient
-            UnifiedClient._api_key_pool = self.key_pool
+            UnifiedClient.set_in_memory_glossary_keys(glossary_keys)
         except Exception:
             pass
 
@@ -5394,7 +5380,7 @@ class MultiAPIKeyDialog(QDialog):
 
         try:
             from unified_api_client import UnifiedClient
-            UnifiedClient._api_key_pool = self.key_pool
+            UnifiedClient.set_in_memory_glossary_keys(glossary_keys)
         except Exception:
             pass
 
@@ -7556,9 +7542,7 @@ class MultiAPIKeyDialog(QDialog):
                 'keys_envs': ['GLOSSARY_REFINEMENT_API_KEYS'],
                 'description': (
                     "Configure dedicated keys for glossary_refinement API calls.\n"
-                    "When enabled, this pool is tried before the regular Glossary Keys pool.\n"
-                    "If no Glossary Refinement keys are configured or the pool is disabled, "
-                    "the regular Glossary Keys pool is used instead."
+                    "When enabled, this pool is isolated and will not fall back to the regular Glossary Keys pool."
                 ),
             },
             'qa_scan': {
@@ -7572,7 +7556,7 @@ class MultiAPIKeyDialog(QDialog):
                 'keys_envs': ['VISION_API_KEYS', 'QA_SCAN_API_KEYS'],
                 'description': (
                     "Configure dedicated keys for vision OCR and image scan calls.\n"
-                    "If no Vision keys are configured or the pool is disabled, the main key pool is used instead."
+                    "When enabled, this pool is isolated and will not fall back to the main key pool."
                 ),
             },
             'metadata': {
@@ -7586,7 +7570,7 @@ class MultiAPIKeyDialog(QDialog):
                 'keys_envs': ['METADATA_API_KEYS'],
                 'description': (
                     "Configure dedicated keys for book title, metadata, TOC, and header translation.\n"
-                    "If this pool is disabled or empty, the normal main/multi-key path is used."
+                    "When enabled, this pool is isolated and will not fall back to the main key pool."
                 ),
             },
             'ai_truncation_detection': {
@@ -7600,7 +7584,7 @@ class MultiAPIKeyDialog(QDialog):
                 'keys_envs': ['AI_TRUNCATION_DETECTION_API_KEYS'],
                 'description': (
                     "Configure dedicated QA scan keys for qa_truncation AI checks.\n"
-                    "If this pool is disabled or empty, the normal main/multi-key path is used."
+                    "When enabled, this pool is isolated and will not fall back to the main key pool."
                 ),
             },
             'truncation_retry': {
@@ -7615,8 +7599,7 @@ class MultiAPIKeyDialog(QDialog):
                 'description': (
                     "Configure dedicated keys used only when RETRY_TRUNCATED schedules a retry.\n"
                     "These keys are separate from Vision/QA truncation scan keys.\n"
-                    "If no Truncation Retry keys are configured or the pool is disabled, "
-                    "retries use the current request key pool."
+                    "When enabled, this pool is isolated and will not fall back to the current request key pool."
                 ),
             },
             'inpainter': {
@@ -7630,8 +7613,7 @@ class MultiAPIKeyDialog(QDialog):
                 'keys_envs': ['INPAINTER_API_KEYS'],
                 'description': (
                     "Configure dedicated keys for image output and custom image-edit calls.\n"
-                    "If no Image Gen / Edit keys are configured or the pool is disabled, "
-                    "the main key pool/current provider is used instead."
+                    "When enabled, this pool is isolated and will not fall back to the main key pool/current provider."
                 ),
             },
         }

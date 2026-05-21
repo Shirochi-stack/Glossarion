@@ -3743,6 +3743,17 @@ Recent translations to summarize:
             return int(current_max_tokens)
         return val
 
+    def _resolve_max_retries(self) -> int:
+        """Return the live Other Settings retry count, falling back to config/default."""
+        raw = getattr(self, 'max_retries_var', None)
+        if raw is None:
+            raw = self.config.get('max_retries', os.environ.get('MAX_RETRIES', '7'))
+        try:
+            value = int(str(raw).strip())
+        except Exception:
+            value = 7
+        return max(1, value)
+
     def _setup_gui(self):
         """Initialize all GUI components"""
         # Create central widget and main layout
@@ -15645,6 +15656,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         # This ensures user changes via the button are reflected in image translation
         current_max_tokens = self.max_output_tokens
         resolved_max_retry_tokens = self._resolve_max_retry_tokens(current_max_tokens)
+        resolved_max_retries = self._resolve_max_retries()
         
         auto_inject_book_title = bool(getattr(self, 'auto_inject_book_title_var', self.config.get('auto_inject_book_title', False)))
         auto_glossary_mode = self.config.get('auto_glossary_mode', None)
@@ -15823,7 +15835,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'HTTP_POOL_CONNECTIONS': str(self.config.get('http_pool_connections', os.environ.get('HTTP_POOL_CONNECTIONS', '20'))),
             'HTTP_POOL_MAXSIZE': str(self.config.get('http_pool_maxsize', os.environ.get('HTTP_POOL_MAXSIZE', '50'))),
             'IGNORE_RETRY_AFTER': '1' if (hasattr(self, 'ignore_retry_after_var') and self.ignore_retry_after_var) else '0',
-            'MAX_RETRIES': str(self.config.get('max_retries', os.environ.get('MAX_RETRIES', '7'))),
+            'MAX_RETRIES': str(resolved_max_retries),
             'INDEFINITE_RATE_LIMIT_RETRY': '1' if self.config.get('indefinite_rate_limit_retry', False) else '0',
             # Scanning/QA settings
             'SCAN_PHASE_ENABLED': '1' if self.config.get('scan_phase_enabled', False) else '0',
@@ -24009,7 +24021,7 @@ Important rules:
                 ('enable_streaming', ['enable_streaming_checkbox', 'enable_streaming_var'], False, bool),
                 ('allow_batch_stream_logs', ['allow_batch_stream_logs_checkbox', 'allow_batch_stream_logs_var'], False, bool),
                 ('stream_thinking_logs', ['stream_thinking_logs_checkbox', 'stream_thinking_logs_var'], False, bool),
-                ('max_retries', ['max_retries_var'], 3, lambda v: safe_int(v, 3)),
+                ('max_retries', ['max_retries_var'], 7, lambda v: safe_int(v, 7)),
                 ('indefinite_rate_limit_retry', ['indefinite_rate_limit_retry_var'], False, bool),
 
                 # Retry settings
@@ -24937,7 +24949,7 @@ Important rules:
                 ('HTTP_POOL_CONNECTIONS', str(getattr(self, 'http_pool_connections_var', '20'))),
                 ('HTTP_POOL_MAXSIZE', str(getattr(self, 'http_pool_maxsize_var', '50'))),
                 ('IGNORE_RETRY_AFTER', '1' if self.config.get('ignore_retry_after', False) else '0'),
-                ('MAX_RETRIES', str(getattr(self, 'max_retries_var', '3'))),
+                ('MAX_RETRIES', str(self._resolve_max_retries())),
 
                 # QA/meta preferences
                 ('QA_AUTO_SEARCH_OUTPUT', '1' if getattr(self, 'qa_auto_search_output_var', True) else '0'),
