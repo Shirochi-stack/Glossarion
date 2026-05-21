@@ -706,7 +706,9 @@ def _epub_cache_dir() -> str:
 #          by the text-length filter.
 #   v4  — reader respects the Show-special-files toggle (cache key now
 #          embeds its state so on/off entries don't collide).
-_EPUB_CACHE_SCHEMA = "v5"
+#   v6  - image cache includes manifest-declared image assets even when
+#          ebooklib classifies them as ITEM_UNKNOWN (notably image/webp).
+_EPUB_CACHE_SCHEMA = "v6"
 
 
 def _epub_cache_key(epub_path: str, show_special_files: bool = True,
@@ -13512,12 +13514,35 @@ class _EpubLoaderThread(QThread):
             book = epub_mod.read_epub(self._epub_path, options={"ignore_ncx": True})
 
             images: dict[str, bytes] = {}
+            _IMAGE_EXTS = (
+                ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp",
+                ".avif", ".jxl",
+            )
             for item in book.get_items():
-                if item.get_type() == ebooklib.ITEM_IMAGE:
-                    images[item.get_name()] = item.get_content()
-                    basename = os.path.basename(item.get_name())
-                    if basename not in images:
-                        images[basename] = item.get_content()
+                item_name = item.get_name() or ""
+                item_media = ""
+                try:
+                    item_media = item.get_media_type() or ""
+                except Exception:
+                    item_media = getattr(item, "media_type", "") or ""
+                lower_name = item_name.lower()
+                is_image = (
+                    item.get_type() == ebooklib.ITEM_IMAGE
+                    or str(item_media).lower().startswith("image/")
+                    or lower_name.endswith(_IMAGE_EXTS)
+                )
+                if not is_image or not item_name:
+                    continue
+                content = item.get_content()
+                if not content:
+                    continue
+                images[item_name] = content
+                stripped = item_name.lstrip("./")
+                if stripped and stripped not in images:
+                    images[stripped] = content
+                basename = os.path.basename(item_name)
+                if basename and basename not in images:
+                    images[basename] = content
 
             # --- Chapter item resolution ------------------------------------
             #
