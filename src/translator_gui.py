@@ -2047,6 +2047,7 @@ Text to analyze:
         self.update_html_headers_var = self.config.get('update_html_headers', True)
         self.save_header_translations_var = self.config.get('save_header_translations', True)
         self.ignore_header_var = self.config.get('ignore_header', False)
+        self.allow_ai_markdown_headers_var = self.config.get('allow_ai_markdown_headers', False)
         self.use_title_var = self.config.get('use_title', False)
         self.remove_duplicate_h1_p_var = self.config.get('remove_duplicate_h1_p', False)
         self.use_sorted_fallback_var = self.config.get('use_sorted_fallback', False)  # Disabled by default
@@ -13069,6 +13070,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Set essential environment variables from current config before translation
                 os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if self.config.get('batch_translate_headers', True) else '0'
                 os.environ['IGNORE_HEADER'] = '1' if self.config.get('ignore_header', False) else '0'
+                os.environ['ALLOW_AI_MARKDOWN_HEADERS'] = '1' if self.config.get('allow_ai_markdown_headers', False) else '0'
                 os.environ['USE_TITLE'] = '1' if self.config.get('use_title', False) else '0'
                 os.environ['REMOVE_DUPLICATE_H1_P'] = '1' if self.config.get('remove_duplicate_h1_p', False) else '0'
                 os.environ['USE_SORTED_FALLBACK'] = '1' if self.config.get('use_sorted_fallback', False) else '0'
@@ -16008,6 +16010,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'HEADERS_PER_BATCH': str(self.headers_per_batch_var),
             'UPDATE_HTML_HEADERS': "1" if self.update_html_headers_var else "0",
             'SAVE_HEADER_TRANSLATIONS': "1" if self.save_header_translations_var else "0",
+            'ALLOW_AI_MARKDOWN_HEADERS': "1" if getattr(self, 'allow_ai_markdown_headers_var', False) else "0",
             'METADATA_SYSTEM_PROMPT': self.config.get('metadata_system_prompt', '').replace('{target_lang}', self.config.get('output_language', 'English')),
             'METADATA_FIELD_PROMPTS': json.dumps(self.config.get('metadata_field_prompts', {})),
             'LANG_PROMPT_BEHAVIOR': self.config.get('lang_prompt_behavior', 'auto'),
@@ -17721,6 +17724,7 @@ Important rules:
             os.environ['TOC_NCX_PER_BATCH'] = str(self.toc_ncx_per_batch_var)
             os.environ['UPDATE_HTML_HEADERS'] = "1" if self.update_html_headers_var else "0"
             os.environ['SAVE_HEADER_TRANSLATIONS'] = "1" if self.save_header_translations_var else "0"
+            os.environ['ALLOW_AI_MARKDOWN_HEADERS'] = "1" if getattr(self, 'allow_ai_markdown_headers_var', False) else "0"
             # Set Chapter Headers prompts from config - replace {target_lang} with output language
             output_lang = self.config.get('output_language', 'English')
             batch_header_system_prompt = self.config.get('batch_header_system_prompt',
@@ -23815,6 +23819,7 @@ Important rules:
                 ('update_html_headers', ['update_html_headers_var'], False, bool),
                 ('save_header_translations', ['save_header_translations_var'], False, bool),
                 ('use_sorted_fallback', ['use_sorted_fallback_var'], False, bool),
+                ('allow_ai_markdown_headers', ['allow_ai_markdown_headers_var'], False, bool),
                 ('single_api_image_chunks', ['single_api_image_chunks_var'], False, bool),
                 ('vision_ocr_batch_translation', ['vision_ocr_batch_translation_var'], True, bool),
                 ('vision_ocr_skip_translation', ['vision_ocr_skip_translation_var'], False, bool),
@@ -25135,6 +25140,7 @@ Important rules:
                 ('UPDATE_HTML_HEADERS', '1' if getattr(self, 'update_html_headers_var', True) else '0'),
                 ('SAVE_HEADER_TRANSLATIONS', '1' if getattr(self, 'save_header_translations_var', True) else '0'),
                 ('IGNORE_HEADER', '1' if getattr(self, 'ignore_header_var', False) else '0'),
+                ('ALLOW_AI_MARKDOWN_HEADERS', '1' if getattr(self, 'allow_ai_markdown_headers_var', False) else '0'),
                 ('USE_TITLE', '1' if getattr(self, 'use_title_var', False) else '0'),
 
                 # Extraction mode

@@ -8015,6 +8015,9 @@ def _create_processing_options_section(self, parent):
     
     if not hasattr(self, 'use_markdown2_converter_var'):
         self.use_markdown2_converter_var = self.config.get('use_markdown2_converter', False)
+
+    if not hasattr(self, 'allow_ai_markdown_headers_var'):
+        self.allow_ai_markdown_headers_var = self.config.get('allow_ai_markdown_headers', False)
     
     # Text Extraction Method
     method_title = QLabel("Text Extraction Method:")
@@ -8155,6 +8158,31 @@ def _create_processing_options_section(self, parent):
     preserve_desc.setStyleSheet("color: gray; font-size: 8pt;")
     preserve_desc.setContentsMargins(20, 0, 0, 3)
     enhanced_opts_v.addWidget(preserve_desc)
+
+    allow_ai_md_headers_cb = self._create_styled_checkbox("Allow AI-created Markdown headers")
+    try:
+        allow_ai_md_headers_cb.setChecked(bool(self.allow_ai_markdown_headers_var))
+    except Exception:
+        pass
+    def _on_allow_ai_md_headers_toggle(checked):
+        try:
+            self.allow_ai_markdown_headers_var = bool(checked)
+            self.config['allow_ai_markdown_headers'] = bool(checked)
+        except Exception:
+            pass
+    allow_ai_md_headers_cb.toggled.connect(_on_allow_ai_md_headers_toggle)
+    allow_ai_md_headers_cb.setToolTip(
+        "Allow Markdown headings returned by the AI to become HTML heading tags,\n"
+        "even when those headings did not come from source h1-h6 tags.\n"
+        "Leave off to only restore headings that existed as source HTML headers."
+    )
+    allow_ai_md_headers_cb.setContentsMargins(0, 2, 0, 0)
+    enhanced_opts_v.addWidget(allow_ai_md_headers_cb)
+
+    allow_ai_md_headers_desc = QLabel("Convert AI-added # headings to HTML headers")
+    allow_ai_md_headers_desc.setStyleSheet("color: gray; font-size: 8pt;")
+    allow_ai_md_headers_desc.setContentsMargins(20, 0, 0, 3)
+    enhanced_opts_v.addWidget(allow_ai_md_headers_desc)
     
     # Single line break option
     single_break_cb = self._create_styled_checkbox("Enable Single Line Break")

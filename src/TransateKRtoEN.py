@@ -14208,6 +14208,8 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
 
     def _escape_untracked_atx_headings(text, provenance):
         """Keep only ATX headings that came from real HTML heading tags."""
+        if os.getenv('ALLOW_AI_MARKDOWN_HEADERS', '0') == '1':
+            return text
         if not isinstance(provenance, dict):
             return text
         atx_headings = provenance.get('atx_headings')
