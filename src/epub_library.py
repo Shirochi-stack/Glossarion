@@ -15838,7 +15838,10 @@ class EpubReaderDialog(QDialog):
     def _active_search_text(self) -> str:
         query = getattr(self, "_search_dialog_query", None)
         if query is not None:
-            text = query.text().strip()
+            try:
+                text = query.text().strip()
+            except RuntimeError:
+                text = ""
             if text:
                 return text
         return str(getattr(self, "_search_current_text", "") or "").strip()
@@ -16994,6 +16997,10 @@ class EpubReaderDialog(QDialog):
                 pass
         self._search_dialog_generation = (
             int(getattr(self, "_search_dialog_generation", 0) or 0) + 1)
+        self._search_realign_generation = (
+            int(getattr(self, "_search_realign_generation", 0) or 0) + 1)
+        self._search_selection_generation = (
+            int(getattr(self, "_search_selection_generation", 0) or 0) + 1)
         self._cancel_search_dialog_workers()
         for worker in list(getattr(self, "_search_workers", []) or []):
             try:
