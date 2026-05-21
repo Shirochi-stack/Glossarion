@@ -319,6 +319,8 @@ def _reasoning_effort() -> str:
     if not _reasoning_toggle_enabled():
         return "none"
 
+    explicit = os.getenv("AUTHND_ENABLE_THINKING")
+    shared_toggle = os.getenv("ENABLE_GPT_THINKING")
     effort = (
         os.getenv("AUTHND_REASONING_EFFORT")
         or os.getenv("GPT_EFFORT")
