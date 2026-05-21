@@ -13593,8 +13593,33 @@ class UnifiedClient:
             _re.match(r'^authgem(?:-vertex|-key)?\d*/', model_lower)
         )
 
+        # AuthND uses NVIDIA NIM's model-specific reasoning controls.
+        if model_lower.startswith('authnd'):
+            authnd_model = model_lower
+            _authnd_match = _re.match(r'^authnd\d{0,4}/', authnd_model)
+            if _authnd_match:
+                authnd_model = authnd_model[_authnd_match.end():]
+            else:
+                authnd_model = authnd_model[len('authnd'):].lstrip('/')
+
+            if os.getenv('ENABLE_GPT_THINKING', '0') != '1':
+                return " (thinking disabled)"
+            effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower()
+            if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
+                effort = 'medium'
+            if effort == 'none':
+                return " (thinking disabled)"
+            if 'gpt-oss' in authnd_model:
+                return f" (reasoning_effort: {'high' if effort == 'xhigh' else effort})"
+            if 'nemotron-3-nano' in authnd_model:
+                mode = 'heavy' if effort in ('high', 'xhigh') else effort
+                return f" (parallel reasoning: {mode})"
+            if 'deepseek-v4' in authnd_model:
+                return f" (reasoning_effort: {'max' if effort == 'xhigh' else 'high'})"
+            return f" (thinking enabled, effort: {effort})"
+
         # Non-Gemini wrapper-auth prefixes: suppress thinking info entirely.
-        _suppress_prefixes = ('authgpt', 'authza', 'authnd', 'authcd', 'antigravity', 'za/')
+        _suppress_prefixes = ('authgpt', 'authza', 'authcd', 'antigravity', 'za/')
         if not _is_gemini_wrapper:
             for p in _suppress_prefixes:
                 if model_lower.startswith(p):
@@ -22832,6 +22857,7 @@ class UnifiedClient:
 
         max_retries = self._get_max_retries()
         last_error = None
+        _authnd_think = self._get_thinking_status_label()
         print(f"🚀 AuthND: Sending request via NVIDIA Build browser route (model={actual_model})")
 
         for attempt in range(max_retries):
@@ -22864,8 +22890,7 @@ class UnifiedClient:
                     _label = 'request'
                     _ctx = 'translation'
                 _thread_name = threading.current_thread().name
-                _think = self._get_thinking_status_label()
-                authnd_progress_label = f"📤 [{_thread_name}] {_label} ({_ctx}) API call in progress{_think}"
+                authnd_progress_label = f"📤 [{_thread_name}] {_label} ({_ctx}) API call in progress{_authnd_think}"
 
                 result = _authnd_send(
                     messages=messages,

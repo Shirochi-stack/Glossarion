@@ -77,7 +77,7 @@ def _payload_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
         "stream": payload.get("stream"),
         "messages": _message_summary(payload.get("messages") or []),
     }
-    for key in ("temperature", "max_tokens", "top_p", "frequency_penalty", "presence_penalty"):
+    for key in ("temperature", "max_tokens", "top_p", "frequency_penalty", "presence_penalty", "reasoning_effort"):
         if key in payload:
             summary[key] = payload.get(key)
     if "chat_template_kwargs" in payload:
@@ -89,6 +89,13 @@ def _stream_logging_enabled() -> bool:
     value = os.getenv("AUTHND_LOG_STREAM_CHUNKS")
     if value is None:
         value = os.getenv("LOG_STREAM_CHUNKS", "1")
+    return str(value).strip().lower() not in ("0", "false", "no", "off")
+
+
+def _stream_thinking_logging_enabled() -> bool:
+    value = os.getenv("AUTHND_STREAM_THINKING_LOGS")
+    if value is None:
+        value = os.getenv("STREAM_THINKING_LOGS", "1")
     return str(value).strip().lower() not in ("0", "false", "no", "off")
 
 
@@ -239,15 +246,22 @@ def _normalize_messages(messages: Iterable[Dict[str, Any]]) -> List[Dict[str, st
     return normalized
 
 
-def _reasoning_enabled() -> bool:
-    """
-    NVIDIA Build exposes reasoning as a boolean chat_template_kwargs toggle for
-    GLM-5.1, not as a graded reasoning_effort parameter. Map the repo's effort
-    variables onto that boolean so existing settings still have an effect.
-    """
+def _reasoning_toggle_enabled() -> bool:
+    shared_toggle = os.getenv("ENABLE_GPT_THINKING")
+    if shared_toggle is not None and shared_toggle.strip().lower() not in ("1", "true", "yes", "on", "enabled"):
+        return False
+
     explicit = os.getenv("AUTHND_ENABLE_THINKING")
     if explicit is not None:
-        return explicit.strip().lower() not in ("0", "false", "no", "none", "off", "disabled")
+        if explicit.strip().lower() in ("0", "false", "no", "none", "off", "disabled"):
+            return False
+    return True
+
+
+def _reasoning_effort() -> str:
+    """Return the AuthND reasoning effort selected by shared GUI controls."""
+    if not _reasoning_toggle_enabled():
+        return "none"
 
     effort = (
         os.getenv("AUTHND_REASONING_EFFORT")
@@ -255,14 +269,69 @@ def _reasoning_enabled() -> bool:
         or os.getenv("REASONING_EFFORT")
         or ""
     ).strip().lower()
-    if effort:
-        return effort not in ("0", "false", "no", "none", "off", "disabled")
+    if effort in ("0", "false", "no", "none", "off", "disabled"):
+        return "none"
+    if effort in ("low", "medium", "high", "xhigh", "max", "heavy"):
+        return effort
 
-    shared_toggle = os.getenv("ENABLE_GPT_THINKING")
-    if shared_toggle is not None:
-        return shared_toggle.strip().lower() in ("1", "true", "yes", "on", "enabled")
+    return "medium" if explicit is not None or shared_toggle is not None else "none"
 
-    return False
+
+def _reasoning_control_configured() -> bool:
+    return any(
+        os.getenv(name) is not None
+        for name in ("AUTHND_ENABLE_THINKING", "AUTHND_REASONING_EFFORT", "GPT_EFFORT", "REASONING_EFFORT", "ENABLE_GPT_THINKING")
+    )
+
+
+def _reasoning_enabled() -> bool:
+    return _reasoning_control_configured() and _reasoning_effort() != "none"
+
+
+def _apply_reasoning_payload(payload: Dict[str, Any], model_path: str) -> None:
+    """
+    NVIDIA NIM uses model-specific reasoning controls:
+    - GPT-OSS supports top-level reasoning_effort: low/medium/high.
+    - Nemotron 3 Nano supports chat_template_kwargs.parallel_reasoning_mode.
+    - Other thinking models generally use chat_template_kwargs.enable_thinking.
+    """
+    if not _reasoning_control_configured():
+        return
+
+    effort = _reasoning_effort()
+    reasoning_disabled = not _reasoning_toggle_enabled() or effort == "none"
+    model_lower = (model_path or "").lower()
+
+    def _kwargs() -> Dict[str, Any]:
+        existing = payload.setdefault("chat_template_kwargs", {})
+        return existing if isinstance(existing, dict) else {}
+
+    if reasoning_disabled:
+        kwargs = _kwargs()
+        kwargs["enable_thinking"] = False
+        if "nemotron-3-nano" in model_lower:
+            kwargs["parallel_reasoning_mode"] = "none"
+        payload["chat_template_kwargs"] = kwargs
+        return
+
+    if "gpt-oss" in model_lower:
+        payload["reasoning_effort"] = "high" if effort in ("xhigh", "max", "heavy") else effort
+        return
+
+    if "nemotron-3-nano" in model_lower:
+        kwargs = _kwargs()
+        kwargs["enable_thinking"] = True
+        kwargs["parallel_reasoning_mode"] = "heavy" if effort in ("high", "xhigh", "max", "heavy") else effort
+        payload["chat_template_kwargs"] = kwargs
+        return
+
+    if "deepseek-v4" in model_lower:
+        payload["reasoning_effort"] = "max" if effort in ("xhigh", "max", "heavy") else "high"
+
+    kwargs = _kwargs()
+    kwargs.setdefault("enable_thinking", True)
+    kwargs.setdefault("clear_thinking", False)
+    payload["chat_template_kwargs"] = kwargs
 
 
 def _get_session() -> requests.Session:
@@ -512,17 +581,41 @@ def _extract_content_from_obj(obj: Any) -> str:
         message = choice.get("message") or {}
         for candidate in (
             delta.get("content"),
-            delta.get("reasoning_content"),
-            delta.get("reasoning"),
             message.get("content"),
-            message.get("reasoning_content"),
-            message.get("reasoning"),
             choice.get("text"),
             choice.get("content"),
         ):
             if isinstance(candidate, str) and candidate:
                 return candidate
     for key in ("output_text", "text", "content", "response"):
+        value = obj.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _extract_reasoning_from_obj(obj: Any) -> str:
+    if not isinstance(obj, dict):
+        return ""
+    choices = obj.get("choices")
+    if isinstance(choices, list) and choices:
+        choice = choices[0] or {}
+        delta = choice.get("delta") or {}
+        message = choice.get("message") or {}
+        for candidate in (
+            delta.get("reasoning_content"),
+            delta.get("reasoning"),
+            delta.get("thinking"),
+            message.get("reasoning_content"),
+            message.get("reasoning"),
+            message.get("thinking"),
+            choice.get("reasoning_content"),
+            choice.get("reasoning"),
+            choice.get("thinking"),
+        ):
+            if isinstance(candidate, str) and candidate:
+                return candidate
+    for key in ("reasoning_content", "reasoning", "thinking"):
         value = obj.get(key)
         if isinstance(value, str) and value:
             return value
@@ -551,6 +644,25 @@ def _usage_completion_tokens(usage: Optional[Dict[str, Any]]) -> Optional[int]:
         if isinstance(value, str) and value.isdigit():
             return int(value)
     return None
+
+
+def _usage_reasoning_tokens(usage: Optional[Dict[str, Any]]) -> int:
+    if not isinstance(usage, dict):
+        return 0
+    for key in ("reasoning_tokens", "thinking_tokens", "thoughts_tokens", "thoughtsTokenCount"):
+        value = usage.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    details = usage.get("completion_tokens_details")
+    if isinstance(details, dict):
+        value = details.get("reasoning_tokens")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return 0
 
 
 def _infer_finish_reason(
@@ -623,14 +735,27 @@ def _parse_sse_lines(
     requested_max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     parts: List[str] = []
+    reasoning_parts: List[str] = []
     finish_reason: Optional[str] = None
     usage: Optional[Dict[str, Any]] = None
     raw_tail: List[Any] = []
     text_log_buf: List[str] = []
-    first_text_ts: Optional[float] = None
+    thought_log_buf: List[str] = []
+    first_token_ts: Optional[float] = None
+    thinking_started = False
+    thinking_ended = False
+    thinking_chunks = 0
+    thinking_start_ts: Optional[float] = None
     stream_started_ts = t_start or time.time()
+    stream_thinking = _stream_thinking_logging_enabled()
     saw_done = False
     saw_event = False
+
+    def _mark_first_token() -> None:
+        nonlocal first_token_ts
+        if first_token_ts is None:
+            first_token_ts = time.time()
+            _log(log_fn, f"📡 AuthND: First token in {first_token_ts - stream_started_ts:.1f}s, streaming...")
 
     def _emit_stream_text(fragment: str) -> None:
         if not log_fn or not log_stream or not fragment:
@@ -648,6 +773,48 @@ def _parse_sse_lines(
         elif len(combined) >= 160:
             log_fn(combined)
             text_log_buf.clear()
+
+    def _emit_thinking(fragment: str) -> None:
+        nonlocal thinking_started, thinking_chunks, thinking_start_ts
+        if not fragment:
+            return
+        if not thinking_started:
+            thinking_started = True
+            thinking_start_ts = time.time()
+            thinking_chunks = 0
+            if log_fn and log_stream and stream_thinking:
+                log_fn("🧠 [authnd] Thinking...")
+        thinking_chunks += 1
+        if not log_fn or not log_stream or not stream_thinking:
+            return
+        thought_log_buf.append(fragment.replace("\\n", "\n").replace("\x1f", "\\x1F"))
+        combined = "".join(thought_log_buf)
+        if "\n" in combined:
+            lines = combined.split("\n")
+            for line in lines[:-1]:
+                log_fn(f"    {line}")
+            thought_log_buf[:] = [lines[-1]]
+        elif len(combined) >= 160:
+            log_fn(f"    {combined}")
+            thought_log_buf.clear()
+
+    def _finish_thinking_before_text() -> None:
+        nonlocal thinking_ended
+        if not thinking_started or thinking_ended:
+            return
+        thinking_ended = True
+        if not log_fn or not log_stream or not stream_thinking:
+            thought_log_buf.clear()
+            return
+        remainder = "".join(thought_log_buf).rstrip("\n")
+        if remainder:
+            for line in remainder.split("\n"):
+                log_fn(f"    {line}")
+        thought_log_buf.clear()
+        duration = time.time() - (thinking_start_ts or stream_started_ts)
+        log_fn(f"🧠 [authnd] Thinking complete ({thinking_chunks} chunks, {duration:.1f}s)")
+        log_fn("─" * 50)
+        log_fn("📡 Text streaming...")
 
     for raw_line in line_iter:
         if _is_cancelled():
@@ -675,10 +842,14 @@ def _parse_sse_lines(
         if len(raw_tail) > 5:
             raw_tail.pop(0)
         text = _extract_content_from_obj(obj)
+        reasoning = _extract_reasoning_from_obj(obj)
+        if reasoning:
+            _mark_first_token()
+            reasoning_parts.append(reasoning)
+            _emit_thinking(reasoning)
         if text:
-            if first_text_ts is None:
-                first_text_ts = time.time()
-                _log(log_fn, f"📡 AuthND: First token in {first_text_ts - stream_started_ts:.1f}s, streaming...")
+            _mark_first_token()
+            _finish_thinking_before_text()
             parts.append(text)
             _emit_stream_text(text)
         reason = _extract_finish_reason(obj)
@@ -691,6 +862,20 @@ def _parse_sse_lines(
         remainder = "".join(text_log_buf).strip()
         if remainder:
             log_fn(remainder)
+    if log_fn and log_stream and stream_thinking and thinking_started and not thinking_ended:
+        remainder = "".join(thought_log_buf).rstrip("\n")
+        if remainder:
+            for line in remainder.split("\n"):
+                log_fn(f"    {line}")
+        duration = time.time() - (thinking_start_ts or stream_started_ts)
+        log_fn(f"🧠 [authnd] Thinking complete ({thinking_chunks} chunks, {duration:.1f}s)")
+    thinking_tokens = _usage_reasoning_tokens(usage)
+    if log_fn and log_stream:
+        if thinking_tokens:
+            log_fn(f"   💭 Thinking tokens used: {thinking_tokens:,}")
+        elif reasoning_parts:
+            estimated_tokens = max(1, len("".join(reasoning_parts)) // 4)
+            log_fn(f"   💭 Thinking tokens used: ~{estimated_tokens:,}")
     _log(log_fn, f"📡 AuthND: Stream finished in {time.time() - stream_started_ts:.1f}s")
 
     content = "".join(parts)
@@ -710,6 +895,7 @@ def _parse_sse_lines(
         "finish_reason_explicit": finish_reason_explicit,
         "finish_reason_inference": finish_reason_inference,
         "usage": usage,
+        "reasoning_content": "".join(reasoning_parts) if reasoning_parts else None,
         "raw_response": raw_tail,
     }
 
@@ -752,11 +938,13 @@ def _parse_json_response(response: requests.Response, *, requested_max_tokens: O
             "finish_reason_explicit": finish_reason_explicit,
             "finish_reason_inference": finish_reason_inference,
             "usage": None,
+            "reasoning_content": None,
             "raw_response": text,
         }
 
     finish_reason = _extract_finish_reason(obj)
     content = _extract_content_from_obj(obj)
+    reasoning = _extract_reasoning_from_obj(obj)
     usage = obj.get("usage") if isinstance(obj, dict) else None
     final_finish_reason, finish_reason_explicit, finish_reason_inference = _infer_finish_reason(
         explicit_finish_reason=finish_reason,
@@ -774,6 +962,7 @@ def _parse_json_response(response: requests.Response, *, requested_max_tokens: O
         "finish_reason_explicit": finish_reason_explicit,
         "finish_reason_inference": finish_reason_inference,
         "usage": usage,
+        "reasoning_content": reasoning or None,
         "raw_response": obj,
     }
 
@@ -835,8 +1024,7 @@ def _post_prediction(
         payload["frequency_penalty"] = float(frequency_penalty)
     if presence_penalty is not None:
         payload["presence_penalty"] = float(presence_penalty)
-    if _reasoning_enabled():
-        payload.setdefault("chat_template_kwargs", {"enable_thinking": True, "clear_thinking": False})
+    _apply_reasoning_payload(payload, model_path)
 
     _log(
         log_fn,
@@ -1015,6 +1203,7 @@ def send_chat_completion(
                     "frequency_penalty": frequency_penalty,
                     "presence_penalty": presence_penalty,
                     "reasoning_enabled": _reasoning_enabled(),
+                    "reasoning_effort": _reasoning_effort(),
                 },
                 "messages": _message_summary(normalized_messages),
             },
