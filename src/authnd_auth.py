@@ -286,17 +286,34 @@ def _extract_json_from_process(stdout: str) -> Dict[str, Any]:
     raise RuntimeError("AuthND token helper did not return JSON")
 
 
+def _is_frozen_app() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
 def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
     helper_timeout = max(30, int(timeout))
-    cmd = [
-        sys.executable,
-        os.path.abspath(__file__),
-        "--mint-token",
-        page_url,
-        "--timeout",
-        str(helper_timeout),
-    ]
+    if _is_frozen_app():
+        # In PyInstaller builds sys.executable is the Glossarion exe, not a
+        # Python interpreter.  Use a dedicated app-level helper argument so the
+        # child process mints a token and exits instead of launching the GUI.
+        cmd = [
+            sys.executable,
+            "--authnd-mint-token",
+            page_url,
+            "--timeout",
+            str(helper_timeout),
+        ]
+    else:
+        cmd = [
+            sys.executable,
+            os.path.abspath(__file__),
+            "--mint-token",
+            page_url,
+            "--timeout",
+            str(helper_timeout),
+        ]
     env = os.environ.copy()
+    env["AUTHND_TOKEN_HELPER"] = "1"
     flags = env.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
     required_flags = "--disable-gpu --disable-software-rasterizer"
     env["QTWEBENGINE_CHROMIUM_FLAGS"] = f"{flags} {required_flags}".strip()

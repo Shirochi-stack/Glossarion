@@ -12,6 +12,19 @@ if __name__ == '__main__':
         import sys
         sys.exit(0)
 
+    # PyInstaller-safe AuthND token helper entrypoint.  authnd_auth.py cannot
+    # run itself via ``sys.executable script.py`` once bundled because
+    # sys.executable is the Glossarion app exe.  Handle this tiny helper command
+    # before importing the full GUI so the child process returns JSON and exits.
+    import sys as _authnd_sys
+    if "--authnd-mint-token" in _authnd_sys.argv:
+        _idx = _authnd_sys.argv.index("--authnd-mint-token")
+        _page_url = _authnd_sys.argv[_idx + 1] if len(_authnd_sys.argv) > _idx + 1 else ""
+        _remaining = _authnd_sys.argv[_idx + 2:]
+        _authnd_sys.argv = [_authnd_sys.argv[0], "--mint-token", _page_url, *_remaining]
+        from authnd_auth import _main as _authnd_main
+        raise SystemExit(_authnd_main())
+
 # Add MSYS2 DLLs to PATH for WeasyPrint (when bundled with PyInstaller)
 import sys
 import os
