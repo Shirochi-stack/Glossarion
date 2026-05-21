@@ -455,8 +455,9 @@ def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
     env = os.environ.copy()
     env["AUTHND_TOKEN_HELPER"] = "1"
     flags = env.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
-    required_flags = "--disable-gpu --disable-software-rasterizer"
+    required_flags = "--disable-gpu --disable-software-rasterizer --disable-dev-shm-usage --no-sandbox"
     env["QTWEBENGINE_CHROMIUM_FLAGS"] = f"{flags} {required_flags}".strip()
+    env.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 
     creationflags = 0
     if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
@@ -510,11 +511,14 @@ def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
 
 
 def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
+    flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    required_flags = "--disable-gpu --disable-software-rasterizer --disable-dev-shm-usage --no-sandbox"
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = f"{flags} {required_flags}".strip()
+    os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+
     from PySide6.QtCore import QEventLoop, QTimer, QUrl
     from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
     from PySide6.QtWidgets import QApplication
-
-    os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-software-rasterizer")
 
     app = QApplication.instance()
     created_app = False
@@ -539,36 +543,53 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
         pass
 
     page = QWebEnginePage(profile, app)
+    try:
+        def run_js(script: str, js_timeout_ms: int = 15000) -> Any:
+            holder: Dict[str, Any] = {}
+            loop = QEventLoop()
 
-    def run_js(script: str, js_timeout_ms: int = 15000) -> Any:
-        holder: Dict[str, Any] = {}
-        loop = QEventLoop()
+            def _done(value: Any) -> None:
+                holder["value"] = value
+                loop.quit()
 
-        def _done(value: Any) -> None:
-            holder["value"] = value
-            loop.quit()
+            page.runJavaScript(script, _done)
+            QTimer.singleShot(js_timeout_ms, loop.quit)
+            loop.exec()
+            return holder.get("value")
 
-        page.runJavaScript(script, _done)
-        QTimer.singleShot(js_timeout_ms, loop.quit)
-        loop.exec()
-        return holder.get("value")
+        load_loop = QEventLoop()
+        load_state: Dict[str, Any] = {"ok": False, "error": ""}
 
-    load_loop = QEventLoop()
-    load_state: Dict[str, Any] = {"ok": False}
+        def _loaded(ok: bool) -> None:
+            load_state["ok"] = bool(ok)
+            load_loop.quit()
 
-    def _loaded(ok: bool) -> None:
-        load_state["ok"] = bool(ok)
-        load_loop.quit()
+        def _loading_changed(info: Any) -> None:
+            try:
+                status = str(info.status()).lower()
+                if "loadfailed" in status or "failed" in status:
+                    err = getattr(info, "errorString", lambda: "")()
+                    code = getattr(info, "errorCode", lambda: "")()
+                    load_state["error"] = f"{err} ({code})".strip()
+            except Exception:
+                pass
 
-    page.loadFinished.connect(_loaded)
-    page.load(QUrl(page_url))
-    QTimer.singleShot(min(max(timeout * 1000, 15000), 60000), load_loop.quit)
-    load_loop.exec()
-    if not load_state.get("ok"):
-        raise RuntimeError(f"AuthND browser failed to load {page_url}")
+        page.loadFinished.connect(_loaded)
+        try:
+            page.loadingChanged.connect(_loading_changed)
+        except Exception:
+            pass
+        page.load(QUrl(page_url))
+        QTimer.singleShot(min(max(timeout * 1000, 15000), 60000), load_loop.quit)
+        load_loop.exec()
+        if not load_state.get("ok"):
+            detail = str(load_state.get("error") or "").strip()
+            if detail:
+                raise RuntimeError(f"AuthND browser failed to load {page_url}: {detail}")
+            raise RuntimeError(f"AuthND browser failed to load {page_url}")
 
-    sitekey = os.getenv("AUTHND_HCAPTCHA_SITEKEY", DEFAULT_HCAPTCHA_SITEKEY)
-    script = f"""
+        sitekey = os.getenv("AUTHND_HCAPTCHA_SITEKEY", DEFAULT_HCAPTCHA_SITEKEY)
+        script = f"""
 (() => {{
   window.__authndResult = {{pending: true, step: "starting"}};
   const sitekey = {json.dumps(sitekey)};
@@ -631,29 +652,38 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
   return true;
 }})();
 """
-    run_js(script, js_timeout_ms=10000)
+        run_js(script, js_timeout_ms=10000)
 
-    deadline = time.time() + max(timeout, 30)
-    last_result: Dict[str, Any] = {}
-    while time.time() < deadline:
-        raw = run_js("JSON.stringify(window.__authndResult || {pending:true})", js_timeout_ms=5000)
+        deadline = time.time() + max(timeout, 30)
+        last_result: Dict[str, Any] = {}
+        while time.time() < deadline:
+            raw = run_js("JSON.stringify(window.__authndResult || {pending:true})", js_timeout_ms=5000)
+            try:
+                result = json.loads(raw or "{}")
+            except Exception:
+                result = {}
+            last_result = result
+            if result and not result.get("pending", True):
+                token = str(result.get("token") or "").strip()
+                if token:
+                    return token
+                raise RuntimeError(f"AuthND hCaptcha failed: {result.get('error') or result}")
+            if _is_cancelled():
+                raise RuntimeError("stream cancelled")
+            wait_loop = QEventLoop()
+            QTimer.singleShot(100, wait_loop.quit)
+            wait_loop.exec()
+
+        raise RuntimeError(f"AuthND hCaptcha timed out: {last_result}")
+    finally:
         try:
-            result = json.loads(raw or "{}")
+            page.deleteLater()
+            profile.deleteLater()
+            cleanup_loop = QEventLoop()
+            QTimer.singleShot(100, cleanup_loop.quit)
+            cleanup_loop.exec()
         except Exception:
-            result = {}
-        last_result = result
-        if result and not result.get("pending", True):
-            token = str(result.get("token") or "").strip()
-            if token:
-                return token
-            raise RuntimeError(f"AuthND hCaptcha failed: {result.get('error') or result}")
-        if _is_cancelled():
-            raise RuntimeError("stream cancelled")
-        wait_loop = QEventLoop()
-        QTimer.singleShot(100, wait_loop.quit)
-        wait_loop.exec()
-
-    raise RuntimeError(f"AuthND hCaptcha timed out: {last_result}")
+            pass
 
 
 def get_captcha_token(page_url: str, timeout: int = 90) -> str:
@@ -1493,9 +1523,15 @@ def _main() -> int:
     parser.add_argument("--debug", action="store_true", help="Enable sanitized AuthND debug logs.")
     args = parser.parse_args()
     if args.page_url:
-        token = _mint_captcha_token_qt(args.page_url, args.timeout)
-        print(json.dumps({"token": token}, separators=(",", ":")), flush=True)
-        return 0
+        try:
+            token = _mint_captcha_token_qt(args.page_url, args.timeout)
+            print(json.dumps({"token": token}, separators=(",", ":")), flush=True)
+            return 0
+        except Exception as exc:
+            message = _short_error(exc)
+            print(json.dumps({"error": message}, separators=(",", ":")), flush=True)
+            print(f"AuthND token helper error: {message}", file=sys.stderr)
+            return 1
 
     if args.debug:
         os.environ["AUTHND_DEBUG"] = "1"
