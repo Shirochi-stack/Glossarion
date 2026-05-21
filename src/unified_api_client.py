@@ -23167,13 +23167,21 @@ class UnifiedClient:
                 content = result.get("content", "")
                 finish_reason = result.get("finish_reason") or "incomplete"
                 usage = result.get("usage")
-                if not result.get("finish_reason_explicit"):
-                    inference = result.get("finish_reason_inference") or "inferred"
+                finish_reason_explicit = bool(result.get("finish_reason_explicit"))
+                inference = result.get("finish_reason_inference") or "inferred"
+                if not finish_reason_explicit:
                     print(f"⚠️ AuthND: NVIDIA did not provide a finish_reason; inferred {finish_reason} ({inference})")
+                response_finish_reason = finish_reason
+                if (
+                    not finish_reason_explicit
+                    and self._force_missing_finish_as_prohibited(None)
+                    and inference != "completion_tokens_reached_max_tokens"
+                ):
+                    response_finish_reason = None
 
                 return UnifiedResponse(
                     content=content,
-                    finish_reason=finish_reason,
+                    finish_reason=response_finish_reason,
                     usage=usage,
                     raw_response=result,
                 )
