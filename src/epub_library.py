@@ -15814,7 +15814,8 @@ class EpubReaderDialog(QDialog):
             return
         self._select_match_in_chapter(chapter_idx, text, local_occurrence)
 
-    def _select_text_occurrence(self, browser, text: str, occurrence: int = 0):
+    def _select_text_occurrence(self, browser, text: str, occurrence: int = 0,
+                                update_reader: bool = True):
         """Select a concrete text occurrence and align the active layout."""
         if not _HAS_WEBENGINE or not text:
             return
@@ -15887,36 +15888,24 @@ class EpubReaderDialog(QDialog):
     r.setEnd(endPoint.node, endPoint.offset);
     return r;
   }}
-  function rectForRangeStart(range) {{
+  function scrollColumnsToRange(range, columns, span, pageCount) {{
     // WebKit/Chromium column layout can report a stale or viewport-clipped
-    // rect for an off-screen Range. Calibre avoids trusting that directly
-    // and scrolls by the selection boundary. A zero-width marker at the
-    // boundary gives us a stable inline position in the same native scroll
-    // coordinate system used by the paginated reader.
+    // rect for an off-screen Range. Calibre first selects the result and then
+    // asks the paged viewport to make the selection boundary visible. Mirror
+    // that here: insert a zero-width boundary marker, let the browser scroll
+    // the column container to it, then derive the page from scrollLeft.
     var marker = document.createElement('span');
     marker.setAttribute('data-glossarion-find-anchor', '1');
-    marker.style.cssText = 'display:inline-block;width:0;height:1em;line-height:1em;padding:0;margin:0;border:0;overflow:hidden;';
+    marker.style.cssText = 'display:inline-block;width:0;height:1em;line-height:1em;padding:0;margin:0;border:0;overflow:hidden;scroll-margin-left:0;scroll-margin-right:0;';
     var probe = range.cloneRange();
     probe.collapse(true);
     probe.insertNode(marker);
-    var rect = marker.getBoundingClientRect();
-    marker.remove();
-    if (rect && (rect.width || rect.height || rect.left || rect.top)) return rect;
-    var rects = range.getClientRects();
-    for (var i = 0; i < rects.length; i++) {{
-      if (rects[i].width || rects[i].height) return rects[i];
-    }}
-    return range.getBoundingClientRect();
-  }}
-  function inlinePosForRangeStart(range, columns) {{
-    var oldLeft = columns.scrollLeft;
-    columns.scrollLeft = 0;
+    marker.scrollIntoView({{block: 'nearest', inline: 'start', behavior: 'auto'}});
     void columns.offsetHeight;
-    var rect = rectForRangeStart(range);
-    var colRect = columns.getBoundingClientRect();
-    var inlinePos = rect.left - colRect.left + columns.scrollLeft;
-    columns.scrollLeft = oldLeft;
-    return inlinePos;
+    var page = Math.min(pageCount - 1, Math.max(0, Math.floor((columns.scrollLeft + span / 2) / span)));
+    columns.scrollLeft = Math.round(page * span);
+    marker.remove();
+    return page;
   }}
   function installFindHighlights() {{
     clearFindHighlights();
@@ -15947,18 +15936,21 @@ class EpubReaderDialog(QDialog):
           var w = (typeof _PAGE_W !== 'undefined' && _PAGE_W) ? _PAGE_W : Math.floor(window.innerWidth);
           var gap = (typeof _PAGE_GAP !== 'undefined') ? _PAGE_GAP : 0;
           var span = Math.max(1, w + gap);
-          var inlinePos = inlinePosForRangeStart(range, columns);
           var pageCount = Math.max(1, Math.floor((columns.scrollWidth + gap + 1) / span));
-          if (inlinePos >= columns.scrollWidth - span) {{
-            inlinePos = columns.scrollWidth - w + 10;
+          var rawPage = scrollColumnsToRange(range, columns, span, pageCount);
+          var targetPage = rawPage;
+          if (visiblePages > 1) {{
+            targetPage = Math.max(0, targetPage - (targetPage % visiblePages));
+            columns.scrollLeft = Math.round(targetPage * span);
           }}
-          var targetPage = Math.min(pageCount - 1, Math.max(0, Math.floor((inlinePos + gap - 1) / span)));
+          if (typeof _CURRENT_PAGE !== 'undefined') _CURRENT_PAGE = targetPage;
           var sel = window.getSelection();
           sel.removeAllRanges();
           sel.addRange(range);
           return {{
             found: true,
             page: targetPage,
+            rawPage: rawPage,
             pageCount: pageCount
           }};
         }}
@@ -15998,13 +15990,21 @@ class EpubReaderDialog(QDialog):
                 self._js_scroll_to(self._reader_left, self._current_page, animate=False)
                 self._js_scroll_to(self._reader_right, self._current_page + 1, animate=False)
                 try:
-                    if browser is self._reader_left:
-                        self._reader_right.page().runJavaScript(js)
-                except Exception:
-                    pass
+                    raw_page = int(result.get("rawPage", self._current_page))
+                except (TypeError, ValueError):
+                    raw_page = self._current_page
+                if raw_page % 2 == 1 and browser is self._reader_left:
+                    QTimer.singleShot(
+                        40,
+                        lambda: self._select_text_occurrence(
+                            self._reader_right, text, occurrence,
+                            update_reader=False))
             self._update_nav_buttons()
 
-        browser.page().runJavaScript(js, _after_select)
+        if update_reader:
+            browser.page().runJavaScript(js, _after_select)
+        else:
+            browser.page().runJavaScript(js)
 
     def _plain_chapter_text(self, html: str) -> str:
         return _epub_plain_chapter_text(html)
