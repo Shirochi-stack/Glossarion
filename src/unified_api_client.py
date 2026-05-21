@@ -6840,7 +6840,6 @@ class UnifiedClient:
                 raise ImportError(
                     "AuthND package not found. Make sure 'authnd_auth.py' exists under src/."
                 )
-            logger.info("🟢 AuthND will use NVIDIA Build browser-backed routing")
 
         elif self.client_type == 'authcd':
             # AuthCD uses Anthropic Messages API via OAuth – no persistent SDK client
