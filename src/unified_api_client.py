@@ -5702,6 +5702,22 @@ class UnifiedClient:
         """
         Unified front for send and send_image. Includes multi-key retry wrapper.
         """
+        if not context:
+            inherited_context = str(getattr(self, 'context', '') or '').strip()
+            if inherited_context in (
+                'translation',
+                'glossary',
+                'glossary_refinement',
+                'summary',
+                'review',
+                'metadata',
+                'book_title',
+                'batch_toc_translation',
+                'batch_header_translation',
+                'qa_truncation',
+                'Truncation',
+            ):
+                context = inherited_context
         batch_mode = os.getenv("BATCH_TRANSLATION", "0") == "1"
         watchdog_started = False
         watchdog_context = context or ('image_translation' if image_data else 'translation')
@@ -5717,6 +5733,36 @@ class UnifiedClient:
         _original_multi_key_mode = None
         _had_instance_pool = False
         _original_instance_pool = None
+        def _retry_without_glossary_refinement_pool(reason: str):
+            nonlocal _glossary_refinement_overridden, _dedicated_pool_state
+            try:
+                print(f"[GLOSSARY REFINEMENT KEYS] {reason}; falling back to the next eligible pool")
+            except Exception:
+                pass
+            self._restore_dedicated_key_pool_override(_dedicated_pool_state)
+            _dedicated_pool_state = None
+            _glossary_refinement_overridden = False
+            tls = self._get_thread_local_client()
+            had_skip_flag = hasattr(tls, 'skip_glossary_refinement_pool_for_request')
+            previous_skip = getattr(tls, 'skip_glossary_refinement_pool_for_request', False)
+            tls.skip_glossary_refinement_pool_for_request = True
+            try:
+                return self._send_core(
+                    messages,
+                    temperature,
+                    max_tokens,
+                    max_completion_tokens,
+                    context,
+                    image_data=image_data,
+                )
+            finally:
+                if had_skip_flag:
+                    tls.skip_glossary_refinement_pool_for_request = previous_skip
+                else:
+                    try:
+                        delattr(tls, 'skip_glossary_refinement_pool_for_request')
+                    except Exception:
+                        pass
         if not batch_mode:
             self._sequential_send_lock.acquire()
         try:
@@ -6026,7 +6072,12 @@ class UnifiedClient:
             if not _qa_scan_overridden and not _inpainter_overridden and context_norm == 'glossary_refinement':
                 try:
                     use_refinement_keys = os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1'
-                    if use_refinement_keys:
+                    try:
+                        tls = self._get_thread_local_client()
+                        skip_refinement_pool = bool(getattr(tls, 'skip_glossary_refinement_pool_for_request', False))
+                    except Exception:
+                        skip_refinement_pool = False
+                    if use_refinement_keys and not skip_refinement_pool:
                         refinement_pool = self.__class__._glossary_refinement_key_pool
                         if not refinement_pool or not getattr(refinement_pool, 'keys', []):
                             refinement_keys_json = os.getenv('GLOSSARY_REFINEMENT_API_KEYS', '[]')
@@ -6048,7 +6099,7 @@ class UnifiedClient:
                             'GlossaryRefinementKey',
                         )
                         if not _dedicated_pool_state:
-                            raise UnifiedClientError("Glossary refinement key pool is enabled for this context but has no available keys; refusing fallback to another pool", error_type="no_keys")
+                            print("[GLOSSARY REFINEMENT KEYS] Enabled, but no available refinement keys; falling back to the next eligible pool")
                         if _dedicated_pool_state:
                             _glossary_refinement_overridden = True
                             _original_api_key = _dedicated_pool_state['api_key']
@@ -6242,6 +6293,8 @@ class UnifiedClient:
                                 # Check if we have any available keys left after rotation
                                 available_keys = self._count_available_keys()
                                 if available_keys == 0:
+                                    if _glossary_refinement_overridden:
+                                        return _retry_without_glossary_refinement_pool("Refinement pool unavailable or exhausted")
                                     print(f"🔄 Multi-key mode: All keys rate-limited, waiting for cooldown...")
                                     # Wait a bit before trying again
                                     wait_time = min(60 + random.uniform(1, 10), 120)  # 60-70 seconds
@@ -6254,6 +6307,12 @@ class UnifiedClient:
                                 
                             except Exception as rotation_error:
                                 print(f"❌ Multi-key mode: Key rotation failed: {rotation_error}")
+                                if (
+                                    _glossary_refinement_overridden
+                                    and isinstance(rotation_error, UnifiedClientError)
+                                    and getattr(rotation_error, "error_type", None) == "no_keys"
+                                ):
+                                    return _retry_without_glossary_refinement_pool("Refinement pool unavailable or exhausted")
                                 # If rotation fails, we can't continue with multi-key retry
                                 if indefinite_retry_enabled:
                                     # In indefinite mode, try to continue with any available key
@@ -8410,6 +8469,8 @@ class UnifiedClient:
                         logger.info(f"Propagating cancellation to caller (Error: {e})")
                     # Re-raise so send_with_interrupt can handle it
                     raise
+                if e.error_type == "no_keys" and _glossary_refinement_overridden:
+                    return _retry_without_glossary_refinement_pool("Refinement pool unavailable or exhausted")
                 
                 # For usage-limit messages, show without the "UnifiedClient error:" prefix.
                 # For all other errors (including other AuthGPT errors), keep the prefix.
@@ -8506,10 +8567,16 @@ class UnifiedClient:
                     None,
                     getattr(self, 'client_type', 'unknown')
                 )
+                context_norm = str(context or '').strip().lower().replace(' ', '_').replace('-', '_')
+                bad_request_is_prohibited = (
+                    bad_request
+                    and not non_safety_bad_request
+                    and context_norm != 'glossary_refinement'
+                )
                 if (
                     e.error_type == "prohibited_content"
                     or safety_detected
-                    or (bad_request and not non_safety_bad_request)
+                    or bad_request_is_prohibited
                 ):
                     try:
                         label = self._extract_chapter_label(messages)
@@ -8538,7 +8605,6 @@ class UnifiedClient:
                                     return res_content, res_fr
                     
                     # Try glossary keys if context is glossary (independent of multi-key mode toggle)
-                    context_norm = str(context or '').strip().lower().replace(' ', '_').replace('-', '_')
                     use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
                     use_refinement_keys = os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1'
                     if (use_glossary_keys or (context_norm == 'glossary_refinement' and use_refinement_keys)) and context_norm in ('glossary', 'glossary_refinement'):
@@ -8592,6 +8658,12 @@ class UnifiedClient:
                                 continue  # Retry with new key immediately
                             except Exception as rotation_error:
                                 print(f"❌ Key rotation failed during server error: {rotation_error}")
+                                if (
+                                    _glossary_refinement_overridden
+                                    and isinstance(rotation_error, UnifiedClientError)
+                                    and getattr(rotation_error, "error_type", None) == "no_keys"
+                                ):
+                                    return _retry_without_glossary_refinement_pool("Refinement pool unavailable or exhausted")
                                 # Fall back to normal exponential backoff
                         
                         # Exponential backoff with jitter
@@ -8790,6 +8862,12 @@ class UnifiedClient:
                                 continue  # Retry with new key immediately
                             except Exception as rotation_error:
                                 print(f"❌ Key rotation failed during unexpected server error: {rotation_error}")
+                                if (
+                                    _glossary_refinement_overridden
+                                    and isinstance(rotation_error, UnifiedClientError)
+                                    and getattr(rotation_error, "error_type", None) == "no_keys"
+                                ):
+                                    return _retry_without_glossary_refinement_pool("Refinement pool unavailable or exhausted")
                                 # Fall back to normal exponential backoff
                         
                         # Exponential backoff with jitter
@@ -8819,6 +8897,12 @@ class UnifiedClient:
                                 continue  # Retry with new key immediately
                             except Exception as rotation_error:
                                 print(f"❌ Key rotation failed during transient error: {rotation_error}")
+                                if (
+                                    _glossary_refinement_overridden
+                                    and isinstance(rotation_error, UnifiedClientError)
+                                    and getattr(rotation_error, "error_type", None) == "no_keys"
+                                ):
+                                    return _retry_without_glossary_refinement_pool("Refinement pool unavailable or exhausted")
                                 # Fall back to normal exponential backoff
                         
                         # Use a slightly less aggressive backoff for transient errors
@@ -8852,6 +8936,12 @@ class UnifiedClient:
                             continue  # Retry with new key immediately
                         except Exception as rotation_error:
                             print(f"❌ Key rotation failed during other error: {rotation_error}")
+                            if (
+                                _glossary_refinement_overridden
+                                and isinstance(rotation_error, UnifiedClientError)
+                                and getattr(rotation_error, "error_type", None) == "no_keys"
+                            ):
+                                return _retry_without_glossary_refinement_pool("Refinement pool unavailable or exhausted")
                             # Fall back to normal exponential backoff
                     
                     # For other unexpected errors, try again with a short delay
@@ -9724,7 +9814,15 @@ class UnifiedClient:
         tls.tried_glossary_direct_per_request[request_id] = True
         
         context_norm = str(context or '').strip().lower().replace(' ', '_').replace('-', '_')
-        use_refinement_keys = context_norm == 'glossary_refinement' and os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1'
+        try:
+            skip_refinement_keys = bool(getattr(tls, 'skip_glossary_refinement_pool_for_request', False))
+        except Exception:
+            skip_refinement_keys = False
+        use_refinement_keys = (
+            context_norm == 'glossary_refinement'
+            and os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1'
+            and not skip_refinement_keys
+        )
         use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
         if not use_refinement_keys and not use_glossary_keys:
             print(f"[GLOSSARY DIRECT] Glossary keys not enabled, skipping")
@@ -9805,7 +9903,11 @@ class UnifiedClient:
                             temp_client.api_version = self.api_version
                         temp_client.is_azure = True
                     
-                    temp_client.key_identifier = f"GLOSSARY KEY ({gk_model})"
+                    temp_client.key_identifier = (
+                        f"GLOSSARY REFINEMENT KEY ({gk_model})"
+                        if use_refinement_keys
+                        else f"GLOSSARY KEY ({gk_model})"
+                    )
                     
                     # Propagate session context
                     temp_client.context = context
@@ -9850,7 +9952,12 @@ class UnifiedClient:
                             
                             if len(content.strip()) >= min_len:
                                 print(f"✅ [GLOSSARY DIRECT {idx+1}] Success with {gk_model}")
-                                self._remember_actual_request_model(gk_model, f"GLOSSARY KEY ({gk_model})")
+                                self._remember_actual_request_model(
+                                    gk_model,
+                                    f"GLOSSARY REFINEMENT KEY ({gk_model})"
+                                    if use_refinement_keys
+                                    else f"GLOSSARY KEY ({gk_model})",
+                                )
                                 return content, finish_reason
                             else:
                                 print(f"⚠️ [GLOSSARY DIRECT {idx+1}] Response too short ({len(content.strip())} chars), trying next key")

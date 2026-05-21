@@ -1877,7 +1877,7 @@ class ProgressManager:
         model_name = str(value or "").strip()
         return model_name or None
 
-    def _current_model_name(self, existing_info=None):
+    def _current_model_name(self, existing_info=None, *, prefer_thread=False):
         if isinstance(existing_info, dict):
             existing_model = self._clean_model_name(existing_info.get("model_name") or existing_info.get("model"))
         else:
@@ -1888,15 +1888,12 @@ class ProgressManager:
             thread_model = self._clean_model_name(get_current_thread_actual_request_model())
         except Exception:
             thread_model = None
-        return (
-            thread_model
-            or existing_model
-            or self._clean_model_name(self.prog.get("model_name") or self.prog.get("model"))
-            or self._clean_model_name(os.getenv("MODEL"))
-        )
+        if prefer_thread and thread_model:
+            return thread_model
+        return existing_model
 
-    def _apply_model_info(self, chapter_info, existing_info=None):
-        model_name = self._current_model_name(existing_info)
+    def _apply_model_info(self, chapter_info, existing_info=None, *, prefer_thread=False):
+        model_name = self._current_model_name(existing_info, prefer_thread=prefer_thread)
         if model_name:
             chapter_info["model_name"] = model_name
         return chapter_info
@@ -2085,12 +2082,7 @@ class ProgressManager:
                     self.restore_all_in_progress_for_hard_stop()
 
                 self.prog["completed_list"] = []
-                current_model_name = self._current_model_name()
-                if current_model_name:
-                    self.prog["model_name"] = current_model_name
                 for chapter_key, chapter_info in self.prog.get("chapters", {}).items():
-                    if isinstance(chapter_info, dict):
-                        self._apply_model_info(chapter_info, chapter_info)
                     if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
                         actual_num = chapter_info.get("actual_num", 0)
                         self.prog["completed_list"].append({
@@ -2304,7 +2296,11 @@ class ProgressManager:
             "status": status,
             "last_updated": time.time()
         }
-        self._apply_model_info(chapter_info, existing_info)
+        self._apply_model_info(
+            chapter_info,
+            existing_info,
+            prefer_thread=status in ("in_progress", "completed", "failed", "qa_failed", "error"),
+        )
         if isinstance(existing_info, dict) and isinstance(existing_info.get("ocr_progress"), dict):
             chapter_info["ocr_progress"] = existing_info["ocr_progress"]
 

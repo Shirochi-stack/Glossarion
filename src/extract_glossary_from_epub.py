@@ -455,8 +455,6 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 if _ctx_norm == 'glossary_refinement'
                 else getattr(UnifiedClient, '_glossary_key_pool', None)
             )
-            if _ctx_norm == 'glossary_refinement' and not (_gk_pool and hasattr(_gk_pool, 'keys') and _gk_pool.keys):
-                _gk_pool = getattr(UnifiedClient, '_glossary_key_pool', None)
             if _gk_pool and hasattr(_gk_pool, 'keys') and _gk_pool.keys:
                 _pool_keys = _gk_pool.keys
                 _cur_idx = getattr(_gk_pool, 'current_index', 0) % len(_pool_keys)
@@ -1013,7 +1011,7 @@ _GLOSSARY_CHAPTER_FILENAMES = {}
 _GLOSSARY_TOTAL_CHAPTERS = 0
 _GLOSSARY_OUTPUT_FILE = ""
 
-def _current_glossary_model_name(existing_info=None):
+def _current_glossary_model_name(existing_info=None, *, prefer_thread=False):
     existing_model = ""
     if isinstance(existing_info, dict):
         existing_model = str(existing_info.get("model_name") or existing_info.get("model") or "").strip()
@@ -1023,12 +1021,9 @@ def _current_glossary_model_name(existing_info=None):
         thread_model = str(get_current_thread_actual_request_model() or "").strip()
     except Exception:
         thread_model = ""
-    return (
-        thread_model
-        or existing_model
-        or str(os.getenv("MODEL") or "").strip()
-        or str(MODEL or "").strip()
-    )
+    if prefer_thread and thread_model:
+        return thread_model
+    return existing_model
 
 class GlossaryProgressContext:
     """Per-run glossary progress state.
@@ -5992,6 +5987,7 @@ def main(log_callback=None, stop_callback=None):
 
     def _mark_glossary_in_progress(indices):
         changed = False
+        model_update_indices = []
         for _idx in indices:
             try:
                 _idx = int(_idx)
@@ -6006,8 +6002,17 @@ def main(log_callback=None, stop_callback=None):
             if _idx not in in_progress:
                 in_progress.append(_idx)
                 changed = True
-        if changed:
-            save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
+            model_update_indices.append(_idx)
+        if changed or model_update_indices:
+            save_progress(
+                completed,
+                glossary,
+                merged_indices,
+                failed=failed,
+                in_progress=in_progress,
+                context=progress_context,
+                model_update_indices=model_update_indices,
+            )
 
     def _clear_glossary_in_progress(indices):
         remove = set()
@@ -7633,7 +7638,7 @@ def main(log_callback=None, stop_callback=None):
     except Exception as e:
         print(f"[Warning] Could not save CSV format: {e}")
 
-def save_progress(completed: List[int], glossary: List[Dict], merged_indices: List[int] = None, failed: List[int] = None, in_progress: List[int] = None, context=None):
+def save_progress(completed: List[int], glossary: List[Dict], merged_indices: List[int] = None, failed: List[int] = None, in_progress: List[int] = None, context=None, model_update_indices=None):
     """Save progress to JSON file (history is now managed separately)
     
     NOTE: We no longer save the glossary itself in the progress file to avoid
@@ -7701,6 +7706,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         preserved_in_progress = []
         externally_failed = []
         manual_removed_indices = []
+        existing_progress = {}
         try:
             if os.path.exists(progress_file):
                 with open(progress_file, 'r', encoding='utf-8') as existing_f:
@@ -7839,6 +7845,12 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 done_set = completed_set | failed_set | merged_set
 
         in_progress_set = set(in_progress_clean)
+        model_update_set = set()
+        for _idx in model_update_indices or []:
+            try:
+                model_update_set.add(int(_idx))
+            except (TypeError, ValueError):
+                pass
 
         chapters = {}
         for idx in sorted(completed_set | failed_set | merged_set | in_progress_set):
@@ -7871,7 +7883,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 "status": status,
                 "last_updated": time.time(),
             }
-            model_name = _current_glossary_model_name(existing_info)
+            model_name = _current_glossary_model_name(existing_info, prefer_thread=idx in model_update_set)
             if model_name:
                 chapter_info["model_name"] = model_name
             if chapter_file:
@@ -7942,7 +7954,7 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             "chapter_filenames": {str(k): v for k, v in sorted((filenames or {}).items())},
             "chapter_count": total_chapters,
             "glossary_output_file": output_file,
-            "model_name": _current_glossary_model_name(),
+            "model_name": _current_glossary_model_name(existing_progress),
             "progress_schema_version": "2.0",
             "indexing": "chapter_index_zero_based",
             "qa_issues_found": {str(idx): issues for idx, issues in sorted(qa_issues_clean.items())},

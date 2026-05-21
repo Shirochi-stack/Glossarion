@@ -122,6 +122,37 @@ class AnimatedRefreshButton(QPushButton):
 class RetranslationMixin:
     """Mixin class containing retranslation methods for TranslatorGUI"""
 
+    _RETRANSLATION_SHOW_MODEL_INFO_CONFIG_KEY = "retranslation_show_model_info"
+
+    def _get_retranslation_show_model_info_state(self, file_path=None):
+        """Return the persisted Show Model Info preference, with live dialog cache first."""
+        try:
+            if file_path:
+                file_key = os.path.abspath(file_path)
+                cached = getattr(self, '_retranslation_dialog_cache', {}).get(file_key, {})
+                if isinstance(cached, dict) and 'show_model_info_state' in cached:
+                    return bool(cached.get('show_model_info_state'))
+        except Exception:
+            pass
+        try:
+            return bool(getattr(self, 'config', {}).get(self._RETRANSLATION_SHOW_MODEL_INFO_CONFIG_KEY, False))
+        except Exception:
+            return False
+
+    def _persist_retranslation_show_model_info_state(self, enabled):
+        """Persist the Show Model Info preference across app sessions."""
+        try:
+            if not hasattr(self, 'config') or not isinstance(self.config, dict):
+                self.config = {}
+            self.config[self._RETRANSLATION_SHOW_MODEL_INFO_CONFIG_KEY] = bool(enabled)
+            if hasattr(self, 'save_config') and callable(self.save_config):
+                self.save_config(show_message=False)
+        except Exception as exc:
+            try:
+                print(f"⚠️ Could not persist Show Model Info state: {exc}")
+            except Exception:
+                pass
+
     def _progress_file_is_skipped_special(self, filename, fallback_is_special=False):
         """Return True only for special files that translation would skip."""
         translate_special = bool(
@@ -597,13 +628,7 @@ class RetranslationMixin:
         
         # State variables for title-row toggles (lists allow nested handlers to mutate them)
         show_special_files = [show_special_files_state]
-        show_model_info_state = False
-        try:
-            _cache = getattr(self, '_retranslation_dialog_cache', {}) or {}
-            _cached_entry = _cache.get(os.path.abspath(file_path), {}) or {}
-            show_model_info_state = bool(_cached_entry.get('show_model_info_state', False))
-        except Exception:
-            show_model_info_state = False
+        show_model_info_state = self._get_retranslation_show_model_info_state(file_path)
         show_model_info = [show_model_info_state]
         
         spine_chapters = []
@@ -1539,6 +1564,48 @@ class RetranslationMixin:
         show_model_info_cb.setChecked(show_model_info[0])
         show_model_info_cb.setToolTip("When enabled, replaces the output-file column with the model used for each request.")
         show_model_info_cb.setStyleSheet(show_special_files_cb.styleSheet())
+
+        model_checkmark = QLabel("\u2713", show_model_info_cb)
+        model_checkmark.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+        model_checkmark.setAlignment(Qt.AlignCenter)
+        model_checkmark.hide()
+        model_checkmark.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+        def position_model_checkmark():
+            try:
+                if model_checkmark:
+                    model_checkmark.setGeometry(2, 1, 14, 14)
+            except RuntimeError:
+                pass
+
+        def update_model_checkmark():
+            try:
+                if show_model_info_cb and model_checkmark:
+                    if show_model_info_cb.isChecked():
+                        position_model_checkmark()
+                        model_checkmark.show()
+                    else:
+                        model_checkmark.hide()
+            except RuntimeError:
+                pass
+
+        show_model_info_cb.stateChanged.connect(update_model_checkmark)
+
+        def safe_init_model_checkmark():
+            try:
+                position_model_checkmark()
+                update_model_checkmark()
+            except RuntimeError:
+                pass
+
+        QTimer.singleShot(0, safe_init_model_checkmark)
         title_layout.addWidget(show_model_info_cb)
         
         # ── Glossary Progress button ──
@@ -2069,7 +2136,7 @@ class RetranslationMixin:
                         model_name = str(info.get('model_name') or info.get('model') or '').strip()
                         if model_name:
                             return model_name
-                return str(_d.get('model_name') or _d.get('model') or '(model unknown)').strip() or '(model unknown)'
+                return '(model unknown)'
 
             def _gp_display_for(ci, fname, _d, cache=None):
                 opf_pos = (panel_state.get('spine_index_map') or {}).get(ci, ci + 1)
@@ -3386,6 +3453,7 @@ class RetranslationMixin:
             if file_key not in self._retranslation_dialog_cache:
                 self._retranslation_dialog_cache[file_key] = {}
             self._retranslation_dialog_cache[file_key]['show_model_info_state'] = show_model_info[0]
+            self._persist_retranslation_show_model_info_state(show_model_info[0])
 
             if tab_frame and parent_dialog and hasattr(parent_dialog, '_epub_files_in_dialog'):
                 for f_path in parent_dialog._epub_files_in_dialog:
@@ -6251,7 +6319,6 @@ class RetranslationMixin:
         if isinstance(data, dict):
             prog = data.get('prog')
             if isinstance(prog, dict):
-                candidates.append(prog)
                 progress_key = info.get('progress_key') if isinstance(info, dict) else None
                 chapters = prog.get('chapters', {})
                 if progress_key and isinstance(chapters, dict) and isinstance(chapters.get(progress_key), dict):

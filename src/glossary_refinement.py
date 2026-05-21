@@ -302,6 +302,13 @@ def _issue_from_finish_reason(finish_reason, default_issue=None):
 
 def _call_send(send_fn, messages, client, temp, mtoks, check_stop, chunk_timeout, chunk_idx, total_chunks, context_label):
     try:
+        client.context = context_label
+        if hasattr(client, "_get_thread_local_client"):
+            tls = client._get_thread_local_client()
+            tls.current_request_context = context_label
+    except Exception:
+        pass
+    try:
         return send_fn(
             messages,
             client,
