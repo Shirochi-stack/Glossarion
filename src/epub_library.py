@@ -15442,7 +15442,9 @@ class EpubReaderDialog(QDialog):
         if panel is not None:
             if content.parent() is not panel:
                 self._search_panel_layout.addWidget(content)
+            self._expand_for_attached_search(require_visible=False)
             panel.show()
+            QTimer.singleShot(0, self._resync_page_count)
         btn = getattr(self, "_search_detach_btn", None)
         if btn is not None:
             btn.setText("Detach")
@@ -15474,12 +15476,14 @@ class EpubReaderDialog(QDialog):
             pass
         return None
 
-    def _expand_for_attached_search(self) -> None:
+    def _expand_for_attached_search(self, require_visible: bool = True) -> None:
         """Grow the reader window so the attached search panel adds space."""
         if bool(getattr(self, "_search_detached", False)):
             return
         panel = getattr(self, "_search_panel", None)
-        if panel is None or not panel.isVisible():
+        if panel is None:
+            return
+        if require_visible and not panel.isVisible():
             return
         target_panel_w = 360
         if not bool(getattr(self, "_search_window_expanded", False)):
@@ -16003,22 +16007,12 @@ class EpubReaderDialog(QDialog):
     return r;
   }}
   function scrollColumnsToRange(range, columns, span, pageCount) {{
-    // WebKit/Chromium column layout can report a stale or viewport-clipped
-    // rect for an off-screen Range. Calibre first selects the result and then
-    // asks the paged viewport to make the selection boundary visible. Mirror
-    // that here: insert a zero-width boundary marker, let the browser scroll
-    // the column container to it, then derive the page from scrollLeft.
-    var marker = document.createElement('span');
-    marker.setAttribute('data-glossarion-find-anchor', '1');
-    marker.style.cssText = 'display:inline-block;width:0;height:1em;line-height:1em;padding:0;margin:0;border:0;overflow:hidden;scroll-margin-left:0;scroll-margin-right:0;';
-    var probe = range.cloneRange();
-    probe.collapse(true);
-    probe.insertNode(marker);
-    marker.scrollIntoView({{block: 'nearest', inline: 'start', behavior: 'auto'}});
-    void columns.offsetHeight;
-    var page = Math.min(pageCount - 1, Math.max(0, Math.floor((columns.scrollLeft + span / 2) / span)));
+    var rects = range.getClientRects();
+    var rect = rects && rects.length ? rects[0] : range.getBoundingClientRect();
+    var columnsRect = columns.getBoundingClientRect();
+    var absoluteLeft = (rect.left - columnsRect.left) + columns.scrollLeft;
+    var page = Math.min(pageCount - 1, Math.max(0, Math.floor(absoluteLeft / span)));
     columns.scrollLeft = Math.round(page * span);
-    marker.remove();
     return page;
   }}
   function installFindHighlights() {{
@@ -16047,8 +16041,10 @@ class EpubReaderDialog(QDialog):
         installFindHighlights();
         var columns = document.getElementById('columns');
         if (columns) {{
-          var w = (typeof _PAGE_W !== 'undefined' && _PAGE_W) ? _PAGE_W : Math.floor(window.innerWidth);
           var gap = (typeof _PAGE_GAP !== 'undefined') ? _PAGE_GAP : 0;
+          var w = (typeof _pageWidthFor === 'function')
+            ? _pageWidthFor(columns)
+            : Math.max(1, Math.floor((columns.clientWidth || window.innerWidth || 1) / Math.max(1, visiblePages)));
           var span = Math.max(1, w + gap);
           var pageCount = Math.max(1, Math.floor((columns.scrollWidth + gap + 1) / span));
           var rawPage = scrollColumnsToRange(range, columns, span, pageCount);
@@ -16098,7 +16094,6 @@ class EpubReaderDialog(QDialog):
                     page_count = None
             self._current_page = self._clamp_page_for_layout(
                 page_num, page_count)
-            self._js_scroll_to(self._reader, self._current_page, animate=False)
             self._update_nav_buttons()
 
         if update_reader:
@@ -16657,8 +16652,10 @@ class EpubReaderDialog(QDialog):
                     "var c = document.getElementById('columns');"
                     "if (c) {"
                     "  if (typeof _setupColumns==='function') _setupColumns();"
-                    "  var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:Math.floor(window.innerWidth);"
                     "  var gap = (typeof _PAGE_GAP!=='undefined')?_PAGE_GAP:0;"
+                    "  var w = (typeof _pageWidthFor==='function')"
+                    "    ? _pageWidthFor(c)"
+                    "    : Math.max(1, Math.floor(c.clientWidth || window.innerWidth || 1));"
                     "  var span = Math.max(1, w + gap);"
                     # Record the target page so _setupColumns can re-anchor
                     # the transform on the next viewport-width change.
@@ -16673,8 +16670,10 @@ class EpubReaderDialog(QDialog):
                     "var c = document.getElementById('columns');"
                     "if (c) {"
                     "  if (typeof _setupColumns==='function') _setupColumns();"
-                    "  var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:Math.floor(window.innerWidth);"
                     "  var gap = (typeof _PAGE_GAP!=='undefined')?_PAGE_GAP:0;"
+                    "  var w = (typeof _pageWidthFor==='function')"
+                    "    ? _pageWidthFor(c)"
+                    "    : Math.max(1, Math.floor(c.clientWidth || window.innerWidth || 1));"
                     "  var span = Math.max(1, w + gap);"
                     f"  _CURRENT_PAGE = {page_num};"
                     "  c.style.transition = 'none';"
@@ -16696,8 +16695,10 @@ class EpubReaderDialog(QDialog):
             js = (
                 "var c = document.getElementById('columns');"
                 "if (typeof _setupColumns==='function') _setupColumns();"
-                "var w = (typeof _PAGE_W!=='undefined'&&_PAGE_W)?_PAGE_W:window.innerWidth;"
                 "var gap = (typeof _PAGE_GAP!=='undefined')?_PAGE_GAP:0;"
+                "var w = (typeof _pageWidthFor==='function')"
+                "  ? _pageWidthFor(c)"
+                "  : Math.max(1, Math.floor(c.clientWidth || window.innerWidth || 1));"
                 "var span = Math.max(1, w + gap);"
                 "c ? Math.max(1, Math.floor((c.scrollWidth + gap + 1) / span)) : 1;"
             )
@@ -17612,7 +17613,7 @@ class EpubReaderDialog(QDialog):
                 f"-webkit-text-size-adjust: 100%; }}"
                 f"#columns {{ column-fill: auto; column-gap: 1px; "
                 f"transition: none; opacity: 0; "
-                f"overflow: hidden; width: 100vw; transform: none; "
+                f"overflow: hidden; width: 100%; transform: none; "
                 f"font-family: {_font_stack}; "
                 f"font-size: {_font_px}px; line-height: {self._line_spacing}; }}"
                 f"#content {{ padding: 0 40px; overflow-wrap: anywhere; word-break: normal; }}"
@@ -17645,6 +17646,19 @@ class EpubReaderDialog(QDialog):
                 f"var _PAGE_W = 0;"
                 f"var _PAGE_GAP = 1;"
                 f"var _SPREAD_PAGES = {_spread_pages};"
+                f"function _viewerWidthFor(c) {{"
+                f"  var r = c ? c.getBoundingClientRect() : null;"
+                f"  return Math.max(1, Math.floor((c && c.clientWidth) || "
+                f"    (r && r.width) || document.documentElement.clientWidth || "
+                f"    window.innerWidth || 1));"
+                f"}}"
+                f"function _pageWidthFor(c) {{"
+                f"  var visible = Math.max(1, _SPREAD_PAGES || 1);"
+                f"  var viewportW = _viewerWidthFor(c);"
+                f"  _PAGE_W = Math.max(1, Math.floor((viewportW - "
+                f"    ((visible - 1) * _PAGE_GAP)) / visible));"
+                f"  return _PAGE_W;"
+                f"}}"
                 # _CURRENT_PAGE is maintained by _js_scroll_to so that
                 # _setupColumns() can re-anchor the transform whenever the
                 # viewport width changes (window resize, TOC toggle). Without
@@ -17657,8 +17671,7 @@ class EpubReaderDialog(QDialog):
                 # Floor to integer pixels so column boundaries and the
                 # translate offset (page * _PAGE_W) always land on whole
                 # pixels — prevents subpixel text rendering shifts.
-                f"  var visible = Math.max(1, _SPREAD_PAGES || 1);"
-                f"  _PAGE_W = Math.max(1, Math.floor((window.innerWidth - ((visible - 1) * _PAGE_GAP)) / visible));"
+                f"  _PAGE_W = _pageWidthFor(c);"
                 f"  c.style.columnWidth = _PAGE_W + 'px';"
                 f"  c.style.columnGap = _PAGE_GAP + 'px';"
                 f"  c.style.height = (window.innerHeight - 20) + 'px';"
