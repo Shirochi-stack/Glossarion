@@ -5667,11 +5667,13 @@ Recent translations to summarize:
             <b>⚠️ Note:</b> POE integration may not work properly due to API limitations or changes.
         </p>
 
-        <h4>NVIDIA (nd/)</h4>
-        <p>Access models through NVIDIA Integrate API (OpenAI-compatible)</p>
+        <h4>NVIDIA (nd/ and authnd/)</h4>
+        <p>Access models through NVIDIA Integrate API with <code>nd/</code>, or through NVIDIA Build browser-backed routing with <code>authnd/</code>.</p>
         <ul>
             <li><b>nd/meta/llama-4-maverick-17b-128e-instruct</b></li>
             <li><b>nd/deepseek-ai/deep-r1</b></li>
+            <li><b>authnd/deepseek-ai/deepseek-v4-flash</b></li>
+            <li><b>authnd/openai/gpt-oss-120b</b></li>
         </ul>
 
         <h4>Custom Prefix Routes</h4>
@@ -21901,6 +21903,7 @@ Important rules:
                 ("☁️", "authgem-vertex/", "AuthGem Vertex", "Vertex AI (GCP billing)", "#143840", "#34a853"),
                 ("🤖", "antigravity/", "Cloud Code", "Local proxy (localhost)", "#181830", "#a0a0f0"),
                 ("🟢", "nd/", "NVIDIA", "NVIDIA Integrate models", "#143014", "#60d060"),
+                ("🟢", "authnd/", "AuthND", "NVIDIA Build browser route", "#143014", "#8ee88e"),
                 ("🇨🇳", "za/", "Zhipu Intl.", "GLM international endpoint", "#1e2030", "#60c0e0"),
                 ("🌌", "nan/", "NanoGPT", "Generative & text models", "#1a1025", "#c084fc"),
                 ("⚙️", "sam/", "SambaNova", "SambaNova Cloud API", "#1a1e14", "#7cb343"),
