@@ -558,7 +558,7 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
         if _is_cancelled():
             raise RuntimeError("stream cancelled")
         wait_loop = QEventLoop()
-        QTimer.singleShot(1000, wait_loop.quit)
+        QTimer.singleShot(100, wait_loop.quit)
         wait_loop.exec()
 
     raise RuntimeError(f"AuthND hCaptcha timed out: {last_result}")
