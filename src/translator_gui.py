@@ -15001,7 +15001,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     configured_count = len(vision_keys)
                     loaded_count = len(getattr(pool, 'keys', [])) if pool else 0
                     load_note = f", {loaded_count} loaded" if loaded_count != configured_count else ""
-                    self.append_log(f"[GTool] Vision key pool: {configured_count} entries configured{load_note} (setup={'OK' if ok else 'FAILED'})")
+                    status_detail = str(getattr(UnifiedClient, '_last_qa_scan_pool_setup_status', '') or '').strip()
+                    status_note = f": {status_detail}" if (not ok and status_detail) else ""
+                    self.append_log(f"[GTool] Vision key pool: {configured_count} entries configured{load_note} (setup={'OK' if ok else 'FAILED'}{status_note})")
                 else:
                     if vision_keys_enabled:
                         self.append_log("[GTool] Vision Keys enabled but no keys configured")
@@ -15026,7 +15028,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     configured_count = len(inpainter_keys)
                     loaded_count = len(getattr(pool, 'keys', [])) if pool else 0
                     load_note = f", {loaded_count} loaded" if loaded_count != configured_count else ""
-                    self.append_log(f"[GTool] Image gen/edit key pool: {configured_count} entries configured{load_note} (setup={'OK' if ok else 'FAILED'})")
+                    status_detail = str(getattr(UnifiedClient, '_last_inpainter_pool_setup_status', '') or '').strip()
+                    status_note = f": {status_detail}" if (not ok and status_detail) else ""
+                    self.append_log(f"[GTool] Image gen/edit key pool: {configured_count} entries configured{load_note} (setup={'OK' if ok else 'FAILED'}{status_note})")
                 elif inpainter_keys_enabled:
                     self.append_log("[GTool] Image Gen / Edit Keys enabled but no keys configured")
             except Exception as e:

@@ -2623,10 +2623,11 @@ class UnifiedClient:
         except Exception:
             pass
         try:
-            cls.setup_qa_scan_key_pool(keys_list, force_rotation=force_rotation, rotation_frequency=rotation_frequency)
-        except Exception:
+            return bool(cls.setup_qa_scan_key_pool(keys_list, force_rotation=force_rotation, rotation_frequency=rotation_frequency))
+        except Exception as e:
+            cls._last_qa_scan_pool_setup_status = f"error: {e}"
+            print(f"🔑 Vision key pool setup failed: {e}")
             return False
-        return True
 
     @classmethod
     def set_in_memory_vision_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
@@ -2665,13 +2666,16 @@ class UnifiedClient:
             # Validate and fix encrypted keys
             validated_keys = []
             encrypted_keys_fixed = 0
+            rejected_reasons = defaultdict(int)
 
             for i, key_data in enumerate(keys_list):
                 if not isinstance(key_data, dict):
+                    rejected_reasons["invalid_entry"] += 1
                     continue
                 api_key = key_data.get('api_key', '')
                 model = key_data.get('model', '')
                 if not api_key and cls._key_data_needs_api_key(key_data, model):
+                    rejected_reasons["missing_api_key"] += 1
                     continue
                 # Fix encrypted keys
                 if api_key and api_key.startswith('ENC:'):
@@ -2684,25 +2688,33 @@ class UnifiedClient:
                             fixed_key_data['api_key'] = decrypted_key
                             validated_keys.append(fixed_key_data)
                             encrypted_keys_fixed += 1
+                        else:
+                            rejected_reasons["encrypted_key_not_decrypted"] += 1
                     except Exception:
+                        rejected_reasons["encrypted_key_decrypt_error"] += 1
                         continue
                 else:
                     validated_keys.append(key_data)
 
-            configured_count = sum(1 for key_data in keys_list if isinstance(key_data, dict))
+            configured_count = len(keys_list) if isinstance(keys_list, list) else 0
+            reject_note = ""
+            if rejected_reasons:
+                reject_note = " (" + ", ".join(f"{count} {reason}" for reason, count in sorted(rejected_reasons.items())) + ")"
             if not validated_keys:
-                print(f"🔑 Vision key pool: {configured_count} entries configured, 0 loaded")
+                cls._last_qa_scan_pool_setup_status = f"0 loaded{reject_note}"
+                print(f"🔑 Vision key pool: {configured_count} entries configured, 0 loaded{reject_note}")
                 return False
 
             cls._qa_scan_key_pool.load_from_list(validated_keys)
+            cls._last_qa_scan_pool_setup_status = "OK"
 
             existing_count = len(getattr(cls._qa_scan_key_pool, 'keys', [])) if cls._qa_scan_key_pool else 0
             if existing_count != len(validated_keys):
                 load_note = f", {len(validated_keys)} loaded" if len(validated_keys) != configured_count else ""
                 if encrypted_keys_fixed > 0:
-                    print(f"🔑 Vision key pool: {configured_count} entries configured{load_note} ({encrypted_keys_fixed} required decryption fix)")
+                    print(f"🔑 Vision key pool: {configured_count} entries configured{load_note}{reject_note} ({encrypted_keys_fixed} required decryption fix)")
                 else:
-                    print(f"🔑 Vision key pool: {configured_count} entries configured{load_note}")
+                    print(f"🔑 Vision key pool: {configured_count} entries configured{load_note}{reject_note}")
 
             return True
 
@@ -2719,10 +2731,11 @@ class UnifiedClient:
         except Exception:
             pass
         try:
-            cls.setup_inpainter_key_pool(keys_list, force_rotation=force_rotation, rotation_frequency=rotation_frequency)
-        except Exception:
+            return bool(cls.setup_inpainter_key_pool(keys_list, force_rotation=force_rotation, rotation_frequency=rotation_frequency))
+        except Exception as e:
+            cls._last_inpainter_pool_setup_status = f"error: {e}"
+            print(f"🔑 Image gen/edit key pool setup failed: {e}")
             return False
-        return True
 
     @classmethod
     def clear_in_memory_inpainter_keys(cls):
@@ -2745,13 +2758,16 @@ class UnifiedClient:
 
             validated_keys = []
             encrypted_keys_fixed = 0
+            rejected_reasons = defaultdict(int)
 
             for key_data in keys_list:
                 if not isinstance(key_data, dict):
+                    rejected_reasons["invalid_entry"] += 1
                     continue
                 api_key = key_data.get('api_key', '')
                 model = key_data.get('model', '')
                 if not api_key and cls._key_data_needs_api_key(key_data, model):
+                    rejected_reasons["missing_api_key"] += 1
                     continue
                 if api_key and api_key.startswith('ENC:'):
                     try:
@@ -2763,25 +2779,33 @@ class UnifiedClient:
                             fixed_key_data['api_key'] = decrypted_key
                             validated_keys.append(fixed_key_data)
                             encrypted_keys_fixed += 1
+                        else:
+                            rejected_reasons["encrypted_key_not_decrypted"] += 1
                     except Exception:
+                        rejected_reasons["encrypted_key_decrypt_error"] += 1
                         continue
                 else:
                     validated_keys.append(key_data)
 
-            configured_count = sum(1 for key_data in keys_list if isinstance(key_data, dict))
+            configured_count = len(keys_list) if isinstance(keys_list, list) else 0
+            reject_note = ""
+            if rejected_reasons:
+                reject_note = " (" + ", ".join(f"{count} {reason}" for reason, count in sorted(rejected_reasons.items())) + ")"
             if not validated_keys:
-                print(f"🔑 Image gen/edit key pool: {configured_count} entries configured, 0 loaded")
+                cls._last_inpainter_pool_setup_status = f"0 loaded{reject_note}"
+                print(f"🔑 Image gen/edit key pool: {configured_count} entries configured, 0 loaded{reject_note}")
                 return False
 
             cls._inpainter_key_pool.load_from_list(validated_keys)
+            cls._last_inpainter_pool_setup_status = "OK"
 
             existing_count = len(getattr(cls._inpainter_key_pool, 'keys', [])) if cls._inpainter_key_pool else 0
             if existing_count != len(validated_keys):
                 load_note = f", {len(validated_keys)} loaded" if len(validated_keys) != configured_count else ""
                 if encrypted_keys_fixed > 0:
-                    print(f"🔑 Image gen/edit key pool: {configured_count} entries configured{load_note} ({encrypted_keys_fixed} required decryption fix)")
+                    print(f"🔑 Image gen/edit key pool: {configured_count} entries configured{load_note}{reject_note} ({encrypted_keys_fixed} required decryption fix)")
                 else:
-                    print(f"🔑 Image gen/edit key pool: {configured_count} entries configured{load_note}")
+                    print(f"🔑 Image gen/edit key pool: {configured_count} entries configured{load_note}{reject_note}")
 
             return True
 
