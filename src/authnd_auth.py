@@ -14,6 +14,7 @@ import json
 import os
 import queue
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -574,6 +575,34 @@ def _is_frozen_app() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def _qtwebengine_chromium_flags(existing: str = "") -> str:
+    try:
+        tokens = shlex.split(existing or "")
+    except ValueError:
+        tokens = (existing or "").split()
+
+    # Linux users can run without usable GPU acceleration.  Disabling both GPU
+    # and Chromium's software rasterizer can make Qt WebEngine fail the page
+    # load before hCaptcha can be minted.
+    if not _env_bool("AUTHND_DISABLE_SOFTWARE_RASTERIZER", False):
+        tokens = [flag for flag in tokens if flag != "--disable-software-rasterizer"]
+
+    required_flags = [
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+    ]
+    seen = set()
+    merged = []
+    for flag in [*tokens, *required_flags]:
+        if flag in seen:
+            continue
+        seen.add(flag)
+        merged.append(flag)
+    return " ".join(merged)
+
+
 def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
     helper_timeout = max(30, int(timeout))
     if _is_frozen_app():
@@ -598,9 +627,7 @@ def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
         ]
     env = os.environ.copy()
     env["AUTHND_TOKEN_HELPER"] = "1"
-    flags = env.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
-    required_flags = "--disable-gpu --disable-software-rasterizer --disable-dev-shm-usage --no-sandbox"
-    env["QTWEBENGINE_CHROMIUM_FLAGS"] = f"{flags} {required_flags}".strip()
+    env["QTWEBENGINE_CHROMIUM_FLAGS"] = _qtwebengine_chromium_flags(env.get("QTWEBENGINE_CHROMIUM_FLAGS", ""))
     env.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 
     creationflags = 0
@@ -636,6 +663,8 @@ def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
     finally:
         with _active_helper_lock:
             _active_helper_processes.discard(proc)
+    if _is_cancelled() and proc.returncode:
+        raise RuntimeError("stream cancelled")
     if proc.returncode != 0:
         try:
             result = _extract_json_from_process(stdout)
@@ -655,9 +684,9 @@ def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
 
 
 def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
-    flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
-    required_flags = "--disable-gpu --disable-software-rasterizer --disable-dev-shm-usage --no-sandbox"
-    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = f"{flags} {required_flags}".strip()
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = _qtwebengine_chromium_flags(
+        os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+    )
     os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 
     from PySide6.QtCore import QEventLoop, QTimer, QUrl

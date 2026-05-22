@@ -132,6 +132,7 @@ python src/authnd_auth.py --model deepseek-ai/deepseek-v4-flash --prompt-file pr
 - `AUTHND_TOKEN_TIMEOUT=120`: browser captcha token timeout in seconds.
 - `AUTHND_TIMEOUT=180`: request read timeout in seconds.
 - `AUTHND_TOKEN_MODE=inline`: run the Qt token helper inline instead of subprocess.
+- `AUTHND_DISABLE_SOFTWARE_RASTERIZER=1`: advanced workaround to disable Chromium software rendering. Leave unset on Linux unless debugging GPU-specific issues.
 - `AUTHND_ENABLE_THINKING=1`: enable model-specific thinking where supported.
 - `AUTHND_REASONING_EFFORT`, `GPT_EFFORT`, `REASONING_EFFORT`: map to AuthND thinking enablement.
 - `AUTHND_ENABLE_STG_PREFIX=1`: legacy mode that sends `stg/<publisher>/<model>`.
