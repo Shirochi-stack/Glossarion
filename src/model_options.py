@@ -257,7 +257,6 @@ def get_model_options() -> List[str]:
         "authgpt/gpt-5.5","authgpt/gpt-5.4", "authgpt/gpt-5.4-pro",
         "authgpt/gpt-5.3-codex", "authgpt/gpt-5.3-codex-spark",
         "authgpt/gpt-5.2", "authgpt/gpt-5.2-codex",
-        "authgpt/gpt-5",
 
         # AuthCD – Claude subscription via OAuth (Anthropic Messages API)
         "authcd/claude-sonnet-4-6", "authcd/claude-sonnet-4-5",

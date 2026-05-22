@@ -5979,6 +5979,37 @@ class UnifiedClient:
                             raise UnifiedClientError("Vision key pool is enabled for this context but has no enabled keys; refusing fallback to another pool", error_type="no_keys")
                         
                         if qa_scan_pool and getattr(qa_scan_pool, 'keys', []):
+                            try:
+                                with self.__class__._in_memory_qa_scan_keys_lock:
+                                    qk_list = self.__class__._in_memory_qa_scan_keys or []
+                            except Exception:
+                                qk_list = []
+                            try:
+                                pool_state = self._apply_dedicated_key_pool_override(
+                                    qa_scan_pool,
+                                    qk_list,
+                                    'Vision',
+                                    'VisionKey',
+                                )
+                                if not pool_state:
+                                    raise UnifiedClientError("Vision key pool has no available keys; refusing fallback to another pool", error_type="no_keys")
+                                _qa_scan_overridden = True
+                                _original_api_key = pool_state['api_key']
+                                _original_model = pool_state['model']
+                                _original_multi_key_mode = pool_state['multi_key_mode']
+                                _had_instance_pool = pool_state['had_instance_pool']
+                                _original_instance_pool = pool_state['instance_pool']
+                                _dedicated_pool_state = pool_state
+                                if not getattr(self.__class__, '_qa_scan_pool_logged', False):
+                                    print(f"[VISION KEYS] 🔑 Using Vision key pool ({len(qa_scan_pool.keys)} keys)")
+                                    self.__class__._qa_scan_pool_logged = True
+                            except Exception as e:
+                                if 'cancel' not in str(e).lower() and not self._is_stop_requested():
+                                    print(f"[VISION KEYS] ⚠️ Failed to get Vision key from pool: {e}")
+                                if isinstance(e, UnifiedClientError):
+                                    raise
+
+                        if False and qa_scan_pool and getattr(qa_scan_pool, 'keys', []):
                             # Vision overrides temporarily replace instance-level
                             # request state. Parallel OCR workers can share one
                             # UnifiedClient, so keep this state swap held until

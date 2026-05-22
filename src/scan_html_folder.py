@@ -8934,6 +8934,20 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             # calls abort immediately when the user presses Stop.
             # Force-stop only — no graceful stop needed for simple QA queries.
             _ai_client._stop_callback = should_stop
+
+            _ai_uses_dedicated_qa_pool = bool(_ai_config.get('use_ai_truncation_detection_keys', False))
+            _ai_worker_clients = _threading_ai.local()
+
+            def _ai_client_for_worker():
+                if not _ai_uses_dedicated_qa_pool:
+                    return _ai_client
+                worker_client = getattr(_ai_worker_clients, 'client', None)
+                if worker_client is None:
+                    worker_client = create_client_with_multi_key_support(_api_key, _model, _output_dir, _ai_config)
+                    worker_client.context = 'qa_truncation'
+                    worker_client._stop_callback = should_stop
+                    _ai_worker_clients.client = worker_client
+                return worker_client
         except Exception as _client_err:
             log(f"   ⚠️ Could not create API client for AI truncation detection: {_client_err}")
             _ai_client = None
@@ -8983,9 +8997,11 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
 
                     _ai_safe_log(f"   🔍 Checking: {filename}")
 
+                    worker_client = _ai_client_for_worker()
+
                     # Set request label so client logs show filename instead of internal counter
                     try:
-                        tls = _ai_client._get_thread_local_client()
+                        tls = worker_client._get_thread_local_client()
                         tls.current_request_label = filename
                     except Exception:
                         pass
@@ -9025,7 +9041,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
 
                     ai_result = run_ai_truncation_check(
                         matched_source_html, trans_html_content,
-                        client=_ai_client,
+                        client=worker_client,
                         tail_chars=_ai_tail_chars,
                         log=_ai_safe_log,
                         custom_system_prompt=_ai_custom_prompt,
