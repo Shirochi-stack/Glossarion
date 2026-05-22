@@ -950,7 +950,8 @@ def _parse_sse_lines(
         nonlocal first_token_ts
         if first_token_ts is None:
             first_token_ts = time.time()
-            _log(log_fn, f"📡 AuthND: First token in {first_token_ts - stream_started_ts:.1f}s, streaming...")
+            if log_stream:
+                _log(log_fn, f"📡 AuthND: First token in {first_token_ts - stream_started_ts:.1f}s, streaming...")
 
     def _emit_stream_text(fragment: str) -> None:
         if not log_fn or not log_stream or not fragment:
@@ -1071,7 +1072,8 @@ def _parse_sse_lines(
         elif reasoning_parts:
             estimated_tokens = max(1, len("".join(reasoning_parts)) // 4)
             log_fn(f"   💭 Thinking tokens used: ~{estimated_tokens:,}")
-    _log(log_fn, f"📡 AuthND: Stream finished in {time.time() - stream_started_ts:.1f}s")
+    if log_stream:
+        _log(log_fn, f"📡 AuthND: Stream finished in {time.time() - stream_started_ts:.1f}s")
 
     content = "".join(parts)
     final_finish_reason, finish_reason_explicit, finish_reason_inference = _infer_finish_reason(
@@ -1221,6 +1223,8 @@ def _post_prediction(
     timeout: int,
     connect_timeout: Optional[float],
     stream: bool,
+    log_stream: Optional[bool] = None,
+    progress_label: Optional[str] = None,
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     metadata = _resolve_model_metadata(page_url)
@@ -1325,13 +1329,16 @@ def _post_prediction(
                     _log(log_fn, f"⚠️ AuthND HTTP failure: {_short_error(exc)}")
                     _unregister_response_closer(closer)
                     raise exc
-                _log(log_fn, f"📡 AuthND: Stream opened (status={response.status_code}, transport=httpx)")
+                if progress_label:
+                    _log(log_fn, progress_label)
+                if log_stream is None or log_stream:
+                    _log(log_fn, f"📡 AuthND: Stream opened (status={response.status_code}, transport=httpx)")
                 try:
                     return _parse_sse_lines(
                         _iter_utf8_lines(response.iter_raw()),
                         close_fn=response.close,
                         log_fn=log_fn,
-                        log_stream=_stream_logging_enabled(),
+                        log_stream=_stream_logging_enabled() if log_stream is None else bool(log_stream),
                         t_start=request_started,
                         requested_max_tokens=max_tokens,
                     )
@@ -1368,13 +1375,16 @@ def _post_prediction(
     _raise_for_status(response)
     content_type = (response.headers.get("content-type") or "").lower()
     if stream or "text/event-stream" in content_type:
-        _log(log_fn, f"📡 AuthND: Stream opened (status={response.status_code})")
+        if progress_label:
+            _log(log_fn, progress_label)
+        if log_stream is None or log_stream:
+            _log(log_fn, f"📡 AuthND: Stream opened (status={response.status_code})")
         closer = _register_response_closer(response.close)
         try:
             return _parse_sse_response(
                 response,
                 log_fn=log_fn,
-                log_stream=_stream_logging_enabled(),
+                log_stream=_stream_logging_enabled() if log_stream is None else bool(log_stream),
                 t_start=request_started,
                 requested_max_tokens=max_tokens,
             )
@@ -1399,6 +1409,7 @@ def send_chat_completion(
     connect_timeout: Optional[float] = None,
     account_id: int = 0,
     stream: Optional[bool] = None,
+    log_stream: Optional[bool] = None,
     progress_label: Optional[str] = None,
 ) -> Dict[str, Any]:
     del account_id  # AuthND has no account slots; kept for unified handler symmetry.
@@ -1463,10 +1474,7 @@ def send_chat_completion(
             debug_only=True,
         )
         _log(log_fn, "📨 AuthND: captcha token acquired; sending NVIDIA request")
-        if progress_label:
-            _log(log_fn, progress_label)
-        else:
-            _log(log_fn, f"📤 [{threading.current_thread().name}] API call in progress")
+        post_progress_label = progress_label or f"📤 [{threading.current_thread().name}] API call in progress"
         try:
             result = _post_prediction(
                 messages=normalized_messages,
@@ -1482,6 +1490,8 @@ def send_chat_completion(
                 timeout=timeout_value,
                 connect_timeout=connect_timeout,
                 stream=bool(use_stream),
+                log_stream=log_stream,
+                progress_label=post_progress_label,
                 log_fn=log_fn,
             )
             result["model"] = model_id

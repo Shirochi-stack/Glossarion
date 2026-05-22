@@ -23138,7 +23138,7 @@ class UnifiedClient:
                         pass
 
                 anti_dupe_params = self._get_anti_duplicate_params(temperature, log_key=response_name)
-                authnd_use_stream = self._streaming_enabled()
+                authnd_log_stream = self._streaming_enabled()
                 try:
                     tls = self._get_thread_local_client()
                     _label = getattr(tls, 'current_request_label', None) or 'request'
@@ -23161,7 +23161,8 @@ class UnifiedClient:
                     frequency_penalty=anti_dupe_params.get("frequency_penalty"),
                     presence_penalty=anti_dupe_params.get("presence_penalty"),
                     progress_label=authnd_progress_label,
-                    stream=authnd_use_stream,
+                    stream=True,
+                    log_stream=authnd_log_stream,
                 )
 
                 content = result.get("content", "")
