@@ -5938,7 +5938,7 @@ class UnifiedClient:
                     print(f"[AI TRUNCATION DETECTION KEYS] Failed to apply override: {e}")
 
             # VISION KEY OVERRIDE: shared pool for vision OCR/image scans.
-            _vision_key_contexts = ('Truncation', 'image_scan', 'image_ocr', 'vision_ocr', 'manga_ocr')
+            _vision_key_contexts = ('Truncation', 'image_scan', 'image_ocr', 'vision_ocr', 'manga_ocr', 'image_translation')
             _is_qa_scan_context = context in _vision_key_contexts or (not context and 'Truncation' in threading.current_thread().name)
             if not _qa_scan_overridden and _is_qa_scan_context:
                 try:

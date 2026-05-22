@@ -30,7 +30,7 @@ try:
 except ImportError:
     CV2_AVAILABLE = False
 import numpy as np
-from unified_api_client import UnifiedClientError
+from unified_api_client import UnifiedClient, UnifiedClientError
 
 logger = logging.getLogger(__name__)
 
@@ -437,6 +437,7 @@ class ImageTranslator:
         self._vision_ocr_progress_scope = None
         self._vision_ocr_summary_lock = threading.Lock()
         self._vision_ocr_summary = None
+        self._vision_ocr_worker_clients = threading.local()
         self._ocr_cache_invalidated = False
         self._ensure_ocr_cache_valid()
         
@@ -2097,6 +2098,37 @@ class ImageTranslator:
         normalized = re.sub(r'^[\s"`\'*_~]+|[\s"`\'*_~.。!！]+$', '', normalized).strip()
         return normalized.lower() == "no"
 
+    def _vision_ocr_client_for_worker(self):
+        """Use one UnifiedClient per OCR worker when the dedicated Vision pool is active."""
+        use_vision_pool = (
+            os.getenv("USE_VISION_KEYS", "0") == "1"
+            or os.getenv("USE_QA_SCAN_KEYS", "0") == "1"
+        )
+        if not use_vision_pool or os.getenv("BATCH_TRANSLATION", "0") != "1":
+            return self.client
+
+        worker_client = getattr(self._vision_ocr_worker_clients, "client", None)
+        if worker_client is not None:
+            return worker_client
+
+        base_api_key = getattr(self.client, "original_api_key", None) or getattr(self.client, "api_key", "")
+        base_model = getattr(self.client, "original_model", None) or getattr(self.client, "model", "")
+        output_dir = getattr(self.client, "output_dir", None) or self.output_dir
+        worker_client = UnifiedClient(base_api_key, base_model, output_dir=output_dir)
+        worker_client.context = "vision_ocr"
+        try:
+            worker_client._stop_callback = getattr(self.client, "_stop_callback", None)
+        except Exception:
+            pass
+        try:
+            worker_client.use_fallback_keys = getattr(self.client, "use_fallback_keys", False)
+            worker_client.use_main_key_fallback = getattr(self.client, "use_main_key_fallback", True)
+            worker_client._use_main_key_fallback = getattr(self.client, "_use_main_key_fallback", True)
+        except Exception:
+            pass
+        self._vision_ocr_worker_clients.client = worker_client
+        return worker_client
+
     def _call_vision_ocr_api(
         self,
         image_data,
@@ -2109,6 +2141,7 @@ class ImageTranslator:
         chapter_num=None,
     ):
         """OCR an image/chunk using the dedicated Vision OCR prompt."""
+        api_client = self._vision_ocr_client_for_worker()
         messages = [{"role": "system", "content": self.vision_ocr_prompt}]
         user_prompt_template = (self.vision_ocr_user_prompt or DEFAULT_VISION_OCR_USER_PROMPT).strip()
         context_text = (assistant_prompt or "").strip()
@@ -2131,7 +2164,7 @@ class ImageTranslator:
                 chapter_part = f"{int(effective_chapter_num):03d}"
             except Exception:
                 chapter_part = str(effective_chapter_num)
-            self.client.set_output_filename(
+            api_client.set_output_filename(
                 f"ocr_{chapter_part}_Chapter_{effective_chapter_num}_image_{effective_image_idx}{chunk_suffix}.txt"
             )
 
@@ -2152,7 +2185,7 @@ class ImageTranslator:
 
         try:
             ocr_response, finish_reason = send_image_with_interrupt(
-                self.client,
+                api_client,
                 messages,
                 image_data,
                 self.temperature,
