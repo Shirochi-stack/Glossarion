@@ -7092,7 +7092,14 @@ class UnifiedClient:
             # Vertex AI doesn't need a client created here
             if hasattr(self, '_original_client_type'):
                 del self._original_client_type
-            logger.info("Vertex AI Model Garden will initialize on demand")
+            try:
+                _ctx = str(getattr(self, 'context', '') or '').strip().lower()
+                _scope = str(getattr(self, '_active_key_pool_scope', '') or '')
+            except Exception:
+                _ctx = ''
+                _scope = ''
+            if _ctx not in ('manga_ocr', 'vision_ocr', 'image_ocr', 'image_scan') and _scope not in ('VisionKey', 'ImageGenEditKey'):
+                logger.info("Vertex AI Model Garden will initialize on demand")
         
         elif self.client_type == 'authgpt':
             # AuthGPT uses ChatGPT backend via OAuth – no persistent SDK client
@@ -14267,7 +14274,29 @@ class UnifiedClient:
         # For immediate requests: flush deferred logs and show "now" at fire time
         if sleep_time <= 0:
             flush_deferred_batch_logs()
-            if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+            _model_lower = getattr(self, 'model', '').lower()
+            _is_authgem = _model_lower.startswith('authgem')
+            _is_authnd = _model_lower.startswith('authnd')
+            _is_native_gemini = _model_lower.startswith('gemini')
+            _is_vertex = (
+                _model_lower.startswith('vertex/') or
+                _model_lower.startswith('vertex_ai/')
+            )
+            _sdk_providers = {
+                'openai', 'deepseek', 'together', 'mistral', 'yi', 'qwen',
+                'moonshot', 'groq', 'electronhub', 'openrouter', 'fireworks',
+                'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu',
+                'nanogpt', 'sambanova', 'literouter', 'custom_openai',
+            }
+            _is_sdk_provider = False
+            try:
+                _provider = self._get_actual_provider()
+                if _provider in _sdk_providers:
+                    _is_sdk_provider = True
+            except Exception:
+                pass
+            _defer_progress_log = _is_authgem or _is_authnd or _is_native_gemini or _is_vertex or _is_sdk_provider
+            if not _defer_progress_log and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
                 try:
                     tls = self._get_thread_local_client()
                     _label = getattr(tls, 'current_request_label', None) or 'request'
