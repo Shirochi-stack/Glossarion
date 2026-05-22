@@ -9064,11 +9064,15 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     _ai_safe_log(f"   ⚠️ AI truncation check failed for {result_obj.get('filename', '?')}: {_e}")
                     return None
 
-            # Respect Batch Translation toggle and batch size from config
-            _batch_enabled = _ai_config.get('batch_translation', False)
+            # Respect Batch Translation toggle and batch size from live GUI/config/env.
+            _batch_raw = _ai_config.get('batch_translation', os.getenv('BATCH_TRANSLATION', '0'))
+            if isinstance(_batch_raw, str):
+                _batch_enabled = _batch_raw.strip().lower() in ('1', 'true', 'yes', 'on')
+            else:
+                _batch_enabled = bool(_batch_raw)
             if _batch_enabled:
                 try:
-                    _ai_max_workers = max(1, min(int(_ai_config.get('batch_size', 3)), len(results)))
+                    _ai_max_workers = max(1, min(int(_ai_config.get('batch_size', os.getenv('BATCH_SIZE', 3))), len(results)))
                 except (ValueError, TypeError):
                     _ai_max_workers = min(3, len(results))
             else:

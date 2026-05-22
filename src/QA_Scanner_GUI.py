@@ -2126,7 +2126,10 @@ class QAScannerMixin:
                         current_qa_settings['_live_model'] = getattr(self, 'model_var', self.config.get('model', ''))
                         live_cfg = dict(self.config)
                         if hasattr(self, 'batch_translation_var'):
-                            live_cfg['batch_translation'] = self.batch_translation_var
+                            batch_value = self.batch_translation_var
+                            if hasattr(batch_value, 'isChecked'):
+                                batch_value = batch_value.isChecked()
+                            live_cfg['batch_translation'] = bool(batch_value)
                         if hasattr(self, 'batch_size_entry'):
                             try:
                                 live_cfg['batch_size'] = int(self.batch_size_entry.text() or 3)
