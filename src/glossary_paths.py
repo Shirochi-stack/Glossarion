@@ -3,6 +3,7 @@
 
 import os
 import shutil
+import sys
 import threading
 
 
@@ -24,6 +25,73 @@ _LEGACY_GLOSSARY_SUFFIXES = (
 
 _BACKGROUND_MIGRATION_LOCK = threading.Lock()
 _BACKGROUND_MIGRATION_THREADS = {}
+
+
+def _mac_app_support_dir() -> str:
+    return os.path.join(
+        os.path.expanduser("~"),
+        "Library",
+        "Application Support",
+        "Glossarion",
+    )
+
+
+def _fallback_dir_from_path(path: str) -> str:
+    if not path:
+        return ""
+    path = os.path.abspath(os.path.expanduser(str(path)))
+    if os.path.isdir(path):
+        return path
+    return os.path.dirname(path)
+
+
+def _cwd_needs_writable_fallback() -> bool:
+    try:
+        cwd = os.path.abspath(os.getcwd())
+    except Exception:
+        return True
+    try:
+        if cwd == os.path.abspath(os.sep):
+            return True
+        return not os.access(cwd, os.W_OK)
+    except Exception:
+        return True
+
+
+def _default_glossary_base(fallback_base: str = None) -> str:
+    if sys.platform == "darwin" and _cwd_needs_writable_fallback():
+        fallback_dir = _fallback_dir_from_path(fallback_base)
+        return fallback_dir or _mac_app_support_dir()
+    return os.getcwd()
+
+
+def resolve_shared_glossary_dir(shared_glossary_dir: str = None, fallback_base: str = None, create: bool = False) -> str:
+    """Resolve the shared Glossary folder without accidentally targeting root.
+
+    Packaged macOS apps can start with cwd set to ``/``. A relative
+    ``Glossary`` path would then become ``/Glossary``, which is read-only on
+    modern macOS. In that case, use the source file's directory when supplied,
+    otherwise the app's writable Application Support directory.
+    """
+    raw = str(shared_glossary_dir or "").strip()
+    base = _default_glossary_base(fallback_base)
+    root_glossary = os.path.abspath(os.path.join(os.path.abspath(os.sep), "Glossary"))
+
+    if raw:
+        expanded = os.path.expanduser(raw)
+        if sys.platform == "darwin" and os.path.abspath(expanded) == root_glossary:
+            path = os.path.join(base, "Glossary")
+        elif os.path.isabs(expanded):
+            path = expanded
+        else:
+            path = os.path.join(base, expanded)
+    else:
+        path = os.path.join(base, "Glossary")
+
+    path = os.path.abspath(path)
+    if create:
+        os.makedirs(path, exist_ok=True)
+    return path
 
 
 def _safe_log(logger, message: str):
@@ -119,9 +187,9 @@ def sanitize_glossary_folder_name(name: str) -> str:
     return folder[:150].rstrip(" .") or "book"
 
 
-def get_book_glossary_dir(shared_glossary_dir: str, book_name: str, create: bool = True) -> str:
+def get_book_glossary_dir(shared_glossary_dir: str, book_name: str, create: bool = True, fallback_base: str = None) -> str:
     """Return Glossary/<book>/, creating it by default."""
-    root = os.path.abspath(shared_glossary_dir or os.path.join(os.getcwd(), "Glossary"))
+    root = resolve_shared_glossary_dir(shared_glossary_dir, fallback_base=fallback_base)
     folder = sanitize_glossary_folder_name(book_name)
     path = os.path.join(root, folder)
     if create:
@@ -129,8 +197,11 @@ def get_book_glossary_dir(shared_glossary_dir: str, book_name: str, create: bool
     return path
 
 
-def get_book_glossary_path(shared_glossary_dir: str, book_name: str, filename: str, create: bool = True) -> str:
-    return os.path.join(get_book_glossary_dir(shared_glossary_dir, book_name, create=create), os.path.basename(filename))
+def get_book_glossary_path(shared_glossary_dir: str, book_name: str, filename: str, create: bool = True, fallback_base: str = None) -> str:
+    return os.path.join(
+        get_book_glossary_dir(shared_glossary_dir, book_name, create=create, fallback_base=fallback_base),
+        os.path.basename(filename),
+    )
 
 
 def migrate_legacy_glossary_files(shared_glossary_dir: str, book_name: str, logger=None):
@@ -139,7 +210,7 @@ def migrate_legacy_glossary_files(shared_glossary_dir: str, book_name: str, logg
     Existing destination files are left untouched to avoid overwriting user edits.
     Returns a list of ``(source, destination)`` pairs that were moved.
     """
-    root = os.path.abspath(shared_glossary_dir or os.path.join(os.getcwd(), "Glossary"))
+    root = resolve_shared_glossary_dir(shared_glossary_dir)
     if not os.path.isdir(root):
         return []
 
@@ -186,7 +257,7 @@ def migrate_legacy_glossary_files(shared_glossary_dir: str, book_name: str, logg
 
 def discover_legacy_glossary_bases(shared_glossary_dir: str):
     """Return every book base that still has flat legacy files in Glossary/."""
-    root = os.path.abspath(shared_glossary_dir or os.path.join(os.getcwd(), "Glossary"))
+    root = resolve_shared_glossary_dir(shared_glossary_dir)
     if not os.path.isdir(root):
         return []
 
@@ -217,7 +288,7 @@ def _legacy_migration_quick_check(root: str) -> bool:
 
 def migrate_all_legacy_glossary_files(shared_glossary_dir: str, logger=None, backup_root: str = None):
     """Run a cheap legacy migration check for a Glossary folder."""
-    root = os.path.abspath(shared_glossary_dir or os.path.join(os.getcwd(), "Glossary"))
+    root = resolve_shared_glossary_dir(shared_glossary_dir)
     if not os.path.isdir(root):
         return []
     if not _legacy_migration_quick_check(root):
@@ -236,7 +307,7 @@ def migrate_all_legacy_glossary_files(shared_glossary_dir: str, logger=None, bac
 
 def migrate_shared_glossary_backups(shared_glossary_dir: str, logger=None):
     """Move legacy shared Glossary/Backups files into per-book Backups folders."""
-    root = os.path.abspath(shared_glossary_dir or os.path.join(os.getcwd(), "Glossary"))
+    root = resolve_shared_glossary_dir(shared_glossary_dir)
     backup_dir = os.path.join(root, "Backups")
     if not os.path.isdir(backup_dir):
         return []
@@ -300,7 +371,7 @@ def migrate_shared_glossary_backups(shared_glossary_dir: str, logger=None):
 
 def start_background_glossary_migration(shared_glossary_dir: str, logger=None, backup_root: str = None):
     """Start a daemon-thread migration sweep for the shared Glossary folder."""
-    root = os.path.abspath(shared_glossary_dir or os.path.join(os.getcwd(), "Glossary"))
+    root = resolve_shared_glossary_dir(shared_glossary_dir)
     with _BACKGROUND_MIGRATION_LOCK:
         existing = _BACKGROUND_MIGRATION_THREADS.get(root)
         if existing and existing.is_alive():
@@ -320,7 +391,7 @@ def start_background_glossary_migration(shared_glossary_dir: str, logger=None, b
 
 def repair_nested_glossary_folder(shared_glossary_dir: str, book_name: str, logger=None):
     """Repair accidental Glossary/<book>/Glossary/<book>/ nesting."""
-    root = os.path.abspath(shared_glossary_dir or os.path.join(os.getcwd(), "Glossary"))
+    root = resolve_shared_glossary_dir(shared_glossary_dir)
     base = glossary_book_base_from_output(book_name)
     book_dir = get_book_glossary_dir(root, base, create=True)
     nested_dir = os.path.join(book_dir, "Glossary", sanitize_glossary_folder_name(base))
@@ -354,7 +425,7 @@ def repair_nested_glossary_folder(shared_glossary_dir: str, book_name: str, logg
 
 def repair_misplaced_glossary_backup(shared_glossary_dir: str, book_name: str, backup_root: str = None, logger=None):
     """Move accidental Glossary/<book>/Glossary_Backup files into book-owned storage."""
-    root = os.path.abspath(shared_glossary_dir or os.path.join(os.getcwd(), "Glossary"))
+    root = resolve_shared_glossary_dir(shared_glossary_dir)
     base = glossary_book_base_from_output(book_name)
     book_dir = get_book_glossary_dir(root, base, create=True)
     misplaced_dir = os.path.join(book_dir, "Glossary_Backup")
@@ -404,7 +475,7 @@ def migrate_legacy_named_files(shared_dir: str, folder_name: str, filenames, log
     This is used by glossary-adjacent stores whose filenames do not use the
     standard ``*_glossary`` suffix, such as manga glossary backups.
     """
-    root = os.path.abspath(shared_dir or os.getcwd())
+    root = os.path.abspath(shared_dir or _default_glossary_base())
     if not os.path.isdir(root):
         return []
 

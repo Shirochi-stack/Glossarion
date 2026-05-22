@@ -3434,7 +3434,14 @@ class AsyncProcessingDialog:
         
         # Output settings
         env_vars['EPUB_OUTPUT_DIR'] = os.getcwd()
-        env_vars['GLOSSARY_SHARED_DIR'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Glossary')
+        try:
+            from glossary_paths import resolve_shared_glossary_dir
+            env_vars['GLOSSARY_SHARED_DIR'] = resolve_shared_glossary_dir(
+                os.environ.get('GLOSSARY_SHARED_DIR', ''),
+                fallback_base=getattr(self.gui, 'file_path', ''),
+            )
+        except Exception:
+            env_vars['GLOSSARY_SHARED_DIR'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Glossary')
         output_path = self.gui.output_entry.get().strip() if hasattr(self.gui, 'output_entry') else ''
         if not output_path:
             try:

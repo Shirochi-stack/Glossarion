@@ -675,14 +675,22 @@ def _get_app_dir() -> str:
     """Return the application's base directory.
 
     On Windows the CWD can be Downloads/Desktop when launching a .exe,
-    so we always use the exe/script directory.  On macOS/Linux the CWD
-    is typically reliable (set by the launcher), so we keep it.
+    so we always use the exe/script directory. On macOS/Linux we normally
+    keep the launcher's CWD, but packaged apps can start at "/" or another
+    unwritable directory. In that case, use the already-resolved writable
+    app data directory.
     """
     if platform.system() == 'Windows':
         if getattr(sys, 'frozen', False):
             return os.path.dirname(sys.executable)
         return os.path.dirname(os.path.abspath(__file__))
-    return os.getcwd()
+    try:
+        cwd = os.path.abspath(os.getcwd())
+        if cwd == os.path.abspath(os.sep) or not os.access(cwd, os.W_OK):
+            return _APP_DIR
+        return cwd
+    except Exception:
+        return _APP_DIR
 
 
 # --- Robust file logging and crash tracing setup ---

@@ -22,6 +22,7 @@ from unified_api_client import UnifiedClient, UnifiedClientError
 from glossary_paths import (
     get_book_glossary_dir,
     migrate_all_legacy_glossary_files,
+    resolve_shared_glossary_dir,
     sanitize_glossary_folder_name,
 )
 from glossary_refinement import (
@@ -1135,6 +1136,30 @@ def _resolved_glossary_progress_file(context=None) -> str:
 
     output_file = str(output_file or "").strip()
     if output_file:
+        source_path = os.getenv("EPUB_PATH", "").strip()
+        try:
+            _mac_cwd_unusable = (
+                sys.platform == "darwin"
+                and (
+                    os.path.abspath(os.getcwd()) == os.path.abspath(os.sep)
+                    or not os.access(os.getcwd(), os.W_OK)
+                )
+            )
+        except Exception:
+            _mac_cwd_unusable = sys.platform == "darwin"
+        if not os.path.isabs(output_file) and _mac_cwd_unusable:
+            source_dir = os.path.dirname(os.path.abspath(source_path)) if source_path else ""
+            output_file = os.path.join(source_dir or resolve_shared_glossary_dir(), output_file)
+        elif os.path.isabs(output_file) and sys.platform == "darwin":
+            try:
+                root_glossary = os.path.abspath(os.path.join(os.path.abspath(os.sep), "Glossary"))
+                output_abs = os.path.abspath(output_file)
+                if os.path.commonpath([root_glossary, output_abs]) == root_glossary:
+                    source_dir = os.path.dirname(os.path.abspath(source_path)) if source_path else ""
+                    rel_output = os.path.relpath(output_abs, root_glossary)
+                    output_file = os.path.join(source_dir or resolve_shared_glossary_dir(), "Glossary", rel_output)
+            except Exception:
+                pass
         glossary_dir = os.path.dirname(os.path.abspath(output_file))
         base = os.path.splitext(os.path.basename(output_file))[0]
         if base.lower().endswith("_glossary"):
@@ -1145,10 +1170,10 @@ def _resolved_glossary_progress_file(context=None) -> str:
     else:
         glossary_dir = os.getenv("GLOSSARY_SHARED_DIR", "").strip()
         if not glossary_dir:
-            glossary_dir = os.path.join(os.getcwd(), "Glossary")
+            glossary_dir = resolve_shared_glossary_dir(fallback_base=os.getenv("EPUB_PATH", "").strip())
         source_path = os.getenv("EPUB_PATH", "").strip()
         base = os.path.splitext(os.path.basename(source_path))[0] if source_path else "book"
-        glossary_dir = get_book_glossary_dir(glossary_dir, base)
+        glossary_dir = get_book_glossary_dir(glossary_dir, base, fallback_base=source_path)
 
     os.makedirs(glossary_dir, exist_ok=True)
     return os.path.join(glossary_dir, f"{base or 'book'}_glossary_progress.json")
@@ -5526,6 +5551,30 @@ def main(log_callback=None, stop_callback=None):
     # If user didn't override --output, derive it from the EPUB filename:
     if args.output == 'glossary.json':
         args.output = f"{file_base}_glossary.json" 
+
+    try:
+        _mac_cwd_unusable = (
+            sys.platform == "darwin"
+            and (
+                os.path.abspath(os.getcwd()) == os.path.abspath(os.sep)
+                or not os.access(os.getcwd(), os.W_OK)
+            )
+        )
+    except Exception:
+        _mac_cwd_unusable = sys.platform == "darwin"
+    if args.output and not os.path.isabs(args.output) and _mac_cwd_unusable:
+        source_dir = os.path.dirname(os.path.abspath(epub_path)) if epub_path else ""
+        args.output = os.path.join(source_dir or resolve_shared_glossary_dir(), args.output)
+    elif args.output and os.path.isabs(args.output) and sys.platform == "darwin":
+        try:
+            root_glossary = os.path.abspath(os.path.join(os.path.abspath(os.sep), "Glossary"))
+            output_abs = os.path.abspath(args.output)
+            if os.path.commonpath([root_glossary, output_abs]) == root_glossary:
+                source_dir = os.path.dirname(os.path.abspath(epub_path)) if epub_path else ""
+                rel_output = os.path.relpath(output_abs, root_glossary)
+                args.output = os.path.join(source_dir or resolve_shared_glossary_dir(), "Glossary", rel_output)
+        except Exception:
+            pass
 
     # Keep regular EPUB glossaries in the shared Glossary subfolder. Output-side
     # backup copies are written only when the caller passes an explicit target.
