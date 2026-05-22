@@ -93,14 +93,29 @@ def _terminate_process_tree(proc: Any, *, kill: bool = False) -> None:
         pass
 
 
-def _message_summary(messages: List[Dict[str, str]]) -> Dict[str, Any]:
+def _message_summary(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     roles: Dict[str, int] = {}
     chars = 0
+    images = 0
     for message in messages:
         role = str(message.get("role") or "unknown")
         roles[role] = roles.get(role, 0) + 1
-        chars += len(str(message.get("content") or ""))
-    return {"count": len(messages), "roles": roles, "chars": chars}
+        content = message.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    chars += len(str(part or ""))
+                    continue
+                part_type = str(part.get("type") or "").lower()
+                if part_type in ("image_url", "input_image", "image"):
+                    images += 1
+                elif part_type in ("text", "input_text"):
+                    chars += len(str(part.get("text") or ""))
+                else:
+                    chars += len(str(part or ""))
+        else:
+            chars += len(str(content or ""))
+    return {"count": len(messages), "roles": roles, "chars": chars, "images": images}
 
 
 def _payload_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -273,13 +288,90 @@ def _content_to_text(content: Any) -> str:
     return str(content)
 
 
-def _normalize_messages(messages: Iterable[Dict[str, Any]]) -> List[Dict[str, str]]:
+def _image_part_url(item: Dict[str, Any]) -> str:
+    image_url = item.get("image_url")
+    image = item.get("image")
+    url = ""
+    mime = item.get("mime_type") or item.get("mimeType") or "image/png"
+
+    if isinstance(image_url, dict):
+        url = image_url.get("url") or image_url.get("data") or image_url.get("base64") or ""
+        mime = image_url.get("mime_type") or image_url.get("mimeType") or mime
+    elif isinstance(image_url, str):
+        url = image_url
+
+    if not url:
+        if isinstance(image, dict):
+            url = image.get("url") or image.get("data") or image.get("base64") or ""
+            mime = image.get("mime_type") or image.get("mimeType") or mime
+        elif isinstance(image, str):
+            url = image
+
+    if not url:
+        url = item.get("url") or item.get("data") or item.get("base64") or ""
+    url = str(url or "").strip()
+    if not url:
+        raise RuntimeError("AuthND image part is missing image_url.url/data/base64")
+    if url.startswith(("http://", "https://", "data:image/")):
+        return url
+    return f"data:{mime};base64,{url}"
+
+
+def _normalize_content(content: Any) -> Any:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content)
+
+    parts: List[Dict[str, Any]] = []
+    for item in content:
+        if isinstance(item, str):
+            if item:
+                parts.append({"type": "text", "text": item})
+            continue
+        if not isinstance(item, dict):
+            text = str(item or "")
+            if text:
+                parts.append({"type": "text", "text": text})
+            continue
+
+        item_type = str(item.get("type") or "").lower()
+        if item_type in ("", "text", "input_text"):
+            text = str(item.get("text") or "")
+            if text:
+                parts.append({"type": "text", "text": text})
+        elif item_type in ("image_url", "input_image", "image"):
+            parts.append({
+                "type": "image_url",
+                "image_url": {"url": _image_part_url(item)},
+            })
+
+    if not parts:
+        return ""
+    if all(part.get("type") == "text" for part in parts):
+        return "\n".join(str(part.get("text") or "") for part in parts if part.get("text"))
+    return parts
+
+
+def _prepend_system_content(content: Any, system_text: str) -> Any:
+    prefix = f"System instructions:\n{system_text}"
+    if isinstance(content, list):
+        return [{"type": "text", "text": prefix}, *content]
+    if content:
+        return f"{prefix}\n\n{content}"
+    return prefix
+
+
+def _normalize_messages(messages: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     system_parts: List[str] = []
-    normalized: List[Dict[str, str]] = []
+    normalized: List[Dict[str, Any]] = []
 
     for message in messages or []:
         role = str(message.get("role", "user")).lower()
-        content = _content_to_text(message.get("content"))
+        raw_content = message.get("content")
+        content = _content_to_text(raw_content) if role == "system" else _normalize_content(raw_content)
         if not content:
             continue
         if role == "system":
@@ -290,13 +382,13 @@ def _normalize_messages(messages: Iterable[Dict[str, Any]]) -> List[Dict[str, st
         normalized.append({"role": role, "content": content})
 
     if system_parts:
-        system_text = "System instructions:\n" + "\n\n".join(system_parts)
+        system_text = "\n\n".join(system_parts)
         for message in normalized:
             if message["role"] == "user":
-                message["content"] = f"{system_text}\n\n{message['content']}"
+                message["content"] = _prepend_system_content(message.get("content"), system_text)
                 break
         else:
-            normalized.insert(0, {"role": "user", "content": system_text})
+            normalized.insert(0, {"role": "user", "content": _prepend_system_content("", system_text)})
 
     if not normalized:
         normalized.append({"role": "user", "content": ""})
@@ -1210,7 +1302,7 @@ def _httpx_status_error(resp: Any) -> RuntimeError:
 
 def _post_prediction(
     *,
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     model_id: str,
     model_path: str,
     page_url: str,
