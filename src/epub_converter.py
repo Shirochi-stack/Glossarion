@@ -6106,7 +6106,7 @@ img {
                         available_tokens = int(max_output_tokens / compression_factor)
                         # ~50 tokens per TOC entry (title text + JSON key/formatting overhead)
                         toc_ncx_per_batch = max(10, available_tokens // 50)
-                        self.log(f"📐 Auto batch size: {toc_ncx_per_batch} entries "
+                        self.log(f"📐 Auto toc.ncx batch size: {toc_ncx_per_batch} entries "
                                  f"({max_output_tokens:,} output / {compression_factor:.1f}x compression = "
                                  f"{available_tokens:,} available tokens, ~50 tok/entry)")
                     self.log(f"🌐 Translating {len(original)} toc.ncx entries in chunks of {toc_ncx_per_batch}...")

@@ -1871,7 +1871,7 @@ class BatchHeaderTranslator:
             compression_factor = 3.0
         available_tokens = int(max_output_tokens / compression_factor)
         batch_size = max(10, available_tokens // 50)
-        print(f"📐 Auto batch size: {batch_size} entries "
+        print(f"📐 Auto header batch size: {batch_size} entries "
               f"({max_output_tokens:,} output / {compression_factor:.1f}x compression = "
               f"{available_tokens:,} available tokens, ~50 tok/entry)")
         return batch_size
