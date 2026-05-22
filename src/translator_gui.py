@@ -10149,10 +10149,12 @@ Recent translations to summarize:
                                         combined_entries.append(entry)
                         except Exception:
                             continue
-                    # If any files are present, prefer aggregated totals
+                    # Merge external files with the live in-process watchdog.
+                    # Do not let stale/zero external snapshots wipe out a real
+                    # in-memory in-flight request in this GUI process.
                     if total_in_flight or latest_change:
-                        in_flight = total_in_flight
-                        last_change = latest_change or last_change
+                        in_flight = max(in_flight, total_in_flight)
+                        last_change = max(last_change, latest_change)
                         last_context = latest_ctx or last_context
                         last_model = latest_model or last_model
                     if combined_entries:
