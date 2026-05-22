@@ -1025,6 +1025,49 @@ def _current_glossary_model_name(existing_info=None, *, prefer_thread=False):
         return thread_model
     return existing_model
 
+def _glossary_key_pool_from_identifier(key_identifier: str) -> str:
+    key_identifier = str(key_identifier or "").strip()
+    pool_prefixes = (
+        ("GlossaryRefinementKey#", "glossary_refinement"),
+        ("GlossaryKey#", "glossary"),
+        ("MetadataKey#", "metadata"),
+        ("VisionKey#", "vision"),
+        ("TruncationRetryKey#", "truncation_retry"),
+        ("AITruncationDetectionKey#", "ai_truncation_detection"),
+        ("ImageGenEditKey#", "inpainter"),
+        ("Key#", "multi"),
+        ("FALLBACK KEY", "fallback"),
+        ("Main Key", "main"),
+        ("Single Key", "single"),
+    )
+    for prefix, pool_name in pool_prefixes:
+        if key_identifier.startswith(prefix):
+            return pool_name
+    return ""
+
+def _current_glossary_key_context(existing_info=None, *, prefer_thread=False):
+    existing_identifier = ""
+    existing_pool = ""
+    if isinstance(existing_info, dict):
+        existing_identifier = str(
+            existing_info.get("key_identifier")
+            or existing_info.get("api_key_context")
+            or existing_info.get("key_context")
+            or ""
+        ).strip()
+        existing_pool = str(existing_info.get("key_pool") or "").strip()
+
+    thread_identifier = ""
+    try:
+        from unified_api_client import get_current_thread_actual_request_key_identifier
+        thread_identifier = str(get_current_thread_actual_request_key_identifier() or "").strip()
+    except Exception:
+        thread_identifier = ""
+
+    key_identifier = thread_identifier if prefer_thread and thread_identifier else existing_identifier
+    key_pool = _glossary_key_pool_from_identifier(key_identifier) or existing_pool
+    return key_identifier, key_pool
+
 class GlossaryProgressContext:
     """Per-run glossary progress state.
 
@@ -7886,6 +7929,11 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             model_name = _current_glossary_model_name(existing_info, prefer_thread=idx in model_update_set)
             if model_name:
                 chapter_info["model_name"] = model_name
+            key_identifier, key_pool = _current_glossary_key_context(existing_info, prefer_thread=idx in model_update_set)
+            if key_identifier:
+                chapter_info["key_identifier"] = key_identifier
+            if key_pool:
+                chapter_info["key_pool"] = key_pool
             if chapter_file:
                 # Match TransateKRtoEN.py's progress shape: every chapter gets
                 # a stable filename anchor so OPF offsets do not shift rows.
@@ -7931,14 +7979,30 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                     if model_name and not (restored.get("model_name") or restored.get("model")):
                         restored = dict(restored)
                         restored["model_name"] = model_name
+                    key_identifier, key_pool = _current_glossary_key_context(existing_info)
+                    if key_identifier and not restored.get("key_identifier"):
+                        restored = dict(restored)
+                        restored["key_identifier"] = key_identifier
+                    if key_pool and not restored.get("key_pool"):
+                        restored = dict(restored)
+                        restored["key_pool"] = key_pool
                     chapters[_glossary_chapter_key(idx)] = restored
             elif existing_status in ("qa_failed", "failed", "error", "pending", "merged", "completed"):
                 model_name = _current_glossary_model_name(existing_info)
                 if model_name and not (existing_info.get("model_name") or existing_info.get("model")):
                     existing_info = dict(existing_info)
                     existing_info["model_name"] = model_name
+                key_identifier, key_pool = _current_glossary_key_context(existing_info)
+                if key_identifier and not existing_info.get("key_identifier"):
+                    existing_info = dict(existing_info)
+                    existing_info["key_identifier"] = key_identifier
+                if key_pool and not existing_info.get("key_pool"):
+                    existing_info = dict(existing_info)
+                    existing_info["key_pool"] = key_pool
                 chapters[_glossary_chapter_key(idx)] = existing_info
 
+        progress_model_name = _current_glossary_model_name(existing_progress, prefer_thread=bool(model_update_set))
+        progress_key_identifier, progress_key_pool = _current_glossary_key_context(existing_progress, prefer_thread=bool(model_update_set))
         progress_data = {
             "book_title_present": bool(context.book_title_present) if isinstance(context, GlossaryProgressContext) else bool(BOOK_TITLE_PRESENT),
             # Use value from entry if present, otherwise fallback to global translated title
@@ -7954,7 +8018,6 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             "chapter_filenames": {str(k): v for k, v in sorted((filenames or {}).items())},
             "chapter_count": total_chapters,
             "glossary_output_file": output_file,
-            "model_name": _current_glossary_model_name(existing_progress),
             "progress_schema_version": "2.0",
             "indexing": "chapter_index_zero_based",
             "qa_issues_found": {str(idx): issues for idx, issues in sorted(qa_issues_clean.items())},
@@ -7963,6 +8026,12 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
             # Glossary is saved separately to output files, not in progress
             # This prevents the progress file from overwriting manual edits
         }
+        if progress_model_name:
+            progress_data["model_name"] = progress_model_name
+        if progress_key_identifier:
+            progress_data["key_identifier"] = progress_key_identifier
+        if progress_key_pool:
+            progress_data["key_pool"] = progress_key_pool
         if existing_refinement:
             progress_data["refinement"] = existing_refinement
         if manual_removed_indices:

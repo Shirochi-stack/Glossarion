@@ -4278,9 +4278,19 @@ Recent translations to summarize:
         self._update_target_lang_state()
         
         # Show Google Cloud Credentials button for Vertex AI models AND Google Translate (paid)
-        needs_google_creds = False
-        
-        if '@' in model or model.startswith('vertex/') or model.startswith('vertex_ai/'):
+        needs_google_creds = (
+            self._model_needs_google_creds(model)
+            or self._has_google_creds_model_in_key_pools()
+            or bool(getattr(self, '_multi_key_manager_needs_google_creds_hint', False))
+        )
+
+        if (
+            '@' in model
+            or model.startswith('vertex/')
+            or model.startswith('vertex_ai/')
+            or self._has_vertex_model_in_key_pools()
+            or bool(getattr(self, '_multi_key_manager_needs_google_creds_hint', False))
+        ):
             needs_google_creds = True
             self.vertex_location_entry.show()  # Show location selector for Vertex
         elif model.lower() == 'google-translate':  # Exact match for paid Google Translate (not google-translate-free)
@@ -4409,6 +4419,63 @@ Recent translations to summarize:
         
         # Show/hide ◀▶ arrows for cycling between numbered auth account slots
         self._refresh_auth_account_arrows()
+
+    def _model_needs_google_creds(self, model: str) -> bool:
+        """Return True when a model route requires Google Cloud service-account creds."""
+        model = (model or '').strip().lower()
+        return (
+            '@' in model
+            or model.startswith('vertex/')
+            or model.startswith('vertex_ai/')
+            or model == 'google-translate'
+        )
+
+    def _iter_enabled_key_pool_models(self):
+        """Yield model names from enabled key pools."""
+        pool_map = {
+            'multi_api_keys': 'use_multi_api_keys',
+            'fallback_keys': 'use_fallback_keys',
+            'glossary_keys': 'use_glossary_keys',
+            'glossary_refinement_keys': 'use_glossary_refinement_keys',
+            'metadata_keys': 'use_metadata_keys',
+            'qa_scan_keys': 'use_qa_scan_keys',
+            'truncation_retry_keys': 'use_truncation_retry_keys',
+            'inpainter_keys': 'use_inpainter_keys',
+        }
+        for pool_key, toggle_key in pool_map.items():
+            if not self.config.get(toggle_key, False):
+                continue
+            for key_data in self.config.get(pool_key, []):
+                if isinstance(key_data, dict):
+                    if not key_data.get('enabled', True):
+                        continue
+                    model = key_data.get('model', '')
+                else:
+                    if not getattr(key_data, 'enabled', True):
+                        continue
+                    model = getattr(key_data, 'model', '')
+                yield pool_key, toggle_key, model
+
+    def _has_google_creds_model_in_key_pools(self):
+        """Check enabled key pools for models that require Google Cloud credentials."""
+        try:
+            for _pool_key, _toggle_key, model in self._iter_enabled_key_pool_models():
+                if self._model_needs_google_creds(model):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _has_vertex_model_in_key_pools(self):
+        """Check enabled key pools for Vertex-style models that need the location field."""
+        try:
+            for _pool_key, _toggle_key, model in self._iter_enabled_key_pool_models():
+                model = (model or '').strip().lower()
+                if '@' in model or model.startswith('vertex/') or model.startswith('vertex_ai/'):
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _has_authgpt_in_key_pools(self):
         """Check if any enabled key pool contains an enabled authgpt model."""

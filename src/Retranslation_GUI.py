@@ -2134,8 +2134,14 @@ class RetranslationMixin:
                         if _gp_index_for_entry(info, key, _d) != ci:
                             continue
                         model_name = str(info.get('model_name') or info.get('model') or '').strip()
+                        key_identifier = str(info.get('key_identifier') or info.get('api_key_context') or '').strip()
+                        key_label = key_identifier.split(' (', 1)[0] if key_identifier else ''
+                        if model_name and key_label:
+                            return f"{model_name} | {key_label}"
                         if model_name:
                             return model_name
+                        if key_label:
+                            return key_label
                 return '(model unknown)'
 
             def _gp_display_for(ci, fname, _d, cache=None):
@@ -2177,7 +2183,13 @@ class RetranslationMixin:
                     after = info.get('entry_count_after')
                     total_chunks = info.get('total_chunks')
                     completed_chunks = info.get('completed_chunks')
-                    model_name = str(info.get('model_name') or info.get('model') or '').strip() or '(model unknown)'
+                    model_name = str(info.get('model_name') or info.get('model') or '').strip()
+                    key_identifier = str(info.get('key_identifier') or info.get('api_key_context') or '').strip()
+                    key_label = key_identifier.split(' (', 1)[0] if key_identifier else ''
+                    if model_name and key_label:
+                        model_name = f"{model_name} | {key_label}"
+                    elif not model_name:
+                        model_name = key_label or '(model unknown)'
                     detail = ""
                     if before is not None and after is not None:
                         detail = f" | {before} -> {after} entries"
@@ -6306,7 +6318,7 @@ class RetranslationMixin:
                 info.pop('progress_entry', None)
 
     def _progress_entry_model_name(self, info, data=None):
-        """Return the model name attached to a progress row, with old-file fallbacks."""
+        """Return model/key context attached to a progress row, with old-file fallbacks."""
         candidates = []
         if isinstance(info, dict):
             candidates.append(info)
@@ -6327,8 +6339,14 @@ class RetranslationMixin:
 
         for candidate in candidates:
             model_name = str(candidate.get('model_name') or candidate.get('model') or '').strip()
+            key_identifier = str(candidate.get('key_identifier') or candidate.get('api_key_context') or '').strip()
+            key_label = key_identifier.split(' (', 1)[0] if key_identifier else ''
+            if model_name and key_label:
+                return f"{model_name} | {key_label}"
             if model_name:
                 return model_name
+            if key_label:
+                return key_label
         return "(model unknown)"
 
     def _progress_model_column_text(self, info, data, fallback_output):

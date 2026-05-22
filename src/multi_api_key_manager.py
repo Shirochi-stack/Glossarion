@@ -1494,6 +1494,97 @@ class MultiAPIKeyDialog(QDialog):
         """Disable mousewheel scrolling on a combobox (PySide6)"""
         combobox.wheelEvent = lambda event: None
 
+    def _get_model_options_for_dropdown(self):
+        """Return the same model list shape used by the main translator dropdown."""
+        models = None
+        try:
+            if hasattr(self.translator_gui, 'config'):
+                models = self.translator_gui.config.get('custom_model_list')
+        except Exception:
+            models = None
+
+        default_catalog = get_model_options()
+        if models is None:
+            return list(default_catalog)
+
+        models = list(models)
+        existing = set(models)
+        models.extend([m for m in default_catalog if m not in existing])
+        return models
+
+    def _model_needs_google_creds(self, model: str) -> bool:
+        model = (model or '').strip().lower()
+        return (
+            '@' in model
+            or model.startswith('vertex/')
+            or model.startswith('vertex_ai/')
+            or model == 'google-translate'
+        )
+
+    def _has_pending_google_creds_model(self):
+        """Check live add-key model fields before they have been saved as keys."""
+        widget_names = [
+            'model_combo',
+            'fallback_model_combo',
+            'glossary_model_combo',
+            'glossary_refinement_model_combo',
+            'metadata_model_combo',
+            'qa_scan_model_combo',
+            'ai_truncation_detection_model_combo',
+            'truncation_retry_model_combo',
+            'inpainter_model_combo',
+        ]
+        for name in widget_names:
+            combo = getattr(self, name, None)
+            try:
+                if combo and self._model_needs_google_creds(combo.currentText()):
+                    return True
+            except RuntimeError:
+                continue
+            except Exception:
+                continue
+        return False
+
+    def _refresh_parent_model_requirements(self, save_config=False):
+        """Ask the parent GUI to refresh provider buttons from saved and live manager state."""
+        if save_config:
+            try:
+                self._save_keys_to_config()
+            except Exception:
+                pass
+
+        try:
+            setattr(
+                self.translator_gui,
+                '_multi_key_manager_needs_google_creds_hint',
+                self._has_pending_google_creds_model(),
+            )
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self.translator_gui, 'on_model_change'):
+                self.translator_gui.on_model_change()
+        except Exception:
+            pass
+
+    def _sync_parent_google_credentials(self, filename):
+        """Load a manager-selected Google credentials file into the parent GUI too."""
+        try:
+            if hasattr(self.translator_gui, 'config'):
+                self.translator_gui.config['google_cloud_credentials'] = filename
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = filename
+            if hasattr(self.translator_gui, 'save_config'):
+                self.translator_gui.save_config(show_message=False)
+            if hasattr(self.translator_gui, 'append_log'):
+                self.translator_gui.append_log(f"Google Cloud credentials loaded: {os.path.basename(filename)}")
+        except Exception:
+            pass
+        self._refresh_parent_model_requirements(save_config=False)
+
+    def _on_model_requirement_input_changed(self):
+        self._refresh_parent_model_requirements(save_config=False)
+
     def _bind_shared_pool(self):
         """Bind this dialog to the UnifiedClient's shared APIKeyPool if available.
         If UnifiedClient has no pool yet, register our pool as the shared pool.
@@ -2180,10 +2271,11 @@ class MultiAPIKeyDialog(QDialog):
 
         # Fallback Model
         add_fallback_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
-        fallback_models = get_model_options()
+        fallback_models = self._get_model_options_for_dropdown()
         self.fallback_model_combo = QComboBox()
         self.fallback_model_combo.addItems(fallback_models)
         self.fallback_model_combo.setEditable(True)
+        self._attach_model_autofill(self.fallback_model_combo, self._on_model_requirement_input_changed)
         self._disable_combobox_mousewheel(self.fallback_model_combo)  # Disable mousewheel
         add_fallback_grid.addWidget(self.fallback_model_combo, 0, 4)
 
@@ -2460,83 +2552,29 @@ class MultiAPIKeyDialog(QDialog):
         if not selected:
             return
 
-        # Get fallback keys
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
-
-        # Create simple dialog
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Change Model for {len(selected)} Fallback Keys")
-        # Use screen ratios for sizing
-        screen = QApplication.primaryScreen().geometry()
-        width = int(screen.width() * 0.21)  # 21% of screen width
-        height = int(screen.height() * 0.13)  # 13% of screen height
-        dialog.resize(width, height)
-        self._set_icon(dialog)
-
-        # Main layout
-        main_layout = QVBoxLayout(dialog)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-
-        # Label
-        label = QLabel("Enter new model name (press Enter to apply):")
-        main_layout.addWidget(label)
-
-        # Full model list
-        all_models = get_model_options()
-
-        model_combo = QComboBox()
-        model_combo.addItems(all_models)
-        model_combo.setEditable(True)
-        main_layout.addWidget(model_combo)
-
-        # Get current model from first selected item as default
         selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
+        current_model = ""
         if selected_indices and selected_indices[0] < len(fallback_keys):
             current_model = fallback_keys[selected_indices[0]].get('model', '')
-            model_combo.setCurrentText(current_model)
-            model_combo.lineEdit().selectAll()
 
-        def apply_change():
-            new_model = model_combo.currentText().strip()
-            if new_model:
-                # Update all selected fallback keys
-                for item in selected:
-                    index = self.fallback_tree.indexOfTopLevelItem(item)
-                    if index < len(fallback_keys):
-                        fallback_keys[index]['model'] = new_model
+        new_model, ok = self._show_model_selection_dialog(
+            current_model,
+            title=f"Change Model for {len(selected)} Fallback Keys",
+            accept_text="Apply",
+        )
+        if not ok or not new_model:
+            return
 
-                # Save to config
-                self.translator_gui.config['fallback_keys'] = fallback_keys
-                self.translator_gui.save_config(show_message=False)
+        for item in selected:
+            index = self.fallback_tree.indexOfTopLevelItem(item)
+            if index < len(fallback_keys):
+                fallback_keys[index]['model'] = new_model
 
-                # Reload the list
-                self._load_fallback_keys()
-
-                # Show status
-                self._show_fallback_status(f"Changed model to '{new_model}' for {len(selected)} fallback keys")
-
-                dialog.accept()
-
-        # Buttons
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-
-        apply_btn = QPushButton("Apply")
-        apply_btn.clicked.connect(apply_change)
-        apply_btn.setDefault(True)
-        button_layout.addWidget(apply_btn)
-
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(dialog.reject)
-        button_layout.addWidget(cancel_btn)
-
-        main_layout.addLayout(button_layout)
-
-        # Focus on the combobox
-        model_combo.setFocus()
-
-        # Show dialog
-        dialog.exec_()
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_fallback_keys()
+        self._show_fallback_status(f"Changed model to '{new_model}' for {len(selected)} fallback keys")
 
     def _load_fallback_keys(self):
         """Load fallback keys from config"""
@@ -2692,6 +2730,8 @@ class MultiAPIKeyDialog(QDialog):
         api_key = self.fallback_key_entry.text().strip()
         model = self.fallback_model_combo.currentText().strip()
         google_credentials = self.fallback_google_creds_entry.text().strip() or None
+        if google_credentials:
+            self._sync_parent_google_credentials(google_credentials)
         google_region = self.fallback_google_region_entry.text().strip() or None
 
         # Only use individual endpoint if toggle is enabled
@@ -3744,10 +3784,11 @@ class MultiAPIKeyDialog(QDialog):
 
         # Model
         add_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
-        add_models = get_model_options()
+        add_models = self._get_model_options_for_dropdown()
         self.model_combo = QComboBox()
         self.model_combo.addItems(add_models)
         self.model_combo.setEditable(True)
+        self._attach_model_autofill(self.model_combo, self._on_model_requirement_input_changed)
         self._disable_combobox_mousewheel(self.model_combo)  # Disable mousewheel
         add_grid.addWidget(self.model_combo, 0, 4)
 
@@ -4323,33 +4364,49 @@ class MultiAPIKeyDialog(QDialog):
 
     def _show_model_edit_dialog(self, current_value):
         """Show dialog for editing model name"""
-        from PySide6.QtWidgets import QInputDialog
-        all_models = get_model_options()
+        return self._show_model_selection_dialog(current_value, title="Edit Model", accept_text="OK")
 
-        # Use QComboBox-based input dialog
+    def _show_model_selection_dialog(self, current_value="", title="Edit Model", label_text="Model Name:", accept_text="OK"):
+        """Show the shared model editor used by every key pool."""
+        all_models = self._get_model_options_for_dropdown()
+
         dialog = QDialog(self)
-        dialog.setWindowTitle("Edit Model")
-        layout = QVBoxLayout(dialog)
+        dialog.setWindowTitle(title)
+        dialog.setMinimumWidth(560)
+        self._set_icon(dialog)
 
-        layout.addWidget(QLabel("Model Name:"))
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+
+        layout.addWidget(QLabel(label_text))
         combo = QComboBox()
         combo.addItems(all_models)
         combo.setEditable(True)
+        self._attach_model_autofill(combo, self._on_model_requirement_input_changed)
         combo.setCurrentText(current_value)
-        combo.lineEdit().selectAll()
+        if combo.lineEdit():
+            combo.lineEdit().selectAll()
         layout.addWidget(combo)
 
-        # Buttons
         button_layout = QHBoxLayout()
-        ok_btn = QPushButton("OK")
+        ok_btn = QPushButton(accept_text)
         ok_btn.setDefault(True)
         cancel_btn = QPushButton("Cancel")
 
         def accept_dialog():
-            dialog.accept()
+            if combo.currentText().strip():
+                dialog.accept()
 
         ok_btn.clicked.connect(accept_dialog)
         cancel_btn.clicked.connect(dialog.reject)
+        if combo.lineEdit():
+            combo.lineEdit().returnPressed.connect(accept_dialog)
+        try:
+            escape_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), dialog)
+            escape_shortcut.activated.connect(dialog.reject)
+        except Exception:
+            pass
 
         button_layout.addStretch()
         button_layout.addWidget(ok_btn)
@@ -4359,7 +4416,7 @@ class MultiAPIKeyDialog(QDialog):
         combo.setFocus()
 
         result = dialog.exec_()
-        return (combo.currentText(), result == QDialog.Accepted)
+        return (combo.currentText().strip(), result == QDialog.Accepted)
 
     def _show_cooldown_edit_dialog(self, current_value):
         """Show dialog for editing cooldown"""
@@ -4618,92 +4675,26 @@ class MultiAPIKeyDialog(QDialog):
         if not selected:
             return
 
-        # Create dialog
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Change Model for {len(selected)} Keys")
-        dialog.setMinimumWidth(400)
-
-        # Set icon
-        try:
-            icon_path = os.path.join(os.path.dirname(__file__), 'icon.ico')
-            if os.path.exists(icon_path):
-                dialog.setWindowIcon(QIcon(icon_path))
-        except Exception:
-            pass
-
-        # Main layout
-        main_layout = QVBoxLayout(dialog)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-
-        # Label
-        label = QLabel("Enter new model name (press Enter to apply):")
-        label_font = QFont()
-        label_font.setPointSize(10)
-        label.setFont(label_font)
-        main_layout.addWidget(label)
-
-        # Model combo box
-        all_models = get_model_options()
-        model_combo = QComboBox()
-        model_combo.addItems(all_models)
-        model_combo.setEditable(True)
-
-        # Get current model from first selected item as default
         selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+        current_model = ""
         if selected_indices and selected_indices[0] < len(self.key_pool.keys):
             current_model = self.key_pool.keys[selected_indices[0]].model
-            model_combo.setCurrentText(current_model)
-            if model_combo.lineEdit():
-                model_combo.lineEdit().selectAll()
 
-        main_layout.addWidget(model_combo)
+        new_model, ok = self._show_model_selection_dialog(
+            current_model,
+            title=f"Change Model for {len(selected)} Keys",
+            accept_text="Apply",
+        )
+        if not ok or not new_model:
+            return
 
-        def apply_change():
-            new_model = model_combo.currentText().strip()
-            if new_model:
-                # Update all selected keys
-                for item in selected:
-                    index = self.tree.indexOfTopLevelItem(item)
-                    if index < len(self.key_pool.keys):
-                        self.key_pool.keys[index].model = new_model
+        for item in selected:
+            index = self.tree.indexOfTopLevelItem(item)
+            if index < len(self.key_pool.keys):
+                self.key_pool.keys[index].model = new_model
 
-                # Refresh the display
-                self._refresh_key_list()
-
-                # Show status
-                self._show_status(f"Changed model to '{new_model}' for {len(selected)} keys")
-
-                dialog.accept()
-
-        # Button layout
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-
-        ok_btn = QPushButton("Apply")
-        ok_btn.setDefault(True)
-        ok_btn.clicked.connect(apply_change)
-        button_layout.addWidget(ok_btn)
-
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(dialog.reject)
-        button_layout.addWidget(cancel_btn)
-
-        main_layout.addLayout(button_layout)
-
-        # Set up keyboard shortcuts
-        from PySide6.QtGui import QShortcut, QKeySequence
-        return_shortcut = QShortcut(QKeySequence(Qt.Key_Return), dialog)
-        return_shortcut.activated.connect(apply_change)
-        enter_shortcut = QShortcut(QKeySequence(Qt.Key_Enter), dialog)
-        enter_shortcut.activated.connect(apply_change)
-        escape_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), dialog)
-        escape_shortcut.activated.connect(dialog.reject)
-
-        # Focus on the combobox
-        model_combo.setFocus()
-
-        # Show dialog
-        dialog.exec_()
+        self._refresh_key_list()
+        self._show_status(f"Changed model to '{new_model}' for {len(selected)} keys")
 
     def _configure_individual_endpoint(self, key_index):
         """Configure individual endpoint for a specific key"""
@@ -4780,6 +4771,7 @@ class MultiAPIKeyDialog(QDialog):
                     creds_data = json.load(f)
                     if 'type' in creds_data and 'project_id' in creds_data:
                         self.google_creds_entry.setText(filename)
+                        self._sync_parent_google_credentials(filename)
                         self._show_status(f"Selected Google credentials: {os.path.basename(filename)}")
                     else:
                         QMessageBox.critical(
@@ -4806,6 +4798,7 @@ class MultiAPIKeyDialog(QDialog):
                     creds_data = json.load(f)
                     if 'type' in creds_data and 'project_id' in creds_data:
                         self.fallback_google_creds_entry.setText(filename)
+                        self._sync_parent_google_credentials(filename)
                         self._show_fallback_status(f"Selected fallback Google credentials: {os.path.basename(filename)}")
                     else:
                         QMessageBox.critical(
@@ -4911,10 +4904,11 @@ class MultiAPIKeyDialog(QDialog):
 
         # Model
         add_glossary_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
-        glossary_models = get_model_options()
+        glossary_models = self._get_model_options_for_dropdown()
         self.glossary_model_combo = QComboBox()
         self.glossary_model_combo.addItems(glossary_models)
         self.glossary_model_combo.setEditable(True)
+        self._attach_model_autofill(self.glossary_model_combo, self._on_model_requirement_input_changed)
         self._disable_combobox_mousewheel(self.glossary_model_combo)
         add_glossary_grid.addWidget(self.glossary_model_combo, 0, 4)
 
@@ -5239,6 +5233,8 @@ class MultiAPIKeyDialog(QDialog):
         api_key = self.glossary_key_entry.text().strip()
         model = self.glossary_model_combo.currentText().strip()
         google_credentials = self.glossary_google_creds_entry.text().strip() or None
+        if google_credentials:
+            self._sync_parent_google_credentials(google_credentials)
         google_region = self.glossary_google_region_entry.text().strip() or None
 
         use_individual_endpoint = self.glossary_individual_endpoint_toggle.isChecked()
@@ -5800,59 +5796,27 @@ class MultiAPIKeyDialog(QDialog):
             return
 
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Change Model for {len(selected)} Glossary Keys")
-        screen = QApplication.primaryScreen().geometry()
-        width = int(screen.width() * 0.21)
-        height = int(screen.height() * 0.13)
-        dialog.resize(width, height)
-        self._set_icon(dialog)
-
-        main_layout = QVBoxLayout(dialog)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-
-        label = QLabel("Enter new model name (press Enter to apply):")
-        main_layout.addWidget(label)
-
-        all_models = get_model_options()
-        model_combo = QComboBox()
-        model_combo.addItems(all_models)
-        model_combo.setEditable(True)
-        main_layout.addWidget(model_combo)
-
         selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
+        current_model = ""
         if selected_indices and selected_indices[0] < len(glossary_keys):
             current_model = glossary_keys[selected_indices[0]].get('model', '')
-            model_combo.setCurrentText(current_model)
-            model_combo.lineEdit().selectAll()
 
-        def apply_change():
-            new_model = model_combo.currentText().strip()
-            if new_model:
-                for item in selected:
-                    idx = self.glossary_tree.indexOfTopLevelItem(item)
-                    if idx < len(glossary_keys):
-                        glossary_keys[idx]['model'] = new_model
-                self.translator_gui.config['glossary_keys'] = glossary_keys
-                self.translator_gui.save_config(show_message=False)
-                self._load_glossary_keys()
-                self._show_glossary_status(f"Changed model to '{new_model}' for {len(selected)} glossary keys")
-                dialog.accept()
+        new_model, ok = self._show_model_selection_dialog(
+            current_model,
+            title=f"Change Model for {len(selected)} Glossary Keys",
+            accept_text="Apply",
+        )
+        if not ok or not new_model:
+            return
 
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-        apply_btn = QPushButton("Apply")
-        apply_btn.clicked.connect(apply_change)
-        apply_btn.setDefault(True)
-        button_layout.addWidget(apply_btn)
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(dialog.reject)
-        button_layout.addWidget(cancel_btn)
-        main_layout.addLayout(button_layout)
-
-        model_combo.setFocus()
-        dialog.exec_()
+        for item in selected:
+            idx = self.glossary_tree.indexOfTopLevelItem(item)
+            if idx < len(glossary_keys):
+                glossary_keys[idx]['model'] = new_model
+        self.translator_gui.config['glossary_keys'] = glossary_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_glossary_keys()
+        self._show_glossary_status(f"Changed model to '{new_model}' for {len(selected)} glossary keys")
 
     def _on_glossary_rows_moved(self):
         """Sync glossary_keys config with tree order after drag-drop"""
@@ -6191,6 +6155,7 @@ class MultiAPIKeyDialog(QDialog):
                     creds_data = json.load(f)
                     if 'type' in creds_data and 'project_id' in creds_data:
                         self.glossary_google_creds_entry.setText(filename)
+                        self._sync_parent_google_credentials(filename)
                         self._show_glossary_status(f"Selected glossary Google credentials: {os.path.basename(filename)}")
                     else:
                         QMessageBox.critical(
@@ -6353,18 +6318,57 @@ class MultiAPIKeyDialog(QDialog):
         self._refusal_patterns_dialog.activateWindow()
 
     def _attach_model_autofill(self, combo: QComboBox, on_change=None):
-        """Attach gentle autofill/autocomplete behavior to a QComboBox.
+        """Attach the same prefix-priority contains completer used by translator_gui."""
+        from PySide6.QtCore import QSortFilterProxyModel, QStringListModel
 
-        PySide6 version using QCompleter with similar behavior to the tkinter version:
-        - Shows suggestions as user types
-        - Prefix-based matching with fallback to contains matching
-        - Respects backspace/delete (no forced autocomplete)
-        """
-        # Set up completer for the combobox
-        completer = QCompleter(combo.model())
+        class _PrefixPriorityProxy(QSortFilterProxyModel):
+            def __init__(self, parent=None):
+                super().__init__(parent)
+                self._search = ""
+                self.setDynamicSortFilter(True)
+
+            def set_search_text(self, text):
+                self._search = (text or "").lower()
+                self.invalidate()
+                self.sort(0)
+
+            def lessThan(self, left, right):
+                l_val = (self.sourceModel().data(left, Qt.DisplayRole) or "").lower()
+                r_val = (self.sourceModel().data(right, Qt.DisplayRole) or "").lower()
+                l_score = self._score(l_val)
+                r_score = self._score(r_val)
+                if l_score != r_score:
+                    return l_score < r_score
+                return l_val < r_val
+
+            def _score(self, text):
+                search = self._search
+                if not search:
+                    return 0
+                if text == search:
+                    return 0
+                if text.startswith(search):
+                    return 1
+                pos = 0
+                while True:
+                    slash = text.find('/', pos)
+                    if slash < 0:
+                        break
+                    if text[slash + 1:].startswith(search):
+                        return 2
+                    pos = slash + 1
+                return 3
+
+        model_values = [combo.itemText(i) for i in range(combo.count())]
+        source = QStringListModel(model_values, combo)
+        proxy = _PrefixPriorityProxy(combo)
+        proxy.setSourceModel(source)
+        proxy.sort(0)
+
+        completer = QCompleter(proxy, combo)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         completer.setCompletionMode(QCompleter.PopupCompletion)
-        completer.setFilterMode(Qt.MatchContains)  # Match anywhere in string
+        completer.setFilterMode(Qt.MatchContains)
         combo.setCompleter(completer)
 
         # Store callback for changes
@@ -6372,59 +6376,16 @@ class MultiAPIKeyDialog(QDialog):
             combo.currentTextChanged.connect(lambda: on_change())
             combo.editTextChanged.connect(lambda: on_change())
 
-        # Enable completion while typing
         if combo.lineEdit():
-            line_edit = combo.lineEdit()
+            combo.lineEdit().textEdited.connect(proxy.set_search_text)
 
-            # Connect to text changed signal for gentle autofill
-            def on_text_edited(text):
-                if not text:
-                    return
-
-                # Find first match (prefix first, then contains)
-                all_items = [combo.itemText(i) for i in range(combo.count())]
-
-                # Try prefix match first
-                prefix_matches = [item for item in all_items if item.lower().startswith(text.lower())]
-                if prefix_matches:
-                    first_match = prefix_matches[0]
-                else:
-                    # Try contains match
-                    contains_matches = [item for item in all_items if text.lower() in item.lower()]
-                    first_match = contains_matches[0] if contains_matches else None
-
-                # Gentle autofill: only if cursor is at end and we found a match
-                if first_match and line_edit.cursorPosition() == len(text):
-                    # Check if text is growing (not backspacing)
-                    if len(text) > len(getattr(line_edit, '_prev_text', '')):
-                        # Only autocomplete if the match starts with what was typed
-                        if first_match.lower().startswith(text.lower()) and first_match != text:
-                            # Save cursor position
-                            cursor_pos = len(text)
-                            # Set the full match
-                            line_edit.setText(first_match)
-                            # Select the auto-filled part
-                            line_edit.setSelection(cursor_pos, len(first_match) - cursor_pos)
-
-                # Store current text for next comparison
-                line_edit._prev_text = text
-
-            line_edit.textEdited.connect(on_text_edited)
-            line_edit._prev_text = ""
+        combo._model_completer = completer
+        combo._model_completer_proxy = proxy
+        combo._model_completer_source = source
 
     def _notify_authgpt_visibility(self):
         """Notify the translator GUI to re-evaluate AuthGPT/AuthGem login button visibility."""
-        try:
-            # Sync the in-memory key pool to config BEFORE notifying,
-            # so the GUI reads the current state when checking for auth prefixes.
-            self._save_keys_to_config()
-        except Exception:
-            pass
-        try:
-            if hasattr(self.translator_gui, 'on_model_change'):
-                self.translator_gui.on_model_change()
-        except Exception:
-            pass
+        self._refresh_parent_model_requirements(save_config=True)
 
     def _toggle_key_visibility(self):
         """Toggle API key visibility"""
@@ -6598,6 +6559,8 @@ class MultiAPIKeyDialog(QDialog):
         model = self.model_combo.currentText().strip()
         cooldown = self.cooldown_spinbox.value()
         google_credentials = self.google_creds_entry.text().strip() or None
+        if google_credentials:
+            self._sync_parent_google_credentials(google_credentials)
         google_region = self.google_region_entry.text().strip() or None
 
         # Only use individual endpoint if toggle is enabled
@@ -7753,8 +7716,9 @@ class MultiAPIKeyDialog(QDialog):
 
         add_grid.addWidget(QLabel("Model:"), 0, 3, Qt.AlignLeft)
         model_combo = QComboBox()
-        model_combo.addItems(get_model_options())
+        model_combo.addItems(self._get_model_options_for_dropdown())
         model_combo.setEditable(True)
+        self._attach_model_autofill(model_combo, self._on_model_requirement_input_changed)
         self._disable_combobox_mousewheel(model_combo)
         setattr(self, self._dedicated_attr(pool_name, 'model_combo'), model_combo)
         add_grid.addWidget(model_combo, 0, 4)
@@ -7965,6 +7929,8 @@ class MultiAPIKeyDialog(QDialog):
             QMessageBox.critical(self, "Error", "Please enter a model name")
             return
         google_credentials = self._dedicated_widget(pool_name, 'google_creds_entry').text().strip() or None
+        if google_credentials:
+            self._sync_parent_google_credentials(google_credentials)
         google_region = self._dedicated_widget(pool_name, 'google_region_entry').text().strip() or None
         use_endpoint = self._dedicated_widget(pool_name, 'individual_endpoint_toggle').isChecked()
         azure_endpoint = self._dedicated_widget(pool_name, 'azure_endpoint_entry').text().strip() if use_endpoint else None
@@ -8279,21 +8245,26 @@ class MultiAPIKeyDialog(QDialog):
         )
 
     def _dedicated_change_model_for_selected(self, pool_name: str):
-        from PySide6.QtWidgets import QInputDialog
         spec = self._dedicated_pool_spec(pool_name)
         indices = self._dedicated_selected_indices(pool_name)
         if not indices:
             return
         keys = self._dedicated_keys(pool_name)
         current = keys[indices[0]].get('model', '') if indices[0] < len(keys) else ''
-        new_model, ok = QInputDialog.getText(self, f"Change Model for {len(indices)} {spec['title']}", "Model:", text=current)
-        if ok and new_model.strip():
-            for idx in indices:
-                if 0 <= idx < len(keys):
-                    keys[idx]['model'] = new_model.strip()
-            self._dedicated_set_keys(pool_name, keys)
-            self._dedicated_load_keys(pool_name)
-            self._dedicated_status(pool_name, f"Changed model to '{new_model.strip()}' for {len(indices)} key(s)")
+        new_model, ok = self._show_model_selection_dialog(
+            current,
+            title=f"Change Model for {len(indices)} {spec['title']}",
+            accept_text="Apply",
+        )
+        if not ok or not new_model:
+            return
+
+        for idx in indices:
+            if 0 <= idx < len(keys):
+                keys[idx]['model'] = new_model
+        self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_load_keys(pool_name)
+        self._dedicated_status(pool_name, f"Changed model to '{new_model}' for {len(indices)} key(s)")
 
     def _dedicated_on_rows_moved(self, pool_name: str):
         tree = self._dedicated_widget(pool_name, 'tree')
@@ -8449,6 +8420,7 @@ class MultiAPIKeyDialog(QDialog):
                     creds_data = json.load(f)
                 if 'type' in creds_data and 'project_id' in creds_data:
                     self._dedicated_widget(pool_name, 'google_creds_entry').setText(filename)
+                    self._sync_parent_google_credentials(filename)
                     self._dedicated_status(pool_name, f"Selected Google credentials: {os.path.basename(filename)}")
                 else:
                     QMessageBox.critical(self, "Error", "Invalid Google Cloud credentials file.")

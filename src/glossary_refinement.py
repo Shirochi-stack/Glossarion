@@ -328,6 +328,66 @@ def _actual_request_model_name(client=None) -> str:
         return ""
 
 
+def _key_pool_from_identifier(key_identifier: str) -> str:
+    key_identifier = str(key_identifier or "").strip()
+    pool_prefixes = (
+        ("GlossaryRefinementKey#", "glossary_refinement"),
+        ("GlossaryKey#", "glossary"),
+        ("MetadataKey#", "metadata"),
+        ("VisionKey#", "vision"),
+        ("TruncationRetryKey#", "truncation_retry"),
+        ("AITruncationDetectionKey#", "ai_truncation_detection"),
+        ("ImageGenEditKey#", "inpainter"),
+        ("Key#", "multi"),
+        ("FALLBACK KEY", "fallback"),
+        ("Main Key", "main"),
+        ("Single Key", "single"),
+    )
+    for prefix, pool_name in pool_prefixes:
+        if key_identifier.startswith(prefix):
+            return pool_name
+    return ""
+
+
+def _actual_request_key_identifier(client=None) -> str:
+    try:
+        from unified_api_client import get_current_thread_actual_request_key_identifier
+        key_identifier = str(get_current_thread_actual_request_key_identifier() or "").strip()
+        if key_identifier:
+            return key_identifier
+    except Exception:
+        pass
+    try:
+        if client is not None and hasattr(client, "get_last_actual_request_key_identifier"):
+            key_identifier = str(client.get_last_actual_request_key_identifier() or "").strip()
+            if key_identifier:
+                return key_identifier
+    except Exception:
+        pass
+    try:
+        tls = client._get_thread_local_client() if client is not None and hasattr(client, "_get_thread_local_client") else None
+        key_identifier = str(getattr(tls, "last_actual_key_identifier", "") or getattr(tls, "key_identifier", "") or "").strip()
+        if key_identifier:
+            return key_identifier
+    except Exception:
+        pass
+    try:
+        return str(getattr(client, "last_actual_key_identifier", "") or getattr(client, "key_identifier", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _actual_request_key_context(client=None) -> Dict:
+    key_identifier = _actual_request_key_identifier(client)
+    if not key_identifier:
+        return {}
+    context = {"key_identifier": key_identifier}
+    key_pool = _key_pool_from_identifier(key_identifier)
+    if key_pool:
+        context["key_pool"] = key_pool
+    return context
+
+
 def _call_send(send_fn, messages, client, temp, mtoks, check_stop, chunk_timeout, chunk_idx, total_chunks, context_label):
     try:
         client.context = context_label
@@ -566,16 +626,21 @@ def refine_glossary_entries(
                 failed_update = {"status": "failed", "error": str(e)}
                 if model_name:
                     failed_update["model_name"] = model_name
+                failed_update.update(_actual_request_key_context(client))
                 update_refinement_progress(progress_file, type_key, failed_update, atomic_replace_fn=atomic_replace_fn)
                 refined_entries = []
                 break
 
             model_name = _actual_request_model_name(client)
-            if model_name:
+            request_context = _actual_request_key_context(client)
+            if model_name or request_context:
+                model_update = dict(request_context)
+                if model_name:
+                    model_update["model_name"] = model_name
                 update_refinement_progress(
                     progress_file,
                     type_key,
-                    {"model_name": model_name},
+                    model_update,
                     atomic_replace_fn=atomic_replace_fn,
                 )
             response_text = raw[0] if isinstance(raw, tuple) else raw
@@ -591,6 +656,7 @@ def refine_glossary_entries(
                 failed_update = {"status": "failed", "error": "empty_or_invalid_response"}
                 if model_name:
                     failed_update["model_name"] = model_name
+                failed_update.update(request_context)
                 update_refinement_progress(progress_file, type_key, failed_update, atomic_replace_fn=atomic_replace_fn)
                 refined_entries = []
                 break
@@ -599,12 +665,14 @@ def refine_glossary_entries(
             chunk_update = {"status": "in_progress", "completed_chunks": chunk_idx}
             if model_name:
                 chunk_update["model_name"] = model_name
+            chunk_update.update(request_context)
             update_refinement_progress(progress_file, type_key, chunk_update, atomic_replace_fn=atomic_replace_fn)
             if _issue_from_finish_reason(finish_reason, None) == "TRUNCATED":
                 log(f"Refinement chunk {chunk_idx} was truncated; keeping original selected entries.")
                 failed_update = {"status": "failed", "error": "TRUNCATED"}
                 if model_name:
                     failed_update["model_name"] = model_name
+                failed_update.update(request_context)
                 update_refinement_progress(progress_file, type_key, failed_update, atomic_replace_fn=atomic_replace_fn)
                 refined_entries = []
                 break
@@ -636,6 +704,7 @@ def refine_glossary_entries(
             model_name = _actual_request_model_name(client)
             if model_name:
                 completed_update["model_name"] = model_name
+            completed_update.update(_actual_request_key_context(client))
             update_refinement_progress(progress_file, type_key, completed_update, atomic_replace_fn=atomic_replace_fn)
             log(f"✅ Refined selected entries: {len(entries)} -> {len(refined_entries)} entries")
             return "ok", entry_type, result_mapping

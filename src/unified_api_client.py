@@ -202,6 +202,10 @@ def get_current_thread_actual_request_model():
     """Return the concrete model selected for the API request on this thread."""
     return getattr(_ACTUAL_REQUEST_MODEL_TLS, "model", None)
 
+def get_current_thread_actual_request_key_identifier():
+    """Return the concrete key/pool identifier selected for the API request on this thread."""
+    return getattr(_ACTUAL_REQUEST_MODEL_TLS, "key_identifier", None)
+
 class _RunIdFilter(logging.Filter):
     """Allow transport logs only for the currently-active run id (when configured)."""
     def filter(self, record: logging.LogRecord) -> bool:
@@ -7229,6 +7233,16 @@ class UnifiedClient:
         except Exception:
             pass
         return getattr(self, "last_actual_request_model", None) or getattr(self, "model", None)
+
+    def get_last_actual_request_key_identifier(self):
+        """Return the last concrete key/pool identifier used by this client instance."""
+        try:
+            tls_key = getattr(self._get_thread_local_client(), "last_actual_key_identifier", None)
+            if tls_key:
+                return tls_key
+        except Exception:
+            pass
+        return getattr(self, "last_actual_key_identifier", None) or getattr(self, "key_identifier", None)
 
     def text_to_speech(self, text: str, output_path: str, voice: Optional[str] = None, audio_format: Optional[str] = None) -> str:
         """Generate speech audio from text and write it to output_path.
