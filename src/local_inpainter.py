@@ -2503,13 +2503,33 @@ class LocalInpainter:
             if use_current_provider:
                 endpoint = 'current-provider'
 
+            self._sync_inpainter_key_pool_from_config()
+            pool_model_hint = ''
+            try:
+                if os.environ.get('USE_INPAINTER_KEYS', '0') == '1':
+                    from unified_api_client import UnifiedClient
+                    pool = getattr(UnifiedClient, '_inpainter_key_pool', None)
+                    for entry in getattr(pool, 'keys', []) or []:
+                        if getattr(entry, 'enabled', True) and getattr(entry, 'model', ''):
+                            pool_model_hint = getattr(entry, 'model', '')
+                            break
+            except Exception:
+                pool_model_hint = ''
+
             model_ref = (
                 os.environ.get('CUSTOM_IMAGE_EDIT_MODEL')
+                or pool_model_hint
                 or self.config.get('custom_image_edit_model', '')
                 or self.config.get('model', '')
                 or ('' if (model_path_is_url or model_path_is_stale_qwen) else model_path)
-                or 'gpt-image-1'
             )
+            if not str(model_ref or '').strip():
+                logger.error(
+                    "Custom image edit has no configured model. Set an Image Gen/Edit key model "
+                    "or CUSTOM_IMAGE_EDIT_MODEL; refusing to guess a default model."
+                )
+                self.model_loaded = False
+                return False
             model_ref_str = str(model_ref or '').strip()
             if model_ref_str.startswith(('http://', 'https://')) or (
                 model_ref_str
@@ -2584,13 +2604,26 @@ class LocalInpainter:
         """Ensure image gen/edit keys are available without opening Multi API Key Manager."""
         try:
             cfg = self.config if isinstance(getattr(self, 'config', None), dict) else {}
-            disk_cfg = {}
+            disk_cfg = self._load_app_config_for_inpainter_keys()
             use_value = cfg.get('use_inpainter_keys', None)
             keys = cfg.get('inpainter_keys', None)
-            if use_value is None or keys is None:
-                disk_cfg = self._load_app_config_for_inpainter_keys()
-                use_value = disk_cfg.get('use_inpainter_keys', use_value)
-                keys = disk_cfg.get('inpainter_keys', keys)
+            disk_use_value = disk_cfg.get('use_inpainter_keys', None)
+            disk_keys = disk_cfg.get('inpainter_keys', None)
+
+            # Some LocalInpainter instances are born with a small/default config
+            # before the full GUI config is applied. Do not let that stale empty
+            # state mask the saved Image Gen/Edit pool.
+            if use_value is None:
+                use_value = disk_use_value
+            if keys is None:
+                keys = disk_keys
+            if (not self._bool_config_value(use_value, False) or not keys) and (
+                self._bool_config_value(disk_use_value, False)
+                and isinstance(disk_keys, list)
+                and disk_keys
+            ):
+                use_value = disk_use_value
+                keys = disk_keys
 
             enabled = self._bool_config_value(use_value, False)
             keys = keys if isinstance(keys, list) else []
@@ -2711,14 +2744,16 @@ class LocalInpainter:
                 or getattr(self, '_custom_image_edit_model_ref', '')
                 or self.config.get('custom_image_edit_model', '')
                 or self.config.get('model', '')
-                or 'gpt-image-1'
             )
+            if not str(model_ref or '').strip():
+                raise RuntimeError(
+                    "Custom image edit has no configured model. Set an Image Gen/Edit key model "
+                    "or CUSTOM_IMAGE_EDIT_MODEL; refusing to guess a default model."
+                )
             model_ref_lower = str(model_ref or '').lower()
             is_nanogpt_image = (not use_current_provider) and (model_ref_lower.startswith(('nan/', 'nanogpt/')) or 'nano-gpt.com' in str(endpoint).lower())
             url = endpoint.rstrip('/') if not use_current_provider else ''
             if is_nanogpt_image:
-                if not model_ref_lower.startswith(('nan/', 'nanogpt/')) and model_ref == 'gpt-image-1':
-                    model_ref = 'nan/gemini-2.5-flash-image-preview'
                 url = os.environ.get('NANOGPT_API_URL', url if 'nano-gpt.com' in url.lower() else 'https://nano-gpt.com').rstrip('/')
                 url = f"{url}/v1/images/generations"
             elif (not use_current_provider) and not url.endswith('/images/edits'):
@@ -2914,7 +2949,7 @@ class LocalInpainter:
                 self._nanogpt_last_input_resize_info = info
                 return f"data:image/png;base64,{image_b64_fallback}"
 
-            direct_pool_key_info = None if use_current_provider else _checkout_image_gen_edit_pool_key()
+            direct_pool_key_info = _checkout_image_gen_edit_pool_key()
             direct_pool_key = direct_pool_key_info[0] if direct_pool_key_info else None
             if direct_pool_key is not None and getattr(direct_pool_key, 'model', None) and not os.environ.get('CUSTOM_IMAGE_EDIT_MODEL'):
                 model_ref = getattr(direct_pool_key, 'model')
@@ -2968,11 +3003,12 @@ class LocalInpainter:
                     or self.config.get('model')
                     or ''
                 )
-                if pool_hint is None and client_model.lower() in ('custom-image-edit', 'gpt-image-1') and self.config.get('model'):
+                if pool_hint is None and client_model.lower() == 'custom-image-edit' and self.config.get('model'):
                     client_model = str(self.config.get('model') or client_model)
                 client_api_key = (
                     os.environ.get('CUSTOM_IMAGE_EDIT_API_KEY')
                     or (getattr(pool_hint, 'api_key', '') if pool_hint is not None else '')
+                    or (getattr(direct_pool_key, 'api_key', '') if direct_pool_key is not None else '')
                     or api_key
                 )
                 client = UnifiedClient(model=client_model, api_key=client_api_key, output_dir=output_dir)

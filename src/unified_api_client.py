@@ -22001,7 +22001,12 @@ class UnifiedClient:
             base_url = scheme + base_url
 
         # Strip any routing prefix (nan/, eh/, etc.) – keep bare model name
-        effective_model = model_name or 'gpt-image-1'
+        effective_model = str(model_name or '').strip()
+        if not effective_model:
+            raise UnifiedClientError(
+                'OpenAI Images API route requires an explicit image model',
+                error_type='validation',
+            )
         for pfx in ('nan/', 'eh/', 'or/', 'fireworks/', 'chutes/'):
             if effective_model.lower().startswith(pfx):
                 effective_model = effective_model[len(pfx):]
