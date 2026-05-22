@@ -8706,8 +8706,6 @@ def _translate_this_text_background(self, message: str, region_index: int):
             return
         
         # Apply GUI environment variables like Start Translation does
-        from unified_api_client import UnifiedClient
-        import os, json
         
         # Apply temperature
         if hasattr(self.main_gui, 'trans_temp'):
@@ -8734,9 +8732,52 @@ def _translate_this_text_background(self, message: str, region_index: int):
                 os.environ['SEND_INTERVAL_SECONDS'] = str(delay)
             except Exception:
                 os.environ['SEND_INTERVAL_SECONDS'] = '1.0'
+
+        # Apply multi-key settings before constructing UnifiedClient. This
+        # button bypasses the normal manga Start Translation setup path.
+        use_mk = False
+        mk_list = []
+        force_rotation = True
+        rotation_frequency = 1
+        try:
+            use_mk = bool(self.main_gui.config.get('use_multi_api_keys', False))
+            mk_list = self.main_gui.config.get('multi_api_keys', []) or []
+            force_rotation = bool(self.main_gui.config.get('force_key_rotation', True))
+            rotation_frequency = int(self.main_gui.config.get('rotation_frequency', 1))
+            if use_mk and mk_list:
+                os.environ['USE_MULTI_API_KEYS'] = '1'
+                os.environ['USE_MULTI_KEYS'] = '1'
+                os.environ['FORCE_KEY_ROTATION'] = '1' if force_rotation else '0'
+                os.environ['ROTATION_FREQUENCY'] = str(rotation_frequency)
+                try:
+                    UnifiedClient.set_in_memory_multi_keys(
+                        mk_list,
+                        force_rotation=force_rotation,
+                        rotation_frequency=rotation_frequency,
+                    )
+                except Exception as pool_err:
+                    print(f"[TRANSLATE_THIS] Failed to load multi-key pool: {pool_err}")
+            else:
+                os.environ['USE_MULTI_API_KEYS'] = '0'
+                os.environ['USE_MULTI_KEYS'] = '0'
+                try:
+                    UnifiedClient.clear_in_memory_multi_keys()
+                except Exception:
+                    pass
+        except Exception as mk_err:
+            print(f"[TRANSLATE_THIS] Failed to apply multi-key settings: {mk_err}")
         
         # Create unified client with main GUI config
         unified_client = UnifiedClient(model=model, api_key=api_key)
+        try:
+            if use_mk and mk_list:
+                UnifiedClient.setup_multi_key_pool(
+                    mk_list,
+                    force_rotation=force_rotation,
+                    rotation_frequency=rotation_frequency,
+                )
+        except Exception as pool_err:
+            print(f"[TRANSLATE_THIS] setup_multi_key_pool failed: {pool_err}")
         
         # Get token limit from manga settings
         max_tokens = 2048  # default
