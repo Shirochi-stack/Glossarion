@@ -2448,6 +2448,22 @@ class UnifiedClient:
         return True
 
     @classmethod
+    def _load_multi_keys_from_config_file(cls):
+        """Best-effort fallback for helper clients that missed GUI pool hydration."""
+        try:
+            config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+            if not os.path.exists(config_path):
+                return []
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            if not bool(config.get('use_multi_api_keys', False)):
+                return []
+            keys = config.get('multi_api_keys', [])
+            return keys if isinstance(keys, list) else []
+        except Exception:
+            return []
+
+    @classmethod
     def clear_in_memory_multi_keys(cls):
         """Clear in-memory multi-key configuration."""
         with cls._in_memory_multi_keys_lock:
@@ -3279,6 +3295,28 @@ class UnifiedClient:
                 except Exception:
                     multi_keys = []
 
+            # Last-resort fallback for manga/preview worker paths that create
+            # their own UnifiedClient after USE_MULTI_API_KEYS has already been
+            # set, but before the in-memory key list was hydrated in that path.
+            if not multi_keys:
+                try:
+                    multi_keys = self.__class__._load_multi_keys_from_config_file()
+                    if multi_keys:
+                        with self.__class__._in_memory_multi_keys_lock:
+                            self.__class__._in_memory_multi_keys = multi_keys
+                        print(f"[DEBUG] Loaded {len(multi_keys)} multi-key entry(s) from config.json fallback")
+                except Exception:
+                    multi_keys = []
+
+            existing_multi_pool = None
+            if not multi_keys:
+                try:
+                    existing_multi_pool = self.__class__._api_key_pool
+                    if not (existing_multi_pool and getattr(existing_multi_pool, 'keys', None)):
+                        existing_multi_pool = None
+                except Exception:
+                    existing_multi_pool = None
+
             try:
                 if multi_keys:
                     # Setup the shared pool
@@ -3290,6 +3328,11 @@ class UnifiedClient:
                     self._rotation_frequency = rotation_frequency
                     
                     print(f"[DEBUG] ✅ This instance has multi-key mode ENABLED")
+                elif existing_multi_pool:
+                    self._multi_key_mode = True
+                    self._force_rotation = force_rotation
+                    self._rotation_frequency = rotation_frequency
+                    print(f"[DEBUG] ✅ This instance has multi-key mode ENABLED from existing shared pool")
                 else:
                     # No multi-keys, but glossary keys may still be configured separately
                     _has_glossary_keys = bool(getattr(self.__class__, '_glossary_key_pool', None) and
