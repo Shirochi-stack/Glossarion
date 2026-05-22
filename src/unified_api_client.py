@@ -3095,16 +3095,15 @@ class UnifiedClient:
         except Exception:
             pass
         self._cancelled = False
-        # Reset stagger timestamp so a new translation run doesn't inherit
-        # huge delays from a previous force-stopped run's queued slots.
-        # Use time.time() (not 0) so the first thread still respects the stagger interval.
-        # IMPORTANT: Only safe here in __init__ which runs once on the main thread
-        # before worker threads are spawned.  Do NOT reset in reset_cleanup_state()
-        # because that runs per-thread and would race with the stagger lock.
+        # Initialize stagger bookkeeping without resetting it. Manga/OCR workers
+        # create short-lived UnifiedClient instances while other requests are
+        # already active, so resetting shared timestamps here makes independent
+        # pools throttle each other.
         try:
-            if hasattr(self.__class__, '_api_stagger_lock'):
-                with self.__class__._api_stagger_lock:
-                    self.__class__._last_api_call_start = time.time()
+            if not hasattr(self.__class__, '_api_stagger_lock'):
+                self.__class__._api_stagger_lock = threading.Lock()
+            if not hasattr(self.__class__, '_last_api_call_start_by_scope'):
+                self.__class__._last_api_call_start_by_scope = {}
         except Exception:
             pass
         # Reset AuthGPT cancel event so it doesn't block new requests
@@ -14073,6 +14072,33 @@ class UnifiedClient:
 
         return ""
 
+    def _get_api_stagger_scope(self) -> str:
+        """Return the independent throttle bucket for this request."""
+        try:
+            scope = getattr(self, '_active_key_pool_scope', None)
+            if scope:
+                return f"pool:{scope}"
+        except Exception:
+            pass
+        try:
+            tls = self._get_thread_local_client()
+            context = getattr(tls, 'current_request_context', None)
+        except Exception:
+            context = None
+        context = str(context or getattr(self, 'context', None) or 'translation').strip().lower()
+        if context in {
+            'manga_ocr',
+            'vision_ocr',
+            'image_ocr',
+            'image_scan',
+            'image_translation',
+            'inpainter',
+            'image_generation',
+            'image_edit',
+        }:
+            return f"context:{context}"
+        return "default"
+
     def _apply_api_call_stagger(self):
         """Stagger API calls to prevent simultaneous requests.
 
@@ -14115,12 +14141,13 @@ class UnifiedClient:
             return
         
         thread_name = threading.current_thread().name
+        stagger_scope = self._get_api_stagger_scope()
         
         # Initialize class-level tracking if needed
-        if not hasattr(self.__class__, '_last_api_call_start'):
-            self.__class__._last_api_call_start = 0
         if not hasattr(self.__class__, '_api_stagger_lock'):
             self.__class__._api_stagger_lock = threading.Lock()
+        if not hasattr(self.__class__, '_last_api_call_start_by_scope'):
+            self.__class__._last_api_call_start_by_scope = {}
         
         # Calculate wait time and reserve slot inside the lock, then sleep OUTSIDE
         # the lock. Previously the sleep was inside the lock, which blocked
@@ -14130,23 +14157,24 @@ class UnifiedClient:
         time_since_last = 0.0
         with self.__class__._api_stagger_lock:
             current_time = time.time()
-            gap_since_last = current_time - self.__class__._last_api_call_start
+            last_start = self.__class__._last_api_call_start_by_scope.get(stagger_scope, 0.0)
+            gap_since_last = current_time - last_start
             
             # Detect stale timestamp from a previous batch run:
             # if the last call was more than 2x the delay ago, this is
             # effectively the first call of a new batch — fire immediately.
             if gap_since_last > api_delay * 2:
-                self.__class__._last_api_call_start = current_time
+                self.__class__._last_api_call_start_by_scope[stagger_scope] = current_time
                 time_since_last = gap_since_last
                 # sleep_time stays 0 → immediate
             else:
                 # Calculate next available slot (ensures exact intervals)
-                next_available = self.__class__._last_api_call_start + api_delay
+                next_available = last_start + api_delay
                 
                 if current_time < next_available:
                     # Reserve this slot (needed so simultaneous batch threads
                     # get staggered, not all sleep_time=0)
-                    self.__class__._last_api_call_start = next_available
+                    self.__class__._last_api_call_start_by_scope[stagger_scope] = next_available
                     
                     try:
                         sleep_time = max(0.0, float(next_available - current_time))
@@ -14157,13 +14185,13 @@ class UnifiedClient:
                             import math
                             sleep_time = math.ceil(sleep_time / api_delay) * api_delay
                             # Update the reserved slot to match the snapped time
-                            self.__class__._last_api_call_start = current_time + sleep_time
+                            self.__class__._last_api_call_start_by_scope[stagger_scope] = current_time + sleep_time
                     except Exception:
                         sleep_time = float(api_delay)
                 else:
                     # Immediate — capture real gap since last call for display
-                    time_since_last = current_time - self.__class__._last_api_call_start
-                    self.__class__._last_api_call_start = current_time
+                    time_since_last = current_time - last_start
+                    self.__class__._last_api_call_start_by_scope[stagger_scope] = current_time
         # Lock released — sleep outside lock (interruptible)
         
         # For queued requests: flush deferred logs and show "Queued" BEFORE sleeping
@@ -14212,8 +14240,9 @@ class UnifiedClient:
         
         # Timer resets ON the log — next thread measures delay from here
         with self.__class__._api_stagger_lock:
-            self.__class__._last_api_call_start = max(
-                self.__class__._last_api_call_start, time.time()
+            current_scope_start = self.__class__._last_api_call_start_by_scope.get(stagger_scope, 0.0)
+            self.__class__._last_api_call_start_by_scope[stagger_scope] = max(
+                current_scope_start, time.time()
             )
         
         # Log stagger status — shows queued+delay or immediate in-progress
@@ -14271,7 +14300,9 @@ class UnifiedClient:
         try:
             if hasattr(self.__class__, '_api_stagger_lock'):
                 with self.__class__._api_stagger_lock:
-                    self.__class__._last_api_call_start = time.time()
+                    if not hasattr(self.__class__, '_last_api_call_start_by_scope'):
+                        self.__class__._last_api_call_start_by_scope = {}
+                    self.__class__._last_api_call_start_by_scope[self._get_api_stagger_scope()] = time.time()
         except Exception:
             pass
 
