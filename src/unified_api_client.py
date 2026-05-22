@@ -5570,6 +5570,7 @@ class UnifiedClient:
         if not any(getattr(k, 'enabled', True) for k in pool.keys):
             return None
 
+        self._dedicated_override_lock.acquire()
         state = {
             'api_key': self.api_key,
             'model': self.model,
@@ -5578,6 +5579,7 @@ class UnifiedClient:
             'instance_pool': self.__dict__.get('_api_key_pool', None),
             'active_key_pool_scope': getattr(self, '_active_key_pool_scope', None),
             'active_key_pool_expected_pool': getattr(self, '_active_key_pool_expected_pool', None),
+            'dedicated_override_lock_acquired': True,
         }
 
         self._multi_key_mode = True
@@ -5688,6 +5690,7 @@ class UnifiedClient:
         """Restore state saved by _apply_dedicated_key_pool_override."""
         if not state:
             return
+        release_override_lock = bool(state.get('dedicated_override_lock_acquired'))
         try:
             self.api_key = state.get('api_key')
             self.model = state.get('model')
@@ -5735,6 +5738,12 @@ class UnifiedClient:
                 self._restoring_dedicated_key_override = False
         except Exception:
             pass
+        finally:
+            if release_override_lock:
+                try:
+                    self._dedicated_override_lock.release()
+                except Exception:
+                    pass
 
     def _send_core(self,
                    messages,
@@ -5778,6 +5787,7 @@ class UnifiedClient:
         _had_instance_pool = False
         _original_instance_pool = None
         _vision_override_lock_acquired = False
+        _glossary_override_lock_acquired = False
         def _retry_without_glossary_refinement_pool(reason: str):
             nonlocal _glossary_refinement_overridden, _dedicated_pool_state
             try:
@@ -6212,6 +6222,8 @@ class UnifiedClient:
                             raise UnifiedClientError("Glossary key pool is enabled for this context but has no enabled keys; refusing fallback to another pool", error_type="no_keys")
                         
                         if glossary_pool and getattr(glossary_pool, 'keys', []):
+                            self._dedicated_override_lock.acquire()
+                            _glossary_override_lock_acquired = True
                             # Save original state
                             _original_api_key = self.api_key
                             _original_model = self.model
@@ -6294,6 +6306,12 @@ class UnifiedClient:
                                             delattr(self, _attr)
                                         except Exception:
                                             pass
+                                if _glossary_override_lock_acquired:
+                                    try:
+                                        self._dedicated_override_lock.release()
+                                    except Exception:
+                                        pass
+                                    _glossary_override_lock_acquired = False
                                 if isinstance(e, UnifiedClientError):
                                     raise
                 except Exception as e:
@@ -6446,9 +6464,20 @@ class UnifiedClient:
                     self._setup_client()
                 finally:
                     self._restoring_dedicated_key_override = False
+                if _dedicated_pool_state and _dedicated_pool_state.get('dedicated_override_lock_acquired'):
+                    try:
+                        self._dedicated_override_lock.release()
+                    except Exception:
+                        pass
+                    _dedicated_pool_state['dedicated_override_lock_acquired'] = False
             if watchdog_started:
                 _api_watchdog_finished(watchdog_context, model=getattr(self, 'model', None), request_id=request_id if 'request_id' in locals() else None)
             if _vision_override_lock_acquired:
+                try:
+                    self._dedicated_override_lock.release()
+                except Exception:
+                    pass
+            if _glossary_override_lock_acquired:
                 try:
                     self._dedicated_override_lock.release()
                 except Exception:
