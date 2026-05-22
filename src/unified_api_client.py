@@ -2689,17 +2689,20 @@ class UnifiedClient:
                 else:
                     validated_keys.append(key_data)
 
+            configured_count = sum(1 for key_data in keys_list if isinstance(key_data, dict))
             if not validated_keys:
+                print(f"🔑 Vision key pool: {configured_count} entries configured, 0 loaded")
                 return False
 
             cls._qa_scan_key_pool.load_from_list(validated_keys)
 
             existing_count = len(getattr(cls._qa_scan_key_pool, 'keys', [])) if cls._qa_scan_key_pool else 0
             if existing_count != len(validated_keys):
+                load_note = f", {len(validated_keys)} loaded" if len(validated_keys) != configured_count else ""
                 if encrypted_keys_fixed > 0:
-                    print(f"🔑 Vision key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
+                    print(f"🔑 Vision key pool: {configured_count} entries configured{load_note} ({encrypted_keys_fixed} required decryption fix)")
                 else:
-                    print(f"🔑 Vision key pool: {len(validated_keys)} keys loaded")
+                    print(f"🔑 Vision key pool: {configured_count} entries configured{load_note}")
 
             return True
 
@@ -2765,17 +2768,20 @@ class UnifiedClient:
                 else:
                     validated_keys.append(key_data)
 
+            configured_count = sum(1 for key_data in keys_list if isinstance(key_data, dict))
             if not validated_keys:
+                print(f"🔑 Image gen/edit key pool: {configured_count} entries configured, 0 loaded")
                 return False
 
             cls._inpainter_key_pool.load_from_list(validated_keys)
 
             existing_count = len(getattr(cls._inpainter_key_pool, 'keys', [])) if cls._inpainter_key_pool else 0
             if existing_count != len(validated_keys):
+                load_note = f", {len(validated_keys)} loaded" if len(validated_keys) != configured_count else ""
                 if encrypted_keys_fixed > 0:
-                    print(f"🔑 Image gen/edit key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
+                    print(f"🔑 Image gen/edit key pool: {configured_count} entries configured{load_note} ({encrypted_keys_fixed} required decryption fix)")
                 else:
-                    print(f"🔑 Image gen/edit key pool: {len(validated_keys)} keys loaded")
+                    print(f"🔑 Image gen/edit key pool: {configured_count} entries configured{load_note}")
 
             return True
 
