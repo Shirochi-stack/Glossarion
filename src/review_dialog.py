@@ -499,7 +499,7 @@ class ReviewDialog(QDialog):
         controls_layout.setSpacing(12)
 
         # 3. Spoiler Mode
-        self.spoiler_checkbox = self._create_styled_checkbox("Spoiler Mode")
+        self.spoiler_checkbox = self._create_styled_checkbox("50/50 Split Mode")
         self.spoiler_checkbox.setToolTip(
             "When enabled, includes both the first and last chapters "
             "(50/50 split) for a comprehensive review.\n"
@@ -509,7 +509,7 @@ class ReviewDialog(QDialog):
         controls_layout.addWidget(self.spoiler_checkbox)
 
         # Chunk Mode toggle
-        self.chunk_mode_checkbox = self._create_styled_checkbox("Chunk Mode")
+        self.chunk_mode_checkbox = self._create_styled_checkbox("Full Review Mode")
         self.chunk_mode_checkbox.setToolTip(
             "When enabled, splits the book into multiple chunks and reviews each\n"
             "separately, then sends a Final Review prompt to synthesize all chunk\n"
