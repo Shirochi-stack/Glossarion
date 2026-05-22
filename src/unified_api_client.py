@@ -3130,7 +3130,8 @@ class UnifiedClient:
         self.original_api_key = api_key
         self.original_model = model
         
-        self._sequential_send_lock = threading.Lock()      
+        self._sequential_send_lock = threading.Lock()
+        self._dedicated_override_lock = threading.RLock()
         
         # Thread submission timing controls
         self._thread_submission_lock = threading.Lock()
@@ -5776,6 +5777,7 @@ class UnifiedClient:
         _original_multi_key_mode = None
         _had_instance_pool = False
         _original_instance_pool = None
+        _vision_override_lock_acquired = False
         def _retry_without_glossary_refinement_pool(reason: str):
             nonlocal _glossary_refinement_overridden, _dedicated_pool_state
             try:
@@ -5967,6 +5969,12 @@ class UnifiedClient:
                             raise UnifiedClientError("Vision key pool is enabled for this context but has no enabled keys; refusing fallback to another pool", error_type="no_keys")
                         
                         if qa_scan_pool and getattr(qa_scan_pool, 'keys', []):
+                            # Vision overrides temporarily replace instance-level
+                            # request state. Parallel OCR workers can share one
+                            # UnifiedClient, so keep this state swap held until
+                            # the request finishes and the finally block restores it.
+                            self._dedicated_override_lock.acquire()
+                            _vision_override_lock_acquired = True
                             _original_api_key = self.api_key
                             _original_model = self.model
                             _original_multi_key_mode = self._multi_key_mode
@@ -6440,6 +6448,11 @@ class UnifiedClient:
                     self._restoring_dedicated_key_override = False
             if watchdog_started:
                 _api_watchdog_finished(watchdog_context, model=getattr(self, 'model', None), request_id=request_id if 'request_id' in locals() else None)
+            if _vision_override_lock_acquired:
+                try:
+                    self._dedicated_override_lock.release()
+                except Exception:
+                    pass
             if not batch_mode:
                 self._sequential_send_lock.release()
         
