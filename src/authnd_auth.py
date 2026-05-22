@@ -1592,7 +1592,16 @@ def send_chat_completion(
         except RuntimeError as exc:
             last_error = exc
             message = str(exc).lower()
-            if attempt == 0 and ("captcha" in message or "400" in message):
+            is_context_length_error = (
+                "maximum context length" in message
+                or "max context length" in message
+            )
+            is_captcha_error = (
+                "captcha" in message
+                or "nv-captcha" in message
+                or "hcaptcha" in message
+            )
+            if attempt == 0 and is_captcha_error and not is_context_length_error:
                 if log_fn:
                     log_fn(f"⚠️ AuthND: captcha token was rejected; retrying with a fresh browser token ({_short_error(exc)})")
                 continue

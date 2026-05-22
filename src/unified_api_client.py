@@ -5983,7 +5983,16 @@ class UnifiedClient:
                             except Exception:
                                 pass
                             try:
-                                key_info = self._get_next_available_key()
+                                if hasattr(qa_scan_pool, 'get_key_for_thread'):
+                                    pool_key_info = qa_scan_pool.get_key_for_thread(
+                                        force_rotation=True,
+                                        rotation_frequency=getattr(self, '_rotation_frequency', 1),
+                                    )
+                                    key_info = (pool_key_info[0], pool_key_info[1]) if pool_key_info else None
+                                    if key_info:
+                                        print(f"[{threading.current_thread().name}] Got {pool_key_info[2]} from Vision pool")
+                                else:
+                                    key_info = self._get_next_available_key()
                                 if key_info:
                                     key_entry, key_idx = key_info
                                     # This UnifiedClient may have been initialized for the
@@ -23166,6 +23175,25 @@ class UnifiedClient:
         _authnd_think = self._get_thinking_status_label()
         print(f"🚀 AuthND: Sending request via NVIDIA Build browser route (model={actual_model})")
 
+        cache_keys = []
+        for key in (getattr(self, 'model', None), actual_model, f"authnd/{actual_model}"):
+            key = str(key or '').strip()
+            if key and key not in cache_keys:
+                cache_keys.append(key)
+        try:
+            with self.__class__._model_limits_lock:
+                cached_limit = None
+                for key in cache_keys:
+                    value = self.__class__._model_token_limits.get(key)
+                    if isinstance(value, int) and value > 0:
+                        cached_limit = value if cached_limit is None else min(cached_limit, value)
+                if cached_limit and (max_tokens is None or int(max_tokens) > cached_limit):
+                    if not self._is_stop_requested():
+                        print(f"📏 Using cached AuthND max_tokens cap for {actual_model}: {max_tokens} → {cached_limit}")
+                    max_tokens = cached_limit
+        except Exception:
+            pass
+
         for attempt in range(max_retries):
             if self._is_stop_requested():
                 raise UnifiedClientError(
@@ -23238,6 +23266,7 @@ class UnifiedClient:
 
             except RuntimeError as exc:
                 error_str = str(exc)
+                error_l = error_str.lower()
                 if "stream cancelled" in error_str.lower():
                     self._log_once("AuthND: Stream cancelled by user")
                     raise UnifiedClientError(
@@ -23251,13 +23280,56 @@ class UnifiedClient:
                         error_type="cancelled"
                     )
 
+                if "maximum context length" in error_l or "max context length" in error_l:
+                    try:
+                        import re as _re_ctx
+                        m_ctx = _re_ctx.search(r"maximum context length is\s+(\d+)\s+tokens", error_str, _re_ctx.IGNORECASE)
+                        m_in = (
+                            _re_ctx.search(r"\((\d+)\s+in\s+the\s+messages", error_str, _re_ctx.IGNORECASE)
+                            or _re_ctx.search(r"\((\d+)\s+of\s+(?:text\s+)?input", error_str, _re_ctx.IGNORECASE)
+                            or _re_ctx.search(r"\((\d+)\s+in\s+the\s+prompt", error_str, _re_ctx.IGNORECASE)
+                        )
+                        if m_ctx and m_in:
+                            max_ctx = int(m_ctx.group(1))
+                            input_tokens = int(m_in.group(1))
+                            allowed_out = max_ctx - input_tokens
+                            if allowed_out <= 0:
+                                raise UnifiedClientError(
+                                    f"AuthND context length exceeded: max_context={max_ctx}, input≈{input_tokens}.",
+                                    error_type="context_length",
+                                    details={"max_context": max_ctx, "input_tokens": input_tokens},
+                                )
+                            current_out = None
+                            try:
+                                current_out = int(max_tokens) if max_tokens is not None else None
+                            except Exception:
+                                current_out = None
+                            if current_out is None or current_out > allowed_out:
+                                with self.__class__._model_limits_lock:
+                                    for key in cache_keys:
+                                        prev = self.__class__._model_token_limits.get(key)
+                                        if prev is None or int(allowed_out) < int(prev):
+                                            self.__class__._model_token_limits[key] = int(allowed_out)
+                                old_disp = current_out if current_out is not None else max_tokens
+                                print(
+                                    f"⚠️ AuthND context window {max_ctx} tokens; input≈{input_tokens}. "
+                                    f"Auto-adjusting max_tokens {old_disp} → {allowed_out} and retrying."
+                                )
+                                max_tokens = int(allowed_out)
+                                last_error = exc
+                                continue
+                    except UnifiedClientError:
+                        raise
+                    except Exception:
+                        pass
+
                 if "429" in error_str or "rate limit" in error_str.lower():
                     raise UnifiedClientError(
                         f"AuthND rate limit reached: {error_str}",
                         error_type="rate_limit"
                     )
 
-                if "captcha" in error_str.lower() and attempt < max_retries - 1:
+                if "captcha" in error_l and attempt < max_retries - 1:
                     delay = max(1.0, self._get_send_interval())
                     print(f"⚠️ AuthND captcha error (attempt {attempt+1}/{max_retries}): {error_str[:1200]}")
                     print(f"🔁 AuthND: captcha retry in {delay:.1f}s (attempt {attempt+1}/{max_retries})")
