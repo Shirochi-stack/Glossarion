@@ -971,14 +971,15 @@ class MangaTranslator:
                 
                 # DEBUG: Log the detector model we're returning to pool
                 try:
-                    det_type, model_id = key
+                    det_type = key[0] if isinstance(key, (tuple, list)) and key else str(key)
                     self._log(f"🔑 Return bubble detector model: {det_type}", "info")
                     
                     # Show all detector models in pool for comparison
                     all_keys = list(MangaTranslator._detector_pool.keys())
                     self._log(f"📊 Pool has {len(all_keys)} detector model(s)", "info")
-                    for pool_det_type, pool_model_id in all_keys:
-                        pool_rec = MangaTranslator._detector_pool.get((pool_det_type, pool_model_id))
+                    for pool_key in all_keys:
+                        pool_det_type = pool_key[0] if isinstance(pool_key, (tuple, list)) and pool_key else str(pool_key)
+                        pool_rec = MangaTranslator._detector_pool.get(pool_key)
                         pool_spares = len(pool_rec.get('spares', [])) if pool_rec else 0
                         pool_checked = len(pool_rec.get('checked_out', [])) if pool_rec else 0
                         self._log(f"   - {pool_det_type}: {pool_spares} spares, {pool_checked} checked out", "info")
@@ -999,7 +1000,7 @@ class MangaTranslator:
                         valid_spares = sum(1 for s in spares_list if s is not None)
                         # Also log the pool key for debugging
                         try:
-                            det_type, model_id = key
+                            det_type = key[0] if isinstance(key, (tuple, list)) and key else str(key)
                             self._log(f"🔄 Returned bubble detector to pool [model: {det_type}] ({checked_out_count}/{total_spares} in use, {available_count} available, {valid_spares} valid)", "info")
                         except:
                             self._log(f"🔄 Returned bubble detector to pool ({checked_out_count}/{total_spares} in use, {available_count} available, {valid_spares} valid)", "info")
