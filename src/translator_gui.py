@@ -17889,18 +17889,21 @@ Important rules:
             os.environ['EXCLUDE_COVER_COMPRESSION'] = '1' if self.config.get('exclude_cover_compression', True) else '0'
             os.environ['EXCLUDE_GIF_COMPRESSION'] = '1' if self.config.get('exclude_gif_compression', True) else '0'
 
-            fallback_compile_epub(folder, log_callback=self.append_log)
+            compiled_path = fallback_compile_epub(folder, log_callback=self.append_log)
             
             if not self.stop_requested:
                 self.append_log("✅ EPUB Converter completed successfully!")
                 
-                epub_files = [f for f in os.listdir(folder) if f.endswith('.epub')]
-                if epub_files:
-                    epub_files.sort(key=lambda x: os.path.getmtime(os.path.join(folder, x)), reverse=True)
-                    out_file = os.path.join(folder, epub_files[0])
-                    QTimer.singleShot(0, lambda: QMessageBox.information(self, "EPUB Compilation Success", f"Created: {out_file}"))
+                if compiled_path and os.path.isfile(compiled_path):
+                    QTimer.singleShot(0, lambda p=compiled_path: QMessageBox.information(self, "EPUB Compilation Success", f"Created: {p}"))
                 else:
-                    self.append_log("⚠️ EPUB file was not created. Check the logs for details.")
+                    epub_files = [f for f in os.listdir(folder) if f.endswith('.epub')]
+                    if epub_files:
+                        epub_files.sort(key=lambda x: os.path.getmtime(os.path.join(folder, x)), reverse=True)
+                        out_file = os.path.join(folder, epub_files[0])
+                        QTimer.singleShot(0, lambda: QMessageBox.information(self, "EPUB Compilation Success", f"Created: {out_file}"))
+                    else:
+                        self.append_log("⚠️ EPUB file was not created. Check the logs for details.")
             
         except Exception as e:
             error_str = str(e)

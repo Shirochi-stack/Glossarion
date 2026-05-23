@@ -58,6 +58,147 @@ _global_log_callback = None
 _stop_flag = False
 
 
+def _norm_abs_path(path: str) -> str:
+    """Return a normalized absolute path key for loose path comparisons."""
+    try:
+        return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+    except Exception:
+        return os.path.normcase(os.path.normpath(str(path or "")))
+
+
+def _glossarion_library_dir() -> str:
+    return os.path.join(os.path.expanduser("~"), "Documents", "Glossarion", "Library")
+
+
+def _load_library_origins_for_compile() -> dict:
+    """Load Library/library_origins.txt without importing the Qt library UI."""
+    origins_path = os.path.join(_glossarion_library_dir(), "library_origins.txt")
+    try:
+        with open(origins_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"version": 3, "raw": {}, "translated": {}, "pairs": {}}
+    if not isinstance(data, dict):
+        return {"version": 3, "raw": {}, "translated": {}, "pairs": {}}
+    if "version" not in data and "raw" not in data and "translated" not in data:
+        data = {"version": 3, "raw": {}, "translated": dict(data), "pairs": {}}
+    data.setdefault("raw", {})
+    data.setdefault("translated", {})
+    data.setdefault("pairs", {})
+    if not isinstance(data["raw"], dict):
+        data["raw"] = {}
+    if not isinstance(data["translated"], dict):
+        data["translated"] = {}
+    if not isinstance(data["pairs"], dict):
+        data["pairs"] = {}
+    return data
+
+
+def _read_compile_source_reference(output_dir: str) -> str:
+    """Return the raw/source path used for this output folder, if known."""
+    sidecar = os.path.join(output_dir, "source_epub.txt")
+    try:
+        with open(sidecar, "r", encoding="utf-8") as f:
+            source_ref = f.read().strip()
+            if source_ref:
+                return source_ref
+    except OSError:
+        pass
+    return os.environ.get("EPUB_PATH", "").strip()
+
+
+def _organized_library_replacement_target(output_dir: str) -> Optional[str]:
+    """Return Library/Translated target for an already-organized compile.
+
+    The library records organized files in ``library_origins.txt``. Prefer
+    translated entries whose original compiled path lived in this output
+    folder, and fall back to translated↔raw pairs so non-EPUB raw inputs
+    organized into Library/Raw resolve through the same origin map.
+    """
+    origins = _load_library_origins_for_compile()
+    translated = origins.get("translated", {}) or {}
+    output_key = _norm_abs_path(output_dir)
+    trans_dir = os.path.join(_glossarion_library_dir(), "Translated")
+
+    matches: list[str] = []
+    for lib_basename, original_path in translated.items():
+        if not lib_basename or not original_path:
+            continue
+        try:
+            original_parent = os.path.dirname(str(original_path))
+        except Exception:
+            continue
+        if original_parent and _norm_abs_path(original_parent) == output_key:
+            matches.append(os.path.join(trans_dir, os.path.basename(str(lib_basename))))
+
+    if matches:
+        existing = [p for p in matches if os.path.isfile(p)]
+        return (existing or matches)[0]
+
+    source_ref = _read_compile_source_reference(output_dir)
+    if not source_ref:
+        return None
+
+    raw_map = origins.get("raw", {}) or {}
+    pairs = origins.get("pairs", {}) or {}
+    source_key = _norm_abs_path(source_ref)
+    raw_dir = os.path.join(_glossarion_library_dir(), "Raw")
+    raw_basenames: set[str] = set()
+    for raw_basename, original_raw_path in raw_map.items():
+        if not raw_basename:
+            continue
+        candidates = [
+            os.path.join(raw_dir, os.path.basename(str(raw_basename))),
+            str(original_raw_path or ""),
+        ]
+        if any(candidate and _norm_abs_path(candidate) == source_key for candidate in candidates):
+            raw_basenames.add(os.path.basename(str(raw_basename)))
+
+    if not raw_basenames:
+        return None
+
+    pair_matches = [
+        os.path.join(trans_dir, os.path.basename(str(trans_basename)))
+        for trans_basename, raw_basename in pairs.items()
+        if raw_basename and os.path.basename(str(raw_basename)) in raw_basenames
+    ]
+    if pair_matches:
+        existing = [p for p in pair_matches if os.path.isfile(p)]
+        return (existing or pair_matches)[0]
+    return None
+
+
+def _replace_organized_library_epub(out_path: str, output_dir: str,
+                                    log_callback: Callable[[str], None]) -> Optional[str]:
+    """Replace an organized Library/Translated EPUB and remove the duplicate."""
+    target = _organized_library_replacement_target(output_dir)
+    if not target:
+        return None
+    if _norm_abs_path(target) == _norm_abs_path(out_path):
+        return target
+
+    import shutil
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    tmp_path = f"{target}.tmp-{os.getpid()}"
+    try:
+        shutil.copy2(out_path, tmp_path)
+        os.replace(tmp_path, target)
+        try:
+            os.remove(out_path)
+        except FileNotFoundError:
+            pass
+        log_callback(f"📚 Updated organized Library copy: {target}")
+        log_callback("🧹 Removed duplicate EPUB from the output folder.")
+        return target
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def set_stop_flag(value: bool):
     """Set the stop flag for EPUB converter"""
     global _stop_flag
@@ -1348,6 +1489,7 @@ class EPUBCompiler:
         self.log_callback = log_callback
         self.stop_callback = stop_callback
         self.output_dir = self.base_dir
+        self.last_epub_output_path: Optional[str] = None
         self.images_dir = os.path.join(self.output_dir, "images")
         self.css_dir = os.path.join(self.output_dir, "css")
         self.fonts_dir = os.path.join(self.output_dir, "fonts")
@@ -2449,6 +2591,7 @@ class EPUBCompiler:
             
             # Show summary
             self._show_summary(chapter_titles_info, css_items)
+            return self.last_epub_output_path
             
         except Exception as e:
             self.log(f"❌ EPUB compilation failed: {e}")
@@ -6663,6 +6806,12 @@ img {
                     self.log(f"[SUCCESS] Written as EPUB2 (took {elapsed:.1f}s)")
                 else:
                     self.log(f"[SUCCESS] Written as EPUB 3.3 (took {elapsed:.1f}s)")
+            self.last_epub_output_path = out_path
+            replacement_path = _replace_organized_library_epub(
+                out_path, self.output_dir, self.log
+            )
+            if replacement_path:
+                self.last_epub_output_path = replacement_path
             
         except Exception as e:
             self.log(f"[ERROR] Write failed: {e}")
@@ -7624,7 +7773,7 @@ def compile_epub(base_dir: str, log_callback: Optional[Callable] = None):
     set_stop_flag(False)
     
     compiler = EPUBCompiler(base_dir, log_callback)
-    compiler.compile()
+    return compiler.compile()
 
 
 # Legacy alias
