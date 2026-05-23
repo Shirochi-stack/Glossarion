@@ -586,7 +586,7 @@ class TranslationConfig:
         self.ROLLING_SUMMARY_MAX_ENTRIES = int(os.getenv("ROLLING_SUMMARY_MAX_ENTRIES", "10"))
         self.DUPLICATE_DETECTION_MODE = os.getenv("DUPLICATE_DETECTION_MODE", "basic")
         self.AI_HUNTER_THRESHOLD = int(os.getenv("AI_HUNTER_THRESHOLD", "75"))
-        self.TRANSLATION_HISTORY_ROLLING = os.getenv("TRANSLATION_HISTORY_ROLLING", "0") == "1"
+        self.TRANSLATION_HISTORY_ROLLING = True
         self.API_KEY = (os.getenv("API_KEY") or 
                        os.getenv("OPENAI_API_KEY") or 
                        os.getenv("OPENAI_OR_Gemini_API_KEY") or

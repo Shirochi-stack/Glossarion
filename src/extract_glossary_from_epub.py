@@ -6151,7 +6151,7 @@ def main(log_callback=None, stop_callback=None):
     
     # Get both settings
     contextual_enabled = os.getenv('CONTEXTUAL', '1') == '1'
-    rolling_window = os.getenv('GLOSSARY_HISTORY_ROLLING', '0') == '1'
+    rolling_window = True
     
     # Initialize HistoryManager for context history (separate from progress file)
     # Use source file-based naming like other glossary files

@@ -703,7 +703,7 @@ class ExtractGlossaryScreen(MDScreen):
         os.environ["GLOSSARY_TRANSLATION_PROMPT"] = str(cfg.get("glossary_translation_prompt", ""))
         os.environ["GLOSSARY_FORMAT_INSTRUCTIONS"] = str(cfg.get("glossary_format_instructions", ""))
         os.environ["GLOSSARY_DISABLE_HONORIFICS_FILTER"] = "1" if cfg.get("glossary_disable_honorifics_filter", False) else "0"
-        os.environ["GLOSSARY_HISTORY_ROLLING"] = "1" if cfg.get("glossary_history_rolling", False) else "0"
+        os.environ["GLOSSARY_HISTORY_ROLLING"] = "1"
         os.environ["GLOSSARY_REQUEST_MERGING_ENABLED"] = "1" if cfg.get("glossary_request_merging_enabled", False) else "0"
         os.environ["GLOSSARY_REQUEST_MERGE_COUNT"] = str(cfg.get("glossary_request_merge_count", 3))
         os.environ["GLOSSARY_ENABLE_CHAPTER_SPLIT"] = "1" if cfg.get("glossary_enable_chapter_split", True) else "0"

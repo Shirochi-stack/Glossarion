@@ -1442,16 +1442,7 @@ class MangaTranslator:
         except Exception:
             self.translation_history_limit = 3
         
-        try:
-            if hasattr(main_gui, 'translation_history_rolling_var'):
-                if hasattr(main_gui.translation_history_rolling_var, 'get'):
-                    self.rolling_history_enabled = main_gui.translation_history_rolling_var.get()
-                else:
-                    self.rolling_history_enabled = main_gui.translation_history_rolling_var
-            else:
-                self.rolling_history_enabled = False
-        except Exception:
-            self.rolling_history_enabled = False
+        self.rolling_history_enabled = True
         
         # Initialize HistoryManager placeholder
         self.history_manager = None

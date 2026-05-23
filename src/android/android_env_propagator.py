@@ -84,7 +84,7 @@ def set_all_env_vars(config):
     # ── Contextual / history ──
     os.environ['CONTEXTUAL'] = '1' if _get('contextual', False) else '0'
     os.environ['TRANSLATION_HISTORY_LIMIT'] = str(_get('translation_history_limit', 2))
-    os.environ['TRANSLATION_HISTORY_ROLLING'] = '1' if _get('translation_history_rolling', False) else '0'
+    os.environ['TRANSLATION_HISTORY_ROLLING'] = '1'
 
     # ── Streaming (always enabled on Android for real-time response) ──
     os.environ['ENABLE_STREAMING'] = '1'

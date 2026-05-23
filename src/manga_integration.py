@@ -4632,7 +4632,7 @@ class MangaTranslationTab(QObject):
         settings_display_layout.addWidget(self.history_limit_label)
         
         # Rolling history status
-        rolling_status = "Enabled (Rolling Window)" if self.main_gui.translation_history_rolling_var else "Disabled (Reset on Limit)"
+        rolling_status = "Enabled (Rolling Window)"
         self.rolling_status_label = QLabel(f"• Rolling History: {rolling_status}")
         self.rolling_status_label.setFont(status_font)
         settings_display_layout.addWidget(self.rolling_status_label)
@@ -9913,9 +9913,9 @@ class MangaTranslationTab(QObject):
             if hasattr(self, 'history_limit_label'):
                 self.history_limit_label.setText(f"• Translation History Limit: {history_limit} exchanges")
         
-        if hasattr(self.main_gui, 'translation_history_rolling_var'):
-            rolling_enabled = self.main_gui.translation_history_rolling_var
-            rolling_status = "Enabled (Rolling Window)" if rolling_enabled else "Disabled (Reset on Limit)"
+        if True:
+            rolling_enabled = True
+            rolling_status = "Enabled (Rolling Window)"
             if hasattr(self, 'rolling_status_label'):
                 self.rolling_status_label.setText(f"• Rolling History: {rolling_status}")
         
@@ -9980,8 +9980,7 @@ class MangaTranslationTab(QObject):
                     except Exception:
                         self.translator.history_manager.max_history = 3
                 
-                if hasattr(self.main_gui, 'translation_history_rolling_var'):
-                    self.translator.history_manager.rolling_enabled = self.main_gui.translation_history_rolling_var
+                self.translator.history_manager.rolling_enabled = True
                 
                 # Reset the history to apply new settings
                 self.translator.history_manager.reset()
@@ -15531,7 +15530,7 @@ class MangaTranslationTab(QObject):
             # Support both Tkinter (with .get()) and PySide6 (plain values)
             contextual_enabled = self.main_gui.contextual_var.get() if hasattr(self.main_gui.contextual_var, 'get') else self.main_gui.contextual_var
             trans_history = self.main_gui.trans_history.get() if hasattr(self.main_gui.trans_history, 'get') else self.main_gui.trans_history
-            rolling_enabled = self.main_gui.translation_history_rolling_var.get() if hasattr(self.main_gui.translation_history_rolling_var, 'get') else self.main_gui.translation_history_rolling_var
+            rolling_enabled = True
             
             self._log(f"Contextual: {'Enabled' if contextual_enabled else 'Disabled'}", "info")
             self._log(f"History limit: {trans_history} exchanges", "info")

@@ -668,7 +668,7 @@ class GlossarionWeb:
         # Translation Settings
         os.environ['CONTEXTUAL'] = '1' if config('contextual', False) else '0'
         os.environ['TRANSLATION_HISTORY_LIMIT'] = str(config('translation_history_limit', 2))
-        os.environ['TRANSLATION_HISTORY_ROLLING'] = '1' if config('translation_history_rolling', False) else '0'
+        os.environ['TRANSLATION_HISTORY_ROLLING'] = '1'
         os.environ['BATCH_TRANSLATION'] = '1' if config('batch_translation', False) else '0'
         os.environ['BATCH_SIZE'] = str(config('batch_size', 10))
         os.environ['THREAD_SUBMISSION_DELAY'] = str(config('thread_submission_delay', 0.1))
@@ -2502,7 +2502,7 @@ class GlossarionWeb:
                     self.trans_temp = MockVar(float(config.get('translation_temperature', 0.3)))
                     self.contextual_var = MockVar(bool(config.get('contextual', False)))
                     self.trans_history = MockVar(int(config.get('translation_history_limit', 2)))
-                    self.translation_history_rolling_var = MockVar(bool(config.get('translation_history_rolling', False)))
+                    self.translation_history_rolling_var = MockVar(True)
                     self.token_limit_disabled = bool(config.get('token_limit_disabled', False))
                     # IMPORTANT: token_limit_entry must return STRING because manga_translator calls .strip() on it
                     self.token_limit_entry = MockVar(str(config.get('token_limit', 200000)))
@@ -5801,11 +5801,6 @@ CRITICAL EXTRACTION RULES:
                                 minimum=0
                             )
                             
-                            rolling_history = gr.Checkbox(
-                                label="Rolling History Window",
-                                value=self.get_config_value('translation_history_rolling', False)
-                            )
-                            
                             batch_translation = gr.Checkbox(
                                 label="Batch Translation",
                                 value=self.get_config_value('batch_translation', False)
@@ -5973,7 +5968,7 @@ CRITICAL EXTRACTION RULES:
                     js_executor = gr.HTML("", visible=False)
                     
                     # Auto-save function for settings tab
-                    def save_settings_tab(thread_delay_val, api_delay_val, chapter_range_val, token_limit_val, disable_token_limit_val, output_token_limit_val, contextual_val, history_limit_val, rolling_history_val, batch_translation_val, batch_size_val, save_api_key_val):
+                    def save_settings_tab(thread_delay_val, api_delay_val, chapter_range_val, token_limit_val, disable_token_limit_val, output_token_limit_val, contextual_val, history_limit_val, batch_translation_val, batch_size_val, save_api_key_val):
                         """Save settings from the Settings tab"""
                         try:
                             current_config = self.get_current_config_for_update()
@@ -5988,7 +5983,7 @@ CRITICAL EXTRACTION RULES:
                             current_config['max_output_tokens'] = int(output_token_limit_val)
                             current_config['contextual'] = bool(contextual_val)
                             current_config['translation_history_limit'] = int(history_limit_val)
-                            current_config['translation_history_rolling'] = bool(rolling_history_val)
+                            current_config['translation_history_rolling'] = True
                             current_config['batch_translation'] = bool(batch_translation_val)
                             current_config['batch_size'] = int(batch_size_val)
                             
@@ -6014,7 +6009,6 @@ CRITICAL EXTRACTION RULES:
                                 window.saveToLocalStorage('output_token_limit', %d);
                                 window.saveToLocalStorage('contextual', %s);
                                 window.saveToLocalStorage('history_limit', %d);
-                                window.saveToLocalStorage('rolling_history', %s);
                                 window.saveToLocalStorage('batch_translation', %s);
                                 window.saveToLocalStorage('batch_size', %d);
                                 console.log('Settings saved to localStorage');
@@ -6024,7 +6018,7 @@ CRITICAL EXTRACTION RULES:
                                 thread_delay_val, api_delay_val, chapter_range_val, token_limit_val,
                                 str(disable_token_limit_val).lower(), output_token_limit_val,
                                 str(contextual_val).lower(), history_limit_val,
-                                str(rolling_history_val).lower(), str(batch_translation_val).lower(),
+                                str(batch_translation_val).lower(),
                                 batch_size_val
                             )
                             

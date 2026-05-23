@@ -3500,8 +3500,8 @@ Recent translations to summarize:
             ('rolling_summary_var', 'use_rolling_summary', False),
             # Controls whether previous source text (user messages) are reused as memory
             ('include_source_in_history_var', 'include_source_in_history', False),
-            ('translation_history_rolling_var', 'translation_history_rolling', False),
-            ('glossary_history_rolling_var', 'glossary_history_rolling', False),
+            ('translation_history_rolling_var', 'translation_history_rolling', True),
+            ('glossary_history_rolling_var', 'glossary_history_rolling', True),
             ('translate_book_title_var', 'translate_book_title', True),
             ('skip_txt_title_translation_var', 'skip_txt_title_translation', True),
             ('include_book_title_glossary_var', 'include_book_title_glossary', False),
@@ -7982,19 +7982,8 @@ Recent translations to summarize:
         history_limit_layout.addStretch()
         self.frame.addWidget(history_limit_container, 4, 2, 1, 2, Qt.AlignLeft)
         
-        # Rolling History (row 5)
-        self.rolling_checkbox = self._create_styled_checkbox("Rolling History Window")
-        rolling_history_tooltip = (
-            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
-            "Recommended: keeps translation history rolling forward instead of resetting to 0 "
-            "every time the history limit is reached.<br><br>"
-            "Example: with a limit of 2, the app keeps the latest 2 history entries and drops older ones, "
-            "so contextual translation can continue using recent context."
-            "</p></qt>"
-        )
-        self.rolling_checkbox.setToolTip(rolling_history_tooltip)
-        self.rolling_checkbox.setChecked(self.translation_history_rolling_var)
-        self.frame.addWidget(self.rolling_checkbox, 5, 2, Qt.AlignLeft)
+        self.translation_history_rolling_var = True
+        self.config['translation_history_rolling'] = True
         
         # Temperature (row 6)
         temp_container = QWidget()
@@ -9012,12 +9001,7 @@ Recent translations to summarize:
             label_color = 'white' if is_contextual else 'gray'
             self.trans_history_label.setStyleSheet(f"color: {label_color};")
         
-        # Enable/disable rolling history checkbox and update description color
-        if hasattr(self, 'rolling_checkbox'):
-            self.rolling_checkbox.setEnabled(is_contextual)
-        if hasattr(self, 'rolling_history_desc'):
-            desc_color = 'gray' if is_contextual else '#404040'
-            self.rolling_history_desc.setStyleSheet(f"color: {desc_color}; font-size: 9pt;")
+        self.translation_history_rolling_var = True
     
     def _on_batch_toggle(self, state=None):
         """Handle batch translation toggle - enable/disable batch size entry"""
@@ -14774,8 +14758,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                                             # For generated images, save only the assistant message with image
                                             # No user message needed - just the generated image as context
                                             history_limit = int(self.trans_history.text()) if hasattr(self, 'trans_history') else 3
-                                            # Check both checkbox state (runtime) and config variable (initial)
-                                            rolling_history = self.rolling_checkbox.isChecked() if hasattr(self, 'rolling_checkbox') else self.translation_history_rolling_var
+                                            rolling_history = True
                                             
                                             # Store structured payload for image exchange
                                             assistant_payload = {
@@ -16016,7 +15999,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Backward compatibility for older scripts expecting CONSERVATIVE_BATCHING
             'CONSERVATIVE_BATCHING': "1" if str(getattr(self, 'batch_mode_var', 'direct')) == 'conservative' else "0",
             'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var else "0",
-            'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var else "0",
+            'TRANSLATION_HISTORY_ROLLING': "1",
             'USE_GEMINI_OPENAI_ENDPOINT': '1' if self.use_gemini_openai_endpoint_var else '0',
             'GEMINI_OPENAI_ENDPOINT': self.gemini_openai_endpoint_var if self.gemini_openai_endpoint_var else 'generativelanguage.googleapis.com',
             'OVERRIDE_GEMMA_FOR_CUSTOM_ENDPOINT': '1' if getattr(self, 'override_gemma_for_custom_endpoint_var', True) else '0',
@@ -17484,7 +17467,7 @@ Important rules:
                     'CHAPTER_RANGE': self.chapter_range_entry.text().strip(),
                     'USE_SPINE_ORDER': '1' if (hasattr(self, 'use_spine_order_checkbox') and self.use_spine_order_checkbox.isChecked()) else '0',
                     'GLOSSARY_DISABLE_HONORIFICS_FILTER': '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0',
-                    'GLOSSARY_HISTORY_ROLLING': "1" if self.glossary_history_rolling_var else "0",
+                    'GLOSSARY_HISTORY_ROLLING': "1",
                     'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
                     'GEMINI_SAFETY_THRESHOLD': str(self.config.get('gemini_safety_threshold', 'BLOCK_NONE')),
                     'OPENROUTER_USE_HTTP_ONLY': '1' if self.openrouter_http_only_var else '0',
@@ -23973,7 +23956,7 @@ Important rules:
                 ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),
                 ('token_limit_disabled', ['token_limit_disabled'], False, bool),
                 ('enable_thoughts', ['enable_thoughts_var'], True, bool),
-                ('translation_history_rolling', ['rolling_checkbox', 'translation_history_rolling_var'], False, bool),
+                ('translation_history_rolling', ['translation_history_rolling_var'], True, bool),
                 ('disable_epub_gallery', ['disable_epub_gallery_var'], False, bool),
                 ('disable_automatic_cover_creation', ['disable_automatic_cover_creation_var'], False, bool),
                 ('use_toc_ncx', ['use_toc_ncx_var'], True, bool),
@@ -24147,7 +24130,7 @@ Important rules:
                 ('glossary_disable_honorifics_filter', ['disable_honorifics_checkbox', 'disable_honorifics_var'], False, bool),
                 ('manual_glossary_temperature', ['manual_temp_entry', 'manual_temp_var'], 0.3, lambda v: safe_float(v, 0.3)),
                 ('manual_context_limit', ['manual_context_entry', 'manual_context_var'], 5, lambda v: safe_int(v, 5)),
-                ('glossary_history_rolling', ['glossary_history_rolling_checkbox', 'glossary_history_rolling_var'], False, bool),
+                ('glossary_history_rolling', ['glossary_history_rolling_var'], True, bool),
                 ('enable_auto_glossary', ['enable_auto_glossary_checkbox', 'enable_auto_glossary_var'], False, bool),
                 ('auto_glossary_mode', ['auto_glossary_mode_var'], 'balanced', str),
                 ('glossary_use_legacy_csv', ['use_legacy_csv_checkbox', 'use_legacy_csv_var'], False, bool),

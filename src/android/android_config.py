@@ -36,7 +36,7 @@ DEFAULT_CONFIG = {
     'enable_auto_glossary': True,
     'contextual': False,
     'translation_history_limit': 2,
-    'translation_history_rolling': False,
+    'translation_history_rolling': True,
     'enable_streaming': False,
     'batch_translate_headers': False,
     'use_multi_api_keys': False,

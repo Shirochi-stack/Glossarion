@@ -3327,7 +3327,7 @@ class AsyncProcessingDialog:
         env_vars['COMPRESS_GLOSSARY_STRICT_GENDER_MATCHING'] = "1" if strict_gender_matching else "0"
         
         # History and summary settings
-        env_vars['TRANSLATION_HISTORY_ROLLING'] = "1" if _val(self.gui.translation_history_rolling_var, False) else "0"
+        env_vars['TRANSLATION_HISTORY_ROLLING'] = "1"
         env_vars['USE_ROLLING_SUMMARY'] = "1" if self.gui.config.get('use_rolling_summary') else "0"
         env_vars['SUMMARY_ROLE'] = self.gui.config.get('summary_role', 'system')
         env_vars['ROLLING_SUMMARY_EXCHANGES'] = _val(self.gui.rolling_summary_exchanges_var, 0)

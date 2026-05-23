@@ -1191,7 +1191,6 @@ class GlossaryManagerMixin:
                     ('enable_gender_nuance_checkbox', 'enable_gender_nuance_var'),
                     ('include_gender_context_checkbox', 'include_gender_context_var'),
                     ('include_description_checkbox', 'include_description_var'),
-                    ('glossary_history_rolling_checkbox', 'glossary_history_rolling_var'),
                     ('strip_honorifics_checkbox', 'strip_honorifics_var'),
                     ('disable_honorifics_checkbox', 'disable_honorifics_var'),
                     ('use_legacy_csv_checkbox', 'use_legacy_csv_var'),
@@ -1240,8 +1239,6 @@ class GlossaryManagerMixin:
                             self.config['include_gender_context'] = bool(checked)
                         elif checkbox_name == 'include_description_checkbox':
                             self.config['include_description'] = bool(checked)
-                        elif checkbox_name == 'glossary_history_rolling_checkbox':
-                            self.config['glossary_history_rolling'] = bool(checked)
                         elif checkbox_name == 'strip_honorifics_checkbox':
                             self.config['strip_honorifics'] = bool(checked)
                         elif checkbox_name == 'disable_honorifics_checkbox':
@@ -2497,7 +2494,7 @@ class GlossaryManagerMixin:
             icon_label.setAlignment(Qt.AlignCenter)
             settings_grid.addWidget(icon_label, 0, 2, 4, 1)  # Span 4 rows
         
-        # Row 0: Temperature and Context Limit
+        # Row 0: Temperature and Glossary History Limit
         self.manual_temp_entry = QLineEdit(str(self.config.get('manual_glossary_temperature', 0.1)))
         self.manual_temp_entry.setFixedWidth(80)
         settings_grid.addWidget(_m_pair(
@@ -2508,7 +2505,7 @@ class GlossaryManagerMixin:
         self.manual_context_entry = QLineEdit(str(self.config.get('manual_context_limit', 2)))
         self.manual_context_entry.setFixedWidth(80)
         settings_grid.addWidget(_m_pair(
-            "Context Limit:", self.manual_context_entry,
+            "Glossary History Limit:", self.manual_context_entry,
             tooltip="This controls how many chapters to include with contextual translation"
         ), 0, 1)
         
@@ -2534,13 +2531,8 @@ class GlossaryManagerMixin:
             tooltip="How much to compress text before sending to the model.\nAuto adjusts based on token limit; manual overrides fixed value."
         ), 1, 0)
         
-        if not hasattr(self, 'glossary_history_rolling_checkbox'):
-            self.glossary_history_rolling_checkbox = self._create_styled_checkbox("Keep recent context instead of reset")
-        self.glossary_history_rolling_checkbox.setChecked(self.config.get('glossary_history_rolling', False))
-        self.glossary_history_rolling_checkbox.setToolTip(
-            "Keep recent glossary context between chunks instead of resetting.\nHelps continuity; may increase token use."
-        )
-        settings_grid.addWidget(self.glossary_history_rolling_checkbox, 1, 1)
+        self.glossary_history_rolling_var = True
+        self.config['glossary_history_rolling'] = True
         
         # Row 2: Output Token Limit and Request Merging checkbox
         # Default changed to -1 (auto/inherit) instead of 65536
