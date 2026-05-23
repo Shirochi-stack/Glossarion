@@ -2125,6 +2125,7 @@ def _create_danger_zone_section(self, parent):
                 'metadata_keys',
                 'qa_scan_keys',
                 'ai_truncation_detection_keys',
+                'rolling_summary_keys',
                 'truncation_retry_keys',
                 'inpainter_keys',
             ):
@@ -2174,6 +2175,7 @@ def _create_danger_zone_section(self, parent):
                 'use_metadata_keys',
                 'use_qa_scan_keys',
                 'use_ai_truncation_detection_keys',
+                'use_rolling_summary_keys',
                 'use_truncation_retry_keys',
                 'use_inpainter_keys',
             ):

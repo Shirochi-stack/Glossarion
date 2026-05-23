@@ -176,6 +176,21 @@ class APIKeyEncryption:
                 decrypted_keys.append(key_entry)
         
         return decrypted_keys
+
+    def multi_key_list_fields(self):
+        """Config list fields that contain per-entry api_key values."""
+        return [
+            'multi_api_keys',
+            'fallback_keys',
+            'glossary_keys',
+            'glossary_refinement_keys',
+            'metadata_keys',
+            'qa_scan_keys',
+            'ai_truncation_detection_keys',
+            'rolling_summary_keys',
+            'truncation_retry_keys',
+            'inpainter_keys',
+        ]
     
     def encrypt_config(self, config):
         """Encrypt specific API key fields including multi-key support"""
@@ -189,13 +204,9 @@ class APIKeyEncryption:
                 if isinstance(value, str) and not value.startswith('ENC:'):
                     encrypted[field] = self.encrypt_value(value)
         
-        # Encrypt multi_api_keys if present
-        if 'multi_api_keys' in encrypted:
-            encrypted['multi_api_keys'] = self.encrypt_multi_keys(encrypted['multi_api_keys'])
-            
-        # Encrypt fallback_keys if present
-        if 'fallback_keys' in encrypted:
-            encrypted['fallback_keys'] = self.encrypt_multi_keys(encrypted['fallback_keys'])
+        for field in self.multi_key_list_fields():
+            if field in encrypted:
+                encrypted[field] = self.encrypt_multi_keys(encrypted[field])
         
         return encrypted
     
@@ -208,13 +219,9 @@ class APIKeyEncryption:
             if field in decrypted and decrypted[field]:
                 decrypted[field] = self.decrypt_value(decrypted[field])
         
-        # Decrypt multi_api_keys if present
-        if 'multi_api_keys' in decrypted:
-            decrypted['multi_api_keys'] = self.decrypt_multi_keys(decrypted['multi_api_keys'])
-            
-        # Decrypt fallback_keys if present  
-        if 'fallback_keys' in decrypted:
-            decrypted['fallback_keys'] = self.decrypt_multi_keys(decrypted['fallback_keys'])
+        for field in self.multi_key_list_fields():
+            if field in decrypted:
+                decrypted[field] = self.decrypt_multi_keys(decrypted[field])
         
         return decrypted
 
@@ -278,21 +285,15 @@ def migrate_config_file(config_file='config.json'):
                     needs_encryption = True
                     break
         
-        # Check multi_api_keys
-        if 'multi_api_keys' in config and isinstance(config['multi_api_keys'], list):
-            for key_entry in config['multi_api_keys']:
-                if isinstance(key_entry, dict) and 'api_key' in key_entry:
-                    if key_entry['api_key'] and not key_entry['api_key'].startswith('ENC:'):
-                        needs_encryption = True
-                        break
-
-        # Check fallback_keys
-        if 'fallback_keys' in config and isinstance(config['fallback_keys'], list):
-            for key_entry in config['fallback_keys']:
-                if isinstance(key_entry, dict) and 'api_key' in key_entry:
-                    if key_entry['api_key'] and not key_entry['api_key'].startswith('ENC:'):
-                        needs_encryption = True
-                        break
+        for field in handler.multi_key_list_fields():
+            if field in config and isinstance(config[field], list):
+                for key_entry in config[field]:
+                    if isinstance(key_entry, dict) and 'api_key' in key_entry:
+                        if key_entry['api_key'] and not key_entry['api_key'].startswith('ENC:'):
+                            needs_encryption = True
+                            break
+            if needs_encryption:
+                break
         
         if not needs_encryption:
             print("Config already encrypted or no API keys found.")
@@ -314,11 +315,9 @@ def migrate_config_file(config_file='config.json'):
         print("✅ Successfully encrypted API keys!")
         
         # Show summary
-        if 'multi_api_keys' in config:
-            print(f"  - Encrypted {len(config['multi_api_keys'])} multi-key entries")
-        
-        if 'fallback_keys' in config:
-            print(f"  - Encrypted {len(config['fallback_keys'])} fallback-key entries")
+        for field in handler.multi_key_list_fields():
+            if field in config:
+                print(f"  - Encrypted {len(config[field])} {field} entries")
     
         return True
         

@@ -1959,6 +1959,10 @@ class UnifiedClient:
     _ai_truncation_detection_key_pool: Optional[APIKeyPool] = None
     _ai_truncation_detection_pool_lock = threading.Lock()
 
+    # Rolling-summary-dedicated key pool (used only for memory summary generation)
+    _rolling_summary_key_pool: Optional[APIKeyPool] = None
+    _rolling_summary_pool_lock = threading.Lock()
+
     # Image gen/edit-dedicated key pool (manga custom-image-edit + image output requests)
     _inpainter_key_pool: Optional[APIKeyPool] = None
     _inpainter_pool_lock = threading.Lock()
@@ -2956,6 +2960,86 @@ class UnifiedClient:
                     print(f"🔑 Truncation retry key pool: {len(validated_keys)} keys loaded")
 
             return True
+
+    # In-memory rolling-summary key configuration.
+    _in_memory_rolling_summary_keys = None
+    _in_memory_rolling_summary_keys_lock = RLock()
+
+    @classmethod
+    def set_in_memory_rolling_summary_keys(cls, keys_list, force_rotation=True, rotation_frequency=1):
+        """Configure rolling-summary key mode without storing the full key list in environment variables."""
+        try:
+            with cls._in_memory_rolling_summary_keys_lock:
+                cls._in_memory_rolling_summary_keys = keys_list
+        except Exception:
+            pass
+        try:
+            cls.setup_rolling_summary_key_pool(
+                keys_list,
+                force_rotation=force_rotation,
+                rotation_frequency=rotation_frequency,
+            )
+        except Exception:
+            return False
+        return True
+
+    @classmethod
+    def clear_in_memory_rolling_summary_keys(cls):
+        """Clear in-memory rolling-summary-key configuration."""
+        with cls._in_memory_rolling_summary_keys_lock:
+            cls._in_memory_rolling_summary_keys = None
+        with cls._rolling_summary_pool_lock:
+            cls._rolling_summary_key_pool = None
+
+    @classmethod
+    def setup_rolling_summary_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
+        """Setup the shared rolling-summary API key pool (mirrors setup_glossary_key_pool)."""
+        with cls._rolling_summary_pool_lock:
+            if cls._rolling_summary_key_pool is None:
+                cls._rolling_summary_key_pool = APIKeyPool()
+            cls._rolling_summary_pool_logged = False
+
+            if cls._rate_limit_cache is None:
+                cls._rate_limit_cache = RateLimitCache()
+
+            validated_keys = []
+            encrypted_keys_fixed = 0
+
+            for key_data in keys_list:
+                if not isinstance(key_data, dict):
+                    continue
+                api_key = key_data.get('api_key', '')
+                model = key_data.get('model', '')
+                if not api_key and cls._key_data_needs_api_key(key_data, model):
+                    continue
+                if api_key and api_key.startswith('ENC:'):
+                    try:
+                        from api_key_encryption import get_handler
+                        handler = get_handler()
+                        decrypted_key = handler.decrypt_value(api_key)
+                        if decrypted_key != api_key and not decrypted_key.startswith('ENC:'):
+                            fixed_key_data = key_data.copy()
+                            fixed_key_data['api_key'] = decrypted_key
+                            validated_keys.append(fixed_key_data)
+                            encrypted_keys_fixed += 1
+                    except Exception:
+                        continue
+                else:
+                    validated_keys.append(key_data)
+
+            if not validated_keys:
+                return False
+
+            cls._rolling_summary_key_pool.load_from_list(validated_keys)
+
+            existing_count = len(getattr(cls._rolling_summary_key_pool, 'keys', [])) if cls._rolling_summary_key_pool else 0
+            if existing_count != len(validated_keys):
+                if encrypted_keys_fixed > 0:
+                    print(f"Rolling summary key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
+                else:
+                    print(f"Rolling summary key pool: {len(validated_keys)} keys loaded")
+
+            return True
     
     @classmethod
     def initialize_key_pool(cls, key_list: list):
@@ -3731,10 +3815,11 @@ class UnifiedClient:
                 if key_info:
                     key, key_index = key_info[:2]  # Handle both tuple formats
                     
-                    # Generate key identifier — use GlossaryKey# prefix when using glossary pool
+                    # Generate key identifier for the active pool.
                     _is_glossary_pool = (self._api_key_pool is getattr(self.__class__, '_glossary_key_pool', None))
                     _is_truncation_retry_pool = (self._api_key_pool is getattr(self.__class__, '_truncation_retry_key_pool', None))
-                    _prefix = "TruncationRetryKey" if _is_truncation_retry_pool else "GlossaryKey" if _is_glossary_pool else "Key"
+                    _is_rolling_summary_pool = (self._api_key_pool is getattr(self.__class__, '_rolling_summary_key_pool', None))
+                    _prefix = "RollingSummaryKey" if _is_rolling_summary_pool else "TruncationRetryKey" if _is_truncation_retry_pool else "GlossaryKey" if _is_glossary_pool else "Key"
                     key_id = f"{_prefix}#{key_index+1} ({key.model})"
                     if hasattr(key, 'identifier') and key.identifier:
                         key_id = key.identifier
@@ -5906,6 +5991,7 @@ class UnifiedClient:
         _glossary_refinement_overridden = False
         _qa_scan_overridden = False
         _inpainter_overridden = False
+        _rolling_summary_overridden = False
         _dedicated_pool_state = None
         _original_api_key = None
         _original_model = None
@@ -6062,6 +6148,56 @@ class UnifiedClient:
                     if isinstance(e, UnifiedClientError):
                         raise
                     print(f"[AI TRUNCATION DETECTION KEYS] Failed to apply override: {e}")
+
+            # ROLLING SUMMARY KEY OVERRIDE: generated memory summaries can use an isolated pool.
+            if not _qa_scan_overridden and context_norm == 'summary' and os.getenv('USE_ROLLING_SUMMARY_KEYS', '0') == '1':
+                try:
+                    rolling_summary_pool = self.__class__._rolling_summary_key_pool
+                    if not rolling_summary_pool or not getattr(rolling_summary_pool, 'keys', []):
+                        rolling_summary_keys_json = os.getenv('ROLLING_SUMMARY_API_KEYS', '[]')
+                        if rolling_summary_keys_json != '[]':
+                            try:
+                                rolling_summary_keys_list = json.loads(rolling_summary_keys_json)
+                                if rolling_summary_keys_list:
+                                    self.__class__.setup_rolling_summary_key_pool(rolling_summary_keys_list)
+                                    rolling_summary_pool = self.__class__._rolling_summary_key_pool
+                            except Exception:
+                                pass
+
+                    if rolling_summary_pool and getattr(rolling_summary_pool, 'keys', []):
+                        _has_enabled = any(getattr(k, 'enabled', True) for k in rolling_summary_pool.keys)
+                        if not _has_enabled:
+                            rolling_summary_pool = None
+                    if not (rolling_summary_pool and getattr(rolling_summary_pool, 'keys', [])):
+                        raise UnifiedClientError("Rolling summary key pool is enabled for this context but has no enabled keys; refusing fallback to another pool", error_type="no_keys")
+
+                    try:
+                        with self.__class__._in_memory_rolling_summary_keys_lock:
+                            rs_list = self.__class__._in_memory_rolling_summary_keys or []
+                    except Exception:
+                        rs_list = []
+                    pool_state = self._apply_dedicated_key_pool_override(
+                        rolling_summary_pool,
+                        rs_list,
+                        'RollingSummary',
+                        'RollingSummaryKey',
+                    )
+                    if not pool_state:
+                        raise UnifiedClientError("Rolling summary key pool is enabled but has no available keys; refusing fallback to another pool", error_type="no_keys")
+                    _rolling_summary_overridden = True
+                    _original_api_key = pool_state['api_key']
+                    _original_model = pool_state['model']
+                    _original_multi_key_mode = pool_state['multi_key_mode']
+                    _had_instance_pool = pool_state['had_instance_pool']
+                    _original_instance_pool = pool_state['instance_pool']
+                    _dedicated_pool_state = pool_state
+                    if not getattr(self.__class__, '_rolling_summary_pool_logged', False):
+                        print(f"[ROLLING SUMMARY KEYS] Using rolling summary key pool ({len(rolling_summary_pool.keys)} keys)")
+                        self.__class__._rolling_summary_pool_logged = True
+                except Exception as e:
+                    if isinstance(e, UnifiedClientError):
+                        raise
+                    print(f"[ROLLING SUMMARY KEYS] Failed to apply rolling summary key override: {e}")
 
             # VISION KEY OVERRIDE: shared pool for vision OCR/image scans.
             _vision_key_contexts = ('Truncation', 'image_scan', 'image_ocr', 'vision_ocr', 'manga_ocr', 'image_translation')
@@ -6574,7 +6710,7 @@ class UnifiedClient:
                     return self._send_image_internal(messages, image_data, temperature, max_tokens, max_completion_tokens, context, retry_reason=None, request_id=request_id)
         finally:
             # Restore original key/model and pool if we overrode them for a dedicated context
-            if _glossary_overridden or _glossary_refinement_overridden or _qa_scan_overridden or _inpainter_overridden:
+            if _glossary_overridden or _glossary_refinement_overridden or _qa_scan_overridden or _inpainter_overridden or _rolling_summary_overridden:
                 if _original_api_key is not None:
                     self.api_key = _original_api_key
                     self.model = _original_model
@@ -7318,7 +7454,7 @@ class UnifiedClient:
                 # pool can otherwise win the cosmetic log line.
                 try:
                     key_identifier = str(getattr(self, 'key_identifier', '') or '')
-                    if key_identifier.startswith(('VisionKey#', 'AITruncationDetectionKey#', 'MetadataKey#', 'GlossaryKey#', 'GlossaryRefinementKey#', 'TruncationRetryKey#')):
+                    if key_identifier.startswith(('VisionKey#', 'AITruncationDetectionKey#', 'MetadataKey#', 'GlossaryKey#', 'GlossaryRefinementKey#', 'RollingSummaryKey#', 'TruncationRetryKey#')):
                         current_model = getattr(self, 'model', None)
                         if current_model:
                             log_model = current_model
@@ -7351,7 +7487,11 @@ class UnifiedClient:
                     active_pool is getattr(self.__class__, '_truncation_retry_key_pool', None)
                     or _key_identifier.startswith('TruncationRetryKey#')
                 )
-                _pool_label = "(truncation-retry-key)" if _is_truncation_retry_pool else "(glossary-refinement-key)" if _is_glossary_refinement_pool else "(glossary-key)" if _is_glossary_pool else "(vision-key)" if _is_qa_pool else "(multi-key)"
+                _is_rolling_summary_pool = (
+                    active_pool is getattr(self.__class__, '_rolling_summary_key_pool', None)
+                    or _key_identifier.startswith('RollingSummaryKey#')
+                )
+                _pool_label = "(rolling-summary-key)" if _is_rolling_summary_pool else "(truncation-retry-key)" if _is_truncation_retry_pool else "(glossary-refinement-key)" if _is_glossary_refinement_pool else "(glossary-key)" if _is_glossary_pool else "(vision-key)" if _is_qa_pool else "(multi-key)"
                 defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model} {_pool_label}")
             elif log_model != model_snapshot and not self._is_stop_requested():
                 defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model}")

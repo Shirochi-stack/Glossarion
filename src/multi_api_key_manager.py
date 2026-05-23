@@ -1575,6 +1575,7 @@ class MultiAPIKeyDialog(QDialog):
             'metadata_model_combo',
             'qa_scan_model_combo',
             'ai_truncation_detection_model_combo',
+            'rolling_summary_model_combo',
             'truncation_retry_model_combo',
             'inpainter_model_combo',
         ]
@@ -1787,6 +1788,14 @@ class MultiAPIKeyDialog(QDialog):
             self.translator_gui.config['use_ai_truncation_detection_keys'] = use_ai_truncation_detection
             self.translator_gui.use_ai_truncation_detection_keys_var = use_ai_truncation_detection
 
+            use_rolling_summary = (
+                self.use_rolling_summary_keys_checkbox.isChecked()
+                if hasattr(self, 'use_rolling_summary_keys_checkbox')
+                else bool(self.translator_gui.config.get('use_rolling_summary_keys', False))
+            )
+            self.translator_gui.config['use_rolling_summary_keys'] = use_rolling_summary
+            self.translator_gui.use_rolling_summary_keys_var = use_rolling_summary
+
             # Save Truncation Retry keys toggle
             use_truncation_retry = (
                 self.use_truncation_retry_keys_checkbox.isChecked()
@@ -1977,6 +1986,7 @@ class MultiAPIKeyDialog(QDialog):
         self._queue_key_pool_section_render(scrollable_layout, self._create_glossary_refinement_section)
         self._queue_key_pool_section_render(scrollable_layout, self._create_metadata_section)
         self._queue_key_pool_section_render(scrollable_layout, self._create_ai_truncation_detection_section)
+        self._queue_key_pool_section_render(scrollable_layout, self._create_rolling_summary_section)
         self._queue_key_pool_section_render(scrollable_layout, self._create_qa_scan_section)
         self._queue_key_pool_section_render(scrollable_layout, self._create_inpainter_section)
 
@@ -7427,6 +7437,20 @@ class MultiAPIKeyDialog(QDialog):
                     "When enabled, this pool is isolated and will not fall back to the main key pool."
                 ),
             },
+            'rolling_summary': {
+                'title': 'Rolling Summary Keys',
+                'label': 'Rolling summary',
+                'config_key': 'rolling_summary_keys',
+                'toggle_key': 'use_rolling_summary_keys',
+                'set_method': 'set_in_memory_rolling_summary_keys',
+                'clear_method': 'clear_in_memory_rolling_summary_keys',
+                'use_envs': ['USE_ROLLING_SUMMARY_KEYS'],
+                'keys_envs': ['ROLLING_SUMMARY_API_KEYS'],
+                'description': (
+                    "Configure dedicated keys for rolling-summary memory generation calls.\n"
+                    "When enabled, this pool is isolated and will not fall back to the main key pool."
+                ),
+            },
             'truncation_retry': {
                 'title': 'Truncation Retry Keys',
                 'label': 'Truncation retry',
@@ -8321,6 +8345,9 @@ class MultiAPIKeyDialog(QDialog):
 
     def _create_ai_truncation_detection_section(self, parent_layout):
         self._create_dedicated_key_pool_section(parent_layout, 'ai_truncation_detection')
+
+    def _create_rolling_summary_section(self, parent_layout):
+        self._create_dedicated_key_pool_section(parent_layout, 'rolling_summary')
 
     def _create_truncation_retry_section(self, parent_layout):
         self._create_dedicated_key_pool_section(parent_layout, 'truncation_retry')
