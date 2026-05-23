@@ -12,7 +12,7 @@ try:
         QTextEdit, QScrollArea, QFileDialog, QMessageBox, QComboBox, QCheckBox,
         QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QSpinBox, QDoubleSpinBox,
         QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
-        QCompleter, QDialogButtonBox, QGraphicsOpacityEffect
+        QCompleter, QDialogButtonBox, QGraphicsOpacityEffect, QInputDialog
     )
     from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, Slot
     from PySide6.QtGui import QIcon, QFont, QPixmap, QShortcut, QKeySequence, QTransform
@@ -30,6 +30,7 @@ except ImportError:
     QLineEdit = object
     QCheckBox = object
     QSpinBox = object
+    QInputDialog = object
     QTreeWidget = object
     QTreeWidgetItem = object
 import json
@@ -136,7 +137,7 @@ class APIKeyEntry:
                 self.individual_key_temperature = None
         except (ValueError, TypeError):
             self.individual_key_temperature = None
-        # Per-key API call delay (overrides global SEND_INTERVAL_SECONDS when > 0)
+        # Per-key API call delay (0 uses global SEND_INTERVAL_SECONDS)
         try:
             v = float(api_call_delay) if api_call_delay not in (None, "") else 0.0
             self.api_call_delay = v if v >= 0 else 0.0
@@ -3195,7 +3196,6 @@ class MultiAPIKeyDialog(QDialog):
 
     def _set_fallback_output_token_limit_for_selected(self):
         """Set per-key output token limit for selected fallback keys"""
-        from PySide6.QtWidgets import QInputDialog
         selected = self.fallback_tree.selectedItems()
         if not selected:
             return
@@ -3205,43 +3205,23 @@ class MultiAPIKeyDialog(QDialog):
         if not selected_indices:
             return
 
-        # Determine default from first selected fallback key or global setting
-        default_val = None
-        first_idx = selected_indices[0]
-        if 0 <= first_idx < len(fallback_keys):
-            try:
-                raw = fallback_keys[first_idx].get('individual_output_token_limit')
-                if raw not in (None, ""):
-                    iv = int(raw)
-                    if iv > 0:
-                        default_val = iv
-            except Exception:
-                default_val = None
-        if default_val is None:
-            try:
-                default_val = int(getattr(self.translator_gui, 'max_output_tokens', 8192))
-            except Exception:
-                default_val = 8192
-
-        value, ok = QInputDialog.getInt(
-            self,
-            "Set Fallback Output Token Limit",
-            "Max output tokens for selected fallback key(s):",
-            default_val,
-            1,
-            2000000,
-            512,
+        selected_keys = [fallback_keys[idx] for idx in selected_indices if 0 <= idx < len(fallback_keys)]
+        value, ok = self._show_output_token_limit_dialog(
+            self._default_output_token_limit(selected_keys),
+            title="Set Fallback Output Token Limit",
+            label="Max output tokens for selected fallback key(s) (0 = use global):",
+            allow_global=True,
         )
-        if not ok or value <= 0:
+        if not ok:
             return
 
         for idx in selected_indices:
             if 0 <= idx < len(fallback_keys):
-                fallback_keys[idx]['individual_output_token_limit'] = int(value)
+                fallback_keys[idx]['individual_output_token_limit'] = int(value) if value > 0 else None
         self.translator_gui.config['fallback_keys'] = fallback_keys
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
-        self._show_fallback_status(f"Set fallback output token limit to {value} for {len(selected_indices)} key(s)")
+        self._show_fallback_status(f"Set fallback output token limit to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
 
     def _clear_fallback_output_token_limit_for_selected(self):
         """Clear per-key output token limit for selected fallback keys"""
@@ -3262,7 +3242,6 @@ class MultiAPIKeyDialog(QDialog):
 
     def _set_fallback_key_temperature_for_selected(self):
         """Set per-key temperature for selected fallback keys"""
-        from PySide6.QtWidgets import QInputDialog
         selected = self.fallback_tree.selectedItems()
         if not selected:
             return
@@ -3272,35 +3251,26 @@ class MultiAPIKeyDialog(QDialog):
         if not selected_indices:
             return
 
-        default_val = 0.7
-        first_idx = selected_indices[0]
-        if 0 <= first_idx < len(fallback_keys):
-            try:
-                raw = fallback_keys[first_idx].get('individual_key_temperature')
-                if raw not in (None, ""):
-                    default_val = float(raw)
-            except Exception:
-                pass
-
-        value, ok = QInputDialog.getDouble(
-            self,
-            "Set Fallback Key Temperature",
-            "Temperature for selected fallback key(s) (0.0 - 1.0):",
-            default_val,
-            0.0,
-            1.0,
-            2,
+        selected_keys = [fallback_keys[idx] for idx in selected_indices if 0 <= idx < len(fallback_keys)]
+        value, ok = self._show_key_temperature_dialog(
+            self._default_key_temperature(selected_keys, allow_global=True),
+            title="Set Fallback Key Temperature",
+            label="Temperature for selected fallback key(s) (-1 = use global, 0.0 - 1.0):",
+            allow_global=True,
         )
         if not ok:
             return
 
         for idx in selected_indices:
             if 0 <= idx < len(fallback_keys):
-                fallback_keys[idx]['individual_key_temperature'] = value
+                if value < 0:
+                    fallback_keys[idx].pop('individual_key_temperature', None)
+                else:
+                    fallback_keys[idx]['individual_key_temperature'] = value
         self.translator_gui.config['fallback_keys'] = fallback_keys
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
-        self._show_fallback_status(f"Set fallback key temperature to {value} for {len(selected_indices)} key(s)")
+        self._show_fallback_status(f"Set fallback key temperature to {value if value >= 0 else 'global'} for {len(selected_indices)} key(s)")
 
     def _clear_fallback_key_temperature_for_selected(self):
         """Clear per-key temperature for selected fallback keys"""
@@ -3321,20 +3291,13 @@ class MultiAPIKeyDialog(QDialog):
 
     def _set_fallback_api_call_delay_for_selected(self):
         """Set per-key API call delay for selected fallback keys"""
-        from PySide6.QtWidgets import QInputDialog
         selected = self.fallback_tree.selectedItems()
         if not selected:
             return
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
-        default_val = 0.0
-        for idx in selected_indices:
-            if 0 <= idx < len(fallback_keys):
-                v = fallback_keys[idx].get('api_call_delay', 0.0) or 0.0
-                if v > 0:
-                    default_val = float(v)
-                    break
-        value, ok = self._show_api_call_delay_dialog(default_val)
+        selected_keys = [fallback_keys[idx] for idx in selected_indices if 0 <= idx < len(fallback_keys)]
+        value, ok = self._show_api_call_delay_dialog(self._default_api_call_delay(selected_keys))
         if ok:
             for idx in selected_indices:
                 if 0 <= idx < len(fallback_keys):
@@ -3966,16 +3929,11 @@ class MultiAPIKeyDialog(QDialog):
                 self._load_fallback_keys()
                 self._show_fallback_status(f"Updated model to: {new_value}")
         elif column == 2:  # Output Limit column
-            from PySide6.QtWidgets import QInputDialog
-            current = fallback_keys[index].get('individual_output_token_limit') or 0
-            try:
-                current = int(current)
-            except (ValueError, TypeError):
-                current = 0
-            value, ok = QInputDialog.getInt(
-                self, "Edit Output Token Limit",
-                "Output token limit (0 = use global):",
-                current, 0, 1000000, 100
+            value, ok = self._show_output_token_limit_dialog(
+                self._default_output_token_limit([fallback_keys[index]], fallback=0),
+                title="Edit Output Token Limit",
+                label="Output token limit (0 = use global):",
+                allow_global=True,
             )
             if ok:
                 fallback_keys[index]['individual_output_token_limit'] = value if value > 0 else None
@@ -3984,13 +3942,11 @@ class MultiAPIKeyDialog(QDialog):
                 self._load_fallback_keys()
                 self._show_fallback_status(f"Updated output limit to: {value if value > 0 else 'global'}")
         elif column == 3:  # Temp column
-            from PySide6.QtWidgets import QInputDialog
-            current = fallback_keys[index].get('individual_key_temperature')
-            default = float(current) if current not in (None, "") else -1.0
-            value, ok = QInputDialog.getDouble(
-                self, "Edit Key Temperature",
-                "Temperature (-1 = use global, 0.0 - 1.0):",
-                default, -1.0, 1.0, 2
+            value, ok = self._show_key_temperature_dialog(
+                self._default_key_temperature([fallback_keys[index]], allow_global=True),
+                title="Edit Key Temperature",
+                label="Temperature (-1 = use global, 0.0 - 1.0):",
+                allow_global=True,
             )
             if ok:
                 if value < 0:
@@ -4003,13 +3959,10 @@ class MultiAPIKeyDialog(QDialog):
                 self._load_fallback_keys()
                 self._show_fallback_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
         elif column == 4:  # API Delay column
-            from PySide6.QtWidgets import QInputDialog
-            current = fallback_keys[index].get('api_call_delay') or 0.0
-            try:
-                current = float(current)
-            except (ValueError, TypeError):
-                current = 0.0
-            value, ok = self._show_api_call_delay_dialog(current, "Edit API Call Delay")
+            value, ok = self._show_api_call_delay_dialog(
+                self._default_api_call_delay([fallback_keys[index]]),
+                "Edit API Call Delay",
+            )
             if ok:
                 fallback_keys[index]['api_call_delay'] = value if value > 0 else 0.0
                 self.translator_gui.config['fallback_keys'] = fallback_keys
@@ -4226,25 +4179,22 @@ class MultiAPIKeyDialog(QDialog):
                 self._refresh_key_list()
                 self._show_status(f"Updated cooldown to: {new_value}s")
         elif column == 3:  # Output Limit column
-            from PySide6.QtWidgets import QInputDialog
-            current = getattr(key, 'individual_output_token_limit', None) or 0
-            value, ok = QInputDialog.getInt(
-                self, "Edit Output Token Limit",
-                "Output token limit (0 = use global):",
-                current, 0, 1000000, 100
+            value, ok = self._show_output_token_limit_dialog(
+                self._default_output_token_limit([key], fallback=0),
+                title="Edit Output Token Limit",
+                label="Output token limit (0 = use global):",
+                allow_global=True,
             )
             if ok:
                 key.individual_output_token_limit = value if value > 0 else None
                 self._refresh_key_list()
                 self._show_status(f"Updated output limit to: {value if value > 0 else 'global'}")
         elif column == 4:  # Temp column
-            from PySide6.QtWidgets import QInputDialog
-            current = getattr(key, 'individual_key_temperature', None)
-            default = current if current is not None else -1.0
-            value, ok = QInputDialog.getDouble(
-                self, "Edit Key Temperature",
-                "Temperature (-1 = use global, 0.0 - 1.0):",
-                default, -1.0, 1.0, 2
+            value, ok = self._show_key_temperature_dialog(
+                self._default_key_temperature([key], allow_global=True),
+                title="Edit Key Temperature",
+                label="Temperature (-1 = use global, 0.0 - 1.0):",
+                allow_global=True,
             )
             if ok:
                 if value < 0:
@@ -4254,9 +4204,10 @@ class MultiAPIKeyDialog(QDialog):
                 self._refresh_key_list()
                 self._show_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
         elif column == 5:  # API Delay column
-            from PySide6.QtWidgets import QInputDialog
-            current = getattr(key, 'api_call_delay', 0.0) or 0.0
-            value, ok = self._show_api_call_delay_dialog(current, "Edit API Call Delay")
+            value, ok = self._show_api_call_delay_dialog(
+                self._default_api_call_delay([key]),
+                "Edit API Call Delay",
+            )
             if ok:
                 key.api_call_delay = value if value > 0 else 0.0
                 self._refresh_key_list()
@@ -4321,28 +4272,133 @@ class MultiAPIKeyDialog(QDialog):
 
     def _show_cooldown_edit_dialog(self, current_value):
         """Show dialog for editing cooldown"""
-        from PySide6.QtWidgets import QInputDialog
         value, ok = QInputDialog.getInt(
             self, "Edit Cooldown", "Cooldown (seconds):",
             current_value, 10, 3600, 10
         )
         return (value, ok)
 
+    def _key_setting_value(self, key_entry, setting: str, default=None):
+        """Read a per-key setting from either dict-backed or object-backed key entries."""
+        if key_entry is None:
+            return default
+        if isinstance(key_entry, dict):
+            return key_entry.get(setting, default)
+        return getattr(key_entry, setting, default)
+
+    def _default_output_token_limit(self, key_entries, fallback=None):
+        """Pick a sensible output-limit default from selected keys or the global setting."""
+        for entry in key_entries or []:
+            try:
+                value = self._key_setting_value(entry, 'individual_output_token_limit')
+                if value not in (None, ""):
+                    value = int(value)
+                    if value > 0:
+                        return value
+            except Exception:
+                pass
+        if fallback is not None:
+            return fallback
+        try:
+            return int(getattr(self.translator_gui, 'max_output_tokens', 8192))
+        except Exception:
+            return 8192
+
+    def _default_key_temperature(self, key_entries, fallback=0.7, allow_global=False):
+        """Pick a sensible temperature default from selected keys."""
+        for entry in key_entries or []:
+            try:
+                value = self._key_setting_value(entry, 'individual_key_temperature')
+                if value not in (None, ""):
+                    return float(value)
+            except Exception:
+                pass
+        return -1.0 if allow_global else fallback
+
+    def _default_api_call_delay(self, key_entries):
+        """Pick the first positive per-key API delay from selected keys."""
+        for entry in key_entries or []:
+            try:
+                raw = self._key_setting_value(entry, 'api_call_delay', 0.0)
+                value = float(raw if raw not in (None, "") else 0.0)
+                if value > 0:
+                    return value
+            except Exception:
+                pass
+        return 0.0
+
+    def _show_per_key_setting_dialog(self, setting: str, current_value, *, title=None, label=None, allow_global=False):
+        """Shared editor for output limit, temperature, and API delay per-key settings."""
+        if setting == 'individual_output_token_limit':
+            try:
+                current_value = int(current_value or 0)
+            except (TypeError, ValueError):
+                current_value = 0
+            return QInputDialog.getInt(
+                self,
+                title or "Set Output Token Limit",
+                label or ("Output token limit (0 = use global):" if allow_global else "Max output tokens:"),
+                current_value,
+                0 if allow_global else 1,
+                2000000,
+                100 if allow_global else 512,
+            )
+        if setting == 'individual_key_temperature':
+            try:
+                current_value = float(current_value)
+            except (TypeError, ValueError):
+                current_value = -1.0 if allow_global else 0.7
+            return QInputDialog.getDouble(
+                self,
+                title or "Set Key Temperature",
+                label or ("Temperature (-1 = use global, 0.0 - 1.0):" if allow_global else "Temperature (0.0 - 1.0):"),
+                current_value,
+                -1.0 if allow_global else 0.0,
+                1.0,
+                2,
+            )
+        if setting == 'api_call_delay':
+            try:
+                current_value = float(current_value if current_value not in (None, "") else 0.0)
+            except (TypeError, ValueError):
+                current_value = 0.0
+            return QInputDialog.getDouble(
+                self,
+                title or "Set API Call Delay",
+                label or "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+                current_value,
+                0.0,
+                3600.0,
+                2,
+            )
+        raise ValueError(f"Unsupported per-key setting: {setting}")
+
+    def _show_output_token_limit_dialog(self, current_value, title="Set Output Token Limit", label="Max output tokens:", allow_global=False):
+        return self._show_per_key_setting_dialog(
+            'individual_output_token_limit',
+            current_value,
+            title=title,
+            label=label,
+            allow_global=allow_global,
+        )
+
+    def _show_key_temperature_dialog(self, current_value, title="Set Key Temperature", label="Temperature (-1 = use global, 0.0 - 1.0):", allow_global=True):
+        return self._show_per_key_setting_dialog(
+            'individual_key_temperature',
+            current_value,
+            title=title,
+            label=label,
+            allow_global=allow_global,
+        )
+
     def _show_api_call_delay_dialog(self, current_value=0.0, title="Set API Call Delay"):
         """Shared editor for per-key API call delay values."""
-        from PySide6.QtWidgets import QInputDialog
-        try:
-            current_value = float(current_value or 0.0)
-        except (TypeError, ValueError):
-            current_value = 0.0
-        return QInputDialog.getDouble(
-            self,
-            title,
-            "API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+        return self._show_per_key_setting_dialog(
+            'api_call_delay',
             current_value,
-            0.0,
-            3600.0,
-            2,
+            title=title,
+            label="API call delay in seconds (0 = use global SEND_INTERVAL_SECONDS):",
+            allow_global=True,
         )
 
     def _show_shared_key_context_menu(
@@ -4438,44 +4494,26 @@ class MultiAPIKeyDialog(QDialog):
 
     def _set_output_token_limit_for_selected(self):
         """Set per-key output token limit for selected multi-key entries"""
-        from PySide6.QtWidgets import QInputDialog
         selected = self.tree.selectedItems()
         if not selected:
             return
 
-        # Determine default value from first selected key or global setting
         selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
-        default_val = None
-        for idx in selected_indices:
-            if 0 <= idx < len(self.key_pool.keys):
-                key = self.key_pool.keys[idx]
-                per_key = getattr(key, 'individual_output_token_limit', None)
-                if per_key and per_key > 0:
-                    default_val = per_key
-                    break
-        if default_val is None:
-            try:
-                default_val = int(getattr(self.translator_gui, 'max_output_tokens', 8192))
-            except Exception:
-                default_val = 8192
-
-        value, ok = QInputDialog.getInt(
-            self,
-            "Set Output Token Limit",
-            "Max output tokens for selected key(s):",
-            default_val,
-            1,
-            2000000,
-            512,
+        selected_keys = [self.key_pool.keys[idx] for idx in selected_indices if 0 <= idx < len(self.key_pool.keys)]
+        value, ok = self._show_output_token_limit_dialog(
+            self._default_output_token_limit(selected_keys),
+            title="Set Output Token Limit",
+            label="Max output tokens for selected key(s) (0 = use global):",
+            allow_global=True,
         )
-        if not ok or value <= 0:
+        if not ok:
             return
 
         for idx in selected_indices:
             if 0 <= idx < len(self.key_pool.keys):
-                self.key_pool.keys[idx].individual_output_token_limit = value
+                self.key_pool.keys[idx].individual_output_token_limit = value if value > 0 else None
         self._refresh_key_list()
-        self._show_status(f"Set output token limit to {value} for {len(selected_indices)} key(s)")
+        self._show_status(f"Set output token limit to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
 
     def _clear_output_token_limit_for_selected(self):
         """Clear per-key output token limit for selected multi-key entries"""
@@ -4491,38 +4529,26 @@ class MultiAPIKeyDialog(QDialog):
 
     def _set_key_temperature_for_selected(self):
         """Set per-key temperature for selected multi-key entries"""
-        from PySide6.QtWidgets import QInputDialog
         selected = self.tree.selectedItems()
         if not selected:
             return
 
         selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
-        default_val = 0.7
-        for idx in selected_indices:
-            if 0 <= idx < len(self.key_pool.keys):
-                key = self.key_pool.keys[idx]
-                per_key = getattr(key, 'individual_key_temperature', None)
-                if per_key is not None:
-                    default_val = per_key
-                    break
-
-        value, ok = QInputDialog.getDouble(
-            self,
-            "Set Key Temperature",
-            "Temperature for selected key(s) (0.0 - 1.0):",
-            default_val,
-            0.0,
-            1.0,
-            2,
+        selected_keys = [self.key_pool.keys[idx] for idx in selected_indices if 0 <= idx < len(self.key_pool.keys)]
+        value, ok = self._show_key_temperature_dialog(
+            self._default_key_temperature(selected_keys, allow_global=True),
+            title="Set Key Temperature",
+            label="Temperature for selected key(s) (-1 = use global, 0.0 - 1.0):",
+            allow_global=True,
         )
         if not ok:
             return
 
         for idx in selected_indices:
             if 0 <= idx < len(self.key_pool.keys):
-                self.key_pool.keys[idx].individual_key_temperature = value
+                self.key_pool.keys[idx].individual_key_temperature = value if value >= 0 else None
         self._refresh_key_list()
-        self._show_status(f"Set key temperature to {value} for {len(selected_indices)} key(s)")
+        self._show_status(f"Set key temperature to {value if value >= 0 else 'global'} for {len(selected_indices)} key(s)")
 
     def _clear_key_temperature_for_selected(self):
         """Clear per-key temperature for selected multi-key entries"""
@@ -4538,19 +4564,12 @@ class MultiAPIKeyDialog(QDialog):
 
     def _set_api_call_delay_for_selected(self):
         """Set per-key API call delay for selected multi-key entries"""
-        from PySide6.QtWidgets import QInputDialog
         selected = self.tree.selectedItems()
         if not selected:
             return
         selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
-        default_val = 0.0
-        for idx in selected_indices:
-            if 0 <= idx < len(self.key_pool.keys):
-                v = getattr(self.key_pool.keys[idx], 'api_call_delay', 0.0)
-                if v and v > 0:
-                    default_val = v
-                    break
-        value, ok = self._show_api_call_delay_dialog(default_val)
+        selected_keys = [self.key_pool.keys[idx] for idx in selected_indices if 0 <= idx < len(self.key_pool.keys)]
+        value, ok = self._show_api_call_delay_dialog(self._default_api_call_delay(selected_keys))
         if ok:
             for idx in selected_indices:
                 if 0 <= idx < len(self.key_pool.keys):
@@ -5774,16 +5793,11 @@ class MultiAPIKeyDialog(QDialog):
                 self._load_glossary_keys()
                 self._show_glossary_status(f"Updated model to: {new_value}")
         elif column == 2:  # Output Limit column
-            from PySide6.QtWidgets import QInputDialog
-            current = glossary_keys[index].get('individual_output_token_limit') or 0
-            try:
-                current = int(current)
-            except (ValueError, TypeError):
-                current = 0
-            value, ok = QInputDialog.getInt(
-                self, "Edit Output Token Limit",
-                "Output token limit (0 = use global):",
-                current, 0, 1000000, 100
+            value, ok = self._show_output_token_limit_dialog(
+                self._default_output_token_limit([glossary_keys[index]], fallback=0),
+                title="Edit Output Token Limit",
+                label="Output token limit (0 = use global):",
+                allow_global=True,
             )
             if ok:
                 glossary_keys[index]['individual_output_token_limit'] = value if value > 0 else None
@@ -5792,13 +5806,11 @@ class MultiAPIKeyDialog(QDialog):
                 self._load_glossary_keys()
                 self._show_glossary_status(f"Updated output limit to: {value if value > 0 else 'global'}")
         elif column == 3:  # Temp column
-            from PySide6.QtWidgets import QInputDialog
-            current = glossary_keys[index].get('individual_key_temperature')
-            default = float(current) if current not in (None, "") else -1.0
-            value, ok = QInputDialog.getDouble(
-                self, "Edit Key Temperature",
-                "Temperature (-1 = use global, 0.0 - 1.0):",
-                default, -1.0, 1.0, 2
+            value, ok = self._show_key_temperature_dialog(
+                self._default_key_temperature([glossary_keys[index]], allow_global=True),
+                title="Edit Key Temperature",
+                label="Temperature (-1 = use global, 0.0 - 1.0):",
+                allow_global=True,
             )
             if ok:
                 if value < 0:
@@ -5811,13 +5823,10 @@ class MultiAPIKeyDialog(QDialog):
                 self._load_glossary_keys()
                 self._show_glossary_status(f"Updated temperature to: {value if value >= 0 else 'global'}")
         elif column == 4:  # API Delay column
-            from PySide6.QtWidgets import QInputDialog
-            current = glossary_keys[index].get('api_call_delay') or 0.0
-            try:
-                current = float(current)
-            except (ValueError, TypeError):
-                current = 0.0
-            value, ok = self._show_api_call_delay_dialog(current, "Edit API Call Delay")
+            value, ok = self._show_api_call_delay_dialog(
+                self._default_api_call_delay([glossary_keys[index]]),
+                "Edit API Call Delay",
+            )
             if ok:
                 glossary_keys[index]['api_call_delay'] = value if value > 0 else 0.0
                 self.translator_gui.config['glossary_keys'] = glossary_keys
@@ -5869,7 +5878,6 @@ class MultiAPIKeyDialog(QDialog):
 
     def _set_glossary_output_token_limit_for_selected(self):
         """Set per-key output token limit for selected glossary keys"""
-        from PySide6.QtWidgets import QInputDialog
         selected = self.glossary_tree.selectedItems()
         if not selected:
             return
@@ -5879,38 +5887,23 @@ class MultiAPIKeyDialog(QDialog):
         if not selected_indices:
             return
 
-        default_val = None
-        first_idx = selected_indices[0]
-        if 0 <= first_idx < len(glossary_keys):
-            try:
-                raw = glossary_keys[first_idx].get('individual_output_token_limit')
-                if raw not in (None, ""):
-                    iv = int(raw)
-                    if iv > 0:
-                        default_val = iv
-            except Exception:
-                default_val = None
-        if default_val is None:
-            try:
-                default_val = int(getattr(self.translator_gui, 'max_output_tokens', 8192))
-            except Exception:
-                default_val = 8192
-
-        value, ok = QInputDialog.getInt(
-            self, "Set Glossary Output Token Limit",
-            "Max output tokens for selected glossary key(s):",
-            default_val, 1, 2000000, 512,
+        selected_keys = [glossary_keys[idx] for idx in selected_indices if 0 <= idx < len(glossary_keys)]
+        value, ok = self._show_output_token_limit_dialog(
+            self._default_output_token_limit(selected_keys),
+            title="Set Glossary Output Token Limit",
+            label="Max output tokens for selected glossary key(s) (0 = use global):",
+            allow_global=True,
         )
-        if not ok or value <= 0:
+        if not ok:
             return
 
         for idx in selected_indices:
             if 0 <= idx < len(glossary_keys):
-                glossary_keys[idx]['individual_output_token_limit'] = int(value)
+                glossary_keys[idx]['individual_output_token_limit'] = int(value) if value > 0 else None
         self.translator_gui.config['glossary_keys'] = glossary_keys
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
-        self._show_glossary_status(f"Set glossary output token limit to {value} for {len(selected_indices)} key(s)")
+        self._show_glossary_status(f"Set glossary output token limit to {value if value > 0 else 'global'} for {len(selected_indices)} key(s)")
 
     def _clear_glossary_output_token_limit_for_selected(self):
         """Clear per-key output token limit for selected glossary keys"""
@@ -5931,7 +5924,6 @@ class MultiAPIKeyDialog(QDialog):
 
     def _set_glossary_key_temperature_for_selected(self):
         """Set per-key temperature for selected glossary keys"""
-        from PySide6.QtWidgets import QInputDialog
         selected = self.glossary_tree.selectedItems()
         if not selected:
             return
@@ -5941,35 +5933,26 @@ class MultiAPIKeyDialog(QDialog):
         if not selected_indices:
             return
 
-        default_val = 0.7
-        first_idx = selected_indices[0]
-        if 0 <= first_idx < len(glossary_keys):
-            try:
-                raw = glossary_keys[first_idx].get('individual_key_temperature')
-                if raw not in (None, ""):
-                    default_val = float(raw)
-            except Exception:
-                pass
-
-        value, ok = QInputDialog.getDouble(
-            self,
-            "Set Glossary Key Temperature",
-            "Temperature for selected glossary key(s) (0.0 - 1.0):",
-            default_val,
-            0.0,
-            1.0,
-            2,
+        selected_keys = [glossary_keys[idx] for idx in selected_indices if 0 <= idx < len(glossary_keys)]
+        value, ok = self._show_key_temperature_dialog(
+            self._default_key_temperature(selected_keys, allow_global=True),
+            title="Set Glossary Key Temperature",
+            label="Temperature for selected glossary key(s) (-1 = use global, 0.0 - 1.0):",
+            allow_global=True,
         )
         if not ok:
             return
 
         for idx in selected_indices:
             if 0 <= idx < len(glossary_keys):
-                glossary_keys[idx]['individual_key_temperature'] = value
+                if value < 0:
+                    glossary_keys[idx].pop('individual_key_temperature', None)
+                else:
+                    glossary_keys[idx]['individual_key_temperature'] = value
         self.translator_gui.config['glossary_keys'] = glossary_keys
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
-        self._show_glossary_status(f"Set glossary key temperature to {value} for {len(selected_indices)} key(s)")
+        self._show_glossary_status(f"Set glossary key temperature to {value if value >= 0 else 'global'} for {len(selected_indices)} key(s)")
 
     def _clear_glossary_key_temperature_for_selected(self):
         """Clear per-key temperature for selected glossary keys"""
@@ -5990,20 +5973,13 @@ class MultiAPIKeyDialog(QDialog):
 
     def _set_glossary_api_call_delay_for_selected(self):
         """Set per-key API call delay for selected glossary keys"""
-        from PySide6.QtWidgets import QInputDialog
         selected = self.glossary_tree.selectedItems()
         if not selected:
             return
         glossary_keys = self.translator_gui.config.get('glossary_keys', [])
         selected_indices = [self.glossary_tree.indexOfTopLevelItem(item) for item in selected]
-        default_val = 0.0
-        for idx in selected_indices:
-            if 0 <= idx < len(glossary_keys):
-                v = glossary_keys[idx].get('api_call_delay', 0.0) or 0.0
-                if v > 0:
-                    default_val = float(v)
-                    break
-        value, ok = self._show_api_call_delay_dialog(default_val)
+        selected_keys = [glossary_keys[idx] for idx in selected_indices if 0 <= idx < len(glossary_keys)]
+        value, ok = self._show_api_call_delay_dialog(self._default_api_call_delay(selected_keys))
         if ok:
             for idx in selected_indices:
                 if 0 <= idx < len(glossary_keys):
@@ -7315,8 +7291,6 @@ class MultiAPIKeyDialog(QDialog):
 
         key = self.key_pool.keys[index]
 
-        # Use QInputDialog for simplicity
-        from PySide6.QtWidgets import QInputDialog
         value, ok = QInputDialog.getInt(
             self, "Edit Cooldown", f"Cooldown for {key.model} (seconds):",
             key.cooldown, 10, 3600, 10
@@ -8243,16 +8217,21 @@ class MultiAPIKeyDialog(QDialog):
             self._dedicated_load_keys(pool_name)
 
     def _dedicated_set_output_token_limit_for_selected(self, pool_name: str):
-        from PySide6.QtWidgets import QInputDialog
         indices = self._dedicated_selected_indices(pool_name)
         if not indices:
             return
-        value, ok = QInputDialog.getInt(self, "Set Output Token Limit", "Max output tokens:", 8192, 1, 2000000, 512)
+        keys = self._dedicated_keys(pool_name)
+        selected_keys = [keys[idx] for idx in indices if 0 <= idx < len(keys)]
+        value, ok = self._show_output_token_limit_dialog(
+            self._default_output_token_limit(selected_keys),
+            title="Set Output Token Limit",
+            label="Max output tokens (0 = use global):",
+            allow_global=True,
+        )
         if ok:
-            keys = self._dedicated_keys(pool_name)
             for idx in indices:
                 if 0 <= idx < len(keys):
-                    keys[idx]['individual_output_token_limit'] = int(value)
+                    keys[idx]['individual_output_token_limit'] = int(value) if value > 0 else None
             self._dedicated_set_keys(pool_name, keys)
             self._dedicated_load_keys(pool_name)
 
@@ -8260,16 +8239,24 @@ class MultiAPIKeyDialog(QDialog):
         self._dedicated_clear_selected_key(pool_name, 'individual_output_token_limit')
 
     def _dedicated_set_temperature_for_selected(self, pool_name: str):
-        from PySide6.QtWidgets import QInputDialog
         indices = self._dedicated_selected_indices(pool_name)
         if not indices:
             return
-        value, ok = QInputDialog.getDouble(self, "Set Key Temperature", "Temperature (0.0 - 1.0):", 0.7, 0.0, 1.0, 2)
+        keys = self._dedicated_keys(pool_name)
+        selected_keys = [keys[idx] for idx in indices if 0 <= idx < len(keys)]
+        value, ok = self._show_key_temperature_dialog(
+            self._default_key_temperature(selected_keys, allow_global=True),
+            title="Set Key Temperature",
+            label="Temperature (-1 = use global, 0.0 - 1.0):",
+            allow_global=True,
+        )
         if ok:
-            keys = self._dedicated_keys(pool_name)
             for idx in indices:
                 if 0 <= idx < len(keys):
-                    keys[idx]['individual_key_temperature'] = value
+                    if value < 0:
+                        keys[idx].pop('individual_key_temperature', None)
+                    else:
+                        keys[idx]['individual_key_temperature'] = value
             self._dedicated_set_keys(pool_name, keys)
             self._dedicated_load_keys(pool_name)
 
@@ -8281,17 +8268,8 @@ class MultiAPIKeyDialog(QDialog):
         if not indices:
             return
         keys = self._dedicated_keys(pool_name)
-        default_val = 0.0
-        for idx in indices:
-            if 0 <= idx < len(keys):
-                try:
-                    current = float(keys[idx].get('api_call_delay', 0.0) or 0.0)
-                except (TypeError, ValueError):
-                    current = 0.0
-                if current > 0:
-                    default_val = current
-                    break
-        value, ok = self._show_api_call_delay_dialog(default_val)
+        selected_keys = [keys[idx] for idx in indices if 0 <= idx < len(keys)]
+        value, ok = self._show_api_call_delay_dialog(self._default_api_call_delay(selected_keys))
         if ok:
             for idx in indices:
                 if 0 <= idx < len(keys):

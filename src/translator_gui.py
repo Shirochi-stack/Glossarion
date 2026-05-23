@@ -3883,13 +3883,22 @@ Recent translations to summarize:
         """)
         arrow_label.setAlignment(Qt.AlignCenter)
         arrow_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        try:
+            icon_path = os.path.join(self.base_dir, 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                arrow_label.setText("")
+                arrow_label.setPixmap(QIcon(icon_path).pixmap(QSize(18, 18)))
+                arrow_label.setStyleSheet("QLabel { background: transparent; border: none; }")
+        except Exception:
+            pass
         
         def position_arrow():
             try:
                 if arrow_label and combobox:
                     width = combobox.width()
                     height = combobox.height()
-                    arrow_label.setGeometry(width - 20, (height - 16) // 2, 20, 16)
+                    arrow_label.setGeometry(width - 29, 0, 28, height)
+                    arrow_label.raise_()
             except RuntimeError:
                 pass
         
@@ -5951,11 +5960,18 @@ Recent translations to summarize:
         self.model_combo.setStyleSheet("""
             QComboBox {
                 padding-left: 34px;
+                padding-right: 31px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 28px;
+                border-left: 1px solid #4a5568;
             }
             QComboBox::down-arrow {
                 image: none;
-                width: 12px;
-                height: 12px;
+                width: 0px;
+                height: 0px;
                 border: none;
             }
         """)
@@ -6243,11 +6259,18 @@ Recent translations to summarize:
         self.profile_menu.setStyleSheet("""
             QComboBox {
                 padding-left: 34px;
+                padding-right: 31px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 28px;
+                border-left: 1px solid #4a5568;
             }
             QComboBox::down-arrow {
                 image: none;
-                width: 12px;
-                height: 12px;
+                width: 0px;
+                height: 0px;
                 border: none;
             }
         """)
