@@ -9610,8 +9610,9 @@ class UnifiedClient:
                                         print(msg)
                                         continue
                                     else:
-                                        msg = f"[{label} {idx+1}] ⚠️ Truncated ({output_len}/{input_len} = {char_ratio:.1%}) - accepting as last option"
+                                        msg = f"[{label} {idx+1}] ⚠️ Truncated ({output_len}/{input_len} = {char_ratio:.1%}) - accepting as last option and marking finish_reason=length"
                                         print(msg)
+                                        finish_reason = 'length'
                         
                         # Check if content is valid - accept any non-empty content (symbols, single chars, etc. are valid)
                         if content and self._safe_len(content, "main_key_retry_content") > 0:
@@ -9971,7 +9972,8 @@ class UnifiedClient:
                                         print(f"⚠️ Fallback key {idx+1} severely truncated ({output_len}/{input_len} = {char_ratio:.1%}) - trying next key")
                                         continue
                                     else:
-                                        print(f"⚠️ Fallback key {idx+1} truncated ({output_len}/{input_len} = {char_ratio:.1%}) - accepting as last option")
+                                        print(f"⚠️ Fallback key {idx+1} truncated ({output_len}/{input_len} = {char_ratio:.1%}) - accepting as last option and marking finish_reason=length")
+                                        finish_reason = 'length'
                         
                         # Check if content is valid - reject if finish_reason indicates failure
                         if (content and 
