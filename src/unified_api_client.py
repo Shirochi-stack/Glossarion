@@ -1611,6 +1611,15 @@ class UnifiedClient:
                 if not extracted_content and finish_reason not in _non_safety_reasons:
                     return True
         return False
+
+    def _is_usage_guidelines_prohibited_error(self, error: Any) -> bool:
+        """Detect provider errors that wrap policy blocks in retryable HTTP statuses."""
+        try:
+            err_str = str(error or "").lower()
+        except Exception:
+            return False
+        return "content violates usage guidelines" in err_str
+
     def _build_gemini3_model_message(self, msg: Dict[str, Any]) -> Dict[str, Any]:
         """
         Convert an assistant/model message to Gemini 3 parts format using assistant role
@@ -15008,6 +15017,12 @@ class UnifiedClient:
                 if is_cancel:
                     # Normalize and stop retry/printing
                     raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+                if self._is_usage_guidelines_prohibited_error(e):
+                    raise UnifiedClientError(
+                        str(e),
+                        error_type="prohibited_content",
+                        http_status=self._extract_http_status_from_exception(e),
+                    )
                 if attempt < max_retries - 1:
                     self._debug_log(f"{provider_name} SDK error (attempt {attempt + 1}): {e}")
 
@@ -15406,7 +15421,7 @@ class UnifiedClient:
             return None
         try:
             import re
-            m = re.search(r"error\s+code\s+(\d{3})", s, re.IGNORECASE)
+            m = re.search(r"error\s+code\s*:?\s*(\d{3})", s, re.IGNORECASE)
             if m:
                 return int(m.group(1))
             m = re.search(r"\bhttp\s+(\d{3})\b", s, re.IGNORECASE)
@@ -20488,6 +20503,12 @@ class UnifiedClient:
                                     raise UnifiedClientError("Operation cancelled", error_type="cancelled")
 
                                 err_str = str(sdk_err)
+                                if self._is_usage_guidelines_prohibited_error(sdk_err):
+                                    raise UnifiedClientError(
+                                        str(sdk_err),
+                                        error_type="prohibited_content",
+                                        http_status=self._extract_http_status_from_exception(sdk_err),
+                                    )
                                 is_timeout = "timed out" in err_str.lower() or "timeout" in err_str.lower()
                                 is_402 = "402" in err_str and "insufficient" in err_str.lower()
                                 
