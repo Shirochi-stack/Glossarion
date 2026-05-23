@@ -138,10 +138,10 @@ CALLBACK_PATH = "/oauth2callback"
 TOKEN_REFRESH_MARGIN_SECONDS = 300  # refresh when <5 min remaining
 
 # Vertex AI endpoint — works with cloud-platform scope (unlike AI Studio)
-# Users MUST set GOOGLE_CLOUD_PROJECT.  GOOGLE_CLOUD_LOCATION defaults to
-# us-central1 which has the widest model availability.
+# GOOGLE_CLOUD_LOCATION defaults to global; newer Gemini models are not always
+# exposed on regional publisher-model endpoints even when older models are.
 VERTEX_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-VERTEX_LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+VERTEX_LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
 
 _DEFAULT_TOKEN_DIR = os.path.join(os.path.expanduser("~"), ".glossarion")
 _DEFAULT_TOKEN_FILE = os.path.join(_DEFAULT_TOKEN_DIR, "authgem_tokens.json")
@@ -1728,21 +1728,31 @@ def send_chat_completion_vertex(
             "You can find your project ID at https://console.cloud.google.com"
         )
 
-    # Preview models often require 'global' location instead of a regional one
-    effective_location = location
-    if "preview" in model.lower():
+    # Preview models often require 'global' location instead of a regional one.
+    # Respect an explicit GOOGLE_CLOUD_LOCATION override, otherwise use the
+    # broadest publisher-model endpoint.
+    effective_location = (location or "global").strip().lower()
+    if "preview" in model.lower() and "GOOGLE_CLOUD_LOCATION" not in os.environ:
         effective_location = "global"
 
-    # Global location uses a different URL format (no region prefix on hostname)
+    # Global and multi-region endpoints use dedicated hostnames; normal regions
+    # keep the usual {region}-aiplatform.googleapis.com shape.
+    if effective_location == "global":
+        hostname = "aiplatform.googleapis.com"
+    elif effective_location in {"us", "eu"}:
+        hostname = f"aiplatform.{effective_location}.rep.googleapis.com"
+    else:
+        hostname = f"{effective_location}-aiplatform.googleapis.com"
+
     if effective_location == "global":
         url = (
-            f"https://aiplatform.googleapis.com/v1beta1/"
+            f"https://{hostname}/v1beta1/"
             f"projects/{project}/locations/global/"
             f"publishers/google/models/{model}:streamGenerateContent?alt=sse"
         )
     else:
         url = (
-            f"https://{effective_location}-aiplatform.googleapis.com/v1beta1/"
+            f"https://{hostname}/v1beta1/"
             f"projects/{project}/locations/{effective_location}/"
             f"publishers/google/models/{model}:streamGenerateContent?alt=sse"
         )
