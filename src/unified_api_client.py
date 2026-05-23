@@ -1572,7 +1572,7 @@ class UnifiedClient:
         safety_indicators = [
             'safety', 'blocked', 'prohibited', 'harmful', 'inappropriate',
             'refused', 'content_filter', 'content policy', 'violation',
-            'content violates usage guidelines',
+            'content violates usage guidelines', 'violates usage guidelines',
             'cannot assist', 'unable to process', 'against guidelines',
             'ethical', 'responsible ai', 'harm_category', 'nsfw',
             'adult content', 'explicit', 'violence', 'disturbing',
@@ -1587,7 +1587,7 @@ class UnifiedClient:
                 'blocked', 'safety', 'cannot', 'unable', 'prohibited',
                 'content filter', 'refused', 'inappropriate', 'i cannot',
                 "i can't", "i'm not able", "not able to", "against my",
-                'content policy', 'content violates usage guidelines', 'guidelines', 'ethical', 'censorship_blocked',
+                'content policy', 'guidelines', 'ethical', 'censorship_blocked',
                 'analyze this image', 'process this image', 'describe this image', 'nsfw'
             ]
             if any(p in content_lower for p in safety_phrases):
@@ -1611,15 +1611,6 @@ class UnifiedClient:
                 if not extracted_content and finish_reason not in _non_safety_reasons:
                     return True
         return False
-
-    def _is_usage_guidelines_prohibited_error(self, error: Any) -> bool:
-        """Detect provider errors that wrap policy blocks in retryable HTTP statuses."""
-        try:
-            err_str = str(error or "").lower()
-        except Exception:
-            return False
-        return "content violates usage guidelines" in err_str
-
     def _build_gemini3_model_message(self, msg: Dict[str, Any]) -> Dict[str, Any]:
         """
         Convert an assistant/model message to Gemini 3 parts format using assistant role
@@ -7352,7 +7343,6 @@ class UnifiedClient:
             "i'm sorry, but i can't assist", "i'm sorry, but i cannot assist",
             "against my programming", "against my guidelines",
             "violates content policy", "i'm not programmed to",
-            "content violates usage guidelines",
             "cannot provide that kind", "unable to provide that",
             "i cannot assist with this request",
             "that's not within my capabilities to appropriately assist with",
@@ -8761,7 +8751,7 @@ class UnifiedClient:
                     finish_reason,
                     None,
                     getattr(self, 'client_type', 'unknown')
-                ) or "content violates usage guidelines" in error_str
+                )
                 context_norm = str(context or '').strip().lower().replace(' ', '_').replace('-', '_')
                 bad_request_is_prohibited = (
                     bad_request
@@ -9017,10 +9007,7 @@ class UnifiedClient:
                         continue  # Retry using normal retry budget
                 
                 # Check for prohibited content in unexpected errors
-                if (
-                    self._detect_safety_filter(messages, extracted_content or "", finish_reason, None, getattr(self, 'client_type', 'unknown'))
-                    or "content violates usage guidelines" in error_str
-                ):
+                if self._detect_safety_filter(messages, extracted_content or "", finish_reason, None, getattr(self, 'client_type', 'unknown')):
                     print(f"❌ Content prohibited in unexpected error: {error_str[:200]}")
                     
                     # If we're in multi-key mode and haven't tried the main key yet
@@ -15017,12 +15004,6 @@ class UnifiedClient:
                 if is_cancel:
                     # Normalize and stop retry/printing
                     raise UnifiedClientError("Operation cancelled", error_type="cancelled")
-                if self._is_usage_guidelines_prohibited_error(e):
-                    raise UnifiedClientError(
-                        str(e),
-                        error_type="prohibited_content",
-                        http_status=self._extract_http_status_from_exception(e),
-                    )
                 if attempt < max_retries - 1:
                     self._debug_log(f"{provider_name} SDK error (attempt {attempt + 1}): {e}")
 
@@ -18337,8 +18318,7 @@ class UnifiedClient:
                 error_str = raw_err.lower()
                 if any(indicator in error_str for indicator in [
                     "content blocked", "prohibited_content", "blockedreason",
-                    "content_filter", "safety filter", "harmful content",
-                    "content violates usage guidelines"
+                    "content_filter", "safety filter", "harmful content"
                 ]):
                     # Re-raise as UnifiedClientError with proper type
                     raise UnifiedClientError(
@@ -20291,6 +20271,19 @@ class UnifiedClient:
                         #   "maximum context length is 32768 tokens... requested about 72559 tokens (7023 of text input, 65536 in the output)"
                         err_str = str(sdk_err)
                         err_l = err_str.lower()
+                        if self._detect_safety_filter(
+                            messages,
+                            "",
+                            None,
+                            sdk_err,
+                            provider,
+                        ):
+                            raise UnifiedClientError(
+                                str(sdk_err),
+                                error_type="prohibited_content",
+                                http_status=self._extract_http_status_from_exception(sdk_err),
+                                details={"provider": provider, "source": "openai_compatible_sdk"},
+                            )
                         context_auto_adjust_succeeded = False
                         if (not context_retry_done) and ("maximum context length" in err_l or "max context length" in err_l):
                             try:
@@ -20503,12 +20496,6 @@ class UnifiedClient:
                                     raise UnifiedClientError("Operation cancelled", error_type="cancelled")
 
                                 err_str = str(sdk_err)
-                                if self._is_usage_guidelines_prohibited_error(sdk_err):
-                                    raise UnifiedClientError(
-                                        str(sdk_err),
-                                        error_type="prohibited_content",
-                                        http_status=self._extract_http_status_from_exception(sdk_err),
-                                    )
                                 is_timeout = "timed out" in err_str.lower() or "timeout" in err_str.lower()
                                 is_402 = "402" in err_str and "insufficient" in err_str.lower()
                                 
@@ -21275,6 +21262,18 @@ class UnifiedClient:
                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                     
                     error_str = str(e).lower()
+                    if (
+                        getattr(e, "error_type", None) == "prohibited_content"
+                        or self._detect_safety_filter(messages, "", None, e, provider)
+                    ):
+                        if isinstance(e, UnifiedClientError):
+                            raise
+                        raise UnifiedClientError(
+                            str(e),
+                            error_type="prohibited_content",
+                            http_status=self._extract_http_status_from_exception(e),
+                            details={"provider": provider, "source": "openai_compatible_outer"},
+                        )
                     
                     # Handle token limit errors (max too high, or provider-enforced valid ranges) - auto-adjust and retry
                     # Examples:
@@ -21463,6 +21462,19 @@ class UnifiedClient:
                     if not self._multi_key_mode and attempt < max_retries - 1:
                         # Suppress cancellation errors when stop is requested
                         error_str = str(e).lower()
+                        if self._detect_safety_filter(
+                            messages,
+                            "",
+                            None,
+                            e,
+                            provider,
+                        ):
+                            raise UnifiedClientError(
+                                str(e),
+                                error_type="prohibited_content",
+                                http_status=self._extract_http_status_from_exception(e),
+                                details={"provider": provider, "source": "openai_compatible_retry"},
+                            )
                         is_cancelled = False
                         try:
                             if isinstance(e, UnifiedClientError) and getattr(e, "error_type", None) == "cancelled":

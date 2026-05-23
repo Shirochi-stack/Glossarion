@@ -13725,7 +13725,6 @@ def is_qa_failed_response(content):
             "response was blocked",
             "safety filter",
             "content policy",
-            "content violates usage guidelines",
             "harmful content",
             "content filtering",
             "blocked by safety",
@@ -13779,7 +13778,6 @@ def is_qa_failed_response(content):
         "i'm sorry, but i can't assist", "i'm sorry, but i cannot assist",
         "against my programming", "against my guidelines",
         "violates content policy", "i'm not programmed to",
-        "content violates usage guidelines",
         "cannot provide that kind", "unable to provide that",
         "i cannot assist with this request",
         "that's not within my capabilities to appropriately assist with",
@@ -13986,7 +13984,7 @@ def is_prohibited_failure(content, failure_reason=None):
         pass
     try:
         cl = str(content or "").lower()
-        if "content_filter" in cl or "content blocked" in cl or "blocked by safety" in cl or "content violates usage guidelines" in cl:
+        if "content_filter" in cl or "content blocked" in cl or "blocked by safety" in cl:
             return True
     except Exception:
         pass

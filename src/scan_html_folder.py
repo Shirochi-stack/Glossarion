@@ -391,7 +391,6 @@ DEFAULT_REFUSAL_PATTERNS = [
     "i'm sorry, but i can't assist", "i'm sorry, but i cannot assist",
     "against my programming", "against my guidelines",
     "violates content policy", "i'm not programmed to",
-    "content violates usage guidelines",
     "cannot provide that kind", "unable to provide that",
     "i cannot assist with this request",
     "that's not within my capabilities to appropriately assist with",

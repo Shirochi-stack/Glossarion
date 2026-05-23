@@ -609,7 +609,6 @@ class RefusalPatternsDialog(QDialog):
             "i'm sorry, but i can't assist", "i'm sorry, but i cannot assist",
             "against my programming", "against my guidelines",
             "violates content policy", "i'm not programmed to",
-            "content violates usage guidelines",
             "cannot provide that kind", "unable to provide that",
             "i cannot assist with this request",
             "that's not within my capabilities to appropriately assist with",
@@ -1399,8 +1398,8 @@ class MultiAPIKeyDialog(QDialog):
 
     def __init__(self, parent, translator_gui):
         # PySide6 dialogs need QWidget parents or None
-        # Create as standalone top-level dialog
-        super().__init__(None)  # Create as top-level dialog
+        style_parent = parent if HAS_GUI and isinstance(parent, QWidget) else None
+        super().__init__(style_parent)
 
         self.translator_gui = translator_gui
         self.tree = None
@@ -1436,6 +1435,49 @@ class MultiAPIKeyDialog(QDialog):
                     pass
         except Exception:
             pass
+
+    def _halgakos_icon_path(self):
+        """Return the best available Halgakos icon path for Qt stylesheets."""
+        candidates = []
+        try:
+            candidates.append(os.path.join(getattr(self.translator_gui, 'base_dir', ''), 'Halgakos.ico'))
+        except Exception:
+            pass
+        candidates.extend([
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico'),
+            os.path.join(os.getcwd(), 'Halgakos.ico'),
+        ])
+        for path in candidates:
+            if path and os.path.exists(path):
+                return path
+        return candidates[0] if candidates else 'Halgakos.ico'
+
+    def _apply_combobox_icon(self, combobox):
+        """Use Halgakos.ico as the dropdown arrow for a combo box."""
+        icon_path = self._halgakos_icon_path().replace('\\', '/')
+        arrow_style = f"""
+            QComboBox {{
+                padding-right: 24px;
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 22px;
+                border-left: 1px solid #4a5568;
+            }}
+            QComboBox::down-arrow {{
+                image: url("{icon_path}");
+                width: 16px;
+                height: 16px;
+            }}
+            QComboBox::down-arrow:on {{
+                top: 1px;
+                left: 1px;
+            }}
+        """
+        existing = combobox.styleSheet()
+        combobox.setStyleSheet(f"{existing}\n{arrow_style}" if existing else arrow_style)
+        return combobox
 
     def _create_styled_checkbox(self, text):
         """Create a checkbox with proper checkmark using text overlay"""
@@ -1781,153 +1823,6 @@ class MultiAPIKeyDialog(QDialog):
         width = int(screen.width() * 0.52)  # 52% of screen width
         height = int(screen.height() * 0.68)  # 68% of screen height
         self.resize(width, height)
-
-        # Apply comprehensive stylesheet matching other settings dialogs
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #1e1e1e;
-                color: #e0e0e0;
-            }
-            QLabel {
-                color: #e0e0e0;
-            }
-            QGroupBox {
-                color: #e0e0e0;
-                border: 1px solid #3a3a3a;
-                border-radius: 4px;
-                margin-top: 8px;
-                padding-top: 8px;
-                font-weight: bold;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                padding: 0 5px;
-                color: #5a9fd4;
-            }
-            QPushButton {
-                background-color: #2d2d2d;
-                color: #e0e0e0;
-                border: 1px solid #3a3a3a;
-                border-radius: 3px;
-                padding: 5px 15px;
-                min-height: 20px;
-            }
-            QPushButton:hover {
-                background-color: #3a3a3a;
-                border-color: #5a5a5a;
-            }
-            QPushButton:pressed {
-                background-color: #1a1a1a;
-            }
-            QPushButton:disabled {
-                background-color: #1a1a1a;
-                color: #666666;
-                border-color: #2a2a2a;
-            }
-            QLineEdit, QTextEdit {
-                background-color: #2d2d2d;
-                color: #e0e0e0;
-                border: 1px solid #3a3a3a;
-                border-radius: 3px;
-                padding: 4px;
-            }
-            QLineEdit:focus, QTextEdit:focus {
-                border-color: #5a5a5a;
-            }
-            QLineEdit:disabled, QTextEdit:disabled {
-                background-color: #1a1a1a;
-                color: #666666;
-            }
-            QCheckBox {
-                color: #e0e0e0;
-                spacing: 6px;
-            }
-            QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-                border: 1px solid #5a5a5a;
-                border-radius: 2px;
-                background-color: #2d2d2d;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #4a7ba7;
-                border-color: #4a7ba7;
-            }
-            QCheckBox::indicator:hover {
-                border-color: #6a6a6a;
-            }
-            QCheckBox:disabled {
-                color: #666666;
-            }
-            QCheckBox::indicator:disabled {
-                background-color: #1a1a1a;
-                border-color: #3a3a3a;
-            }
-            QTreeWidget {
-                background-color: #2d2d2d;
-                color: #e0e0e0;
-                border: 1px solid #3a3a3a;
-                border-radius: 3px;
-                alternate-background-color: #252525;
-            }
-            QTreeWidget::item {
-                padding: 4px;
-            }
-            QTreeWidget::item:selected {
-                background-color: #3a3a3a;
-                color: #e0e0e0;
-            }
-            QTreeWidget::item:hover {
-                background-color: #3a3a3a;
-            }
-            QHeaderView::section {
-                background-color: #2d2d2d;
-                color: #e0e0e0;
-                border: none;
-                border-right: 1px solid #3a3a3a;
-                border-bottom: 1px solid #3a3a3a;
-                padding: 4px;
-                font-weight: bold;
-            }
-            QScrollBar:vertical {
-                background-color: #1e1e1e;
-                width: 12px;
-                border: none;
-            }
-            QScrollBar::handle:vertical {
-                background-color: #4a7ba7;
-                border-radius: 6px;
-                min-height: 20px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background-color: #5a8ab7;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-            QScrollBar:horizontal {
-                background-color: #1e1e1e;
-                height: 12px;
-                border: none;
-            }
-            QScrollBar::handle:horizontal {
-                background-color: #4a7ba7;
-                border-radius: 6px;
-                min-width: 20px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background-color: #5a8ab7;
-            }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-                width: 0px;
-            }
-            QFrame[frameShape="4"] {
-                /* HLine */
-                background-color: #3a3a3a;
-                max-height: 1px;
-            }
-        """)
 
         # Create scroll area
         scroll_area = QScrollArea(self)
@@ -2277,6 +2172,7 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_model_combo.addItems(fallback_models)
         self.fallback_model_combo.setEditable(True)
         self._attach_model_autofill(self.fallback_model_combo, self._on_model_requirement_input_changed)
+        self._apply_combobox_icon(self.fallback_model_combo)
         self._disable_combobox_mousewheel(self.fallback_model_combo)  # Disable mousewheel
         add_fallback_grid.addWidget(self.fallback_model_combo, 0, 4)
 
@@ -2346,6 +2242,7 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_azure_api_version_combo.addItems(fallback_azure_versions)
         self.fallback_azure_api_version_combo.setCurrentText('2025-01-01-preview')
         self.fallback_azure_api_version_combo.setStyleSheet("font-size: 7pt;")
+        self._apply_combobox_icon(self.fallback_azure_api_version_combo)
         self.fallback_azure_api_version_combo.setMaximumWidth(180)
         self._disable_combobox_mousewheel(self.fallback_azure_api_version_combo)  # Disable mousewheel
         add_fallback_grid.addWidget(self.fallback_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
@@ -3790,6 +3687,7 @@ class MultiAPIKeyDialog(QDialog):
         self.model_combo.addItems(add_models)
         self.model_combo.setEditable(True)
         self._attach_model_autofill(self.model_combo, self._on_model_requirement_input_changed)
+        self._apply_combobox_icon(self.model_combo)
         self._disable_combobox_mousewheel(self.model_combo)  # Disable mousewheel
         add_grid.addWidget(self.model_combo, 0, 4)
 
@@ -3885,6 +3783,7 @@ class MultiAPIKeyDialog(QDialog):
         self.azure_api_version_combo.addItems(azure_versions)
         self.azure_api_version_combo.setCurrentText('2025-01-01-preview')
         self.azure_api_version_combo.setStyleSheet("font-size: 7pt;")
+        self._apply_combobox_icon(self.azure_api_version_combo)
         self.azure_api_version_combo.setMaximumWidth(180)
         self.azure_api_version_combo.setEnabled(False)
         self._disable_combobox_mousewheel(self.azure_api_version_combo)  # Disable mousewheel
@@ -4386,6 +4285,7 @@ class MultiAPIKeyDialog(QDialog):
         combo.setEditable(True)
         self._attach_model_autofill(combo, self._on_model_requirement_input_changed)
         combo.setCurrentText(current_value)
+        self._apply_combobox_icon(combo)
         if combo.lineEdit():
             combo.lineEdit().selectAll()
         layout.addWidget(combo)
@@ -4910,6 +4810,7 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_model_combo.addItems(glossary_models)
         self.glossary_model_combo.setEditable(True)
         self._attach_model_autofill(self.glossary_model_combo, self._on_model_requirement_input_changed)
+        self._apply_combobox_icon(self.glossary_model_combo)
         self._disable_combobox_mousewheel(self.glossary_model_combo)
         add_glossary_grid.addWidget(self.glossary_model_combo, 0, 4)
 
@@ -4975,6 +4876,7 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_azure_api_version_combo.addItems(glossary_azure_versions)
         self.glossary_azure_api_version_combo.setCurrentText('2025-01-01-preview')
         self.glossary_azure_api_version_combo.setStyleSheet("font-size: 7pt;")
+        self._apply_combobox_icon(self.glossary_azure_api_version_combo)
         self.glossary_azure_api_version_combo.setMaximumWidth(180)
         self._disable_combobox_mousewheel(self.glossary_azure_api_version_combo)
         add_glossary_grid.addWidget(self.glossary_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
@@ -7720,6 +7622,7 @@ class MultiAPIKeyDialog(QDialog):
         model_combo.addItems(self._get_model_options_for_dropdown())
         model_combo.setEditable(True)
         self._attach_model_autofill(model_combo, self._on_model_requirement_input_changed)
+        self._apply_combobox_icon(model_combo)
         self._disable_combobox_mousewheel(model_combo)
         setattr(self, self._dedicated_attr(pool_name, 'model_combo'), model_combo)
         add_grid.addWidget(model_combo, 0, 4)
@@ -7773,6 +7676,7 @@ class MultiAPIKeyDialog(QDialog):
         ])
         api_version_combo.setCurrentText('2025-01-01-preview')
         api_version_combo.setStyleSheet("font-size: 7pt;")
+        self._apply_combobox_icon(api_version_combo)
         api_version_combo.setMaximumWidth(180)
         self._disable_combobox_mousewheel(api_version_combo)
         setattr(self, self._dedicated_attr(pool_name, 'azure_api_version_combo'), api_version_combo)

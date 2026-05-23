@@ -8760,7 +8760,6 @@ class MangaTranslator:
                         "against my guidelines",
                         r"against.{0,20}(content )?policy",  # "against policy" or "against content policy"
                         "violates content policy",
-                        "content violates usage guidelines",
                         "violates.*policy",
                         "i'm not programmed to",
                         "cannot provide that kind",
@@ -8905,7 +8904,6 @@ class MangaTranslator:
                     "against my programming",
                     "against my guidelines",
                     "violates content policy",
-                    "content violates usage guidelines",
                     "i'm not programmed to",
                     "sexually explicit",
                     "content policy",

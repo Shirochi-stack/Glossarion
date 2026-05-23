@@ -518,12 +518,18 @@ def _disable_spinbox_mousewheel(self, spinbox):
     spinbox.wheelEvent = lambda event: None
 
 def _add_combobox_arrow(self, combobox):
-    """Add a unicode arrow overlay to a combobox"""
+    """Add a Halgakos icon overlay to a combobox."""
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QLabel
     from PySide6.QtCore import Qt
-    
-    arrow_label = QLabel("▼", combobox)
+
+    arrow_label = QLabel(combobox)
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    pixmap = QPixmap(icon_path) if os.path.exists(icon_path) else QPixmap()
+    if not pixmap.isNull():
+        arrow_label.setPixmap(pixmap.scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+    else:
+        arrow_label.setText(chr(0x25BE))
     arrow_label.setStyleSheet("""
         QLabel {
             color: white;
@@ -535,27 +541,23 @@ def _add_combobox_arrow(self, combobox):
     arrow_label.setAlignment(Qt.AlignCenter)
     arrow_label.setAttribute(Qt.WA_TransparentForMouseEvents)
     combobox._custom_arrow_label = arrow_label
-    
+
     def position_arrow():
         try:
             if arrow_label and combobox:
                 width = combobox.width()
                 height = combobox.height()
-                arrow_label.setGeometry(width - 20, (height - 16) // 2, 20, 16)
+                arrow_label.setGeometry(width - 22, (height - 18) // 2, 18, 18)
         except RuntimeError:
             pass
-    
-    # Position arrow when combobox is resized
+
     original_resize = combobox.resizeEvent
     def new_resize(event):
         original_resize(event)
         position_arrow()
-    
-    combobox.resizeEvent = new_resize
-    
-    # Initial position
-    QTimer.singleShot(0, position_arrow)
 
+    combobox.resizeEvent = new_resize
+    QTimer.singleShot(0, position_arrow)
 
 _THINKING_COMBO_STYLE = """
     QComboBox:disabled {
@@ -1308,6 +1310,7 @@ def open_other_settings(self, *args, show=True):
     main_layout = QVBoxLayout(dialog)
     main_layout.setContentsMargins(5, 5, 5, 5)  # Set uniform margins
     main_layout.setSpacing(8)  # Set spacing between widgets
+    combo_arrow_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico').replace('\\', '/')
 
     # Explicit dark theme for the dialog — on macOS, child dialogs with
     # Qt.WindowType.Window don't inherit the parent's stylesheet reliably.
@@ -1360,6 +1363,17 @@ def open_other_settings(self, *args, show=True):
             border: 1px solid #4a5568;
             border-radius: 3px;
             padding: 4px;
+        }
+        QComboBox::drop-down {
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 22px;
+            border-left: 1px solid #4a5568;
+        }
+        QComboBox::down-arrow {
+            image: url('""" + combo_arrow_path + """');
+            width: 16px;
+            height: 16px;
         }
         QComboBox QAbstractItemView {
             background-color: #2d2d2d;
@@ -4723,9 +4737,12 @@ def open_multi_api_key_manager(self):
     try:
         from multi_api_key_manager import MultiAPIKeyDialog
         
-        # Use the static show_dialog method which handles PySide6 properly
-        # This blocks until the dialog is closed
-        MultiAPIKeyDialog.show_dialog(self.master, self)
+        # Use the live Other Settings dialog as the parent so the manager
+        # inherits its global stylesheet instead of creating a separate theme.
+        parent_dialog = getattr(self, '_other_settings_dialog', None)
+        if parent_dialog is None:
+            parent_dialog = self.master
+        MultiAPIKeyDialog.show_dialog(parent_dialog, self)
         
         # Refresh the settings display if in settings dialog
         if hasattr(self, 'current_settings_dialog'):
