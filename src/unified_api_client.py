@@ -2265,6 +2265,57 @@ class UnifiedClient:
             return None
         return None
 
+    @classmethod
+    def _provider_from_model_name(cls, model: str) -> Optional[str]:
+        """Resolve a provider from the model name alone, independent of mutable client state."""
+        try:
+            model_l = (model or '').strip().lower()
+            if not model_l:
+                return None
+            if model_l.startswith('vertex/') or '@' in model_l:
+                return 'vertex_model_garden'
+            if cls._get_custom_prefix_route_for_model(model_l):
+                return 'custom_openai'
+            for prefix, provider in sorted(cls.MODEL_PROVIDERS.items(), key=lambda item: len(str(item[0])), reverse=True):
+                if model_l.startswith(str(prefix).lower()):
+                    return provider
+            numbered_routes = (
+                (r'^authgem-vertex\d{1,4}(?:/|$)', 'authgem_vertex'),
+                (r'^authgem\d{1,4}(?:/|$)', 'authgem'),
+                (r'^authgpt\d{1,4}(?:/|$)', 'authgpt'),
+                (r'^authza\d{1,4}(?:/|$)', 'authza'),
+                (r'^authnd\d{1,4}(?:/|$)', 'authnd'),
+                (r'^authcd\d{1,4}(?:/|$)', 'authcd'),
+            )
+            for pattern, provider in numbered_routes:
+                if re.match(pattern, model_l):
+                    return provider
+        except Exception:
+            return None
+        return None
+
+    def _get_active_request_model(self) -> str:
+        """Return the current thread's model when available, avoiding cross-thread model bleed."""
+        try:
+            tls = self._get_thread_local_client()
+            tls_model = getattr(tls, 'model', None)
+            if getattr(tls, 'initialized', False) and tls_model:
+                return tls_model
+        except Exception:
+            pass
+        return getattr(self, 'model', '') or ''
+
+    def _get_active_request_api_key(self) -> str:
+        """Return the current thread's API key when available, avoiding cross-thread key bleed."""
+        try:
+            tls = self._get_thread_local_client()
+            tls_key = getattr(tls, 'api_key', None)
+            if getattr(tls, 'initialized', False) and tls_key is not None:
+                return tls_key
+        except Exception:
+            pass
+        return getattr(self, 'api_key', '') or ''
+
     @staticmethod
     def _strip_custom_route_prefix(model: str, route: Optional[Dict[str, str]]) -> str:
         """Strip only the GUI route prefix from a model id."""
@@ -3756,6 +3807,9 @@ class UnifiedClient:
                         tls.azure_api_version = None
                         tls.google_region = None
                         tls.use_individual_endpoint = False
+                        tls.output_token_limit = None
+                        tls.per_key_max_output_tokens = None
+                        tls.individual_key_temperature = None
                         tls.api_call_delay = 0.0
                         tls.active_api_delay_override = None
                         tls.initialized = True
@@ -3765,6 +3819,20 @@ class UnifiedClient:
                             self.model = self.original_model
                             self.key_identifier = "Main Key (fallback)"
                             self.current_key_index = -1
+                            self.current_key_google_creds = None
+                            self.current_key_azure_endpoint = None
+                            self.current_key_azure_api_version = None
+                            self.current_key_google_region = None
+                            self.current_key_use_individual_endpoint = False
+                            self.current_key_output_token_limit = None
+                        for _attr in ('_original_client_type', '_custom_prefix_route'):
+                            if hasattr(self, _attr):
+                                try:
+                                    delattr(self, _attr)
+                                except Exception:
+                                    pass
+                        self._individual_endpoint_applied = False
+                        self._skip_global_custom_endpoint = False
                         # No per-key delay when using main GUI key
                         self._per_key_api_delay = None
                         self._setup_client()
@@ -3911,6 +3979,21 @@ class UnifiedClient:
             self.api_key = self.original_api_key
             self.model = self.original_model
             self.key_identifier = "Main Key (fallback)"
+            self.current_key_index = -1
+            self.current_key_google_creds = None
+            self.current_key_azure_endpoint = None
+            self.current_key_azure_api_version = None
+            self.current_key_google_region = None
+            self.current_key_use_individual_endpoint = False
+            self.current_key_output_token_limit = None
+            for _attr in ('_original_client_type', '_custom_prefix_route'):
+                if hasattr(self, _attr):
+                    try:
+                        delattr(self, _attr)
+                    except Exception:
+                        pass
+            self._individual_endpoint_applied = False
+            self._skip_global_custom_endpoint = False
             self._setup_client()
             return
         raise UnifiedClientError(f"No available API keys for thread after {max_retries} retries", error_type="no_keys")
@@ -15483,7 +15566,7 @@ class UnifiedClient:
 
     def _build_anthropic_payload(self, formatted_messages: list, temperature: float, max_tokens: int, anti_dupe_params: dict, system_message: Optional[str] = None) -> dict:
         data = {
-            "model": self.model,
+            "model": self._get_active_request_model(),
             "messages": formatted_messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -15798,7 +15881,7 @@ class UnifiedClient:
 
         # Determine actual provider (e.g., Gemini using OpenAI endpoint still reports 'gemini')
         actual_provider = self._get_actual_provider()
-        route_model = (getattr(self, 'model', '') or '').strip().lower()
+        route_model = (self._get_active_request_model() or '').strip().lower()
         if route_model.startswith('vertex/') or '@' in route_model:
             actual_provider = 'vertex_model_garden'
             self.client_type = 'vertex_model_garden'
@@ -15952,15 +16035,10 @@ class UnifiedClient:
         This is used for proper routing and detection.
         """
         client_type = getattr(self, 'client_type', 'openai')
-        model_lower = (getattr(self, 'model', '') or '').strip().lower()
-        if model_lower.startswith('vertex/') or '@' in model_lower:
-            return 'vertex_model_garden'
-        try:
-            for prefix, provider in sorted(self.MODEL_PROVIDERS.items(), key=lambda item: len(item[0]), reverse=True):
-                if model_lower.startswith(str(prefix).lower()):
-                    return provider
-        except Exception:
-            pass
+        model_snapshot = self._get_active_request_model()
+        provider_from_model = self._provider_from_model_name(model_snapshot)
+        if provider_from_model:
+            return provider_from_model
         try:
             tls = self._get_thread_local_client()
             endpoint = getattr(tls, 'azure_endpoint', None)
@@ -16928,7 +17006,7 @@ class UnifiedClient:
     def _build_openai_params(self, messages, temperature, max_tokens, max_completion_tokens=None):
         """Build parameters for OpenAI API call"""
         params = {
-            "model": self.model,
+            "model": self._get_active_request_model(),
             "messages": messages,
             "temperature": temperature
         }
@@ -17103,7 +17181,25 @@ class UnifiedClient:
         
         Supports 'thought signatures' for Gemini 3.0 by checking for '_raw_content_object' in messages.
         """
-        model_for_route = (getattr(self, 'model', '') or '').strip().lower()
+        request_model = (self._get_active_request_model() or '').strip()
+        request_api_key = self._get_active_request_api_key()
+        expected_provider = self._provider_from_model_name(request_model)
+        if expected_provider and expected_provider != 'gemini':
+            raise UnifiedClientError(
+                f"Routing guard: refusing to send model '{request_model}' through Gemini endpoint "
+                f"(resolved provider: {expected_provider})",
+                error_type="routing"
+            )
+
+        try:
+            request_tls = self._get_thread_local_client()
+        except Exception:
+            request_tls = None
+        request_gemini_client = getattr(request_tls, 'gemini_client', None) if request_tls is not None else None
+        if request_gemini_client is None:
+            request_gemini_client = getattr(self, 'gemini_client', None)
+
+        model_for_route = request_model.lower()
         if model_for_route.startswith('vertex/') or '@' in model_for_route:
             if image_base64 is not None:
                 return self._send_vertex_model_garden_image(
@@ -17135,7 +17231,7 @@ class UnifiedClient:
         if (not use_openai_endpoint or not gemini_endpoint) and not use_grpc_transport:
             custom_enabled = os.getenv("USE_CUSTOM_OPENAI_ENDPOINT", "0") == "1"
             custom_base_url = os.getenv("OPENAI_CUSTOM_BASE_URL", os.getenv("OPENAI_API_BASE", ""))
-            if custom_enabled and custom_base_url and not self._looks_like_google_api_key(self.api_key):
+            if custom_enabled and custom_base_url and not self._looks_like_google_api_key(request_api_key):
                 use_openai_endpoint = True
                 gemini_endpoint = custom_base_url
                 if not self._is_stop_requested():
@@ -17169,7 +17265,7 @@ class UnifiedClient:
         
         # Get thinking level for Gemini 3 (minimal/low/medium/high)
         thinking_level = os.getenv("GEMINI_THINKING_LEVEL", "high").lower()
-        model_lower = self.model.lower() if self.model else ""
+        model_lower = request_model.lower() if request_model else ""
 
         # Normalize unexpected values defensively
         if thinking_level not in ("minimal", "low", "medium", "high"):
@@ -17214,12 +17310,12 @@ class UnifiedClient:
         _force_vision = getattr(threading.current_thread(), '_force_vision_mode', False)
         if _force_vision or self._is_vision_input_only_context():
             enable_image_output = False
-        elif self._is_image_gen_model(self.model):
+        elif self._is_image_gen_model(request_model):
             enable_image_output = True
             if not self._is_stop_requested():
-                print(f"[ImageGen] Image output mode auto-enabled for {self.model}")
+                print(f"[ImageGen] Image output mode auto-enabled for {request_model}")
         elif enable_image_output and not self._is_stop_requested():
-            print(f"[ImageGen] Image output mode enabled for {self.model}")
+            print(f"[ImageGen] Image output mode enabled for {request_model}")
         
         # Check if this model supports thinking
         supports_thinking = self._supports_thinking()
@@ -17325,7 +17421,7 @@ class UnifiedClient:
             request_type = "GEMINI_OPENAI_ENDPOINT_" + request_type
         config_data = {
             "type": request_type,
-            "model": self.model,
+            "model": request_model,
             "endpoint": gemini_endpoint if use_openai_endpoint else (gemini_endpoint if use_grpc_transport else "native"),
             "transport": "grpc" if use_grpc_transport else ("openai" if use_openai_endpoint else "native-sdk"),
             "safety_enabled": not disable_safety,
@@ -17390,7 +17486,8 @@ class UnifiedClient:
                         max_tokens=max_tokens,
                         base_url=gemini_endpoint,
                         response_name=response_name,
-                        provider="gemini-openai"
+                        provider="gemini-openai",
+                        model_override=request_model
                     )
                     
                     # For OpenAI endpoint, we already have a UnifiedResponse
@@ -17501,8 +17598,8 @@ class UnifiedClient:
                     grpc_ep = gemini_endpoint.strip() if gemini_endpoint else getattr(self, '_grpc_endpoint', 'generativelanguage.googleapis.com')
                     
                     # Initialize gRPC client on-the-fly, or recreate if the API key changed (multi-key rotation)
-                    _existing = getattr(self, 'grpc_gemini_client', None)
-                    _key_changed = _existing is not None and getattr(_existing, 'api_key', None) != self.api_key
+                    _existing = getattr(request_tls, 'grpc_gemini_client', None) if request_tls is not None else getattr(self, 'grpc_gemini_client', None)
+                    _key_changed = _existing is not None and getattr(_existing, 'api_key', None) != request_api_key
                     if _existing is None or _key_changed:
                         if _key_changed and _existing:
                             try:
@@ -17511,12 +17608,15 @@ class UnifiedClient:
                                 pass
                         try:
                             self.grpc_gemini_client = GrpcGeminiClient(
-                                api_key=self.api_key,
+                                api_key=request_api_key,
                                 endpoint=grpc_ep
                             )
+                            if request_tls is not None:
+                                request_tls.grpc_gemini_client = self.grpc_gemini_client
                         except Exception as grpc_init_err:
                             print(f"⚠️ gRPC init failed: {grpc_init_err} — falling back to native SDK")
                             use_grpc_transport = False
+                    grpc_gemini_client = getattr(request_tls, 'grpc_gemini_client', None) if request_tls is not None else getattr(self, 'grpc_gemini_client', None)
                     
                     if use_grpc_transport and not self._is_stop_requested():
                         print(f"⚡ [gemini-grpc] Using raw gRPC transport (endpoint: {grpc_ep})")
@@ -17529,8 +17629,8 @@ class UnifiedClient:
                         if use_streaming:
                             if not self._is_stop_requested():
                                 print(f"🛰️ [gemini-grpc] Stream start (model={self.model})")
-                            grpc_response = self.grpc_gemini_client.generate_content_stream(
-                                model=self.model,
+                            grpc_response = grpc_gemini_client.generate_content_stream(
+                                model=request_model,
                                 messages=messages,
                                 temperature=temperature,
                                 max_output_tokens=max_tokens,
@@ -17544,8 +17644,8 @@ class UnifiedClient:
                                 log_stream=self._stream_logging_enabled(use_streaming),
                             )
                         else:
-                            grpc_response = self.grpc_gemini_client.generate_content(
-                                model=self.model,
+                            grpc_response = grpc_gemini_client.generate_content(
+                                model=request_model,
                                 messages=messages,
                                 temperature=temperature,
                                 max_output_tokens=max_tokens,
@@ -17845,7 +17945,7 @@ class UnifiedClient:
                     # Make the native API call with optional streaming
                     try:
                         # Check if gemini_client exists and is not None
-                        if not hasattr(self, 'gemini_client') or self.gemini_client is None:
+                        if request_gemini_client is None:
                             # print("⚠️ Gemini client is None. This typically happens when stop was requested.")
                             raise UnifiedClientError("Gemini client not initialized - operation may have been cancelled", error_type="cancelled")
 
@@ -17853,8 +17953,8 @@ class UnifiedClient:
                         if use_streaming:
                             if not self._is_stop_requested():
                                 print(f"🛰️ [gemini-native] Stream start (model={self.model})")
-                            stream = self.gemini_client.models.generate_content_stream(
-                                model=self.model,
+                            stream = request_gemini_client.models.generate_content_stream(
+                                model=request_model,
                                 contents=contents,
                                 config=generation_config
                             )
@@ -17949,8 +18049,8 @@ class UnifiedClient:
                             if finish_reason is None:
                                 finish_reason = 'incomplete'
                         else:
-                            response = self.gemini_client.models.generate_content(
-                                model=self.model,
+                            response = request_gemini_client.models.generate_content(
+                                model=request_model,
                                 contents=contents,
                                 config=generation_config
                             )
@@ -19362,9 +19462,7 @@ class UnifiedClient:
         if model_override is not None:
             effective_model = model_override
         else:
-            # Read instance model under microsecond lock to avoid cross-thread contamination
-            with self._model_lock:
-                effective_model = self.model
+            effective_model = self._get_active_request_model()
         custom_prefix_route = None
         if provider == 'custom_openai':
             custom_prefix_route = self._get_custom_prefix_route_for_model(effective_model)
@@ -19407,7 +19505,7 @@ class UnifiedClient:
         
         # CUSTOM ENDPOINT OVERRIDE - Check if enabled and override base_url
         use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
-        actual_api_key = self.api_key
+        actual_api_key = self._get_active_request_api_key()
         try:
             tls = self._get_thread_local_client()
             if getattr(tls, 'use_individual_endpoint', False):
