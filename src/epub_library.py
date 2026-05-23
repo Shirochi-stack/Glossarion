@@ -14781,6 +14781,7 @@ class EpubReaderDialog(QDialog):
             self._raw_btn.blockSignals(False)
         self._chapters = chapters
         self._images = images
+        self._refresh_search_for_active_chapters()
         # Keep filenames around so callers can resolve chapter indices by
         # source filename (used by initial_chapter_filename lookup + TOC jumps).
         self._chapter_filenames = [os.path.basename(f or "").lower() for f in filenames]
@@ -15596,6 +15597,32 @@ class EpubReaderDialog(QDialog):
             timer.start(180)
         else:
             self._start_search_dialog_worker()
+
+    def _refresh_search_for_active_chapters(self) -> None:
+        """Re-run open search UI after raw/translated chapter swaps."""
+        self._search_current_text = ""
+        self._search_match_index = -1
+        self._search_match_count = 0
+        self._search_last_row = getattr(self, "_current_row", 0)
+        self._search_dialog_active_text = ""
+        self._search_dialog_active_chapter = -1
+        self._search_dialog_active_occurrence = -1
+        self._search_dialog_active_row = -1
+        self._search_realign_generation = (
+            int(getattr(self, "_search_realign_generation", 0) or 0) + 1)
+        self._search_selection_generation = (
+            int(getattr(self, "_search_selection_generation", 0) or 0) + 1)
+        if _HAS_WEBENGINE:
+            self._clear_reader_find_highlights()
+
+        if not self._search_ui_is_open():
+            return
+        query = getattr(self, "_search_dialog_query", None)
+        text = query.text().strip() if query is not None else ""
+        if text:
+            self._populate_search_results(text)
+        else:
+            self._populate_search_results("")
 
     def _start_search_dialog_worker(self):
         query_widget = getattr(self, "_search_dialog_query", None)
@@ -17100,6 +17127,7 @@ class EpubReaderDialog(QDialog):
             return
         self._chapters = (self._chapters_raw if self._show_raw
                           else self._chapters_overlaid)
+        self._refresh_search_for_active_chapters()
         # Rebuild TOC entries so titles reflect the active flavor. Hold
         # the current row so we don't lose the reading position.
         current_row = max(0, min(self._current_row, len(self._chapters) - 1))

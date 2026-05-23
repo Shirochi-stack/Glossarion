@@ -6817,11 +6817,13 @@ img {
             self.log(f"[ERROR] Write failed: {e}")
             raise
         
-        # Verify the file
-        if os.path.exists(out_path):
-            file_size = os.path.getsize(out_path)
+        # Verify the final file. Organized library replacements remove
+        # out_path after copying it into Library/Translated.
+        final_path = self.last_epub_output_path or out_path
+        if os.path.exists(final_path):
+            file_size = os.path.getsize(final_path)
             if file_size > 0:
-                self.log(f"✅ EPUB created: {out_path}")
+                self.log(f"✅ EPUB created: {final_path}")
                 self.log(f"📊 File size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
                 if getattr(self, 'legacy_epub_structure', False):
                     self.log("📝 Format: EPUB2 (legacy OEBPS/Text structure)")
