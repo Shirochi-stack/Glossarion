@@ -1572,6 +1572,7 @@ class UnifiedClient:
         safety_indicators = [
             'safety', 'blocked', 'prohibited', 'harmful', 'inappropriate',
             'refused', 'content_filter', 'content policy', 'violation',
+            'content violates usage guidelines',
             'cannot assist', 'unable to process', 'against guidelines',
             'ethical', 'responsible ai', 'harm_category', 'nsfw',
             'adult content', 'explicit', 'violence', 'disturbing',
@@ -1586,7 +1587,7 @@ class UnifiedClient:
                 'blocked', 'safety', 'cannot', 'unable', 'prohibited',
                 'content filter', 'refused', 'inappropriate', 'i cannot',
                 "i can't", "i'm not able", "not able to", "against my",
-                'content policy', 'guidelines', 'ethical', 'censorship_blocked',
+                'content policy', 'content violates usage guidelines', 'guidelines', 'ethical', 'censorship_blocked',
                 'analyze this image', 'process this image', 'describe this image', 'nsfw'
             ]
             if any(p in content_lower for p in safety_phrases):
@@ -7342,6 +7343,7 @@ class UnifiedClient:
             "i'm sorry, but i can't assist", "i'm sorry, but i cannot assist",
             "against my programming", "against my guidelines",
             "violates content policy", "i'm not programmed to",
+            "content violates usage guidelines",
             "cannot provide that kind", "unable to provide that",
             "i cannot assist with this request",
             "that's not within my capabilities to appropriately assist with",
@@ -8750,7 +8752,7 @@ class UnifiedClient:
                     finish_reason,
                     None,
                     getattr(self, 'client_type', 'unknown')
-                )
+                ) or "content violates usage guidelines" in error_str
                 context_norm = str(context or '').strip().lower().replace(' ', '_').replace('-', '_')
                 bad_request_is_prohibited = (
                     bad_request
@@ -9006,7 +9008,10 @@ class UnifiedClient:
                         continue  # Retry using normal retry budget
                 
                 # Check for prohibited content in unexpected errors
-                if self._detect_safety_filter(messages, extracted_content or "", finish_reason, None, getattr(self, 'client_type', 'unknown')):
+                if (
+                    self._detect_safety_filter(messages, extracted_content or "", finish_reason, None, getattr(self, 'client_type', 'unknown'))
+                    or "content violates usage guidelines" in error_str
+                ):
                     print(f"❌ Content prohibited in unexpected error: {error_str[:200]}")
                     
                     # If we're in multi-key mode and haven't tried the main key yet
@@ -18317,7 +18322,8 @@ class UnifiedClient:
                 error_str = raw_err.lower()
                 if any(indicator in error_str for indicator in [
                     "content blocked", "prohibited_content", "blockedreason",
-                    "content_filter", "safety filter", "harmful content"
+                    "content_filter", "safety filter", "harmful content",
+                    "content violates usage guidelines"
                 ]):
                     # Re-raise as UnifiedClientError with proper type
                     raise UnifiedClientError(
