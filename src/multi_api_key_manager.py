@@ -4765,7 +4765,7 @@ class MultiAPIKeyDialog(QDialog):
         desc_label = QLabel(
                 "Configure dedicated keys for glossary-context API calls.\n"
                 "These keys will be used exclusively when the translation context is 'Glossary'.\n"
-                "When enabled, this pool is isolated and will not fall back to the main key pool.")
+                "Normal rate-limit retries rotate within this pool; prohibited-content handling may still use configured fallback paths.")
         desc_label.setStyleSheet("color: gray;")
         desc_label.setWordWrap(True)
         glossary_frame_layout.addWidget(desc_label)
@@ -7392,7 +7392,7 @@ class MultiAPIKeyDialog(QDialog):
                 'keys_envs': ['GLOSSARY_REFINEMENT_API_KEYS'],
                 'description': (
                     "Configure dedicated keys for glossary_refinement API calls.\n"
-                    "When enabled, this pool is isolated and will not fall back to the regular Glossary Keys pool."
+                    "This pool is preferred for refinement requests, then eligible glossary/fallback paths may still apply for some errors."
                 ),
             },
             'qa_scan': {
@@ -7406,7 +7406,7 @@ class MultiAPIKeyDialog(QDialog):
                 'keys_envs': ['VISION_API_KEYS', 'QA_SCAN_API_KEYS'],
                 'description': (
                     "Configure dedicated keys for vision OCR and image scan calls.\n"
-                    "When enabled, this pool is isolated and will not fall back to the main key pool."
+                    "Normal rate-limit retries rotate within this pool; prohibited-content handling may still use configured fallback paths."
                 ),
             },
             'metadata': {
@@ -7420,7 +7420,7 @@ class MultiAPIKeyDialog(QDialog):
                 'keys_envs': ['METADATA_API_KEYS'],
                 'description': (
                     "Configure dedicated keys for book title, metadata, TOC, and header translation.\n"
-                    "When enabled, this pool is isolated and will not fall back to the main key pool."
+                    "Normal rate-limit retries rotate within this pool; prohibited-content handling may still use configured fallback paths."
                 ),
             },
             'ai_truncation_detection': {
@@ -7434,7 +7434,7 @@ class MultiAPIKeyDialog(QDialog):
                 'keys_envs': ['AI_TRUNCATION_DETECTION_API_KEYS'],
                 'description': (
                     "Configure dedicated QA scan keys for qa_truncation AI checks.\n"
-                    "When enabled, this pool is isolated and will not fall back to the main key pool."
+                    "Normal rate-limit retries rotate within this pool; prohibited-content handling may still use configured fallback paths."
                 ),
             },
             'rolling_summary': {
@@ -7448,7 +7448,7 @@ class MultiAPIKeyDialog(QDialog):
                 'keys_envs': ['ROLLING_SUMMARY_API_KEYS'],
                 'description': (
                     "Configure dedicated keys for rolling-summary memory generation calls.\n"
-                    "When enabled, this pool is isolated and will not fall back to the main key pool."
+                    "Normal rate-limit retries rotate within this pool; prohibited-content handling may still use configured fallback paths."
                 ),
             },
             'truncation_retry': {
@@ -7463,7 +7463,7 @@ class MultiAPIKeyDialog(QDialog):
                 'description': (
                     "Configure dedicated keys used only when RETRY_TRUNCATED schedules a retry.\n"
                     "These keys are separate from Vision/QA truncation scan keys.\n"
-                    "When enabled, this pool is isolated and will not fall back to the current request key pool."
+                    "If available, this pool is preferred for truncation retries; otherwise the retry may use the current request pool."
                 ),
             },
             'inpainter': {
@@ -7477,7 +7477,7 @@ class MultiAPIKeyDialog(QDialog):
                 'keys_envs': ['INPAINTER_API_KEYS'],
                 'description': (
                     "Configure dedicated keys for image output and custom image-edit calls.\n"
-                    "When enabled, this pool is isolated and will not fall back to the main key pool/current provider."
+                    "Normal rate-limit retries rotate within this pool; prohibited-content handling may still use configured fallback paths."
                 ),
             },
         }
