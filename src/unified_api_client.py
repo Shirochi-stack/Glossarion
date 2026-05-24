@@ -6540,8 +6540,12 @@ class UnifiedClient:
                                 except Exception:
                                     pass
 
-                        if refinement_pool and getattr(self, '_active_key_pool_expected_pool', None) is refinement_pool:
-                            _glossary_refinement_overridden = True
+                        refinement_pool_already_active = (
+                            refinement_pool
+                            and getattr(self, '_active_key_pool_expected_pool', None) is refinement_pool
+                        )
+                        if refinement_pool_already_active:
+                            pass
                         else:
                             with self.__class__._in_memory_glossary_refinement_keys_lock:
                                 rk_list = self.__class__._in_memory_glossary_refinement_keys or []
@@ -6574,6 +6578,7 @@ class UnifiedClient:
                 not _qa_scan_overridden
                 and not _inpainter_overridden
                 and not _glossary_refinement_overridden
+                and getattr(self, '_active_key_pool_expected_pool', None) is not getattr(self.__class__, '_glossary_refinement_key_pool', None)
                 and (context_norm in ('glossary', 'glossary_refinement') or (not context and 'Glossary' in threading.current_thread().name))
             ):
                 try:
