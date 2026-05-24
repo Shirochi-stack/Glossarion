@@ -18885,6 +18885,18 @@ Important rules:
         # Set wait for chunks mode - only applies when graceful stop is also enabled
         wait_for_chunks = getattr(self, 'wait_for_chunks_var', False) and graceful_stop
         os.environ['WAIT_FOR_CHUNKS'] = '1' if wait_for_chunks else '0'
+
+        # Drop any queued API-delay reservations now. Stopped worker threads may
+        # have already reserved future send slots, and keeping those slots makes
+        # the next translation inherit a stacked "Sending API call in ..." timer.
+        try:
+            import unified_api_client
+            if hasattr(unified_api_client, 'reset_api_call_stagger'):
+                unified_api_client.reset_api_call_stagger()
+            elif hasattr(unified_api_client, 'UnifiedClient') and hasattr(unified_api_client.UnifiedClient, 'reset_api_call_stagger'):
+                unified_api_client.UnifiedClient.reset_api_call_stagger()
+        except Exception:
+            pass
         
         # Debug: Log the stop settings being applied
         print(f"🔧 Stop triggered: graceful_stop={graceful_stop}, wait_for_chunks_var={getattr(self, 'wait_for_chunks_var', False)}, WAIT_FOR_CHUNKS={os.environ.get('WAIT_FOR_CHUNKS')}")

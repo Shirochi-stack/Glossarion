@@ -3115,6 +3115,24 @@ class UnifiedClient:
         """Set global cancellation flag for all client instances"""
         with cls._global_cancel_lock:
             cls._global_cancelled = cancelled
+        if cancelled:
+            cls.reset_api_call_stagger()
+
+    @classmethod
+    def reset_api_call_stagger(cls):
+        """Clear shared API-send pacing reservations after user stop/cancel.
+
+        Worker threads reserve future slots before they sleep. If the user stops
+        during that sleep, those reservations must be dropped so the next run
+        starts from a fresh timer instead of inheriting the old queue.
+        """
+        try:
+            if not hasattr(cls, '_api_stagger_lock'):
+                cls._api_stagger_lock = threading.Lock()
+            with cls._api_stagger_lock:
+                cls._last_api_call_start_by_scope = {}
+        except Exception:
+            pass
 
     @classmethod
     def hard_cancel_all(cls):
@@ -3629,6 +3647,12 @@ class UnifiedClient:
                 # Use comprehensive stop check
                 if self._should_abort_retry():
                     self._cancelled = True
+                    try:
+                        with self._thread_submission_lock:
+                            self._next_allowed_send_ts = 0.0
+                            self._thread_submission_count = 0
+                    except Exception:
+                        pass
                     # print(f"🛑 Thread delay cancelled")  # Redundant - summary will show stop
                     return
                 
@@ -14405,6 +14429,7 @@ class UnifiedClient:
         # If graceful stop is active, do not proceed to send new calls.
         try:
             if os.environ.get('GRACEFUL_STOP') == '1':
+                self.__class__.reset_api_call_stagger()
                 raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
         except UnifiedClientError:
             raise
@@ -14509,9 +14534,23 @@ class UnifiedClient:
             step = 0.1
             while elapsed < sleep_time:
                 if os.environ.get('GRACEFUL_STOP') == '1':
+                    self.__class__.reset_api_call_stagger()
                     raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
                 if self._should_abort_retry() or getattr(self, '_cancelled', False):
                     self._cancelled = True
+                    try:
+                        with self._thread_submission_lock:
+                            self._next_allowed_send_ts = 0.0
+                            self._thread_submission_count = 0
+                    except Exception:
+                        pass
+                    if (
+                        os.environ.get('TRANSLATION_CANCELLED') == '1'
+                        or os.environ.get('GRACEFUL_STOP') == '1'
+                        or self.__class__.is_globally_cancelled()
+                        or global_stop_flag
+                    ):
+                        self.__class__.reset_api_call_stagger()
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 dt = min(step, sleep_time - elapsed)
                 time.sleep(dt)
@@ -26883,6 +26922,11 @@ def set_stop_flag(value: bool = True):
         UnifiedClient.set_global_cancellation(global_stop_flag)
     except Exception:
         pass
+    if value:
+        try:
+            UnifiedClient.reset_api_call_stagger()
+        except Exception:
+            pass
     # Also signal browser-backed cancel events so in-flight requests abort.
     if value and _antigravity_cancel_stream is not None:
         try:
@@ -26894,6 +26938,14 @@ def set_stop_flag(value: bool = True):
             _authnd_cancel_stream()
         except Exception:
             pass
+
+
+def reset_api_call_stagger():
+    """Clear queued API-call delay reservations."""
+    try:
+        UnifiedClient.reset_api_call_stagger()
+    except Exception:
+        pass
 
 
 def is_stop_requested() -> bool:
