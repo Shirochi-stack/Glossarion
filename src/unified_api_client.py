@@ -20629,7 +20629,8 @@ class UnifiedClient:
 
                     generic_reasoning_effort = self._get_openai_compatible_reasoning_effort(provider, effective_model)
                     if generic_reasoning_effort:
-                        extra_body.setdefault("reasoning_effort", generic_reasoning_effort)
+                        if not use_responses_api:
+                            params.setdefault("reasoning_effort", generic_reasoning_effort)
                         try:
                             tls = self._get_thread_local_client()
                             if not hasattr(tls, 'openai_compatible_reasoning_logged'):
