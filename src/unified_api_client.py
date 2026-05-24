@@ -2419,7 +2419,7 @@ class UnifiedClient:
         """Setup the shared API key pool"""
         with cls._pool_lock:
             if cls._api_key_pool is None:
-                cls._api_key_pool = APIKeyPool()
+                cls._api_key_pool = APIKeyPool("Main key pool")
             
             # Initialize rate limit cache if needed
             if cls._rate_limit_cache is None:
@@ -2591,7 +2591,7 @@ class UnifiedClient:
         """Setup the shared glossary API key pool (mirrors setup_multi_key_pool)."""
         with cls._glossary_pool_lock:
             if cls._glossary_key_pool is None:
-                cls._glossary_key_pool = APIKeyPool()
+                cls._glossary_key_pool = APIKeyPool("Glossary key pool")
             cls._glossary_pool_logged = False  # Reset so the one-time log shows once per run
 
             # Initialize rate limit cache if needed
@@ -2644,7 +2644,7 @@ class UnifiedClient:
         """Setup the shared glossary-refinement API key pool."""
         with cls._glossary_refinement_pool_lock:
             if cls._glossary_refinement_key_pool is None:
-                cls._glossary_refinement_key_pool = APIKeyPool()
+                cls._glossary_refinement_key_pool = APIKeyPool("Glossary refinement key pool")
             cls._glossary_refinement_pool_logged = False
 
             if cls._rate_limit_cache is None:
@@ -2734,7 +2734,7 @@ class UnifiedClient:
         """Setup the shared Vision API key pool (mirrors setup_glossary_key_pool)."""
         with cls._qa_scan_pool_lock:
             if cls._qa_scan_key_pool is None:
-                cls._qa_scan_key_pool = APIKeyPool()
+                cls._qa_scan_key_pool = APIKeyPool("Vision key pool")
             cls._qa_scan_pool_logged = False  # Reset so the one-time log shows once per run
 
             # Initialize rate limit cache if needed
@@ -2828,7 +2828,7 @@ class UnifiedClient:
         """Setup the shared Image gen/edit API key pool (mirrors setup_glossary_key_pool)."""
         with cls._inpainter_pool_lock:
             if cls._inpainter_key_pool is None:
-                cls._inpainter_key_pool = APIKeyPool()
+                cls._inpainter_key_pool = APIKeyPool("Image gen/edit key pool")
             cls._inpainter_pool_logged = False
 
             if cls._rate_limit_cache is None:
@@ -2922,7 +2922,7 @@ class UnifiedClient:
         """Setup the shared truncation-retry API key pool (mirrors setup_glossary_key_pool)."""
         with cls._truncation_retry_pool_lock:
             if cls._truncation_retry_key_pool is None:
-                cls._truncation_retry_key_pool = APIKeyPool()
+                cls._truncation_retry_key_pool = APIKeyPool("Truncation retry key pool")
             cls._truncation_retry_pool_logged = False
 
             if cls._rate_limit_cache is None:
@@ -3002,7 +3002,7 @@ class UnifiedClient:
         """Setup the shared rolling-summary API key pool (mirrors setup_glossary_key_pool)."""
         with cls._rolling_summary_pool_lock:
             if cls._rolling_summary_key_pool is None:
-                cls._rolling_summary_key_pool = APIKeyPool()
+                cls._rolling_summary_key_pool = APIKeyPool("Rolling summary key pool")
             cls._rolling_summary_pool_logged = False
 
             if cls._rate_limit_cache is None:
@@ -3052,7 +3052,7 @@ class UnifiedClient:
         """Initialize the shared API key pool (legacy compatibility)"""
         with cls._pool_lock:
             if cls._api_key_pool is None:
-                cls._api_key_pool = APIKeyPool()
+                cls._api_key_pool = APIKeyPool("Main key pool")
             cls._api_key_pool.load_from_list(key_list)
     
     @classmethod
@@ -3060,7 +3060,7 @@ class UnifiedClient:
         """Get the shared API key pool (legacy compatibility)"""
         with cls._pool_lock:
             if cls._api_key_pool is None:
-                cls._api_key_pool = APIKeyPool()
+                cls._api_key_pool = APIKeyPool("Main key pool")
             return cls._api_key_pool
     
     def _get_max_retries(self) -> int:
@@ -6339,7 +6339,7 @@ class UnifiedClient:
                         raise UnifiedClientError("Metadata key pool is enabled for this context but has no keys; refusing fallback to another pool", error_type="no_keys")
                     with self.__class__._metadata_pool_lock:
                         if self.__class__._metadata_key_pool is None:
-                            self.__class__._metadata_key_pool = APIKeyPool()
+                            self.__class__._metadata_key_pool = APIKeyPool("Metadata key pool")
                         self.__class__._metadata_key_pool.load_from_list(metadata_keys)
                         metadata_pool = self.__class__._metadata_key_pool
                     pool_state = self._apply_dedicated_key_pool_override(
@@ -6366,7 +6366,7 @@ class UnifiedClient:
                         raise UnifiedClientError("AI truncation detection key pool is enabled for this context but has no keys; refusing fallback to another pool", error_type="no_keys")
                     with self.__class__._ai_truncation_detection_pool_lock:
                         if self.__class__._ai_truncation_detection_key_pool is None:
-                            self.__class__._ai_truncation_detection_key_pool = APIKeyPool()
+                            self.__class__._ai_truncation_detection_key_pool = APIKeyPool("AI truncation detection key pool")
                         self.__class__._ai_truncation_detection_key_pool.load_from_list(ai_keys)
                         ai_pool = self.__class__._ai_truncation_detection_key_pool
                     pool_state = self._apply_dedicated_key_pool_override(
@@ -24701,11 +24701,11 @@ class UnifiedClient:
         if image_data_urls:
             if len(image_data_urls) == 1:
                 payload["imageDataUrl"] = image_data_urls[0]
-                payload["imageDataUrls"] = image_data_urls
                 if not self._is_stop_requested():
                     _preview = image_data_urls[0][:60]
                     print(f"🖼️ [NanoGPT] Attaching input image for edit ({_preview}…)")
             else:
+                payload.pop("imageDataUrl", None)
                 payload["imageDataUrls"] = image_data_urls
                 if not self._is_stop_requested():
                     print(f"🖼️ [NanoGPT] Attaching {len(image_data_urls)} input images for edit")
@@ -24740,7 +24740,7 @@ class UnifiedClient:
                         ]
                         if len(image_data_urls) == 1:
                             payload["imageDataUrl"] = image_data_urls[0]
-                            payload["imageDataUrls"] = image_data_urls
+                            payload.pop("imageDataUrls", None)
                         else:
                             payload["imageDataUrls"] = image_data_urls
                             payload.pop("imageDataUrl", None)

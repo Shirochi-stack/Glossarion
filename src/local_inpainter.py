@@ -3129,7 +3129,6 @@ class LocalInpainter:
                     }
                     nanogpt_image_data_url = _nanogpt_image_data_url_from_bgr(proc_bgr)
                     payload['imageDataUrl'] = nanogpt_image_data_url
-                    payload['imageDataUrls'] = [nanogpt_image_data_url]
                     self._log(f"NanoGPT image edit payload includes imageDataUrl ({len(nanogpt_image_data_url)} chars)", "info")
                     resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
                 else:

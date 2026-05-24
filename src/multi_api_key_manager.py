@@ -215,12 +215,14 @@ class APIKeyEntry:
         }
 class APIKeyPool:
     """Thread-safe API key pool with proper rotation"""
-    def __init__(self):
+    def __init__(self, pool_name: str = "API key pool"):
+        self.pool_name = pool_name
         self.keys: List[APIKeyEntry] = []
         self.lock = threading.Lock()  # This already exists
         self._rotation_index = 0
         self._thread_assignments = {}
         self._rate_limit_cache = RateLimitCache()
+        self._last_load_log_signature = None
 
         # NEW LOCKS:
         self.key_locks = {}  # Will be populated when keys are loaded
@@ -317,7 +319,33 @@ class APIKeyPool:
             else:
                 self._rotation_index = getattr(self, '_rotation_index', 0)
             self._keys_in_use.clear()
-            logger.info(f"Loaded {len(self.keys)} API keys into pool with individual locks (preserved counters where possible)")
+            enabled_count = sum(1 for key in self.keys if getattr(key, 'enabled', True))
+            configured_count = len(self.keys)
+            disabled_count = configured_count - enabled_count
+            pool_name = getattr(self, 'pool_name', None) or "API key pool"
+            log_signature = (
+                pool_name,
+                tuple(
+                    (
+                        getattr(key, 'model', ''),
+                        bool(getattr(key, 'api_key', '')),
+                        bool(getattr(key, 'enabled', True)),
+                        int(getattr(key, 'cooldown', 0) or 0),
+                        bool(getattr(key, 'use_individual_endpoint', False)),
+                    )
+                    for key in self.keys
+                ),
+            )
+            disabled_note = f", {disabled_count} disabled" if disabled_count else ""
+            log_message = (
+                f"{pool_name}: loaded {enabled_count} enabled / {configured_count} configured "
+                f"API keys{disabled_note} (individual locks; counters preserved)"
+            )
+            if log_signature != getattr(self, '_last_load_log_signature', None):
+                logger.info(log_message)
+                self._last_load_log_signature = log_signature
+            else:
+                logger.debug(f"{log_message}; unchanged reload suppressed")
 
     def get_key_for_thread(self, force_rotation: bool = False,
                           rotation_frequency: int = 1) -> Optional[Tuple[APIKeyEntry, int, str]]:
@@ -1406,7 +1434,7 @@ class MultiAPIKeyDialog(QDialog):
         self.tree = None
         self.test_results = queue.Queue()
 
-        self.key_pool = APIKeyPool()
+        self.key_pool = APIKeyPool("Multi-key manager pool")
 
         # Attempt to bind to UnifiedClient's shared pool so UI reflects live usage
         self._bind_shared_pool()
