@@ -983,25 +983,32 @@ def _flush_thinking_display_buf(state: Dict, _log, force: bool = False) -> None:
 
 
 def _append_thinking_display_text(state: Dict, text: str, _log) -> None:
-    if state.get("text_stream_started"):
-        state["late_thinking_display_buf"] = state.get("late_thinking_display_buf", "") + text
-        return
+    if state.get("text_stream_started") and state.get("display_phase") != "thinking":
+        _flush_stream_log_buf(state, _log)
+        _log("─" * 50)
+        _log("🧠 [authgpt] Thinking...")
+        state["display_phase"] = "thinking"
     _flush_stream_log_buf(state, _log)
     state["thinking_display_buf"] = state.get("thinking_display_buf", "") + text
-    _flush_thinking_display_buf(state, _log)
+    _flush_thinking_display_buf(state, _log, force=bool(state.get("text_stream_started")))
 
 
 def _start_text_stream(state: Dict, _log) -> None:
     if state.get("text_stream_started"):
+        if state.get("display_phase") != "text":
+            if _authgpt_stream_thinking_text_enabled():
+                _flush_thinking_display_buf(state, _log, force=True)
+            _log("─" * 50)
+            _log("📡 AuthGPT: Text streaming...")
+            state["display_phase"] = "text"
         return
     if _authgpt_stream_thinking_text_enabled():
         _flush_thinking_display_buf(state, _log, force=True)
     state["text_stream_started"] = True
     if state.get("thinking_started"):
-        elapsed = time.time() - (state.get("thinking_start_ts") or time.time())
-        _log(f"🧠 [authgpt] Thinking stream paused for text ({state.get('thinking_chunks', 0)} chunks, {elapsed:.1f}s)")
         _log("─" * 50)
     _log("📡 AuthGPT: Text streaming...")
+    state["display_phase"] = "text"
 
 
 def _append_reasoning_delta(state: Dict, text: str) -> str:
@@ -1021,6 +1028,7 @@ def _mark_reasoning_event(state: Dict, _log) -> None:
         if not state.get("text_stream_started"):
             _flush_stream_log_buf(state, _log)
             _log("🧠 [authgpt] Thinking...")
+            state["display_phase"] = "thinking"
         state["last_thinking_progress_ts"] = now
     elif not state.get("text_stream_started"):
         _flush_thinking_display_buf(state, _log)
@@ -1173,13 +1181,6 @@ def _finalize_stream(state: Dict, _log, log_stream: bool, t_start: float) -> Dic
     stream_thinking_text = _authgpt_stream_thinking_text_enabled()
     if stream_thinking_text:
         _flush_thinking_display_buf(state, _log, force=True)
-        late_buf = state.get("late_thinking_display_buf", "")
-        if late_buf.strip():
-            _log("─" * 50)
-            _log("🧠 [authgpt] Late thinking captured after text:")
-            state["thinking_display_buf"] = late_buf
-            state["late_thinking_display_buf"] = ""
-            _flush_thinking_display_buf(state, _log, force=True)
     if state.get("thinking_started"):
         thinking_dur = time.time() - (state.get("thinking_start_ts") or time.time())
         thinking_text = "".join(state.get("thinking_text_parts", []))
@@ -1217,9 +1218,9 @@ def _new_stream_state() -> Dict:
         "thinking_log_buf": [],
         "thinking_text_parts": [],
         "thinking_display_buf": "",
-        "late_thinking_display_buf": "",
         "text_stream_started": False,
         "text_stream_complete_logged": False,
+        "display_phase": None,
         "pending_event_type": "",
         "event_types_seen": set(),
         "event_types_logged": set(),

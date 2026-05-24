@@ -1683,8 +1683,8 @@ class FileUtilities:
     @staticmethod
     def create_chapter_filename(chapter, actual_num=None):
         """Create consistent chapter filename"""
-        # Check if we should use header as output name
-        use_header_output = os.getenv("USE_HEADER_AS_OUTPUT", "0") == "1"
+        # Legacy header-derived filenames are disabled; chapter numbering is safer.
+        use_header_output = False
         
         # Check if this is for a text file
         is_text_file = chapter.get('filename', '').endswith('.txt') or chapter.get('is_chunk', False)

@@ -9174,25 +9174,13 @@ def _create_processing_options_section(self, parent):
     zero_detect_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(zero_detect_desc)
     
-    # Use Header as Output Name
-    header_output_cb = self._create_styled_checkbox("Use Header as Output Name")
+    # Legacy "Use Header as Output Name" is intentionally disabled. It can
+    # create surprising filenames from translated chapter titles.
+    self.use_header_as_output_var = False
     try:
-        header_output_cb.setChecked(bool(self.use_header_as_output_var))
+        self.config['use_header_as_output'] = False
     except Exception:
         pass
-    def _on_header_output_toggle(checked):
-        try:
-            self.use_header_as_output_var = bool(checked)
-        except Exception:
-            pass
-    header_output_cb.toggled.connect(_on_header_output_toggle)
-    header_output_cb.setContentsMargins(0, 2, 0, 0)
-    section_v.addWidget(header_output_cb)
-    
-    header_output_desc = QLabel("Use chapter headers/titles as output filenames")
-    header_output_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    header_output_desc.setContentsMargins(20, 0, 0, 10)
-    section_v.addWidget(header_output_desc)
     
     # Separator
     sep_opts1 = QFrame()

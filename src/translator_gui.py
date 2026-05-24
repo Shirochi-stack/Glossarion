@@ -3524,6 +3524,8 @@ Recent translations to summarize:
         if 'max_images_per_chapter_v2' not in self.config:
             self.config['max_images_per_chapter_v2'] = '-1'
         self.config.pop('max_images_per_chapter', None)
+        # Legacy header-derived output filenames are intentionally disabled.
+        self.config['use_header_as_output'] = False
         
         # Create all config variables with helper
         def create_var(var_type, key, default):
@@ -3603,6 +3605,7 @@ Recent translations to summarize:
         
         for var_name, key, default in bool_vars:
             setattr(self, var_name, create_var(bool, key, default))
+        self.use_header_as_output_var = False
         
         self.translate_special_files_var = self.config.get('translate_special_files', False)
         self.skip_image_title_translation_var = bool(self.config.get('skip_image_title_translation', True))
@@ -16453,7 +16456,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SKIP_DUPLICATE_TOC_TRANSLATION': "1" if getattr(self, 'skip_duplicate_toc_translation_var', False) else "0",
             'DUPLICATE_DETECTION_MODE': str(self.duplicate_detection_mode_var),
             'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var), 
-            'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var else "0",
+            'USE_HEADER_AS_OUTPUT': "0",
             'ENABLE_DECIMAL_CHAPTERS': "1" if self.enable_decimal_chapters_var else "0",
             'ENABLE_WATERMARK_REMOVAL': "1" if self.enable_watermark_removal_var else "0",
             'ADVANCED_WATERMARK_REMOVAL': "1" if self.advanced_watermark_removal_var else "0",
@@ -24379,7 +24382,7 @@ Important rules:
                 ('deduplicate_toc_use_translated', ['deduplicate_toc_use_translated_var'], False, bool),
                 ('skip_duplicate_toc_translation', ['skip_duplicate_toc_translation_var'], False, bool),
                 ('duplicate_detection_mode', ['duplicate_detection_mode_var'], 'off', str),
-                ('use_header_as_output', ['use_header_as_output_var'], False, bool),
+                ('use_header_as_output', [], False, bool),
                 ('enable_decimal_chapters', ['enable_decimal_chapters_var'], False, bool),
                 ('force_ncx_only', ['force_ncx_only_var'], False, bool),
                 ('batch_translate_headers', ['batch_translate_headers_var'], True, bool),
@@ -24706,6 +24709,9 @@ Important rules:
                     # Only apply default if key doesn't already exist in config
                     # (prevents wiping loaded values when save_config is called before widgets exist)
                     self.config[key] = default
+
+            self.config['use_header_as_output'] = False
+            self.use_header_as_output_var = False
 
             if hasattr(self, 'custom_prefix_routes'):
                 self.custom_prefix_routes = self._normalize_custom_prefix_routes(self.custom_prefix_routes)

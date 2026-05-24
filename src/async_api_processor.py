@@ -3420,7 +3420,7 @@ class AsyncProcessingDialog:
         env_vars['ENHANCED_FILTERING'] = enhanced_filtering
         env_vars['USE_HTML2TEXT'] = "1" if output_mode == "vision" or text_extraction_method in ('enhanced', 'html2text', 'markdown') or extraction_mode == 'enhanced' else "0"
         env_vars['DISABLE_ZERO_DETECTION'] = "1" if _val(self.gui.disable_zero_detection_var, False) else "0"
-        env_vars['USE_HEADER_AS_OUTPUT'] = "1" if _val(self.gui.use_header_as_output_var, False) else "0"
+        env_vars['USE_HEADER_AS_OUTPUT'] = "0"
         env_vars['ENABLE_DECIMAL_CHAPTERS'] = "1" if _val(self.gui.enable_decimal_chapters_var, False) else "0"
         env_vars['ENABLE_WATERMARK_REMOVAL'] = "1" if _val(self.gui.enable_watermark_removal_var, False) else "0"
         env_vars['ADVANCED_WATERMARK_REMOVAL'] = "1" if _val(self.gui.advanced_watermark_removal_var, False) else "0"
