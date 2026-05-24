@@ -1120,9 +1120,6 @@ def toggle_gpt_reasoning_controls(self):
             color = "white" if enabled else "#808080"
             self.gpt_effort_label.setStyleSheet(f"color: {color};")
 
-        if hasattr(self, 'pass_thinking_all_openai_cb'):
-            self.pass_thinking_all_openai_cb.setEnabled(enabled)
-            
         # GPT tokens label
         if hasattr(self, 'gpt_tokens_label'):
             self.gpt_tokens_label.setEnabled(enabled)

@@ -16041,6 +16041,23 @@ class UnifiedClient:
             and os.getenv('ENABLE_GPT_THINKING', '0') != '1'
         )
 
+    def _get_openai_compatible_thinking_disabled(self, provider: str, effective_model: str = "") -> bool:
+        """Return True when we should explicitly pass a disabled thinking state."""
+        try:
+            provider = (provider or '').strip().lower()
+            if provider in {'deepseek', 'gemini-openai', 'openrouter', 'nanogpt', 'anthropic'}:
+                return False
+            if 'claude' in (effective_model or '').lower() or 'anthropic' in (effective_model or '').lower():
+                return False
+            if provider == 'opencode':
+                return self._opencode_thinking_disabled(effective_model)
+            return (
+                os.getenv('PASS_THINKING_TO_OPENAI_COMPATIBLE', '0') == '1'
+                and os.getenv('ENABLE_GPT_THINKING', '0') != '1'
+            )
+        except Exception:
+            return False
+
     def _apply_openai_safety(self, provider: str, disable_safety: bool, payload: dict, headers: dict):
         """Apply safety flags for providers that support them (avoid unsupported params)."""
         if not disable_safety:
@@ -20657,17 +20674,17 @@ class UnifiedClient:
                                 )
                         except Exception:
                             pass
-                    elif provider == 'opencode' and self._opencode_thinking_disabled(effective_model):
+                    elif self._get_openai_compatible_thinking_disabled(provider, effective_model):
                         extra_body.setdefault("thinking", {"type": "disabled"})
                         try:
                             tls = self._get_thread_local_client()
-                            if not hasattr(tls, 'opencode_thinking_logged'):
-                                tls.opencode_thinking_logged = set()
-                            state_key = (str(effective_model or ''), 'disabled')
-                            if state_key not in tls.opencode_thinking_logged:
-                                tls.opencode_thinking_logged.add(state_key)
+                            if not hasattr(tls, 'openai_compatible_thinking_logged'):
+                                tls.openai_compatible_thinking_logged = set()
+                            state_key = (str(provider or ''), str(effective_model or ''), 'disabled')
+                            if state_key not in tls.openai_compatible_thinking_logged:
+                                tls.openai_compatible_thinking_logged.add(state_key)
                                 self._debug_log(
-                                    f"🧠 [opencode] thinking=DISABLED (model={effective_model})"
+                                    f"🧠 [{provider}] thinking=DISABLED (model={effective_model})"
                                 )
                         except Exception:
                             pass
@@ -22443,7 +22460,7 @@ class UnifiedClient:
                 generic_reasoning_effort = self._get_openai_compatible_reasoning_effort(provider, effective_model)
                 if generic_reasoning_effort:
                     data.setdefault("reasoning_effort", generic_reasoning_effort)
-                elif provider == 'opencode' and self._opencode_thinking_disabled(effective_model):
+                elif self._get_openai_compatible_thinking_disabled(provider, effective_model):
                     data.setdefault("thinking", {"type": "disabled"})
             
             # Apply safety flags
