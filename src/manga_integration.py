@@ -1853,9 +1853,7 @@ class MangaTranslationTab(QObject):
             provider = self.ocr_provider_value
             
             # Initialize OCR manager if needed
-            if not hasattr(self, 'ocr_manager'):
-                from ocr_manager import OCRManager
-                self.ocr_manager = OCRManager(log_callback=self._log)
+            self._ensure_ocr_manager()
             
             # Model sizes (approximate in MB)
             model_sizes = {
@@ -2552,20 +2550,21 @@ class MangaTranslationTab(QObject):
                                     progress_state['file_started_at'] = time.time()
                                 load_success = False
                                 last_load_error = ""
+                                ocr_manager = self._ensure_ocr_manager()
                                 for load_attempt in range(1, 4):
                                     log_queue.put(f"Loading manga-ocr model (attempt {load_attempt}/3)...")
                                     if load_attempt > 1:
                                         time.sleep(3.0)
                                         try:
                                             from ocr_manager import MangaOCRProvider
-                                            self.ocr_manager.providers['manga-ocr'] = MangaOCRProvider(self.ocr_manager.log_callback)
+                                            ocr_manager.providers['manga-ocr'] = MangaOCRProvider(ocr_manager.log_callback)
                                         except Exception:
                                             pass
-                                    load_success = bool(self.ocr_manager.load_provider('manga-ocr'))
+                                    load_success = bool(ocr_manager.load_provider('manga-ocr'))
                                     if load_success:
                                         break
                                     try:
-                                        provider_obj = self.ocr_manager.get_provider('manga-ocr')
+                                        provider_obj = ocr_manager.get_provider('manga-ocr')
                                         last_load_error = str(getattr(provider_obj, 'last_error', '') or '')
                                     except Exception:
                                         last_load_error = ""
@@ -2775,7 +2774,7 @@ class MangaTranslationTab(QObject):
                     add_log("Initializing model...")
                     status_label.setText("Initializing...")
                     
-                    qwen_provider = self.ocr_manager.get_provider('Qwen2-VL')
+                    qwen_provider = self._ensure_ocr_manager().get_provider('Qwen2-VL')
                     if qwen_provider:
                         qwen_provider.processor = processor
                         qwen_provider.tokenizer = tokenizer  
@@ -2918,6 +2917,13 @@ class MangaTranslationTab(QObject):
         except Exception:
             return False, "❌ Invalid credentials JSON"
     
+    def _ensure_ocr_manager(self):
+        """Return a usable OCR manager, recreating it after memory cleanup if needed."""
+        if getattr(self, 'ocr_manager', None) is None:
+            from ocr_manager import OCRManager
+            self.ocr_manager = OCRManager(log_callback=self._log)
+        return self.ocr_manager
+
     def _check_provider_status(self):
         """Check and display OCR provider status"""
         # Skip during initialization to prevent lag
@@ -3023,14 +3029,12 @@ class MangaTranslationTab(QObject):
      
         elif provider == 'Qwen2-VL':
             # Initialize OCR manager if needed
-            if not hasattr(self, 'ocr_manager'):
-                from ocr_manager import OCRManager
-                self.ocr_manager = OCRManager(log_callback=self._log)
+            ocr_manager = self._ensure_ocr_manager()
             
             # Get provider instance to check its loading status
             provider_instance = None
             try:
-                provider_instance = self.ocr_manager.get_provider(provider)
+                provider_instance = ocr_manager.get_provider(provider)
                 # Pass model size to provider for proper loading
                 if provider == 'Qwen2-VL':
                     saved_model_size = getattr(self, 'qwen2vl_model_size', self.main_gui.config.get('qwen2vl_model_size', '1'))
@@ -3039,7 +3043,7 @@ class MangaTranslationTab(QObject):
                 pass
                 
             # Check status first
-            status = self.ocr_manager.check_provider_status(provider)
+            status = ocr_manager.check_provider_status(provider)
             
             # When displaying status for loaded model
             if status['loaded']:
@@ -3089,19 +3093,17 @@ class MangaTranslationTab(QObject):
  
         else:
             # Local OCR providers
-            if not hasattr(self, 'ocr_manager'):
-                from ocr_manager import OCRManager
-                self.ocr_manager = OCRManager(log_callback=self._log)
+            ocr_manager = self._ensure_ocr_manager()
                 
             # Get provider instance to check its loading status
             provider_instance = None
             try:
-                provider_instance = self.ocr_manager.get_provider(provider)
+                provider_instance = ocr_manager.get_provider(provider)
             except Exception:
                 pass
                 
             # Check if model is loaded and ready
-            status = self.ocr_manager.check_provider_status(provider)
+            status = ocr_manager.check_provider_status(provider)
             
             # Determine loaded status for local providers, including JIT models
             is_loaded = status['loaded']
@@ -3208,7 +3210,8 @@ class MangaTranslationTab(QObject):
                 ))
             return
         
-        status = self.ocr_manager.check_provider_status(provider)
+        ocr_manager = self._ensure_ocr_manager()
+        status = ocr_manager.check_provider_status(provider)
         
         # For Qwen2-VL, check if we need to select model size first
         model_size = None
@@ -3418,7 +3421,7 @@ class MangaTranslationTab(QObject):
                     # Install provider
                     print(f"Installing {provider}...")
                     update_progress(f"Installing {provider}...")
-                    success = self.ocr_manager.install_provider(provider, update_progress)
+                    success = ocr_manager.install_provider(provider, update_progress)
                     print(f"Install result: {success}")
                     
                     if not success:
@@ -3450,7 +3453,7 @@ class MangaTranslationTab(QObject):
                     self._log(f"DEBUG: In thread, about to load with model_size={model_size}")
                     if model_size:
                         try:
-                            success = self.ocr_manager.load_provider(provider, model_size=model_size)
+                            success = ocr_manager.load_provider(provider, model_size=model_size)
                             self._log(f"DEBUG: load_provider call completed, success={success}")
                         except Exception as load_error:
                             self._log(f"Exception during load_provider: {str(load_error)}", "error")
@@ -3459,7 +3462,7 @@ class MangaTranslationTab(QObject):
                             success = False
                         
                         if success:
-                            provider_obj = self.ocr_manager.get_provider('Qwen2-VL')
+                            provider_obj = ocr_manager.get_provider('Qwen2-VL')
                             if provider_obj:
                                 provider_obj.loaded_model_size = {
                                     "1": "2B",
@@ -3475,7 +3478,7 @@ class MangaTranslationTab(QObject):
                     else:
                         self._log("Warning: No model size specified for Qwen2-VL, defaulting to 2B", "warning")
                         try:
-                            success = self.ocr_manager.load_provider(provider, model_size="1")
+                            success = ocr_manager.load_provider(provider, model_size="1")
                             self._log(f"DEBUG: Default load_provider call completed, success={success}")
                         except Exception as load_error:
                             self._log(f"Exception during default load_provider: {str(load_error)}", "error")
@@ -3483,7 +3486,7 @@ class MangaTranslationTab(QObject):
                 else:
                     print(f"Loading {provider} without model_size parameter")
                     self._log(f"DEBUG: Loading {provider} without model_size parameter")
-                    success = self.ocr_manager.load_provider(provider)
+                    success = ocr_manager.load_provider(provider)
                     print(f"load_provider returned: {success}")
                     self._log(f"DEBUG: load_provider returned success={success}")
                 
@@ -14772,7 +14775,7 @@ class MangaTranslationTab(QObject):
             ocr_config = {'provider': self.ocr_provider_value}
 
             if ocr_config['provider'] == 'Qwen2-VL':
-                qwen_provider = self.ocr_manager.get_provider('Qwen2-VL')
+                qwen_provider = self._ensure_ocr_manager().get_provider('Qwen2-VL')
                 if qwen_provider:
                     # Set model size configuration
                     if hasattr(qwen_provider, 'loaded_model_size'):

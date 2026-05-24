@@ -5975,6 +5975,7 @@ class UnifiedClient:
             inherited_context = str(getattr(self, 'context', '') or '').strip()
             if inherited_context in (
                 'translation',
+                'refinement',
                 'glossary',
                 'glossary_refinement',
                 'summary',
@@ -6008,7 +6009,7 @@ class UnifiedClient:
         def _retry_without_glossary_refinement_pool(reason: str):
             nonlocal _glossary_refinement_overridden, _dedicated_pool_state
             try:
-                print(f"[GLOSSARY REFINEMENT KEYS] {reason}; falling back to the next eligible pool")
+                print(f"[REFINEMENT KEYS] {reason}; falling back to the next eligible pool")
             except Exception:
                 pass
             self._restore_dedicated_key_pool_override(_dedicated_pool_state)
@@ -6434,10 +6435,10 @@ class UnifiedClient:
                         raise
                     print(f"[IMAGE GEN/EDIT KEYS] Failed to apply image gen/edit key override: {e}")
 
-            # GLOSSARY REFINEMENT KEY OVERRIDE: refinement keys are preferred over
-            # the broader glossary pool when the request context is glossary_refinement.
+            # REFINEMENT KEY OVERRIDE: refinement keys are preferred over the
+            # broader glossary pool for translation and glossary refinement calls.
             context_norm = str(context or '').strip().lower().replace(' ', '_').replace('-', '_')
-            if not _qa_scan_overridden and not _inpainter_overridden and context_norm == 'glossary_refinement':
+            if not _qa_scan_overridden and not _inpainter_overridden and context_norm in ('refinement', 'glossary_refinement'):
                 try:
                     use_refinement_keys = os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1'
                     try:
@@ -6467,7 +6468,7 @@ class UnifiedClient:
                             'GlossaryRefinementKey',
                         )
                         if not _dedicated_pool_state:
-                            print("[GLOSSARY REFINEMENT KEYS] Enabled, but no available refinement keys; falling back to the next eligible pool")
+                            print("[REFINEMENT KEYS] Enabled, but no available refinement keys; falling back to the next eligible pool")
                         if _dedicated_pool_state:
                             _glossary_refinement_overridden = True
                             _original_api_key = _dedicated_pool_state['api_key']
@@ -6476,12 +6477,12 @@ class UnifiedClient:
                             _had_instance_pool = _dedicated_pool_state['had_instance_pool']
                             _original_instance_pool = _dedicated_pool_state['instance_pool']
                             if not getattr(self.__class__, '_glossary_refinement_pool_logged', False):
-                                print(f"[GLOSSARY REFINEMENT KEYS] Using glossary refinement key pool ({len(refinement_pool.keys)} keys)")
+                                print(f"[REFINEMENT KEYS] Using refinement key pool ({len(refinement_pool.keys)} keys)")
                                 self.__class__._glossary_refinement_pool_logged = True
                 except Exception as e:
                     if isinstance(e, UnifiedClientError):
                         raise
-                    print(f"[GLOSSARY REFINEMENT KEYS] Failed to apply glossary refinement key override: {e}")
+                    print(f"[REFINEMENT KEYS] Failed to apply refinement key override: {e}")
 
             # GLOSSARY KEY OVERRIDE: When context is 'glossary' and glossary keys are enabled,
             # use the glossary key pool for full multi-key rotation (mirrors main multi-key mode).
@@ -7496,7 +7497,7 @@ class UnifiedClient:
                     active_pool is getattr(self.__class__, '_rolling_summary_key_pool', None)
                     or _key_identifier.startswith('RollingSummaryKey#')
                 )
-                _pool_label = "(rolling-summary-key)" if _is_rolling_summary_pool else "(truncation-retry-key)" if _is_truncation_retry_pool else "(glossary-refinement-key)" if _is_glossary_refinement_pool else "(glossary-key)" if _is_glossary_pool else "(vision-key)" if _is_qa_pool else "(multi-key)"
+                _pool_label = "(rolling-summary-key)" if _is_rolling_summary_pool else "(truncation-retry-key)" if _is_truncation_retry_pool else "(refinement-key)" if _is_glossary_refinement_pool else "(glossary-key)" if _is_glossary_pool else "(vision-key)" if _is_qa_pool else "(multi-key)"
                 defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model} {_pool_label}")
             elif log_model != model_snapshot and not self._is_stop_requested():
                 defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model}")
@@ -8535,8 +8536,13 @@ class UnifiedClient:
                             context_norm = str(context or '').strip().lower().replace(' ', '_').replace('-', '_')
                             use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
                             use_refinement_keys = os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1'
-                            if (use_glossary_keys or (context_norm == 'glossary_refinement' and use_refinement_keys)) and context_norm in ('glossary', 'glossary_refinement'):
-                                print(f"[GLOSSARY DIRECT] Safety filter detected - trying glossary keys")
+                            should_try_context_keys = (
+                                (context_norm == 'glossary' and use_glossary_keys)
+                                or (context_norm == 'glossary_refinement' and (use_refinement_keys or use_glossary_keys))
+                                or (context_norm == 'refinement' and use_refinement_keys)
+                            )
+                            if should_try_context_keys:
+                                print(f"[GLOSSARY DIRECT] Safety filter detected - trying glossary/refinement keys")
                                 try:
                                     retry_res = self._try_glossary_keys_direct(
                                         messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data
@@ -9020,8 +9026,13 @@ class UnifiedClient:
                     # Try glossary keys if context is glossary (independent of multi-key mode toggle)
                     use_glossary_keys = os.getenv('USE_GLOSSARY_KEYS', '0') == '1'
                     use_refinement_keys = os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1'
-                    if (use_glossary_keys or (context_norm == 'glossary_refinement' and use_refinement_keys)) and context_norm in ('glossary', 'glossary_refinement'):
-                        print(f"[GLOSSARY DIRECT] Using glossary keys for prohibited content retry")
+                    should_try_context_keys = (
+                        (context_norm == 'glossary' and use_glossary_keys)
+                        or (context_norm == 'glossary_refinement' and (use_refinement_keys or use_glossary_keys))
+                        or (context_norm == 'refinement' and use_refinement_keys)
+                    )
+                    if should_try_context_keys:
+                        print(f"[GLOSSARY DIRECT] Using glossary/refinement keys for prohibited content retry")
                         try:
                             retry_res = self._try_glossary_keys_direct(
                                 messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data
@@ -10234,7 +10245,7 @@ class UnifiedClient:
         except Exception:
             skip_refinement_keys = False
         use_refinement_keys = (
-            context_norm == 'glossary_refinement'
+            context_norm in ('refinement', 'glossary_refinement')
             and os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') == '1'
             and not skip_refinement_keys
         )
@@ -10246,7 +10257,7 @@ class UnifiedClient:
         
         # Load glossary keys from environment
         glossary_keys_json = os.getenv('GLOSSARY_REFINEMENT_API_KEYS', '[]') if use_refinement_keys else os.getenv('GLOSSARY_API_KEYS', '[]')
-        pool_label = "glossary refinement" if use_refinement_keys else "glossary"
+        pool_label = "refinement" if use_refinement_keys else "glossary"
         if glossary_keys_json == '[]':
             print(f"[GLOSSARY DIRECT] No {pool_label} keys configured")
             del tls.tried_glossary_direct_per_request[request_id]
@@ -17273,7 +17284,7 @@ class UnifiedClient:
         explicit = getattr(self, 'context', None)
         if self._is_manga_ocr_context(explicit):
             return self._get_payload_context_thread_directory("Manga_OCR")
-        if explicit in ('translation', 'glossary', 'glossary_refinement', 'summary', 'review', 'metadata', 'book_title', 'batch_toc_translation', 'batch_header_translation', 'qa_truncation', 'Truncation'):
+        if explicit in ('translation', 'refinement', 'glossary', 'glossary_refinement', 'summary', 'review', 'metadata', 'book_title', 'batch_toc_translation', 'batch_header_translation', 'qa_truncation', 'Truncation'):
             context = explicit
         else:
             if 'Translation' in thread_name:

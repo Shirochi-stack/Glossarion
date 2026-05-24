@@ -499,6 +499,7 @@ class TranslationConfig:
             self.OUTPUT_MODE = "refinement"
         if self.OUTPUT_MODE not in ("text", "vision", "image", "video", "audio", "refinement"):
             self.OUTPUT_MODE = "text"
+        self.MULTIPASS_MODE = os.getenv("MULTIPASS_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
         self.input_path = os.getenv("input_path", "default.epub")
         self.PROFILE_NAME = os.getenv("PROFILE_NAME", "korean").lower()
         self.CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
@@ -12737,6 +12738,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
     batch_size = max(1, int(getattr(config, "BATCH_SIZE", 1) or 1))
     if use_batch and len(chapters) > 1:
         print(f"⚡ Batch mode enabled for {mode}: {batch_size} parallel workers")
+    refined_output_paths = set()
 
     def _force_stop_requested():
         return (
@@ -12801,6 +12803,12 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             output_file, output_path = _find_existing_translated_output(out, chapter, actual_num, progress_manager)
         if not output_path:
             return "skipped", f"⬜ Chapter {actual_num}: translated output not found ({output_file})"
+        if mode == "refinement":
+            normalized_output_path = os.path.normcase(os.path.abspath(output_path))
+            with progress_lock:
+                if normalized_output_path in refined_output_paths:
+                    return "skipped", f"âœ¨ Chapter {actual_num}: output already refined in this pass ({output_file})"
+                refined_output_paths.add(normalized_output_path)
 
         with open(output_path, "r", encoding="utf-8", errors="ignore") as f:
             html_content = f.read()
@@ -20618,6 +20626,29 @@ def main(log_callback=None, stop_callback=None):
                     last_summary_chapter_num = actual_num
             
             chapters_completed += 1
+
+    if (
+        getattr(config, "MULTIPASS_MODE", False)
+        and config.OUTPUT_MODE not in ("refinement", "audio", "image", "video")
+        and os.environ.get('TRANSLATION_CANCELLED') != '1'
+        and os.environ.get('GRACEFUL_STOP') != '1'
+        and not check_stop()
+    ):
+        print("\n" + "=" * 50)
+        print("✨ MULTIPASS REFINEMENT")
+        print("=" * 50)
+        print("Running a refinement pass over translated HTML output.")
+        original_output_mode = config.OUTPUT_MODE
+        try:
+            config.OUTPUT_MODE = "refinement"
+            _process_refinement_or_tts_mode(config, client, chapters, out, progress_manager, check_stop)
+        finally:
+            config.OUTPUT_MODE = original_output_mode
+            try:
+                progress_manager.prog["output_mode"] = original_output_mode
+                progress_manager.save()
+            except Exception:
+                pass
 
     # Check if PDF should output as PDF or EPUB
     pdf_output_format = os.getenv('PDF_OUTPUT_FORMAT', 'pdf').lower()

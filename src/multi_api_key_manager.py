@@ -7382,8 +7382,8 @@ class MultiAPIKeyDialog(QDialog):
         """
         return {
             'glossary_refinement': {
-                'title': 'Glossary Refinement Keys',
-                'label': 'Glossary refinement',
+                'title': 'Refinement Keys',
+                'label': 'Refinement',
                 'config_key': 'glossary_refinement_keys',
                 'toggle_key': 'use_glossary_refinement_keys',
                 'set_method': 'set_in_memory_glossary_refinement_keys',
@@ -7391,8 +7391,8 @@ class MultiAPIKeyDialog(QDialog):
                 'use_envs': ['USE_GLOSSARY_REFINEMENT_KEYS'],
                 'keys_envs': ['GLOSSARY_REFINEMENT_API_KEYS'],
                 'description': (
-                    "Configure dedicated keys for glossary_refinement API calls.\n"
-                    "This pool is preferred for refinement requests, then eligible glossary/fallback paths may still apply for some errors."
+                    "Configure dedicated keys for translation and glossary refinement API calls.\n"
+                    "This pool is preferred when the request context is 'refinement' or 'glossary_refinement'; eligible glossary/fallback paths may still apply for some errors."
                 ),
             },
             'qa_scan': {

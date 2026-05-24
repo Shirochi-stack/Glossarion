@@ -1771,6 +1771,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.use_rolling_summary_keys_var = self.config.get('use_rolling_summary_keys', False)
         self.use_truncation_retry_keys_var = self.config.get('use_truncation_retry_keys', False)
         self.use_inpainter_keys_var = self.config.get('use_inpainter_keys', False)
+        self.multipass_mode_var = self.config.get('multipass_mode', False)
 
         # Initialize fuzzy threshold variable
         if not hasattr(self, 'fuzzy_threshold_var'):
@@ -8195,6 +8196,21 @@ Recent translations to summarize:
         self.batch_size_entry.textChanged.connect(lambda: setattr(self, 'batch_size_var', self.batch_size_entry.text()))
         batch_right_layout.addWidget(self.batch_size_entry)
 
+        self.multipass_checkbox = self._create_styled_checkbox("Multipass mode")
+        self.multipass_checkbox.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
+            "After the normal translation finishes, run a second pass using refinement output mode."
+            "</p></qt>"
+        )
+        self.multipass_checkbox.setChecked(bool(self.multipass_mode_var))
+        self.multipass_checkbox.toggled.connect(
+            lambda checked: (
+                setattr(self, 'multipass_mode_var', bool(checked)),
+                self.config.__setitem__('multipass_mode', bool(checked))
+            )
+        )
+        batch_right_layout.addWidget(self.multipass_checkbox)
+
         auto_glossary_row_container = QWidget()
         auto_glossary_row_layout = QHBoxLayout(auto_glossary_row_container)
         auto_glossary_row_layout.setContentsMargins(0, 0, 0, 0)
@@ -9262,7 +9278,7 @@ Recent translations to summarize:
                 if hasattr(self, attr):
                     self.frame.addWidget(getattr(self, attr), row, col, row_span, col_span, alignment)
             if hasattr(self, '_gloss_status_row'):
-                self.frame.addWidget(self._gloss_status_row, 5 + row_shift, 4, Qt.AlignRight)
+                self.frame.addWidget(self._gloss_status_row, 5, 4, Qt.AlignRight)
 
         self.translation_history_rolling_var = True
     
@@ -16257,6 +16273,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'QA_AUTO_SEARCH_OUTPUT': '1' if self.config.get('qa_auto_search_output', True) else '0',
             'BATCH_TRANSLATION': "1" if self.batch_translation_var else "0",
             'BATCH_SIZE': str(self.batch_size_var),
+            'MULTIPASS_MODE': "1" if getattr(self, 'multipass_mode_var', self.config.get('multipass_mode', False)) else "0",
             'BATCHING_MODE': self._translation_batching_mode_for_env(),
             'BATCH_GROUP_SIZE': str(getattr(self, 'batch_group_size_var', '3')),
             # Backward compatibility for older scripts expecting CONSERVATIVE_BATCHING
@@ -24350,6 +24367,7 @@ Important rules:
                 # Batching
                 ('batch_translation', ['batch_checkbox', 'batch_translation_var'], True, bool),
                 ('batch_size', ['batch_size_entry', 'batch_size_var'], 5, lambda v: safe_int(v, 5)),
+                ('multipass_mode', ['multipass_checkbox', 'multipass_mode_var'], False, bool),
                 ('vision_ocr_batch_size', ['vision_ocr_batch_size_var'], 10, lambda v: safe_int(v, 10)),
                 ('batching_mode', ['batch_mode_var'], 'aggressive', str),
                 ('batch_group_size', ['batch_group_size_var'], 3, lambda v: safe_int(v, 3)),
@@ -25468,6 +25486,7 @@ Important rules:
                 ('ENABLE_VIDEO_OUTPUT_MODE', self._get_allowed_video_output_mode()),
                 ('ENABLE_AUDIO_OUTPUT_MODE', '1' if output_mode == 'audio' else '0'),
                 ('ENABLE_REFINEMENT_OUTPUT_MODE', '1' if output_mode == 'refinement' else '0'),
+                ('MULTIPASS_MODE', '1' if getattr(self, 'multipass_mode_var', self.config.get('multipass_mode', False)) else '0'),
                 # Normalize to uppercase so validation in unified_api_client accepts 1K/2K/4K
                 ('IMAGE_OUTPUT_RESOLUTION', str(getattr(self, 'image_output_resolution_var', '1K')).upper()),
                 ('NANOGPT_VIDEO_DURATION', str(getattr(self, 'nanogpt_video_duration_var', '60')) + 's'),
