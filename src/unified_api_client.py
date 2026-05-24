@@ -15732,6 +15732,14 @@ class UnifiedClient:
             if provider == 'opencode':
                 return effort
 
+            if provider in {'deepseek', 'gemini-openai', 'openrouter', 'nanogpt', 'anthropic'}:
+                return None
+
+            # Claude/Anthropic models have their own extended-thinking controls,
+            # even when reached through an OpenAI-compatible wrapper.
+            if 'claude' in (effective_model or '').lower() or 'anthropic' in (effective_model or '').lower():
+                return None
+
             if pass_all:
                 return effort
         except Exception:
