@@ -17,6 +17,7 @@ Flow:
 """
 import os
 import json
+import re
 import time
 import hashlib
 import base64
@@ -910,35 +911,137 @@ def _collect_reasoning_text(value: Any, force_text: bool = False) -> str:
     return "".join(walk(value, force_text))
 
 
-def _append_reasoning_text(state: Dict, text: str, _log) -> None:
-    if not text:
+def _extract_reasoning_item(value: Any) -> Optional[Any]:
+    """Return an explicit reasoning item from a stream payload, if present."""
+    if not isinstance(value, dict):
+        return None
+    candidates = [
+        value.get("item"),
+        value.get("output_item"),
+        value.get("part"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, dict) and "reasoning" in str(candidate.get("type", "") or "").lower():
+            return candidate
+    return None
+
+
+def _flush_stream_log_buf(state: Dict, _log) -> None:
+    if state.get("log_buf"):
+        remainder = "".join(state["log_buf"]).strip()
+        if remainder:
+            _log(remainder.replace('\x1f', '\\x1F'))
+        state["log_buf"] = []
+
+
+def _authgpt_stream_thinking_text_enabled() -> bool:
+    raw = os.getenv("STREAM_AUTHGPT_THINKING_TEXT")
+    if raw is None:
+        raw = os.getenv("STREAM_THINKING_LOGS", "0")
+    return str(raw).lower() not in ("0", "false")
+
+
+def _flush_thinking_display_buf(state: Dict, _log, force: bool = False) -> None:
+    buf = state.get("thinking_display_buf", "")
+    if not buf:
         return
-    state["thinking_chunks"] += 1
-    state["thinking_text_parts"].append(str(text))
+
+    def emit(text: str) -> None:
+        for line in text.splitlines():
+            if line.strip():
+                safe_line = line.replace('\x1f', '\\x1F')
+                _log(f"    {safe_line}")
+
+    # AuthGPT often sends markdown headings with no preceding newline after
+    # a sentence delta. Split those so sections do not get stitched together.
+    buf = re.sub(r"(?<!^)(?<!\n)(\*\*[^*\n]{3,120}\*\*)", r"\n\1", buf)
+
+    while "\n" in buf:
+        line, buf = buf.split("\n", 1)
+        emit(line)
+
+    if force:
+        if buf.strip():
+            emit(buf)
+        state["thinking_display_buf"] = ""
+        return
+
+    # Flush readable chunks, not token-sized fragments. Prefer sentence-ish
+    # boundaries, then spaces, and only hard-cut as a last resort.
+    max_buf = 220
+    while len(buf) >= max_buf:
+        boundary = max(buf.rfind(mark, 0, max_buf) for mark in (". ", "? ", "! ", "; ", ": "))
+        if boundary >= 80:
+            cut = boundary + 1
+        else:
+            cut = buf.rfind(" ", 0, max_buf)
+            if cut < 120:
+                cut = max_buf
+        emit(buf[:cut].strip())
+        buf = buf[cut:].lstrip()
+    state["thinking_display_buf"] = buf
+
+
+def _append_thinking_display_text(state: Dict, text: str, _log) -> None:
+    if state.get("text_stream_started"):
+        state["late_thinking_display_buf"] = state.get("late_thinking_display_buf", "") + text
+        return
+    _flush_stream_log_buf(state, _log)
+    state["thinking_display_buf"] = state.get("thinking_display_buf", "") + text
+    _flush_thinking_display_buf(state, _log)
+
+
+def _start_text_stream(state: Dict, _log) -> None:
+    if state.get("text_stream_started"):
+        return
+    if _authgpt_stream_thinking_text_enabled():
+        _flush_thinking_display_buf(state, _log, force=True)
+    state["text_stream_started"] = True
+    if state.get("thinking_started"):
+        elapsed = time.time() - (state.get("thinking_start_ts") or time.time())
+        _log(f"🧠 [authgpt] Thinking stream paused for text ({state.get('thinking_chunks', 0)} chunks, {elapsed:.1f}s)")
+        _log("─" * 50)
+    _log("📡 AuthGPT: Text streaming...")
+
+
+def _append_reasoning_delta(state: Dict, text: str) -> str:
+    text = str(text or "").replace("\\n", "\n")
+    if not text:
+        return ""
+    return text
+
+
+def _mark_reasoning_event(state: Dict, _log) -> None:
+    now = time.time()
     if state["thinking_start_ts"] is None:
-        state["thinking_start_ts"] = time.time()
+        state["thinking_start_ts"] = now
 
     if not state["thinking_started"]:
         state["thinking_started"] = True
+        if not state.get("text_stream_started"):
+            _flush_stream_log_buf(state, _log)
+            _log("🧠 [authgpt] Thinking...")
+        state["last_thinking_progress_ts"] = now
+    elif not state.get("text_stream_started"):
+        _flush_thinking_display_buf(state, _log)
+
+
+def _append_reasoning_text(state: Dict, text: str, _log, is_delta: bool = False) -> None:
+    _mark_reasoning_event(state, _log)
+    delta = _append_reasoning_delta(state, text)
+    if not delta:
+        return
+    state["thinking_chunks"] += 1
+    state["thinking_text_parts"].append(delta)
 
     # AuthGPT can emit reasoning-summary chunks interleaved with output-text
     # chunks. Keep capturing them, but do not print the text into the live
     # translation stream unless explicitly requested.
-    stream_thinking_text = os.getenv("STREAM_AUTHGPT_THINKING_TEXT", "0").lower() not in ("0", "false")
+    stream_thinking_text = _authgpt_stream_thinking_text_enabled()
     if not stream_thinking_text:
         return
 
-    state["thinking_log_buf"].append(str(text))
-    combined = "".join(state["thinking_log_buf"])
-    if "\n" in combined:
-        parts = combined.split("\n")
-        for part in parts[:-1]:
-            if part.strip():
-                _log(part.replace('\x1f', '\\x1F'))
-        state["thinking_log_buf"] = [parts[-1]]
-    elif len(combined) > 180:
-        _log(combined.replace('\x1f', '\\x1F'))
-        state["thinking_log_buf"] = []
+    _append_thinking_display_text(state, delta, _log)
 
 
 def _process_sse_line(
@@ -985,6 +1088,7 @@ def _process_sse_line(
             delta_text = data.get("delta", "")
             state["streamed_chars"] += len(delta_text)
             if log_stream and delta_text:
+                _start_text_stream(state, _log)
                 log_buf = state["log_buf"]
                 combined = "".join(log_buf) + delta_text
                 for tag in ('</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>'):
@@ -997,7 +1101,7 @@ def _process_sse_line(
                 else:
                     log_buf.append(delta_text)
                     if len("".join(log_buf)) > 150:
-                        print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
+                        _log("".join(log_buf).replace('\x1f', '\\x1F'))
                         state["log_buf"] = []
         except (json.JSONDecodeError, KeyError):
             pass
@@ -1006,19 +1110,28 @@ def _process_sse_line(
     # Capture them separately so thinking does not get mixed into the final answer.
     if data is not None and "reasoning" in event_type:
         try:
+            _mark_reasoning_event(state, _log)
             force_text = event_type.endswith(".delta")
             reasoning_text = _collect_reasoning_text(data, force_text=force_text)
-            if reasoning_text and (force_text or state.get("thinking_chunks", 0) == 0):
-                _append_reasoning_text(state, reasoning_text, _log)
+            if reasoning_text and (
+                force_text
+                or state.get("thinking_chunks", 0) == 0
+                or _authgpt_stream_thinking_text_enabled()
+            ):
+                _append_reasoning_text(state, reasoning_text, _log, is_delta=force_text)
         except Exception:
             pass
     elif data is not None:
         try:
             # Some Responses streams carry completed reasoning items under
             # response.output_item.done instead of a reasoning-specific event.
-            reasoning_text = _collect_reasoning_text(data, force_text=False)
-            if reasoning_text and state.get("thinking_chunks", 0) == 0:
-                _append_reasoning_text(state, reasoning_text, _log)
+            reasoning_item = _extract_reasoning_item(data)
+            reasoning_text = _collect_reasoning_text(reasoning_item, force_text=False) if reasoning_item else ""
+            if reasoning_text and (
+                state.get("thinking_chunks", 0) == 0
+                or _authgpt_stream_thinking_text_enabled()
+            ):
+                _append_reasoning_text(state, reasoning_text, _log, is_delta=False)
         except Exception:
             pass
 
@@ -1038,19 +1151,24 @@ def _process_sse_line(
 def _finalize_stream(state: Dict, _log, log_stream: bool, t_start: float) -> Dict:
     """Flush log buffer, parse collected SSE lines, return result dict."""
     if log_stream and state["log_buf"]:
-        remainder = "".join(state["log_buf"]).strip()
-        if remainder:
-            _log(remainder.replace('\x1f', '\\x1F'))
+        _flush_stream_log_buf(state, _log)
+    if state.get("text_stream_started") and not state.get("text_stream_complete_logged"):
+        _log("📡 AuthGPT: Text streaming complete")
+        state["text_stream_complete_logged"] = True
 
-    stream_thinking_text = os.getenv("STREAM_AUTHGPT_THINKING_TEXT", "0").lower() not in ("0", "false")
-    if stream_thinking_text and state.get("thinking_log_buf"):
-        remainder = "".join(state["thinking_log_buf"]).strip()
-        if remainder:
-            _log(remainder.replace('\x1f', '\\x1F'))
-        state["thinking_log_buf"] = []
+    stream_thinking_text = _authgpt_stream_thinking_text_enabled()
+    if stream_thinking_text:
+        _flush_thinking_display_buf(state, _log, force=True)
+        late_buf = state.get("late_thinking_display_buf", "")
+        if late_buf.strip():
+            _log("─" * 50)
+            _log("🧠 [authgpt] Late thinking captured after text:")
+            state["thinking_display_buf"] = late_buf
+            state["late_thinking_display_buf"] = ""
+            _flush_thinking_display_buf(state, _log, force=True)
     if state.get("thinking_started"):
         thinking_dur = time.time() - (state.get("thinking_start_ts") or time.time())
-        _log(f"🧠 AuthGPT: Thinking captured ({state.get('thinking_chunks', 0)} chunks, {thinking_dur:.1f}s)")
+        _log(f"🧠 [authgpt] Thinking complete ({state.get('thinking_chunks', 0)} chunks, {thinking_dur:.1f}s)")
 
     raw_text = "\n".join(state["raw_lines"])
     t_total = time.time() - t_start
@@ -1075,9 +1193,14 @@ def _new_stream_state() -> Dict:
         "log_buf": [],
         "thinking_started": False,
         "thinking_start_ts": None,
+        "last_thinking_progress_ts": 0.0,
         "thinking_chunks": 0,
         "thinking_log_buf": [],
         "thinking_text_parts": [],
+        "thinking_display_buf": "",
+        "late_thinking_display_buf": "",
+        "text_stream_started": False,
+        "text_stream_complete_logged": False,
         "pending_event_type": "",
         "event_types_seen": set(),
         "event_types_logged": set(),
