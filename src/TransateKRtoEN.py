@@ -12744,8 +12744,15 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         return False
 
     progress_lock = threading.Lock()
-    use_batch = bool(getattr(config, "BATCH_TRANSLATION", False))
-    batch_size = max(1, int(getattr(config, "BATCH_SIZE", 1) or 1))
+    env_batch = os.getenv("BATCH_TRANSLATION")
+    if env_batch is not None:
+        use_batch = str(env_batch).strip().lower() in ("1", "true", "yes", "on")
+    else:
+        use_batch = bool(getattr(config, "BATCH_TRANSLATION", False))
+    try:
+        batch_size = max(1, int(os.getenv("BATCH_SIZE", getattr(config, "BATCH_SIZE", 1)) or 1))
+    except Exception:
+        batch_size = max(1, int(getattr(config, "BATCH_SIZE", 1) or 1))
     if use_batch and len(chapters) > 1:
         print(f"⚡ Batch mode enabled for {mode}: {batch_size} parallel workers")
     refined_output_paths = set()
@@ -12767,6 +12774,57 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         if text.strip():
             return f"{text.strip()}\n\nHTML to refine:\n{html_content}"
         return html_content
+
+    def _refinement_skip_reason_for_qa(entry, html_content=None):
+        if html_content is not None and not str(html_content or "").strip():
+            return "empty output"
+        if not isinstance(entry, dict):
+            return None
+
+        values = []
+
+        def _collect(value):
+            if value is None:
+                return
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    _collect(key)
+                    _collect(item)
+                return
+            if isinstance(value, (list, tuple, set)):
+                for item in value:
+                    _collect(item)
+                return
+            values.append(str(value))
+
+        for key in (
+            "qa_issues_found",
+            "qa_issues",
+            "failure_reason",
+            "error_message",
+            "finish_reason",
+            "error",
+        ):
+            _collect(entry.get(key))
+
+        status = str(entry.get("status", "") or "").lower()
+        if status == "qa_failed":
+            _collect(status)
+
+        normalized = " ".join(values).lower().replace("-", "_").replace(" ", "_")
+        if not normalized:
+            return None
+
+        blocked_issues = (
+            ("truncated", ("truncated", "truncation", "max_tokens", "max_length", "finish_reason_length")),
+            ("prohibited content", ("prohibited_content", "content_filter", "blocked_by_safety", "safety_filter")),
+            ("api error", ("api_error", "api_call_failed", "request_failed", "server_error", "client_error")),
+            ("empty output", ("empty_output", "blank_output", "no_usable_output", "no_output")),
+        )
+        for label, markers in blocked_issues:
+            if any(marker in normalized for marker in markers):
+                return label
+        return None
 
     def _find_progress_entry_for_output(output_file, actual_num=None):
         if not output_file:
@@ -12836,6 +12894,15 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             html_content = f.read()
         content_hash = ContentProcessor.get_content_hash(html_content)
 
+        with progress_lock:
+            _pre_key, pre_existing_entry = _find_progress_entry_for_output(output_file, actual_num)
+            pre_existing_entry = dict(pre_existing_entry) if pre_existing_entry else {}
+
+        if mode == "refinement":
+            skip_reason = _refinement_skip_reason_for_qa(pre_existing_entry, html_content)
+            if skip_reason:
+                return "skipped", f"⏭️ Chapter {actual_num}: skipped refinement ({skip_reason})"
+
         # Ensure a base completed entry exists so the two post-process checks are visible.
         with progress_lock:
             progress_manager.update(idx, actual_num, content_hash, output_file, status="completed", chapter_obj=chapter)
@@ -12850,9 +12917,6 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         if mode == "refinement":
             if entry.get("refinement_status") == "refined":
                 return "skipped", f"✨ Chapter {actual_num}: already refined"
-            with progress_lock:
-                progress_manager.update_refinement_status(idx, actual_num, content_hash, output_file, "in_progress", chapter_obj=chapter)
-                progress_manager.save()
             try:
                 refine_system = _format_refinement_prompt(
                     getattr(config, "REFINEMENT_SYSTEM_PROMPT", "").strip(),
@@ -12872,7 +12936,25 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 if refine_assistant:
                     messages.append({"role": "assistant", "content": refine_assistant})
                 messages.append({"role": "user", "content": refine_user})
-                refined, finish_reason = client.send(messages, temperature=config.TEMP, max_tokens=config.MAX_OUTPUT_TOKENS, context="refinement")
+
+                def _mark_refinement_progress_on_send():
+                    with progress_lock:
+                        progress_manager.update(idx, actual_num, content_hash, output_file, status="in_progress", chapter_obj=chapter)
+                        progress_manager.update_refinement_status(idx, actual_num, content_hash, output_file, "in_progress", chapter_obj=chapter)
+                        progress_manager.save()
+
+                refined, finish_reason, _raw_obj = send_with_interrupt(
+                    messages,
+                    client,
+                    config.TEMP,
+                    config.MAX_OUTPUT_TOKENS,
+                    check_stop,
+                    chunk_timeout=None,
+                    context="refinement",
+                    chapter_context={"chapter": actual_num},
+                    bypass_graceful_stop=True,
+                    before_send_callback=_mark_refinement_progress_on_send,
+                )
                 if not refined or not str(refined).strip() or finish_reason in ("content_filter", "prohibited_content", "error"):
                     raise RuntimeError(f"Refinement returned no usable HTML (finish_reason={finish_reason})")
                 refined = re.sub(r"^```(?:html)?\s*\n?", "", refined, count=1, flags=re.MULTILINE)
@@ -12889,6 +12971,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 return "processed", f"✨ Refined Chapter {actual_num}: {output_file}"
             except Exception as exc:
                 with progress_lock:
+                    progress_manager.update(idx, actual_num, content_hash, output_file, status="completed", chapter_obj=chapter)
                     progress_manager.update_refinement_status(idx, actual_num, content_hash, output_file, "failed", chapter_obj=chapter, error=exc)
                     progress_manager.save()
                 return "failed", f"❌ Refinement failed for Chapter {actual_num}: {exc}"
@@ -12954,47 +13037,73 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         if message:
             print(message)
 
-    if use_batch and len(chapters) > 1:
-        executor = ThreadPoolExecutor(max_workers=batch_size, thread_name_prefix=f"{mode.title()}Worker")
-        futures = {
-            executor.submit(_process_one, idx, chapter): (idx, chapter)
-            for idx, chapter in enumerate(chapters)
-        }
-        pending = set(futures.keys())
-        try:
-            while pending:
-                if _force_stop_requested():
-                    for future in pending:
-                        future.cancel()
-                    print("⏹️ Force stop requested; cancelling queued post-processing items...")
-                    break
+    previous_batch_env = os.environ.get("BATCH_TRANSLATION")
+    previous_batch_size_env = os.environ.get("BATCH_SIZE")
+    refinement_pool_state = None
+    if use_batch and batch_size > 1:
+        os.environ["BATCH_TRANSLATION"] = "1"
+        os.environ["BATCH_SIZE"] = str(batch_size)
+        if mode == "refinement" and hasattr(client, "activate_refinement_key_pool_for_batch"):
+            try:
+                refinement_pool_state = client.activate_refinement_key_pool_for_batch()
+            except Exception as exc:
+                print(f"⚠️ Failed to activate refinement key pool for batch: {exc}")
+    try:
+        if use_batch and len(chapters) > 1:
+            executor = ThreadPoolExecutor(max_workers=batch_size, thread_name_prefix=f"{mode.title()}Worker")
+            futures = {
+                executor.submit(_process_one, idx, chapter): (idx, chapter)
+                for idx, chapter in enumerate(chapters)
+            }
+            pending = set(futures.keys())
+            try:
+                while pending:
+                    if _force_stop_requested():
+                        for future in pending:
+                            future.cancel()
+                        print("⏹️ Force stop requested; cancelling queued post-processing items...")
+                        break
 
-                done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
-                if not done:
-                    continue
-                for future in done:
-                    try:
-                        _record_result(future.result())
-                    except Exception as exc:
-                        if getattr(exc, "error_type", None) == "cancelled" or "cancelled" in str(exc).lower():
-                            skipped += 1
+                    done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+                    if not done:
+                        continue
+                    for future in done:
+                        try:
+                            _record_result(future.result())
+                        except Exception as exc:
+                            if getattr(exc, "error_type", None) == "cancelled" or "cancelled" in str(exc).lower():
+                                skipped += 1
+                                idx, chapter = futures[future]
+                                actual_num = chapter.get("actual_chapter_num", chapter.get("num", idx + 1))
+                                print(f"⏹️ {mode.title()} cancelled for Chapter {actual_num}")
+                                continue
+                            failed += 1
                             idx, chapter = futures[future]
                             actual_num = chapter.get("actual_chapter_num", chapter.get("num", idx + 1))
-                            print(f"⏹️ {mode.title()} cancelled for Chapter {actual_num}")
-                            continue
-                        failed += 1
-                        idx, chapter = futures[future]
-                        actual_num = chapter.get("actual_chapter_num", chapter.get("num", idx + 1))
-                        print(f"❌ {mode.title()} failed for Chapter {actual_num}: {exc}")
-        finally:
-            force_stop = _force_stop_requested()
-            executor.shutdown(wait=not force_stop, cancel_futures=force_stop)
-    else:
-        for idx, chapter in enumerate(chapters):
-            if _force_stop_requested():
-                print("⏹️ Force stop requested; stopping post-processing.")
-                break
-            _record_result(_process_one(idx, chapter))
+                            print(f"❌ {mode.title()} failed for Chapter {actual_num}: {exc}")
+            finally:
+                force_stop = _force_stop_requested()
+                executor.shutdown(wait=not force_stop, cancel_futures=force_stop)
+        else:
+            for idx, chapter in enumerate(chapters):
+                if _force_stop_requested():
+                    print("⏹️ Force stop requested; stopping post-processing.")
+                    break
+                _record_result(_process_one(idx, chapter))
+    finally:
+        if previous_batch_env is None:
+            os.environ.pop("BATCH_TRANSLATION", None)
+        else:
+            os.environ["BATCH_TRANSLATION"] = previous_batch_env
+        if previous_batch_size_env is None:
+            os.environ.pop("BATCH_SIZE", None)
+        else:
+            os.environ["BATCH_SIZE"] = previous_batch_size_env
+        if refinement_pool_state and hasattr(client, "restore_refinement_key_pool_for_batch"):
+            try:
+                client.restore_refinement_key_pool_for_batch(refinement_pool_state)
+            except Exception:
+                pass
 
     print(f"\n📊 {mode.title()} summary: {processed} processed, {skipped} skipped, {failed} failed")
     return True

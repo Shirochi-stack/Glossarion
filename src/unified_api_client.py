@@ -3846,9 +3846,10 @@ class UnifiedClient:
                     
                     # Generate key identifier for the active pool.
                     _is_glossary_pool = (self._api_key_pool is getattr(self.__class__, '_glossary_key_pool', None))
+                    _is_refinement_pool = (self._api_key_pool is getattr(self.__class__, '_glossary_refinement_key_pool', None))
                     _is_truncation_retry_pool = (self._api_key_pool is getattr(self.__class__, '_truncation_retry_key_pool', None))
                     _is_rolling_summary_pool = (self._api_key_pool is getattr(self.__class__, '_rolling_summary_key_pool', None))
-                    _prefix = "RollingSummaryKey" if _is_rolling_summary_pool else "TruncationRetryKey" if _is_truncation_retry_pool else "GlossaryKey" if _is_glossary_pool else "Key"
+                    _prefix = "RollingSummaryKey" if _is_rolling_summary_pool else "TruncationRetryKey" if _is_truncation_retry_pool else "GlossaryRefinementKey" if _is_refinement_pool else "GlossaryKey" if _is_glossary_pool else "Key"
                     key_id = f"{_prefix}#{key_index+1} ({key.model})"
                     if hasattr(key, 'identifier') and key.identifier:
                         key_id = key.identifier
@@ -5883,6 +5884,62 @@ class UnifiedClient:
             self._restore_dedicated_key_pool_override(state)
             return None
 
+    def activate_refinement_key_pool_for_batch(self):
+        """Bind the refinement key pool for a whole batch without per-request override locking."""
+        if os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') != '1':
+            return None
+        refinement_pool = self.__class__._glossary_refinement_key_pool
+        if not refinement_pool or not getattr(refinement_pool, 'keys', []):
+            refinement_keys_json = os.getenv('GLOSSARY_REFINEMENT_API_KEYS', '[]')
+            if refinement_keys_json != '[]':
+                try:
+                    refinement_keys_list = json.loads(refinement_keys_json)
+                    if refinement_keys_list:
+                        self.__class__.setup_glossary_refinement_key_pool(refinement_keys_list)
+                        refinement_pool = self.__class__._glossary_refinement_key_pool
+                except Exception:
+                    pass
+        if not refinement_pool or not getattr(refinement_pool, 'keys', []):
+            return None
+
+        state = {
+            'multi_key_mode': self._multi_key_mode,
+            'had_instance_pool': '_api_key_pool' in self.__dict__,
+            'instance_pool': self.__dict__.get('_api_key_pool', None),
+            'active_key_pool_scope': getattr(self, '_active_key_pool_scope', None),
+            'active_key_pool_expected_pool': getattr(self, '_active_key_pool_expected_pool', None),
+        }
+        self._multi_key_mode = True
+        self._api_key_pool = refinement_pool
+        self._active_key_pool_scope = 'GlossaryRefinementKey'
+        self._active_key_pool_expected_pool = refinement_pool
+        try:
+            refinement_pool.release_thread_assignment()
+        except Exception:
+            pass
+        if not getattr(self.__class__, '_glossary_refinement_pool_logged', False):
+            print(f"[REFINEMENT KEYS] Using refinement key pool ({len(refinement_pool.keys)} keys)")
+            self.__class__._glossary_refinement_pool_logged = True
+        return state
+
+    def restore_refinement_key_pool_for_batch(self, state):
+        """Restore key-pool binding changed by activate_refinement_key_pool_for_batch."""
+        if not state:
+            return
+        self._multi_key_mode = state.get('multi_key_mode')
+        if state.get('had_instance_pool'):
+            self._api_key_pool = state.get('instance_pool')
+        elif '_api_key_pool' in self.__dict__:
+            del self._api_key_pool
+        if state.get('active_key_pool_scope') is not None:
+            self._active_key_pool_scope = state.get('active_key_pool_scope')
+        elif hasattr(self, '_active_key_pool_scope'):
+            delattr(self, '_active_key_pool_scope')
+        if state.get('active_key_pool_expected_pool') is not None:
+            self._active_key_pool_expected_pool = state.get('active_key_pool_expected_pool')
+        elif hasattr(self, '_active_key_pool_expected_pool'):
+            delattr(self, '_active_key_pool_expected_pool')
+
     def _apply_truncation_retry_key_pool_override(self):
         """Temporarily route a RETRY_TRUNCATED attempt through the truncation-retry pool."""
         try:
@@ -6483,26 +6540,29 @@ class UnifiedClient:
                                 except Exception:
                                     pass
 
-                        with self.__class__._in_memory_glossary_refinement_keys_lock:
-                            rk_list = self.__class__._in_memory_glossary_refinement_keys or []
-                        _dedicated_pool_state = self._apply_dedicated_key_pool_override(
-                            refinement_pool,
-                            rk_list,
-                            'GlossaryRefinement',
-                            'GlossaryRefinementKey',
-                        )
-                        if not _dedicated_pool_state:
-                            print("[REFINEMENT KEYS] Enabled, but no available refinement keys; falling back to the next eligible pool")
-                        if _dedicated_pool_state:
+                        if refinement_pool and getattr(self, '_active_key_pool_expected_pool', None) is refinement_pool:
                             _glossary_refinement_overridden = True
-                            _original_api_key = _dedicated_pool_state['api_key']
-                            _original_model = _dedicated_pool_state['model']
-                            _original_multi_key_mode = _dedicated_pool_state['multi_key_mode']
-                            _had_instance_pool = _dedicated_pool_state['had_instance_pool']
-                            _original_instance_pool = _dedicated_pool_state['instance_pool']
-                            if not getattr(self.__class__, '_glossary_refinement_pool_logged', False):
-                                print(f"[REFINEMENT KEYS] Using refinement key pool ({len(refinement_pool.keys)} keys)")
-                                self.__class__._glossary_refinement_pool_logged = True
+                        else:
+                            with self.__class__._in_memory_glossary_refinement_keys_lock:
+                                rk_list = self.__class__._in_memory_glossary_refinement_keys or []
+                            _dedicated_pool_state = self._apply_dedicated_key_pool_override(
+                                refinement_pool,
+                                rk_list,
+                                'GlossaryRefinement',
+                                'GlossaryRefinementKey',
+                            )
+                            if not _dedicated_pool_state:
+                                print("[REFINEMENT KEYS] Enabled, but no available refinement keys; falling back to the next eligible pool")
+                            if _dedicated_pool_state:
+                                _glossary_refinement_overridden = True
+                                _original_api_key = _dedicated_pool_state['api_key']
+                                _original_model = _dedicated_pool_state['model']
+                                _original_multi_key_mode = _dedicated_pool_state['multi_key_mode']
+                                _had_instance_pool = _dedicated_pool_state['had_instance_pool']
+                                _original_instance_pool = _dedicated_pool_state['instance_pool']
+                                if not getattr(self.__class__, '_glossary_refinement_pool_logged', False):
+                                    print(f"[REFINEMENT KEYS] Using refinement key pool ({len(refinement_pool.keys)} keys)")
+                                    self.__class__._glossary_refinement_pool_logged = True
                 except Exception as e:
                     if isinstance(e, UnifiedClientError):
                         raise

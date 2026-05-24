@@ -6225,6 +6225,11 @@ class RetranslationMixin:
         if status in ('completed_empty', 'completed_image_only'):
             status = 'completed'
 
+        ref_status = str(entry.get('refinement_status') or '').lower().strip()
+        tts_status = str(entry.get('tts_status') or '').lower().strip()
+        if status == 'in_progress' and (ref_status == 'in_progress' or tts_status == 'in_progress'):
+            return 'in_progress'
+
         if status == 'in_progress' and data and data.get('output_dir'):
             previous_status = str(entry.get('previous_status') or '').lower().strip()
             previous_entry = entry.get('previous_progress_entry')
@@ -6244,7 +6249,7 @@ class RetranslationMixin:
         if status in ('failed', 'qa_failed', 'in_progress', 'pending', 'merged', 'not_translated'):
             return status
         if mode == 'refinement':
-            ref_status = str(entry.get('refinement_status') or 'not_refined').lower().strip()
+            ref_status = ref_status or 'not_refined'
             if ref_status in ('failed', 'error'):
                 return 'failed'
             if ref_status == 'in_progress':
@@ -6252,7 +6257,7 @@ class RetranslationMixin:
             if ref_status not in ('refined', 'completed'):
                 return 'not_refined'
         if mode == 'audio':
-            tts_status = str(entry.get('tts_status') or 'no_tts').lower().strip()
+            tts_status = tts_status or 'no_tts'
             if tts_status in ('failed', 'error'):
                 return 'failed'
             if tts_status == 'in_progress':
