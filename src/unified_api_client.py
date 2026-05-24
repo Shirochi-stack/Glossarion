@@ -16076,7 +16076,7 @@ class UnifiedClient:
                 summary = (
                     os.getenv('AUTHGPT_REASONING_SUMMARY')
                     or os.getenv('GPT_REASONING_SUMMARY')
-                    or 'auto'
+                    or 'detailed'
                 )
                 summary = str(summary).strip().lower()
                 if summary in ('auto', 'concise', 'detailed'):

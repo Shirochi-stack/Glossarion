@@ -950,6 +950,8 @@ def _flush_thinking_display_buf(state: Dict, _log, force: bool = False) -> None:
         for line in text.splitlines():
             if line.strip():
                 safe_line = line.replace('\x1f', '\\x1F')
+                if safe_line.strip().startswith("**"):
+                    _log("")
                 _log(f"    {safe_line}")
 
     # AuthGPT often sends markdown headings with no preceding newline after
