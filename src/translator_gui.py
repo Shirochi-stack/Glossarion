@@ -8112,6 +8112,7 @@ Recent translations to summarize:
         history_limit_layout.addWidget(self.rolling_summary_retain_edit)
 
         history_limit_layout.addStretch()
+        self.context_options_container = history_limit_container
         self.frame.addWidget(history_limit_container, 4, 2, 1, 2, Qt.AlignLeft)
         
         self.translation_history_rolling_var = True
@@ -8131,6 +8132,7 @@ Recent translations to summarize:
         self.trans_temp.setMaximumWidth(60)
         temp_layout.addWidget(self.trans_temp)
         temp_layout.addStretch()
+        self.temp_container = temp_container
         self.frame.addWidget(temp_container, 6, 2, 1, 2, Qt.AlignLeft)
         
         # Batch Translation (row 7) with spinning icon
@@ -8177,6 +8179,7 @@ Recent translations to summarize:
         batch_layout.addWidget(self.batch_checkbox)
         batch_layout.addStretch()
         
+        self.batch_container = batch_container
         self.frame.addWidget(batch_container, 7, 2, Qt.AlignLeft)
         
         # Container for batch size + auto glossary dropdown side by side
@@ -9026,6 +9029,8 @@ Recent translations to summarize:
         batch_right_layout.addStretch()
         
         
+        self.auto_glossary_row_container = auto_glossary_row_container
+        self.batch_right_container = batch_right_container
         self.frame.addWidget(auto_glossary_row_container, 5, 2, 1, 2, Qt.AlignLeft)
         self.frame.addWidget(batch_right_container, 7, 3, Qt.AlignLeft)
         self.frame.addWidget(self._gloss_status_row, 5, 4, Qt.AlignRight)
@@ -9140,6 +9145,7 @@ Recent translations to summarize:
         is_contextual = mode == 'contextual_history'
         is_summary = mode in ('rolling_summary_replace', 'rolling_summary_append')
         is_summary_append = mode == 'rolling_summary_append'
+        has_context_options = is_contextual or is_summary
 
         self.contextual_var = is_contextual
         self.rolling_summary_var = is_summary
@@ -9152,6 +9158,8 @@ Recent translations to summarize:
 
         if hasattr(self, 'contextual_warning_label'):
             self.contextual_warning_label.setVisible(is_contextual)
+        if hasattr(self, 'context_options_container'):
+            self.context_options_container.setVisible(has_context_options)
         if hasattr(self, 'trans_history_label'):
             self.trans_history_label.setVisible(is_contextual)
         if hasattr(self, 'trans_history'):
@@ -9169,6 +9177,22 @@ Recent translations to summarize:
         ):
             if hasattr(self, attr):
                 getattr(self, attr).setVisible(is_summary_append)
+
+        if hasattr(self, 'frame'):
+            row_shift = 0 if has_context_options else -1
+            placements = (
+                ('auto_glossary_row_container', 5 + row_shift, 2, 1, 2, Qt.AlignLeft),
+                ('temp_container', 6 + row_shift, 2, 1, 2, Qt.AlignLeft),
+                ('batch_container', 7 + row_shift, 2, 1, 1, Qt.AlignLeft),
+                ('batch_right_container', 7 + row_shift, 3, 1, 1, Qt.AlignLeft),
+            )
+            for attr, row, col, row_span, col_span, alignment in placements:
+                if hasattr(self, attr):
+                    self.frame.addWidget(getattr(self, attr), row, col, row_span, col_span, alignment)
+            if hasattr(self, 'library_btn'):
+                self.frame.addWidget(self.library_btn, 6 + row_shift, 4)
+            if hasattr(self, '_gloss_status_row'):
+                self.frame.addWidget(self._gloss_status_row, 5 + row_shift, 4, Qt.AlignRight)
 
         self.translation_history_rolling_var = True
     
