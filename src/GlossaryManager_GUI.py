@@ -2534,7 +2534,7 @@ class GlossaryManagerMixin:
         self.glossary_history_rolling_var = True
         self.config['glossary_history_rolling'] = True
         
-        # Row 2: Output Token Limit and Request Merging checkbox
+        # Row 2: Output Token Limit
         # Default changed to -1 (auto/inherit) instead of 65536
         self.glossary_output_token_limit_entry = QLineEdit(str(self.config.get('glossary_max_output_tokens', -1)))
         self.glossary_output_token_limit_entry.setFixedWidth(80)
@@ -2566,7 +2566,7 @@ class GlossaryManagerMixin:
         self.glossary_request_merging_checkbox.setToolTip(
             "Merge multiple small glossary requests before sending.\nReduces API calls; controlled by Merge Count below."
         )
-        settings_grid.addWidget(self.glossary_request_merging_checkbox, 2, 1)
+        settings_grid.addWidget(self.glossary_request_merging_checkbox, 1, 1)
 
         # Row 3: Chapter split toggle (output-limit safe chunking)
         if not hasattr(self, 'glossary_enable_chapter_split_checkbox'):
@@ -2622,13 +2622,13 @@ class GlossaryManagerMixin:
         # Initial update
         _update_glossary_compression()
         
-        # Row 3: Empty and Merge Count
+        # Row 2: Merge Count
         self.glossary_request_merge_count_entry = QLineEdit(str(self.config.get('glossary_request_merge_count', 10)))
         self.glossary_request_merge_count_entry.setFixedWidth(80)
         settings_grid.addWidget(_m_pair(
             "Merge Count:", self.glossary_request_merge_count_entry,
             tooltip="When request merging is on, combine this many chunks\nbefore one glossary API call."
-        ), 3, 1)
+        ), 2, 1)
         
         # Shortcut button: Anti Duplicate Parameters (glossary-specific)
         anti_dup_btn = QPushButton("Anti Duplicate Parameters")
