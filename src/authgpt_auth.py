@@ -1044,6 +1044,20 @@ def _append_reasoning_text(state: Dict, text: str, _log, is_delta: bool = False)
     _append_thinking_display_text(state, delta, _log)
 
 
+def _count_thinking_tokens(text: str, model: Optional[str] = None) -> Optional[int]:
+    if not text:
+        return 0
+    try:
+        import tiktoken
+        try:
+            enc = tiktoken.encoding_for_model(model or "")
+        except Exception:
+            enc = tiktoken.get_encoding("o200k_base")
+        return len(enc.encode(text))
+    except Exception:
+        return None
+
+
 def _process_sse_line(
     line: str,
     state: Dict,
@@ -1168,7 +1182,12 @@ def _finalize_stream(state: Dict, _log, log_stream: bool, t_start: float) -> Dic
             _flush_thinking_display_buf(state, _log, force=True)
     if state.get("thinking_started"):
         thinking_dur = time.time() - (state.get("thinking_start_ts") or time.time())
-        _log(f"🧠 [authgpt] Thinking complete ({state.get('thinking_chunks', 0)} chunks, {thinking_dur:.1f}s)")
+        thinking_text = "".join(state.get("thinking_text_parts", []))
+        thinking_tokens = _count_thinking_tokens(thinking_text, state.get("model"))
+        if thinking_tokens is None:
+            _log(f"🧠 [authgpt] Thinking tokens used: unavailable ({thinking_dur:.1f}s)")
+        else:
+            _log(f"🧠 [authgpt] Thinking tokens used: {thinking_tokens:,} ({thinking_dur:.1f}s)")
 
     raw_text = "\n".join(state["raw_lines"])
     t_total = time.time() - t_start
@@ -1204,6 +1223,7 @@ def _new_stream_state() -> Dict:
         "pending_event_type": "",
         "event_types_seen": set(),
         "event_types_logged": set(),
+        "model": None,
     }
 
 
@@ -1224,6 +1244,7 @@ def _stream_with_httpx(
 ) -> Dict:
     """Stream SSE using httpx (same stack as the openai Python SDK)."""
     state = _new_stream_state()
+    state["model"] = body.get("model")
     # httpx timeout: connect + read.  When connect_timeout is None the connect
     # timeout falls back to the main ``timeout`` value (no separate limit).
     _timeout = _httpx.Timeout(timeout, connect=connect_timeout)
@@ -1280,6 +1301,7 @@ def _stream_with_requests(
 ) -> Dict:
     """Stream SSE using requests (fallback when httpx is not available)."""
     state = _new_stream_state()
+    state["model"] = body.get("model")
     resp = requests.post(url, json=body, headers=headers, timeout=timeout, stream=True)
 
     if resp.status_code >= 400:
