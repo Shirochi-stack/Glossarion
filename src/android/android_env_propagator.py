@@ -150,7 +150,10 @@ def set_all_env_vars(config):
     # ── Thinking mode ──
     os.environ['ENABLE_GPT_THINKING'] = '1' if _get('enable_gpt_thinking', True) else '0'
     os.environ['GPT_THINKING_EFFORT'] = _get('gpt_thinking_effort', 'medium')
+    os.environ['GPT_EFFORT'] = _get('gpt_effort', _get('gpt_thinking_effort', 'medium'))
     os.environ['OR_THINKING_TOKENS'] = str(_get('or_thinking_tokens', 2000))
+    os.environ['GPT_REASONING_TOKENS'] = str(_get('gpt_reasoning_tokens', _get('or_thinking_tokens', 2000)))
+    os.environ['PASS_THINKING_TO_OPENAI_COMPATIBLE'] = '1' if _get('pass_thinking_all_openai', False) else '0'
     os.environ['ENABLE_GEMINI_THINKING'] = '1' if _get('enable_gemini_thinking', False) else '0'
     os.environ['GEMINI_THINKING_BUDGET'] = str(_get('gemini_thinking_budget', 0))
     os.environ['THINKING_BUDGET'] = str(_get('gemini_thinking_budget', 0))

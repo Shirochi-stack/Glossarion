@@ -14339,6 +14339,10 @@ class UnifiedClient:
             return ""
 
         # --- OpenAI / GPT family ---
+        if model_lower.startswith(('oc/', 'opencode/', 'opencode-go/')):
+            effort = self._get_openai_compatible_reasoning_effort('opencode', model_lower)
+            return f" (reasoning_effort: {effort})" if effort else ""
+
         _openai_prefixes = ('gpt', 'o1', 'o3', 'o4', 'codex', 'chatgpt')
         if any(model_lower.startswith(p) for p in _openai_prefixes):
             if os.getenv('ENABLE_GPT_THINKING', '0') != '1':
@@ -15709,6 +15713,30 @@ class UnifiedClient:
             return f"Glossarion/{APP_VERSION}"
         except Exception:
             return "Glossarion"
+
+    def _get_openai_compatible_reasoning_effort(self, provider: str, effective_model: str = "") -> Optional[str]:
+        """Return GPT-effort reasoning_effort for OpenAI-compatible opt-in routes."""
+        try:
+            if os.getenv('ENABLE_GPT_THINKING', '0') != '1':
+                return None
+            effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower()
+            if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
+                effort = 'medium'
+            if effort == 'none':
+                return None
+
+            provider = (provider or '').strip().lower()
+            pass_all = os.getenv('PASS_THINKING_TO_OPENAI_COMPATIBLE', '0') == '1'
+
+            # OpenCode Go is controlled by the GPT/OpenRouter/NIM effort selector.
+            if provider == 'opencode':
+                return effort
+
+            if pass_all:
+                return effort
+        except Exception:
+            return None
+        return None
 
     def _apply_openai_safety(self, provider: str, disable_safety: bool, payload: dict, headers: dict):
         """Apply safety flags for providers that support them (avoid unsupported params)."""
@@ -20309,6 +20337,22 @@ class UnifiedClient:
                                 
                         except Exception:
                             pass
+
+                    generic_reasoning_effort = self._get_openai_compatible_reasoning_effort(provider, effective_model)
+                    if generic_reasoning_effort:
+                        extra_body.setdefault("reasoning_effort", generic_reasoning_effort)
+                        try:
+                            tls = self._get_thread_local_client()
+                            if not hasattr(tls, 'openai_compatible_reasoning_logged'):
+                                tls.openai_compatible_reasoning_logged = set()
+                            state_key = (str(provider or ''), str(effective_model or ''), str(generic_reasoning_effort))
+                            if state_key not in tls.openai_compatible_reasoning_logged:
+                                tls.openai_compatible_reasoning_logged.add(state_key)
+                                self._debug_log(
+                                    f"🧠 [{provider}] reasoning_effort={generic_reasoning_effort} (model={effective_model})"
+                                )
+                        except Exception:
+                            pass
                     
                     # Add safety parameters for providers that support them
                     # Note: Together AI and Groq don't support the 'moderation' parameter
@@ -22077,6 +22121,10 @@ class UnifiedClient:
                     data['search_domain_filter'] = ['perplexity.ai']
                     data['return_citations'] = True
                     data['search_recency_filter'] = 'month'
+
+                generic_reasoning_effort = self._get_openai_compatible_reasoning_effort(provider, effective_model)
+                if generic_reasoning_effort:
+                    data.setdefault("reasoning_effort", generic_reasoning_effort)
             
             # Apply safety flags
             self._apply_openai_safety(provider, disable_safety, data, headers)

@@ -1119,6 +1119,9 @@ def toggle_gpt_reasoning_controls(self):
             self.gpt_effort_label.setEnabled(enabled)
             color = "white" if enabled else "#808080"
             self.gpt_effort_label.setStyleSheet(f"color: {color};")
+
+        if hasattr(self, 'pass_thinking_all_openai_cb'):
+            self.pass_thinking_all_openai_cb.setEnabled(enabled)
             
         # GPT tokens label
         if hasattr(self, 'gpt_tokens_label'):
@@ -2996,7 +2999,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(sep_stream)
 
     # GPT-5/OpenAI Reasoning Toggle
-    gpt5_title = QLabel("GPT-5 / OpenRouter / NIM Thinking")
+    gpt5_title = QLabel("GPT-5 / OpenRouter / NIM / OpenCode Thinking")
     gpt5_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
     section_v.addWidget(gpt5_title)
     
@@ -3004,7 +3007,7 @@ def _create_response_handling_section(self, parent):
     gpt_h1 = QHBoxLayout(gpt_row1)
     gpt_h1.setContentsMargins(20, 5, 0, 0)
     
-    gpt_enable_cb = self._create_styled_checkbox("Enable GPT / OR / NIM Thinking")
+    gpt_enable_cb = self._create_styled_checkbox("Enable GPT / OR / NIM / OC Thinking")
     try:
         gpt_enable_cb.setChecked(bool(self.enable_gpt_thinking_var))
     except Exception:
@@ -3069,9 +3072,31 @@ def _create_response_handling_section(self, parent):
     gpt_h2.addWidget(self.gpt_tokens_label)
     gpt_h2.addStretch()
     section_v.addWidget(gpt_row2)
+
+    gpt_row3 = QWidget()
+    gpt_h3 = QHBoxLayout(gpt_row3)
+    gpt_h3.setContentsMargins(40, 2, 0, 0)
+    if not hasattr(self, 'pass_thinking_all_openai_var'):
+        self.pass_thinking_all_openai_var = bool(self.config.get('pass_thinking_all_openai', False))
+    self.pass_thinking_all_openai_cb = self._create_styled_checkbox("Pass thinking to all OpenAI compatible models")
+    try:
+        self.pass_thinking_all_openai_cb.setChecked(bool(self.pass_thinking_all_openai_var))
+    except Exception:
+        pass
+    def _on_pass_thinking_all_openai_toggle(checked):
+        try:
+            self.pass_thinking_all_openai_var = bool(checked)
+            self.config['pass_thinking_all_openai'] = self.pass_thinking_all_openai_var
+            os.environ['PASS_THINKING_TO_OPENAI_COMPATIBLE'] = '1' if checked else '0'
+        except Exception:
+            pass
+    self.pass_thinking_all_openai_cb.toggled.connect(_on_pass_thinking_all_openai_toggle)
+    gpt_h3.addWidget(self.pass_thinking_all_openai_cb)
+    gpt_h3.addStretch()
+    section_v.addWidget(gpt_row3)
     
     # Store reference to description label for enable/disable
-    self.gpt_desc_label = QLabel("Controls GPT-5, OpenRouter, DeepSeek V4, NanoGPT, and AuthND NVIDIA Build browser reasoning.\nProvide Tokens to force a max token budget for other models,\n GPT-5 uses Effort (none/low/medium/high/xhigh).\n DeepSeek V4 maps: low/medium/high→high, xhigh→max.\n AuthND: NVIDIA browser route uses Effort where supported.\n NanoGPT: Tokens ≥ 1024 → budget_tokens, otherwise Effort.")
+    self.gpt_desc_label = QLabel("Controls reasoning for GPT-5, OpenRouter, OpenCode, NIM/AuthND, DeepSeek V4, and NanoGPT.\nEffort sets reasoning_effort where supported; Tokens sets a budget where supported.\nDeepSeek V4: xhigh→max. NanoGPT: Tokens ≥ 1024→budget_tokens.")
     self.gpt_desc_label.setStyleSheet("color: gray; font-size: 9pt;")
     self.gpt_desc_label.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(self.gpt_desc_label)
