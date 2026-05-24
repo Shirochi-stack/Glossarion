@@ -14540,6 +14540,11 @@ class UnifiedClient:
                 return f" (reasoning_effort: {'max' if effort == 'xhigh' else 'high'})"
             return f" (thinking enabled, effort: {effort})"
 
+        if model_lower.startswith('authgpt'):
+            reasoning = self._get_authgpt_reasoning_param()
+            effort = str(reasoning.get('effort', 'none') or 'none')
+            return f" (reasoning_effort: {effort})"
+
         # Non-Gemini wrapper-auth prefixes: suppress thinking info entirely.
         _suppress_prefixes = ('authgpt', 'authza', 'authcd', 'antigravity', 'za/')
         if not _is_gemini_wrapper:
@@ -16057,6 +16062,28 @@ class UnifiedClient:
             )
         except Exception:
             return False
+
+    def _get_authgpt_reasoning_param(self) -> dict:
+        """Return the Responses API reasoning object for AuthGPT/Codex OAuth."""
+        try:
+            if os.getenv('ENABLE_GPT_THINKING', '0') != '1':
+                return {"effort": "none"}
+            effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').strip().lower()
+            if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
+                effort = 'medium'
+            reasoning = {"effort": effort}
+            if effort != 'none':
+                summary = (
+                    os.getenv('AUTHGPT_REASONING_SUMMARY')
+                    or os.getenv('GPT_REASONING_SUMMARY')
+                    or 'auto'
+                )
+                summary = str(summary).strip().lower()
+                if summary in ('auto', 'concise', 'detailed'):
+                    reasoning["summary"] = summary
+            return reasoning
+        except Exception:
+            return {"effort": "none"}
 
     def _apply_openai_safety(self, provider: str, disable_safety: bool, payload: dict, headers: dict):
         """Apply safety flags for providers that support them (avoid unsupported params)."""
@@ -23157,6 +23184,26 @@ class UnifiedClient:
                 if _authgpt_reset_cancel is not None:
                     _authgpt_reset_cancel()
 
+                authgpt_reasoning = self._get_authgpt_reasoning_param()
+                try:
+                    tls = self._get_thread_local_client()
+                    if not hasattr(tls, 'authgpt_reasoning_logged'):
+                        tls.authgpt_reasoning_logged = set()
+                    state_key = (
+                        str(actual_model),
+                        str(authgpt_reasoning.get('effort', 'none')),
+                        str(authgpt_reasoning.get('summary', '')),
+                    )
+                    if state_key not in tls.authgpt_reasoning_logged:
+                        tls.authgpt_reasoning_logged.add(state_key)
+                        _summary = authgpt_reasoning.get('summary')
+                        _summary_msg = f", summary={_summary}" if _summary else ""
+                        self._debug_log(
+                            f"🧠 [authgpt] reasoning_effort={authgpt_reasoning.get('effort', 'none')}{_summary_msg} (model={actual_model})"
+                        )
+                except Exception:
+                    pass
+
                 # Determine connect/read timeout: only apply overrides
                 # when the user has HTTP tuning enabled.
                 _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
@@ -23177,6 +23224,7 @@ class UnifiedClient:
                     timeout=_read_timeout,
                     log_fn=print,
                     connect_timeout=_connect_timeout,
+                    reasoning=authgpt_reasoning,
                 )
 
                 content = result.get("content", "")

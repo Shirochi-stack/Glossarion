@@ -621,6 +621,7 @@ def _build_responses_body(
     model: str,
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
+    reasoning: Optional[Dict[str, Any]] = None,
 ) -> Dict:
     """Build a Codex Responses API request body from standard OpenAI messages.
 
@@ -723,6 +724,9 @@ def _build_responses_body(
     if max_tokens is not None:
         body["max_output_tokens"] = max_tokens
 
+    if reasoning:
+        body["reasoning"] = reasoning
+
     return body
 
 
@@ -806,7 +810,7 @@ def _parse_sse_responses(raw_text: str) -> Dict:
         if event_type == "response.output_text.delta":
             content_parts.append(data.get("delta", ""))
         # Final completed event has the full response
-        elif event_type == "response.completed":
+        elif event_type in ("response.completed", "response.incomplete"):
             resp_obj = data.get("response", data)
             result = _parse_responses_result(resp_obj)
             # The Codex API's completed event often omits the full text
@@ -814,6 +818,8 @@ def _parse_sse_responses(raw_text: str) -> Dict:
             # Fall back to accumulated deltas when content is empty.
             if not result.get("content") and content_parts:
                 result["content"] = "".join(content_parts)
+            if event_type == "response.incomplete" and result.get("finish_reason") == "stop":
+                result["finish_reason"] = "length"
             return result
         elif event_type == "response.failed":
             resp_obj = data.get("response", data)
@@ -858,6 +864,83 @@ def _parse_sse_responses(raw_text: str) -> Dict:
 # SSE stream processing helpers
 # ---------------------------------------------------------------------------
 
+def _collect_reasoning_text(value: Any, force_text: bool = False) -> str:
+    """Extract reasoning summary text from Responses stream payload fragments."""
+    text_keys = {"delta", "text", "summary_text", "reasoning_text"}
+    container_keys = {
+        "summary",
+        "summaries",
+        "content",
+        "reasoning",
+        "reasoning_summary",
+        "reasoning_content",
+        "item",
+        "output_item",
+        "part",
+    }
+
+    def walk(node: Any, allow_text: bool = False) -> List[str]:
+        if node is None:
+            return []
+        if isinstance(node, str):
+            return [node] if allow_text else []
+        if isinstance(node, list):
+            parts: List[str] = []
+            for child in node:
+                parts.extend(walk(child, allow_text))
+            return parts
+        if not isinstance(node, dict):
+            return []
+
+        type_hint = str(node.get("type", "") or "").lower()
+        in_reasoning = allow_text or "reasoning" in type_hint or "summary" in type_hint
+        parts: List[str] = []
+        for key, child in node.items():
+            key_l = str(key).lower()
+            if key_l in text_keys:
+                parts.extend(walk(child, in_reasoning or force_text))
+            elif (
+                key_l in container_keys
+                or "reasoning" in key_l
+                or "summary" in key_l
+            ):
+                parts.extend(walk(child, True))
+        return parts
+
+    return "".join(walk(value, force_text))
+
+
+def _append_reasoning_text(state: Dict, text: str, _log) -> None:
+    if not text:
+        return
+    state["thinking_chunks"] += 1
+    state["thinking_text_parts"].append(str(text))
+    if state["thinking_start_ts"] is None:
+        state["thinking_start_ts"] = time.time()
+
+    if not state["thinking_started"]:
+        state["thinking_started"] = True
+
+    # AuthGPT can emit reasoning-summary chunks interleaved with output-text
+    # chunks. Keep capturing them, but do not print the text into the live
+    # translation stream unless explicitly requested.
+    stream_thinking_text = os.getenv("STREAM_AUTHGPT_THINKING_TEXT", "0").lower() not in ("0", "false")
+    if not stream_thinking_text:
+        return
+
+    state["thinking_log_buf"].append(str(text))
+    combined = "".join(state["thinking_log_buf"])
+    if "\n" in combined:
+        parts = combined.split("\n")
+        for part in parts[:-1]:
+            if part.strip():
+                _log(part.replace('\x1f', '\\x1F'))
+        state["thinking_log_buf"] = [parts[-1]]
+    elif len(combined) > 180:
+        _log(combined.replace('\x1f', '\\x1F'))
+        state["thinking_log_buf"] = []
+
+
 def _process_sse_line(
     line: str,
     state: Dict,
@@ -871,16 +954,35 @@ def _process_sse_line(
     """
     state["raw_lines"].append(line)
 
+    if line.startswith("event: "):
+        state["pending_event_type"] = line[7:].strip()
+        return False
+
     if not state["got_first_data"] and line.startswith("data: "):
         state["got_first_data"] = True
         ttft = time.time() - t_start
-        _log(f"📡 AuthGPT: First token in {ttft:.1f}s, streaming…")
+        _log(f"📡 AuthGPT: First stream event in {ttft:.1f}s, streaming…")
+
+    data = None
+    event_type = ""
+    if line.startswith("data: ") and line[6:] != "[DONE]":
+        try:
+            data = json.loads(line[6:])
+            event_type = str(data.get("type", "") or state.get("pending_event_type", "") or "")
+        except json.JSONDecodeError:
+            data = None
+
+    if data is not None and event_type:
+        state["event_types_seen"].add(event_type)
+        if os.getenv("AUTHGPT_DEBUG_STREAM_EVENTS", "0").lower() not in ("0", "false"):
+            if event_type not in state["event_types_logged"]:
+                state["event_types_logged"].add(event_type)
+                _log(f"🔎 AuthGPT stream event: {event_type}")
 
     # Extract text deltas and display in real-time
-    if line.startswith("data: ") and '"response.output_text.delta"' in line:
+    if data is not None and event_type == "response.output_text.delta":
         try:
-            delta_data = json.loads(line[6:])
-            delta_text = delta_data.get("delta", "")
+            delta_text = data.get("delta", "")
             state["streamed_chars"] += len(delta_text)
             if log_stream and delta_text:
                 log_buf = state["log_buf"]
@@ -900,10 +1002,35 @@ def _process_sse_line(
         except (json.JSONDecodeError, KeyError):
             pass
 
+    # Responses streams may emit reasoning summary/text events before output text.
+    # Capture them separately so thinking does not get mixed into the final answer.
+    if data is not None and "reasoning" in event_type:
+        try:
+            force_text = event_type.endswith(".delta")
+            reasoning_text = _collect_reasoning_text(data, force_text=force_text)
+            if reasoning_text and (force_text or state.get("thinking_chunks", 0) == 0):
+                _append_reasoning_text(state, reasoning_text, _log)
+        except Exception:
+            pass
+    elif data is not None:
+        try:
+            # Some Responses streams carry completed reasoning items under
+            # response.output_item.done instead of a reasoning-specific event.
+            reasoning_text = _collect_reasoning_text(data, force_text=False)
+            if reasoning_text and state.get("thinking_chunks", 0) == 0:
+                _append_reasoning_text(state, reasoning_text, _log)
+        except Exception:
+            pass
+
     # Stop signals
     if line.strip() == "data: [DONE]":
         return True
-    if '"type":"response.completed"' in line or '"type": "response.completed"' in line:
+    if (
+        '"type":"response.completed"' in line
+        or '"type": "response.completed"' in line
+        or '"type":"response.incomplete"' in line
+        or '"type": "response.incomplete"' in line
+    ):
         return True
     return False
 
@@ -914,23 +1041,28 @@ def _finalize_stream(state: Dict, _log, log_stream: bool, t_start: float) -> Dic
         remainder = "".join(state["log_buf"]).strip()
         if remainder:
             _log(remainder.replace('\x1f', '\\x1F'))
+
+    stream_thinking_text = os.getenv("STREAM_AUTHGPT_THINKING_TEXT", "0").lower() not in ("0", "false")
+    if stream_thinking_text and state.get("thinking_log_buf"):
+        remainder = "".join(state["thinking_log_buf"]).strip()
+        if remainder:
+            _log(remainder.replace('\x1f', '\\x1F'))
+        state["thinking_log_buf"] = []
+    if state.get("thinking_started"):
+        thinking_dur = time.time() - (state.get("thinking_start_ts") or time.time())
+        _log(f"🧠 AuthGPT: Thinking captured ({state.get('thinking_chunks', 0)} chunks, {thinking_dur:.1f}s)")
+
     raw_text = "\n".join(state["raw_lines"])
     t_total = time.time() - t_start
     _log(f"📡 AuthGPT: Stream finished in {t_total:.1f}s")
     result = _parse_sse_responses(raw_text)
+    if state.get("thinking_chunks", 0) > 0:
+        result["thinking_chunks"] = state.get("thinking_chunks", 0)
+        result["thinking_text"] = "".join(state.get("thinking_text_parts", []))
 
     content = result.get("content", "")
     if not content:
-        event_types = []
-        for rl in state["raw_lines"][:50]:
-            if rl.startswith("data: ") and rl[6:] != "[DONE]":
-                try:
-                    evt = json.loads(rl[6:])
-                    t = evt.get("type", "(no type)")
-                    if t not in event_types:
-                        event_types.append(t)
-                except Exception:
-                    pass
+        event_types = sorted(state.get("event_types_seen", []))
         _log(f"⚠️ AuthGPT: Empty content after parsing. Event types seen: {event_types}")
     return result
 
@@ -941,6 +1073,14 @@ def _new_stream_state() -> Dict:
         "got_first_data": False,
         "streamed_chars": 0,
         "log_buf": [],
+        "thinking_started": False,
+        "thinking_start_ts": None,
+        "thinking_chunks": 0,
+        "thinking_log_buf": [],
+        "thinking_text_parts": [],
+        "pending_event_type": "",
+        "event_types_seen": set(),
+        "event_types_logged": set(),
     }
 
 
@@ -1073,6 +1213,7 @@ def send_chat_completion(
     base_url: Optional[str] = None,
     log_fn: Optional[Any] = None,
     connect_timeout: Optional[float] = None,
+    reasoning: Optional[Dict[str, Any]] = None,
 ) -> Dict:
     """Send a chat completion request via the ChatGPT Codex Responses API.
 
@@ -1114,6 +1255,7 @@ def send_chat_completion(
         model=model,
         temperature=temperature,
         max_tokens=max_tokens,
+        reasoning=reasoning,
     )
 
     headers = {
@@ -1124,6 +1266,15 @@ def send_chat_completion(
 
     _log = log_fn or print
     logger.info("AuthGPT: POST %s  model=%s", url, model)
+    if max_tokens is not None:
+        _log(f"📏 AuthGPT max_output_tokens={max_tokens}")
+    if reasoning:
+        effort = reasoning.get("effort", "none")
+        summary = reasoning.get("summary") or reasoning.get("generate_summary")
+        if summary:
+            _log(f"🧠 AuthGPT reasoning payload: effort={effort}, summary={summary}")
+        else:
+            _log(f"🧠 AuthGPT reasoning payload: effort={effort}")
 
     # AuthGPT always streams (the API requires it), so streaming log is on
     # by default.  During batch translation, silence it unless the user
