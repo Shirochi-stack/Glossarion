@@ -9135,6 +9135,76 @@ Recent translations to summarize:
         """Compatibility shim for older callers; the combo is now authoritative."""
         self._on_context_mode_changed()
 
+    def _set_batching_mode(self, mode):
+        """Update batching mode state and any visible radio controls."""
+        mode = str(mode or 'direct').strip().lower()
+        if mode not in ('direct', 'conservative', 'aggressive'):
+            mode = 'direct'
+        self.batch_mode_var = mode
+        self.config['batching_mode'] = mode
+
+        radio_map = (
+            ('batch_conservative_radio', mode == 'conservative'),
+            ('batch_direct_radio', mode == 'direct'),
+            ('batch_no_batching_radio', mode == 'aggressive'),
+        )
+        for attr, checked in radio_map:
+            if not hasattr(self, attr):
+                continue
+            radio = getattr(self, attr)
+            try:
+                radio.blockSignals(True)
+                radio.setChecked(checked)
+                radio.blockSignals(False)
+            except Exception:
+                pass
+
+    def _enforce_context_batching_mode(self):
+        """Context modes need deterministic batching; preserve no-batching for glossary extraction."""
+        mode = getattr(self, 'context_mode_var', None) or self._context_mode_from_flags()
+        requires_batched_mode = mode in (
+            'contextual_history',
+            'rolling_summary_replace',
+            'rolling_summary_append',
+        )
+        current = str(getattr(self, 'batch_mode_var', 'aggressive') or 'aggressive').strip().lower()
+
+        if requires_batched_mode:
+            if current == 'aggressive':
+                self._context_forced_batch_mode_source = 'aggressive'
+                self._set_batching_mode('direct')
+            return
+
+        if (
+            getattr(self, '_context_forced_batch_mode_source', None) == 'aggressive'
+            and current == 'direct'
+        ):
+            self._set_batching_mode('aggressive')
+        self._context_forced_batch_mode_source = None
+
+    def _translation_batching_mode_for_env(self):
+        """Return the effective batching mode for main translation subprocesses."""
+        mode = str(getattr(self, 'batch_mode_var', 'aggressive') or 'aggressive').strip().lower()
+        if mode not in ('direct', 'conservative', 'aggressive'):
+            mode = 'direct'
+        context_mode = getattr(self, 'context_mode_var', None) or self._context_mode_from_flags()
+        if context_mode != 'off' and mode == 'aggressive':
+            return 'direct'
+        return mode
+
+    def _glossary_batching_mode_for_env(self):
+        """Glossary EPUB extraction supports contextual history only; keep preserved no-batching for rolling summary modes."""
+        mode = str(getattr(self, 'batch_mode_var', 'aggressive') or 'aggressive').strip().lower()
+        context_mode = getattr(self, 'context_mode_var', None) or self._context_mode_from_flags()
+        if (
+            context_mode in ('rolling_summary_replace', 'rolling_summary_append')
+            and getattr(self, '_context_forced_batch_mode_source', None) == 'aggressive'
+        ):
+            mode = 'aggressive'
+        if mode not in ('direct', 'conservative', 'aggressive'):
+            mode = 'direct'
+        return mode
+
     def _on_context_mode_changed(self, index=None):
         """Map the Context Mode combo onto the existing runtime config flags."""
         mode = 'off'
@@ -9155,6 +9225,7 @@ Recent translations to summarize:
         self.config['contextual'] = self.contextual_var
         self.config['use_rolling_summary'] = self.rolling_summary_var
         self.config['rolling_summary_mode'] = self.rolling_summary_mode_var
+        self._enforce_context_batching_mode()
 
         if hasattr(self, 'contextual_warning_label'):
             self.contextual_warning_label.setVisible(is_contextual)
@@ -16185,10 +16256,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'QA_AUTO_SEARCH_OUTPUT': '1' if self.config.get('qa_auto_search_output', True) else '0',
             'BATCH_TRANSLATION': "1" if self.batch_translation_var else "0",
             'BATCH_SIZE': str(self.batch_size_var),
-            'BATCHING_MODE': str(getattr(self, 'batch_mode_var', 'aggressive')),
+            'BATCHING_MODE': self._translation_batching_mode_for_env(),
             'BATCH_GROUP_SIZE': str(getattr(self, 'batch_group_size_var', '3')),
             # Backward compatibility for older scripts expecting CONSERVATIVE_BATCHING
-            'CONSERVATIVE_BATCHING': "1" if str(getattr(self, 'batch_mode_var', 'direct')) == 'conservative' else "0",
+            'CONSERVATIVE_BATCHING': "1" if self._translation_batching_mode_for_env() == 'conservative' else "0",
             'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var else "0",
             'TRANSLATION_HISTORY_ROLLING': "1",
             'USE_GEMINI_OPENAI_ENDPOINT': '1' if self.use_gemini_openai_endpoint_var else '0',
@@ -17640,6 +17711,8 @@ Important rules:
                 else:
                     resolved_glossary_tokens = int(glossary_token_cfg)
                 
+                glossary_batching_mode = self._glossary_batching_mode_for_env()
+
                 env_updates = {
                     'GLOSSARY_TEMPERATURE': str(self.config.get('manual_glossary_temperature', 0.1)),
                     'GLOSSARY_CONTEXT_LIMIT': str(self.config.get('manual_context_limit', 2)),
@@ -17651,9 +17724,9 @@ Important rules:
                     'GLOSSARY_MAX_OUTPUT_TOKENS': str(resolved_glossary_tokens),
                     'BATCH_TRANSLATION': "1" if self.batch_translation_var else "0",
                     'BATCH_SIZE': str(self.batch_size_var),
-                    'BATCHING_MODE': str(getattr(self, 'batch_mode_var', 'aggressive')),
+                    'BATCHING_MODE': glossary_batching_mode,
                     'BATCH_GROUP_SIZE': str(getattr(self, 'batch_group_size_var', '3')),
-                    'CONSERVATIVE_BATCHING': "1" if str(getattr(self, 'batch_mode_var', 'direct')) == 'conservative' else "0",
+                    'CONSERVATIVE_BATCHING': "1" if glossary_batching_mode == 'conservative' else "0",
                     'GLOSSARY_SYSTEM_PROMPT': self.manual_glossary_prompt,
                     'CHAPTER_RANGE': self.chapter_range_entry.text().strip(),
                     'USE_SPINE_ORDER': '1' if (hasattr(self, 'use_spine_order_checkbox') and self.use_spine_order_checkbox.isChecked()) else '0',

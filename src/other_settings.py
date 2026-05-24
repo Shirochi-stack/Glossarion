@@ -9289,6 +9289,9 @@ def _create_processing_options_section(self, parent):
     conservative_rb = QRadioButton("Conservative batching")
     direct_rb = QRadioButton("Direct batching")
     aggressive_rb = QRadioButton("No batching")
+    self.batch_conservative_radio = conservative_rb
+    self.batch_direct_radio = direct_rb
+    self.batch_no_batching_radio = aggressive_rb
 
     batch_group.addButton(conservative_rb)
     batch_group.addButton(direct_rb)
@@ -9312,6 +9315,10 @@ def _create_processing_options_section(self, parent):
     def _set_mode(mode):
         try:
             self.batch_mode_var = mode
+            if mode != 'aggressive' and hasattr(self, '_context_forced_batch_mode_source'):
+                self._context_forced_batch_mode_source = None
+            if hasattr(self, '_enforce_context_batching_mode'):
+                self._enforce_context_batching_mode()
         except Exception:
             pass
 
