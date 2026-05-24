@@ -6002,6 +6002,12 @@ Recent translations to summarize:
                 height: 16px;
                 border: none;
             }}
+            QComboBox::down-arrow:disabled {{
+                image: url({model_icon_path});
+                width: 16px;
+                height: 16px;
+                border: none;
+            }}
             QComboBox::down-arrow:on {{
                 top: 1px;
             }}
@@ -6298,6 +6304,12 @@ Recent translations to summarize:
                 border-left: 1px solid #4a5568;
             }}
             QComboBox::down-arrow {{
+                image: url({profile_icon_path});
+                width: 16px;
+                height: 16px;
+                border: none;
+            }}
+            QComboBox::down-arrow:disabled {{
                 image: url({profile_icon_path});
                 width: 16px;
                 height: 16px;
@@ -7998,6 +8010,12 @@ Recent translations to summarize:
                 border-left: 1px solid #4a5568;
             }}
             QComboBox::down-arrow {{
+                image: url({context_icon_path});
+                width: 16px;
+                height: 16px;
+                border: none;
+            }}
+            QComboBox::down-arrow:disabled {{
                 image: url({context_icon_path});
                 width: 16px;
                 height: 16px;

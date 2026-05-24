@@ -541,6 +541,12 @@ def _add_combobox_arrow(self, combobox):
             height: 16px;
             border: none;
         }}
+        QComboBox::down-arrow:disabled {{
+            image: url({icon_path});
+            width: 16px;
+            height: 16px;
+            border: none;
+        }}
         QComboBox::down-arrow:on {{
             top: 1px;
         }}
@@ -1364,6 +1370,12 @@ def open_other_settings(self, *args, show=True):
             height: 16px;
             border: none;
         }
+        QComboBox::down-arrow:disabled {
+            image: url('""" + combo_arrow_path + """');
+            width: 16px;
+            height: 16px;
+            border: none;
+        }
         QComboBox::down-arrow:on {
             top: 1px;
         }
@@ -1394,6 +1406,12 @@ def open_other_settings(self, *args, show=True):
             border-left: 1px solid #4a5568;
         }
         QComboBox::down-arrow {
+            image: url(""" + icon_path.replace('\\', '/') + """);
+            width: 16px;
+            height: 16px;
+            border: none;
+        }
+        QComboBox::down-arrow:disabled {
             image: url(""" + icon_path.replace('\\', '/') + """);
             width: 16px;
             height: 16px;
