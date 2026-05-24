@@ -413,8 +413,8 @@ class APIKeyPool:
                                         del self._keys_in_use[k_idx]
 
                         logger.info(f"[Thread-{thread_name}] Assigned {key_id}")
-                        time.sleep(0.5)  # Brief pause to improve retry responsiveness
                         logger.debug("💤 Pausing briefly to improve retry responsiveness after key assignment")
+                        time.sleep(0.0001)  # Tiny yield for scheduler fairness without serializing workers
                         return key, key_index, key_id
 
                 attempts += 1
@@ -442,8 +442,8 @@ class APIKeyPool:
                 key_id = f"Key#{best_key_index+1} ({key.model})"
                 logger.warning(f"[Thread-{thread_name}] All keys on cooldown, using {key_id} (cooldown: {min_cooldown:.1f}s)")
                 self._thread_assignments[thread_id] = (best_key_index, time.time())
-                time.sleep(0.5)  # Brief pause to improve retry responsiveness
                 logger.debug("💤 Pausing briefly to improve retry responsiveness after cooldown key selection")
+                time.sleep(0.0001)  # Tiny yield for scheduler fairness without serializing workers
                 return key, best_key_index, key_id
 
             logger.error(f"[Thread-{thread_name}] No keys available at all")
@@ -464,7 +464,7 @@ class APIKeyPool:
                     self._rate_limit_cache.add_rate_limit(key_id, key.cooldown)
 
                     logger.debug(f"Marked key {key_id} with an error code")
-                    time.sleep(0.5)  # Brief pause to improve retry responsiveness
+                    time.sleep(0.0001)  # Tiny yield for scheduler fairness without serializing workers
                     logger.debug("💤 Pausing briefly to improve retry responsiveness after marking key error")
 
     def mark_key_success(self, key_index: int):

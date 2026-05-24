@@ -230,6 +230,7 @@ class _RunIdFilter(logging.Filter):
 
 # Set up logging
 logger = logging.getLogger(__name__)
+logging.getLogger("google_genai._api_client").setLevel(logging.WARNING)
 
 # Global stop indicator used by GUI to interrupt in-flight requests.
 global_stop_flag = False
@@ -5884,6 +5885,140 @@ class UnifiedClient:
             self._restore_dedicated_key_pool_override(state)
             return None
 
+    def _send_with_isolated_dedicated_key(
+        self,
+        pool,
+        key_data_list,
+        label: str,
+        key_prefix: str,
+        messages,
+        temperature=None,
+        max_tokens=None,
+        max_completion_tokens=None,
+        context=None,
+        image_data=None,
+        request_id=None,
+    ):
+        """Send one request through a dedicated pool without mutating this shared client.
+
+        Vision/OCR workers often share a UnifiedClient instance. The older
+        dedicated-pool override swapped self.api_key/self.model for the duration
+        of the HTTP call, which forced a coarse lock around the whole request.
+        This helper selects a pool key, creates an isolated one-shot client for
+        that key, and lets sibling workers proceed in parallel.
+        """
+        if not pool or not getattr(pool, 'keys', []):
+            raise UnifiedClientError(f"{label} key pool has no keys", error_type="no_keys")
+
+        max_attempts = max(1, len(getattr(pool, 'keys', []) or []))
+        last_error = None
+        for _attempt in range(max_attempts):
+            if self._is_stop_requested():
+                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+            try:
+                key_info = pool.get_key_for_thread(
+                    force_rotation=True,
+                    rotation_frequency=getattr(self, '_rotation_frequency', 1),
+                ) if hasattr(pool, 'get_key_for_thread') else None
+            except Exception as exc:
+                raise UnifiedClientError(f"{label} key pool selection failed: {exc}", error_type="no_keys")
+            if not key_info:
+                raise UnifiedClientError(f"{label} key pool has no available keys", error_type="no_keys")
+
+            key_entry, key_idx = key_info[0], key_info[1]
+            key_data = None
+            try:
+                if key_idx < len(key_data_list or []):
+                    key_data = key_data_list[key_idx]
+            except Exception:
+                key_data = None
+
+            import copy as _copy
+            temp = _copy.copy(self)
+            temp._thread_local = threading.local()
+            temp._sequential_send_lock = threading.Lock()
+            temp._dedicated_override_lock = threading.RLock()
+            temp._thread_submission_lock = threading.Lock()
+            temp._last_thread_submission_time = 0
+            temp._thread_submission_count = 0
+            if hasattr(temp, '_next_allowed_send_ts'):
+                delattr(temp, '_next_allowed_send_ts')
+            temp._thread_last_payload_paths = {}
+            temp._image_thread_dir_cache = {}
+            temp._payload_context_thread_dir_cache = {}
+            temp._multi_key_mode = False
+            temp._force_image_output_mode = getattr(self, '_force_image_output_mode', False)
+            temp._forced_image_output_resolution = getattr(self, '_forced_image_output_resolution', None)
+            temp._suppress_custom_image_edit_endpoint = getattr(self, '_suppress_custom_image_edit_endpoint', False)
+            temp._disable_internal_retry = getattr(self, '_disable_internal_retry', False)
+            temp.context = context or getattr(self, 'context', None)
+            temp.key_identifier = f"{key_prefix}#{key_idx + 1} ({getattr(key_entry, 'model', '')})"
+            temp.current_key_index = key_idx
+            temp.api_key = getattr(key_entry, 'api_key', None)
+            temp.model = getattr(key_entry, 'model', None)
+
+            tls = temp._get_thread_local_client()
+            runtime_overrides = temp._apply_key_runtime_overrides(key_entry=key_entry, key_data=key_data, tls=tls)
+            if not (runtime_overrides or {}).get('api_call_delay'):
+                tls.api_call_delay = 0.0
+                tls.active_api_delay_override = 0.0
+                temp._per_key_api_delay = 0.0
+            tls.api_key = temp.api_key
+            tls.model = temp.model
+            tls.key_index = key_idx
+            tls.key_identifier = temp.key_identifier
+            tls.initialized = True
+            tls.last_rotation = time.time()
+            tls.request_count = 0
+
+            try:
+                if getattr(temp, 'current_key_use_individual_endpoint', False) and getattr(temp, 'current_key_azure_endpoint', None):
+                    temp.client_type = 'openai'
+                    temp._apply_individual_key_endpoint_if_needed()
+                else:
+                    temp._setup_client()
+
+                result = temp._send_internal(
+                    messages,
+                    temperature,
+                    max_tokens,
+                    max_completion_tokens,
+                    context,
+                    retry_reason=None,
+                    request_id=request_id,
+                    image_data=image_data,
+                )
+                try:
+                    pool.mark_key_success(key_idx)
+                except Exception:
+                    pass
+                try:
+                    shared_tls = self._get_thread_local_client()
+                    shared_tls.last_actual_request_model = getattr(temp, 'last_actual_request_model', temp.model)
+                    shared_tls.last_actual_key_identifier = temp.key_identifier
+                    shared_tls.last_unified_response = temp.get_last_unified_response()
+                except Exception:
+                    pass
+                return result
+            except Exception as exc:
+                last_error = exc
+                try:
+                    pool.mark_key_error(key_idx, 429 if self._is_rate_limit_error(exc) else None)
+                except Exception:
+                    pass
+                if not self._is_rate_limit_error(exc):
+                    raise
+            finally:
+                try:
+                    pool.release_thread_assignment()
+                except Exception:
+                    pass
+
+        if last_error:
+            raise last_error
+        raise UnifiedClientError(f"{label} key pool has no available keys", error_type="no_keys")
+
     def activate_refinement_key_pool_for_batch(self):
         """Bind the refinement key pool for a whole batch without per-request override locking."""
         if os.getenv('USE_GLOSSARY_REFINEMENT_KEYS', '0') != '1':
@@ -6070,6 +6205,20 @@ class UnifiedClient:
             ):
                 context = inherited_context
         batch_mode = os.getenv("BATCH_TRANSLATION", "0") == "1"
+        context_norm = str(context or '').strip().lower()
+        _vision_parallel_contexts = {
+            'truncation',
+            'image_scan',
+            'image_ocr',
+            'vision_ocr',
+            'manga_ocr',
+            'image_translation',
+        }
+        _vision_parallel_request = (
+            context_norm in _vision_parallel_contexts
+            and (os.getenv('USE_VISION_KEYS', '0') == '1' or os.getenv('USE_QA_SCAN_KEYS', '0') == '1')
+        )
+        _serialize_send = (not batch_mode) and (not _vision_parallel_request)
         watchdog_started = False
         watchdog_context = context or ('image_translation' if image_data else 'translation')
         # Initialize override flags BEFORE try block so the finally clause
@@ -6117,13 +6266,14 @@ class UnifiedClient:
                         delattr(tls, 'skip_glossary_refinement_pool_for_request')
                     except Exception:
                         pass
-        if not batch_mode:
+        if _serialize_send:
             self._sequential_send_lock.acquire()
         try:
             self.reset_cleanup_state()
             # Pre-stagger log so users see what's being sent before delay
             self._log_pre_stagger(messages, watchdog_context)
-            self._apply_thread_submission_delay()
+            if not _vision_parallel_request:
+                self._apply_thread_submission_delay()
             request_id = str(uuid.uuid4())[:8]
             # Capture chapter/chunk context for watchdog tooltip
             chapter = None
@@ -6182,7 +6332,6 @@ class UnifiedClient:
             # use that pool for full multi-key rotation (mirrors main multi-key mode).
 
             # METADATA KEY OVERRIDE: book title, metadata, TOC, and header translation.
-            context_norm = str(context or '').strip().lower()
             if context_norm in ('book_title', 'metadata', 'batch_toc_translation', 'batch_header_translation') and os.getenv('USE_METADATA_KEYS', '0') == '1':
                 try:
                     metadata_keys = json.loads(os.getenv('METADATA_API_KEYS', '[]') or '[]')
@@ -6334,6 +6483,23 @@ class UnifiedClient:
                             except Exception:
                                 qk_list = []
                             try:
+                                if _vision_parallel_request:
+                                    if not getattr(self.__class__, '_qa_scan_pool_logged', False):
+                                        print(f"[VISION KEYS] 🔑 Using Vision key pool ({len(qa_scan_pool.keys)} keys)")
+                                        self.__class__._qa_scan_pool_logged = True
+                                    return self._send_with_isolated_dedicated_key(
+                                        qa_scan_pool,
+                                        qk_list,
+                                        'Vision',
+                                        'VisionKey',
+                                        messages,
+                                        temperature,
+                                        max_tokens,
+                                        max_completion_tokens,
+                                        context,
+                                        image_data=image_data,
+                                        request_id=request_id,
+                                    )
                                 pool_state = self._apply_dedicated_key_pool_override(
                                     qa_scan_pool,
                                     qk_list,
@@ -6870,7 +7036,7 @@ class UnifiedClient:
                     self._dedicated_override_lock.release()
                 except Exception:
                     pass
-            if not batch_mode:
+            if _serialize_send:
                 self._sequential_send_lock.release()
         
     def _get_thread_assigned_key(self) -> Optional[int]:
