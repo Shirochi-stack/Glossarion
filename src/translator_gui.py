@@ -9189,8 +9189,6 @@ Recent translations to summarize:
             for attr, row, col, row_span, col_span, alignment in placements:
                 if hasattr(self, attr):
                     self.frame.addWidget(getattr(self, attr), row, col, row_span, col_span, alignment)
-            if hasattr(self, 'library_btn'):
-                self.frame.addWidget(self.library_btn, 6 + row_shift, 4)
             if hasattr(self, '_gloss_status_row'):
                 self.frame.addWidget(self._gloss_status_row, 5 + row_shift, 4, Qt.AlignRight)
 
