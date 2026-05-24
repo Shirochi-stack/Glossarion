@@ -9699,30 +9699,12 @@ def _set_output_mode(self, mode: str):
         pass
 
 def _enforce_image_output_dependency(self):
-    """Enforce output mode based on model type and image translation state.
-
-    * Video-gen models  → auto-switch to 'video'
-    * Image-gen models  → auto-switch to 'image'
-    * Otherwise, disable image/video output when image translation is off
-      (unless using a special generative model).
-    """
+    """Keep output mode as an explicit user selection."""
     try:
         model = str(getattr(self, 'model_var', ''))
         model_lower = model.lower()
         current_mode = getattr(self, 'config', {}).get('output_mode', 'text')
         if current_mode in ('audio', 'refinement'):
-            return
-
-        # Auto-enable video mode for video-gen models
-        if self._model_is_video_gen(model):
-            if current_mode != 'video':
-                self._set_output_mode('video')
-            return
-
-        # Auto-enable image mode for image-gen models
-        if self._model_is_image_gen(model):
-            if current_mode != 'image':
-                self._set_output_mode('image')
             return
 
         allow_without_translation = 'gemini-3-pro-image-preview' in model_lower
