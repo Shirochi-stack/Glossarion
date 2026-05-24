@@ -508,8 +508,18 @@ class TranslationConfig:
         try:
             import large_env
             self.SYSTEM_PROMPT = (large_env.get_env("SYSTEM_PROMPT", "") or "").strip()
+            self.REFINEMENT_SYSTEM_PROMPT = (large_env.get_env("REFINEMENT_SYSTEM_PROMPT", "") or "").strip()
+            self.REFINEMENT_USER_PROMPT = (large_env.get_env("REFINEMENT_USER_PROMPT", "") or "").strip()
         except Exception:
             self.SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "").strip()
+            self.REFINEMENT_SYSTEM_PROMPT = os.getenv("REFINEMENT_SYSTEM_PROMPT", "").strip()
+            self.REFINEMENT_USER_PROMPT = os.getenv("REFINEMENT_USER_PROMPT", "").strip()
+        if not self.REFINEMENT_SYSTEM_PROMPT:
+            self.REFINEMENT_SYSTEM_PROMPT = (
+                "You are refining an existing English translation. Improve clarity, flow, consistency, "
+                "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
+                "Return only the refined HTML."
+            )
         self.ASSISTANT_PROMPT = os.getenv("ASSISTANT_PROMPT", "").strip()  # Optional assistant prefill
         self.REQUEST_MERGING_ENABLED = os.getenv("REQUEST_MERGING_ENABLED", "0") == "1"
         
@@ -12746,6 +12756,18 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             and os.environ.get("GRACEFUL_STOP") != "1"
         ) or (check_stop() and os.environ.get("GRACEFUL_STOP") != "1")
 
+    def _format_refinement_prompt(prompt, html_content=None):
+        text = str(prompt or "")
+        target_lang = os.getenv("OUTPUT_LANGUAGE", "English")
+        text = text.replace("{target_lang}", target_lang)
+        if html_content is None:
+            return text
+        if "{html}" in text or "{content}" in text:
+            return text.replace("{html}", html_content).replace("{content}", html_content)
+        if text.strip():
+            return f"{text.strip()}\n\nHTML to refine:\n{html_content}"
+        return html_content
+
     def _find_progress_entry_for_output(output_file, actual_num=None):
         if not output_file:
             return None, {}
@@ -12832,14 +12854,24 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 progress_manager.update_refinement_status(idx, actual_num, content_hash, output_file, "in_progress", chapter_obj=chapter)
                 progress_manager.save()
             try:
-                refine_system = (
-                    getattr(config, "SYSTEM_PROMPT", "").strip()
-                    or "You are refining an existing English translation. Improve clarity, flow, consistency, and readability while preserving all HTML structure, tags, images, links, ids, and meaning. Return only the refined HTML."
+                refine_system = _format_refinement_prompt(
+                    getattr(config, "REFINEMENT_SYSTEM_PROMPT", "").strip(),
+                    None
+                ).strip()
+                if not refine_system:
+                    refine_system = "You are refining an existing English translation. Improve clarity, flow, consistency, and readability while preserving all HTML structure, tags, images, links, ids, and meaning. Return only the refined HTML."
+                refine_user = _format_refinement_prompt(
+                    getattr(config, "REFINEMENT_USER_PROMPT", "").strip(),
+                    html_content
                 )
-                messages = [
-                    {"role": "system", "content": refine_system},
-                    {"role": "user", "content": html_content},
-                ]
+                messages = [{"role": "system", "content": refine_system}]
+                refine_assistant = _format_refinement_prompt(
+                    getattr(config, "ASSISTANT_PROMPT", "").strip(),
+                    None
+                ).strip()
+                if refine_assistant:
+                    messages.append({"role": "assistant", "content": refine_assistant})
+                messages.append({"role": "user", "content": refine_user})
                 refined, finish_reason = client.send(messages, temperature=config.TEMP, max_tokens=config.MAX_OUTPUT_TOKENS, context="refinement")
                 if not refined or not str(refined).strip() or finish_reason in ("content_filter", "prohibited_content", "error"):
                     raise RuntimeError(f"Refinement returned no usable HTML (finish_reason={finish_reason})")

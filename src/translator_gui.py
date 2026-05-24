@@ -3325,6 +3325,13 @@ Text to analyze:
         
         # Default assistant prompt (empty by default - user can optionally set this to prefill)
         self.default_assistant_prompt = ""
+
+        self.default_refinement_system_prompt = (
+            "You are refining an existing English translation. Improve clarity, flow, consistency, "
+            "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
+            "Return only the refined HTML."
+        )
+        self.default_refinement_user_prompt = ""
         
         self.default_rolling_summary_user_prompt = """Analyze the recent translation exchanges and create a structured summary for context continuity.
 
@@ -3434,6 +3441,16 @@ Recent translations to summarize:
         self.glossary_refinement_user_prompt = self.config.get(
             'glossary_refinement_user_prompt',
             getattr(self, 'default_glossary_refinement_user_prompt', '')
+        )
+        self.refinement_system_prompt = self.config.get(
+            'refinement_system_prompt',
+            getattr(self, 'default_refinement_system_prompt', '')
+        )
+        if not self.refinement_system_prompt or not str(self.refinement_system_prompt).strip():
+            self.refinement_system_prompt = getattr(self, 'default_refinement_system_prompt', '')
+        self.refinement_user_prompt = self.config.get(
+            'refinement_user_prompt',
+            getattr(self, 'default_refinement_user_prompt', '')
         )
         self.rolling_summary_system_prompt = self.config.get('rolling_summary_system_prompt', self.default_rolling_summary_system_prompt)
         self.rolling_summary_user_prompt = self.config.get('rolling_summary_user_prompt', self.default_rolling_summary_user_prompt)
@@ -4203,6 +4220,101 @@ Recent translations to summarize:
             # No prompt set - use neutral style
             self.assistant_prompt_button.setStyleSheet("background-color: #6c757d; color: white; font-weight: bold;")
             self.assistant_prompt_button.setToolTip("Optional: Set an assistant prefill prompt")
+
+    def _update_refinement_prompt_button_style(self):
+        """Update the refinement prompt button style based on custom prompt fields."""
+        if not hasattr(self, 'refinement_prompt_button'):
+            return
+        default_system = getattr(self, 'default_refinement_system_prompt', '')
+        system_prompt = str(getattr(self, 'refinement_system_prompt', '') or '')
+        user_prompt = str(getattr(self, 'refinement_user_prompt', '') or '')
+        is_custom = (
+            (system_prompt.strip() and system_prompt.strip() != str(default_system).strip())
+            or bool(user_prompt.strip())
+        )
+        if is_custom:
+            self.refinement_prompt_button.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+            self.refinement_prompt_button.setToolTip("Refinement prompt override is active")
+        else:
+            self.refinement_prompt_button.setStyleSheet("background-color: #6c757d; color: white; font-weight: bold;")
+            self.refinement_prompt_button.setToolTip("Edit the prompts used by refinement output mode and multipass refinement")
+
+    def show_refinement_prompt_dialog(self):
+        """Open dialog to edit prompts used by refinement output mode and multipass."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Refinement Prompt")
+        screen = QApplication.primaryScreen().geometry()
+        dialog.setMinimumSize(int(screen.width() * 0.42), int(screen.height() * 0.55))
+
+        layout = QVBoxLayout(dialog)
+        instructions = QLabel(
+            "Edit prompts sent only to refinement requests. "
+            "Use {target_lang} for the selected target language. "
+            "In the user prompt, {html} or {content} can mark where the translated HTML should be inserted. "
+            "The existing Assistant Prompt button is used for optional assistant prefill."
+        )
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+
+        system_label = QLabel("System Prompt:")
+        layout.addWidget(system_label)
+        system_prompt_editor = QTextEdit()
+        system_prompt_editor.setPlainText(
+            str(getattr(self, 'refinement_system_prompt', '') or self.config.get('refinement_system_prompt', '') or getattr(self, 'default_refinement_system_prompt', ''))
+        )
+        layout.addWidget(system_prompt_editor)
+
+        user_label = QLabel("User Prompt (optional):")
+        layout.addWidget(user_label)
+        user_prompt_editor = QTextEdit()
+        user_prompt_editor.setPlaceholderText("Optional extra instruction for this refinement request")
+        user_prompt_editor.setPlainText(
+            str(getattr(self, 'refinement_user_prompt', '') or self.config.get('refinement_user_prompt', ''))
+        )
+        layout.addWidget(user_prompt_editor)
+
+        button_layout = QHBoxLayout()
+
+        def save_prompt():
+            system_prompt = system_prompt_editor.toPlainText().strip() or getattr(self, 'default_refinement_system_prompt', '')
+            user_prompt = user_prompt_editor.toPlainText().strip()
+            self.refinement_system_prompt = system_prompt
+            self.refinement_user_prompt = user_prompt
+            self.config['refinement_system_prompt'] = system_prompt
+            self.config['refinement_user_prompt'] = user_prompt
+            self._update_refinement_prompt_button_style()
+            self.save_config(show_message=False)
+            self.append_log("✅ Refinement prompts updated")
+            dialog.accept()
+
+        def reset_prompt():
+            reply = QMessageBox.question(
+                dialog,
+                "Reset Refinement Prompts",
+                "Reset the refinement system prompt to the default and clear optional user/assistant prompts?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+            system_prompt_editor.setPlainText(getattr(self, 'default_refinement_system_prompt', ''))
+            user_prompt_editor.clear()
+
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(save_prompt)
+        button_layout.addWidget(save_btn)
+
+        reset_btn = QPushButton("Reset to Default")
+        reset_btn.clicked.connect(reset_prompt)
+        button_layout.addWidget(reset_btn)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+        button_layout.addStretch()
+
+        layout.addLayout(button_layout)
+        dialog.exec()
 
     def show_assistant_prompt_dialog(self):
         """Show dialog to edit the optional assistant prompt"""
@@ -8202,6 +8314,12 @@ Recent translations to summarize:
             )
         )
         batch_right_layout.addWidget(self.multipass_checkbox)
+
+        self.refinement_prompt_button = QPushButton("Edit Prompt")
+        self.refinement_prompt_button.setMinimumWidth(90)
+        self.refinement_prompt_button.clicked.connect(self.show_refinement_prompt_dialog)
+        self._update_refinement_prompt_button_style()
+        batch_right_layout.addWidget(self.refinement_prompt_button)
 
         auto_glossary_row_container = QWidget()
         auto_glossary_row_layout = QHBoxLayout(auto_glossary_row_container)
@@ -16235,6 +16353,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'VISION_OCR_KEEP_IMAGES': '1' if _bool_setting(getattr(self, 'vision_ocr_keep_images_var', None), self.config.get('vision_ocr_keep_images', False)) else '0',
             'VISION_OCR_SOURCE_PREPASS': str(getattr(self, 'vision_ocr_source_prepass_var', self.config.get('vision_ocr_source_prepass', 'auto')) or 'auto'),
             'ENABLE_REFINEMENT_OUTPUT_MODE': "1" if output_mode == 'refinement' else "0",
+            'REFINEMENT_SYSTEM_PROMPT': self.config.get('refinement_system_prompt') or getattr(self, 'refinement_system_prompt', getattr(self, 'default_refinement_system_prompt', '')),
+            'REFINEMENT_USER_PROMPT': self.config.get('refinement_user_prompt', getattr(self, 'refinement_user_prompt', '')),
             'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var else "0",
             'WEBNOVEL_MIN_HEIGHT': str(self.webnovel_min_height_var),
@@ -24325,6 +24445,8 @@ Important rules:
                 ('custom_image_edit_endpoint', ['custom_image_edit_endpoint_var'], '', str),
                 ('custom_image_edit_system_prompt', ['custom_image_edit_system_prompt_var'], '', str),
                 ('custom_image_edit_user_prompt', ['custom_image_edit_user_prompt_var'], '', str),
+                ('refinement_system_prompt', ['refinement_system_prompt'], getattr(self, 'default_refinement_system_prompt', ''), str),
+                ('refinement_user_prompt', ['refinement_user_prompt'], '', str),
                 ('inpainter_keys', ['inpainter_keys_var'], [], list),
                 ('rolling_summary_keys', ['rolling_summary_keys_var'], [], list),
                 ('truncation_retry_keys', ['truncation_retry_keys_var'], [], list),
@@ -25491,6 +25613,8 @@ Important rules:
                 ('ENABLE_AUDIO_OUTPUT_MODE', '1' if output_mode == 'audio' else '0'),
                 ('ENABLE_REFINEMENT_OUTPUT_MODE', '1' if output_mode == 'refinement' else '0'),
                 ('MULTIPASS_MODE', '1' if getattr(self, 'multipass_mode_var', self.config.get('multipass_mode', False)) else '0'),
+                ('REFINEMENT_SYSTEM_PROMPT', self.config.get('refinement_system_prompt') or getattr(self, 'refinement_system_prompt', getattr(self, 'default_refinement_system_prompt', ''))),
+                ('REFINEMENT_USER_PROMPT', self.config.get('refinement_user_prompt', getattr(self, 'refinement_user_prompt', ''))),
                 # Normalize to uppercase so validation in unified_api_client accepts 1K/2K/4K
                 ('IMAGE_OUTPUT_RESOLUTION', str(getattr(self, 'image_output_resolution_var', '1K')).upper()),
                 ('NANOGPT_VIDEO_DURATION', str(getattr(self, 'nanogpt_video_duration_var', '60')) + 's'),
