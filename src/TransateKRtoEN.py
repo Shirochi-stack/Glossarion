@@ -2606,6 +2606,25 @@ class ProgressManager:
     def update_refinement_status(self, idx, actual_num, content_hash, output_file, refinement_status, chapter_obj=None, error=None):
         chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
         info = dict(self.prog.get("chapters", {}).get(chapter_key, {}))
+        if not info and output_file:
+            def _norm_out(fname):
+                base = os.path.basename(str(fname or ""))
+                if base.startswith("response_"):
+                    base = base[len("response_"):]
+                return os.path.splitext(base)[0].lower()
+            target_norm = _norm_out(output_file)
+            for existing_key, candidate in self.prog.get("chapters", {}).items():
+                if not isinstance(candidate, dict):
+                    continue
+                candidate_out = candidate.get("output_file")
+                if not candidate_out:
+                    continue
+                same_output = candidate_out == output_file or _norm_out(candidate_out) == target_norm
+                same_num = str(candidate.get("actual_num", candidate.get("chapter_num"))) == str(actual_num)
+                if same_output and same_num:
+                    chapter_key = existing_key
+                    info = dict(candidate)
+                    break
         info.update({
             "actual_num": actual_num,
             "content_hash": content_hash,
@@ -20782,7 +20801,18 @@ def main(log_callback=None, stop_callback=None):
         original_output_mode = config.OUTPUT_MODE
         try:
             config.OUTPUT_MODE = "refinement"
-            _process_refinement_or_tts_mode(config, client, chapters, out, progress_manager, check_stop)
+            multipass_chapters = []
+            skipped_special_refinement = 0
+            for _chapter in chapters:
+                if not translate_special and not is_text_file:
+                    _name = _chapter.get('original_basename') or os.path.basename(_chapter.get('filename', ''))
+                    if _is_configured_special_file(_name):
+                        skipped_special_refinement += 1
+                        continue
+                multipass_chapters.append(_chapter)
+            if skipped_special_refinement:
+                print(f"⏭️ Skipping {skipped_special_refinement} copied-as-is special file(s) during multipass refinement")
+            _process_refinement_or_tts_mode(config, client, multipass_chapters, out, progress_manager, check_stop)
         finally:
             config.OUTPUT_MODE = original_output_mode
             try:
