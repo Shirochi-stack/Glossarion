@@ -8019,7 +8019,7 @@ Recent translations to summarize:
         # Context mode (right side, row 3) - drives contextual history and rolling summary.
         contextual_container = QWidget()
         contextual_layout = QHBoxLayout(contextual_container)
-        contextual_layout.setContentsMargins(0, 0, 0, 0)
+        contextual_layout.setContentsMargins(0, 6, 0, 0)
         contextual_layout.setSpacing(8)
         
         contextual_layout.addWidget(QLabel("Context Mode:"))
