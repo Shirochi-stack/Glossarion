@@ -14606,6 +14606,9 @@ class UnifiedClient:
 
         # --- OpenAI / GPT family ---
         if model_lower.startswith(('oc/', 'opencode/', 'opencode-go/')):
+            model_for_detect = model_lower.split('/', 1)[1] if '/' in model_lower else model_lower
+            if self._opencode_thinking_disabled(model_for_detect):
+                return " (thinking disabled)"
             effort = self._get_openai_compatible_reasoning_effort('opencode', model_lower)
             return f" (reasoning_effort: {effort})" if effort else ""
 
@@ -16026,6 +16029,17 @@ class UnifiedClient:
         except Exception:
             return None
         return None
+
+    @staticmethod
+    def _is_opencode_deepseek_v4_model(effective_model: str = "") -> bool:
+        m = (effective_model or '').strip().lower()
+        return m in {'deepseek-v4-flash', 'deepseek-v4-pro'}
+
+    def _opencode_thinking_disabled(self, effective_model: str = "") -> bool:
+        return (
+            self._is_opencode_deepseek_v4_model(effective_model)
+            and os.getenv('ENABLE_GPT_THINKING', '0') != '1'
+        )
 
     def _apply_openai_safety(self, provider: str, disable_safety: bool, payload: dict, headers: dict):
         """Apply safety flags for providers that support them (avoid unsupported params)."""
@@ -20643,6 +20657,20 @@ class UnifiedClient:
                                 )
                         except Exception:
                             pass
+                    elif provider == 'opencode' and self._opencode_thinking_disabled(effective_model):
+                        extra_body.setdefault("thinking", {"type": "disabled"})
+                        try:
+                            tls = self._get_thread_local_client()
+                            if not hasattr(tls, 'opencode_thinking_logged'):
+                                tls.opencode_thinking_logged = set()
+                            state_key = (str(effective_model or ''), 'disabled')
+                            if state_key not in tls.opencode_thinking_logged:
+                                tls.opencode_thinking_logged.add(state_key)
+                                self._debug_log(
+                                    f"🧠 [opencode] thinking=DISABLED (model={effective_model})"
+                                )
+                        except Exception:
+                            pass
                     
                     # Add safety parameters for providers that support them
                     # Note: Together AI and Groq don't support the 'moderation' parameter
@@ -22415,6 +22443,8 @@ class UnifiedClient:
                 generic_reasoning_effort = self._get_openai_compatible_reasoning_effort(provider, effective_model)
                 if generic_reasoning_effort:
                     data.setdefault("reasoning_effort", generic_reasoning_effort)
+                elif provider == 'opencode' and self._opencode_thinking_disabled(effective_model):
+                    data.setdefault("thinking", {"type": "disabled"})
             
             # Apply safety flags
             self._apply_openai_safety(provider, disable_safety, data, headers)
