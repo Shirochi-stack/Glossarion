@@ -979,7 +979,15 @@ def set_stop_flag(value):
 def is_stop_requested():
     """Check if stop was requested"""
     global _stop_requested
-    return _stop_requested
+    if _stop_requested:
+        return True
+    try:
+        stop_file = os.environ.get('GLOSSARY_STOP_FILE')
+        if stop_file and os.path.exists(stop_file):
+            return True
+    except Exception:
+        pass
+    return False
 
 # ─── resilient tokenizer setup ───
 try:

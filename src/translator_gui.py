@@ -578,6 +578,61 @@ if '--run-pdf-extraction' in sys.argv:
     finally:
         sys.exit(0)
 
+# Support worker-mode dispatch for manual glossary extraction subprocesses.
+# In frozen builds sys.executable is the app .exe, so the parent launches this
+# same executable with --run-glossary-extraction instead of a .py file.
+if '--run-glossary-extraction' in sys.argv:
+    try:
+        os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+        try:
+            _env_file = None
+            _new_argv = [sys.argv[0]]
+            _skip_next = False
+            for _idx, _arg in enumerate(sys.argv[1:]):
+                if _skip_next:
+                    _skip_next = False
+                    continue
+                if _arg == '--run-glossary-extraction':
+                    continue
+                if _arg == '--glossary-env-file':
+                    _real_idx = _idx + 1
+                    if len(sys.argv) > _real_idx + 1:
+                        _env_file = sys.argv[_real_idx + 1]
+                    _skip_next = True
+                    continue
+                _new_argv.append(_arg)
+            sys.argv = _new_argv
+
+            if _env_file:
+                try:
+                    import json as _glossary_env_json
+                    with open(_env_file, 'r', encoding='utf-8') as _f:
+                        _env_updates = _glossary_env_json.load(_f)
+                    if isinstance(_env_updates, dict):
+                        for _k, _v in _env_updates.items():
+                            os.environ[str(_k)] = "" if _v is None else str(_v)
+                finally:
+                    try:
+                        os.remove(_env_file)
+                    except Exception:
+                        pass
+        except Exception as _env_e:
+            try:
+                print(f"[ERROR] Failed to load glossary worker env: {_env_e}")
+            except Exception:
+                pass
+
+        from extract_glossary_from_epub import main as _glossary_extract_main
+        from shutdown_utils import run_cli_main as _run_cli_main
+        _run_cli_main(_glossary_extract_main)
+    except Exception as _e:
+        try:
+            print(f"[ERROR] Glossary extraction worker failed: {_e}")
+        except Exception:
+            pass
+    finally:
+        sys.exit(1)
+
 
 # Enforce a 400 MB cap on app-local debug caches (Payloads/, http_requests/).
 # Runs at startup (background thread) and again at exit. Both runs log a
@@ -2718,6 +2773,14 @@ Text to analyze:
                         self._glossary_thread.join(timeout=1.0)
                 except:
                     pass
+
+            try:
+                proc = getattr(self, 'glossary_process', None)
+                if proc and proc.poll() is None:
+                    print("[CLEANUP] Stopping glossary subprocess...")
+                    proc.terminate()
+            except Exception:
+                pass
             
             # Stop executor if it exists
             if hasattr(self, 'executor') and self.executor:
@@ -9304,10 +9367,7 @@ Recent translations to summarize:
                 self._set_batching_mode('direct')
             return
 
-        if (
-            getattr(self, '_context_forced_batch_mode_source', None) == 'aggressive'
-            and current == 'direct'
-        ):
+        if mode == 'off':
             self._set_batching_mode('aggressive')
         self._context_forced_batch_mode_source = None
 
@@ -18025,13 +18085,6 @@ Important rules:
                         os.environ['MAX_INPUT_TOKENS'] = '50000'
                         self.append_log(f"🎯 Input Token Limit: 50000 (default)")
                 
-                sys.argv = [
-                    'extract_glossary_from_epub.py',
-                    '--epub', file_path,
-                    '--output', output_path,
-                    '--config', CONFIG_FILE
-                ]
-                
                 self.append_log(f"🚀 Extracting glossary from: {os.path.basename(file_path)}")
                 self.append_log(f"📤 Output Token Limit: {resolved_glossary_tokens} ({'glossary override' if str(glossary_token_cfg) != '-1' else 'global'})")
                 format_parts = ["type", "raw_name", "translated_name", "gender"]
@@ -18052,48 +18105,171 @@ Important rules:
                 
                 os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
                 
-                # Enhanced stop callback that checks both flags
-                def enhanced_stop_callback():
-                    """Stop callback for glossary extraction.
-
-                    Immediate stop: abort quickly.
-                    Graceful stop: do NOT abort an in-flight API call; stop only once in-flight is idle.
-                    """
-                    # Check GUI stop flag
-                    if self.stop_requested:
-                        graceful = bool(getattr(self, 'graceful_stop_active', False)) or (os.environ.get('GRACEFUL_STOP') == '1')
-                        if graceful:
-                            # If any API calls are currently in flight, keep going so they can finish.
-                            try:
-                                import unified_api_client
-                                st = unified_api_client.get_api_watchdog_state() or {}
-                                if int(st.get('in_flight', 0) or 0) > 0:
-                                    return False
-                            except Exception:
-                                return False
-                            # No in-flight calls: safe to stop before starting a new one.
-                            return True
-                        return True
-                        
-                    # Also check if the glossary extraction module has its own stop flag
+                # Run the manual text glossary extractor out-of-process. This keeps
+                # EPUB parsing, tokenization, and dedupe CPU work out of the Qt
+                # process, and the worker flag keeps PyInstaller .exe builds safe.
+                def run_glossary_subprocess():
+                    env_delta = {
+                        k: v for k, v in os.environ.items()
+                        if old_env.get(k) != v
+                    }
+                    env_file = None
                     try:
-                        import extract_glossary_from_epub
-                        if hasattr(extract_glossary_from_epub, 'is_stop_requested') and extract_glossary_from_epub.is_stop_requested():
-                            return True
-                    except:
-                        pass
-                        
-                    return False
+                        import subprocess
+                        import tempfile
 
-                try:
-                    # Import traceback for better error info
-                    import traceback
-                    
-                    # Run glossary extraction with enhanced stop callback
+                        with tempfile.NamedTemporaryFile(
+                            mode='w',
+                            encoding='utf-8',
+                            delete=False,
+                            prefix='glossarion_glossary_env_',
+                            suffix='.json'
+                        ) as _env_f:
+                            json.dump(env_delta, _env_f, ensure_ascii=False)
+                            env_file = _env_f.name
+
+                        if getattr(sys, 'frozen', False):
+                            cmd = [
+                                sys.executable,
+                                '--run-glossary-extraction',
+                                '--glossary-env-file', env_file,
+                                '--epub', file_path,
+                                '--output', output_path,
+                                '--config', CONFIG_FILE,
+                            ]
+                        else:
+                            cmd = [
+                                sys.executable,
+                                os.path.abspath(__file__),
+                                '--run-glossary-extraction',
+                                '--glossary-env-file', env_file,
+                                '--epub', file_path,
+                                '--output', output_path,
+                                '--config', CONFIG_FILE,
+                            ]
+
+                        child_env = old_env.copy()
+                        child_env.setdefault('PYTHONIOENCODING', 'utf-8')
+                        child_env.setdefault('PYTHONLEGACYWINDOWSSTDIO', '0')
+                        creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0
+
+                        self.append_log("Running glossary extraction in subprocess")
+                        proc = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            encoding='utf-8',
+                            errors='replace',
+                            bufsize=1,
+                            universal_newlines=True,
+                            env=child_env,
+                            creationflags=creationflags,
+                        )
+                        self.glossary_process = proc
+
+                        while True:
+                            if self.stop_requested and not bool(getattr(self, 'graceful_stop_active', False)):
+                                try:
+                                    if proc.poll() is None:
+                                        proc.terminate()
+                                except Exception:
+                                    pass
+                                break
+
+                            line = proc.stdout.readline() if proc.stdout else ''
+                            if line:
+                                self.append_log(line.rstrip())
+                                continue
+
+                            if proc.poll() is not None:
+                                break
+
+                            time.sleep(0.05)
+
+                        try:
+                            if proc.stdout:
+                                for line in proc.stdout:
+                                    if line:
+                                        self.append_log(line.rstrip())
+                        except Exception:
+                            pass
+
+                        return_code = proc.wait(timeout=5)
+                        if return_code != 0 and not self.stop_requested:
+                            self.append_log(f"Glossary subprocess exited with code {return_code}")
+                            return False
+                        return True
+                    finally:
+                        try:
+                            self.glossary_process = None
+                        except Exception:
+                            pass
+                        try:
+                            if env_file and os.path.exists(env_file):
+                                os.remove(env_file)
+                        except Exception:
+                            pass
+
+                def run_glossary_in_process():
+                    sys.argv = [
+                        'extract_glossary_from_epub.py',
+                        '--epub', file_path,
+                        '--output', output_path,
+                        '--config', CONFIG_FILE
+                    ]
+
+                    def enhanced_stop_callback():
+                        """Stop callback for glossary extraction.
+
+                        Immediate stop: abort quickly.
+                        Graceful stop: do NOT abort an in-flight API call; stop only once in-flight is idle.
+                        """
+                        if self.stop_requested:
+                            graceful = bool(getattr(self, 'graceful_stop_active', False)) or (os.environ.get('GRACEFUL_STOP') == '1')
+                            if graceful:
+                                try:
+                                    import unified_api_client
+                                    st = unified_api_client.get_api_watchdog_state() or {}
+                                    if int(st.get('in_flight', 0) or 0) > 0:
+                                        return False
+                                except Exception:
+                                    return False
+                                return True
+                            return True
+
+                        try:
+                            import extract_glossary_from_epub
+                            if hasattr(extract_glossary_from_epub, 'is_stop_requested') and extract_glossary_from_epub.is_stop_requested():
+                                return True
+                        except Exception:
+                            pass
+
+                        return False
+
                     glossary_main(
                         log_callback=self.append_log,
                         stop_callback=enhanced_stop_callback
                     )
+                    return True
+
+                try:
+                    # Import traceback for better error info
+                    import traceback
+
+                    try:
+                        glossary_batch_size = int(str(self.batch_size_var).replace(',', '').strip() or '0')
+                    except Exception:
+                        glossary_batch_size = 0
+
+                    if glossary_batch_size >= 101:
+                        ok = run_glossary_subprocess()
+                    else:
+                        self.append_log("Running glossary extraction in-process (batch size <= 100)")
+                        ok = run_glossary_in_process()
+
+                    if not ok:
+                        return False
                 except Exception as e:
                     # Get the full traceback
                     tb_lines = traceback.format_exc()
@@ -19132,6 +19308,7 @@ Important rules:
 
                         # Known helper flags / scripts
                         if ("--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s
+                                or "--run-glossary-extraction" in cmd_s or "extract_glossary_from_epub" in cmd_s
                                 or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
                                 or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s):
                             processes_to_terminate.append(child)
@@ -19378,6 +19555,13 @@ Important rules:
                     unified_api_client.hard_cancel_all()
             except Exception:
                 pass
+
+            try:
+                proc = getattr(self, 'glossary_process', None)
+                if proc and proc.poll() is None:
+                    proc.terminate()
+            except Exception:
+                pass
             
             # Best-effort: terminate only known helper subprocesses we started.
             # See stop_translation(): avoid touching multiprocessing spawn/worker processes in frozen builds.
@@ -19423,6 +19607,7 @@ Important rules:
                         if _is_mp_internal(cmd_s):
                             continue
                         if ("--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s
+                                or "--run-glossary-extraction" in cmd_s or "extract_glossary_from_epub" in cmd_s
                                 or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
                                 or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s):
                             processes_to_terminate.append(child)
