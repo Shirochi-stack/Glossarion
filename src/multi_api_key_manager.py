@@ -12,7 +12,7 @@ try:
         QTextEdit, QScrollArea, QFileDialog, QMessageBox, QComboBox, QCheckBox,
         QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QSpinBox, QDoubleSpinBox,
         QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
-        QCompleter, QDialogButtonBox, QGraphicsOpacityEffect, QInputDialog
+        QCompleter, QDialogButtonBox, QInputDialog
     )
     from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, Slot
     from PySide6.QtGui import QIcon, QFont, QPixmap, QShortcut, QKeySequence, QTransform
@@ -1999,16 +1999,19 @@ class MultiAPIKeyDialog(QDialog):
 
         # Key list section
         self._create_key_list_section(scrollable_layout)
-        self._apply_initial_multi_key_render_guard()
 
         # Add stretch before fallback that only appears when multi-key is enabled
         # This will be removed when multi-key is disabled to bring fallback closer
         scrollable_layout.addStretch(0)
 
-        # Queue the lower pool sections so the dialog shell paints immediately.
+        # Render the fallback section immediately so the dialog has visible,
+        # useful content on first paint even when multi-key mode is disabled.
+        self._create_fallback_section(scrollable_layout)
+        self._toggle_multi_key_mode()
+
+        # Queue the remaining lower pool sections so the dialog shell paints immediately.
         # Qt widgets must still be created on the GUI thread, so these render in
         # independent event-loop tasks instead of one long blocking constructor.
-        self._queue_key_pool_section_render(scrollable_layout, self._create_fallback_section)
         self._queue_key_pool_section_render(scrollable_layout, self._create_truncation_retry_section)
         self._queue_key_pool_section_render(scrollable_layout, self._create_glossary_section)
         self._queue_key_pool_section_render(scrollable_layout, self._create_glossary_refinement_section)
@@ -2044,35 +2047,6 @@ class MultiAPIKeyDialog(QDialog):
             getattr(self, 'multikey_separator', None),
             getattr(self, 'key_list_frame', None),
         ]
-
-    def _apply_initial_multi_key_render_guard(self):
-        """Prevent disabled multi-key widgets from flashing before deferred init finishes."""
-        if bool(self.translator_gui.config.get('use_multi_api_keys', False)):
-            return
-        guarded_widgets = [widget for widget in self._multi_key_mode_widgets() if widget is not None]
-        if not guarded_widgets:
-            return
-        self._initial_multi_key_opacity_effects = []
-        for widget in guarded_widgets:
-            widget.hide()
-            widget.setMaximumHeight(0)
-            try:
-                effect = QGraphicsOpacityEffect(widget)
-                effect.setOpacity(0.0)
-                widget.setGraphicsEffect(effect)
-                self._initial_multi_key_opacity_effects.append((widget, effect))
-            except Exception:
-                pass
-        QTimer.singleShot(25, self._clear_initial_multi_key_render_guard)
-
-    def _clear_initial_multi_key_render_guard(self):
-        for widget, effect in getattr(self, '_initial_multi_key_opacity_effects', []):
-            try:
-                if widget.graphicsEffect() is effect:
-                    widget.setGraphicsEffect(None)
-            except Exception:
-                pass
-        self._initial_multi_key_opacity_effects = []
 
     def _queue_key_pool_section_render(self, parent_layout, render_callback):
         """Render one key-pool section in its own queued GUI event."""
@@ -2187,7 +2161,7 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_key_shuffle_checkbox.setChecked(self.fallback_key_shuffle_var)
         fallback_frame_layout.addWidget(self.fallback_key_shuffle_checkbox)
 
-        # Add fallback key section - store reference for opacity effect
+        # Add fallback key section
         self.add_fallback_frame = QWidget()
         add_fallback_grid = QGridLayout(self.add_fallback_frame)
         add_fallback_grid.setContentsMargins(0, 0, 0, 10)
