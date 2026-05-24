@@ -558,12 +558,12 @@ def _add_combobox_arrow(self, combobox):
     existing_style = combobox.styleSheet() or ""
     combobox.setStyleSheet(existing_style + f"""
         QComboBox {{
-            padding-right: 31px;
+            padding-right: 4px;
         }}
         QComboBox::drop-down {{
             subcontrol-origin: padding;
             subcontrol-position: top right;
-            width: 28px;
+            width: 18px;
             border-left: 1px solid #4a5568;
         }}
         QComboBox::down-arrow {{
@@ -1393,7 +1393,7 @@ def open_other_settings(self, *args, show=True):
         QComboBox::drop-down {
             subcontrol-origin: padding;
             subcontrol-position: top right;
-            width: 28px;
+            width: 18px;
             border-left: 1px solid #4a5568;
         }
         QComboBox::down-arrow {
@@ -1435,7 +1435,7 @@ def open_other_settings(self, *args, show=True):
         QComboBox::drop-down {
             subcontrol-origin: padding;
             subcontrol-position: top right;
-            width: 28px;
+            width: 18px;
             border-left: 1px solid #4a5568;
         }
         QComboBox::down-arrow {
@@ -3024,7 +3024,7 @@ def _create_response_handling_section(self, parent):
     self.gpt_effort_combo = QComboBox()
     # GPT thinking effort now supports "none" (disable) and "xhigh" in addition to low/medium/high
     self.gpt_effort_combo.addItems(["none", "low", "medium", "high", "xhigh"])
-    self.gpt_effort_combo.setFixedWidth(100)
+    self.gpt_effort_combo.setFixedWidth(80)
     self.gpt_effort_combo.setStyleSheet(_THINKING_COMBO_STYLE)
     self._add_combobox_arrow(self.gpt_effort_combo)
     self._disable_combobox_mousewheel(self.gpt_effort_combo)
@@ -3132,7 +3132,7 @@ def _create_response_handling_section(self, parent):
     thinking_h_level.addWidget(self.thinking_level_label)
     self.thinking_level_combo = QComboBox()
     self.thinking_level_combo.addItems(["minimal", "low", "medium", "high"])
-    self.thinking_level_combo.setFixedWidth(110)
+    self.thinking_level_combo.setFixedWidth(80)
     self.thinking_level_combo.setStyleSheet(_THINKING_COMBO_STYLE)
     self._add_combobox_arrow(self.thinking_level_combo)
     self._disable_combobox_mousewheel(self.thinking_level_combo)
@@ -3230,7 +3230,7 @@ def _create_response_handling_section(self, parent):
     deepseek_h.addWidget(self.deepseek_effort_label)
     self.deepseek_effort_combo = QComboBox()
     self.deepseek_effort_combo.addItems(["high", "max"])
-    self.deepseek_effort_combo.setFixedWidth(90)
+    self.deepseek_effort_combo.setFixedWidth(80)
     self.deepseek_effort_combo.setStyleSheet(_THINKING_COMBO_STYLE)
     self._add_combobox_arrow(self.deepseek_effort_combo)
     self._disable_combobox_mousewheel(self.deepseek_effort_combo)
@@ -3370,7 +3370,7 @@ def _create_response_handling_section(self, parent):
     anthropic_h2.addWidget(self.anthropic_effort_label)
     self.anthropic_effort_combo = QComboBox()
     self.anthropic_effort_combo.addItems(["low", "medium", "high", "xhigh", "max"])
-    self.anthropic_effort_combo.setFixedWidth(110)
+    self.anthropic_effort_combo.setFixedWidth(80)
     self.anthropic_effort_combo.setStyleSheet(_THINKING_COMBO_STYLE)
     self._add_combobox_arrow(self.anthropic_effort_combo)
     self._disable_combobox_mousewheel(self.anthropic_effort_combo)

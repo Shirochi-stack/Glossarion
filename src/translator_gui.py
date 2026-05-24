@@ -6019,12 +6019,12 @@ Recent translations to summarize:
         self.model_combo.setStyleSheet(f"""
             QComboBox {{
                 padding-left: 34px;
-                padding-right: 31px;
+                padding-right: 4px;
             }}
             QComboBox::drop-down {{
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 28px;
+                width: 18px;
                 border-left: 1px solid #4a5568;
             }}
             QComboBox::down-arrow {{
@@ -6327,12 +6327,12 @@ Recent translations to summarize:
         self.profile_menu.setStyleSheet(f"""
             QComboBox {{
                 padding-left: 34px;
-                padding-right: 31px;
+                padding-right: 4px;
             }}
             QComboBox::drop-down {{
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 28px;
+                width: 18px;
                 border-left: 1px solid #4a5568;
             }}
             QComboBox::down-arrow {{
@@ -8029,17 +8029,17 @@ Recent translations to summarize:
         self.context_mode_combo.addItem("Rolling Summary (Replace)", "rolling_summary_replace")
         self.context_mode_combo.addItem("Rolling Summary (Append)", "rolling_summary_append")
         self.context_mode_combo.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Select how prior translation context is provided to the model.</p></qt>")
-        self.context_mode_combo.setMinimumWidth(205)
+        self.context_mode_combo.setFixedWidth(180)
         context_icon_path = f"{self.base_dir}/Halgakos.ico".replace('\\', '/')
         context_disabled_icon_path = _get_disabled_halgakos_icon_path(context_icon_path)
         self.context_mode_combo.setStyleSheet(f"""
             QComboBox {{
-                padding-right: 28px;
+                padding-right: 4px;
             }}
             QComboBox::drop-down {{
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 24px;
+                width: 18px;
                 border-left: 1px solid #4a5568;
             }}
             QComboBox::down-arrow {{
