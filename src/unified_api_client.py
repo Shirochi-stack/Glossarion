@@ -16781,6 +16781,13 @@ class UnifiedClient:
             try:
                 stop_file = os.environ.get('GLOSSARY_STOP_FILE')
                 if stop_file and os.path.exists(stop_file):
+                    try:
+                        with open(stop_file, 'r', encoding='utf-8', errors='ignore') as _sf:
+                            stop_mode = (_sf.read(256) or '').strip().lower()
+                    except Exception:
+                        stop_mode = ''
+                    if 'graceful' in stop_mode:
+                        return False
                     self._cancelled = True
                     return True
             except Exception:
