@@ -18149,6 +18149,7 @@ Important rules:
                         else:
                             cmd = [
                                 sys.executable,
+                                '-u',
                                 os.path.abspath(__file__),
                                 '--run-glossary-extraction',
                                 '--glossary-env-file', env_file,
@@ -18158,7 +18159,8 @@ Important rules:
                             ]
 
                         child_env = old_env.copy()
-                        child_env.setdefault('PYTHONIOENCODING', 'utf-8')
+                        child_env['PYTHONUNBUFFERED'] = '1'
+                        child_env['PYTHONIOENCODING'] = 'utf-8'
                         child_env.setdefault('PYTHONLEGACYWINDOWSSTDIO', '0')
                         creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0
 
@@ -18207,6 +18209,18 @@ Important rules:
                             if "site-packages\\ebooklib\\epub.py:" in line or "site-packages/ebooklib/epub.py:" in line:
                                 suppress_warning_continuation = True
                                 return
+                            if "Processing Batch" in stripped and "(Chapters:" in stripped and len(stripped) > 400:
+                                chapter_nums = re.findall(r'\d+', stripped.split("(Chapters:", 1)[1])
+                                batch_head = stripped.split("(Chapters:", 1)[0].rstrip()
+                                if chapter_nums:
+                                    preview = ", ".join(chapter_nums[:8])
+                                    remaining = max(0, len(chapter_nums) - 8)
+                                    suffix = f", +{remaining} more" if remaining else ""
+                                    self.append_log(f"{batch_head} ({len(chapter_nums)} chapters: {preview}{suffix})")
+                                    return
+                            if len(line) > 4000:
+                                self.append_log(f"{line[:4000]} ... [truncated {len(line) - 4000} chars]")
+                                return
 
                             self.append_log(line)
 
@@ -18224,14 +18238,19 @@ Important rules:
                         )
                         self.glossary_process = proc
 
+                        hard_stop_started = None
                         while True:
                             if self.stop_requested and not bool(getattr(self, 'graceful_stop_active', False)):
-                                try:
-                                    if proc.poll() is None:
-                                        proc.terminate()
-                                except Exception:
-                                    pass
-                                break
+                                if hard_stop_started is None:
+                                    hard_stop_started = time.time()
+                                if proc.poll() is not None:
+                                    break
+                                # The stop button wrote GLOSSARY_STOP_FILE=immediate.
+                                # Give the worker a short window to observe it and close
+                                # its own HTTP sessions, then kill the process tree.
+                                if time.time() - hard_stop_started >= 1.0:
+                                    self._terminate_glossary_process_tree(proc, grace_seconds=0.0, reason="force stop")
+                                    break
 
                             line = proc.stdout.readline() if proc.stdout else ''
                             if line:
@@ -18318,10 +18337,10 @@ Important rules:
                     except Exception:
                         glossary_batch_size = 0
 
-                    if glossary_batch_size >= 101:
+                    if glossary_batch_size >= 51:
                         ok = run_glossary_subprocess()
                     else:
-                        self.append_log("Running glossary extraction in-process (batch size <= 100)")
+                        self.append_log("Running glossary extraction in-process (batch size <= 50)")
                         ok = run_glossary_in_process()
 
                     if not ok:
@@ -19511,6 +19530,64 @@ Important rules:
             import traceback
             traceback.print_exc()
 
+    def _terminate_glossary_process_tree(self, proc=None, *, grace_seconds=0.8, reason="immediate stop"):
+        """Terminate the glossary worker process and any children it spawned."""
+        proc = proc or getattr(self, 'glossary_process', None)
+        if not proc:
+            return False
+        try:
+            if proc.poll() is not None:
+                return True
+        except Exception:
+            return False
+
+        try:
+            proc.wait(timeout=max(0.0, float(grace_seconds)))
+            return True
+        except Exception:
+            pass
+
+        terminated = False
+        try:
+            import psutil
+            parent = psutil.Process(proc.pid)
+            children = parent.children(recursive=True)
+            targets = children + [parent]
+            for p in targets:
+                try:
+                    p.terminate()
+                    terminated = True
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            try:
+                _, alive = psutil.wait_procs(targets, timeout=0.75)
+            except Exception:
+                alive = targets
+            for p in alive:
+                try:
+                    p.kill()
+                    terminated = True
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except Exception:
+            try:
+                proc.terminate()
+                terminated = True
+                proc.wait(timeout=0.75)
+            except Exception:
+                try:
+                    proc.kill()
+                    terminated = True
+                except Exception:
+                    pass
+
+        if terminated:
+            try:
+                self.append_log(f"🔧 Terminated glossary subprocess ({reason})")
+            except Exception:
+                pass
+        return terminated
+
     def stop_glossary_extraction(self):
         """Stop glossary extraction specifically"""
         # Check if graceful stop is enabled
@@ -19638,9 +19715,11 @@ Important rules:
                 pass
 
             try:
-                proc = getattr(self, 'glossary_process', None)
-                if proc and proc.poll() is None:
-                    proc.terminate()
+                self._terminate_glossary_process_tree(
+                    getattr(self, 'glossary_process', None),
+                    grace_seconds=1.0,
+                    reason="force stop",
+                )
             except Exception:
                 pass
             

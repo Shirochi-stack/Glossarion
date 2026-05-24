@@ -703,6 +703,7 @@ def _compute_safe_input_tokens(max_output_tokens: int, compression_factor: float
 
 # Global stop flag for GUI integration
 _stop_requested = False
+_glossary_hard_cancel_dispatched = False
 
 # Threading locks for atomic glossary saves
 _glossary_json_lock = threading.Lock()
@@ -965,11 +966,12 @@ def _ensure_book_title_entry(glossary: List[Dict], context=None) -> List[Dict]:
 
 def set_stop_flag(value):
     """Set the global stop flag"""
-    global _stop_requested
+    global _stop_requested, _glossary_hard_cancel_dispatched
     _stop_requested = value
     
     # When clearing the stop flag, also clear the multi-key environment variable
     if not value:
+        _glossary_hard_cancel_dispatched = False
         os.environ['TRANSLATION_CANCELLED'] = '0'
         
         # Also clear UnifiedClient global flag
@@ -989,6 +991,24 @@ def set_stop_flag(value):
                 unified_api_client.UnifiedClient._global_cancelled = True
         except Exception:
             pass
+
+def _dispatch_glossary_hard_cancel():
+    """Close API transports in this process for an immediate glossary stop."""
+    global _glossary_hard_cancel_dispatched
+    if _glossary_hard_cancel_dispatched:
+        return
+    _glossary_hard_cancel_dispatched = True
+    try:
+        import unified_api_client
+        if hasattr(unified_api_client, 'set_stop_flag'):
+            unified_api_client.set_stop_flag(True)
+        if hasattr(unified_api_client, 'UnifiedClient'):
+            unified_api_client.UnifiedClient._global_cancelled = True
+        if hasattr(unified_api_client, 'hard_cancel_all'):
+            unified_api_client.hard_cancel_all()
+        print("🛑 Immediate stop: closed glossary HTTP sessions")
+    except Exception:
+        pass
 
 def _read_glossary_stop_control():
     """Return cross-process stop mode from GLOSSARY_STOP_FILE.
@@ -1022,7 +1042,9 @@ def _sync_glossary_stop_control():
         return mode
     if mode == "immediate":
         os.environ['GRACEFUL_STOP'] = '0'
+        os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
         os.environ['TRANSLATION_CANCELLED'] = '1'
+        _dispatch_glossary_hard_cancel()
         return mode
     return None
 
