@@ -39,6 +39,7 @@ if __name__ == '__main__':
 # Add MSYS2 DLLs to PATH for WeasyPrint (when bundled with PyInstaller)
 import sys
 import os
+import tempfile
 from app_version import APP_DISPLAY_NAME, APP_READY_MESSAGE, APP_STARTUP_MESSAGE, APP_USER_MODEL_ID, APP_VERSION
 
 # Force UTF-8 console output to prevent UnicodeEncodeError on Windows cp1252
@@ -395,7 +396,7 @@ try:
                                     QScrollArea, QTabWidget, QCheckBox, QComboBox, QSpinBox,
                                     QSizePolicy, QSplitter, QProgressBar, QStyle, QToolButton, QGraphicsOpacityEffect)
     from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QEvent, QPropertyAnimation, QEasingCurve, Property, QObject, QEventLoop, QMetaObject
-    from PySide6.QtGui import QFont, QFontMetrics, QColor, QIcon, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform, QShortcut
+    from PySide6.QtGui import QFont, QFontMetrics, QColor, QIcon, QPixmap, QPainter, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform, QShortcut
 except ImportError as e:
     print(f"\n{'='*60}")
     print("ERROR: PySide6 is not installed or could not be imported.")
@@ -409,6 +410,35 @@ from ai_hunter_enhanced import AIHunterConfigGUI, ImprovedAIHunterDetection
 import traceback
 from splash_utils import SplashManager
 from api_key_encryption import encrypt_config, decrypt_config
+
+
+def _get_disabled_halgakos_icon_path(icon_path: str) -> str:
+    """Create a dimmed combobox arrow icon for disabled combo boxes."""
+    if not icon_path:
+        return icon_path
+    source_path = icon_path.replace('/', os.sep)
+    if not os.path.exists(source_path):
+        return icon_path.replace('\\', '/')
+
+    disabled_path = os.path.join(tempfile.gettempdir(), "Glossarion_Halgakos_combo_disabled.png")
+    try:
+        if os.path.exists(disabled_path) and os.path.getmtime(disabled_path) >= os.path.getmtime(source_path):
+            return disabled_path.replace('\\', '/')
+
+        pixmap = QPixmap(source_path)
+        if pixmap.isNull():
+            return icon_path.replace('\\', '/')
+
+        disabled = QPixmap(pixmap.size())
+        disabled.fill(Qt.transparent)
+        painter = QPainter(disabled)
+        painter.setOpacity(0.28)
+        painter.drawPixmap(0, 0, pixmap)
+        painter.end()
+        disabled.save(disabled_path, "PNG")
+        return disabled_path.replace('\\', '/')
+    except Exception:
+        return icon_path.replace('\\', '/')
 from metadata_batch_translator import MetadataBatchTranslatorUI
 from model_options import get_model_options
 
@@ -5985,6 +6015,7 @@ Recent translations to summarize:
         self.model_combo.setMaximumWidth(450)
         # Add custom styling with Halgakos arrow and left padding for cog overlay
         model_icon_path = f"{self.base_dir}/Halgakos.ico".replace('\\', '/')
+        model_disabled_icon_path = _get_disabled_halgakos_icon_path(model_icon_path)
         self.model_combo.setStyleSheet(f"""
             QComboBox {{
                 padding-left: 34px;
@@ -6003,7 +6034,7 @@ Recent translations to summarize:
                 border: none;
             }}
             QComboBox::down-arrow:disabled {{
-                image: url({model_icon_path});
+                image: url({model_disabled_icon_path});
                 width: 16px;
                 height: 16px;
                 border: none;
@@ -6292,6 +6323,7 @@ Recent translations to summarize:
         self.profile_menu.setMaximumWidth(450)
         # Add custom styling with Halgakos arrow and left padding for cog overlay
         profile_icon_path = f"{self.base_dir}/Halgakos.ico".replace('\\', '/')
+        profile_disabled_icon_path = _get_disabled_halgakos_icon_path(profile_icon_path)
         self.profile_menu.setStyleSheet(f"""
             QComboBox {{
                 padding-left: 34px;
@@ -6310,7 +6342,7 @@ Recent translations to summarize:
                 border: none;
             }}
             QComboBox::down-arrow:disabled {{
-                image: url({profile_icon_path});
+                image: url({profile_disabled_icon_path});
                 width: 16px;
                 height: 16px;
                 border: none;
@@ -7999,6 +8031,7 @@ Recent translations to summarize:
         self.context_mode_combo.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Select how prior translation context is provided to the model.</p></qt>")
         self.context_mode_combo.setMinimumWidth(205)
         context_icon_path = f"{self.base_dir}/Halgakos.ico".replace('\\', '/')
+        context_disabled_icon_path = _get_disabled_halgakos_icon_path(context_icon_path)
         self.context_mode_combo.setStyleSheet(f"""
             QComboBox {{
                 padding-right: 28px;
@@ -8016,7 +8049,7 @@ Recent translations to summarize:
                 border: none;
             }}
             QComboBox::down-arrow:disabled {{
-                image: url({context_icon_path});
+                image: url({context_disabled_icon_path});
                 width: 16px;
                 height: 16px;
                 border: none;

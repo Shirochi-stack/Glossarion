@@ -10,6 +10,7 @@ import json
 import re
 import sys
 import platform
+import tempfile
 
 # PySide6 imports (fully migrated from Tkinter)
 from PySide6.QtWidgets import (
@@ -30,7 +31,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QIcon, QPixmap, QPainter
 from PySide6.QtCore import QObject, Signal
 
 
@@ -41,6 +42,35 @@ def _get_app_dir() -> str:
             return os.path.dirname(sys.executable)
         return os.path.dirname(os.path.abspath(__file__))
     return os.getcwd()
+
+
+def _get_disabled_halgakos_icon_path(icon_path: str) -> str:
+    """Create a dimmed combobox arrow icon for disabled combo boxes."""
+    if not icon_path:
+        return icon_path
+    source_path = icon_path.replace('/', os.sep)
+    if not os.path.exists(source_path):
+        return icon_path.replace('\\', '/')
+
+    disabled_path = os.path.join(tempfile.gettempdir(), "Glossarion_Halgakos_combo_disabled.png")
+    try:
+        if os.path.exists(disabled_path) and os.path.getmtime(disabled_path) >= os.path.getmtime(source_path):
+            return disabled_path.replace('\\', '/')
+
+        pixmap = QPixmap(source_path)
+        if pixmap.isNull():
+            return icon_path.replace('\\', '/')
+
+        disabled = QPixmap(pixmap.size())
+        disabled.fill(Qt.transparent)
+        painter = QPainter(disabled)
+        painter.setOpacity(0.28)
+        painter.drawPixmap(0, 0, pixmap)
+        painter.end()
+        disabled.save(disabled_path, "PNG")
+        return disabled_path.replace('\\', '/')
+    except Exception:
+        return icon_path.replace('\\', '/')
 
 
 class ConnTestBridge(QObject):
@@ -523,6 +553,7 @@ def _add_combobox_arrow(self, combobox):
     if not os.path.exists(icon_path):
         return
 
+    disabled_icon_path = _get_disabled_halgakos_icon_path(icon_path)
     icon_path = icon_path.replace('\\', '/')
     existing_style = combobox.styleSheet() or ""
     combobox.setStyleSheet(existing_style + f"""
@@ -542,7 +573,7 @@ def _add_combobox_arrow(self, combobox):
             border: none;
         }}
         QComboBox::down-arrow:disabled {{
-            image: url({icon_path});
+            image: url({disabled_icon_path});
             width: 16px;
             height: 16px;
             border: none;
@@ -1305,6 +1336,7 @@ def open_other_settings(self, *args, show=True):
     main_layout.setContentsMargins(5, 5, 5, 5)  # Set uniform margins
     main_layout.setSpacing(8)  # Set spacing between widgets
     combo_arrow_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico').replace('\\', '/')
+    combo_disabled_arrow_path = _get_disabled_halgakos_icon_path(combo_arrow_path)
 
     # Explicit dark theme for the dialog — on macOS, child dialogs with
     # Qt.WindowType.Window don't inherit the parent's stylesheet reliably.
@@ -1371,7 +1403,7 @@ def open_other_settings(self, *args, show=True):
             border: none;
         }
         QComboBox::down-arrow:disabled {
-            image: url('""" + combo_arrow_path + """');
+            image: url('""" + combo_disabled_arrow_path + """');
             width: 16px;
             height: 16px;
             border: none;
@@ -1395,6 +1427,7 @@ def open_other_settings(self, *args, show=True):
 
     # Set up icon path
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+    disabled_icon_path = _get_disabled_halgakos_icon_path(icon_path)
 
     # Apply global stylesheet for blue checkboxes (from manga integration)
     # Back to regular string concatenation which was working before
@@ -1412,7 +1445,7 @@ def open_other_settings(self, *args, show=True):
             border: none;
         }
         QComboBox::down-arrow:disabled {
-            image: url(""" + icon_path.replace('\\', '/') + """);
+            image: url(""" + disabled_icon_path + """);
             width: 16px;
             height: 16px;
             border: none;
@@ -3337,7 +3370,7 @@ def _create_response_handling_section(self, parent):
     anthropic_h2.addWidget(self.anthropic_effort_label)
     self.anthropic_effort_combo = QComboBox()
     self.anthropic_effort_combo.addItems(["low", "medium", "high", "xhigh", "max"])
-    self.anthropic_effort_combo.setFixedWidth(100)
+    self.anthropic_effort_combo.setFixedWidth(110)
     self.anthropic_effort_combo.setStyleSheet(_THINKING_COMBO_STYLE)
     self._add_combobox_arrow(self.anthropic_effort_combo)
     self._disable_combobox_mousewheel(self.anthropic_effort_combo)
