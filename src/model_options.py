@@ -208,6 +208,12 @@ def get_model_options() -> List[str]:
         "lr/openrouter:free:full-context", "lr/owl-alpha:free:full-context",
         "lr/pixtral-large-2411", "lr/pixtral-large-latest",
         "lr/qwen3-4b-fp8:free", "lr/trinity-large-thinking", "lr/trinity-mini:free",
+
+        # OpenCode Go (oc/ prefix) - OpenAI-compatible /chat/completions models
+        "oc/glm-5.1", "oc/glm-5",
+        "oc/kimi-k2.6", "oc/kimi-k2.5",
+        "oc/deepseek-v4-pro", "oc/deepseek-v4-flash",
+        "oc/mimo-v2.5-pro", "oc/mimo-v2.5",
         
         # For OR, prefix with 'or/'
         "or/openrouter/free",

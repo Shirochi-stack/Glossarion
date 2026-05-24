@@ -44,6 +44,7 @@ Supported models and their prefixes (Updated July 2025):
 - xAI: grok* (e.g., grok-3, grok-vision)
 - Poe: poe/* (e.g., poe/claude-4-opus, poe/gpt-4.5, poe/Assistant)
 - OpenRouter: or/*, openrouter/* (e.g., or/anthropic/claude-4-opus, or/openai/gpt-4.5)
+- OpenCode Go: oc/* (e.g., oc/kimi-k2.6, oc/glm-5.1)
 - Fireworks AI: fireworks/* (e.g., fireworks/llama-v3-70b)
 - Groq: groq/* (e.g., groq/llama-3.1-8b-instant)
 - AuthGPT: authgpt/* (e.g., authgpt/gpt-4o, authgpt/o3) – ChatGPT subscription via OAuth
@@ -93,6 +94,7 @@ Environment Variables:
 - SALESFORCE_API_URL: Salesforce API endpoint
 - OPENROUTER_REFERER: HTTP referer for OpenRouter (default: https://github.com/Shirochi-stack/Glossarion)
 - OPENROUTER_APP_NAME: App name for OpenRouter (default: Glossarion Translation)
+- OPENCODE_API_URL: Custom OpenCode Go endpoint (default: https://opencode.ai/zen/go/v1)
 - POE_API_KEY: API key for Poe platform
 - AUTHGPT_BASE_URL: Override ChatGPT backend URL (default: https://chatgpt.com/backend-api)
 - AUTHGPT_TOKEN_FILE: Custom path for OAuth token storage (default: ~/.glossarion/authgpt_tokens.json)
@@ -2106,6 +2108,9 @@ class UnifiedClient:
         'openrouter': 'openrouter',
         'lr/': 'literouter',
         'lr': 'literouter',
+        'oc/': 'opencode',
+        'opencode/': 'opencode',
+        'opencode-go/': 'opencode',
         'fireworks': 'fireworks',
         'nd/': 'nvidia',
         'authnd/': 'authnd',
@@ -7381,7 +7386,7 @@ class UnifiedClient:
                                   'sensenova', 'internlm', 'tii', 'microsoft', 
                                   'azure', 'google', 'alephalpha', 'databricks', 
                                   'huggingface', 'salesforce', 'bigscience', 'meta',
-                                  'electronhub', 'poe', 'openrouter', 'chutes', 'za',
+                                  'electronhub', 'poe', 'openrouter', 'literouter', 'opencode', 'chutes', 'za',
                                   'sambanova']:
             # These providers will use HTTP API or OpenAI-compatible endpoints
             # No client initialization needed here
@@ -11168,7 +11173,7 @@ class UnifiedClient:
         _OPENAI_COMPAT_PROVIDERS = {
             'openai', 'chutes', 'groq', 'openrouter', 'fireworks', 'deepseek',
             'xai', 'nvidia', 'za', 'electronhub', 'zhipu', 'gemini-openai',
-            'together', 'yi', 'qwen', 'moonshot', 'mistral',
+            'together', 'yi', 'qwen', 'moonshot', 'mistral', 'opencode',
         }
 
         # ========== GEMINI-SPECIFIC HANDLING ==========
@@ -14512,7 +14517,7 @@ class UnifiedClient:
                 'openai', 'deepseek', 'together', 'mistral', 'yi', 'qwen',
                 'moonshot', 'groq', 'electronhub', 'openrouter', 'fireworks',
                 'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu',
-                'nanogpt', 'sambanova', 'literouter', 'custom_openai',
+                'nanogpt', 'sambanova', 'literouter', 'opencode', 'custom_openai',
             }
             _is_sdk_provider = False
             try:
@@ -14562,7 +14567,7 @@ class UnifiedClient:
             'openai', 'deepseek', 'together', 'mistral', 'yi', 'qwen',
             'moonshot', 'groq', 'electronhub', 'openrouter', 'fireworks',
             'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu',
-            'nanogpt', 'sambanova', 'literouter', 'custom_openai',
+            'nanogpt', 'sambanova', 'literouter', 'opencode', 'custom_openai',
         }
         _is_sdk_provider = False
         try:
@@ -15692,7 +15697,18 @@ class UnifiedClient:
         # Ensure we explicitly request JSON back from providers
         if 'Accept' not in h:
             h['Accept'] = 'application/json'
+        if provider == 'opencode' and 'User-Agent' not in h:
+            h['User-Agent'] = self._opencode_user_agent()
         return h
+
+    @staticmethod
+    def _opencode_user_agent() -> str:
+        """Return the app User-Agent required by OpenCode Zen/Go WAF routing."""
+        try:
+            from app_version import APP_VERSION
+            return f"Glossarion/{APP_VERSION}"
+        except Exception:
+            return "Glossarion"
 
     def _apply_openai_safety(self, provider: str, disable_safety: bool, payload: dict, headers: dict):
         """Apply safety flags for providers that support them (avoid unsupported params)."""
@@ -16092,6 +16108,7 @@ class UnifiedClient:
             'huggingface': self._send_huggingface,
             'openrouter': self._send_openai_provider_router,  # OpenRouter aggregator
             'literouter': self._send_openai_provider_router,  # LiteRouter aggregator
+            'opencode': self._send_openai_provider_router,  # OpenCode Go OpenAI-compatible endpoint
             'poe': self._send_poe,  # POE platform (restored)
             'electronhub': self._send_electronhub,  # ElectronHub aggregator (restored)
             'fireworks': self._send_openai_provider_router,
@@ -16438,7 +16455,7 @@ class UnifiedClient:
         # Apply parameters based on provider capabilities
         params = {}
         
-        if self.client_type in ['openai', 'custom_openai', 'deepseek', 'groq', 'electronhub', 'openrouter', 'nvidia', 'authnd']:
+        if self.client_type in ['openai', 'custom_openai', 'deepseek', 'groq', 'electronhub', 'openrouter', 'opencode', 'nvidia', 'authnd']:
             # OpenAI-compatible providers
             if frequency_penalty > 0:
                 params["frequency_penalty"] = frequency_penalty
@@ -19622,6 +19639,12 @@ class UnifiedClient:
             if effective_model.startswith('lr/'):
                 effective_model = effective_model[3:]
             effective_model = effective_model.strip()
+        elif provider == 'opencode':
+            for prefix in ('oc/', 'opencode/', 'opencode-go/'):
+                if effective_model.startswith(prefix):
+                    effective_model = effective_model[len(prefix):]
+                    break
+            effective_model = effective_model.strip()
         elif provider == 'fireworks':
             if effective_model.startswith('fireworks/'):
                 effective_model = effective_model[len('fireworks/') :]
@@ -19664,7 +19687,7 @@ class UnifiedClient:
         # Never override OpenRouter base_url with custom endpoint
         # CRITICAL: Also skip if individual endpoint was already applied
         skip_custom = getattr(self, '_skip_global_custom_endpoint', False)
-        if use_custom_endpoint and provider not in ("gemini-openai", "openrouter", "custom_openai") and not skip_custom:
+        if use_custom_endpoint and provider not in ("gemini-openai", "openrouter", "opencode", "custom_openai") and not skip_custom:
             custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
             if custom_base_url:
                 # Check if it's Azure
@@ -19888,7 +19911,7 @@ class UnifiedClient:
         
         # Use OpenAI SDK for providers known to work well with it
         sdk_compatible = ['openai', 'deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq', 
-                         'electronhub', 'openrouter', 'literouter', 'fireworks', 'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu', 'nanogpt', 'sambanova', 'custom_openai']
+                         'electronhub', 'openrouter', 'literouter', 'opencode', 'fireworks', 'xai', 'gemini-openai', 'chutes', 'nvidia', 'za', 'zhipu', 'nanogpt', 'sambanova', 'custom_openai']
         
         # Allow forcing HTTP-only for OpenRouter via toggle (default: disabled)
         openrouter_http_only = os.getenv('OPENROUTER_USE_HTTP_ONLY', '0') == '1'
@@ -19946,11 +19969,19 @@ class UnifiedClient:
                     except Exception:
                         timeout_obj = None
 
+                    client_kwargs = {
+                        "api_key": api_key_clean,
+                        "base_url": base_url,
+                        "timeout": timeout_obj,
+                        "max_retries": 0,
+                    }
+                    if provider == 'opencode':
+                        client_kwargs["default_headers"] = {
+                            "User-Agent": self._opencode_user_agent()
+                        }
+
                     client = openai.OpenAI(
-                        api_key=api_key_clean,
-                        base_url=base_url,
-                        timeout=timeout_obj,
-                        max_retries=0,
+                        **client_kwargs,
                     )
 
                     # Track this per-attempt SDK client so GUI stop (hard_cancel_all) can abort it cross-thread.
@@ -20344,6 +20375,8 @@ class UnifiedClient:
                     # Use Idempotency-Key header to avoid unsupported kwarg on some endpoints
                     idem_key = self._get_idempotency_key()
                     extra_headers = {"Idempotency-Key": idem_key}
+                    if provider == 'opencode':
+                        extra_headers["User-Agent"] = self._opencode_user_agent()
                     if provider == 'chutes':
                         try:
                             # Log once per-thread per (model,state)
@@ -25012,6 +25045,7 @@ class UnifiedClient:
             'together': "https://api.together.xyz/v1",
             'openrouter': "https://openrouter.ai/api/v1",
             'literouter': "https://api.literouter.com/v1",
+            'opencode': lambda: os.getenv("OPENCODE_API_URL", "https://opencode.ai/zen/go/v1"),
             'fireworks': lambda: os.getenv("FIREWORKS_API_URL", "https://api.fireworks.ai/inference/v1"),
             'xai': lambda: os.getenv("XAI_API_URL", "https://api.x.ai/v1"),
             'deepseek': lambda: os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1"),
