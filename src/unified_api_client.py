@@ -1250,7 +1250,7 @@ def flush_deferred_batch_logs() -> None:
     """Print and clear all deferred batch log messages for the current thread."""
     if hasattr(_deferred_batch_logs, 'messages') and _deferred_batch_logs.messages:
         for msg in _deferred_batch_logs.messages:
-            print(msg)
+            print(msg, flush=True)
         _deferred_batch_logs.messages.clear()
 
 def pop_deferred_batch_logs() -> list:
@@ -1415,22 +1415,29 @@ class UnifiedClient:
         Sanitizes HTML content to keep logs readable.
         """
         try:
-            if getattr(self, '_in_cleanup', False):
+            msg_text = str(message or "")
+            is_lifecycle = (
+                "Queued " in msg_text
+                or "API call in progress" in msg_text
+                or "thinking=" in msg_text
+            )
+            if getattr(self, '_in_cleanup', False) and not (is_lifecycle and self._should_show_api_lifecycle_logs()):
                 return
-            if getattr(self, '_cancelled', False):
+            if getattr(self, '_cancelled', False) and not (is_lifecycle and self._should_show_api_lifecycle_logs()):
                 return
             # Some call sites expose a stop check
             if hasattr(self, '_is_stop_requested') and callable(getattr(self, '_is_stop_requested')):
                 try:
                     if self._is_stop_requested():
-                        return
+                        if not (is_lifecycle and self._should_show_api_lifecycle_logs()):
+                            return
                 except Exception:
                     pass
             if os.getenv('QUIET_LOGS', '0') == '1':
                 return
             # Sanitize HTML from message before printing
             sanitized_message = self._sanitize_html_for_log(message)
-            print(sanitized_message)
+            print(sanitized_message, flush=is_lifecycle)
             # Optional mirror to raw CMD stderr to bypass GUI filters
             if os.getenv('VERBOSE_CMD_LOGS', '0') == '1':
                 try:
@@ -1445,6 +1452,34 @@ class UnifiedClient:
                 print(message)
             except Exception:
                 pass
+
+    def _should_show_api_lifecycle_logs(self) -> bool:
+        """Return True for lightweight API send/progress logs.
+
+        This intentionally does not call _is_stop_requested(); that method can
+        consult glossary stop files and translation stop state, which is useful
+        for control flow but too aggressive for visibility logs in subprocesses.
+        """
+        try:
+            if os.getenv('QUIET_LOGS', '0') == '1':
+                return False
+            try:
+                tls = self._get_thread_local_client()
+                ctx = getattr(tls, 'current_request_context', None)
+            except Exception:
+                ctx = None
+            ctx = str(ctx or getattr(self, 'context', None) or '').strip().lower()
+            is_glossary = ctx == 'glossary'
+            immediate_stop = os.environ.get('TRANSLATION_CANCELLED') == '1' and os.environ.get('GRACEFUL_STOP') != '1'
+            if immediate_stop:
+                return False
+            if getattr(self, '_in_cleanup', False) and not is_glossary:
+                return False
+            if getattr(self, '_cancelled', False) and not is_glossary and os.environ.get('GRACEFUL_STOP') != '1':
+                return False
+            return True
+        except Exception:
+            return True
 
     def _safe_len(self, obj, context="unknown"):
         """Safely get length of an object with better error reporting"""
@@ -14758,7 +14793,7 @@ class UnifiedClient:
         # so the user sees it in real-time while waiting
         if sleep_time > 0:
             flush_deferred_batch_logs()
-            if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+            if self._should_show_api_lifecycle_logs() and os.environ.get('GRACEFUL_STOP') != '1':
                 try:
                     tls = self._get_thread_local_client()
                     _label = getattr(tls, 'current_request_label', None) or 'request'
@@ -14820,7 +14855,7 @@ class UnifiedClient:
             except Exception:
                 pass
             _defer_progress_log = _is_authgem or _is_authnd or _is_native_gemini or _is_vertex or _is_sdk_provider
-            if not _defer_progress_log and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+            if not _defer_progress_log and self._should_show_api_lifecycle_logs() and os.environ.get('GRACEFUL_STOP') != '1':
                 try:
                     tls = self._get_thread_local_client()
                     _label = getattr(tls, 'current_request_label', None) or 'request'
@@ -14869,7 +14904,7 @@ class UnifiedClient:
                 _is_sdk_provider = True
         except Exception:
             pass
-        if not _is_authgem and not _is_authnd and not _is_native_gemini and not _is_vertex and not _is_sdk_provider and not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+        if not _is_authgem and not _is_authnd and not _is_native_gemini and not _is_vertex and not _is_sdk_provider and self._should_show_api_lifecycle_logs() and os.environ.get('GRACEFUL_STOP') != '1':
             try:
                 tls = self._get_thread_local_client()
                 label = getattr(tls, 'current_request_label', None) or 'request'
@@ -20858,7 +20893,7 @@ class UnifiedClient:
 
                     # Emit "API call in progress" here so it appears after
                     # the route/config logs and right before the HTTP POST.
-                    if not self._is_stop_requested() and os.environ.get('GRACEFUL_STOP') != '1':
+                    if self._should_show_api_lifecycle_logs() and os.environ.get('GRACEFUL_STOP') != '1':
                         try:
                             _tls = self._get_thread_local_client()
                             _label = getattr(_tls, 'current_request_label', None) or 'request'
@@ -20871,8 +20906,8 @@ class UnifiedClient:
                     try:
                         import time as _t
                         start_ts = _t.time()
-                        if use_streaming and not self._is_stop_requested():
-                            print(f"🛰️ [{provider}] SDK stream start (model={effective_model}, base_url={base_url})")
+                        if use_streaming and self._should_show_api_lifecycle_logs():
+                            print(f"🛰️ [{provider}] SDK stream start (model={effective_model}, base_url={base_url})", flush=True)
                         if use_responses_api:
                             resp = client.responses.create(**call_kwargs)
                         else:

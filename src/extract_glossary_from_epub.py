@@ -145,6 +145,23 @@ def _is_graceful_stop_skip_error(err: Exception) -> bool:
         return os.environ.get('GRACEFUL_STOP', '0') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED', '0') == '1'
     return False
 
+def _log_glossary_entries(idx: int, entries: list, elapsed: float = None, total_chapters: int = None) -> None:
+    """Log parsed glossary entries as soon as a chapter response is validated."""
+    try:
+        total_ent = len(entries or [])
+        if total_ent <= 0:
+            return
+        chapter_num = _chapter_positions.get(idx, idx + 1) if '_chapter_positions' in globals() else idx + 1
+        chapter_label = f"{chapter_num}/{total_chapters}" if total_chapters else str(chapter_num)
+        elapsed_part = f" ({elapsed:.1f}s elapsed)" if elapsed is not None else ""
+        for eidx, entry in enumerate(entries, start=1):
+            entry_type = entry.get("type", "?")
+            raw_name = entry.get("raw_name", "?")
+            trans_name = entry.get("translated_name", "?")
+            print(f'[Chapter {chapter_label}] [{eidx}/{total_ent}]{elapsed_part} -> {entry_type}: {raw_name} ({trans_name})', flush=True)
+    except Exception:
+        pass
+
 def create_client_with_multi_key_support(api_key, model, output_dir, config):
     """Create a UnifiedClient with multi API key support if enabled.
     
@@ -4992,8 +5009,8 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
         data = parse_api_response(resp)
         
         # More detailed debug logging
-        print(f"[BATCH] Chapter {idx+1} - Raw response length: {len(resp)} chars")
-        print(f"[BATCH] Chapter {idx+1} - Parsed {len(data)} entries before validation")
+        print(f"[BATCH] Chapter {idx+1} - Raw response length: {len(resp)} chars", flush=True)
+        print(f"[BATCH] Chapter {idx+1} - Parsed {len(data)} entries before validation", flush=True)
         
         # Filter out invalid entries
         valid_data = []
@@ -5004,10 +5021,11 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                     entry['raw_name'] = entry['raw_name'].strip()
                 valid_data.append(entry)
             else:
-                print(f"[BATCH] Chapter {idx+1} - Invalid entry: {entry}")
+                print(f"[BATCH] Chapter {idx+1} - Invalid entry: {entry}", flush=True)
         
         elapsed = time.time() - start_time
-        print(f"[BATCH] Completed Chapter {idx+1} in {elapsed:.1f}s at {time.strftime('%H:%M:%S')} - Extracted {len(valid_data)} valid entries")
+        print(f"[BATCH] Completed Chapter {idx+1} in {elapsed:.1f}s at {time.strftime('%H:%M:%S')} - Extracted {len(valid_data)} valid entries", flush=True)
+        _log_glossary_entries(idx, valid_data, elapsed=elapsed)
         
         return {
             'idx': idx,
@@ -5016,6 +5034,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             'chap': chap,  # Include the chapter text in the result
             'raw_obj': raw_obj,  # Include raw object for history (from send_with_interrupt)
             'finish_reason': finish_reason,  # Track truncation ('length'/'MAX_TOKENS' = truncated)
+            'entries_logged': True,
             'error': None
         }
             
@@ -6554,11 +6573,12 @@ def main(log_callback=None, stop_callback=None):
                                     batch_entry_count += total_ent
                                     
                                     for eidx, entry in enumerate(data, start=1):
-                                        elapsed = time.time() - start
-                                        entry_type = entry.get("type", "?")
-                                        raw_name = entry.get("raw_name", "?")
-                                        trans_name = entry.get("translated_name", "?")
-                                        print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
+                                        if not result.get('entries_logged'):
+                                            elapsed = time.time() - start
+                                            entry_type = entry.get("type", "?")
+                                            raw_name = entry.get("raw_name", "?")
+                                            trans_name = entry.get("translated_name", "?")
+                                            print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
                                         glossary.append(entry)
                                 
                                 # Check if this was actually a failure (empty/refused content)
@@ -6626,14 +6646,13 @@ def main(log_callback=None, stop_callback=None):
                                 batch_entry_count += total_ent
                                 
                                 for eidx, entry in enumerate(data, start=1):
-                                    elapsed = time.time() - start
-                                    
-                                    # Get entry info
-                                    entry_type = entry.get("type", "?")
-                                    raw_name = entry.get("raw_name", "?")
-                                    trans_name = entry.get("translated_name", "?")
-                                    
-                                    print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
+                                    if not result.get('entries_logged'):
+                                        elapsed = time.time() - start
+                                        # Get entry info
+                                        entry_type = entry.get("type", "?")
+                                        raw_name = entry.get("raw_name", "?")
+                                        trans_name = entry.get("translated_name", "?")
+                                        print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
                                     
                                     # Add entry immediately WITHOUT deduplication
                                     glossary.append(entry)

@@ -18122,6 +18122,8 @@ Important rules:
                         k: v for k, v in os.environ.items()
                         if old_env.get(k) != v
                     }
+                    env_delta['QUIET_LOGS'] = '0'
+                    env_delta['GRACEFUL_STOP_HTTP_SUPPRESS'] = '0'
                     env_file = None
                     try:
                         import subprocess
@@ -18161,8 +18163,11 @@ Important rules:
                         child_env = old_env.copy()
                         child_env['PYTHONUNBUFFERED'] = '1'
                         child_env['PYTHONIOENCODING'] = 'utf-8'
+                        child_env['QUIET_LOGS'] = '0'
+                        child_env['GRACEFUL_STOP_HTTP_SUPPRESS'] = '0'
                         child_env.setdefault('PYTHONLEGACYWINDOWSSTDIO', '0')
                         creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0
+                        self.append_log(f"🚀 Launching glossary subprocess (batch size {glossary_batch_size})")
 
                         suppress_warning_continuation = False
                         suppress_http_continuation = False
@@ -18196,10 +18201,27 @@ Important rules:
                                 "DEBUG:httpcore.",
                                 "DEBUG:httpcore:",
                                 "DEBUG:httpx:",
-                                "INFO:httpx:",
                                 "DEBUG:unified_api_client:",
                                 "INFO:unified_api_client:",
                             )
+                            if stripped.startswith("INFO:httpx:"):
+                                if "HTTP Request:" in stripped:
+                                    http_msg = stripped.split("INFO:httpx:", 1)[1].strip()
+                                    self.append_log(http_msg)
+                                return
+                            if stripped.startswith(("INFO:unified_api_client:", "DEBUG:unified_api_client:")):
+                                api_msg = stripped.split(":", 2)[2].strip() if stripped.count(":") >= 2 else stripped
+                                lifecycle_markers = (
+                                    "Queued ",
+                                    "API call in progress",
+                                    "thinking=",
+                                    "SDK stream start",
+                                    "SDK stream opened",
+                                    "HTTP Request:",
+                                )
+                                if any(marker in api_msg for marker in lifecycle_markers):
+                                    self.append_log(api_msg)
+                                return
                             if stripped.startswith(noisy_prefixes):
                                 if "return_value=" in stripped or "request=<" in stripped:
                                     suppress_http_continuation = True
@@ -18337,10 +18359,10 @@ Important rules:
                     except Exception:
                         glossary_batch_size = 0
 
-                    if glossary_batch_size >= 51:
+                    if glossary_batch_size >= 11:
                         ok = run_glossary_subprocess()
                     else:
-                        self.append_log("Running glossary extraction in-process (batch size <= 50)")
+                        self.append_log("Running glossary extraction in-process (batch size <= 10)")
                         ok = run_glossary_in_process()
 
                     if not ok:
