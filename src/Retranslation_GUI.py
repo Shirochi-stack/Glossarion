@@ -2138,6 +2138,18 @@ class RetranslationMixin:
                             return model_name
                 return '(model unknown)'
 
+            def _gp_entry_for(ci, _d):
+                if not isinstance(_d, dict):
+                    return {}
+                chapters = _d.get('chapters', {})
+                if isinstance(chapters, dict):
+                    for key, info in chapters.items():
+                        if not isinstance(info, dict):
+                            continue
+                        if _gp_index_for_entry(info, key, _d) == ci:
+                            return info
+                return {}
+
             def _gp_display_for(ci, fname, _d, cache=None):
                 opf_pos = (panel_state.get('spine_index_map') or {}).get(ci, ci + 1)
                 ch_num = _gp_display_chapter_num(ci, fname)
@@ -2152,7 +2164,11 @@ class RetranslationMixin:
                     'not_completed': '\u2b1c',
                 }
                 icon = icons.get(status) or '\u2b1c'
-                display = f"[{opf_pos:03d}] Ch.{ch_num:03d} | {icon} {status.replace('_', ' ').title():14s} | {fname} -> {model_name}"
+                status_label = status.replace('_', ' ').title()
+                entry = _gp_entry_for(ci, _d)
+                if status == 'completed' and str(entry.get('refinement_status') or '').lower().strip() in ('refined', 'completed'):
+                    status_label = f"{status_label} ⭐"
+                display = f"[{opf_pos:03d}] Ch.{ch_num:03d} | {icon} {status_label:14s} | {fname} -> {model_name}"
                 if issues:
                     issues_display = ', '.join(issues[:2])
                     if len(issues) > 2:
@@ -3674,6 +3690,8 @@ class RetranslationMixin:
             output_display = self._progress_model_column_text(info, _display_data, output_file)
             icon = status_icons.get(status, '❓')
             status_label = status_labels.get(status, status)
+            if status == 'completed' and self._progress_entry_is_refined(info):
+                status_label = f"{status_label} ⭐"
             chapter_info = info.get('info') or info.get('progress_entry') or {}
             ocr_progress = chapter_info.get('ocr_progress') if isinstance(chapter_info, dict) else None
             if status == 'in_progress' and isinstance(ocr_progress, dict):
@@ -3877,6 +3895,21 @@ class RetranslationMixin:
                 if ch.get('output_file') == target_out:
                     return key, ch
             return None
+
+        def _clear_refinement_progress_fields(entry):
+            """Remove stale refinement metadata when a chapter is queued again."""
+            if not isinstance(entry, dict):
+                return 0
+            removed = 0
+            for field in ("refinement_status", "refined_at", "refinement_error", "unrefined_backup_file"):
+                if field in entry:
+                    entry.pop(field, None)
+                    removed += 1
+            previous_entry = entry.get("previous_progress_entry")
+            if isinstance(previous_entry, dict):
+                for field in ("refinement_status", "refined_at", "refinement_error", "unrefined_backup_file"):
+                    previous_entry.pop(field, None)
+            return removed
 
         def _restore_regular_in_progress_entry(info):
             if not isinstance(info, dict):
@@ -4187,6 +4220,7 @@ class RetranslationMixin:
             deleted_count = 0
             marked_count = 0
             status_reset_count = 0
+            refinement_cleared_count = 0
             merged_cleared_count = 0
             progress_updated = False
 
@@ -4221,6 +4255,8 @@ class RetranslationMixin:
                         ch_entry["status"] = "pending"
                         ch_entry["failure_reason"] = ""
                         ch_entry["error_message"] = ""
+                        if _clear_refinement_progress_fields(ch_entry):
+                            refinement_cleared_count += 1
                         progress_updated = True
                         status_reset_count += 1
                     else:
@@ -4263,6 +4299,8 @@ class RetranslationMixin:
                 success_parts.append(f"marked {marked_count} missing chapters for translation")
             if status_reset_count > 0:
                 success_parts.append(f"reset {status_reset_count} chapter statuses to pending")
+            if refinement_cleared_count > 0:
+                success_parts.append(f"cleared refinement state for {refinement_cleared_count} chapter(s)")
             if merged_cleared_count > 0:
                 success_parts.append(f"cleared {merged_cleared_count} merged child chapters")
             
@@ -6223,6 +6261,16 @@ class RetranslationMixin:
                 return 'no_tts'
         return status
 
+    def _progress_entry_is_refined(self, info):
+        """Return True when a completed progress entry also has refined output."""
+        try:
+            entry = info.get('progress_entry') or info.get('info') or info
+            if not isinstance(entry, dict):
+                return False
+            return str(entry.get('refinement_status') or '').lower().strip() in ('refined', 'completed')
+        except Exception:
+            return False
+
     def _update_chapter_status_info(self, data):
         """Update chapter status information after refresh"""
         # Re-check file existence and update status for each chapter
@@ -6402,6 +6450,8 @@ class RetranslationMixin:
             output_display = self._progress_model_column_text(info, data, output_file)
             icon = status_icons.get(status, '❓')
             status_label = status_labels.get(status, status)
+            if status == 'completed' and self._progress_entry_is_refined(info):
+                status_label = f"{status_label} ⭐"
             chapter_info = info.get('info') or info.get('progress_entry') or {}
             ocr_progress = chapter_info.get('ocr_progress') if isinstance(chapter_info, dict) else None
             if status == 'in_progress' and isinstance(ocr_progress, dict):

@@ -1284,7 +1284,6 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         # Keep this list in sync with the always-include logic in _init_variables.
         protected = {
             "Universal",
-            "Refinement",
             "Korean_BeautifulSoup",
             "Japanese_BeautifulSoup",
             "Chinese_BeautifulSoup",
@@ -2262,11 +2261,6 @@ Text to analyze:
                 "- Maintain the original meaning, tone, and style.\n"
                 "- Strictly follow a Subject Tracking & Pronoun Resolution process: track omitted or ambiguous subjects/pronouns from surrounding context, titles, relationships, dialogue, and repeated mentions so pronouns stay consistent instead of defaulting to 'he', 'she', or 'it'.\n"
                 "- Output ONLY the translated text in {target_lang}. Do not add any explanations, notes, or conversational filler.\n"
-            ),
-            "Refinement": (
-                "You are refining an existing English translation. Improve clarity, flow, "
-                "consistency, and readability while preserving all HTML structure, tags, "
-                "images, links, ids, and meaning. Return only the refined HTML."
             ),
             "Korean_BeautifulSoup": (
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
@@ -3692,17 +3686,17 @@ Recent translations to summarize:
         
         # Profiles
         self.prompt_profiles = self.config.get('prompt_profiles', self.default_prompts.copy())
-        removed_ocr_profiles = {"korean_OCR", "japanese_OCR", "chinese_OCR"}
+        removed_ocr_profiles = {"korean_OCR", "japanese_OCR", "chinese_OCR", "Refinement"}
         for profile_name in removed_ocr_profiles:
             self.prompt_profiles.pop(profile_name, None)
         if self.config.get('active_profile') in removed_ocr_profiles:
             self.config['active_profile'] = 'Universal'
+        self.config['prompt_profiles'] = self.prompt_profiles
         
         # Ensure Universal profile and all extraction mode profiles exist and are up to date
         # Define profiles that should always be included (in order of priority)
         always_include_profiles = [
             "Universal",
-            "Refinement",
             "Korean_BeautifulSoup",
             "Japanese_BeautifulSoup",
             "Chinese_BeautifulSoup",
@@ -8320,7 +8314,7 @@ Recent translations to summarize:
         )
         batch_right_layout.addWidget(self.multipass_checkbox)
 
-        self.refinement_prompt_button = QPushButton("Edit Prompt")
+        self.refinement_prompt_button = QPushButton("Refine Prompt")
         self.refinement_prompt_button.setMinimumWidth(90)
         self.refinement_prompt_button.clicked.connect(self.show_refinement_prompt_dialog)
         self._update_refinement_prompt_button_style()
