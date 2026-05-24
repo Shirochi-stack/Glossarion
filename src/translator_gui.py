@@ -8028,7 +8028,14 @@ Recent translations to summarize:
         self.context_mode_combo.addItem("Contextual History", "contextual_history")
         self.context_mode_combo.addItem("Rolling Summary (Replace)", "rolling_summary_replace")
         self.context_mode_combo.addItem("Rolling Summary (Append)", "rolling_summary_append")
-        self.context_mode_combo.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Select how prior translation context is provided to the model.</p></qt>")
+        self.context_mode_combo.setToolTip(
+            "<qt><p style='white-space: normal; max-width: 40em; margin: 0;'>"
+            "<b>Off:</b> translate each request without prior chapter context.<br>"
+            "<b>Contextual History:</b> include recent translated entries as direct conversation history.<br>"
+            "<b>Rolling Summary (Replace):</b> summarize the latest exchanges and replace the previous memory summary.<br>"
+            "<b>Rolling Summary (Append):</b> summarize the latest exchanges, append them to memory, and retain the most recent entries."
+            "</p></qt>"
+        )
         self.context_mode_combo.setFixedWidth(180)
         context_icon_path = f"{self.base_dir}/Halgakos.ico".replace('\\', '/')
         context_disabled_icon_path = _get_disabled_halgakos_icon_path(context_icon_path)
@@ -8183,6 +8190,11 @@ Recent translations to summarize:
         self.batch_size_entry.setMaximumWidth(60)
         self.batch_size_entry.textChanged.connect(lambda: setattr(self, 'batch_size_var', self.batch_size_entry.text()))
         batch_right_layout.addWidget(self.batch_size_entry)
+
+        auto_glossary_row_container = QWidget()
+        auto_glossary_row_layout = QHBoxLayout(auto_glossary_row_container)
+        auto_glossary_row_layout.setContentsMargins(0, 0, 0, 0)
+        auto_glossary_row_layout.setSpacing(6)
         
         # Duplicate Auto Glossary dropdown (synced with main auto_glossary_mode_combo)
         from PySide6.QtCore import QSize
@@ -8280,7 +8292,7 @@ Recent translations to summarize:
             def minimumSizeHint(self):
                 hint = super().minimumSizeHint()
                 hint.setWidth(95)
-                hint.setHeight(max(hint.height(), 38))
+                hint.setHeight(max(hint.height(), 32))
                 return hint
 
             def showPopup(self):
@@ -8360,12 +8372,12 @@ Recent translations to summarize:
                     QStyle.SC_ComboBoxEditField,
                     self
                 )
-                text_rect.adjust(4, 1, -4, -1)
+                text_rect.adjust(1, 1, -4, -1)
 
                 icon = self.itemIcon(self.currentIndex())
                 if not icon.isNull():
                     icon_size = self.iconSize()
-                    text_rect.setLeft(text_rect.left() + icon_size.width() + 5)
+                    text_rect.setLeft(text_rect.left() + icon_size.width() + 2)
 
                 if QFontMetrics(self.font()).horizontalAdvance(self.currentText()) <= max(1, text_rect.width()):
                     super().paintEvent(event)
@@ -8381,7 +8393,7 @@ Recent translations to summarize:
                     QStyle.SC_ComboBoxEditField,
                     self
                 )
-                text_rect.adjust(4, 1, -4, -1)
+                text_rect.adjust(1, 1, -4, -1)
 
                 if not icon.isNull():
                     icon_size = self.iconSize()
@@ -8392,7 +8404,7 @@ Recent translations to summarize:
                         icon_size.height()
                     )
                     icon.paint(painter, icon_rect, Qt.AlignCenter)
-                    text_rect.setLeft(icon_rect.right() + 5)
+                    text_rect.setLeft(icon_rect.right() + 2)
 
                 font, rendered_text = self._fitted_font_and_text(self.currentText(), max(1, text_rect.width()))
                 painter.setFont(font)
@@ -8402,13 +8414,10 @@ Recent translations to summarize:
                 painter.setClipRect(text_rect)
                 painter.drawText(text_rect, rendered_text, text_option)
 
-        auto_glossary_label = FittingStatusLabel("Auto Glossary:")
-        auto_glossary_label.setStyleSheet("color: #e8f0ff; font-size: 10pt; font-weight: bold;")
-        auto_glossary_label.setContentsMargins(8, 0, 0, 0)
-        auto_glossary_label.setAlignment(Qt.AlignCenter)
-        auto_glossary_label.setText(auto_glossary_label.text())
-        auto_glossary_label.setFixedWidth(78)
-        batch_right_layout.addWidget(auto_glossary_label)
+        auto_glossary_label = QLabel("Glossary Mode:")
+        auto_glossary_label.setContentsMargins(0, 0, 0, 0)
+        auto_glossary_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        auto_glossary_row_layout.addWidget(auto_glossary_label)
         auto_glossary_control = QWidget()
         auto_glossary_control.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         auto_glossary_control.setStyleSheet("background-color: transparent;")
@@ -8446,13 +8455,14 @@ Recent translations to summarize:
         )
         self.auto_glossary_shortcut_combo.setMinimumWidth(82)
         self.auto_glossary_shortcut_combo.setMaximumWidth(165)
+        self.auto_glossary_shortcut_combo.setFixedHeight(32)
         self.auto_glossary_shortcut_combo.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.auto_glossary_shortcut_combo.setIconSize(QSize(18, 18))
         self.auto_glossary_shortcut_combo.setStyleSheet("""
             QComboBox {
                 background-color: #1a2a44;
                 color: #e8f0ff;
-                padding: 5px 10px;
+                padding: 2px 6px 2px 2px;
                 padding-right: 0px;
                 border: 2px solid #4a8fd4;
                 border-top-left-radius: 4px;
@@ -8589,7 +8599,7 @@ Recent translations to summarize:
         self.auto_glossary_shortcut_combo.currentIndexChanged.connect(_on_auto_glossary_shortcut_changed)
         self.auto_glossary_shortcut_combo.wheelEvent = lambda event: event.ignore()
         auto_glossary_control_layout.addWidget(self.auto_glossary_shortcut_combo)
-        batch_right_layout.addWidget(auto_glossary_control)
+        auto_glossary_row_layout.addWidget(auto_glossary_control)
 
         # ── Manual glossary status row (sits ABOVE the auto glossary row) ──
         self._gloss_status_row = QWidget()
@@ -8964,8 +8974,8 @@ Recent translations to summarize:
 
         self.delete_glossary_btn = QPushButton("🗑️")
         self.delete_glossary_btn.setToolTip("Delete glossary files for selected input files")
-        self.delete_glossary_btn.setFixedWidth(38)
-        self.delete_glossary_btn.setFixedHeight(40)
+        self.delete_glossary_btn.setFixedWidth(34)
+        self.delete_glossary_btn.setFixedHeight(32)
         self.delete_glossary_btn.setStyleSheet(
             "QPushButton { background-color: #dc3545; color: white; border: 2px solid #4a8fd4; border-left: none; border-right: none; border-radius: 0px; font-size: 12pt; padding: 0; } "
             "QPushButton:hover { background-color: #c82333; border-color: #70b8ff; } "
@@ -8977,17 +8987,17 @@ Recent translations to summarize:
             separator.setFrameShape(QFrame.VLine)
             separator.setFrameShadow(QFrame.Plain)
             separator.setFixedWidth(1)
-            separator.setFixedHeight(40)
+            separator.setFixedHeight(32)
             separator.setStyleSheet("background-color: #4a8fd4; margin-top: 2px; margin-bottom: 2px;")
             self._auto_glossary_control_layout.addWidget(separator)
             self._auto_glossary_control_layout.addWidget(self.delete_glossary_btn)
         except Exception:
-            batch_right_layout.addWidget(self.delete_glossary_btn)
+            auto_glossary_row_layout.addWidget(self.delete_glossary_btn)
 
         self.restore_glossary_btn = QPushButton("↩️")
         self.restore_glossary_btn.setToolTip("Restore the most recent glossary backup")
-        self.restore_glossary_btn.setFixedWidth(38)
-        self.restore_glossary_btn.setFixedHeight(40)
+        self.restore_glossary_btn.setFixedWidth(34)
+        self.restore_glossary_btn.setFixedHeight(32)
         self.restore_glossary_btn.setStyleSheet(
             "QPushButton { background-color: #6f43c1; color: white; border: 2px solid #4a8fd4; border-left: none; border-top-left-radius: 0px; border-bottom-left-radius: 0px; border-top-right-radius: 4px; border-bottom-right-radius: 4px; font-size: 12pt; padding: 0; } "
             "QPushButton:hover { background-color: #5a32a3; border-color: #70b8ff; } "
@@ -9000,21 +9010,23 @@ Recent translations to summarize:
             separator.setFrameShape(QFrame.VLine)
             separator.setFrameShadow(QFrame.Plain)
             separator.setFixedWidth(1)
-            separator.setFixedHeight(40)
+            separator.setFixedHeight(32)
             separator.setStyleSheet("background-color: #4a8fd4; margin-top: 2px; margin-bottom: 2px;")
             self._auto_glossary_control_layout.addWidget(separator)
             self._auto_glossary_control_layout.addWidget(self.restore_glossary_btn)
         except Exception:
-            batch_right_layout.addWidget(self.restore_glossary_btn)
+            auto_glossary_row_layout.addWidget(self.restore_glossary_btn)
 
         # Check restore visibility on startup (deferred so selected_files is populated)
         from PySide6.QtCore import QTimer
         QTimer.singleShot(500, _update_restore_visibility)
         self._update_restore_visibility = _update_restore_visibility
 
+        auto_glossary_row_layout.addStretch()
         batch_right_layout.addStretch()
         
         
+        self.frame.addWidget(auto_glossary_row_container, 5, 2, 1, 2, Qt.AlignLeft)
         self.frame.addWidget(batch_right_container, 7, 3, Qt.AlignLeft)
         self.frame.addWidget(self._gloss_status_row, 5, 4, Qt.AlignRight)
 
