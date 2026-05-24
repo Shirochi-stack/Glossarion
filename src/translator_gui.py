@@ -3384,12 +3384,8 @@ Recent translations to summarize:
     def _get_allowed_image_output_mode(self):
         """Check if image output mode should be enabled based on dependencies.
         Returns '1' if allowed and enabled, '0' otherwise.
-        Auto-enables for any model whose name indicates image generation."""
+        The model name never changes this setting; the dropdown/radio choice does."""
         try:
-            model = str(getattr(self, 'model_var', ''))
-            # Auto-force on for image-gen models
-            if self._model_is_image_gen(model):
-                return '1'
             # Video mode takes priority – never both at once
             if getattr(self, 'enable_video_output_mode_var', False):
                 return '0'
@@ -3406,12 +3402,8 @@ Recent translations to summarize:
     def _get_allowed_video_output_mode(self):
         """Check if video output mode should be enabled based on dependencies.
         Returns '1' if allowed and enabled, '0' otherwise.
-        Auto-enables for any model whose name indicates video generation."""
+        The model name never changes this setting; the dropdown/radio choice does."""
         try:
-            model = str(getattr(self, 'model_var', ''))
-            # Auto-force on for video-gen models
-            if self._model_is_video_gen(model):
-                return '1'
             # Image mode takes priority if somehow both are on
             if getattr(self, 'enable_image_output_mode_var', False):
                 return '0'
