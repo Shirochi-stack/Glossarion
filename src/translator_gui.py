@@ -75,6 +75,61 @@ if getattr(sys, 'frozen', False):
     # to future maintainers: don't try to rmtree `sys._MEIPASS` from inside
     # the frozen process, it only makes the bootloader's own cleanup fail.
 
+# Fast worker-mode dispatch for manual glossary extraction subprocesses.
+# Keep this before GUI/manga imports so glossary workers do not import OCR/ML
+# modules such as bubble_detector, huggingface_hub, torch, or pydot.
+if '--run-glossary-extraction' in sys.argv:
+    try:
+        os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+        try:
+            _env_file = None
+            _new_argv = [sys.argv[0]]
+            _skip_next = False
+            for _idx, _arg in enumerate(sys.argv[1:]):
+                if _skip_next:
+                    _skip_next = False
+                    continue
+                if _arg == '--run-glossary-extraction':
+                    continue
+                if _arg == '--glossary-env-file':
+                    _real_idx = _idx + 1
+                    if len(sys.argv) > _real_idx + 1:
+                        _env_file = sys.argv[_real_idx + 1]
+                    _skip_next = True
+                    continue
+                _new_argv.append(_arg)
+            sys.argv = _new_argv
+
+            if _env_file:
+                try:
+                    import json as _glossary_env_json
+                    with open(_env_file, 'r', encoding='utf-8') as _f:
+                        _env_updates = _glossary_env_json.load(_f)
+                    if isinstance(_env_updates, dict):
+                        for _k, _v in _env_updates.items():
+                            os.environ[str(_k)] = "" if _v is None else str(_v)
+                finally:
+                    try:
+                        os.remove(_env_file)
+                    except Exception:
+                        pass
+        except Exception as _env_e:
+            try:
+                print(f"[ERROR] Failed to load glossary worker env: {_env_e}")
+            except Exception:
+                pass
+
+        from extract_glossary_from_epub import main as _glossary_extract_main
+        from shutdown_utils import run_cli_main as _run_cli_main
+        _run_cli_main(_glossary_extract_main)
+    except Exception as _e:
+        try:
+            print(f"[ERROR] Glossary extraction worker failed: {_e}")
+        except Exception:
+            pass
+    finally:
+        sys.exit(1)
+
 # --- Helper utilities to quiet PyInstaller temp-dir warnings & stray children ---
 def _kill_child_process_tree(timeout=1.5):
     """Terminate all child processes of the current process to free _MEIPASS locks.
@@ -577,62 +632,6 @@ if '--run-pdf-extraction' in sys.argv:
             pass
     finally:
         sys.exit(0)
-
-# Support worker-mode dispatch for manual glossary extraction subprocesses.
-# In frozen builds sys.executable is the app .exe, so the parent launches this
-# same executable with --run-glossary-extraction instead of a .py file.
-if '--run-glossary-extraction' in sys.argv:
-    try:
-        os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
-        try:
-            _env_file = None
-            _new_argv = [sys.argv[0]]
-            _skip_next = False
-            for _idx, _arg in enumerate(sys.argv[1:]):
-                if _skip_next:
-                    _skip_next = False
-                    continue
-                if _arg == '--run-glossary-extraction':
-                    continue
-                if _arg == '--glossary-env-file':
-                    _real_idx = _idx + 1
-                    if len(sys.argv) > _real_idx + 1:
-                        _env_file = sys.argv[_real_idx + 1]
-                    _skip_next = True
-                    continue
-                _new_argv.append(_arg)
-            sys.argv = _new_argv
-
-            if _env_file:
-                try:
-                    import json as _glossary_env_json
-                    with open(_env_file, 'r', encoding='utf-8') as _f:
-                        _env_updates = _glossary_env_json.load(_f)
-                    if isinstance(_env_updates, dict):
-                        for _k, _v in _env_updates.items():
-                            os.environ[str(_k)] = "" if _v is None else str(_v)
-                finally:
-                    try:
-                        os.remove(_env_file)
-                    except Exception:
-                        pass
-        except Exception as _env_e:
-            try:
-                print(f"[ERROR] Failed to load glossary worker env: {_env_e}")
-            except Exception:
-                pass
-
-        from extract_glossary_from_epub import main as _glossary_extract_main
-        from shutdown_utils import run_cli_main as _run_cli_main
-        _run_cli_main(_glossary_extract_main)
-    except Exception as _e:
-        try:
-            print(f"[ERROR] Glossary extraction worker failed: {_e}")
-        except Exception:
-            pass
-    finally:
-        sys.exit(1)
-
 
 # Enforce a 400 MB cap on app-local debug caches (Payloads/, http_requests/).
 # Runs at startup (background thread) and again at exit. Both runs log a
@@ -17011,6 +17010,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if self.stop_requested:
                 self._glossary_stop_was_requested = True
             self.stop_requested = False
+            self.graceful_stop_active = False
+            os.environ['GRACEFUL_STOP'] = '0'
+            os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
+            os.environ['WAIT_FOR_CHUNKS'] = '0'
+            try:
+                stop_file = os.environ.get('GLOSSARY_STOP_FILE')
+                if stop_file and os.path.exists(stop_file):
+                    os.remove(stop_file)
+            except Exception:
+                pass
             if glossary_stop_flag:
                 glossary_stop_flag(False)
             
@@ -18153,7 +18162,54 @@ Important rules:
                         child_env.setdefault('PYTHONLEGACYWINDOWSSTDIO', '0')
                         creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0
 
-                        self.append_log("Running glossary extraction in subprocess")
+                        suppress_warning_continuation = False
+                        suppress_http_continuation = False
+
+                        def _forward_worker_log(raw_line):
+                            nonlocal suppress_warning_continuation, suppress_http_continuation
+                            line = str(raw_line or '').rstrip()
+                            if not line:
+                                return
+
+                            stripped = line.strip()
+                            if suppress_http_continuation:
+                                suppress_http_continuation = False
+                                if (
+                                    not stripped.startswith(("INFO:", "DEBUG:", "WARNING:", "ERROR:"))
+                                    and not stripped.startswith(("[", "Chapter", "Done.", "Also saved"))
+                                ):
+                                    return
+
+                            if suppress_warning_continuation:
+                                suppress_warning_continuation = False
+                                if (
+                                    stripped.startswith("warnings.warn(")
+                                    or stripped.startswith("for root_file in")
+                                    or stripped.startswith("warnings.warn")
+                                ):
+                                    return
+
+                            noisy_prefixes = (
+                                "[HTTP Logger] Enabled",
+                                "DEBUG:httpcore.",
+                                "DEBUG:httpcore:",
+                                "DEBUG:httpx:",
+                                "INFO:httpx:",
+                                "DEBUG:unified_api_client:",
+                                "INFO:unified_api_client:",
+                            )
+                            if stripped.startswith(noisy_prefixes):
+                                if "return_value=" in stripped or "request=<" in stripped:
+                                    suppress_http_continuation = True
+                                return
+                            if "DPI scaling configured" in stripped:
+                                return
+                            if "site-packages\\ebooklib\\epub.py:" in line or "site-packages/ebooklib/epub.py:" in line:
+                                suppress_warning_continuation = True
+                                return
+
+                            self.append_log(line)
+
                         proc = subprocess.Popen(
                             cmd,
                             stdout=subprocess.PIPE,
@@ -18179,7 +18235,7 @@ Important rules:
 
                             line = proc.stdout.readline() if proc.stdout else ''
                             if line:
-                                self.append_log(line.rstrip())
+                                _forward_worker_log(line)
                                 continue
 
                             if proc.poll() is not None:
@@ -18191,7 +18247,7 @@ Important rules:
                             if proc.stdout:
                                 for line in proc.stdout:
                                     if line:
-                                        self.append_log(line.rstrip())
+                                        _forward_worker_log(line)
                         except Exception:
                             pass
 
@@ -18313,7 +18369,8 @@ Important rules:
                         has_content = True
                 
                 if has_content:
-                    if self.stop_requested:
+                    graceful_stop_finished = bool(getattr(self, 'graceful_stop_active', False)) or (os.environ.get('GRACEFUL_STOP') == '1')
+                    if self.stop_requested and not graceful_stop_finished:
                         self.append_log(f"⚠️ Partial glossary saved (stopped by user): {output_path}")
                         # Don't return True here so it doesn't count as fully successful, 
                         # but we can track it as partial if needed
@@ -19518,6 +19575,25 @@ Important rules:
         
         # Set graceful stop mode in environment so API client knows to show logs
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
+        if graceful_stop:
+            os.environ['TRANSLATION_CANCELLED'] = '0'
+        wait_for_chunks = getattr(self, 'wait_for_chunks_var', False) and graceful_stop
+        os.environ['WAIT_FOR_CHUNKS'] = '1' if wait_for_chunks else '0'
+        self.graceful_stop_active = graceful_stop
+
+        # Propagate stop mode to glossary subprocesses. Child processes do not
+        # see parent os.environ changes after launch, so this file is the live
+        # control channel for graceful vs immediate stop.
+        try:
+            stop_file = os.environ.get('GLOSSARY_STOP_FILE')
+            if stop_file:
+                with open(stop_file, 'w', encoding='utf-8') as f:
+                    if graceful_stop:
+                        f.write(f"graceful\nwait_for_chunks={1 if wait_for_chunks else 0}\n")
+                    else:
+                        f.write("immediate\n")
+        except Exception:
+            pass
         
         # Suppress HTTP logs during graceful stop
         if graceful_stop:
@@ -19533,6 +19609,11 @@ Important rules:
         # For graceful stop: DON'T abort in-flight API calls, let them finish
         # For immediate stop: abort everything aggressively
         if not graceful_stop:
+            try:
+                self._reset_api_watchdog_progress(clear_stale_external_files=True)
+            except Exception:
+                pass
+
             if glossary_stop_flag:
                 glossary_stop_flag(True)
             
@@ -19634,14 +19715,7 @@ Important rules:
             except Exception as e:
                 print(f"Error terminating helper child processes: {e}")
 
-            # Touch stop file for GlossaryManager subprocesses
-            try:
-                stop_file = os.environ.get('GLOSSARY_STOP_FILE')
-                if stop_file:
-                    with open(stop_file, 'w', encoding='utf-8') as f:
-                        f.write('stop')
-            except Exception:
-                pass
+            # Stop file already written above before any process termination.
         
         # Log message depends on stop mode
         if graceful_stop:
@@ -19652,7 +19726,7 @@ Important rules:
             if wait_for_chunks:
                 self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
             else:
-                self.append_log("🛑 Stop requested — cancelling glossary API calls (WAIT_FOR_CHUNKS=0)")
+                self.append_log("⏳ Graceful stop — not starting new glossary API calls; draining in-flight calls (WAIT_FOR_CHUNKS=0)")
         else:
             self.append_log("❌ Glossary extraction stop requested.")
             self.append_log("⏳ Please wait... stopping after current API call completes.")

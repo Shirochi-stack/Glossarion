@@ -139,7 +139,11 @@ def _is_graceful_stop_skip_error(err: Exception) -> bool:
         s = str(err).lower()
     except Exception:
         return False
-    return "graceful stop active - not starting new api call" in s
+    if "graceful stop active" in s or "skipped before api call" in s:
+        return True
+    if "operation cancelled" in s:
+        return os.environ.get('GRACEFUL_STOP', '0') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED', '0') == '1'
+    return False
 
 def create_client_with_multi_key_support(api_key, model, output_dir, config):
     """Create a UnifiedClient with multi API key support if enabled.
@@ -308,6 +312,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     """
     global _glossary_last_thread_submit, _glossary_thread_submit_lock
     
+    _sync_glossary_stop_control()
     # Early exit: if stop/graceful-stop is already flagged, skip client init and delays
     if stop_check_fn() or os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
         raise UnifiedClientError("Glossary extraction stopped by user (skipped before API call)")
@@ -559,6 +564,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                             os.environ['GRACEFUL_STOP_COMPLETED'] = '1'
                         return content, finish_reason or 'stop', raw_obj
                 except queue.Empty:
+                    _sync_glossary_stop_control()
                     # During graceful stop, don't cancel the API call - let it complete
                     if os.environ.get('GRACEFUL_STOP') != '1' and stop_check_fn():
                         # More aggressive cancellation
@@ -587,8 +593,16 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
         except UnifiedClientError as e:
             error_msg = str(e)
             
-            # Treat cancelled errors (from client being closed) as timeout
+            # Retry transport timeouts, but treat graceful-stop cancellation as a clean skip.
             if "cancelled" in error_msg.lower() or "Gemini client not initialized" in error_msg or "timed out" in error_msg.lower():
+                _sync_glossary_stop_control()
+                graceful_stop_active = (
+                    os.environ.get('GRACEFUL_STOP', '0') == '1'
+                    or os.environ.get('GRACEFUL_STOP_COMPLETED', '0') == '1'
+                )
+                if graceful_stop_active and "timed out" not in error_msg.lower():
+                    raise UnifiedClientError("Graceful stop active - not starting new API call") from None
+
                 # Check stop flag before retrying
                 if stop_check_fn():
                     # print("❌ Glossary extraction stopped by user during timeout retry")  # Redundant
@@ -976,17 +990,52 @@ def set_stop_flag(value):
         except Exception:
             pass
 
+def _read_glossary_stop_control():
+    """Return cross-process stop mode from GLOSSARY_STOP_FILE.
+
+    Values:
+    - "graceful": stop scheduling new work, let in-flight API calls finish.
+    - "immediate": abort queued/in-flight work as soon as possible.
+    """
+    try:
+        stop_file = os.environ.get('GLOSSARY_STOP_FILE')
+        if not stop_file or not os.path.exists(stop_file):
+            return None
+        with open(stop_file, 'r', encoding='utf-8', errors='ignore') as f:
+            data = f.read(512).strip().lower()
+        if not data:
+            return "immediate"
+        if "graceful" in data:
+            return "graceful"
+        if any(token in data for token in ("immediate", "force", "cancel", "stop")):
+            return "immediate"
+    except Exception:
+        return None
+    return None
+
+def _sync_glossary_stop_control():
+    """Mirror cross-process stop file state into env vars used by this module."""
+    mode = _read_glossary_stop_control()
+    if mode == "graceful":
+        os.environ['GRACEFUL_STOP'] = '1'
+        os.environ['TRANSLATION_CANCELLED'] = '0'
+        return mode
+    if mode == "immediate":
+        os.environ['GRACEFUL_STOP'] = '0'
+        os.environ['TRANSLATION_CANCELLED'] = '1'
+        return mode
+    return None
+
 def is_stop_requested():
     """Check if stop was requested"""
     global _stop_requested
+    mode = _sync_glossary_stop_control()
+    if mode == "graceful":
+        return False
+    if mode == "immediate":
+        return True
     if _stop_requested:
         return True
-    try:
-        stop_file = os.environ.get('GLOSSARY_STOP_FILE')
-        if stop_file and os.path.exists(stop_file):
-            return True
-    except Exception:
-        pass
     return False
 
 # ─── resilient tokenizer setup ───
@@ -1416,12 +1465,15 @@ def _glossary_disk_entry_is_still_in_progress(idx, context=None):
     return bool(snapshot is not None and idx in snapshot)
 
 def _glossary_is_graceful_stop_active():
+    _sync_glossary_stop_control()
     return os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
 
 def _glossary_is_hard_stop_env_active():
+    _sync_glossary_stop_control()
     return os.environ.get('TRANSLATION_CANCELLED') == '1' and not _glossary_is_graceful_stop_active()
 
 def _glossary_is_hard_stop_requested(stop_callback=None):
+    _sync_glossary_stop_control()
     if os.environ.get('TRANSLATION_CANCELLED') == '1':
         return True
     if _glossary_is_graceful_stop_active():
@@ -5387,6 +5439,7 @@ def main(log_callback=None, stop_callback=None):
     
     # Set up stop checking
     def check_stop():
+        _sync_glossary_stop_control()
         if os.environ.get('TRANSLATION_CANCELLED') == '1':
             return True
         # During graceful stop, ALWAYS return False to let current chapter complete fully
@@ -6626,6 +6679,7 @@ def main(log_callback=None, stop_callback=None):
                     # Use wait(FIRST_COMPLETED) so newly-submitted futures are also observed promptly.
                     active_futures = {}
                     next_unit_idx = 0
+                    graceful_drain_logged = False
                     # Ensure batch_size is at least 1 to avoid submission loops never running
                     effective_aggressive_batch_size = max(1, batch_size)
 
@@ -6644,6 +6698,7 @@ def main(log_callback=None, stop_callback=None):
                         pass
 
                     while active_futures or next_unit_idx < len(current_batch_units):
+                        _sync_glossary_stop_control()
                         if check_stop():
                             stopped_early = True
                             for active_unit in list(active_futures.values()):
@@ -6662,6 +6717,12 @@ def main(log_callback=None, stop_callback=None):
 
                         # Only break if truly done: no active futures AND nothing left to submit
                         if not active_futures and next_unit_idx >= len(current_batch_units):
+                            break
+
+                        # Graceful stop: do not submit more work. Drain and save
+                        # all already-started futures, then leave the batch.
+                        if os.environ.get('GRACEFUL_STOP') == '1' and not active_futures:
+                            stopped_early = True
                             break
                         
                         # If active_futures is empty but there are items left, submit them now
@@ -6691,14 +6752,9 @@ def main(log_callback=None, stop_callback=None):
                                 break
 
                             if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
-                                print("\u2705 Graceful stop: Chapter completed and saved, stopping...")
-                                stopped_early = True
-                                cancelled = cancel_all_futures(list(active_futures.keys()))
-                                if cancelled > 0:
-                                    print(f"\u2705 Cancelled {cancelled} pending API calls")
-                                executor.shutdown(wait=False)
-                                active_futures.clear()
-                                break
+                                if not graceful_drain_logged:
+                                    print("\u2705 Graceful stop: draining in-flight glossary API calls...")
+                                    graceful_drain_logged = True
 
                         if stopped_early:
                             break
