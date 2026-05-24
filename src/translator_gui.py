@@ -4291,7 +4291,7 @@ Recent translations to summarize:
             reply = QMessageBox.question(
                 dialog,
                 "Reset Refinement Prompts",
-                "Reset the refinement system prompt to the default and clear optional user/assistant prompts?",
+                "Reset the refinement system prompt to the default and clear the optional user prompt?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No
             )
@@ -4302,16 +4302,21 @@ Recent translations to summarize:
 
         save_btn = QPushButton("Save")
         save_btn.clicked.connect(save_prompt)
+        save_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         button_layout.addWidget(save_btn)
 
         reset_btn = QPushButton("Reset to Default")
         reset_btn.clicked.connect(reset_prompt)
+        reset_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         button_layout.addWidget(reset_btn)
 
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(dialog.reject)
+        cancel_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         button_layout.addWidget(cancel_btn)
-        button_layout.addStretch()
+        button_layout.setStretch(0, 1)
+        button_layout.setStretch(1, 1)
+        button_layout.setStretch(2, 1)
 
         layout.addLayout(button_layout)
         dialog.exec()
