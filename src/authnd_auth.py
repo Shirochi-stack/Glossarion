@@ -41,6 +41,8 @@ _cancel_event = threading.Event()
 _thread_local = threading.local()
 _metadata_cache: Dict[str, Dict[str, str]] = {}
 _metadata_lock = threading.Lock()
+_chat_template_unsupported_models: set = set()
+_chat_template_unsupported_lock = threading.Lock()
 _captcha_mint_lock = threading.Lock()
 _active_helper_processes: set = set()
 _active_helper_lock = threading.Lock()
@@ -440,6 +442,43 @@ def _reasoning_enabled() -> bool:
     return _reasoning_control_configured() and _reasoning_effort() != "none"
 
 
+def _is_mistral_authnd_model(model_path: str) -> bool:
+    model_lower = (model_path or "").strip("/").lower()
+    if not model_lower:
+        return False
+    publisher, _, model_id = model_lower.partition("/")
+    return (
+        publisher in ("mistral", "mistralai", "mistral-ai")
+        or model_id.startswith(("mistral", "mixtral", "codestral", "devstral", "ministral", "magistral"))
+    )
+
+
+def _is_chat_template_unsupported_error(error: Any) -> bool:
+    return "chat_template is not supported" in str(error or "").lower()
+
+
+def _chat_template_cache_key(model_path: str) -> str:
+    return (model_path or "").strip("/").lower()
+
+
+def _model_requires_no_chat_template_kwargs(model_path: str) -> bool:
+    if _is_mistral_authnd_model(model_path):
+        return True
+    key = _chat_template_cache_key(model_path)
+    if not key:
+        return False
+    with _chat_template_unsupported_lock:
+        return key in _chat_template_unsupported_models
+
+
+def _remember_chat_template_unsupported_model(model_path: str) -> None:
+    key = _chat_template_cache_key(model_path)
+    if not key:
+        return
+    with _chat_template_unsupported_lock:
+        _chat_template_unsupported_models.add(key)
+
+
 def _apply_reasoning_payload(payload: Dict[str, Any], model_path: str) -> None:
     """
     NVIDIA NIM uses model-specific reasoning controls:
@@ -453,6 +492,8 @@ def _apply_reasoning_payload(payload: Dict[str, Any], model_path: str) -> None:
     effort = _reasoning_effort()
     reasoning_disabled = not _reasoning_toggle_enabled() or effort == "none"
     model_lower = (model_path or "").lower()
+    if _model_requires_no_chat_template_kwargs(model_lower):
+        return
 
     def _kwargs() -> Dict[str, Any]:
         existing = payload.setdefault("chat_template_kwargs", {})
@@ -1347,6 +1388,7 @@ def _post_prediction(
     log_stream: Optional[bool] = None,
     progress_label: Optional[str] = None,
     log_fn: Optional[Callable[[str], None]] = None,
+    suppress_chat_template_kwargs: bool = False,
 ) -> Dict[str, Any]:
     metadata = _resolve_model_metadata(page_url)
     org_id = metadata.get("namespace") or DEFAULT_ORG_ID
@@ -1368,6 +1410,8 @@ def _post_prediction(
     if presence_penalty is not None:
         payload["presence_penalty"] = float(presence_penalty)
     _apply_reasoning_payload(payload, model_path)
+    if suppress_chat_template_kwargs:
+        payload.pop("chat_template_kwargs", None)
 
     _log(
         log_fn,
@@ -1539,6 +1583,7 @@ def send_chat_completion(
 
     publisher, model_id, page_url = _normalize_model(model)
     model_path = f"{publisher}/{model_id}"
+    suppress_chat_template_kwargs = _model_requires_no_chat_template_kwargs(model_path)
     timeout_value = int(timeout or _env_int("AUTHND_TIMEOUT", DEFAULT_TIMEOUT))
     token_timeout = _env_int("AUTHND_TOKEN_TIMEOUT", min(max(timeout_value, 60), 180))
     use_stream = stream
@@ -1614,6 +1659,7 @@ def send_chat_completion(
                 log_stream=log_stream,
                 progress_label=post_progress_label,
                 log_fn=log_fn,
+                suppress_chat_template_kwargs=suppress_chat_template_kwargs,
             )
             result["model"] = model_id
             result["page_url"] = page_url
@@ -1621,6 +1667,40 @@ def send_chat_completion(
         except RuntimeError as exc:
             last_error = exc
             message = str(exc).lower()
+            if (
+                _is_chat_template_unsupported_error(exc)
+                and _reasoning_control_configured()
+                and not suppress_chat_template_kwargs
+            ):
+                _remember_chat_template_unsupported_model(model_path)
+                suppress_chat_template_kwargs = True
+                if log_fn:
+                    log_fn(
+                        "AuthND: NVIDIA rejected chat_template_kwargs; "
+                        "caching this model without chat template controls and retrying once"
+                    )
+                result = _post_prediction(
+                    messages=normalized_messages,
+                    model_id=model_id,
+                    model_path=model_path,
+                    page_url=page_url,
+                    captcha_token=captcha_token,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    frequency_penalty=frequency_penalty,
+                    presence_penalty=presence_penalty,
+                    timeout=timeout_value,
+                    connect_timeout=connect_timeout,
+                    stream=bool(use_stream),
+                    log_stream=log_stream,
+                    progress_label=post_progress_label,
+                    log_fn=log_fn,
+                    suppress_chat_template_kwargs=True,
+                )
+                result["model"] = model_id
+                result["page_url"] = page_url
+                return result
             is_context_length_error = (
                 "maximum context length" in message
                 or "max context length" in message
