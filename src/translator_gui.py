@@ -8182,7 +8182,7 @@ Recent translations to summarize:
         # Container for batch size + auto glossary dropdown side by side
         batch_right_container = QWidget()
         batch_right_layout = QHBoxLayout(batch_right_container)
-        batch_right_layout.setContentsMargins(0, 0, 0, 0)
+        batch_right_layout.setContentsMargins(2, 0, 0, 0)
         batch_right_layout.setSpacing(6)
         
         self.batch_size_entry = QLineEdit()
