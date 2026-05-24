@@ -518,46 +518,34 @@ def _disable_spinbox_mousewheel(self, spinbox):
     spinbox.wheelEvent = lambda event: None
 
 def _add_combobox_arrow(self, combobox):
-    """Add a Halgakos icon overlay to a combobox."""
-    from PySide6.QtCore import QTimer
-    from PySide6.QtWidgets import QLabel
-    from PySide6.QtCore import Qt
-
-    arrow_label = QLabel(combobox)
+    """Use the shared Halgakos combobox arrow styling."""
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
-    pixmap = QPixmap(icon_path) if os.path.exists(icon_path) else QPixmap()
-    if not pixmap.isNull():
-        arrow_label.setPixmap(pixmap.scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-    else:
-        arrow_label.setText(chr(0x25BE))
-    arrow_label.setStyleSheet("""
-        QLabel {
-            color: white;
-            background: transparent;
-            font-size: 10pt;
+    if not os.path.exists(icon_path):
+        return
+
+    icon_path = icon_path.replace('\\', '/')
+    existing_style = combobox.styleSheet() or ""
+    combobox.setStyleSheet(existing_style + f"""
+        QComboBox {{
+            padding-right: 31px;
+        }}
+        QComboBox::drop-down {{
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 28px;
+            border-left: 1px solid #4a5568;
+        }}
+        QComboBox::down-arrow {{
+            image: url({icon_path});
+            width: 16px;
+            height: 16px;
             border: none;
-        }
+        }}
+        QComboBox::down-arrow:on {{
+            top: 1px;
+        }}
     """)
-    arrow_label.setAlignment(Qt.AlignCenter)
-    arrow_label.setAttribute(Qt.WA_TransparentForMouseEvents)
-    combobox._custom_arrow_label = arrow_label
-
-    def position_arrow():
-        try:
-            if arrow_label and combobox:
-                width = combobox.width()
-                height = combobox.height()
-                arrow_label.setGeometry(width - 22, (height - 18) // 2, 18, 18)
-        except RuntimeError:
-            pass
-
-    original_resize = combobox.resizeEvent
-    def new_resize(event):
-        original_resize(event)
-        position_arrow()
-
-    combobox.resizeEvent = new_resize
-    QTimer.singleShot(0, position_arrow)
+    combobox._custom_arrow_label = None
 
 _THINKING_COMBO_STYLE = """
     QComboBox:disabled {
@@ -1367,13 +1355,17 @@ def open_other_settings(self, *args, show=True):
         QComboBox::drop-down {
             subcontrol-origin: padding;
             subcontrol-position: top right;
-            width: 22px;
+            width: 28px;
             border-left: 1px solid #4a5568;
         }
         QComboBox::down-arrow {
             image: url('""" + combo_arrow_path + """');
             width: 16px;
             height: 16px;
+            border: none;
+        }
+        QComboBox::down-arrow:on {
+            top: 1px;
         }
         QComboBox QAbstractItemView {
             background-color: #2d2d2d;
@@ -1395,10 +1387,20 @@ def open_other_settings(self, *args, show=True):
     # Apply global stylesheet for blue checkboxes (from manga integration)
     # Back to regular string concatenation which was working before
     checkbox_radio_style = """
+        QComboBox::drop-down {
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 28px;
+            border-left: 1px solid #4a5568;
+        }
         QComboBox::down-arrow {
             image: url(""" + icon_path.replace('\\', '/') + """);
             width: 16px;
             height: 16px;
+            border: none;
+        }
+        QComboBox::down-arrow:on {
+            top: 1px;
         }
         QCheckBox {
             color: white;
@@ -2338,60 +2340,29 @@ def _create_context_management_section(self, parent):
     include_source_cb.toggled.connect(_on_include_source_toggled)
     section_v.addWidget(include_source_cb)
 
-    # Rolling summary toggle
-    rolling_cb = self._create_styled_checkbox("Use Rolling Summary (Memory)")
-    rolling_cb.setToolTip("Injects a summary request API call after every translation.\nIf batch translation is enabled, the summary request is performed on a per-batch basis.")
-    try:
-        rolling_cb.setChecked(bool(self.rolling_summary_var))
-    except Exception:
-        pass
+    # Rolling summary on/off and mode are controlled by the main Context Mode combo.
 
-    # Warning label (kept visually distinct, but on the same row)
-    rolling_warn = QLabel("⚠ Do not use with contextual translation")
-    rolling_warn.setStyleSheet(
-        "color: #f59e0b; font-style: italic; font-size: 9pt;"
-    )
-    rolling_warn.setContentsMargins(0, 0, 0, 0)
-
-    # Store references to controls that should be enabled/disabled
     rolling_controls = []
     
-    def _on_rolling_toggled(checked):
-        try:
-            self.rolling_summary_var = bool(checked)
-            # Enable/disable all rolling summary controls
-            for control in rolling_controls:
-                control.setEnabled(bool(checked))
-        except Exception:
-            pass
-    rolling_cb.toggled.connect(_on_rolling_toggled)
-
-    # Put checkbox + warning on the same line
-    rolling_row = QWidget()
-    rolling_row_l = QHBoxLayout(rolling_row)
-    rolling_row_l.setContentsMargins(0, 0, 0, 0)
-    rolling_row_l.setSpacing(8)
-    rolling_row_l.addWidget(rolling_cb)
-    rolling_row_l.addWidget(rolling_warn)
-    rolling_row_l.addStretch(1)
-    section_v.addWidget(rolling_row)
+    rolling_header = QLabel("Rolling Summary Settings")
+    rolling_header.setStyleSheet("font-weight: bold; color: #e0e0e0;")
+    section_v.addWidget(rolling_header)
 
     # Description
-    desc = QLabel("AI-powered memory system that maintains story context")
+    desc = QLabel("Used when Context Mode is Rolling Summary (Replace) or Rolling Summary (Append)")
     desc.setStyleSheet("color: gray; font-size: 9pt;")
-    desc.setContentsMargins(0, 0, 0, 8)
+    desc.setContentsMargins(0, 0, 0, 4)
     section_v.addWidget(desc)
 
-    # Settings container - 2 column grid layout
+    # Settings container - compact row
     settings_w = QWidget()
-    settings_grid = QGridLayout(settings_w)
-    settings_grid.setContentsMargins(0, 5, 0, 5)
-    settings_grid.setHorizontalSpacing(0)  # No spacing between label and input
-    settings_grid.setVerticalSpacing(6)
+    settings_row = QHBoxLayout(settings_w)
+    settings_row.setContentsMargins(0, 2, 0, 4)
+    settings_row.setSpacing(8)
 
-    # Row 0: Role and Mode
+    # Role and summary token cap
     role_lbl = QLabel("Role: ")
-    settings_grid.addWidget(role_lbl, 0, 0, alignment=Qt.AlignRight)
+    settings_row.addWidget(role_lbl)
     rolling_controls.append(role_lbl)
     role_combo = QComboBox()
     # Controls how the rolling-summary GENERATION request is built (summary API call).
@@ -2428,42 +2399,11 @@ def _create_context_management_section(self, parent):
         except Exception:
             pass
     role_combo.currentTextChanged.connect(_on_role_changed)
-    settings_grid.addWidget(role_combo, 0, 1, alignment=Qt.AlignLeft)
+    settings_row.addWidget(role_combo)
     rolling_controls.append(role_combo)
     
-    mode_lbl = QLabel(" Mode: ")
-    settings_grid.addWidget(mode_lbl, 0, 2, alignment=Qt.AlignRight)
-    rolling_controls.append(mode_lbl)
-    mode_combo = QComboBox()
-    mode_combo.addItems(["append", "replace"])
-    mode_combo.setFixedWidth(100)
-    # Add custom styling with unicode arrow
-    mode_combo.setStyleSheet("""
-        QComboBox::down-arrow {
-            image: none;
-            width: 12px;
-            height: 12px;
-            border: none;
-        }
-    """)
-    self._add_combobox_arrow(mode_combo)
-    self._disable_combobox_mousewheel(mode_combo)
-    try:
-        mode_combo.setCurrentText(self.rolling_summary_mode_var)
-    except Exception:
-        pass
-    def _on_mode_changed(text):
-        try:
-            self.rolling_summary_mode_var = text
-        except Exception:
-            pass
-    mode_combo.currentTextChanged.connect(_on_mode_changed)
-    settings_grid.addWidget(mode_combo, 0, 3, alignment=Qt.AlignLeft)
-    rolling_controls.append(mode_combo)
-    
-    # Add Max Tokens field to the right of Mode
     max_tokens_lbl = QLabel(" Max tokens: ")
-    settings_grid.addWidget(max_tokens_lbl, 0, 4, alignment=Qt.AlignRight)
+    settings_row.addWidget(max_tokens_lbl)
     rolling_controls.append(max_tokens_lbl)
     max_tokens_edit = QLineEdit()
     max_tokens_edit.setFixedWidth(80)
@@ -2477,45 +2417,9 @@ def _create_context_management_section(self, parent):
         except Exception:
             pass
     max_tokens_edit.textChanged.connect(_on_max_tokens_changed)
-    settings_grid.addWidget(max_tokens_edit, 0, 5, alignment=Qt.AlignLeft)
+    settings_row.addWidget(max_tokens_edit)
     rolling_controls.append(max_tokens_edit)
-
-    # Row 1: Summarize last and Retain
-    summ_lbl = QLabel("Summarize last \n  N exchanges: ")
-    settings_grid.addWidget(summ_lbl, 1, 0, alignment=Qt.AlignRight)
-    rolling_controls.append(summ_lbl)
-    exchanges_edit = QLineEdit()
-    exchanges_edit.setFixedWidth(70)
-    try:
-        exchanges_edit.setText(str(self.rolling_summary_exchanges_var))
-    except Exception:
-        pass
-    def _on_exchanges_changed(text):
-        try:
-            self.rolling_summary_exchanges_var = text
-        except Exception:
-            pass
-    exchanges_edit.textChanged.connect(_on_exchanges_changed)
-    settings_grid.addWidget(exchanges_edit, 1, 1, alignment=Qt.AlignLeft)
-    rolling_controls.append(exchanges_edit)
-    
-    retain_lbl = QLabel(" Retain N entries: ")
-    settings_grid.addWidget(retain_lbl, 1, 2, alignment=Qt.AlignRight)
-    rolling_controls.append(retain_lbl)
-    retain_edit = QLineEdit()
-    retain_edit.setFixedWidth(70)
-    try:
-        retain_edit.setText(str(self.rolling_summary_max_entries_var))
-    except Exception:
-        pass
-    def _on_retain_changed(text):
-        try:
-            self.rolling_summary_max_entries_var = text
-        except Exception:
-            pass
-    retain_edit.textChanged.connect(_on_retain_changed)
-    settings_grid.addWidget(retain_edit, 1, 3, alignment=Qt.AlignLeft)
-    rolling_controls.append(retain_edit)
+    settings_row.addStretch(1)
 
     section_v.addWidget(settings_w)
     
@@ -2540,11 +2444,6 @@ def _create_context_management_section(self, parent):
     cfg_btn.clicked.connect(self.configure_rolling_summary_prompts)
     section_v.addWidget(cfg_btn)
     rolling_controls.append(cfg_btn)
-    
-    # Set initial enabled state based on checkbox
-    initial_state = rolling_cb.isChecked()
-    for control in rolling_controls:
-        control.setEnabled(initial_state)
 
     # Separator
     sep1 = QFrame()

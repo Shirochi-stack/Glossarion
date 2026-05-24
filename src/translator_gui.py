@@ -3873,6 +3873,7 @@ Recent translations to summarize:
         """Add a unicode arrow overlay to a combobox"""
         from PySide6.QtCore import QTimer
         
+        icon_size = 18
         arrow_label = QLabel("▼", combobox)
         arrow_label.setStyleSheet("""
             QLabel {
@@ -3884,12 +3885,25 @@ Recent translations to summarize:
         """)
         arrow_label.setAlignment(Qt.AlignCenter)
         arrow_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        has_icon = False
         try:
             icon_path = os.path.join(self.base_dir, 'Halgakos.ico')
             if os.path.exists(icon_path):
                 arrow_label.setText("")
-                arrow_label.setPixmap(QIcon(icon_path).pixmap(QSize(18, 18)))
+                try:
+                    dpr = self.devicePixelRatioF()
+                except Exception:
+                    dpr = 1.0
+                dev_px = int(icon_size * max(1.0, dpr))
+                pixmap = QIcon(icon_path).pixmap(QSize(dev_px, dev_px))
+                try:
+                    pixmap.setDevicePixelRatio(dpr)
+                except Exception:
+                    pass
+                arrow_label.setPixmap(pixmap)
+                arrow_label.setFixedSize(icon_size, icon_size)
                 arrow_label.setStyleSheet("QLabel { background: transparent; border: none; }")
+                has_icon = True
         except Exception:
             pass
         
@@ -3898,7 +3912,13 @@ Recent translations to summarize:
                 if arrow_label and combobox:
                     width = combobox.width()
                     height = combobox.height()
-                    arrow_label.setGeometry(width - 29, 0, 28, height)
+                    arrow_width = 28
+                    if has_icon:
+                        x = width - arrow_width + (arrow_width - icon_size) // 2
+                        y = max(0, (height - icon_size) // 2)
+                        arrow_label.setGeometry(x, y, icon_size, icon_size)
+                    else:
+                        arrow_label.setGeometry(width - 29, 0, arrow_width, height)
                     arrow_label.raise_()
             except RuntimeError:
                 pass
@@ -5963,27 +5983,29 @@ Recent translations to summarize:
         self.model_combo.addItems(models)
         self.model_combo.setCurrentText(default_model)
         self.model_combo.setMaximumWidth(450)
-        # Add custom styling with unicode arrow and left padding for cog overlay
-        self.model_combo.setStyleSheet("""
-            QComboBox {
+        # Add custom styling with Halgakos arrow and left padding for cog overlay
+        model_icon_path = f"{self.base_dir}/Halgakos.ico".replace('\\', '/')
+        self.model_combo.setStyleSheet(f"""
+            QComboBox {{
                 padding-left: 34px;
                 padding-right: 31px;
-            }
-            QComboBox::drop-down {
+            }}
+            QComboBox::drop-down {{
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
                 width: 28px;
                 border-left: 1px solid #4a5568;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                width: 0px;
-                height: 0px;
+            }}
+            QComboBox::down-arrow {{
+                image: url({model_icon_path});
+                width: 16px;
+                height: 16px;
                 border: none;
-            }
+            }}
+            QComboBox::down-arrow:on {{
+                top: 1px;
+            }}
         """)
-        # Add unicode arrow using a label overlay
-        self._add_combobox_arrow(self.model_combo)
         self.frame.addWidget(self.model_combo, 1, 1, 1, 1)  # row, col, rowspan, colspan
         
         # Manage Models (cog) button overlaid on the left inside the combo
@@ -6262,27 +6284,29 @@ Recent translations to summarize:
         self.profile_menu.addItems(list(self.prompt_profiles.keys()))
         self.profile_menu.setCurrentText(self.profile_var)
         self.profile_menu.setMaximumWidth(450)
-        # Add custom styling with unicode arrow and left padding for cog overlay
-        self.profile_menu.setStyleSheet("""
-            QComboBox {
+        # Add custom styling with Halgakos arrow and left padding for cog overlay
+        profile_icon_path = f"{self.base_dir}/Halgakos.ico".replace('\\', '/')
+        self.profile_menu.setStyleSheet(f"""
+            QComboBox {{
                 padding-left: 34px;
                 padding-right: 31px;
-            }
-            QComboBox::drop-down {
+            }}
+            QComboBox::drop-down {{
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
                 width: 28px;
                 border-left: 1px solid #4a5568;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                width: 0px;
-                height: 0px;
+            }}
+            QComboBox::down-arrow {{
+                image: url({profile_icon_path});
+                width: 16px;
+                height: 16px;
                 border: none;
-            }
+            }}
+            QComboBox::down-arrow:on {{
+                top: 1px;
+            }}
         """)
-        # Add unicode arrow using a label overlay
-        self._add_combobox_arrow(self.profile_menu)
         self.frame.addWidget(self.profile_menu, 2, 1)
 
         # Manage Profiles (cog) button overlaid on the left inside the combo
@@ -7948,26 +7972,57 @@ Recent translations to summarize:
         self.toggle_token_btn.setMinimumWidth(150)
         self.frame.addWidget(self.toggle_token_btn, 7, 1, Qt.AlignLeft)
         
-        # Contextual Translation (right side, row 3) - with extra padding on top
+        # Context mode (right side, row 3) - drives contextual history and rolling summary.
         contextual_container = QWidget()
         contextual_layout = QHBoxLayout(contextual_container)
         contextual_layout.setContentsMargins(0, 0, 0, 0)
         contextual_layout.setSpacing(8)
         
-        self.contextual_checkbox = self._create_styled_checkbox("Contextual Translation")
-        self.contextual_checkbox.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Provides the AI with context from previous chunks/chapters to improve consistency.</p></qt>")
-        self.contextual_checkbox.setChecked(self.contextual_var)
-        self.contextual_checkbox.stateChanged.connect(self._on_contextual_toggle)
-        contextual_layout.addWidget(self.contextual_checkbox)
+        contextual_layout.addWidget(QLabel("Context Mode:"))
+        self.context_mode_combo = QComboBox()
+        self.context_mode_combo.addItem("Off", "off")
+        self.context_mode_combo.addItem("Contextual History", "contextual_history")
+        self.context_mode_combo.addItem("Rolling Summary (Replace)", "rolling_summary_replace")
+        self.context_mode_combo.addItem("Rolling Summary (Append)", "rolling_summary_append")
+        self.context_mode_combo.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Select how prior translation context is provided to the model.</p></qt>")
+        self.context_mode_combo.setMinimumWidth(205)
+        context_icon_path = f"{self.base_dir}/Halgakos.ico".replace('\\', '/')
+        self.context_mode_combo.setStyleSheet(f"""
+            QComboBox {{
+                padding-right: 28px;
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 24px;
+                border-left: 1px solid #4a5568;
+            }}
+            QComboBox::down-arrow {{
+                image: url({context_icon_path});
+                width: 16px;
+                height: 16px;
+                border: none;
+            }}
+            QComboBox::down-arrow:on {{
+                top: 1px;
+            }}
+        """)
+        self._disable_combobox_mousewheel(self.context_mode_combo)
+        self.context_mode_var = self._context_mode_from_flags()
+        idx = self.context_mode_combo.findData(self.context_mode_var)
+        self.context_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.context_mode_combo.currentIndexChanged.connect(self._on_context_mode_changed)
+        contextual_layout.addWidget(self.context_mode_combo)
         
         contextual_warning = QLabel("⚠️ May result in malformed outputs")
         contextual_warning.setStyleSheet("color: #ff9800; font-size: 9pt; font-style: italic;")
+        self.contextual_warning_label = contextual_warning
         contextual_layout.addWidget(contextual_warning)
         contextual_layout.addStretch()
         
         self.frame.addWidget(contextual_container, 3, 2, 1, 2, Qt.AlignLeft)
         
-        # Translation History Limit (row 4)
+        # Context-mode numeric options (row 4)
         history_limit_container = QWidget()
         history_limit_layout = QHBoxLayout(history_limit_container)
         history_limit_layout.setContentsMargins(0, 0, 0, 0)
@@ -7979,6 +8034,25 @@ Recent translations to summarize:
         self.trans_history.setText(str(self.config.get('translation_history_limit', 2)))
         self.trans_history.setMaximumWidth(60)
         history_limit_layout.addWidget(self.trans_history)
+
+        self.rolling_summary_exchanges_label = QLabel("Summarize last:")
+        history_limit_layout.addWidget(self.rolling_summary_exchanges_label)
+
+        self.rolling_summary_exchanges_edit = QLineEdit()
+        self.rolling_summary_exchanges_edit.setText(str(self.rolling_summary_exchanges_var))
+        self.rolling_summary_exchanges_edit.setMaximumWidth(60)
+        self.rolling_summary_exchanges_edit.textChanged.connect(lambda text: setattr(self, 'rolling_summary_exchanges_var', text))
+        history_limit_layout.addWidget(self.rolling_summary_exchanges_edit)
+
+        self.rolling_summary_retain_label = QLabel("Retain:")
+        history_limit_layout.addWidget(self.rolling_summary_retain_label)
+
+        self.rolling_summary_retain_edit = QLineEdit()
+        self.rolling_summary_retain_edit.setText(str(self.rolling_summary_max_entries_var))
+        self.rolling_summary_retain_edit.setMaximumWidth(60)
+        self.rolling_summary_retain_edit.textChanged.connect(lambda text: setattr(self, 'rolling_summary_max_entries_var', text))
+        history_limit_layout.addWidget(self.rolling_summary_retain_edit)
+
         history_limit_layout.addStretch()
         self.frame.addWidget(history_limit_container, 4, 2, 1, 2, Qt.AlignLeft)
         
@@ -8060,7 +8134,6 @@ Recent translations to summarize:
         batch_right_layout.addWidget(self.batch_size_entry)
         
         # Duplicate Auto Glossary dropdown (synced with main auto_glossary_mode_combo)
-        from PySide6.QtWidgets import QComboBox
         from PySide6.QtCore import QSize
         class FittingStatusLabel(QLabel):
             def __init__(self, text="", parent=None, min_point_size=7.0):
@@ -8978,29 +9051,62 @@ Recent translations to summarize:
         self.loc_trim.setMaximumWidth(60)
         self.loc_trim.hide()
         
-        # Set initial state based on contextual translation
-        self._on_contextual_toggle()
+        # Set initial state based on the selected context mode.
+        self._on_context_mode_changed()
+
+    def _context_mode_from_flags(self):
+        """Return the UI context mode represented by legacy config flags."""
+        if bool(getattr(self, 'rolling_summary_var', False)):
+            mode = str(getattr(self, 'rolling_summary_mode_var', 'replace') or 'replace').strip().lower()
+            return 'rolling_summary_append' if mode == 'append' else 'rolling_summary_replace'
+        if bool(getattr(self, 'contextual_var', False)):
+            return 'contextual_history'
+        return 'off'
 
     def _on_contextual_toggle(self, state=None):
-        """Handle contextual translation toggle - enable/disable related controls"""
-        # If called with a state (Qt.CheckState), update the var
-        if state is not None:
-            self.contextual_var = (state == Qt.Checked)
-        
-        # Always get the current checkbox state to be sure
-        if hasattr(self, 'contextual_checkbox'):
-            is_contextual = self.contextual_checkbox.isChecked()
-            self.contextual_var = is_contextual
-        else:
-            is_contextual = self.contextual_var
-        
-        # Enable/disable translation history limit entry and update label color
-        if hasattr(self, 'trans_history'):
-            self.trans_history.setEnabled(is_contextual)
+        """Compatibility shim for older callers; the combo is now authoritative."""
+        self._on_context_mode_changed()
+
+    def _on_context_mode_changed(self, index=None):
+        """Map the Context Mode combo onto the existing runtime config flags."""
+        mode = 'off'
+        if hasattr(self, 'context_mode_combo'):
+            mode = self.context_mode_combo.currentData() or 'off'
+        self.context_mode_var = mode
+
+        is_contextual = mode == 'contextual_history'
+        is_summary = mode in ('rolling_summary_replace', 'rolling_summary_append')
+        is_summary_append = mode == 'rolling_summary_append'
+
+        self.contextual_var = is_contextual
+        self.rolling_summary_var = is_summary
+        if is_summary:
+            self.rolling_summary_mode_var = 'append' if mode == 'rolling_summary_append' else 'replace'
+
+        self.config['contextual'] = self.contextual_var
+        self.config['use_rolling_summary'] = self.rolling_summary_var
+        self.config['rolling_summary_mode'] = self.rolling_summary_mode_var
+
+        if hasattr(self, 'contextual_warning_label'):
+            self.contextual_warning_label.setVisible(is_contextual)
         if hasattr(self, 'trans_history_label'):
-            label_color = 'white' if is_contextual else 'gray'
-            self.trans_history_label.setStyleSheet(f"color: {label_color};")
-        
+            self.trans_history_label.setVisible(is_contextual)
+        if hasattr(self, 'trans_history'):
+            self.trans_history.setVisible(is_contextual)
+            self.trans_history.setEnabled(is_contextual)
+        for attr in (
+            'rolling_summary_exchanges_label',
+            'rolling_summary_exchanges_edit',
+        ):
+            if hasattr(self, attr):
+                getattr(self, attr).setVisible(is_summary)
+        for attr in (
+            'rolling_summary_retain_label',
+            'rolling_summary_retain_edit',
+        ):
+            if hasattr(self, attr):
+                getattr(self, attr).setVisible(is_summary_append)
+
         self.translation_history_rolling_var = True
     
     def _on_batch_toggle(self, state=None):
@@ -9716,7 +9822,7 @@ Recent translations to summarize:
                 self.target_lang_combo.setStyleSheet(combo_style)
         except Exception:
             pass
-            
+
         output_layout.addWidget(self.target_lang_combo)
         
         # Open Output Folder Button
@@ -14480,7 +14586,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Initialize history manager for contextual translation if enabled
             history_manager = None
             # Check both checkbox state (runtime) and config variable (initial)
-            contextual_enabled = self.contextual_checkbox.isChecked() if hasattr(self, 'contextual_checkbox') else self.contextual_var
+            contextual_enabled = bool(getattr(self, 'contextual_var', False))
             if contextual_enabled:
                 try:
                     from history_manager import HistoryManager
@@ -23868,6 +23974,8 @@ Important rules:
 
             # Create backup of existing config before saving
             self._backup_config_file()
+            if hasattr(self, '_on_context_mode_changed'):
+                self._on_context_mode_changed()
 
             # Helper functions for safe type conversion
             def safe_int(value, default):
@@ -23887,6 +23995,10 @@ Important rules:
                     (self.trans_temp, "Temperature", lambda v: v == "" or v.replace('.', '', 1).replace('-', '', 1).isdigit()),
                     (self.trans_history, "Translation History Limit", lambda v: v.isdigit() or v == ""),
                 ]
+                if hasattr(self, 'rolling_summary_exchanges_edit'):
+                    validation_map.append((self.rolling_summary_exchanges_edit, "Summarize last", lambda v: v.isdigit() or v == ""))
+                if hasattr(self, 'rolling_summary_retain_edit'):
+                    validation_map.append((self.rolling_summary_retain_edit, "Retain", lambda v: v.isdigit() or v == ""))
                 from PySide6.QtWidgets import QMessageBox
                 for source, name, is_valid_func in validation_map:
                     try:
@@ -24205,9 +24317,9 @@ Important rules:
                 ('preserve_original_text_on_failure', ['preserve_original_text_var'], False, bool),
                 
                 # Rolling summary
-                ('rolling_summary_exchanges', ['rolling_summary_exchanges_var'], 5, lambda v: safe_int(v, 5)),
+                ('rolling_summary_exchanges', ['rolling_summary_exchanges_edit', 'rolling_summary_exchanges_var'], 5, lambda v: safe_int(v, 5)),
                 ('rolling_summary_mode', ['rolling_summary_mode_var'], 'replace', str),
-                ('rolling_summary_max_entries', ['rolling_summary_max_entries_var'], 10, lambda v: safe_int(v, 10)),
+                ('rolling_summary_max_entries', ['rolling_summary_retain_edit', 'rolling_summary_max_entries_var'], 10, lambda v: safe_int(v, 10)),
                 ('rolling_summary_max_tokens', ['rolling_summary_max_tokens_var'], 8192, lambda v: safe_int(v, 8192)),
 
                 # QA/Scanning
