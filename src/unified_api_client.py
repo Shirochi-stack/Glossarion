@@ -13845,26 +13845,32 @@ class UnifiedClient:
                             contents=contents,
                             config=generation_config
                         )
-                        for chunk in _stream:
-                            if is_stop_requested():
-                                try:
-                                    _stream.close()
-                                except Exception:
-                                    pass
-                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            last_response = chunk
-                            if getattr(chunk, 'prompt_feedback', None) is not None:
-                                prompt_feedback = chunk.prompt_feedback
-                            _capture_candidate_meta(getattr(chunk, 'candidates', None) or [])
-                            for candidate in (getattr(chunk, 'candidates', None) or []):
-                                content_obj = getattr(candidate, 'content', None)
-                                if not content_obj:
-                                    continue
-                                parts = getattr(content_obj, 'parts', None) or []
-                                for part in parts:
-                                    _handle_part(part)
-                            if getattr(chunk, 'usage_metadata', None) is not None:
-                                raw_usage = chunk.usage_metadata
+                        with self._active_streams_lock:
+                            self._active_streams.add(_stream)
+                        try:
+                            for chunk in _stream:
+                                if is_stop_requested():
+                                    try:
+                                        _stream.close()
+                                    except Exception:
+                                        pass
+                                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                last_response = chunk
+                                if getattr(chunk, 'prompt_feedback', None) is not None:
+                                    prompt_feedback = chunk.prompt_feedback
+                                _capture_candidate_meta(getattr(chunk, 'candidates', None) or [])
+                                for candidate in (getattr(chunk, 'candidates', None) or []):
+                                    content_obj = getattr(candidate, 'content', None)
+                                    if not content_obj:
+                                        continue
+                                    parts = getattr(content_obj, 'parts', None) or []
+                                    for part in parts:
+                                        _handle_part(part)
+                                if getattr(chunk, 'usage_metadata', None) is not None:
+                                    raw_usage = chunk.usage_metadata
+                        finally:
+                            with self._active_streams_lock:
+                                self._active_streams.discard(_stream)
                         # Flush any buffered log tails
                         if _log_stream and log_buf:
                             tail = "".join(log_buf).replace('\x1f', '\\x1F')
@@ -14103,25 +14109,31 @@ class UnifiedClient:
                                     contents=contents,
                                     config=generation_config,
                                 )
-                                for _chunk in _stream_r:
-                                    if is_stop_requested():
-                                        try:
-                                            _stream_r.close()
-                                        except Exception:
-                                            pass
-                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                                    last_response = _chunk
-                                    if getattr(_chunk, 'prompt_feedback', None) is not None:
-                                        prompt_feedback = _chunk.prompt_feedback
-                                    _capture_candidate_meta(getattr(_chunk, 'candidates', None) or [])
-                                    for _cand in (getattr(_chunk, 'candidates', None) or []):
-                                        _co = getattr(_cand, 'content', None)
-                                        if not _co:
-                                            continue
-                                        for _p in (getattr(_co, 'parts', None) or []):
-                                            _handle_part(_p)
-                                    if getattr(_chunk, 'usage_metadata', None) is not None:
-                                        raw_usage = _chunk.usage_metadata
+                                with self._active_streams_lock:
+                                    self._active_streams.add(_stream_r)
+                                try:
+                                    for _chunk in _stream_r:
+                                        if is_stop_requested():
+                                            try:
+                                                _stream_r.close()
+                                            except Exception:
+                                                pass
+                                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                        last_response = _chunk
+                                        if getattr(_chunk, 'prompt_feedback', None) is not None:
+                                            prompt_feedback = _chunk.prompt_feedback
+                                        _capture_candidate_meta(getattr(_chunk, 'candidates', None) or [])
+                                        for _cand in (getattr(_chunk, 'candidates', None) or []):
+                                            _co = getattr(_cand, 'content', None)
+                                            if not _co:
+                                                continue
+                                            for _p in (getattr(_co, 'parts', None) or []):
+                                                _handle_part(_p)
+                                        if getattr(_chunk, 'usage_metadata', None) is not None:
+                                            raw_usage = _chunk.usage_metadata
+                                finally:
+                                    with self._active_streams_lock:
+                                        self._active_streams.discard(_stream_r)
                                 # Flush buffered text tail
                                 if _log_stream and log_buf:
                                     _tail = "".join(log_buf).replace('\x1f', '\\x1F')
@@ -14344,30 +14356,36 @@ class UnifiedClient:
                                     contents=contents,
                                     config=generation_config,
                                 )
-                                for _chunk in _stream2:
-                                    if is_stop_requested():
-                                        try:
-                                            _stream2.close()
-                                        except Exception:
-                                            pass
-                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                                    last_response = _chunk
-                                    # Capture finish_reason from candidates so MAX_TOKENS
-                                    # propagates as 'length' to the outer retry layer.
-                                    _capture_candidate_meta(getattr(_chunk, 'candidates', None) or [])
-                                    for _cand in (getattr(_chunk, 'candidates', None) or []):
-                                        _co = getattr(_cand, 'content', None)
-                                        if not _co:
-                                            continue
-                                        for _p in (getattr(_co, 'parts', None) or []):
-                                            if getattr(_p, 'text', None):
-                                                if not getattr(_p, 'thought', False):
-                                                    result_text += _p.text
-                                            elif getattr(_p, 'inline_data', None) is not None:
-                                                if hasattr(_p.inline_data, 'data'):
-                                                    image_data = _p.inline_data.data
-                                    if getattr(_chunk, 'usage_metadata', None) is not None:
-                                        raw_usage = _chunk.usage_metadata
+                                with self._active_streams_lock:
+                                    self._active_streams.add(_stream2)
+                                try:
+                                    for _chunk in _stream2:
+                                        if is_stop_requested():
+                                            try:
+                                                _stream2.close()
+                                            except Exception:
+                                                pass
+                                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                        last_response = _chunk
+                                        # Capture finish_reason from candidates so MAX_TOKENS
+                                        # propagates as 'length' to the outer retry layer.
+                                        _capture_candidate_meta(getattr(_chunk, 'candidates', None) or [])
+                                        for _cand in (getattr(_chunk, 'candidates', None) or []):
+                                            _co = getattr(_cand, 'content', None)
+                                            if not _co:
+                                                continue
+                                            for _p in (getattr(_co, 'parts', None) or []):
+                                                if getattr(_p, 'text', None):
+                                                    if not getattr(_p, 'thought', False):
+                                                        result_text += _p.text
+                                                elif getattr(_p, 'inline_data', None) is not None:
+                                                    if hasattr(_p.inline_data, 'data'):
+                                                        image_data = _p.inline_data.data
+                                        if getattr(_chunk, 'usage_metadata', None) is not None:
+                                            raw_usage = _chunk.usage_metadata
+                                finally:
+                                    with self._active_streams_lock:
+                                        self._active_streams.discard(_stream2)
                                 response_retry = last_response
                                 if finish_reason is None:
                                     finish_reason = 'incomplete'
@@ -18643,6 +18661,10 @@ class UnifiedClient:
                                 contents=contents,
                                 config=generation_config
                             )
+                            # Register for hard_cancel_all so forceful stop can
+                            # close this stream from another thread.
+                            with self._active_streams_lock:
+                                self._active_streams.add(stream)
                             text_parts = []
                             stream_image_data = None  # Capture image bytes from stream
                             finish_reason = None
@@ -18656,71 +18678,85 @@ class UnifiedClient:
                             gemini_thinking_chunks = 0
                             gemini_thinking_start_ts = None
                             import time as _t
-                            for evt in stream:
-                                response = evt  # keep last event for debugging
-                                cands = getattr(evt, 'candidates', None)
-                                if not cands:
-                                    continue
-                                cand = cands[0]
-                                if hasattr(cand, 'finish_reason') and cand.finish_reason is not None:
-                                    finish_reason = str(cand.finish_reason)
-                                content_obj = getattr(cand, 'content', None)
-                                if content_obj:
-                                    parts = getattr(content_obj, 'parts', None)
-                                    if parts:
-                                        for part in parts:
-                                            # Check for thinking/thought parts
-                                            is_thought = getattr(part, 'thought', False)
-                                            if is_thought and hasattr(part, 'text') and part.text:
-                                                gemini_thinking_chunks += 1
-                                                if gemini_thinking_start_ts is None:
-                                                    gemini_thinking_start_ts = _t.time()
-                                                if not gemini_thinking_started:
-                                                    gemini_thinking_started = True
+                            try:
+                                for evt in stream:
+                                    # ── Forceful stop: close the HTTP stream immediately ──
+                                    if self._is_stop_requested():
+                                        try:
+                                            if hasattr(stream, 'close'):
+                                                stream.close()
+                                        except Exception:
+                                            pass
+                                        self._cancelled = True
+                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+
+                                    response = evt  # keep last event for debugging
+                                    cands = getattr(evt, 'candidates', None)
+                                    if not cands:
+                                        continue
+                                    cand = cands[0]
+                                    if hasattr(cand, 'finish_reason') and cand.finish_reason is not None:
+                                        finish_reason = str(cand.finish_reason)
+                                    content_obj = getattr(cand, 'content', None)
+                                    if content_obj:
+                                        parts = getattr(content_obj, 'parts', None)
+                                        if parts:
+                                            for part in parts:
+                                                # Check for thinking/thought parts
+                                                is_thought = getattr(part, 'thought', False)
+                                                if is_thought and hasattr(part, 'text') and part.text:
+                                                    gemini_thinking_chunks += 1
+                                                    if gemini_thinking_start_ts is None:
+                                                        gemini_thinking_start_ts = _t.time()
+                                                    if not gemini_thinking_started:
+                                                        gemini_thinking_started = True
+                                                        if stream_thinking and log_stream and not self._is_stop_requested():
+                                                            print(f"🧠 [gemini-native] Thinking...", flush=True)
                                                     if stream_thinking and log_stream and not self._is_stop_requested():
-                                                        print(f"🧠 [gemini-native] Thinking...", flush=True)
-                                                if stream_thinking and log_stream and not self._is_stop_requested():
-                                                    thought_text = part.text.replace("\\n", "\n")
-                                                    for line in thought_text.split("\n"):
-                                                        print(f"    {line}", flush=True)
-                                                continue
-                                            # Capture inline_data (image) parts from stream
-                                            if hasattr(part, 'inline_data') and part.inline_data:
-                                                if hasattr(part.inline_data, 'data') and part.inline_data.data:
-                                                    stream_image_data = part.inline_data.data
-                                                    _mime = getattr(part.inline_data, 'mime_type', 'image/png')
-                                                    if not self._is_stop_requested():
-                                                        print(f"   🖼️ Image received from stream (mime: {_mime})", flush=True)
-                                                continue
-                                            if hasattr(part, 'text') and part.text:
-                                                # If we were in thinking mode, print completion
-                                                if gemini_thinking_started and stream_thinking and not self._is_stop_requested():
-                                                    thinking_dur = _t.time() - gemini_thinking_start_ts if gemini_thinking_start_ts else 0
-                                                    print(f"🧠 [gemini-native] Thinking complete ({gemini_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
-                                                    print("─" * 50, flush=True)
-                                                    print("📡 Text streaming...", flush=True)
-                                                    gemini_thinking_started = False
-                                                text_parts.append(part.text)
-                                                if log_stream and not self._is_stop_requested():
-                                                    frag = part.text.replace("\r", "")
-                                                    # Use local line buffering to preserve structure
-                                                    combined = "".join(log_buf) + frag
-                                                    
-                                                    # Inject newlines after HTML closing tags
-                                                    temp_combined = combined
-                                                    for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
-                                                        temp_combined = temp_combined.replace(tag, tag + '\n')
-                                                    
-                                                    if "\n" in temp_combined:
-                                                        parts = temp_combined.split("\n")
-                                                        for p in parts[:-1]:
-                                                            print(p.replace('\x1f', '\\x1F'))
-                                                        log_buf = [parts[-1]]
-                                                    else:
-                                                        log_buf.append(frag)
-                                                        if len("".join(log_buf)) > 150:
-                                                            print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
-                                                            log_buf = []
+                                                        thought_text = part.text.replace("\\n", "\n")
+                                                        for line in thought_text.split("\n"):
+                                                            print(f"    {line}", flush=True)
+                                                    continue
+                                                # Capture inline_data (image) parts from stream
+                                                if hasattr(part, 'inline_data') and part.inline_data:
+                                                    if hasattr(part.inline_data, 'data') and part.inline_data.data:
+                                                        stream_image_data = part.inline_data.data
+                                                        _mime = getattr(part.inline_data, 'mime_type', 'image/png')
+                                                        if not self._is_stop_requested():
+                                                            print(f"   🖼️ Image received from stream (mime: {_mime})", flush=True)
+                                                    continue
+                                                if hasattr(part, 'text') and part.text:
+                                                    # If we were in thinking mode, print completion
+                                                    if gemini_thinking_started and stream_thinking and not self._is_stop_requested():
+                                                        thinking_dur = _t.time() - gemini_thinking_start_ts if gemini_thinking_start_ts else 0
+                                                        print(f"🧠 [gemini-native] Thinking complete ({gemini_thinking_chunks} chunks, {thinking_dur:.1f}s)", flush=True)
+                                                        print("─" * 50, flush=True)
+                                                        print("📡 Text streaming...", flush=True)
+                                                        gemini_thinking_started = False
+                                                    text_parts.append(part.text)
+                                                    if log_stream and not self._is_stop_requested():
+                                                        frag = part.text.replace("\r", "")
+                                                        # Use local line buffering to preserve structure
+                                                        combined = "".join(log_buf) + frag
+                                                        
+                                                        # Inject newlines after HTML closing tags
+                                                        temp_combined = combined
+                                                        for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
+                                                            temp_combined = temp_combined.replace(tag, tag + '\n')
+                                                        
+                                                        if "\n" in temp_combined:
+                                                            parts = temp_combined.split("\n")
+                                                            for p in parts[:-1]:
+                                                                print(p.replace('\x1f', '\\x1F'))
+                                                            log_buf = [parts[-1]]
+                                                        else:
+                                                            log_buf.append(frag)
+                                                            if len("".join(log_buf)) > 150:
+                                                                print("".join(log_buf).replace('\x1f', '\\x1F'), end="", flush=True)
+                                                                log_buf = []
+                            finally:
+                                with self._active_streams_lock:
+                                    self._active_streams.discard(stream)
                             if log_stream and not self._is_stop_requested():
                                 if log_buf:
                                     print("".join(log_buf).replace('\x1f', '\\x1F'))
