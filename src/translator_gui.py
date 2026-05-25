@@ -18367,10 +18367,12 @@ Important rules:
                     except Exception:
                         glossary_batch_size = 0
 
-                    if glossary_batch_size >= 11:
+                    glossary_batch_enabled = os.environ.get('BATCH_TRANSLATION', '0') == '1'
+                    if glossary_batch_enabled and glossary_batch_size >= 11:
                         ok = run_glossary_subprocess()
                     else:
-                        self.append_log("Running glossary extraction in-process (batch size <= 10)")
+                        reason = "batch mode off" if not glossary_batch_enabled else "batch size <= 10"
+                        self.append_log(f"Running glossary extraction in-process ({reason})")
                         ok = run_glossary_in_process()
 
                     if not ok:

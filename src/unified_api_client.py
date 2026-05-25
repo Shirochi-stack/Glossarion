@@ -1419,8 +1419,11 @@ class UnifiedClient:
             msg_text = str(message or "")
             is_lifecycle = (
                 "Queued " in msg_text
+                or "Sending API call" in msg_text
                 or "API call in progress" in msg_text
                 or "thinking=" in msg_text
+                or "SDK stream start" in msg_text
+                or "SDK stream opened" in msg_text
             )
             if getattr(self, '_in_cleanup', False) and not (is_lifecycle and self._should_show_api_lifecycle_logs()):
                 return
@@ -1582,7 +1585,8 @@ class UnifiedClient:
         # Heuristic patterns consolidated from previous branches
         # 1) Suspicious finish reasons that explicitly indicate content filtering
         normalized_finish = str(finish_reason or "").strip().lower()
-        if self._force_missing_finish_as_prohibited(finish_reason):
+        response_is_exception = isinstance(response, BaseException)
+        if not response_is_exception and self._force_missing_finish_as_prohibited(finish_reason):
             return True
         if normalized_finish in ['content_filter', 'prohibited_content', 'blocked', 'censorship_blocked']:
             return True
@@ -1601,7 +1605,6 @@ class UnifiedClient:
             return False
         # 2) Safety indicators in raw response/error details
         response_str = ""
-        response_is_exception = isinstance(response, BaseException)
         if response is not None:
             if hasattr(response, 'raw_response') and response.raw_response is not None:
                 response_str = str(response.raw_response).lower()
@@ -2055,7 +2058,7 @@ class UnifiedClient:
     _all_openai_clients_lock = threading.Lock()
     _all_httpx_clients = set()
     _all_httpx_clients_lock = threading.Lock()
-    
+
     # Track all active streaming responses so we can close them on cancellation
     _active_streams = set()
     _active_streams_lock = threading.Lock()
@@ -8886,19 +8889,28 @@ class UnifiedClient:
                                 or (context_norm == 'glossary_refinement' and (use_refinement_keys or use_glossary_keys))
                                 or (context_norm == 'refinement' and use_refinement_keys)
                             )
+                            active_pool_scope = str(getattr(self, '_active_key_pool_scope', '') or '').strip().lower()
+                            already_using_context_pool = (
+                                (context_norm == 'glossary' and active_pool_scope == 'glossarykey')
+                                or (context_norm in ('glossary_refinement', 'refinement') and active_pool_scope == 'glossaryrefinementkey')
+                            )
                             if should_try_context_keys:
-                                print(f"[GLOSSARY DIRECT] Safety filter detected - trying glossary/refinement keys")
-                                try:
-                                    retry_res = self._try_glossary_keys_direct(
-                                        messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data
-                                    )
-                                    if retry_res:
-                                        res_content, res_fr = retry_res
-                                        if res_content and res_content.strip():
-                                            print(f"✅ Glossary key succeeded for safety filter")
-                                            return res_content, res_fr
-                                except Exception as gk_err:
-                                    print(f"❌ Glossary key retry failed: {gk_err}")
+                                if already_using_context_pool:
+                                    print(f"[GLOSSARY DIRECT] Already using {active_pool_scope}; skipping same-pool safety retry")
+                                else:
+                                    retry_pool_label = "refinement" if context_norm in ('glossary_refinement', 'refinement') and use_refinement_keys else "glossary"
+                                    print(f"[GLOSSARY DIRECT] Safety filter detected - trying {retry_pool_label} keys")
+                                    try:
+                                        retry_res = self._try_glossary_keys_direct(
+                                            messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data
+                                        )
+                                        if retry_res:
+                                            res_content, res_fr = retry_res
+                                            if res_content and res_content.strip():
+                                                print(f"✅ {retry_pool_label.title()} key succeeded for safety filter")
+                                                return res_content, res_fr
+                                    except Exception as gk_err:
+                                        print(f"❌ {retry_pool_label.title()} key retry failed: {gk_err}")
                             
                             # Try fallback keys directly (independent of multi-key mode toggle)
                             use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
@@ -8915,6 +8927,8 @@ class UnifiedClient:
                                             return res_content, res_fr
                                 except Exception as fb_err:
                                     print(f"❌ Fallback key retry failed: {fb_err}")
+                            else:
+                                print("[FALLBACK DIRECT] Fallback keys disabled; skipping safety-filter retry")
                     
                     # Retry transient empty responses (finish_reason='error') before giving up.
                     # Safety-filter empties go straight to finalize — retrying won't help.
@@ -9376,18 +9390,27 @@ class UnifiedClient:
                         or (context_norm == 'glossary_refinement' and (use_refinement_keys or use_glossary_keys))
                         or (context_norm == 'refinement' and use_refinement_keys)
                     )
+                    active_pool_scope = str(getattr(self, '_active_key_pool_scope', '') or '').strip().lower()
+                    already_using_context_pool = (
+                        (context_norm == 'glossary' and active_pool_scope == 'glossarykey')
+                        or (context_norm in ('glossary_refinement', 'refinement') and active_pool_scope == 'glossaryrefinementkey')
+                    )
                     if should_try_context_keys:
-                        print(f"[GLOSSARY DIRECT] Using glossary/refinement keys for prohibited content retry")
-                        try:
-                            retry_res = self._try_glossary_keys_direct(
-                                messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data
-                            )
-                            if retry_res:
-                                res_content, res_fr = retry_res
-                                if res_content and res_content.strip():
-                                    return res_content, res_fr
-                        except Exception as gk_err:
-                            print(f"❌ Glossary key retry failed: {gk_err}")
+                        if already_using_context_pool:
+                            print(f"[GLOSSARY DIRECT] Already using {active_pool_scope}; skipping same-pool prohibited-content retry")
+                        else:
+                            retry_pool_label = "refinement" if context_norm in ('glossary_refinement', 'refinement') and use_refinement_keys else "glossary"
+                            print(f"[GLOSSARY DIRECT] Using {retry_pool_label} keys for prohibited-content retry")
+                            try:
+                                retry_res = self._try_glossary_keys_direct(
+                                    messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id, image_data=image_data
+                                )
+                                if retry_res:
+                                    res_content, res_fr = retry_res
+                                    if res_content and res_content.strip():
+                                        return res_content, res_fr
+                            except Exception as gk_err:
+                                print(f"❌ {retry_pool_label.title()} key retry failed: {gk_err}")
                     
                     # Try fallback keys directly (independent of multi-key mode toggle)
                     use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
@@ -9403,6 +9426,8 @@ class UnifiedClient:
                                     return res_content, res_fr
                         except Exception as fb_err:
                             print(f"❌ Fallback key retry failed: {fb_err}")
+                    else:
+                        print("[FALLBACK DIRECT] Fallback keys disabled; skipping prohibited-content retry")
                     
                     # Fallthrough: record and return generic fallback
                     self._save_failed_request(messages, e, context)
@@ -9455,7 +9480,17 @@ class UnifiedClient:
                         print(f"❌ Server error ({http_status or 'API error'}) - exhausted {internal_retries} retries")
                 
                 # Check for other retryable errors (timeouts, connection issues)
-                timeout_errors = ["timeout", "timed out", "connection reset", "connection aborted", "connection error", "network error"]
+                timeout_errors = [
+                    "timeout",
+                    "timed out",
+                    "connection reset",
+                    "connection aborted",
+                    "connection error",
+                    "network error",
+                    "not a socket",
+                    "readerror",
+                    "read error",
+                ]
                 if any(err in error_str for err in timeout_errors):
                     if attempt < internal_retries - 1:
                         delay = self._compute_backoff(attempt, base_delay/2, 30)  # Shorter delay for timeouts
@@ -10247,7 +10282,12 @@ class UnifiedClient:
         try:
             configured_fallbacks = json.loads(fallback_keys_json)
             # Filter to only enabled keys with valid data
+            raw_fallback_count = len(configured_fallbacks) if isinstance(configured_fallbacks, list) else 0
             configured_fallbacks = [fb for fb in configured_fallbacks if fb.get('enabled') is not False and fb.get('api_key') and fb.get('model')]
+            if not configured_fallbacks:
+                print(f"[FALLBACK DIRECT] No enabled fallback keys available ({raw_fallback_count} configured, all disabled/invalid)")
+                del tls.tried_fallback_direct_per_request[request_id]
+                return None
             print(f"[FALLBACK DIRECT] 🔑 Loaded {len(configured_fallbacks)} fallback key{'s' if len(configured_fallbacks) != 1 else ''}")
             
             # Try each fallback key (all of them, no arbitrary limit)
@@ -20402,6 +20442,7 @@ class UnifiedClient:
                 resp = None
                 underlying = None
                 fresh_sdk_client = False
+                stream_cleanup_done = False
                 def _close_fresh_sdk_client_now():
                     if not (fresh_sdk_client and client is not None):
                         return
@@ -21421,6 +21462,7 @@ class UnifiedClient:
                         oai_thinking_text_parts = []  # accumulate all reasoning text for token counting
                         _in_think_tag = False  # track <think>...</think> inline reasoning
                         _think_tag_buf = ""  # buffer for partial tag detection
+                        stream_read_error = None
 
                         def _check_cancel_during_stream():
                             if self._is_stop_requested():
@@ -21435,9 +21477,18 @@ class UnifiedClient:
                                     pass
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
 
+                        def _iter_stream_events():
+                            nonlocal stream_read_error
+                            try:
+                                for stream_event in resp:
+                                    yield stream_event
+                            except Exception as stream_exc:
+                                stream_read_error = stream_exc
+                                return
+
                         _check_cancel_during_stream()
                         
-                        for event in resp:
+                        for event in _iter_stream_events():
                             _check_cancel_during_stream()
                             try:
                                 frag_collected = False
@@ -21728,6 +21779,12 @@ class UnifiedClient:
                                                     log_buf = []
                             except Exception:
                                 continue
+
+                        if stream_read_error is not None:
+                            if not text_parts:
+                                raise stream_read_error
+                            if not self._is_stop_requested():
+                                print(f"⚠️ [{provider}] Stream closed with transport error after {len(''.join(text_parts))} chars; using collected text ({self._summarize_exception(stream_read_error)})")
                         
                         # Print any remaining buffer content at the end
                         if log_buf and log_stream and not self._is_stop_requested():
@@ -21752,6 +21809,7 @@ class UnifiedClient:
                             _close_fresh_sdk_client_now()
                         except Exception:
                             pass
+                        stream_cleanup_done = True
                         
                         # Count thinking tokens from accumulated text
                         if oai_thinking_chunks > 0 and not self._is_stop_requested():
@@ -22374,6 +22432,22 @@ class UnifiedClient:
                     except Exception:
                         _defer_stream_close = False
                     if not _defer_stream_close:
+                        try:
+                            _close_fresh_sdk_client_now()
+                        except Exception:
+                            pass
+                    elif not stream_cleanup_done:
+                        try:
+                            if resp is not None and hasattr(resp, 'close'):
+                                resp.close()
+                        except Exception:
+                            pass
+                        try:
+                            if resp is not None:
+                                with self._active_streams_lock:
+                                    self._active_streams.discard(resp)
+                        except Exception:
+                            pass
                         try:
                             _close_fresh_sdk_client_now()
                         except Exception:
