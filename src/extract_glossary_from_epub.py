@@ -3987,6 +3987,126 @@ def _dedup_field_count(entry):
     return count
 
 
+def skip_duplicate_entries_incremental(existing_glossary, new_entries):
+    """Fast incremental deduplication: check *only* new_entries against existing_glossary.
+
+    existing_glossary is assumed to already be deduplicated (from CSV load or
+    prior full dedup).  New entries are checked against the existing ones and
+    against each other, but existing entries are NOT re-compared to each other.
+
+    Returns a new list: existing_glossary (possibly with replacements) + any
+    genuinely new entries that survived dedup.
+    """
+    if not new_entries:
+        return list(existing_glossary)
+
+    try:
+        from rapidfuzz import fuzz
+        use_rapidfuzz = True
+    except ImportError:
+        use_rapidfuzz = False
+
+    fuzzy_threshold = float(os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.9'))
+    dedupe_translations = os.getenv('GLOSSARY_DEDUPE_TRANSLATIONS', '1') == '1'
+
+    # --- Build seen-state from existing glossary (O(n), no comparisons) ---
+    result = list(existing_glossary)
+    seen_raw_names = []          # (cleaned, original_raw, entry)
+    raw_name_to_indices = {}     # raw_name -> [indices in result]
+    seen_translations = {}       # translated_lower -> (raw_name, entry, index)
+
+    for idx, entry in enumerate(result):
+        raw_name = entry.get('raw_name', '')
+        if not raw_name:
+            continue
+        cleaned = unicodedata.normalize('NFC', remove_honorifics(raw_name))
+        seen_raw_names.append((cleaned, raw_name, entry))
+        raw_name_to_indices.setdefault(raw_name, []).append(idx)
+
+        if dedupe_translations:
+            trans = str(entry.get('translated_name', '')).strip().lower()
+            if trans:
+                seen_translations[trans] = (raw_name, entry, idx)
+
+    added = 0
+    skipped = 0
+    replaced = 0
+
+    for entry in new_entries:
+        raw_name = entry.get('raw_name', '')
+        if not raw_name:
+            continue
+
+        cleaned = unicodedata.normalize('NFC', remove_honorifics(raw_name))
+
+        # --- Exact raw-name match ---
+        exact_indices = raw_name_to_indices.get(raw_name)
+        if exact_indices:
+            existing_idx = exact_indices[0]
+            existing_entry = result[existing_idx]
+            if _dedup_field_count(entry) > _dedup_field_count(existing_entry):
+                result[existing_idx] = entry
+                replaced += 1
+            else:
+                skipped += 1
+            continue
+
+        # --- Fuzzy raw-name match ---
+        is_dup, best_score, best_match = _find_best_duplicate_match(
+            cleaned, seen_raw_names, fuzzy_threshold, use_rapidfuzz, entry
+        )
+        if is_dup and best_match:
+            best_indices = raw_name_to_indices.get(best_match, [])
+            if best_indices:
+                existing_idx = best_indices[0]
+                existing_entry = result[existing_idx]
+                if _dedup_field_count(entry) > _dedup_field_count(existing_entry):
+                    result[existing_idx] = entry
+                    raw_name_to_indices[raw_name] = [existing_idx]
+                    del raw_name_to_indices[best_match]
+                    # Update seen_raw_names for future comparisons within this batch
+                    for si, (sc, so, se) in enumerate(seen_raw_names):
+                        if so == best_match:
+                            seen_raw_names[si] = (cleaned, raw_name, entry)
+                            break
+                    replaced += 1
+                else:
+                    skipped += 1
+            else:
+                skipped += 1
+            continue
+
+        # --- Pass 2: translated-name exact match ---
+        if dedupe_translations:
+            trans = str(entry.get('translated_name', '')).strip().lower()
+            if trans and trans in seen_translations:
+                existing_raw, existing_entry, existing_idx = seen_translations[trans]
+                if _dedup_field_count(entry) > _dedup_field_count(existing_entry):
+                    result[existing_idx] = entry
+                    seen_translations[trans] = (raw_name, entry, existing_idx)
+                    replaced += 1
+                else:
+                    skipped += 1
+                    print(f"[Skip] Pass 2: '{raw_name}' -> '{entry.get('translated_name','')}' (duplicate of '{existing_raw}' -> '{existing_entry.get('translated_name','')}')")
+                continue
+
+        # --- Genuinely new entry ---
+        new_idx = len(result)
+        result.append(entry)
+        seen_raw_names.append((cleaned, raw_name, entry))
+        raw_name_to_indices.setdefault(raw_name, []).append(new_idx)
+        if dedupe_translations:
+            trans = str(entry.get('translated_name', '')).strip().lower()
+            if trans:
+                seen_translations[trans] = (raw_name, entry, new_idx)
+        added += 1
+
+    total_new = len(new_entries)
+    if skipped or replaced:
+        print(f"[Dedup] Incremental: {total_new} new entries → {added} added, {skipped} duplicates skipped, {replaced} replaced")
+    return result
+
+
 def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):
     """
     Skip entries with duplicate raw names and translated names using 2-pass deduplication.
@@ -7743,8 +7863,7 @@ def main(log_callback=None, stop_callback=None):
                             chapter_num=_chapter_positions.get(tracker_idx, tracker_idx + 1),
                             chapter_file=_chapter_filenames.get(tracker_idx, ""),
                         )
-                    glossary.extend(data)
-                    glossary[:] = skip_duplicate_entries(glossary)
+                    glossary[:] = skip_duplicate_entries_incremental(glossary, data)
                     completed.append(idx)
                     
                     # Mark truncated chapters as failed so they get retried
