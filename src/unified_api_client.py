@@ -5584,11 +5584,20 @@ class UnifiedClient:
         logger.info(f"[{thread_name}] Cleanup complete")
     
     def __del__(self):
-        """Destructor to ensure all resources are cleaned up when the client is garbage collected"""
+        """Destructor — only performs aggressive cleanup when a stop flag is active.
+
+        During normal parallel operation, GC can fire at any time on any thread.
+        Closing class-level _active_streams / shared clients here would kill
+        sibling threads' active sockets (WinError 10038).  Only do it when the
+        user actually requested a stop.
+        """
         try:
-            # Set cleanup flag to suppress noise
             self._in_cleanup = True
-            
+
+            # Only tear down shared resources if a stop was explicitly requested.
+            if not (self._cancelled or os.environ.get('TRANSLATION_CANCELLED') == '1'):
+                return
+
             # Close all active streaming responses
             try:
                 with self._active_streams_lock:
@@ -5601,7 +5610,7 @@ class UnifiedClient:
                         pass
             except Exception:
                 pass
-            
+
             # Close HTTP clients
             try:
                 if hasattr(self, 'openai_client') and self.openai_client:
@@ -5609,7 +5618,7 @@ class UnifiedClient:
                         self.openai_client.close()
             except Exception:
                 pass
-            
+
             try:
                 if hasattr(self, 'gemini_client') and self.gemini_client:
                     if hasattr(self.gemini_client, 'close'):
@@ -5617,7 +5626,6 @@ class UnifiedClient:
             except Exception:
                 pass
         except Exception:
-            # Never let destructor raise exceptions
             pass
     
     def _get_safe_filename(self, base_filename: str, content_hash: str = None) -> str:
