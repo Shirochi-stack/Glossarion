@@ -2471,10 +2471,11 @@ class GlossaryManagerMixin:
         settings_grid.setColumnStretch(0, 0)
         settings_grid.setColumnStretch(1, 0)
         settings_grid.setColumnStretch(2, 0)
-        settings_grid.setColumnStretch(3, 1)
+        settings_grid.setColumnStretch(3, 0)
+        settings_grid.setColumnStretch(4, 1)
         settings_spacer = QWidget()
         settings_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        settings_grid.addWidget(settings_spacer, 0, 3, 4, 1)
+        settings_grid.addWidget(settings_spacer, 0, 4, 3, 1)
         
         # Compact label+field pair helper for manual Extraction Settings
         def _m_pair(label_text, field_widget, label_width=120, tooltip=None):
@@ -2492,7 +2493,7 @@ class GlossaryManagerMixin:
             h.addStretch()
             return cont
         
-        # Row 0: Temperature and Glossary History Limit
+        # Row 0: Temperature, request controls, and glossary history toggle
         self.manual_temp_entry = QLineEdit(str(self.config.get('manual_glossary_temperature', 0.1)))
         self.manual_temp_entry.setFixedWidth(80)
         settings_grid.addWidget(_m_pair(
@@ -2500,22 +2501,15 @@ class GlossaryManagerMixin:
             tooltip="AI creativity for manual extraction.\nLower = more deterministic (recommended 0.1–0.3)."
         ), 0, 0)
 
-        self.manual_context_entry = QLineEdit(str(self.config.get('manual_context_limit', 2)))
-        self.manual_context_entry.setFixedWidth(80)
-        settings_grid.addWidget(_m_pair(
-            "Glossary History Limit:", self.manual_context_entry,
-            tooltip="This controls how many chapters to include with contextual translation"
-        ), 0, 1)
-
         # Large accent icon; keep it in one side column so it does not add empty rows.
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
         if os.path.exists(icon_path):
             from PySide6.QtGui import QIcon
             icon_label = QLabel()
-            icon_label.setFixedSize(140, 140)
+            icon_label.setFixedSize(150, 150)
             icon_label.setAlignment(Qt.AlignCenter)
-            icon_label.setPixmap(QIcon(icon_path).pixmap(112, 112))
-            settings_grid.addWidget(icon_label, 0, 2, 4, 1, Qt.AlignCenter)
+            icon_label.setPixmap(QIcon(icon_path).pixmap(120, 120))
+            settings_grid.addWidget(icon_label, 0, 3, 3, 1, Qt.AlignCenter)
         
         # Row 1: Compression Factor and Rolling window checkbox
         self.glossary_compression_factor_entry = QLineEdit(str(self.config.get('glossary_compression_factor', 1.0)))
@@ -2568,7 +2562,7 @@ class GlossaryManagerMixin:
         # Label tooltip
         token_cont.parentWidget().layout().itemAt(0).widget().setToolTip("Maximum tokens allowed in AI responses. -1 inherits main translation output limit.")
 
-        # Row 3: Disable glossary conversation history
+        # Disable glossary conversation history
         if not hasattr(self, 'disable_glossary_history_checkbox'):
             self.disable_glossary_history_checkbox = self._create_styled_checkbox("Disable Glossary History")
         self.disable_glossary_history_checkbox.setChecked(self.config.get('disable_glossary_history', True))
@@ -2576,7 +2570,31 @@ class GlossaryManagerMixin:
             "When enabled, Extract Glossary will not send previous glossary extraction\n"
             "responses as contextual conversation history. Recommended ON."
         )
-        settings_grid.addWidget(self.disable_glossary_history_checkbox, 3, 0)
+        settings_grid.addWidget(self.disable_glossary_history_checkbox, 0, 2)
+
+        self.manual_context_entry = QLineEdit(str(self.config.get('manual_context_limit', 2)))
+        self.manual_context_entry.setFixedWidth(80)
+        glossary_history_limit_pair = _m_pair(
+            "Glossary History Limit:", self.manual_context_entry,
+            tooltip="This controls how many chapters to include with contextual translation"
+        )
+        settings_grid.addWidget(glossary_history_limit_pair, 1, 2)
+
+        def _sync_glossary_history_limit_enabled(*_args):
+            disabled = self.disable_glossary_history_checkbox.isChecked()
+            glossary_history_limit_pair.setEnabled(not disabled)
+            for label in glossary_history_limit_pair.findChildren(QLabel):
+                label.setStyleSheet("color: #777;" if disabled else "color: #ffffff;")
+
+        previous_slot = getattr(self, '_sync_glossary_history_limit_enabled_slot', None)
+        if previous_slot is not None:
+            try:
+                self.disable_glossary_history_checkbox.toggled.disconnect(previous_slot)
+            except (TypeError, RuntimeError):
+                pass
+        self.disable_glossary_history_checkbox.toggled.connect(_sync_glossary_history_limit_enabled)
+        self._sync_glossary_history_limit_enabled_slot = _sync_glossary_history_limit_enabled
+        _sync_glossary_history_limit_enabled()
         
         if not hasattr(self, 'glossary_request_merging_checkbox'):
             self.glossary_request_merging_checkbox = self._create_styled_checkbox("Glossary Request Merging")
@@ -2584,7 +2602,7 @@ class GlossaryManagerMixin:
         self.glossary_request_merging_checkbox.setToolTip(
             "Merge multiple small glossary requests before sending.\nReduces API calls; controlled by Merge Count below."
         )
-        settings_grid.addWidget(self.glossary_request_merging_checkbox, 1, 1)
+        settings_grid.addWidget(self.glossary_request_merging_checkbox, 0, 1)
 
         # Dynamic request splitting toggle (below Glossary Request Merging)
         if not hasattr(self, 'glossary_enable_chapter_split_checkbox'):
@@ -2593,7 +2611,7 @@ class GlossaryManagerMixin:
         self.glossary_enable_chapter_split_checkbox.setToolTip(
             "Automatically split large chapters using token/output limits\nso each glossary request stays under size caps."
         )
-        settings_grid.addWidget(self.glossary_enable_chapter_split_checkbox, 2, 1)
+        settings_grid.addWidget(self.glossary_enable_chapter_split_checkbox, 1, 1)
 
         # Logic for Auto Compression Factor
         def _update_glossary_compression():
@@ -2639,13 +2657,13 @@ class GlossaryManagerMixin:
         # Initial update
         _update_glossary_compression()
         
-        # Row 3: Glossary Merge Count (below Dynamic request splitting)
+        # Row 2: Glossary Merge Count (below Dynamic request splitting)
         self.glossary_request_merge_count_entry = QLineEdit(str(self.config.get('glossary_request_merge_count', 10)))
         self.glossary_request_merge_count_entry.setFixedWidth(80)
         settings_grid.addWidget(_m_pair(
             "Glossary Merge Count:", self.glossary_request_merge_count_entry,
             tooltip="When request merging is on, combine this many chunks\nbefore one glossary API call."
-        ), 3, 1)
+        ), 2, 1)
         
         # Shortcut button: Anti Duplicate Parameters (glossary-specific)
         anti_dup_btn = QPushButton("Anti Duplicate Parameters")
