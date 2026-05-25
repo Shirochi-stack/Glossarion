@@ -3842,7 +3842,7 @@ class UnifiedClient:
         # that will be skipped anyway. _is_stop_requested() intentionally doesn't
         # check GRACEFUL_STOP (to let in-flight API responses complete), but here
         # we're BEFORE the API call, so we should skip immediately.
-        if os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
+        if (os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1') and not getattr(self, '_ignore_graceful_stop', False):
             raise UnifiedClientError("Skipped (graceful stop)", error_type="cancelled")
             
         tls = self._get_thread_local_client()
@@ -4656,7 +4656,7 @@ class UnifiedClient:
                 # Set flags to prevent _setup_client and _send_openai_compatible from overriding
                 self._individual_endpoint_applied = True
                 self._skip_global_custom_endpoint = True
-                print(f"[DEBUG] Individual non-Azure endpoint applied: {individual_endpoint}")
+
                 
                 # CRITICAL: Update thread-local storage with our correct client
                 tls = self._get_thread_local_client()
@@ -10002,7 +10002,7 @@ class UnifiedClient:
                             # Cancellable sleep — check stop flags every 0.2s
                             _slept = 0.0
                             while _slept < _wait_needed:
-                                if self._is_stop_requested() or getattr(self, '_cancelled', False) or os.environ.get('GRACEFUL_STOP') == '1':
+                                if self._is_stop_requested() or getattr(self, '_cancelled', False) or (os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False)):
                                     # Release the reserved slot before aborting
                                     with _fallback_key_lock:
                                         _fallback_key_in_use.discard(_key_id)
@@ -10019,7 +10019,7 @@ class UnifiedClient:
                 # ------------------------------------------
 
                 # Final stop check after delay (in case flag was set just as sleep ended)
-                if self._is_stop_requested() or os.environ.get('GRACEFUL_STOP') == '1':
+                if self._is_stop_requested() or (os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False)):
                     if _api_call_delay > 0:
                         with _fallback_key_lock:
                             _fallback_key_in_use.discard(_key_id)
@@ -10398,7 +10398,7 @@ class UnifiedClient:
                             # Cancellable sleep — check stop flags every 0.2s
                             _slept = 0.0
                             while _slept < _wait_needed:
-                                if self._is_stop_requested() or getattr(self, '_cancelled', False) or os.environ.get('GRACEFUL_STOP') == '1':
+                                if self._is_stop_requested() or getattr(self, '_cancelled', False) or (os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False)):
                                     # Release the reserved slot before aborting
                                     with _fallback_key_lock:
                                         _fallback_key_in_use.discard(_key_id)
@@ -10415,7 +10415,7 @@ class UnifiedClient:
                 # ------------------------------------------
                 
                 # Final stop check after delay (in case flag was set just as sleep ended)
-                if self._is_stop_requested() or os.environ.get('GRACEFUL_STOP') == '1':
+                if self._is_stop_requested() or (os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False)):
                     if _api_call_delay > 0:
                         with _fallback_key_lock:
                             _fallback_key_in_use.discard(_key_id)
@@ -14869,7 +14869,7 @@ class UnifiedClient:
         """
         # If graceful stop is active, do not proceed to send new calls.
         try:
-            if os.environ.get('GRACEFUL_STOP') == '1':
+            if os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False):
                 self.__class__.reset_api_call_stagger()
                 raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
         except UnifiedClientError:
@@ -14974,7 +14974,7 @@ class UnifiedClient:
             elapsed = 0.0
             step = 0.1
             while elapsed < sleep_time:
-                if os.environ.get('GRACEFUL_STOP') == '1':
+                if os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False):
                     self.__class__.reset_api_call_stagger()
                     raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
                 if self._should_abort_retry() or getattr(self, '_cancelled', False):
@@ -15238,7 +15238,7 @@ class UnifiedClient:
                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
             
             # Graceful stop: don't start new API calls (including retries)
-            if os.environ.get('GRACEFUL_STOP') == '1':
+            if os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False):
                 raise UnifiedClientError("Graceful stop active - aborting API retry", error_type="cancelled")
             
             # Debug logging for retry loop
@@ -15374,13 +15374,13 @@ class UnifiedClient:
                 # During rate-limit waits, graceful stop should prevent any further retries from starting.
                 def _sleep_rate_limit(wait_seconds: float) -> None:
                     # Check immediately before sleeping
-                    if os.environ.get('GRACEFUL_STOP') == '1':
+                    if os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False):
                         raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
                     slept = 0.0
                     step = 0.5
                     while slept < wait_seconds:
                         # Re-check during sleep so a mid-wait graceful stop cancels promptly.
-                        if os.environ.get('GRACEFUL_STOP') == '1':
+                        if os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False):
                             raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
                         if self._is_stop_requested() or getattr(self, '_cancelled', False):
                             self._cancelled = True
@@ -15733,7 +15733,7 @@ class UnifiedClient:
 
                     # If graceful stop is active, do not schedule any further API calls (including retries).
                     try:
-                        if os.environ.get('GRACEFUL_STOP') == '1':
+                        if os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False):
                             raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
                     except UnifiedClientError:
                         raise
@@ -16548,7 +16548,7 @@ class UnifiedClient:
         # If graceful stop is active, do not transition queued work to in-flight and do not send.
         # This prevents the "initial batch" from continuing after the user requests graceful stop.
         try:
-            if os.environ.get('GRACEFUL_STOP') == '1':
+            if os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False):
                 raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
         except UnifiedClientError:
             raise
@@ -22514,7 +22514,7 @@ class UnifiedClient:
                         # If graceful stop is active, do not schedule any further API calls (including retries).
                         # Graceful stop is different from force-stop: it lets in-flight calls finish, but blocks new ones.
                         try:
-                            if os.environ.get('GRACEFUL_STOP') == '1':
+                            if os.environ.get('GRACEFUL_STOP') == '1' and not getattr(self, '_ignore_graceful_stop', False):
                                 raise UnifiedClientError("Graceful stop active - not starting new API call", error_type="cancelled")
                         except UnifiedClientError:
                             raise

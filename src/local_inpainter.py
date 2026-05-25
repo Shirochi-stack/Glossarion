@@ -3037,6 +3037,9 @@ class LocalInpainter:
                 # image-edit client from recursively routing through a stale
                 # image-edit endpoint without mutating process-wide env vars.
                 client._suppress_custom_image_edit_endpoint = True
+                # Inpainting is a concurrent background task — it must NOT be
+                # killed by the translation pipeline's graceful-stop signal.
+                client._ignore_graceful_stop = True
                 content, _finish_reason = client.send(
                     messages,
                     temperature=float(self.config.get('temperature', 0.3) or 0.3),
