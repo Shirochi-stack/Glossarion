@@ -352,6 +352,33 @@ def _api_watchdog_norm_int(val):
         except Exception:
             return None
 
+def _create_isolated_httpx_client(timeout=None):
+    """Create an httpx.Client with an isolated connection pool.
+
+    Every ``openai.OpenAI()`` instance that does *not* receive an explicit
+    ``http_client`` will share httpx's process-wide default connection pool.
+    When *any* of those clients is garbage-collected or explicitly closed, the
+    shared pool's sockets are torn down, killing in-flight streams belonging to
+    other clients.
+
+    This helper returns a dedicated ``httpx.Client`` (or ``None`` on failure)
+    that callers should pass as ``http_client=`` to ``openai.OpenAI()``.
+    """
+    try:
+        if httpx is None:
+            return None
+        kwargs = {}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        kwargs["limits"] = httpx.Limits(
+            max_connections=100,
+            max_keepalive_connections=5,
+            keepalive_expiry=30,
+        )
+        return httpx.Client(**kwargs)
+    except Exception:
+        return None
+
 def _api_watchdog_external_path() -> Optional[str]:
     """Return per-process watchdog state file path if enabled via env."""
     try:
@@ -3618,10 +3645,11 @@ class UnifiedClient:
                     print(f"[WARNING] Custom base URL missing protocol, adding https://")
                     custom_base_url = 'https://' + custom_base_url
                 
-                self.openai_client = openai.OpenAI(
-                    api_key=self.api_key,
-                    base_url=custom_base_url
-                )
+                _oai_kwargs = dict(api_key=self.api_key, base_url=custom_base_url)
+                _iso_http = _create_isolated_httpx_client()
+                if _iso_http is not None:
+                    _oai_kwargs['http_client'] = _iso_http
+                self.openai_client = openai.OpenAI(**_oai_kwargs)
                 print(f"[DEBUG] OpenAI client created with custom base URL: {custom_base_url}")
             elif custom_base_url and not use_custom_endpoint:
                 print(f"[DEBUG] Custom base URL detected but disabled via toggle, using standard client")
@@ -4539,10 +4567,11 @@ class UnifiedClient:
                 import openai
                 # MICROSECOND LOCK: Create custom endpoint client with thread safety
                 with self._model_lock:
-                    self.openai_client = openai.OpenAI(
-                        api_key=self.api_key,
-                        base_url=custom_base_url
-                    )
+                    _oai_kwargs = dict(api_key=self.api_key, base_url=custom_base_url)
+                    _iso_http = _create_isolated_httpx_client()
+                    if _iso_http is not None:
+                        _oai_kwargs['http_client'] = _iso_http
+                    self.openai_client = openai.OpenAI(**_oai_kwargs)
             except ImportError:
                 print(f"[ERROR] OpenAI library not installed, cannot use custom endpoint")
                 self.client_type = original_client_type  # Restore original type
@@ -4618,10 +4647,11 @@ class UnifiedClient:
                 
                 # MICROSECOND LOCK: Create individual endpoint client with thread safety
                 with self._model_lock:
-                    self.openai_client = openai.OpenAI(
-                        api_key=endpoint_api_key,
-                        base_url=individual_endpoint
-                    )
+                    _oai_kwargs = dict(api_key=endpoint_api_key, base_url=individual_endpoint)
+                    _iso_http = _create_isolated_httpx_client()
+                    if _iso_http is not None:
+                        _oai_kwargs['http_client'] = _iso_http
+                    self.openai_client = openai.OpenAI(**_oai_kwargs)
                 
                 # Set flags to prevent _setup_client and _send_openai_compatible from overriding
                 self._individual_endpoint_applied = True
@@ -4992,10 +5022,11 @@ class UnifiedClient:
             if not custom_base_url.startswith(('http://', 'https://')):
                 custom_base_url = 'https://' + custom_base_url
             
-            self.openai_client = openai.OpenAI(
-                api_key=self.api_key,
-                base_url=custom_base_url
-            )
+            _oai_kwargs = dict(api_key=self.api_key, base_url=custom_base_url)
+            _iso_http = _create_isolated_httpx_client()
+            if _iso_http is not None:
+                _oai_kwargs['http_client'] = _iso_http
+            self.openai_client = openai.OpenAI(**_oai_kwargs)
             print(f"[DEBUG] Re-created OpenAI client with custom base URL")
     
     def _force_rotate_to_untried_key(self, attempted_keys: set) -> bool:
@@ -7397,11 +7428,12 @@ class UnifiedClient:
                 chutes_base_url = os.getenv("CHUTES_API_URL", "https://llm.chutes.ai/v1")
                 
                 # MICROSECOND LOCK for chutes client
+                _iso_http = _create_isolated_httpx_client()
                 with self._model_lock:
-                    self.openai_client = openai.OpenAI(
-                        api_key=api_key_snapshot,
-                        base_url=chutes_base_url
-                    )
+                    _oai_kwargs = dict(api_key=api_key_snapshot, base_url=chutes_base_url)
+                    if _iso_http is not None:
+                        _oai_kwargs['http_client'] = _iso_http
+                    self.openai_client = openai.OpenAI(**_oai_kwargs)
                 defer_batch_log(f"🔌 chutes client configured with endpoint: {chutes_base_url}")
             else:
                 logger.info("chutes will use HTTP API")
@@ -7495,10 +7527,11 @@ class UnifiedClient:
                     self.openai_client = None
                 else:
                     # Use regular OpenAI client - individual endpoint will be set later
-                    self.openai_client = openai.OpenAI(
-                        api_key=api_key_snapshot,
-                        base_url=base_url_for_client
-                    )
+                    _oai_kwargs = dict(api_key=api_key_snapshot, base_url=base_url_for_client)
+                    _iso_http = _create_isolated_httpx_client()
+                    if _iso_http is not None:
+                        _oai_kwargs['http_client'] = _iso_http
+                    self.openai_client = openai.OpenAI(**_oai_kwargs)
         
         elif self.client_type == 'gemini':
             # Auto-detect gRPC vs OpenAI from endpoint URL format
@@ -7515,10 +7548,11 @@ class UnifiedClient:
                 
                 # MICROSECOND LOCK for Gemini with OpenAI endpoint
                 with self._model_lock:
-                    self.openai_client = openai.OpenAI(
-                        api_key=api_key_snapshot,
-                        base_url=base_url
-                    )
+                    _oai_kwargs = dict(api_key=api_key_snapshot, base_url=base_url)
+                    _iso_http = _create_isolated_httpx_client()
+                    if _iso_http is not None:
+                        _oai_kwargs['http_client'] = _iso_http
+                    self.openai_client = openai.OpenAI(**_oai_kwargs)
                     self._original_client_type = 'gemini'
                     self.client_type = 'openai'
                 print(f"[DEBUG] Gemini using OpenAI-compatible endpoint: {base_url}")
@@ -7579,11 +7613,12 @@ class UnifiedClient:
                     base_url = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1")
                 
                 # MICROSECOND LOCK for DeepSeek client
+                _iso_http = _create_isolated_httpx_client()
                 with self._model_lock:
-                    self.openai_client = openai.OpenAI(
-                        api_key=api_key_snapshot,
-                        base_url=base_url
-                    )
+                    _oai_kwargs = dict(api_key=api_key_snapshot, base_url=base_url)
+                    if _iso_http is not None:
+                        _oai_kwargs['http_client'] = _iso_http
+                    self.openai_client = openai.OpenAI(**_oai_kwargs)
                 defer_batch_log(f"🔌 DeepSeek client configured with endpoint: {base_url}")
         
         elif self.client_type == 'groq':
@@ -7595,11 +7630,12 @@ class UnifiedClient:
                         base_url = "https://api.groq.com/openai/v1"
                 
                 # MICROSECOND LOCK for Groq client
+                _iso_http = _create_isolated_httpx_client()
                 with self._model_lock:
-                    self.openai_client = openai.OpenAI(
-                        api_key=api_key_snapshot,
-                        base_url=base_url
-                    )
+                    _oai_kwargs = dict(api_key=api_key_snapshot, base_url=base_url)
+                    if _iso_http is not None:
+                        _oai_kwargs['http_client'] = _iso_http
+                    self.openai_client = openai.OpenAI(**_oai_kwargs)
                 defer_batch_log(f"🔌 Groq client configured with endpoint: {base_url}")
         
         elif self.client_type == 'fireworks':
@@ -7608,11 +7644,12 @@ class UnifiedClient:
                     base_url = os.getenv("FIREWORKS_API_URL", "https://api.fireworks.ai/inference/v1")
                 
                 # MICROSECOND LOCK for Fireworks client
+                _iso_http = _create_isolated_httpx_client()
                 with self._model_lock:
-                    self.openai_client = openai.OpenAI(
-                        api_key=api_key_snapshot,
-                        base_url=base_url
-                    )
+                    _oai_kwargs = dict(api_key=api_key_snapshot, base_url=base_url)
+                    if _iso_http is not None:
+                        _oai_kwargs['http_client'] = _iso_http
+                    self.openai_client = openai.OpenAI(**_oai_kwargs)
                 defer_batch_log(f"🔌 Fireworks client configured with endpoint: {base_url}")
         
         elif self.client_type == 'sambanova':
@@ -7621,11 +7658,12 @@ class UnifiedClient:
                     base_url = os.getenv("SAMBANOVA_API_URL", "https://api.sambanova.ai/v1")
 
                 # MICROSECOND LOCK for SambaNova client
+                _iso_http = _create_isolated_httpx_client()
                 with self._model_lock:
-                    self.openai_client = openai.OpenAI(
-                        api_key=api_key_snapshot,
-                        base_url=base_url
-                    )
+                    _oai_kwargs = dict(api_key=api_key_snapshot, base_url=base_url)
+                    if _iso_http is not None:
+                        _oai_kwargs['http_client'] = _iso_http
+                    self.openai_client = openai.OpenAI(**_oai_kwargs)
                 defer_batch_log(f"🔌 SambaNova client configured with endpoint: {base_url}")
 
         elif self.client_type == 'xai':
@@ -7634,22 +7672,24 @@ class UnifiedClient:
                     base_url = os.getenv("XAI_API_URL", "https://api.x.ai/v1")
                 
                 # MICROSECOND LOCK for xAI client
+                _iso_http = _create_isolated_httpx_client()
                 with self._model_lock:
-                    self.openai_client = openai.OpenAI(
-                        api_key=api_key_snapshot,
-                        base_url=base_url
-                    )
+                    _oai_kwargs = dict(api_key=api_key_snapshot, base_url=base_url)
+                    if _iso_http is not None:
+                        _oai_kwargs['http_client'] = _iso_http
+                    self.openai_client = openai.OpenAI(**_oai_kwargs)
                 defer_batch_log(f"🔌 xAI client configured with endpoint: {base_url}")
         elif self.client_type == 'nvidia':
             if openai is not None:
                 if base_url is None:
                     base_url = os.getenv("NVIDIA_API_URL", "https://integrate.api.nvidia.com/v1")
 
+                _iso_http = _create_isolated_httpx_client()
                 with self._model_lock:
-                    self.openai_client = openai.OpenAI(
-                        api_key=api_key_snapshot,
-                        base_url=base_url
-                    )
+                    _oai_kwargs = dict(api_key=api_key_snapshot, base_url=base_url)
+                    if _iso_http is not None:
+                        _oai_kwargs['http_client'] = _iso_http
+                    self.openai_client = openai.OpenAI(**_oai_kwargs)
                 defer_batch_log(f"🔌 NVIDIA client configured with endpoint: {base_url}")
  
         elif self.client_type == 'deepl' or model_snapshot.startswith('deepl'):
@@ -16437,12 +16477,16 @@ class UnifiedClient:
                 timeout_obj = float(read)
             # Disable OpenAI SDK internal retries so our outer retry loop (and user-configured
             # SEND_INTERVAL_SECONDS pacing) is the single source of truth.
-            client = openai.OpenAI(
+            _oai_kwargs = dict(
                 api_key=api_key_clean,
                 base_url=base_url,
                 timeout=timeout_obj,
-                max_retries=0
+                max_retries=0,
             )
+            _iso_http = _create_isolated_httpx_client(timeout=timeout_obj)
+            if _iso_http is not None:
+                _oai_kwargs['http_client'] = _iso_http
+            client = openai.OpenAI(**_oai_kwargs)
             tls.openai_clients[map_key] = client
 
             # Track for hard-cancel/timeout cleanup (cross-thread)
@@ -25840,10 +25884,11 @@ class UnifiedClient:
                     time.sleep(api_delay)
                 
                 # Create client with xAI base URL
-                client = openai.OpenAI(
-                    api_key=self.api_key,
-                    base_url=base_url
-                )
+                _oai_kwargs = dict(api_key=self.api_key, base_url=base_url)
+                _iso_http = _create_isolated_httpx_client()
+                if _iso_http is not None:
+                    _oai_kwargs['http_client'] = _iso_http
+                client = openai.OpenAI(**_oai_kwargs)
                 
                 # Build params for responses.create()
                 params = {
