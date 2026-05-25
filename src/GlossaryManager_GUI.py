@@ -2621,13 +2621,13 @@ class GlossaryManagerMixin:
         # Initial update
         _update_glossary_compression()
         
-        # Row 2: Merge Count
+        # Row 3: Glossary Merge Count (below Dynamic request splitting)
         self.glossary_request_merge_count_entry = QLineEdit(str(self.config.get('glossary_request_merge_count', 10)))
         self.glossary_request_merge_count_entry.setFixedWidth(80)
         settings_grid.addWidget(_m_pair(
-            "Merge Count:", self.glossary_request_merge_count_entry,
+            "Glossary Merge Count:", self.glossary_request_merge_count_entry,
             tooltip="When request merging is on, combine this many chunks\nbefore one glossary API call."
-        ), 2, 1)
+        ), 3, 1)
         
         # Shortcut button: Anti Duplicate Parameters (glossary-specific)
         anti_dup_btn = QPushButton("Anti Duplicate Parameters")
