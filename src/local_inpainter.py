@@ -3273,16 +3273,20 @@ class LocalInpainter:
             #   0%   = conservative mask-only blend (default)
             #   100% = full-page output (trust the model entirely)
             #   1-99 = dilate/expand the mask proportionally before blending
-            _raw_area_pct = self.config.get('custom_image_edit_full_page_output', None)
-            if _raw_area_pct is None:
-                _env = os.environ.get('CUSTOM_IMAGE_EDIT_FULL_PAGE_OUTPUT', '')
-                _raw_area_pct = _env if _env != '' else 10
+            # The GUI syncs this env var on every spinbox change, while
+            # self.config is a stale snapshot loaded from disk at init.
+            # Always prefer the env var for runtime accuracy.
+            _env = os.environ.get('CUSTOM_IMAGE_EDIT_FULL_PAGE_OUTPUT', '').strip()
+            if _env:
+                _raw_area_pct = _env
+            else:
+                _raw_area_pct = self.config.get('custom_image_edit_full_page_output', 10)
             # Backward compat: old boolean values map to 10/100
             if isinstance(_raw_area_pct, bool):
                 _raw_area_pct = 100 if _raw_area_pct else 10
             else:
                 _s = str(_raw_area_pct).strip().lower()
-                if _s in ('true', 'yes', 'on', '1'):
+                if _s in ('true', 'yes', 'on'):
                     _raw_area_pct = 100
                 elif _s in ('false', 'no', 'off'):
                     _raw_area_pct = 0

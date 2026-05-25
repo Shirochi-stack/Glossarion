@@ -5277,6 +5277,9 @@ class MangaTranslationTab(QObject):
         if isinstance(_raw_full_page, bool):
             _raw_full_page = 100 if _raw_full_page else 10
         self.custom_image_edit_full_page_output_value = max(0, min(100, int(_raw_full_page)))
+        # Write the migrated int back so the inpainter sees it (not the old bool)
+        self.main_gui.config['custom_image_edit_full_page_output'] = self.custom_image_edit_full_page_output_value
+        self.main_gui.custom_image_edit_full_page_output_var = self.custom_image_edit_full_page_output_value
         custom_image_edit_cb = self._create_styled_checkbox("Enable Custom Image Edit Endpoint")
         custom_image_edit_cb.setToolTip(
             "Uses the Custom Image Edit Endpoint only for manga custom-image-edit inpainting. "
@@ -5316,8 +5319,8 @@ class MangaTranslationTab(QObject):
         custom_image_edit_area_spin.setValue(self.custom_image_edit_full_page_output_value)
         custom_image_edit_area_spin.setToolTip(
             "0% = mask-only blend (conservative)\n"
-            "100% = no masking, uses the generated image exactly as returned\n"
-            "Intermediate = expanded mask"
+            "1–99% = gradually expands the mask around text\n"
+            "100% = no masking, uses the generated image exactly as returned"
         )
         custom_image_edit_area_spin.setMinimumWidth(80)
         custom_image_edit_area_spin.setMaximumWidth(100)
@@ -10941,7 +10944,7 @@ class MangaTranslationTab(QObject):
             os.environ['CUSTOM_IMAGE_EDIT_BASE_URL'] = url if enabled else ''
             os.environ['OPENAI_IMAGE_EDIT_BASE_URL'] = url if enabled else ''
             os.environ['CUSTOM_IMAGE_EDIT_FULL_PAGE_OUTPUT'] = str(
-                int(getattr(self, 'custom_image_edit_full_page_output_value', 0))
+                int(getattr(self, 'custom_image_edit_full_page_output_value', 10))
             )
         except Exception:
             pass
@@ -11135,6 +11138,7 @@ class MangaTranslationTab(QObject):
         self.custom_image_edit_full_page_output_value = int(value)
         self.main_gui.custom_image_edit_full_page_output_var = int(value)
         self.main_gui.config['custom_image_edit_full_page_output'] = int(value)
+        self._set_custom_image_edit_env()
         if not (hasattr(self, '_initializing') and self._initializing):
             self._save_rendering_settings()
 
