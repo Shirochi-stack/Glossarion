@@ -4282,20 +4282,28 @@ def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, us
                 # miss candidates where token_sort or jaro_winkler scores higher
                 prefilter_pct = max((fuzzy_threshold - 0.15) * 100, 50)
                 
-                # Single C++ batch call — replaces thousands of Python iterations
-                top_matches = rf_process.extract(
-                    name_lower, candidate_names,
-                    scorer=rf_fuzz.ratio,
-                    score_cutoff=prefilter_pct,
-                    limit=20
-                )
+                # Two fast C++ batch calls to cover different matching dimensions:
+                # - ratio: character-level similarity (catches join/split variations)
+                # - token_sort_ratio: word-reorder matches (e.g. "Park Jisoo" / "Jisoo Park")
+                # Both run in C++ — two calls are still orders of magnitude faster
+                # than the old Python loop over all candidates.
+                candidate_indices = set()
+                for scorer in (rf_fuzz.ratio, rf_fuzz.token_sort_ratio):
+                    hits = rf_process.extract(
+                        name_lower, candidate_names,
+                        scorer=scorer,
+                        score_cutoff=prefilter_pct,
+                        limit=20
+                    )
+                    for _, _, idx in (hits or []):
+                        candidate_indices.add(idx)
                 
-                if not top_matches:
+                if not candidate_indices:
                     return (False, 0.0, None)
                 
                 # Full multi-algorithm scoring only on pre-filtered candidates
                 current_has_gender = _entry_type_has_active_gender(current_entry) if current_entry else False
-                for _, _, idx in top_matches:
+                for idx in candidate_indices:
                     seen_item = seen_raw_names[idx]
                     seen_clean = seen_item[0]
                     seen_original = seen_item[1]
