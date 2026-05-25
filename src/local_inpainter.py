@@ -3268,14 +3268,32 @@ class LocalInpainter:
                 out_bgr = cv2.resize(out_bgr, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
 
             # Endpoint-backed image edit models can optionally own the whole
-            # returned page. Keep the conservative mask-limited blend by
-            # default, and only trust the full page when the manga setting is on.
-            use_full_page_output = str(
-                self.config.get('custom_image_edit_full_page_output', False)
-                or os.environ.get('CUSTOM_IMAGE_EDIT_FULL_PAGE_OUTPUT', '')
-            ).lower() in ('1', 'true', 'yes', 'on')
+            # returned page. The edit-output-area percentage controls how much
+            # of the AI result is trusted:
+            #   0%   = conservative mask-only blend (default)
+            #   100% = full-page output (trust the model entirely)
+            #   1-99 = dilate/expand the mask proportionally before blending
+            _raw_area_pct = (
+                self.config.get('custom_image_edit_full_page_output', 10)
+                or os.environ.get('CUSTOM_IMAGE_EDIT_FULL_PAGE_OUTPUT', '10')
+            )
+            # Backward compat: old boolean values map to 0/100
+            if isinstance(_raw_area_pct, bool):
+                _raw_area_pct = 100 if _raw_area_pct else 0
+            else:
+                try:
+                    _raw_area_pct = int(float(str(_raw_area_pct)))
+                except (ValueError, TypeError):
+                    _raw_area_pct = 0
+                # Legacy boolean-like strings
+                if str(_raw_area_pct).lower() in ('true', 'yes', 'on'):
+                    _raw_area_pct = 100
+                elif str(_raw_area_pct).lower() in ('false', 'no', 'off'):
+                    _raw_area_pct = 0
+            edit_area_pct = max(0, min(100, _raw_area_pct))
+
             if (
-                use_full_page_output
+                edit_area_pct >= 100
                 and left == 0
                 and top == 0
                 and right == orig_w
@@ -3283,13 +3301,29 @@ class LocalInpainter:
                 and out_bgr.shape[:2] == image.shape[:2]
             ):
                 self._log_inpaint_diag('custom-image-edit', out_bgr, mask_gray)
-                self._log("Custom image edit full-page output applied", "info")
+                self._log("Custom image edit full-page output applied (area=100%)", "info")
                 logger.info("Custom image edit inpainting completed")
                 return out_bgr
 
             mask_for_blend = crop_mask
             if mask_for_blend.shape[:2] != crop_bgr.shape[:2]:
                 mask_for_blend = cv2.resize(mask_for_blend, (crop_bgr.shape[1], crop_bgr.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+            if edit_area_pct > 0:
+                # Dilate the mask to expand the trusted edit area.
+                # Scale: at 50% the kernel ≈ 10% of the image diagonal,
+                # at 100% it covers the entire image.
+                diag = max(1, int((crop_bgr.shape[0]**2 + crop_bgr.shape[1]**2) ** 0.5))
+                dilation_px = max(1, int(diag * edit_area_pct / 100.0 * 0.2))
+                kernel_size = 2 * dilation_px + 1
+                dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+                mask_for_blend = cv2.dilate(mask_for_blend, dilate_kernel, iterations=1)
+                self._log(
+                    f"Custom image edit mask expanded by area={edit_area_pct}% "
+                    f"(dilation={dilation_px}px, kernel={kernel_size}x{kernel_size})",
+                    "info"
+                )
+
             mask_float = mask_for_blend.astype(np.float32) / 255.0
             mask_float = cv2.GaussianBlur(mask_float, (21, 21), 5)
             mask_float = np.clip(mask_float, 0.0, 1.0)[:, :, np.newaxis]

@@ -2012,7 +2012,10 @@ Text to analyze:
 
         self.custom_image_edit_user_prompt_var = self.config.get('custom_image_edit_user_prompt', '')
         self.custom_image_edit_prompt_var = self.custom_image_edit_system_prompt_var
-        self.custom_image_edit_full_page_output_var = bool(self.config.get('custom_image_edit_full_page_output', False))
+        _raw_fp = self.config.get('custom_image_edit_full_page_output', 10)
+        if isinstance(_raw_fp, bool):
+            _raw_fp = 100 if _raw_fp else 10
+        self.custom_image_edit_full_page_output_var = max(0, min(100, int(_raw_fp)))
         self.manga_disable_inpaint_performance_mode_var = bool(self.config.get('manga_disable_inpaint_performance_mode', False))
         self.use_custom_image_edit_endpoint_var = self.config.get(
             'use_custom_image_edit_endpoint',
@@ -24446,7 +24449,7 @@ Important rules:
                 ('vision_ocr_source_prepass', ['vision_ocr_source_prepass_var'], 'auto', str),
                 ('use_custom_openai_endpoint', ['use_custom_openai_endpoint_var'], False, bool),
                 ('use_custom_image_edit_endpoint', ['use_custom_image_edit_endpoint_var'], False, bool),
-                ('custom_image_edit_full_page_output', ['custom_image_edit_full_page_output_var'], False, bool),
+                ('custom_image_edit_full_page_output', ['custom_image_edit_full_page_output_var'], 10, lambda v: max(0, min(100, safe_int(v, 10)))),
                 ('manga_disable_inpaint_performance_mode', ['manga_disable_inpaint_performance_mode_var'], False, bool),
                 ('use_inpainter_keys', ['use_inpainter_keys_var'], False, bool),
                 ('disable_chapter_merging', ['disable_chapter_merging_var'], False, bool),
