@@ -1181,15 +1181,20 @@ class MangaTranslationTab(QObject):
 
             if hasattr(self, 'start_button') and self.start_button:
                 self.start_button.setEnabled(False)
+                if hasattr(self, 'start_button_text'):
+                    self.start_button_text.setText("Inpainter failed")
 
-            # Disable inpainting-dependent buttons but keep their normal labels.
-            # The failure is already communicated via the status label and logs.
             if hasattr(self, 'image_preview_widget'):
                 ipw = self.image_preview_widget
-                for attr in ('translate_btn', 'translate_all_btn', 'clean_btn'):
+                for attr, text in (
+                    ('translate_btn', 'Inpainter failed'),
+                    ('translate_all_btn', 'Inpainter failed'),
+                    ('clean_btn', 'Inpainter failed'),
+                ):
                     btn = getattr(ipw, attr, None)
                     if btn:
                         btn.setEnabled(False)
+                        btn.setText(text)
         except Exception as e:
             print(f"[BUTTON_STATE] Error setting inpainter failure state: {e}")
     
@@ -1254,6 +1259,11 @@ class MangaTranslationTab(QObject):
         try:
             # Store waiting state for context menu checks
             self._waiting_for_model = waiting
+            
+            # If a workflow operation (OCR, clean, translate) is actively running,
+            # don't touch button states — the operation owns them until it finishes.
+            if getattr(self, '_workflow_operation_active', False):
+                return
             
             # Start Translation button
             if hasattr(self, 'start_button') and self.start_button:
@@ -1325,6 +1335,11 @@ class MangaTranslationTab(QObject):
                     else:
                         ipw.clean_btn.setEnabled(True)
                         ipw.clean_btn.setText("Clean")
+                
+                # Hide the stop button during waiting state — stopping during
+                # model load causes hard failures.
+                if waiting and hasattr(ipw, 'stop_translation_btn'):
+                    ipw.stop_translation_btn.setVisible(False)
         except Exception as e:
             print(f"[BUTTON_STATE] Error setting button state: {e}")
     

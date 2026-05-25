@@ -11352,6 +11352,11 @@ def _disable_workflow_buttons(self, exclude=None, show_stop_button=True):
         show_stop_button: Whether to show the workflow stop button (False for Start Translation which has its own stop)
     """
     try:
+        # Mark that a workflow operation is actively running.
+        # This prevents _set_translation_buttons_waiting from re-enabling
+        # buttons or hiding the stop button while the operation is in progress.
+        self._workflow_operation_active = True
+        
         ipw = self.image_preview_widget if hasattr(self, 'image_preview_widget') else None
         if not ipw:
             return
@@ -11382,25 +11387,20 @@ def _disable_workflow_buttons(self, exclude=None, show_stop_button=True):
         if exclude != 'start_button' and hasattr(self, 'start_button') and self.start_button:
             self.start_button.setEnabled(False)
         
-        # Show the stop button when workflow operations start (not for Start Translation)
-        # Suppress the stop button while models are still loading — stopping during
-        # inpainter/bubble-detector load causes hard failures.
-        models_still_loading = (
-            getattr(self, '_waiting_for_model', False)
-            or not getattr(self, '_preload_complete', True)
-        )
-        if show_stop_button and not models_still_loading and hasattr(ipw, 'stop_translation_btn'):
+        # Always show the stop button when an actual operation starts.
+        if show_stop_button and hasattr(ipw, 'stop_translation_btn'):
             ipw.stop_translation_btn.setVisible(True)
             ipw.stop_translation_btn.setEnabled(True)
             ipw.stop_translation_btn.setText("⏹ Stop")
         
-        print(f"[WORKFLOW] Disabled workflow buttons (exclude={exclude}, show_stop={show_stop_button}, models_loading={models_still_loading})")
+        print(f"[WORKFLOW] Disabled workflow buttons (exclude={exclude}, show_stop={show_stop_button})")
     except Exception as e:
         print(f"[WORKFLOW] Error disabling buttons: {e}")
 
 def _enable_workflow_buttons(self):
     """Re-enable all workflow buttons after operation completes."""
     try:
+        self._workflow_operation_active = False
         ipw = self.image_preview_widget if hasattr(self, 'image_preview_widget') else None
         if not ipw:
             return
@@ -11437,6 +11437,16 @@ def _enable_workflow_buttons(self):
             ipw.stop_translation_btn.setText("⏹ Stop")
         
         print(f"[WORKFLOW] Re-enabled all workflow buttons")
+        
+        # Re-apply waiting/failed state if models are still loading.
+        # Without this, buttons briefly show as enabled after an operation
+        # finishes even though the inpainter is still loading.
+        try:
+            if hasattr(self, '_check_preload_status'):
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, self._check_preload_status)
+        except Exception:
+            pass
     except Exception as e:
         print(f"[WORKFLOW] Error enabling buttons: {e}")
 
