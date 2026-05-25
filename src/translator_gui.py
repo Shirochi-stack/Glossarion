@@ -19629,6 +19629,91 @@ Important rules:
                 pass
         return terminated
 
+    def _start_glossary_force_stop_cleanup(self):
+        """Run slow force-stop cleanup away from the Qt GUI thread."""
+        try:
+            existing = getattr(self, '_glossary_force_stop_thread', None)
+            if existing and getattr(existing, 'is_alive', lambda: False)():
+                return
+        except Exception:
+            pass
+
+        def _cleanup():
+            try:
+                import unified_api_client
+                if hasattr(unified_api_client, 'hard_cancel_all'):
+                    unified_api_client.hard_cancel_all()
+            except Exception:
+                pass
+
+            try:
+                self._terminate_glossary_process_tree(
+                    getattr(self, 'glossary_process', None),
+                    grace_seconds=1.0,
+                    reason="force stop",
+                )
+            except Exception:
+                pass
+
+            # Best-effort: terminate only known glossary/PDF helper subprocesses.
+            try:
+                import psutil
+                current_process = psutil.Process(os.getpid())
+                children = current_process.children(recursive=True)
+
+                def _cmdline_s(proc) -> str:
+                    try:
+                        cmd = proc.cmdline()
+                        return " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+                    except Exception:
+                        return ""
+
+                def _is_mp_internal(cmd_s: str) -> bool:
+                    cs = (cmd_s or "")
+                    return ("--multiprocessing-fork" in cs) or ("spawn_main" in cs) or ("multiprocessing.spawn" in cs)
+
+                processes_to_terminate = []
+                for child in children:
+                    try:
+                        cmd_s = _cmdline_s(child)
+                        if _is_mp_internal(cmd_s):
+                            continue
+                        if ("--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s
+                                or "--run-glossary-extraction" in cmd_s or "extract_glossary_from_epub" in cmd_s
+                                or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
+                                or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s):
+                            processes_to_terminate.append(child)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+
+                if processes_to_terminate:
+                    self.append_log(f"🔧 Terminating {len(processes_to_terminate)} helper process(es)...")
+                    for proc in processes_to_terminate:
+                        try:
+                            proc.terminate()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+
+                    try:
+                        _, alive = psutil.wait_procs(processes_to_terminate, timeout=1)
+                    except Exception:
+                        alive = processes_to_terminate
+                    for proc in alive:
+                        try:
+                            proc.kill()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+            except Exception as e:
+                print(f"Error terminating helper child processes: {e}")
+
+        try:
+            import threading
+            thread = threading.Thread(target=_cleanup, name="GlossaryForceStopCleanup", daemon=True)
+            self._glossary_force_stop_thread = thread
+            thread.start()
+        except Exception:
+            _cleanup()
+
     def stop_glossary_extraction(self):
         """Stop glossary extraction specifically"""
         # Check if graceful stop is enabled
@@ -19727,10 +19812,42 @@ Important rules:
                 pass
         
         self.stop_requested = True
+        force_cleanup_started = False
+
+        if not graceful_stop:
+            try:
+                self._reset_api_watchdog_progress(clear_stale_external_files=True)
+            except Exception:
+                pass
+
+            try:
+                if glossary_stop_flag:
+                    glossary_stop_flag(True)
+            except Exception:
+                pass
+
+            try:
+                import extract_glossary_from_epub
+                if hasattr(extract_glossary_from_epub, 'set_stop_flag'):
+                    extract_glossary_from_epub.set_stop_flag(True)
+            except Exception:
+                pass
+
+            try:
+                import unified_api_client
+                if hasattr(unified_api_client, 'set_stop_flag'):
+                    unified_api_client.set_stop_flag(True)
+                if hasattr(unified_api_client, 'UnifiedClient'):
+                    unified_api_client.UnifiedClient._global_cancelled = True
+            except Exception:
+                pass
+
+            self._start_glossary_force_stop_cleanup()
+            force_cleanup_started = True
         
         # For graceful stop: DON'T abort in-flight API calls, let them finish
         # For immediate stop: abort everything aggressively
-        if not graceful_stop:
+        if not graceful_stop and not force_cleanup_started:
             try:
                 self._reset_api_watchdog_progress(clear_stale_external_files=True)
             except Exception:
