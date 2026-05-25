@@ -1267,9 +1267,12 @@ class MangaTranslationTab(QObject):
                 if hasattr(ipw, 'stop_translation_btn'):
                     ipw.stop_translation_btn.setVisible(False)
             
-            # If a workflow operation (OCR, clean, translate) is actively running,
-            # don't touch button states — the operation owns them until it finishes.
-            if getattr(self, '_workflow_operation_active', False):
+            # If a workflow operation (OCR, clean, translate) is actively running
+            # and we're entering waiting state, don't overwrite button text with
+            # "Waiting..." — the operation owns the button states.
+            # But when waiting=False (model done loading), always let it through
+            # so buttons get their normal text restored.
+            if waiting and getattr(self, '_workflow_operation_active', False):
                 return
             
             # Start Translation button

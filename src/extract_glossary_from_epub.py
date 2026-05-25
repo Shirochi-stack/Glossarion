@@ -18,6 +18,26 @@ from ebooklib import epub
 from chapter_splitter import ChapterSplitter
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from typing import List, Dict, Tuple
+
+if '--glossary-env-file' in sys.argv:
+    try:
+        _env_idx = sys.argv.index('--glossary-env-file')
+        _env_file = sys.argv[_env_idx + 1] if len(sys.argv) > _env_idx + 1 else ''
+        if _env_file:
+            with open(_env_file, 'r', encoding='utf-8') as _f:
+                _env_updates = json.load(_f)
+            if isinstance(_env_updates, dict):
+                for _k, _v in _env_updates.items():
+                    os.environ[str(_k)] = "" if _v is None else str(_v)
+        del sys.argv[_env_idx:_env_idx + 2]
+        try:
+            if _env_file:
+                os.remove(_env_file)
+        except Exception:
+            pass
+    except Exception as _env_e:
+        print(f"[ERROR] Failed to load glossary worker env: {_env_e}")
+
 from unified_api_client import UnifiedClient, UnifiedClientError
 from glossary_paths import (
     get_book_glossary_dir,
@@ -550,6 +570,30 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
         api_thread = threading.Thread(target=api_call)
         api_thread.daemon = True
         api_thread.start()
+
+        def _wait_for_api_thread_shutdown(reason: str, timeout_s: float = None) -> bool:
+            """After cancellation, do not free the batch slot until this send thread exits."""
+            try:
+                timeout_s = float(
+                    timeout_s
+                    if timeout_s is not None
+                    else os.getenv("GLOSSARY_API_CANCEL_JOIN_TIMEOUT", "10")
+                )
+            except Exception:
+                timeout_s = 10.0
+            deadline = time.time() + max(0.0, timeout_s)
+            while api_thread.is_alive() and time.time() < deadline:
+                try:
+                    api_thread.join(timeout=0.1)
+                except RuntimeError:
+                    break
+            if api_thread.is_alive():
+                try:
+                    print(f"⚠️ {chapter_label}: API thread still shutting down after {timeout_s:.1f}s ({reason}); not retrying this request")
+                except Exception:
+                    pass
+                return False
+            return True
         
         timeout = chunk_timeout  # None means wait indefinitely
         check_interval = 0.1
@@ -608,9 +652,15 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         # Try to cancel the operation
                         if hasattr(client, 'cancel_current_operation'):
                             client.cancel_current_operation()
+                        try:
+                            import unified_api_client
+                            if hasattr(unified_api_client, 'hard_cancel_all'):
+                                unified_api_client.hard_cancel_all()
+                        except Exception:
+                            pass
+                        _wait_for_api_thread_shutdown("stop requested")
                         
                         os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
-                        # Don't wait for the thread to finish - just raise immediately
                         raise UnifiedClientError("Glossary extraction stopped by user")
                     
                     if timeout is not None:
@@ -621,6 +671,10 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                             if hasattr(client, 'cancel_current_operation'):
                                 client.cancel_current_operation()
                             os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
+                            if not _wait_for_api_thread_shutdown("timeout"):
+                                raise UnifiedClientError(
+                                    f"API call timed out after {timeout} seconds and is still shutting down"
+                                ) from None
                             raise UnifiedClientError(f"API call timed out after {timeout} seconds") from None
         
         except UnifiedClientError as e:

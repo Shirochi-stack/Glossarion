@@ -122,8 +122,12 @@ if '--run-glossary-extraction' in sys.argv:
                 pass
 
         from extract_glossary_from_epub import main as _glossary_extract_main
-        from shutdown_utils import run_cli_main as _run_cli_main
-        _result = _run_cli_main(_glossary_extract_main)
+        _result = _glossary_extract_main()
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
         _glossary_worker_exit_code = 0 if _result is None else int(_result)
     except SystemExit as _e:
         _code = getattr(_e, 'code', 0)
@@ -680,13 +684,13 @@ try:
 except Exception:
     pass
     
-# Manga translation support (optional)
+# Manga translation support (optional).  Import on normal GUI startup so the
+# manga stack is ready immediately; glossary worker mode exits above this block.
 try:
     from manga_integration import MangaTranslationTab
     MANGA_SUPPORT = True
-except ImportError:
+except Exception:
     MANGA_SUPPORT = False
-    print("Manga translation modules not found.")
 
 # Async processing support (lazy loaded)
 ASYNC_SUPPORT = False
@@ -3236,7 +3240,7 @@ Text to analyze:
             from PySide6.QtCore import Qt
         except ImportError:
             QMessageBox.critical(self, "Missing Dependency", 
-                               "PySide6 is required for manga translation. Please install it:\npip install PySide6")
+                               "Manga translation dependencies are missing.")
             return
 
         # If dialog already exists, just show and focus it to preserve exact state
@@ -18168,8 +18172,7 @@ Important rules:
                             cmd = [
                                 sys.executable,
                                 '-u',
-                                os.path.abspath(__file__),
-                                '--run-glossary-extraction',
+                                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'extract_glossary_from_epub.py'),
                                 '--glossary-env-file', env_file,
                                 '--epub', file_path,
                                 '--output', output_path,
@@ -18278,18 +18281,13 @@ Important rules:
                         )
                         self.glossary_process = proc
 
-                        hard_stop_started = None
+                        hard_stop_logged = False
                         while True:
                             if self.stop_requested and not bool(getattr(self, 'graceful_stop_active', False)):
-                                if hard_stop_started is None:
-                                    hard_stop_started = time.time()
+                                if not hard_stop_logged:
+                                    self.append_log("🛑 Immediate stop requested — waiting for glossary worker cleanup/dedupe")
+                                    hard_stop_logged = True
                                 if proc.poll() is not None:
-                                    break
-                                # The stop button wrote GLOSSARY_STOP_FILE=immediate.
-                                # Give the worker a short window to observe it and close
-                                # its own HTTP sessions, then kill the process tree.
-                                if time.time() - hard_stop_started >= 1.0:
-                                    self._terminate_glossary_process_tree(proc, grace_seconds=0.0, reason="force stop")
                                     break
 
                             line = proc.stdout.readline() if proc.stdout else ''
@@ -19642,16 +19640,10 @@ Important rules:
             except Exception:
                 pass
 
-            try:
-                self._terminate_glossary_process_tree(
-                    getattr(self, 'glossary_process', None),
-                    grace_seconds=1.0,
-                    reason="force stop",
-                )
-            except Exception:
-                pass
-
-            # Best-effort: terminate only known glossary/PDF helper subprocesses.
+            # Best-effort: terminate only non-glossary helper subprocesses.
+            # The glossary worker receives GLOSSARY_STOP_FILE=immediate and closes
+            # its own HTTP sessions, then deduplicates/saves before exiting. Do not
+            # kill it here or the final dedupe/save logs are truncated.
             try:
                 import psutil
                 current_process = psutil.Process(os.getpid())
@@ -19675,7 +19667,6 @@ Important rules:
                         if _is_mp_internal(cmd_s):
                             continue
                         if ("--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s
-                                or "--run-glossary-extraction" in cmd_s or "extract_glossary_from_epub" in cmd_s
                                 or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
                                 or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s):
                             processes_to_terminate.append(child)
@@ -19925,7 +19916,6 @@ Important rules:
                         if _is_mp_internal(cmd_s):
                             continue
                         if ("--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s
-                                or "--run-glossary-extraction" in cmd_s or "extract_glossary_from_epub" in cmd_s
                                 or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
                                 or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s):
                             processes_to_terminate.append(child)

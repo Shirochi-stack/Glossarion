@@ -11387,8 +11387,8 @@ def _disable_workflow_buttons(self, exclude=None, show_stop_button=True):
         if exclude != 'start_button' and hasattr(self, 'start_button') and self.start_button:
             self.start_button.setEnabled(False)
         
-        # Always show the stop button when an actual operation starts.
-        if show_stop_button and hasattr(ipw, 'stop_translation_btn'):
+        # Show the stop button when an operation starts, but not during model loading.
+        if show_stop_button and not getattr(self, '_waiting_for_model', False) and hasattr(ipw, 'stop_translation_btn'):
             ipw.stop_translation_btn.setVisible(True)
             ipw.stop_translation_btn.setEnabled(True)
             ipw.stop_translation_btn.setText("⏹ Stop")
