@@ -1717,12 +1717,22 @@ def _extract_chapters_universal(zf, extraction_mode="smart", parser=None, progre
             avg_chars = total_chars // enhanced_count if enhanced_count > 0 else 0
             print(f"   🚀 Enhanced extraction: {enhanced_count}/{len(chapters)} chapters, {total_chars:,} total chars (avg: {avg_chars:,})")
         
-        # Check for gaps
-        chapter_nums = [c["num"] for c in chapters]
-        expected_nums = list(range(min(chapter_nums), max(chapter_nums) + 1))
-        missing = set(expected_nums) - set(chapter_nums)
-        if missing:
-            print(f"   ⚠️ Missing chapter numbers: {sorted(missing)}")
+        # Check for gaps (informational only — non-contiguous numbering is
+        # normal in EPUBs where spine items like images/TOC create gaps)
+        chapter_nums = set(c["num"] for c in chapters)
+        full_range = set(range(min(chapter_nums), max(chapter_nums) + 1))
+        gaps = sorted(full_range - chapter_nums)
+        if gaps:
+            # Collapse into ranges for compact display
+            ranges, i = [], 0
+            while i < len(gaps):
+                start = gaps[i]
+                while i + 1 < len(gaps) and gaps[i + 1] == gaps[i] + 1:
+                    i += 1
+                end = gaps[i]
+                ranges.append(str(start) if start == end else f"{start}–{end}")
+                i += 1
+            print(f"   ℹ️ Gaps in chapter numbering ({len(gaps)}): {', '.join(ranges)}")
     
     # Language detection
     combined_sample = ' '.join(sample_texts) if effective_mode == "smart" else ''
