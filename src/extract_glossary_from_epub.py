@@ -4239,8 +4239,15 @@ def _dedupe_worker(item, all_items, fuzzy_threshold, use_rapidfuzz):
     return (entry, raw_name, cleaned_name, is_dup, best_score, best_match)
 
 
-def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz, current_entry=None):
-    """Find the best duplicate match using multi-algorithm fuzzy matching"""
+def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz, current_entry=None,
+                                _config=None, _partial_gender_only=None, _config_no_partial=None,
+                                _seen_lower_names=None):
+    """Find the best duplicate match using multi-algorithm fuzzy matching.
+    
+    Performance: when RapidFuzz is available, uses C++ batch comparison
+    (process.extract) as a pre-filter, reducing full multi-algorithm
+    evaluations from O(n) per call to ~20 candidates.
+    """
     if not seen_raw_names:
         return (False, 0.0, None)
     
@@ -4252,23 +4259,76 @@ def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, us
     if use_advanced:
         try:
             from duplicate_detection_config import calculate_similarity_with_config, get_duplicate_detection_config
-            config = get_duplicate_detection_config()
+            config = _config if _config is not None else get_duplicate_detection_config()
+            partial_gender_only = _partial_gender_only if _partial_gender_only is not None else _partial_ratio_gender_only()
+            config_no_partial = _config_no_partial
             
             best_score = 0.0
             best_match = None
             
+            # ── Fast path: RapidFuzz C++ batch pre-filter ──
+            # Instead of a Python for-loop calling calculate_similarity_with_config
+            # N times per entry (O(n²) total), use a single C++ batch call to find
+            # the top candidates, then run full multi-algorithm scoring only on those.
+            if use_rapidfuzz and len(seen_raw_names) > 10:
+                from rapidfuzz import fuzz as rf_fuzz, process as rf_process
+                
+                # Use pre-built lowercase list if caller maintains one
+                candidate_names = _seen_lower_names if _seen_lower_names is not None else [
+                    item[0].lower() for item in seen_raw_names
+                ]
+                
+                # Pre-filter cutoff: generous margin below threshold so we don't
+                # miss candidates where token_sort or jaro_winkler scores higher
+                prefilter_pct = max((fuzzy_threshold - 0.15) * 100, 50)
+                
+                # Single C++ batch call — replaces thousands of Python iterations
+                top_matches = rf_process.extract(
+                    name_lower, candidate_names,
+                    scorer=rf_fuzz.ratio,
+                    score_cutoff=prefilter_pct,
+                    limit=20
+                )
+                
+                if not top_matches:
+                    return (False, 0.0, None)
+                
+                # Full multi-algorithm scoring only on pre-filtered candidates
+                current_has_gender = _entry_type_has_active_gender(current_entry) if current_entry else False
+                for _, _, idx in top_matches:
+                    seen_item = seen_raw_names[idx]
+                    seen_clean = seen_item[0]
+                    seen_original = seen_item[1]
+                    seen_entry = seen_item[2] if len(seen_item) > 2 else None
+                    
+                    cmp_config = config
+                    if partial_gender_only and not (
+                        current_has_gender and _entry_type_has_active_gender(seen_entry)
+                    ):
+                        cmp_config = config_no_partial if config_no_partial is not None else config
+                    
+                    score = calculate_similarity_with_config(cleaned_name, seen_clean, cmp_config)
+                    if score >= fuzzy_threshold and score > best_score:
+                        best_score = score
+                        best_match = seen_original
+                
+                return (best_score >= fuzzy_threshold, best_score, best_match)
+            
+            # ── Small list fallback: Python loop is acceptable for ≤10 items ──
             for seen_item in seen_raw_names:
                 seen_clean = seen_item[0]
                 seen_original = seen_item[1]
                 seen_entry = seen_item[2] if len(seen_item) > 2 else None
                 compare_config = config
-                if _partial_ratio_gender_only() and not (
+                if partial_gender_only and not (
                     _entry_type_has_active_gender(current_entry)
                     and _entry_type_has_active_gender(seen_entry)
                 ):
-                    compare_config = dict(config)
-                    compare_config["algorithms"] = [a for a in config.get("algorithms", []) if a != "partial"]
-                # Use multi-algorithm similarity scoring
+                    if config_no_partial is not None:
+                        compare_config = config_no_partial
+                    else:
+                        compare_config = dict(config)
+                        compare_config["algorithms"] = [a for a in config.get("algorithms", []) if a != "partial"]
                 score = calculate_similarity_with_config(cleaned_name, seen_clean, compare_config)
                 
                 if score >= fuzzy_threshold and score > best_score:
@@ -4286,8 +4346,10 @@ def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, us
         
         # For large candidate lists, use batch processing (much faster)
         if len(seen_raw_names) > 50:
-            # Extract just the cleaned names for batch comparison
-            candidate_names = [seen_item[0].lower() for seen_item in seen_raw_names]
+            # Use pre-built lowercase list if caller maintains one
+            candidate_names = _seen_lower_names if _seen_lower_names is not None else [
+                seen_item[0].lower() for seen_item in seen_raw_names
+            ]
             
             # Use extractOne for fast best-match finding
             result = process.extractOne(
@@ -4350,11 +4412,29 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
         import difflib
     
     seen_raw_names = []  # List of (cleaned_name, original_raw_name) tuples
+    seen_lower_names = []  # Pre-lowered names for C++ batch comparison
     raw_name_to_indices = {}  # raw_name -> list of indices in deduplicated
     # Reverse map: for a given index in deduplicated, which index in seen_raw_names?
     dedup_idx_to_seen_idx = {}
     deduplicated = []
     skipped_count = 0
+    
+    # ── Cache configuration once before the hot loop ──
+    # Avoids millions of os.getenv / dict construction calls inside _find_best_duplicate_match
+    _cached_config = None
+    _cached_config_no_partial = None
+    _cached_partial_gender_only = None
+    try:
+        from duplicate_detection_config import get_duplicate_detection_config
+        _cached_config = get_duplicate_detection_config()
+        _cached_config_no_partial = dict(_cached_config)
+        _cached_config_no_partial["algorithms"] = [
+            a for a in _cached_config.get("algorithms", []) if a != "partial"
+        ]
+        _cached_partial_gender_only = _partial_ratio_gender_only()
+    except ImportError:
+        pass
+    _cached_alias_enabled = _alias_aware_name_matching_enabled()
     
     for entry in glossary:
         # Get raw_name and clean it
@@ -4419,7 +4499,7 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
 
         # Check for fuzzy matches with seen names
         alias_matched = False
-        if _alias_aware_name_matching_enabled() and _alias_entry_allowed(entry):
+        if _cached_alias_enabled and _alias_entry_allowed(entry):
             for existing_idx, existing_entry in enumerate(deduplicated):
                 if not _alias_entry_allowed(existing_entry):
                     continue
@@ -4437,6 +4517,7 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
             if alias_matched:
                 seen_idx = len(seen_raw_names)
                 seen_raw_names.append((cleaned_name, raw_name, entry))
+                seen_lower_names.append(cleaned_name.lower())
                 dedup_idx = len(deduplicated)
                 raw_name_to_indices.setdefault(raw_name, []).append(dedup_idx)
                 dedup_idx_to_seen_idx[dedup_idx] = seen_idx
@@ -4444,7 +4525,9 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
                 continue
 
         is_duplicate, best_score, best_match = _find_best_duplicate_match(
-            cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz, entry
+            cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz, entry,
+            _config=_cached_config, _partial_gender_only=_cached_partial_gender_only,
+            _config_no_partial=_cached_config_no_partial, _seen_lower_names=seen_lower_names
         )
         
         if is_duplicate:
@@ -4470,6 +4553,7 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
                     seen_idx = dedup_idx_to_seen_idx.get(existing_index)
                     if seen_idx is not None:
                         seen_raw_names[seen_idx] = (cleaned_name, raw_name, entry)
+                        seen_lower_names[seen_idx] = cleaned_name.lower()
                     skipped_count += 1
                     if skipped_count <= 10:
                         print(f"[Skip] Pass 1: Replacing {best_match} ({existing_field_count} fields) with {raw_name} ({current_field_count} fields) - {best_score*100:.1f}% match, more detailed entry")
@@ -4504,6 +4588,7 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
             # Add to seen list and keep the entry
             seen_idx = len(seen_raw_names)
             seen_raw_names.append((cleaned_name, raw_name, entry))
+            seen_lower_names.append(cleaned_name.lower())
             dedup_idx = len(deduplicated)
             raw_name_to_indices.setdefault(raw_name, []).append(dedup_idx)
             dedup_idx_to_seen_idx[dedup_idx] = seen_idx
