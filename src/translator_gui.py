@@ -13973,13 +13973,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # Restore original print for main GUI
                     if hasattr(builtins, 'print') and hasattr(builtins.print, '__name__'):
                         if builtins.print.__name__ == 'manga_print':
-                            # Print is hijacked, restore it
-                            from manga_translator import MangaTranslator
-                            if hasattr(MangaTranslator, '_original_print_backup'):
+                            # Print is hijacked, restore it.  Do not import the
+                            # manga stack here; it is loaded at GUI startup.
+                            import sys
+                            _manga_mod = sys.modules.get('manga_translator')
+                            MangaTranslator = getattr(_manga_mod, 'MangaTranslator', None)
+                            if MangaTranslator is not None and hasattr(MangaTranslator, '_original_print_backup'):
                                 builtins.print = MangaTranslator._original_print_backup
                                 # Also restore in unified_api_client
                                 try:
-                                    import sys
                                     import unified_api_client
                                     uc_module = sys.modules.get('unified_api_client')
                                     if uc_module:
@@ -16791,13 +16793,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # Restore original print for main GUI
                     if hasattr(builtins, 'print') and hasattr(builtins.print, '__name__'):
                         if builtins.print.__name__ == 'manga_print':
-                            # Print is hijacked, restore it
-                            from manga_translator import MangaTranslator
-                            if hasattr(MangaTranslator, '_original_print_backup'):
+                            # Print is hijacked, restore it.  Do not import the
+                            # manga stack here; it is loaded at GUI startup.
+                            import sys
+                            _manga_mod = sys.modules.get('manga_translator')
+                            MangaTranslator = getattr(_manga_mod, 'MangaTranslator', None)
+                            if MangaTranslator is not None and hasattr(MangaTranslator, '_original_print_backup'):
                                 builtins.print = MangaTranslator._original_print_backup
                                 # Also restore in unified_api_client
                                 try:
-                                    import sys
                                     import unified_api_client
                                     uc_module = sys.modules.get('unified_api_client')
                                     if uc_module:
@@ -19381,8 +19385,9 @@ Important rules:
                 # Collect inpainter worker PIDs to protect from termination.
                 _protected_pids = set()
                 try:
-                    from manga_translator import MangaTranslator
-                    if hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
+                    _manga_mod = sys.modules.get('manga_translator')
+                    MangaTranslator = getattr(_manga_mod, 'MangaTranslator', None)
+                    if MangaTranslator is not None and hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
                         for _key, _rec in MangaTranslator._inpaint_pool.items():
                             if _rec and 'spares' in _rec:
                                 for _inp in _rec['spares']:
@@ -19881,8 +19886,9 @@ Important rules:
 
                 _protected_pids = set()
                 try:
-                    from manga_translator import MangaTranslator
-                    if hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
+                    _manga_mod = sys.modules.get('manga_translator')
+                    MangaTranslator = getattr(_manga_mod, 'MangaTranslator', None)
+                    if MangaTranslator is not None and hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
                         for _key, _rec in MangaTranslator._inpaint_pool.items():
                             if _rec and 'spares' in _rec:
                                 for _inp in _rec['spares']:
