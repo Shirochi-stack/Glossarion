@@ -20441,21 +20441,15 @@ class UnifiedClient:
                 client = None
                 resp = None
                 underlying = None
+                _http_client = None
                 fresh_sdk_client = False
                 stream_cleanup_done = False
                 def _close_fresh_sdk_client_now():
+                    """Close this attempt's fresh SDK client and its httpx transport."""
                     if not (fresh_sdk_client and client is not None):
                         return
-                    try:
-                        if hasattr(client, "close"):
-                            client.close()
-                    except Exception:
-                        pass
-                    try:
-                        if underlying is not None and hasattr(underlying, "close"):
-                            underlying.close()
-                    except Exception:
-                        pass
+                    # Remove from global tracking FIRST so hard_cancel_all
+                    # (running on another thread) won't double-close.
                     try:
                         with self._all_openai_clients_lock:
                             self._all_openai_clients.discard(client)
@@ -20465,6 +20459,16 @@ class UnifiedClient:
                         if underlying is not None:
                             with self._all_httpx_clients_lock:
                                 self._all_httpx_clients.discard(underlying)
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(client, "close"):
+                            client.close()
+                    except Exception:
+                        pass
+                    try:
+                        if _http_client is not None and hasattr(_http_client, "close"):
+                            _http_client.close()
                     except Exception:
                         pass
 
@@ -20512,12 +20516,31 @@ class UnifiedClient:
                     except Exception:
                         timeout_obj = None
 
+                    # Isolate httpx connection pool: single connection, no keepalive.
+                    # Each per-attempt client gets its own pool so closing one client
+                    # cannot destroy sockets belonging to a sibling parallel stream.
+                    # This prevents WinError 10038 on Windows during parallel OCR.
+                    try:
+                        if httpx is not None:
+                            _http_client = httpx.Client(
+                                timeout=timeout_obj,
+                                limits=httpx.Limits(
+                                    max_connections=1,
+                                    max_keepalive_connections=0,
+                                    keepalive_expiry=0,
+                                ),
+                            )
+                    except Exception:
+                        _http_client = None
+
                     client_kwargs = {
                         "api_key": api_key_clean,
                         "base_url": base_url,
                         "timeout": timeout_obj,
                         "max_retries": 0,
                     }
+                    if _http_client is not None:
+                        client_kwargs["http_client"] = _http_client
                     if provider == 'opencode':
                         client_kwargs["default_headers"] = {
                             "User-Agent": self._opencode_user_agent()
@@ -20527,15 +20550,17 @@ class UnifiedClient:
                         **client_kwargs,
                     )
 
-                    # Track this per-attempt SDK client so GUI stop (hard_cancel_all) can abort it cross-thread.
-                    # Note: we also discard it in finally; this is best-effort.
+                    # Track for hard_cancel_all / cancel_current_operation so the
+                    # GUI stop button can abort even non-streaming SDK calls.
+                    # _close_fresh_sdk_client_now removes these before closing to
+                    # prevent double-close races with hard_cancel_all.
                     try:
                         with self._all_openai_clients_lock:
                             self._all_openai_clients.add(client)
                     except Exception:
                         pass
+                    underlying = getattr(client, '_client', None)
                     try:
-                        underlying = getattr(client, '_client', None)
                         if underlying is not None:
                             with self._all_httpx_clients_lock:
                                 self._all_httpx_clients.add(underlying)
@@ -22131,6 +22156,7 @@ class UnifiedClient:
                             with self._active_streams_lock:
                                 self._active_streams.discard(resp)
                             _close_fresh_sdk_client_now()
+                            stream_cleanup_done = True  # Prevent double-close in finally
                     except Exception:
                         pass
                     # Check for stop request after API call returns
