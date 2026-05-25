@@ -3255,13 +3255,13 @@ class LocalInpainter:
                         )
                     else:
                         self._log(
-                            f"Custom image edit output dimensions differ from input; forcing original resolution: "
+                            f"🔄 Custom image edit output dimensions differ from input; forcing original resolution: "
                             f"{out_bgr.shape[1]}x{out_bgr.shape[0]} -> {target_w}x{target_h}",
                             "info",
                         )
                 else:
                     self._log(
-                        f"Custom image edit output dimensions differ from input; forcing original resolution: "
+                        f"🔄 Custom image edit output dimensions differ from input; forcing original resolution: "
                         f"{out_bgr.shape[1]}x{out_bgr.shape[0]} -> {target_w}x{target_h}",
                         "info",
                     )
@@ -3306,8 +3306,7 @@ class LocalInpainter:
                 and out_bgr.shape[:2] == image.shape[:2]
             ):
                 self._log_inpaint_diag('custom-image-edit', out_bgr, mask_gray)
-                self._log("Custom image edit full-page output applied (area=100%)", "info")
-                logger.info("Custom image edit inpainting completed")
+                self._log("🖼️ Custom image edit full-page output applied (area=100%)", "info")
                 return out_bgr
 
             mask_for_blend = crop_mask
@@ -3324,7 +3323,7 @@ class LocalInpainter:
                 dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
                 mask_for_blend = cv2.dilate(mask_for_blend, dilate_kernel, iterations=1)
                 self._log(
-                    f"Custom image edit mask expanded by area={edit_area_pct}% "
+                    f"📐 Custom image edit mask expanded by area={edit_area_pct}% "
                     f"(dilation={dilation_px}px, kernel={kernel_size}x{kernel_size})",
                     "info"
                 )
@@ -3338,8 +3337,7 @@ class LocalInpainter:
             result = image.copy()
             result[top:bottom, left:right] = blended_crop
             self._log_inpaint_diag('custom-image-edit', result, mask_gray)
-            self._log("Custom image edit inpainting complete", "info")
-            logger.info("Custom image edit inpainting completed")
+            self._log("✅ Custom image edit inpainting complete", "info")
             return result
         except Exception as e:
             logger.error(f"Custom image edit inpainting failed: {e}")
