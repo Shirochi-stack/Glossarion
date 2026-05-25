@@ -2465,9 +2465,16 @@ class GlossaryManagerMixin:
         
         settings_grid = QGridLayout()
         settings_grid.setContentsMargins(2, 4, 6, 6)
-        settings_grid.setHorizontalSpacing(8)
-        settings_grid.setVerticalSpacing(6)
+        settings_grid.setHorizontalSpacing(20)
+        settings_grid.setVerticalSpacing(10)
         settings_frame_layout.addLayout(settings_grid)
+        settings_grid.setColumnStretch(0, 0)
+        settings_grid.setColumnStretch(1, 0)
+        settings_grid.setColumnStretch(2, 0)
+        settings_grid.setColumnStretch(3, 1)
+        settings_spacer = QWidget()
+        settings_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        settings_grid.addWidget(settings_spacer, 0, 3, 4, 1)
         
         # Compact label+field pair helper for manual Extraction Settings
         def _m_pair(label_text, field_widget, label_width=120, tooltip=None):
@@ -2505,9 +2512,9 @@ class GlossaryManagerMixin:
         if os.path.exists(icon_path):
             from PySide6.QtGui import QIcon
             icon_label = QLabel()
-            icon_label.setFixedSize(150, 150)
+            icon_label.setFixedSize(140, 140)
             icon_label.setAlignment(Qt.AlignCenter)
-            icon_label.setPixmap(QIcon(icon_path).pixmap(120, 120))
+            icon_label.setPixmap(QIcon(icon_path).pixmap(112, 112))
             settings_grid.addWidget(icon_label, 0, 2, 4, 1, Qt.AlignCenter)
         
         # Row 1: Compression Factor and Rolling window checkbox
