@@ -19065,114 +19065,103 @@ Important rules:
                 # Set the _cancelled flag on the UnifiedClient class itself
                 if hasattr(unified_api_client, 'UnifiedClient'):
                     unified_api_client.UnifiedClient._global_cancelled = True
+            except Exception as e:
+                print(f"Error setting stop flags: {e}")
+            
+            # ── SLOW PATH (background thread): close connections, kill procs ──
+            def _stop_heavy_work():
                 # Hard cancel: close active HTTP sessions to abort in-flight requests
-                if hasattr(unified_api_client, 'hard_cancel_all'):
-                    unified_api_client.hard_cancel_all()
-                # Also reset watchdog counts so progress bar clears immediately
-                if hasattr(unified_api_client, '_api_watchdog_reset'):
-                    unified_api_client._api_watchdog_reset()
+                try:
+                    import unified_api_client as _uac
+                    if hasattr(_uac, 'hard_cancel_all'):
+                        _uac.hard_cancel_all()
+                    # Also reset watchdog counts so progress bar clears immediately
+                    if hasattr(_uac, '_api_watchdog_reset'):
+                        _uac._api_watchdog_reset()
+                except Exception:
+                    pass
 
-                # Delete watchdog files again after stop flags/hard-cancel, in case something
-                # wrote a fresh watchdog snapshot during shutdown.
+                # Delete watchdog files again after stop flags/hard-cancel
                 try:
                     self._reset_api_watchdog_progress(clear_stale_external_files=True)
                 except Exception:
                     pass
-                    
-            except Exception as e:
-                print(f"Error setting stop flags: {e}")
-            
-            # Best-effort: terminate only known helper subprocesses we started.
-            # IMPORTANT: Do NOT kill multiprocessing spawn/worker processes here.
-            # In PyInstaller-frozen Windows builds, aggressively terminating spawn_main / --multiprocessing-fork
-            # children can lead to [WinError 87] crashes when the runtime hook tries to start/handshake.
-            try:
-                import psutil
-                current_process = psutil.Process(os.getpid())
-                children = current_process.children(recursive=True)
-
-                # Collect inpainter worker PIDs to protect from termination.
-                _protected_pids = set()
+                
+                # Best-effort: terminate only known helper subprocesses we started.
                 try:
-                    from manga_translator import MangaTranslator
-                    if hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
-                        for _key, _rec in MangaTranslator._inpaint_pool.items():
-                            if _rec and 'spares' in _rec:
-                                for _inp in _rec['spares']:
-                                    if _inp and getattr(_inp, '_mp_worker', None):
-                                        try:
-                                            _pid = _inp._mp_worker.pid
-                                            if _pid:
-                                                _protected_pids.add(_pid)
-                                        except Exception:
-                                            pass
-                except Exception:
-                    pass
+                    import psutil
+                    current_process = psutil.Process(os.getpid())
+                    children = current_process.children(recursive=True)
 
-                def _cmdline_s(proc) -> str:
+                    # Collect inpainter worker PIDs to protect from termination.
+                    _protected_pids = set()
                     try:
-                        cmd = proc.cmdline()
-                        return " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+                        from manga_translator import MangaTranslator
+                        if hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
+                            for _key, _rec in MangaTranslator._inpaint_pool.items():
+                                if _rec and 'spares' in _rec:
+                                    for _inp in _rec['spares']:
+                                        if _inp and getattr(_inp, '_mp_worker', None):
+                                            try:
+                                                _pid = _inp._mp_worker.pid
+                                                if _pid:
+                                                    _protected_pids.add(_pid)
+                                            except Exception:
+                                                pass
                     except Exception:
-                        return ""
+                        pass
 
-                def _is_mp_internal(cmd_s: str) -> bool:
-                    cs = (cmd_s or "")
-                    return ("--multiprocessing-fork" in cs) or ("spawn_main" in cs) or ("multiprocessing.spawn" in cs)
-
-                # Only terminate explicit helper modes (safe).
-                processes_to_terminate = []
-                for child in children:
-                    try:
-                        if child.pid in _protected_pids:
-                            continue
-                        cmd_s = _cmdline_s(child)
-                        if _is_mp_internal(cmd_s):
-                            continue
-
-                        # Known helper flags / scripts
-                        if ("--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s
-                                or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
-                                or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s):
-                            processes_to_terminate.append(child)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        continue
-
-                if processes_to_terminate:
-                    self.append_log(f"🔧 Terminating {len(processes_to_terminate)} helper process(es)...")
-                    for proc in processes_to_terminate:
+                    def _cmdline_s(proc) -> str:
                         try:
-                            pid = getattr(proc, 'pid', None)
-                            name = "<unknown>"
-                            try:
-                                name = proc.name()
-                            except Exception:
-                                pass
-                            cmd_s = _cmdline_s(proc)
-                            if isinstance(cmd_s, str) and len(cmd_s) > 300:
-                                cmd_s = cmd_s[:300] + "…"
-                            self.append_log(f"   • pid={pid} name={name} cmd={cmd_s}")
+                            cmd = proc.cmdline()
+                            return " ".join(cmd) if isinstance(cmd, list) else str(cmd)
                         except Exception:
-                            pass
+                            return ""
 
-                    for proc in processes_to_terminate:
+                    def _is_mp_internal(cmd_s: str) -> bool:
+                        cs = (cmd_s or "")
+                        return ("--multiprocessing-fork" in cs) or ("spawn_main" in cs) or ("multiprocessing.spawn" in cs)
+
+                    # Only terminate explicit helper modes (safe).
+                    processes_to_terminate = []
+                    for child in children:
                         try:
-                            proc.terminate()
+                            if child.pid in _protected_pids:
+                                continue
+                            cmd_s = _cmdline_s(child)
+                            if _is_mp_internal(cmd_s):
+                                continue
+
+                            # Known helper flags / scripts
+                            if ("--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s
+                                    or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
+                                    or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s):
+                                processes_to_terminate.append(child)
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
+                            continue
 
-                    try:
-                        gone, alive = psutil.wait_procs(processes_to_terminate, timeout=1)
-                    except Exception:
-                        alive = processes_to_terminate
+                    if processes_to_terminate:
+                        for proc in processes_to_terminate:
+                            try:
+                                proc.terminate()
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
 
-                    for proc in alive:
                         try:
-                            proc.kill()
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-            except Exception as e:
-                print(f"Error terminating helper child processes: {e}")
+                            gone, alive = psutil.wait_procs(processes_to_terminate, timeout=1)
+                        except Exception:
+                            alive = processes_to_terminate
+
+                        for proc in alive:
+                            try:
+                                proc.kill()
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
+                except Exception as e:
+                    print(f"Error terminating helper child processes: {e}")
+            
+            import threading
+            threading.Thread(target=_stop_heavy_work, daemon=True, name="translation-stop-cleanup").start()
         
         # Only poke the EPUB converter stop flag when the converter itself is
         # running. Translation/image stop should not wake or dirty converter
@@ -19356,6 +19345,7 @@ Important rules:
         # For graceful stop: DON'T abort in-flight API calls, let them finish
         # For immediate stop: abort everything aggressively
         if not graceful_stop:
+            # ── FAST PATH (main thread): set all boolean flags instantly ──
             if glossary_stop_flag:
                 glossary_stop_flag(True)
             
@@ -19366,97 +19356,105 @@ Important rules:
             except:
                 pass
             
-            # Also propagate stop to unified_api_client for streaming cancellation
+            # Set cancel flags immediately so _is_stop_requested() returns True
             try:
                 import unified_api_client
                 if hasattr(unified_api_client, 'set_stop_flag'):
                     unified_api_client.set_stop_flag(True)
                 if hasattr(unified_api_client, 'UnifiedClient'):
                     unified_api_client.UnifiedClient._global_cancelled = True
-                # Hard cancel: close active HTTP sessions to abort in-flight requests
-                if hasattr(unified_api_client, 'hard_cancel_all'):
-                    unified_api_client.hard_cancel_all()
             except Exception:
                 pass
             
-            # Best-effort: terminate only known helper subprocesses we started.
-            # See stop_translation(): avoid touching multiprocessing spawn/worker processes in frozen builds.
-            try:
-                import psutil
-                current_process = psutil.Process(os.getpid())
-                children = current_process.children(recursive=True)
-
-                _protected_pids = set()
+            # ── SLOW PATH (background thread): close connections, kill procs ──
+            def _stop_heavy_work():
+                # Hard cancel: close active HTTP sessions to abort in-flight requests
                 try:
-                    from manga_translator import MangaTranslator
-                    if hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
-                        for _key, _rec in MangaTranslator._inpaint_pool.items():
-                            if _rec and 'spares' in _rec:
-                                for _inp in _rec['spares']:
-                                    if _inp and getattr(_inp, '_mp_worker', None):
-                                        try:
-                                            _pid = _inp._mp_worker.pid
-                                            if _pid:
-                                                _protected_pids.add(_pid)
-                                        except Exception:
-                                            pass
+                    import unified_api_client as _uac
+                    if hasattr(_uac, 'hard_cancel_all'):
+                        _uac.hard_cancel_all()
                 except Exception:
                     pass
+                
+                # Best-effort: terminate only known helper subprocesses we started.
+                try:
+                    import psutil
+                    current_process = psutil.Process(os.getpid())
+                    children = current_process.children(recursive=True)
 
-                def _cmdline_s(proc) -> str:
+                    _protected_pids = set()
                     try:
-                        cmd = proc.cmdline()
-                        return " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+                        from manga_translator import MangaTranslator
+                        if hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
+                            for _key, _rec in MangaTranslator._inpaint_pool.items():
+                                if _rec and 'spares' in _rec:
+                                    for _inp in _rec['spares']:
+                                        if _inp and getattr(_inp, '_mp_worker', None):
+                                            try:
+                                                _pid = _inp._mp_worker.pid
+                                                if _pid:
+                                                    _protected_pids.add(_pid)
+                                            except Exception:
+                                                pass
                     except Exception:
-                        return ""
+                        pass
 
-                def _is_mp_internal(cmd_s: str) -> bool:
-                    cs = (cmd_s or "")
-                    return ("--multiprocessing-fork" in cs) or ("spawn_main" in cs) or ("multiprocessing.spawn" in cs)
-
-                processes_to_terminate = []
-                for child in children:
-                    try:
-                        if child.pid in _protected_pids:
-                            continue
-                        cmd_s = _cmdline_s(child)
-                        if _is_mp_internal(cmd_s):
-                            continue
-                        if ("--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s
-                                or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
-                                or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s):
-                            processes_to_terminate.append(child)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        continue
-
-                if processes_to_terminate:
-                    self.append_log(f"🔧 Terminating {len(processes_to_terminate)} helper process(es)...")
-                    for proc in processes_to_terminate:
+                    def _cmdline_s(proc) -> str:
                         try:
-                            proc.terminate()
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
+                            cmd = proc.cmdline()
+                            return " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+                        except Exception:
+                            return ""
 
-                    try:
-                        gone, alive = psutil.wait_procs(processes_to_terminate, timeout=1)
-                    except Exception:
-                        alive = processes_to_terminate
-                    for proc in alive:
+                    def _is_mp_internal(cmd_s: str) -> bool:
+                        cs = (cmd_s or "")
+                        return ("--multiprocessing-fork" in cs) or ("spawn_main" in cs) or ("multiprocessing.spawn" in cs)
+
+                    processes_to_terminate = []
+                    for child in children:
                         try:
-                            proc.kill()
+                            if child.pid in _protected_pids:
+                                continue
+                            cmd_s = _cmdline_s(child)
+                            if _is_mp_internal(cmd_s):
+                                continue
+                            if ("--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s
+                                    or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
+                                    or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s):
+                                processes_to_terminate.append(child)
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-            except Exception as e:
-                print(f"Error terminating helper child processes: {e}")
+                            continue
 
-            # Touch stop file for GlossaryManager subprocesses
-            try:
-                stop_file = os.environ.get('GLOSSARY_STOP_FILE')
-                if stop_file:
-                    with open(stop_file, 'w', encoding='utf-8') as f:
-                        f.write('stop')
-            except Exception:
-                pass
+                    if processes_to_terminate:
+                        for proc in processes_to_terminate:
+                            try:
+                                proc.terminate()
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
+
+                        try:
+                            gone, alive = psutil.wait_procs(processes_to_terminate, timeout=1)
+                        except Exception:
+                            alive = processes_to_terminate
+                        for proc in alive:
+                            try:
+                                proc.kill()
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
+                except Exception as e:
+                    print(f"Error terminating helper child processes: {e}")
+
+                # Touch stop file for GlossaryManager subprocesses
+                try:
+                    stop_file = os.environ.get('GLOSSARY_STOP_FILE')
+                    if stop_file:
+                        with open(stop_file, 'w', encoding='utf-8') as f:
+                            f.write('stop')
+                except Exception:
+                    pass
+            
+            import threading
+            threading.Thread(target=_stop_heavy_work, daemon=True, name="glossary-stop-cleanup").start()
         
         # Log message depends on stop mode
         if graceful_stop:
@@ -19470,7 +19468,6 @@ Important rules:
                 self.append_log("🛑 Stop requested — cancelling glossary API calls (WAIT_FOR_CHUNKS=0)")
         else:
             self.append_log("❌ Glossary extraction stop requested.")
-            self.append_log("⏳ Please wait... stopping after current API call completes.")
         # Don't call update_run_button() here - keep the "Stopping..." state until thread finishes
 
 

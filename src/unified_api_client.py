@@ -3303,15 +3303,17 @@ class UnifiedClient:
         with cls._global_cancel_lock:
             return cls._global_cancelled
     
-    def __init__(self, api_key: str, model: str, output_dir: str = "Output"):
+    def __init__(self, api_key: str, model: str, output_dir: str = "Output", _skip_cancel_reset: bool = False):
         """Initialize the unified client with enhanced thread safety"""
         # Clear any lingering global stop/cancel state when starting a new client context
+        # BUT skip this when creating internal fallback/retry clients during an active stop
         global global_stop_flag
-        global_stop_flag = False
-        try:
-            self.set_global_cancellation(False)
-        except Exception:
-            pass
+        if not _skip_cancel_reset:
+            global_stop_flag = False
+            try:
+                self.set_global_cancellation(False)
+            except Exception:
+                pass
         self._cancelled = False
         # Initialize stagger bookkeeping without resetting it. Manga/OCR workers
         # create short-lived UnifiedClient instances while other requests are
@@ -9993,7 +9995,8 @@ class UnifiedClient:
                     temp_client = UnifiedClient(
                         api_key=fallback_key,  
                         model=fallback_model,   
-                        output_dir=self.output_dir
+                        output_dir=self.output_dir,
+                        _skip_cancel_reset=True
                     )
                     temp_client._apply_key_runtime_overrides(key_data=fallback_data, apply_delay=False)
 
@@ -10388,7 +10391,8 @@ class UnifiedClient:
                     temp_client = UnifiedClient(
                         api_key=fallback_key,  
                         model=fallback_model,   
-                        output_dir=self.output_dir
+                        output_dir=self.output_dir,
+                        _skip_cancel_reset=True
                     )
                     temp_client._apply_key_runtime_overrides(key_data=fb, apply_delay=False)
                     
@@ -10440,7 +10444,7 @@ class UnifiedClient:
                     
                     # Copy relevant state
                     temp_client.context = context
-                    temp_client._cancelled = False
+                    temp_client._cancelled = getattr(self, '_cancelled', False)
                     temp_client._in_cleanup = False
                     temp_client.current_session_context = self.current_session_context
                     temp_client.conversation_message_count = self.conversation_message_count
@@ -10684,7 +10688,8 @@ class UnifiedClient:
                     temp_client = UnifiedClient(
                         api_key=gk_key,  
                         model=gk_model,   
-                        output_dir=self.output_dir
+                        output_dir=self.output_dir,
+                        _skip_cancel_reset=True
                     )
                     temp_client._apply_key_runtime_overrides(key_data=gk)
                     
