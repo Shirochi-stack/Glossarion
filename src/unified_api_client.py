@@ -6000,6 +6000,16 @@ class UnifiedClient:
             temp.api_key = getattr(key_entry, 'api_key', None) or 'dummy-key-for-dedicated-endpoint'
             temp.model = getattr(key_entry, 'model', None)
 
+            try:
+                source_tls = self._get_thread_local_client()
+                source_chapter_context = getattr(source_tls, 'chapter_context', None)
+                source_request_label = getattr(source_tls, 'current_request_label', None)
+                source_pre_send_callback = getattr(source_tls, 'pre_api_call_callback', None)
+            except Exception:
+                source_chapter_context = None
+                source_request_label = None
+                source_pre_send_callback = None
+
             tls = temp._get_thread_local_client()
             runtime_overrides = temp._apply_key_runtime_overrides(key_entry=key_entry, key_data=key_data, tls=tls)
             if not (runtime_overrides or {}).get('api_call_delay'):
@@ -6010,7 +6020,12 @@ class UnifiedClient:
             tls.model = temp.model
             tls.key_index = key_idx
             tls.key_identifier = temp.key_identifier
+            tls.current_request_id = request_id
+            tls.current_request_label = source_request_label
             tls.current_request_context = context or getattr(temp, 'context', None)
+            tls.chapter_context = source_chapter_context
+            if callable(source_pre_send_callback):
+                tls.pre_api_call_callback = source_pre_send_callback
             tls.initialized = True
             tls.last_rotation = time.time()
             tls.request_count = 0
@@ -14878,7 +14893,6 @@ class UnifiedClient:
             _model_lower = getattr(self, 'model', '').lower()
             _is_authgem = _model_lower.startswith('authgem')
             _is_authnd = _model_lower.startswith('authnd')
-            _is_native_gemini = _model_lower.startswith('gemini')
             _is_vertex = (
                 _model_lower.startswith('vertex/') or
                 _model_lower.startswith('vertex_ai/')
@@ -14896,7 +14910,7 @@ class UnifiedClient:
                     _is_sdk_provider = True
             except Exception:
                 pass
-            _defer_progress_log = _is_authgem or _is_authnd or _is_native_gemini or _is_vertex or _is_sdk_provider
+            _defer_progress_log = _is_authgem or _is_authnd or _is_vertex or _is_sdk_provider
             if not _defer_progress_log and self._should_show_api_lifecycle_logs() and os.environ.get('GRACEFUL_STOP') != '1':
                 try:
                     tls = self._get_thread_local_client()
