@@ -434,6 +434,19 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     except Exception as cb_err:
                         print(f"⚠️ Failed to register pre-send glossary progress callback: {cb_err}")
 
+                try:
+                    _effective_api_delay = float(api_delay) if api_delay not in (None, '') else 0.0
+                except Exception:
+                    _effective_api_delay = 0.0
+                if _effective_api_delay > 0 and hasattr(client, '_get_thread_local_client'):
+                    try:
+                        tls_delay = client._get_thread_local_client()
+                        tls_delay.api_call_delay = _effective_api_delay
+                        tls_delay.active_api_delay_override = _effective_api_delay
+                        tls_delay.current_request_context = context or 'glossary'
+                    except Exception:
+                        pass
+
                 start_time = time.time()
                 try:
                     result = client.send(messages, temperature=temperature, max_tokens=max_tokens, context=context or 'glossary')
@@ -661,7 +674,20 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     # Prefer per-key delay from glossary keys, fall back to SEND_INTERVAL_SECONDS
                     import random
                     _retry_per_key = getattr(client, '_per_key_api_delay', None)
-                    base_delay = float(_retry_per_key) if _retry_per_key and float(_retry_per_key) > 0 else float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                    try:
+                        _retry_per_key = float(_retry_per_key) if _retry_per_key not in (None, '') else 0.0
+                    except Exception:
+                        _retry_per_key = 0.0
+                    try:
+                        _computed_api_delay = float(api_delay) if api_delay not in (None, '') else 0.0
+                    except Exception:
+                        _computed_api_delay = 0.0
+                    if _retry_per_key > 0:
+                        base_delay = _retry_per_key
+                    elif _computed_api_delay > 0:
+                        base_delay = _computed_api_delay
+                    else:
+                        base_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
                     retry_delay = random.uniform(base_delay / 2, base_delay)
                     print(f"   ⏳ Waiting {retry_delay:.1f}s before retry...")
                     time.sleep(retry_delay)

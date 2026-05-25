@@ -5984,6 +5984,8 @@ class UnifiedClient:
             temp._image_thread_dir_cache = {}
             temp._payload_context_thread_dir_cache = {}
             temp._multi_key_mode = False
+            temp._active_key_pool_scope = key_prefix
+            temp._active_key_pool_expected_pool = pool
             temp._force_image_output_mode = getattr(self, '_force_image_output_mode', False)
             temp._forced_image_output_resolution = getattr(self, '_forced_image_output_resolution', None)
             temp._suppress_custom_image_edit_endpoint = getattr(self, '_suppress_custom_image_edit_endpoint', False)
@@ -6004,6 +6006,7 @@ class UnifiedClient:
             tls.model = temp.model
             tls.key_index = key_idx
             tls.key_identifier = temp.key_identifier
+            tls.current_request_context = context or getattr(temp, 'context', None)
             tls.initialized = True
             tls.last_rotation = time.time()
             tls.request_count = 0
@@ -14714,6 +14717,8 @@ class UnifiedClient:
             context = None
         context = str(context or getattr(self, 'context', None) or 'translation').strip().lower()
         if context in {
+            'glossary',
+            'glossary_refinement',
             'manga_ocr',
             'vision_ocr',
             'image_ocr',
