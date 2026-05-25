@@ -9267,6 +9267,8 @@ Recent translations to summarize:
             mode = 'direct'
         self.batch_mode_var = mode
         self.config['batching_mode'] = mode
+        if mode in ('direct', 'conservative'):
+            self._context_last_batched_mode = mode
 
         radio_map = (
             ('batch_conservative_radio', mode == 'conservative'),
@@ -9284,51 +9286,103 @@ Recent translations to summarize:
             except Exception:
                 pass
 
-    def _enforce_context_batching_mode(self):
-        """Context modes need deterministic batching; preserve no-batching for glossary extraction."""
-        mode = getattr(self, 'context_mode_var', None) or self._context_mode_from_flags()
-        requires_batched_mode = mode in (
-            'contextual_history',
-            'rolling_summary_replace',
-            'rolling_summary_append',
+    def _refresh_context_batching_controls(self):
+        """Reflect context-mode batching constraints in the Other Settings radios."""
+        controls = (
+            ('batch_conservative_radio', 'Conservative batching'),
+            ('batch_direct_radio', 'Direct batching'),
+            ('batch_no_batching_radio', 'No batching'),
         )
-        current = str(getattr(self, 'batch_mode_var', 'aggressive') or 'aggressive').strip().lower()
-
-        if requires_batched_mode:
-            if current == 'aggressive':
-                self._context_forced_batch_mode_source = 'aggressive'
-                self._set_batching_mode('direct')
+        if not any(hasattr(self, attr) for attr, _label in controls):
             return
 
-        if (
-            getattr(self, '_context_forced_batch_mode_source', None) == 'aggressive'
-            and current == 'direct'
-        ):
+        mode = getattr(self, 'context_mode_var', None) or self._context_mode_from_flags()
+        purple = "#b388ff"
+        muted = "#777"
+        normal = "#ddd"
+
+        def apply_radio(attr, label, enabled, locked=False):
+            radio = getattr(self, attr, None)
+            if radio is None:
+                return
+            try:
+                base_label = getattr(radio, '_context_base_text', None)
+                if not base_label:
+                    radio._context_base_text = label
+                    base_label = label
+                radio.setText(f"🔒  {base_label}" if locked else base_label)
+                radio.setEnabled(enabled)
+                if locked:
+                    radio.setStyleSheet(
+                        f"QRadioButton {{ color: {purple}; }}"
+                        f"QRadioButton:disabled {{ color: {purple}; }}"
+                    )
+                elif enabled:
+                    radio.setStyleSheet(f"QRadioButton {{ color: {normal}; }}")
+                else:
+                    radio.setStyleSheet(f"QRadioButton {{ color: {muted}; }}")
+            except Exception:
+                pass
+
+        if mode == 'off':
+            apply_radio('batch_conservative_radio', 'Conservative batching', False, False)
+            apply_radio('batch_direct_radio', 'Direct batching', False, False)
+            apply_radio('batch_no_batching_radio', 'No batching', True, True)
+            status = "ℹ️ Context Mode Off uses No batching for translation.\n   Glossary extraction also uses No batching."
+        else:
+            apply_radio('batch_conservative_radio', 'Conservative batching', True, True)
+            apply_radio('batch_direct_radio', 'Direct batching', True, True)
+            apply_radio('batch_no_batching_radio', 'No batching', False, False)
+            if mode == 'contextual_history':
+                status = "ℹ️ Contextual History requires Direct or Conservative batching.\n   Glossary extraction uses the selected batching mode so history order stays aligned."
+            else:
+                status = "ℹ️ Rolling Summary requires Direct or Conservative batching for translation.\n   Glossary extraction stays on No batching and does not use the selected batching mode."
+
+        label = getattr(self, 'batch_context_lock_label', None)
+        if label is not None:
+            try:
+                label.setText(status)
+                label.setStyleSheet("color: #17a2b8; font-size: 10pt;")
+                label.setVisible(True)
+            except Exception:
+                pass
+
+    def _enforce_context_batching_mode(self):
+        """Apply context-mode batching constraints and keep the visible controls in sync."""
+        mode = getattr(self, 'context_mode_var', None) or self._context_mode_from_flags()
+        current = str(getattr(self, 'batch_mode_var', 'aggressive') or 'aggressive').strip().lower()
+
+        if mode == 'off':
+            if current in ('direct', 'conservative'):
+                self._context_last_batched_mode = current
             self._set_batching_mode('aggressive')
-        self._context_forced_batch_mode_source = None
+        else:
+            if current not in ('direct', 'conservative'):
+                self._set_batching_mode(getattr(self, '_context_last_batched_mode', 'direct'))
+
+        self._refresh_context_batching_controls()
 
     def _translation_batching_mode_for_env(self):
         """Return the effective batching mode for main translation subprocesses."""
+        context_mode = getattr(self, 'context_mode_var', None) or self._context_mode_from_flags()
+        if context_mode == 'off':
+            return 'aggressive'
         mode = str(getattr(self, 'batch_mode_var', 'aggressive') or 'aggressive').strip().lower()
         if mode not in ('direct', 'conservative', 'aggressive'):
             mode = 'direct'
-        context_mode = getattr(self, 'context_mode_var', None) or self._context_mode_from_flags()
-        if context_mode != 'off' and mode == 'aggressive':
+        if mode == 'aggressive':
             return 'direct'
         return mode
 
     def _glossary_batching_mode_for_env(self):
-        """Glossary EPUB extraction supports contextual history only; keep preserved no-batching for rolling summary modes."""
-        mode = str(getattr(self, 'batch_mode_var', 'aggressive') or 'aggressive').strip().lower()
+        """Glossary extraction uses no batching except when Contextual History is active."""
         context_mode = getattr(self, 'context_mode_var', None) or self._context_mode_from_flags()
-        if (
-            context_mode in ('rolling_summary_replace', 'rolling_summary_append')
-            and getattr(self, '_context_forced_batch_mode_source', None) == 'aggressive'
-        ):
-            mode = 'aggressive'
+        if context_mode != 'contextual_history':
+            return 'aggressive'
+        mode = str(getattr(self, 'batch_mode_var', 'direct') or 'direct').strip().lower()
         if mode not in ('direct', 'conservative', 'aggressive'):
             mode = 'direct'
-        return mode
+        return 'direct' if mode == 'aggressive' else mode
 
     def _coerce_live_bool(self, value, default=False):
         if value is None:
@@ -17043,7 +17097,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 else:
                     os.environ.pop("GLOSSARY_OUTPUT_BACKUP_DIR", None)
                 
-                if self._extract_glossary_from_text_file(text_file):
+                if self._extract_glossary_from_text_file(
+                    text_file,
+                    force_balanced_request_merging=force_balanced_request_merging,
+                ):
                     successful += 1
                     successful_items.append(f"📄 {output_path}")
                 else:
@@ -17909,7 +17966,7 @@ Important rules:
         except queue.Empty:
             raise UnifiedClientError("API call completed but no result received")
 
-    def _extract_glossary_from_text_file(self, file_path):
+    def _extract_glossary_from_text_file(self, file_path, force_balanced_request_merging=False):
         """Extract glossary from EPUB or TXT file using existing glossary extraction"""
         # Skip glossary extraction for traditional APIs
         try:

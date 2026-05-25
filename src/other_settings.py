@@ -9324,9 +9324,11 @@ def _create_processing_options_section(self, parent):
 
     def _set_mode(mode):
         try:
-            self.batch_mode_var = mode
-            if mode != 'aggressive' and hasattr(self, '_context_forced_batch_mode_source'):
-                self._context_forced_batch_mode_source = None
+            if hasattr(self, '_set_batching_mode'):
+                self._set_batching_mode(mode)
+            else:
+                self.batch_mode_var = mode
+                self.config['batching_mode'] = mode
             if hasattr(self, '_enforce_context_batching_mode'):
                 self._enforce_context_batching_mode()
         except Exception:
@@ -9360,10 +9362,26 @@ def _create_processing_options_section(self, parent):
     mode_row_h.addStretch()
     section_v.addWidget(mode_row)
 
-    batch_desc = QLabel("Direct: fixed batches of batch size.\nConservative: groups = batch size × multiplier (set above).\nNo batching: keeps parallel slots full by opening a new request whenever one finishes.")
+    batch_lock_label = QLabel("")
+    batch_lock_label.setContentsMargins(20, 4, 0, 2)
+    batch_lock_label.setVisible(False)
+    self.batch_context_lock_label = batch_lock_label
+    section_v.addWidget(batch_lock_label)
+
+    batch_desc = QLabel(
+        "Direct: fixed batches of batch size.\n"
+        "Conservative: groups = batch size × multiplier (set above).\n"
+        "No batching: keeps parallel slots full by opening a new request whenever one finishes.\n"
+        "Context Mode Off locks translation and glossary to No batching.\n"
+        "Contextual History allows Direct/Conservative and glossary follows it.\n"
+        "Rolling Summary allows Direct/Conservative for translation; glossary stays No batching."
+    )
     batch_desc.setStyleSheet("color: gray; font-size: 10pt;")
     batch_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(batch_desc)
+
+    if hasattr(self, '_enforce_context_batching_mode'):
+        self._enforce_context_batching_mode()
     
     # Separator
     sep_opts3 = QFrame()
