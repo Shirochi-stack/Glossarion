@@ -3273,23 +3273,24 @@ class LocalInpainter:
             #   0%   = conservative mask-only blend (default)
             #   100% = full-page output (trust the model entirely)
             #   1-99 = dilate/expand the mask proportionally before blending
-            _raw_area_pct = (
-                self.config.get('custom_image_edit_full_page_output', 10)
-                or os.environ.get('CUSTOM_IMAGE_EDIT_FULL_PAGE_OUTPUT', '10')
-            )
-            # Backward compat: old boolean values map to 0/100
+            _raw_area_pct = self.config.get('custom_image_edit_full_page_output', None)
+            if _raw_area_pct is None:
+                _env = os.environ.get('CUSTOM_IMAGE_EDIT_FULL_PAGE_OUTPUT', '')
+                _raw_area_pct = _env if _env != '' else 10
+            # Backward compat: old boolean values map to 10/100
             if isinstance(_raw_area_pct, bool):
-                _raw_area_pct = 100 if _raw_area_pct else 0
+                _raw_area_pct = 100 if _raw_area_pct else 10
             else:
-                try:
-                    _raw_area_pct = int(float(str(_raw_area_pct)))
-                except (ValueError, TypeError):
-                    _raw_area_pct = 0
-                # Legacy boolean-like strings
-                if str(_raw_area_pct).lower() in ('true', 'yes', 'on'):
+                _s = str(_raw_area_pct).strip().lower()
+                if _s in ('true', 'yes', 'on', '1'):
                     _raw_area_pct = 100
-                elif str(_raw_area_pct).lower() in ('false', 'no', 'off'):
+                elif _s in ('false', 'no', 'off'):
                     _raw_area_pct = 0
+                else:
+                    try:
+                        _raw_area_pct = int(float(_s))
+                    except (ValueError, TypeError):
+                        _raw_area_pct = 10
             edit_area_pct = max(0, min(100, _raw_area_pct))
 
             if (
