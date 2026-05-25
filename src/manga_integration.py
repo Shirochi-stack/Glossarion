@@ -10902,6 +10902,7 @@ class MangaTranslationTab(QObject):
         return (
             "This is an image editing task. Erase only the written characters and letters from this image. "
             "Preserve speech bubbles, text boxes, frames, and all other visual elements — only remove the text inside them. "
+            "Maintain the same speech bubble styling, shape, color, and appearance. "
             "Do NOT return plain text or OCR — you MUST return the generated edited image."
         )
 
