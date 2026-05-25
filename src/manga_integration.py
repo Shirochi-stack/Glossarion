@@ -10908,12 +10908,9 @@ class MangaTranslationTab(QObject):
     def _is_old_custom_image_edit_default_prompt(self, prompt):
         text = " ".join(str(prompt or '').split()).lower()
         return (
-            (
-                "replacing all foreign-language text" in text
-                and "{target_lang}" in text
-                and "if the image has no translatable text" in text
-            )
-            or "simply removing all text" in text
+            "replacing all foreign-language text" in text
+            and "{target_lang}" in text
+            and "if the image has no translatable text" in text
         )
 
     def _set_custom_image_edit_env(self):
