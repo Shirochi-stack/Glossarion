@@ -219,6 +219,7 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config):
         os.environ['USE_MULTI_API_KEYS'] = '1'
         os.environ['USE_MULTI_KEYS'] = '1'
         os.environ['USE_GLOSSARY_KEYS'] = '1'
+        os.environ['GLOSSARY_API_KEYS'] = json.dumps(glossary_keys)
         os.environ['FORCE_KEY_ROTATION'] = '1' if config.get('force_key_rotation', True) else '0'
         os.environ['ROTATION_FREQUENCY'] = str(config.get('rotation_frequency', 1))
 

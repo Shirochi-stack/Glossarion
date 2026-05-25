@@ -382,27 +382,25 @@ class CustomAPIProvider(OCRProvider):
             else:
                 model = os.environ.get('MODEL', 'gpt-4o-mini')
             
-            keyless_local_seed = False
+            keyless_individual_seed = False
             if vision_seed is not None:
                 try:
                     endpoint = str(vision_seed.get('azure_endpoint') or '').strip()
-                    keyless_local_seed = (
+                    keyless_individual_seed = (
                         bool(vision_seed.get('use_individual_endpoint'))
                         and bool(endpoint)
-                        and UnifiedClient._is_local_openai_base_url(endpoint)
                     )
                 except Exception:
-                    keyless_local_seed = False
+                    keyless_individual_seed = False
 
             # Check if model uses own auth (no API key needed) — delegate to UnifiedClient
             if not UnifiedClient._model_needs_api_key(model):
                 if not api_key:
                     api_key = 'own-auth'  # placeholder — actual auth handled by provider/local endpoint
-            elif keyless_local_seed and not api_key:
-                api_key = 'local-endpoint'
+            elif keyless_individual_seed and not api_key:
+                api_key = 'dummy-key-for-individual-endpoint'
             elif not api_key:
-                self._log("❌ No API key configured", "error")
-                return False
+                api_key = 'dummy-key-for-custom-api-ocr'
         
             # Create UnifiedClient just like translations do
             self.client = UnifiedClient(model=model, api_key=api_key)

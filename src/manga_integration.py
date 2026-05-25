@@ -1362,6 +1362,8 @@ class MangaTranslationTab(QObject):
             
             # Check provider-specific credentials
             saved_provider = self.main_gui.config.get('manga_ocr_provider', 'custom-api')
+            if saved_provider == 'custom-api':
+                has_api_key = True
             if saved_provider == 'google':
                 google_path = self.main_gui.config.get('google_vision_credentials', '')
                 ok, _ = self._validate_google_credentials(google_path)
@@ -3012,20 +3014,17 @@ class MangaTranslationTab(QObject):
                     _uses_own_auth = not _UC._model_needs_api_key(_model)
                 except Exception:
                     _uses_own_auth = False
-                if _uses_own_auth:
+                if _uses_own_auth or not api_key:
                     _custom_ep_on = os.environ.get('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
                     _custom_ep_url = (os.environ.get('OPENAI_CUSTOM_BASE_URL', '') or '').lower()
                     _is_local_endpoint = _custom_ep_on and any(h in _custom_ep_url for h in ('localhost', '127.0.0.1', '0.0.0.0', '::1'))
-                    _label_suffix = "local endpoint" if _is_local_endpoint else "own-auth model"
+                    _label_suffix = "local endpoint" if _is_local_endpoint else ("own-auth model" if _uses_own_auth else "custom-api")
                     if bubble_detection_enabled:
                         self.provider_status_label.setText(f"✅ Ready ({_label_suffix})")
                         self.provider_status_label.setStyleSheet("color: green;")
                     else:
                         self.provider_status_label.setText("⚠️ Enable AI bubble detection for best results")
                         self.provider_status_label.setStyleSheet("color: orange;")
-                else:
-                    self.provider_status_label.setText("❌ API key needed")
-                    self.provider_status_label.setStyleSheet("color: red;")
      
         elif provider == 'Qwen2-VL':
             # Initialize OCR manager if needed
@@ -3657,6 +3656,8 @@ class MangaTranslationTab(QObject):
         
         # Get current provider
         provider = self.ocr_provider_value if hasattr(self, 'ocr_provider_value') else self.main_gui.config.get('manga_ocr_provider', 'custom-api')
+        if provider == 'custom-api':
+            has_api_key = True
         
         # Determine readiness based on provider
         if provider == 'google':
@@ -3813,6 +3814,8 @@ class MangaTranslationTab(QObject):
         
         # Get the saved OCR provider to check appropriate credentials
         saved_provider = self.main_gui.config.get('manga_ocr_provider', 'custom-api')
+        if saved_provider == 'custom-api':
+            has_api_key = True
         
         # Determine readiness based on provider
         if saved_provider == 'google':
@@ -14914,6 +14917,8 @@ class MangaTranslationTab(QObject):
                         api_key = 'own-auth'  # placeholder — actual auth handled by provider/local endpoint
                 except Exception:
                     pass
+            if not api_key and ocr_config.get('provider') == 'custom-api':
+                api_key = 'dummy-key-for-custom-api'
             
             if not api_key:
                 self._log("❌ API key not found. Please configure your API key in the main settings.", "error")

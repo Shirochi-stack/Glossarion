@@ -231,6 +231,7 @@ class _RunIdFilter(logging.Filter):
 # Set up logging
 logger = logging.getLogger(__name__)
 logging.getLogger("google_genai._api_client").setLevel(logging.WARNING)
+logging.getLogger("google_genai.models").setLevel(logging.WARNING)
 
 # Global stop indicator used by GUI to interrupt in-flight requests.
 global_stop_flag = False
@@ -2445,8 +2446,7 @@ class UnifiedClient:
         except Exception:
             endpoint = ''
         if key_data.get('use_individual_endpoint') and endpoint:
-            if cls._is_local_openai_base_url(endpoint):
-                return False
+            return False
         return cls._model_needs_api_key(model)
 
     @classmethod
@@ -2787,8 +2787,8 @@ class UnifiedClient:
                     continue
                 api_key = key_data.get('api_key', '')
                 model = key_data.get('model', '')
-                if not api_key and cls._key_data_needs_api_key(key_data, model):
-                    rejected_reasons["missing_api_key"] += 1
+                if not model:
+                    rejected_reasons["missing_model"] += 1
                     continue
                 # Fix encrypted keys
                 if api_key and api_key.startswith('ENC:'):
@@ -4605,8 +4605,8 @@ class UnifiedClient:
             try:
                 import openai
                 endpoint_api_key = self.api_key
-                if self._is_local_openai_base_url(individual_endpoint) and not endpoint_api_key:
-                    endpoint_api_key = "dummy-key-for-local-llm"
+                if not endpoint_api_key:
+                    endpoint_api_key = "dummy-key-for-individual-endpoint"
                 
                 # MICROSECOND LOCK: Create individual endpoint client with thread safety
                 with self._model_lock:
@@ -5047,14 +5047,15 @@ class UnifiedClient:
     def _is_inpainter_context(self, context: Any = None) -> bool:
         """Return True for manga custom-image-edit inpainter requests."""
         value = context if context is not None else getattr(self, 'context', None)
-        return str(value or '').strip().lower() == 'inpainter'
+        context_norm = str(value or '').strip().lower().replace(' ', '_').replace('-', '_')
+        return context_norm in {'inpainter', 'manga_image_edit', 'custom_image_edit', 'image_edit'}
 
     def _uses_image_gen_edit_key_context(self, context: Any = None) -> bool:
         """Return True for requests that should use the image gen/edit key pool."""
-        value = str(context if context is not None else getattr(self, 'context', None) or '').strip().lower()
-        if value == 'inpainter':
+        value = str(context if context is not None else getattr(self, 'context', None) or '').strip().lower().replace(' ', '_').replace('-', '_')
+        if value in ('inpainter', 'image_edit', 'custom_image_edit', 'manga_image_edit'):
             return True
-        if value in ('image_generation', 'imagegen'):
+        if value in ('image_generation', 'imagegen', 'image_renderer', 'image_render', 'image_output'):
             return True
         if value in ('image', 'image_translation'):
             return self._image_output_mode_enabled()
@@ -5102,7 +5103,7 @@ class UnifiedClient:
     def _is_manga_ocr_context(self, context: Any = None) -> bool:
         """Return True for manga OCR requests."""
         value = context if context is not None else getattr(self, 'context', None)
-        return str(value or '').strip().lower() == 'manga_ocr'
+        return str(value or '').strip().lower().replace(' ', '_').replace('-', '_') == 'manga_ocr'
 
     def _is_payload_too_large_error(self, exc_or_text: Any) -> bool:
         text = str(exc_or_text or '').lower()
@@ -5213,7 +5214,7 @@ class UnifiedClient:
     def _is_vision_input_only_context(self, context: Any = None) -> bool:
         """Return True for vision/OCR requests that must never request image output."""
         value = context if context is not None else getattr(self, 'context', None)
-        return str(value or '').strip().lower() in {
+        return str(value or '').strip().lower().replace(' ', '_').replace('-', '_') in {
             'manga_ocr',
             'image_ocr',
             'vision_ocr',
@@ -5882,7 +5883,7 @@ class UnifiedClient:
                         pass
             self._individual_endpoint_applied = False
             self._skip_global_custom_endpoint = False
-            self.api_key = key_entry.api_key
+            self.api_key = key_entry.api_key or 'dummy-key-for-dedicated-endpoint'
             self.model = key_entry.model
             self.current_key_index = key_idx
             self.key_identifier = f"{key_prefix}#{key_idx + 1} ({key_entry.model})"
@@ -5903,7 +5904,7 @@ class UnifiedClient:
             self._skip_next_ensure_thread = True
             try:
                 tls = self._get_thread_local_client()
-                tls.api_key = key_entry.api_key
+                tls.api_key = self.api_key
                 tls.model = key_entry.model
                 tls.key_index = key_idx
                 tls.key_identifier = self.key_identifier
@@ -5990,7 +5991,7 @@ class UnifiedClient:
             temp.context = context or getattr(self, 'context', None)
             temp.key_identifier = f"{key_prefix}#{key_idx + 1} ({getattr(key_entry, 'model', '')})"
             temp.current_key_index = key_idx
-            temp.api_key = getattr(key_entry, 'api_key', None)
+            temp.api_key = getattr(key_entry, 'api_key', None) or 'dummy-key-for-dedicated-endpoint'
             temp.model = getattr(key_entry, 'model', None)
 
             tls = temp._get_thread_local_client()
@@ -6013,6 +6014,10 @@ class UnifiedClient:
                     temp._apply_individual_key_endpoint_if_needed()
                 else:
                     temp._setup_client()
+                try:
+                    _api_watchdog_update_model(getattr(temp, 'model', None), request_id)
+                except Exception:
+                    pass
 
                 result = temp._send_internal(
                     messages,
@@ -6240,7 +6245,7 @@ class UnifiedClient:
             ):
                 context = inherited_context
         batch_mode = os.getenv("BATCH_TRANSLATION", "0") == "1"
-        context_norm = str(context or '').strip().lower()
+        context_norm = str(context or '').strip().lower().replace(' ', '_').replace('-', '_')
         _vision_parallel_contexts = {
             'truncation',
             'image_scan',
@@ -6471,8 +6476,8 @@ class UnifiedClient:
                     print(f"[ROLLING SUMMARY KEYS] Failed to apply rolling summary key override: {e}")
 
             # VISION KEY OVERRIDE: shared pool for vision OCR/image scans.
-            _vision_key_contexts = ('Truncation', 'image_scan', 'image_ocr', 'vision_ocr', 'manga_ocr', 'image_translation')
-            _is_qa_scan_context = context in _vision_key_contexts or (not context and 'Truncation' in threading.current_thread().name)
+            _vision_key_contexts = {'truncation', 'image_scan', 'image_ocr', 'vision_ocr', 'manga_ocr', 'image_translation'}
+            _is_qa_scan_context = context_norm in _vision_key_contexts or (not context and 'truncation' in threading.current_thread().name.lower())
             if not _qa_scan_overridden and _is_qa_scan_context:
                 try:
                     vision_keys_flag = os.getenv('USE_VISION_KEYS', '0')
@@ -6775,11 +6780,13 @@ class UnifiedClient:
 
             # GLOSSARY KEY OVERRIDE: When context is 'glossary' and glossary keys are enabled,
             # use the glossary key pool for full multi-key rotation (mirrors main multi-key mode).
+            _active_expected_pool = getattr(self, '_active_key_pool_expected_pool', None)
+            _refinement_pool = getattr(self.__class__, '_glossary_refinement_key_pool', None)
             if (
                 not _qa_scan_overridden
                 and not _inpainter_overridden
                 and not _glossary_refinement_overridden
-                and getattr(self, '_active_key_pool_expected_pool', None) is not getattr(self.__class__, '_glossary_refinement_key_pool', None)
+                and (_refinement_pool is None or _active_expected_pool is not _refinement_pool)
                 and (context_norm in ('glossary', 'glossary_refinement') or (not context and 'Glossary' in threading.current_thread().name))
             ):
                 try:
@@ -6811,6 +6818,28 @@ class UnifiedClient:
                             raise UnifiedClientError("Glossary key pool is enabled for this context but has no enabled keys; refusing fallback to another pool", error_type="no_keys")
                         
                         if glossary_pool and getattr(glossary_pool, 'keys', []):
+                            try:
+                                with self.__class__._in_memory_glossary_keys_lock:
+                                    gk_list_for_isolated = self.__class__._in_memory_glossary_keys or []
+                            except Exception:
+                                gk_list_for_isolated = []
+                            if batch_mode:
+                                if not getattr(self.__class__, '_glossary_pool_logged', False):
+                                    print(f"[GLOSSARY KEYS] 🔑 Using glossary key pool ({len(glossary_pool.keys)} keys)")
+                                    self.__class__._glossary_pool_logged = True
+                                return self._send_with_isolated_dedicated_key(
+                                    glossary_pool,
+                                    gk_list_for_isolated,
+                                    'Glossary',
+                                    'GlossaryKey',
+                                    messages,
+                                    temperature,
+                                    max_tokens,
+                                    max_completion_tokens,
+                                    context,
+                                    image_data=image_data,
+                                    request_id=request_id,
+                                )
                             self._dedicated_override_lock.acquire()
                             _glossary_override_lock_acquired = True
                             # Save original state
@@ -7779,6 +7808,10 @@ class UnifiedClient:
                     active_pool is getattr(self.__class__, '_qa_scan_key_pool', None)
                     or _key_identifier.startswith('VisionKey#')
                 )
+                _is_inpainter_pool = (
+                    active_pool is getattr(self.__class__, '_inpainter_key_pool', None)
+                    or _key_identifier.startswith('ImageGenEditKey#')
+                )
                 _is_truncation_retry_pool = (
                     active_pool is getattr(self.__class__, '_truncation_retry_key_pool', None)
                     or _key_identifier.startswith('TruncationRetryKey#')
@@ -7787,7 +7820,7 @@ class UnifiedClient:
                     active_pool is getattr(self.__class__, '_rolling_summary_key_pool', None)
                     or _key_identifier.startswith('RollingSummaryKey#')
                 )
-                _pool_label = "(rolling-summary-key)" if _is_rolling_summary_pool else "(truncation-retry-key)" if _is_truncation_retry_pool else "(refinement-key)" if _is_glossary_refinement_pool else "(glossary-key)" if _is_glossary_pool else "(vision-key)" if _is_qa_pool else "(multi-key)"
+                _pool_label = "(rolling-summary-key)" if _is_rolling_summary_pool else "(truncation-retry-key)" if _is_truncation_retry_pool else "(refinement-key)" if _is_glossary_refinement_pool else "(glossary-key)" if _is_glossary_pool else "(image-gen/edit-key)" if _is_inpainter_pool else "(vision-key)" if _is_qa_pool else "(multi-key)"
                 defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model} {_pool_label}")
             elif log_model != model_snapshot and not self._is_stop_requested():
                 defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model}")
@@ -20093,8 +20126,8 @@ class UnifiedClient:
             if getattr(tls, 'use_individual_endpoint', False):
                 actual_api_key = getattr(tls, 'api_key', actual_api_key)
                 tls_endpoint = getattr(tls, 'azure_endpoint', None)
-                if tls_endpoint and self._is_local_openai_base_url(str(tls_endpoint)) and not actual_api_key:
-                    actual_api_key = "dummy-key-for-local-llm"
+                if tls_endpoint and not actual_api_key:
+                    actual_api_key = "dummy-key-for-individual-endpoint"
         except Exception:
             pass
         
@@ -20107,6 +20140,8 @@ class UnifiedClient:
         if use_custom_endpoint and provider not in ("gemini-openai", "openrouter", "opencode", "custom_openai") and not skip_custom:
             custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
             if custom_base_url:
+                if not actual_api_key:
+                    actual_api_key = "dummy-key-for-custom-endpoint"
                 # Check if it's Azure
                 if '.azure.com' in custom_base_url or '.cognitiveservices' in custom_base_url:
                     # Azure needs special client

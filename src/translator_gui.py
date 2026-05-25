@@ -79,6 +79,7 @@ if getattr(sys, 'frozen', False):
 # Keep this before GUI/manga imports so glossary workers do not import OCR/ML
 # modules such as bubble_detector, huggingface_hub, torch, or pydot.
 if '--run-glossary-extraction' in sys.argv:
+    _glossary_worker_exit_code = 1
     try:
         os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
         try:
@@ -121,14 +122,19 @@ if '--run-glossary-extraction' in sys.argv:
 
         from extract_glossary_from_epub import main as _glossary_extract_main
         from shutdown_utils import run_cli_main as _run_cli_main
-        _run_cli_main(_glossary_extract_main)
+        _result = _run_cli_main(_glossary_extract_main)
+        _glossary_worker_exit_code = 0 if _result is None else int(_result)
+    except SystemExit as _e:
+        _code = getattr(_e, 'code', 0)
+        _glossary_worker_exit_code = int(_code) if isinstance(_code, int) else (0 if _code in (None, '') else 1)
     except Exception as _e:
         try:
             print(f"[ERROR] Glossary extraction worker failed: {_e}")
         except Exception:
             pass
+        _glossary_worker_exit_code = 1
     finally:
-        sys.exit(1)
+        sys.exit(_glossary_worker_exit_code)
 
 # --- Helper utilities to quiet PyInstaller temp-dir warnings & stray children ---
 def _kill_child_process_tree(timeout=1.5):
@@ -18218,6 +18224,8 @@ Important rules:
                                     "SDK stream start",
                                     "SDK stream opened",
                                     "HTTP Request:",
+                                    "[GLOSSARY KEYS]",
+                                    "(glossary-key)",
                                 )
                                 if any(marker in api_msg for marker in lifecycle_markers):
                                     self.append_log(api_msg)
