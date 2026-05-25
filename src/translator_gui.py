@@ -2007,7 +2007,7 @@ Text to analyze:
                 "Preserve speech bubbles, text boxes, frames, and all other visual elements — only remove the text inside them. "
                 "Do NOT return plain text or OCR — you MUST return the generated edited image."
             )
-
+        )
 
         self.custom_image_edit_user_prompt_var = self.config.get('custom_image_edit_user_prompt', '')
         self.custom_image_edit_prompt_var = self.custom_image_edit_system_prompt_var
