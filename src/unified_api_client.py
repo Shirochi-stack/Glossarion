@@ -5998,8 +5998,8 @@ class UnifiedClient:
             runtime_overrides = temp._apply_key_runtime_overrides(key_entry=key_entry, key_data=key_data, tls=tls)
             if not (runtime_overrides or {}).get('api_call_delay'):
                 tls.api_call_delay = 0.0
-                tls.active_api_delay_override = 0.0
-                temp._per_key_api_delay = 0.0
+                tls.active_api_delay_override = None
+                temp._per_key_api_delay = None
             tls.api_key = temp.api_key
             tls.model = temp.model
             tls.key_index = key_idx
@@ -25422,8 +25422,10 @@ class UnifiedClient:
             raw_response=json_resp,
         )
 
-    def _send_openai_provider_router(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+    def _send_openai_provider_router(self, messages, temperature, max_tokens, max_completion_tokens_or_response_name=None, response_name=None) -> UnifiedResponse:
         """Generic router for many OpenAI-compatible providers to reduce wrapper duplication."""
+        if response_name is None:
+            response_name = max_completion_tokens_or_response_name
         # Re-apply per-key individual endpoint (if any) before routing, so routing can't override it.
         try:
             self._apply_individual_key_endpoint_if_needed()
