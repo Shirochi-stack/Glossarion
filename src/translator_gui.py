@@ -2003,7 +2003,8 @@ Text to analyze:
             'custom_image_edit_system_prompt',
             self.config.get(
                 'custom_image_edit_prompt',
-                "This is an image editing task. Edit this image by simply removing all text. "
+                "This is an image editing task. Erase only the written characters and letters from this image. "
+                "Preserve speech bubbles, text boxes, frames, and all other visual elements — only remove the text inside them. "
                 "Do NOT return plain text or OCR — you MUST return the generated edited image."
             )
         )
@@ -2012,9 +2013,13 @@ Text to analyze:
             and "{target_lang}" in str(self.custom_image_edit_system_prompt_var or '')
             and "if the image has no translatable text" in str(self.custom_image_edit_system_prompt_var or '').lower()
         )
-        if _old_custom_image_edit_prompt:
+        _old_remove_all_text_prompt = (
+            "simply removing all text" in str(self.custom_image_edit_system_prompt_var or '').lower()
+        )
+        if _old_custom_image_edit_prompt or _old_remove_all_text_prompt:
             self.custom_image_edit_system_prompt_var = (
-                "This is an image editing task. Edit this image by simply removing all text. "
+                "This is an image editing task. Erase only the written characters and letters from this image. "
+                "Preserve speech bubbles, text boxes, frames, and all other visual elements — only remove the text inside them. "
                 "Do NOT return plain text or OCR — you MUST return the generated edited image."
             )
             self.config['custom_image_edit_system_prompt'] = self.custom_image_edit_system_prompt_var

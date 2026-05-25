@@ -10900,16 +10900,20 @@ class MangaTranslationTab(QObject):
 
     def _default_custom_image_edit_system_prompt(self):
         return (
-            "This is an image editing task. Edit this image by simply removing all text. "
+            "This is an image editing task. Erase only the written characters and letters from this image. "
+            "Preserve speech bubbles, text boxes, frames, and all other visual elements — only remove the text inside them. "
             "Do NOT return plain text or OCR — you MUST return the generated edited image."
         )
 
     def _is_old_custom_image_edit_default_prompt(self, prompt):
         text = " ".join(str(prompt or '').split()).lower()
         return (
-            "replacing all foreign-language text" in text
-            and "{target_lang}" in text
-            and "if the image has no translatable text" in text
+            (
+                "replacing all foreign-language text" in text
+                and "{target_lang}" in text
+                and "if the image has no translatable text" in text
+            )
+            or "simply removing all text" in text
         )
 
     def _set_custom_image_edit_env(self):

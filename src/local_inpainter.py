@@ -2781,7 +2781,8 @@ class LocalInpainter:
                 or self.config.get('custom_image_edit_prompt')
                 or os.environ.get('QWEN_IMAGE_EDIT_INPAINT_PROMPT')
                 or (
-                    "This is an image editing task. Edit this image by simply removing all text. "
+                    "This is an image editing task. Erase only the written characters and letters from this image. "
+                    "Preserve speech bubbles, text boxes, frames, and all other visual elements — only remove the text inside them. "
                     "Do NOT return plain text or OCR — you MUST return the generated edited image."
                 )
             )
