@@ -10575,9 +10575,10 @@ Recent translations to summarize:
         except Exception:
             pass
 
-        # Count waiting_cooldown entries separately for display
+        # Count waiting_cooldown and queued entries separately for display
         _waiting_count = sum(1 for e in entries if isinstance(e, dict) and e.get("status") == "waiting_cooldown")
-        _total_active = in_flight + _waiting_count
+        _queued_count = sum(1 for e in entries if isinstance(e, dict) and e.get("status") == "queued")
+        _total_active = in_flight + _waiting_count + _queued_count
 
         if _total_active > 0:
             # Keep determinate mode so text is not overridden by busy animation
@@ -10592,6 +10593,7 @@ Recent translations to summarize:
             # Build compact active-call labels (up to 5) for the progress bar text itself
             in_flight_entries = [e for e in entries if e.get("status") in (None, "in_flight")]
             waiting_entries = [e for e in entries if e.get("status") == "waiting_cooldown"]
+            queued_entries = [e for e in entries if e.get("status") == "queued"]
 
             def _safe_int(v, default=None):
                 try:
@@ -10845,8 +10847,13 @@ Recent translations to summarize:
                 active_bits = []
 
             label = f"API calls: {in_flight}"
-            if waiting_entries:
-                label += f" (+{len(waiting_entries)} queued)"
+            if waiting_entries or queued_entries:
+                _extra_parts = []
+                if queued_entries:
+                    _extra_parts.append(f"{len(queued_entries)} queued")
+                if waiting_entries:
+                    _extra_parts.append(f"{len(waiting_entries)} cooldown")
+                label += f" (+{', '.join(_extra_parts)})"
             if age > 0:
                 label += f" • last change {age}s ago"
             if active_bits:
@@ -13353,6 +13360,36 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.stop_translation()
             return
         
+        # Double-click force stop: if a graceful stop just finished (thread no longer
+        # alive) but the user clicks again within 2 seconds, treat it as a force-stop
+        # request instead of starting a new translation.  This prevents the race where
+        # the translation thread dies between the two clicks of a double-click.
+        import time as _time_mod
+        _last_stop_ts = getattr(self, '_last_stop_translation_ts', 0)
+        _was_graceful = getattr(self, '_last_stop_was_graceful', False)
+        if _was_graceful and (_time_mod.time() - _last_stop_ts) < 2.0:
+            self.append_log("⚡ Double-click detected after graceful stop — forcing hard cancel!")
+            self._last_stop_was_graceful = False
+            self.graceful_stop_active = False
+            os.environ['GRACEFUL_STOP'] = '0'
+            os.environ['TRANSLATION_CANCELLED'] = '1'
+            os.environ['WAIT_FOR_CHUNKS'] = '0'
+            try:
+                import unified_api_client
+                if hasattr(unified_api_client, 'set_stop_flag'):
+                    unified_api_client.set_stop_flag(True)
+                if hasattr(unified_api_client, 'hard_cancel_all'):
+                    unified_api_client.hard_cancel_all()
+                if hasattr(unified_api_client, '_api_watchdog_reset'):
+                    unified_api_client._api_watchdog_reset()
+            except Exception:
+                pass
+            try:
+                self._reset_api_watchdog_progress(clear_stale_external_files=True)
+            except Exception:
+                pass
+            return
+        
         # Check if files are selected
         _model_name = str(getattr(self, 'model_var', ''))
         _is_generative_model = self._model_is_image_gen(_model_name) or self._model_is_video_gen(_model_name) or self._is_generative_output_mode()
@@ -13429,6 +13466,24 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self._main_module.set_stop_flag(False)
         except:
             pass
+
+        # CRITICAL: Before starting a new run, hard-cancel any lingering streams
+        # from the previous run.  A graceful stop does NOT call hard_cancel_all(),
+        # so glossary/translation streams can still be alive and printing output.
+        # Close them NOW before we reset the stop flags (otherwise they'd keep running
+        # after we clear _global_cancelled and leak into the new translation phase).
+        try:
+            import unified_api_client
+            # Close lingering streams/sessions from any previous run
+            # (hard_cancel_all also resets the watchdog internally)
+            if hasattr(unified_api_client, 'UnifiedClient'):
+                try:
+                    unified_api_client.UnifiedClient.hard_cancel_all()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         # Reset unified_api_client global cancellation (streaming stop) for new runs
         try:
             import unified_api_client
@@ -19025,6 +19080,11 @@ Important rules:
         
         # Track graceful stop state - when True, stop_callback returns False to allow in-flight calls to complete
         self.graceful_stop_active = graceful_stop
+        
+        # Record stop timestamp so run_translation_thread can detect a rapid re-click
+        # after the translation thread has already died (double-click force stop).
+        self._last_stop_translation_ts = time.time()
+        self._last_stop_was_graceful = graceful_stop
         
         self.stop_requested = True
 

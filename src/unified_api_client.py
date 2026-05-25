@@ -409,7 +409,6 @@ def _api_watchdog_started(context: Optional[str] = None, model: Optional[str] = 
                     if len(merged_nums) == 1:
                         merged_label = f"Merged {merged_nums[0]}"
                     else:
-                        rate_limit_retry_count += 1
                         merged_label = f"Merged {merged_nums[0]}-{merged_nums[-1]}"
             except Exception:
                 pass
