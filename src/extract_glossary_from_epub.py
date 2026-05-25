@@ -362,7 +362,7 @@ def _log_assistant_prompt_once():
             print(f"🤖 Assistant Prompt: {assistant_prompt}")
             _log_assistant_prompt_once._logged = True
 
-def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, chapter_idx=None, chunk_idx=None, total_chunks=None, merged_chapters=None, before_send_callback=None, context='glossary'):
+def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, chapter_idx=None, chapter_num=None, chunk_idx=None, total_chunks=None, merged_chapters=None, before_send_callback=None, context='glossary'):
     """Send API request with interrupt capability and optional timeout retry
     
     Args:
@@ -395,11 +395,11 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 chapter_label = f"{chapter_label} (chunk {chunk_idx}/{total_chunks})"
         except Exception:
             pass
-    elif chapter_idx is not None:
+    elif chapter_idx is not None or chapter_num is not None:
         try:
-            chap_num = int(chapter_idx) + 1
+            chap_num = int(chapter_num) if chapter_num is not None else int(chapter_idx) + 1
         except Exception:
-            chap_num = chapter_idx
+            chap_num = chapter_num if chapter_num is not None else chapter_idx
         if chunk_idx and total_chunks:
             chapter_label = f"Chapter {chap_num} (chunk {chunk_idx}/{total_chunks})"
         else:
@@ -433,11 +433,14 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 # thread-local metadata is visible to watchdog/payloads.
                 try:
                     if hasattr(client, 'set_chapter_context'):
-                        chap_val = (chapter_idx + 1) if isinstance(chapter_idx, int) else (
-                            int(chapter_idx) + 1 if chapter_idx is not None and str(chapter_idx).isdigit() else chapter_idx
-                        )
+                        if chapter_num is not None:
+                            chap_val = chapter_num
+                        else:
+                            chap_val = (chapter_idx + 1) if isinstance(chapter_idx, int) else (
+                                int(chapter_idx) + 1 if chapter_idx is not None and str(chapter_idx).isdigit() else chapter_idx
+                            )
                         client.set_chapter_context(
-                            chapter=chap_val if chapter_idx is not None else None,
+                            chapter=chap_val if (chapter_idx is not None or chapter_num is not None) else None,
                             chunk=chunk_idx,
                             total_chunks=total_chunks,
                             merged_chapters=merged_chapters,
@@ -4781,6 +4784,7 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
         for idx, chap in chapters_batch:
             if check_stop():
                 break
+            display_idx = _glossary_chapter_actual_num(idx)
                 
             # Get system and user prompts
             system_prompt, user_prompt = build_prompt(chap)
@@ -4823,13 +4827,13 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
 
                 if contextual_enabled and assistant_tokens > 0:
                     print(
-                        f"💬 Batch Chapter {idx+1} combined prompt: "
+                        f"💬 Batch Chapter {display_idx} combined prompt: "
                         f"{total_tokens:,} tokens (system + user: {non_assistant:,}, "
                         f"assistant/memory: {assistant_tokens:,}) / {GLOSSARY_LIMIT_STR}"
                     )
                 else:
                     print(
-                        f"💬 Batch Chapter {idx+1} combined prompt: "
+                        f"💬 Batch Chapter {display_idx} combined prompt: "
                         f"{total_tokens:,} tokens (system + user) / {GLOSSARY_LIMIT_STR}"
                     )
             except Exception:
@@ -4839,7 +4843,8 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
             # Submit to thread pool
             future = executor.submit(
                 process_single_chapter_api_call,
-                idx, chap, msgs, client, temp, mtoks, check_stop, chunk_timeout
+                idx, chap, msgs, client, temp, mtoks, check_stop, chunk_timeout,
+                chapter_num=display_idx,
             )
             futures[future] = (idx, chap, msgs)  # Store messages for history update
         
@@ -4891,14 +4896,14 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                                         assistant_entry["_raw_content_object"] = result['raw_obj']
                                     history.append(assistant_entry)
                         except Exception as e:
-                            print(f"⚠️ Failed to save batch history for chapter {idx+1}: {e}")
+                            print(f"⚠️ Failed to save batch history for chapter {_glossary_chapter_actual_num(idx)}: {e}")
                 
                 results.append(result)
             except Exception as e:
                 if "stopped by user" in str(e).lower():
-                    print(f"✅ Chapter {idx+1} stopped by user")
+                    print(f"✅ Chapter {_glossary_chapter_actual_num(idx)} stopped by user")
                 else:
-                    print(f"Error processing chapter {idx+1}: {e}")
+                    print(f"Error processing chapter {_glossary_chapter_actual_num(idx)}: {e}")
                 results.append({
                     'idx': idx,
                     'data': [],
@@ -4926,8 +4931,10 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                                   client: UnifiedClient, temp: float, mtoks: int,
                                   stop_check_fn, chunk_timeout: int = None,
                                   chunk_idx: int = None, total_chunks: int = None,
+                                  chapter_num: int = None,
                                   before_send_callback=None) -> Dict:
     """Process a single chapter API call with thread-safe payload handling"""
+    display_chapter_num = chapter_num if chapter_num is not None else idx + 1
     
     # Early exit: skip immediately if stop/graceful-stop is already flagged
     if stop_check_fn() or os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
@@ -4956,7 +4963,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                     thread_name = threading.current_thread().name
                     
                     # PRINT BEFORE THE DELAY STARTS
-                    print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.5f}s for Chapter {idx+1}")
+                    print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.5f}s for Chapter {display_chapter_num}")
                     
                     # Interruptible sleep - check stop flag every 0.1 seconds
                     elapsed = 0
@@ -5002,7 +5009,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                     clean_msgs.append(clean_msg)
                 
                 json.dump({
-                    'chapter': idx + 1,
+                    'chapter': display_chapter_num,
                     'messages': clean_msgs,
                     'temperature': temp,
                     'max_tokens': mtoks,
@@ -5021,6 +5028,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             stop_check_fn=stop_check_fn,
             chunk_timeout=chunk_timeout,
             chapter_idx=idx,
+            chapter_num=display_chapter_num,
             chunk_idx=chunk_idx,
             total_chunks=total_chunks,
             before_send_callback=before_send_callback,
@@ -5028,7 +5036,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
 
         # Handle the response - it might be a tuple or a string
         if raw is None:
-            print(f"⚠️ API returned None for chapter {idx+1}")
+            print(f"⚠️ API returned None for chapter {display_chapter_num}")
             return {
                 'idx': idx,
                 'data': [],
@@ -5065,8 +5073,8 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
         data = parse_api_response(resp)
         
         # More detailed debug logging
-        print(f"[BATCH] Chapter {idx+1} - Raw response length: {len(resp)} chars")
-        print(f"[BATCH] Chapter {idx+1} - Parsed {len(data)} entries before validation")
+        print(f"[BATCH] Chapter {display_chapter_num} - Raw response length: {len(resp)} chars")
+        print(f"[BATCH] Chapter {display_chapter_num} - Parsed {len(data)} entries before validation")
         
         # Filter out invalid entries
         valid_data = []
@@ -5077,10 +5085,10 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                     entry['raw_name'] = entry['raw_name'].strip()
                 valid_data.append(entry)
             else:
-                print(f"[BATCH] Chapter {idx+1} - Invalid entry: {entry}")
+                print(f"[BATCH] Chapter {display_chapter_num} - Invalid entry: {entry}")
         
         elapsed = time.time() - start_time
-        print(f"[BATCH] Completed Chapter {idx+1} in {elapsed:.1f}s at {time.strftime('%H:%M:%S')} - Extracted {len(valid_data)} valid entries")
+        print(f"[BATCH] Completed Chapter {display_chapter_num} in {elapsed:.1f}s at {time.strftime('%H:%M:%S')} - Extracted {len(valid_data)} valid entries")
         
         return {
             'idx': idx,
@@ -5097,11 +5105,11 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
         # Keep a concise log so it's clear why extraction stopped/skipped without spamming the full error.
         if _is_graceful_stop_skip_error(e):
             if chunk_idx and total_chunks and int(total_chunks) > 1:
-                print(f"⏭️ Chapter {idx+1} chunk {chunk_idx}/{total_chunks} skipped (graceful stop)")
+                print(f"⏭️ Chapter {display_chapter_num} chunk {chunk_idx}/{total_chunks} skipped (graceful stop)")
             else:
-                print(f"⏭️ Chapter {idx+1} skipped (graceful stop)")
+                print(f"⏭️ Chapter {display_chapter_num} skipped (graceful stop)")
         else:
-            print(f"[Error] API call interrupted/failed for chapter {idx+1}: {e}")
+            print(f"[Error] API call interrupted/failed for chapter {display_chapter_num}: {e}")
 
         return {
             'idx': idx,
@@ -5112,7 +5120,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             'graceful_stop_skip': _is_graceful_stop_skip_error(e),
         }
     except Exception as e:
-        print(f"[Error] Unexpected error for chapter {idx+1}: {e}")
+        print(f"[Error] Unexpected error for chapter {display_chapter_num}: {e}")
         import traceback
         print(f"[Error] Traceback: {traceback.format_exc()}")
         return {
@@ -5137,11 +5145,14 @@ def process_single_chapter_with_split(idx: int,
                                       mtoks: int,
                                       stop_check_fn,
                                       chunk_timeout: int = None,
-                                      before_send_callback=None):
+                                      before_send_callback=None,
+                                      chapter_num: int = None):
     """
     Wrapper that performs chapter-level splitting (using output-limit budget) before calling the API.
     Aggregates all chunk results into a single result dict to keep batch accounting identical.
     """
+    display_chapter_num = chapter_num if chapter_num is not None else idx + 1
+
     # Decide if splitting is needed
     chapter_tokens = chapter_splitter.count_tokens(chap)
     if not (chapter_split_enabled and chapter_tokens > available_tokens):
@@ -5169,9 +5180,9 @@ def process_single_chapter_with_split(idx: int,
                     + assistant_prefill_msgs
                     + [{"role": "user", "content": user_prompt}]
                 )
-        return process_single_chapter_api_call(idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout, before_send_callback=before_send_callback)
+        return process_single_chapter_api_call(idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout, chapter_num=display_chapter_num, before_send_callback=before_send_callback)
 
-    print(f"⚠️ Chapter {idx+1} exceeds chunk budget ({chapter_tokens:,} > {available_tokens:,}); splitting...")
+    print(f"⚠️ Chapter {display_chapter_num} exceeds chunk budget ({chapter_tokens:,} > {available_tokens:,}); splitting...")
     # Wrap plain text as simple HTML for splitter
     chapter_html = f"<html><body><p>{chap.replace(chr(10)+chr(10), '</p><p>')}</p></body></html>"
     chunks = chapter_splitter.split_chapter(chapter_html, available_tokens)
@@ -5183,7 +5194,7 @@ def process_single_chapter_with_split(idx: int,
     any_chunk_truncated = False
     for chunk_html, chunk_idx, total_chunks in chunks:
         if stop_check_fn():
-            print(f"❌ Glossary extraction stopped during chunk {chunk_idx}/{total_chunks} of chapter {idx+1}")
+            print(f"❌ Glossary extraction stopped during chunk {chunk_idx}/{total_chunks} of chapter {display_chapter_num}")
             break
         soup = BeautifulSoup(chunk_html, 'html.parser')
         chunk_text = soup.get_text(strip=True)
@@ -5212,12 +5223,13 @@ def process_single_chapter_with_split(idx: int,
                     + [{"role": "user", "content": user_prompt}]
                 )
 
-        print(f"🔄 Processing chunk {chunk_idx}/{total_chunks} of Chapter {idx+1}")
+        print(f"🔄 Processing chunk {chunk_idx}/{total_chunks} of Chapter {display_chapter_num}")
         # Sanitize before delegating (guarantees user + no raw blobs in payload)
         msgs = _sanitize_messages_for_api(msgs, chunk_text)
         result = process_single_chapter_api_call(
             idx, chunk_text, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout,
             chunk_idx=chunk_idx, total_chunks=total_chunks,
+            chapter_num=display_chapter_num,
             before_send_callback=before_send_callback,
         )
         if result.get("data"):
@@ -5243,7 +5255,8 @@ def process_single_chapter_with_split(idx: int,
 def process_merged_group_api_call(merge_group: list, msgs_builder_fn, 
                                    client, temp: float, mtoks: int,
                                    stop_check_fn, chunk_timeout: int = None,
-                                   before_send_callback=None) -> Dict:
+                                   before_send_callback=None,
+                                   chapter_num_map=None) -> Dict:
     """
     Process a merged group of chapters in a single API call.
     
@@ -5270,7 +5283,11 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
         idx, chap = merge_group[0]
         system_prompt, user_prompt = msgs_builder_fn(chap)
         msgs = [{"role": "system", "content": system_prompt}] + assistant_prefill_msgs + [{"role": "user", "content": user_prompt}]
-        result = process_single_chapter_api_call(idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout, before_send_callback=before_send_callback)
+        result = process_single_chapter_api_call(
+            idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout,
+            chapter_num=(chapter_num_map or {}).get(idx, idx + 1),
+            before_send_callback=before_send_callback,
+        )
         return {'results': [result], 'merged_indices': []}
     
     # Merge chapter contents WITHOUT separators (glossary extraction doesn't need them)
@@ -5279,7 +5296,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
     chapter_nums = []
     
     for idx, chap in merge_group:
-        chapter_num = idx + 1  # Fallback for module-level function
+        chapter_num = (chapter_num_map or {}).get(idx, idx + 1)
         chapter_nums.append(chapter_num)
         merged_parts.append(chap)
     
@@ -5335,6 +5352,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
             stop_check_fn=stop_check_fn,
             chunk_timeout=chunk_timeout,
             chapter_idx=parent_idx,
+            chapter_num=chapter_nums[0] if chapter_nums else parent_idx + 1,
             merged_chapters=chapter_nums,
             before_send_callback=before_send_callback,
         )
@@ -6543,6 +6561,10 @@ def main(log_callback=None, stop_callback=None):
                             process_merged_group_api_call,
                             unit, build_prompt, client, temp, mtoks, check_stop, chunk_timeout,
                             _mark_unit_progress_on_send,
+                            chapter_num_map={
+                                u_idx: _glossary_chapter_actual_num(u_idx, context=progress_context)
+                                for u_idx, _ in unit
+                            },
                         )
                     else:
                         idx, chap = unit[0]
@@ -6585,6 +6607,7 @@ def main(log_callback=None, stop_callback=None):
                             check_stop,
                             chunk_timeout,
                             _mark_unit_progress_on_send,
+                            chapter_num=_glossary_chapter_actual_num(idx, context=progress_context),
                         )
                     futures[future] = unit
                     # Small yield to keep GUI responsive
@@ -6613,13 +6636,14 @@ def main(log_callback=None, stop_callback=None):
                                 error = result.get('error')
                                 raw_obj = result.get('raw_obj')
                                 chap = result.get('chap')
+                                display_idx = _glossary_chapter_actual_num(idx, context=progress_context)
                                 
                                 if error:
                                     # Suppress expected "graceful stop" pre-send cancellations.
                                     if isinstance(error, str) and _is_graceful_stop_skip_error(error):
                                         stopped_early = True
                                         return
-                                    print(f"[Chapter {idx+1}] Error: {error}")
+                                    print(f"[Chapter {display_idx}] Error: {error}")
                                     _mark_glossary_failed(failed, idx, "API_ERROR")
                                     _clear_glossary_in_progress(unit_indices)
                                     save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
@@ -6654,7 +6678,7 @@ def main(log_callback=None, stop_callback=None):
                                         entry_type = entry.get("type", "?")
                                         raw_name = entry.get("raw_name", "?")
                                         trans_name = entry.get("translated_name", "?")
-                                        print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
+                                        print(f'[Chapter {display_idx}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
                                         glossary.append(entry)
                                 
                                 # Check if this was actually a failure (empty/refused content)
@@ -6668,7 +6692,7 @@ def main(log_callback=None, stop_callback=None):
                                     _is_empty_failure = (not data) and (not _resp_text.strip() or _resp_text.strip() in ('[]', '{}'))
                                     
                                     if _is_empty_failure:
-                                        print(f"⚠️ Chapter {idx+1} returned empty/refused content — marking as failed for retry")
+                                        print(f"⚠️ Chapter {display_idx} returned empty/refused content — marking as failed for retry")
                                         ch_finish = result.get('finish_reason', 'stop')
                                         _mark_glossary_failed(failed, idx, _glossary_issue_from_finish_reason(ch_finish))
                                     else:
@@ -6677,7 +6701,7 @@ def main(log_callback=None, stop_callback=None):
                                         # Mark truncated chapters as failed so they get retried
                                         ch_finish = result.get('finish_reason', 'stop')
                                         if _glossary_issue_from_finish_reason(ch_finish, None) == "TRUNCATED":
-                                            print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
+                                            print(f"⚠️ Chapter {display_idx} was truncated — entries kept but chapter will be retried")
                                             _mark_glossary_failed(failed, idx, "TRUNCATED")
                                 
                                 # Store history for parent chapter only
@@ -6689,6 +6713,7 @@ def main(log_callback=None, stop_callback=None):
                         else:
                             # Handle single chapter result
                             idx, chap = unit[0]
+                            display_idx = _glossary_chapter_actual_num(idx, context=progress_context)
                             result = future.result(timeout=0.5)
                             
                             # Process this chapter's results immediately
@@ -6702,7 +6727,7 @@ def main(log_callback=None, stop_callback=None):
                                 if (isinstance(error, str) and _is_graceful_stop_skip_error(error)) or result.get('graceful_stop_skip'):
                                     stopped_early = True
                                     return
-                                print(f"[Chapter {idx+1}] Error: {error}")
+                                print(f"[Chapter {display_idx}] Error: {error}")
                                 _mark_glossary_failed(failed, idx, "API_ERROR")
                                 _clear_glossary_in_progress(unit_indices)
                                 save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
@@ -6729,7 +6754,7 @@ def main(log_callback=None, stop_callback=None):
                                     raw_name = entry.get("raw_name", "?")
                                     trans_name = entry.get("translated_name", "?")
                                     
-                                    print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
+                                    print(f'[Chapter {display_idx}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
                                     
                                     # Add entry immediately WITHOUT deduplication
                                     glossary.append(entry)
@@ -6739,7 +6764,7 @@ def main(log_callback=None, stop_callback=None):
                             _is_empty_failure = (not data) and (not _resp_text.strip() or _resp_text.strip() in ('[]', '{}'))
                             
                             if _is_empty_failure:
-                                print(f"⚠️ Chapter {idx+1} returned empty/refused content — marking as failed for retry")
+                                print(f"⚠️ Chapter {display_idx} returned empty/refused content — marking as failed for retry")
                                 ch_finish = result.get('finish_reason', 'stop')
                                 _mark_glossary_failed(failed, idx, _glossary_issue_from_finish_reason(ch_finish))
                             else:
@@ -6748,7 +6773,7 @@ def main(log_callback=None, stop_callback=None):
                                 # Mark truncated chapters as failed so they get retried
                                 ch_finish = result.get('finish_reason', 'stop')
                                 if _glossary_issue_from_finish_reason(ch_finish, None) == "TRUNCATED":
-                                    print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
+                                    print(f"⚠️ Chapter {display_idx} was truncated — entries kept but chapter will be retried")
                                     _mark_glossary_failed(failed, idx, "TRUNCATED")
                             
                             # Store history entry for this chapter (will be added after batch completes)
@@ -6778,7 +6803,7 @@ def main(log_callback=None, stop_callback=None):
                             _is_user_cancel = "stopped by user" in _err_lower or "cancelled by user" in _err_lower or "operation cancelled" in _err_lower
                             for u_idx, u_chap in unit:
                                 if not _is_user_cancel:
-                                    print(f"Error processing merged chapter {u_idx+1}: {e}")
+                                    print(f"Error processing merged chapter {_glossary_chapter_actual_num(u_idx, context=progress_context)}: {e}")
                                 if u_idx not in completed and u_idx not in failed:
                                     _mark_glossary_failed(failed, u_idx, "API_ERROR")
                         else:
@@ -6786,7 +6811,7 @@ def main(log_callback=None, stop_callback=None):
                             _err_lower = str(e).lower()
                             _is_user_cancel = "stopped by user" in _err_lower or "cancelled by user" in _err_lower or "operation cancelled" in _err_lower
                             if not _is_user_cancel:
-                                print(f"Error processing chapter {idx+1}: {e}")
+                                print(f"Error processing chapter {_glossary_chapter_actual_num(idx, context=progress_context)}: {e}")
                             if idx not in completed and idx not in failed:
                                 _mark_glossary_failed(failed, idx, "API_ERROR")
                         _clear_glossary_in_progress(unit_indices)
@@ -6929,7 +6954,7 @@ def main(log_callback=None, stop_callback=None):
                                 raw_assistant_object=raw_obj
                             )
                         except Exception as e:
-                            print(f"⚠️ Failed to append Chapter {idx+1} to glossary history: {e}")
+                            print(f"⚠️ Failed to append Chapter {_glossary_chapter_actual_num(idx, context=progress_context)} to glossary history: {e}")
                 print(f"💾 Saved glossary history ({len(history)} messages)")
             
             batch_elapsed = time.time() - batch_start_time
@@ -7149,7 +7174,7 @@ def main(log_callback=None, stop_callback=None):
             
             # Check for stop at the beginning of each chapter
             if check_stop():
-                print(f"❌ Glossary extraction stopped at chapter {idx+1}")
+                print(f"❌ Glossary extraction stopped at chapter {_glossary_chapter_actual_num(idx, context=progress_context)}")
                 return
             
             # Skip if this chapter was merged into another (current run only)
@@ -7177,7 +7202,7 @@ def main(log_callback=None, stop_callback=None):
                     
             # Show filename alongside chapter number when available
             _fname = _chapter_filenames.get(idx, '')
-            _chap_num = _chapter_positions.get(idx, idx + 1)
+            _chap_num = _glossary_chapter_actual_num(idx, context=progress_context)
             if _fname:
                 print(f"🔄 Processing Chapter {_chap_num}/{total_chapters} ({_fname})")
             else:
@@ -7193,13 +7218,13 @@ def main(log_callback=None, stop_callback=None):
                     # Don't add separators - glossary extraction doesn't need them
                     merged_contents.append(g_chap)
                     if g_idx != idx:
-                        print(f"   → Including chapter {g_idx+1}")
+                        print(f"   → Including chapter {_glossary_chapter_actual_num(g_idx, context=progress_context)}")
                 
                 chapter_content = "\n\n".join(merged_contents)
                 print(f"   📊 Merged content: {len(chapter_content):,} characters")
             
             # Build merged chapter nums for watchdog progress bar
-            merged_chapter_nums = [g_idx + 1 for g_idx, _ in merge_groups[idx]] if idx in merge_groups else None
+            merged_chapter_nums = [_glossary_chapter_actual_num(g_idx, context=progress_context) for g_idx, _ in merge_groups[idx]] if idx in merge_groups else None
             current_progress_indices = [g_idx for g_idx, _ in merge_groups[idx]] if idx in merge_groups else [idx]
 
             def _mark_current_glossary_progress_on_send():
@@ -7278,13 +7303,13 @@ def main(log_callback=None, stop_callback=None):
                 # Log combined prompt similar to main translator (use safe chunk budget)
                 if contextual_enabled and assistant_tokens > 0:
                     print(
-                        f"💬 Chapter {idx+1} combined prompt: "
+                        f"💬 Chapter {_chap_num} combined prompt: "
                         f"{total_tokens:,} tokens (system + user: {non_assistant_tokens:,}, "
                         f"assistant/memory: {assistant_tokens:,}) | chunk budget {available_tokens:,}"
                     )
                 else:
                     print(
-                        f"💬 Chapter {idx+1} combined prompt: "
+                        f"💬 Chapter {_chap_num} combined prompt: "
                         f"{total_tokens:,} tokens (system + user) | chunk budget {available_tokens:,}"
                     )
 
@@ -7292,7 +7317,7 @@ def main(log_callback=None, stop_callback=None):
                 chapter_had_truncated_chunk = False
                 chapter_tokens = chapter_splitter.count_tokens(chapter_content)
                 if chapter_split_enabled and chapter_tokens > available_tokens:
-                    print(f"⚠️ Chapter {idx+1} exceeds chunk budget: {chapter_tokens:,} > {available_tokens:,}")
+                    print(f"⚠️ Chapter {_chap_num} exceeds chunk budget: {chapter_tokens:,} > {available_tokens:,}")
                     print(f"📄 Using ChapterSplitter to split into smaller chunks (output-limit safe)...")
 
                     # Since glossary extraction works with plain text, wrap it in a simple HTML structure
@@ -7308,11 +7333,11 @@ def main(log_callback=None, stop_callback=None):
                     
                     for chunk_html, chunk_idx, total_chunks in chunks:
                         if check_stop():
-                            print(f"❌ Glossary extraction stopped during chunk {chunk_idx} of chapter {idx+1}")
+                            print(f"❌ Glossary extraction stopped during chunk {chunk_idx} of chapter {_chap_num}")
                             _restore_glossary_in_progress_for_hard_stop(current_progress_indices)
                             return
                             
-                        print(f"🔄 Processing chunk {chunk_idx}/{total_chunks} of Chapter {idx+1}")
+                        print(f"🔄 Processing chunk {chunk_idx}/{total_chunks} of Chapter {_chap_num}")
                         
                         # Extract text from the chunk HTML
                         from bs4 import BeautifulSoup
@@ -7399,6 +7424,7 @@ def main(log_callback=None, stop_callback=None):
                                 stop_check_fn=check_stop,
                                 chunk_timeout=chunk_timeout,
                                 chapter_idx=idx,
+                                chapter_num=_chap_num,
                                 chunk_idx=chunk_idx,
                                 total_chunks=total_chunks,
                                 merged_chapters=merged_chapter_nums,
@@ -7524,13 +7550,13 @@ def main(log_callback=None, stop_callback=None):
                     resp = ""  # Combined response not needed for progress tracking
                     # Set raw_obj to None for chunked processing (history was already saved per chunk)
                     raw_obj = None
-                    print(f"✅ Chapter {idx+1} processed in {len(chunks)} chunks, total entries: {len(data)}")
+                    print(f"✅ Chapter {_chap_num} processed in {len(chunks)} chunks, total entries: {len(data)}")
                     
                 else:
                     # Original single-chapter processing
                     # Check for stop before API call
                     if check_stop():
-                        print(f"❌ Glossary extraction stopped before API call for chapter {idx+1}")
+                        print(f"❌ Glossary extraction stopped before API call for chapter {_chap_num}")
                         _restore_glossary_in_progress_for_hard_stop(current_progress_indices)
                         return
                 
@@ -7572,28 +7598,29 @@ def main(log_callback=None, stop_callback=None):
                             stop_check_fn=check_stop,
                             chunk_timeout=chunk_timeout,
                             chapter_idx=idx,
+                            chapter_num=_chap_num,
                             merged_chapters=merged_chapter_nums,
                             before_send_callback=_mark_current_glossary_progress_on_send,
                         )
                                 
                     except UnifiedClientError as e:
                         if "stopped by user" in str(e).lower():
-                            print(f"❌ Glossary extraction stopped during API call for chapter {idx+1}")
+                            print(f"❌ Glossary extraction stopped during API call for chapter {_chap_num}")
                             _restore_glossary_in_progress_for_hard_stop(current_progress_indices)
                             return
                         elif "timeout" in str(e).lower():
-                            print(f"⚠️ API call timed out for chapter {idx+1}: {e}")
+                            print(f"⚠️ API call timed out for chapter {_chap_num}: {e}")
                             continue
                         else:
-                            print(f"❌ API error for chapter {idx+1}: {e}")
+                            print(f"❌ API error for chapter {_chap_num}: {e}")
                             continue
                     except Exception as e:
-                        print(f"❌ Unexpected error for chapter {idx+1}: {e}")
+                        print(f"❌ Unexpected error for chapter {_chap_num}: {e}")
                         continue
                     
                     # Handle response
                     if raw is None:
-                        print(f"❌ API returned None for chapter {idx+1}")
+                        print(f"❌ API returned None for chapter {_chap_num}")
                         continue
 
                     # Handle different response types
@@ -7606,23 +7633,23 @@ def main(log_callback=None, stop_callback=None):
                     elif hasattr(raw, 'text'):
                         resp = raw.text if raw.text is not None else ""
                     else:
-                        print(f"❌ Unexpected response type for chapter {idx+1}: {type(raw)}")
+                        print(f"❌ Unexpected response type for chapter {_chap_num}: {type(raw)}")
                         resp = str(raw) if raw is not None else ""
 
                     # Ensure resp is a string
                     if not isinstance(resp, str):
-                        print(f"⚠️ Converting non-string response to string for chapter {idx+1}")
+                        print(f"⚠️ Converting non-string response to string for chapter {_chap_num}")
                         resp = str(resp) if resp is not None else ""
 
                     # NULL CHECK before checking if response is empty
                     if resp is None:
-                        print(f"⚠️ Response is None for chapter {idx+1}, skipping...")
+                        print(f"⚠️ Response is None for chapter {_chap_num}, skipping...")
                         _mark_glossary_failed(failed, idx, _glossary_issue_from_finish_reason(finish_reason))
                         continue
 
                     # Check if response is empty
                     if not resp or resp.strip() == "":
-                        print(f"⚠️ Empty response for chapter {idx+1}, skipping...")
+                        print(f"⚠️ Empty response for chapter {_chap_num}, skipping...")
                         _mark_glossary_failed(failed, idx, _glossary_issue_from_finish_reason(finish_reason))
                         continue
 
@@ -7651,7 +7678,7 @@ def main(log_callback=None, stop_callback=None):
                     try:
                         data = parse_api_response(resp)
                     except Exception as e:
-                        print(f"❌ Error parsing response for chapter {idx+1}: {e}")
+                        print(f"❌ Error parsing response for chapter {_chap_num}: {e}")
                         print(f"   Response preview: {resp[:200] if resp else 'None'}...")
                         _mark_glossary_failed(failed, idx, "PARSE_ERROR")
                         continue
@@ -7673,7 +7700,7 @@ def main(log_callback=None, stop_callback=None):
                     # Log entries
                     for eidx, entry in enumerate(data, start=1):
                         if check_stop():
-                            print(f"❌ Glossary extraction stopped during entry processing for chapter {idx+1}")
+                            print(f"❌ Glossary extraction stopped during entry processing for chapter {_chap_num}")
                             _restore_glossary_in_progress_for_hard_stop(current_progress_indices)
                             return
                             
@@ -7689,7 +7716,7 @@ def main(log_callback=None, stop_callback=None):
                         raw_name = entry.get("raw_name", "?")
                         trans_name = entry.get("translated_name", "?")
                         
-                        print(f'[Chapter {_chapter_positions.get(idx, idx+1)}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → {entry_type}: {raw_name} ({trans_name})')    
+                        print(f'[Chapter {_chap_num}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → {entry_type}: {raw_name} ({trans_name})')
                     
                 # Check if this was actually a failure (empty/refused content)
                 _resp_text = locals().get('resp', '') or ''
@@ -7697,7 +7724,7 @@ def main(log_callback=None, stop_callback=None):
                 
                 if _is_empty_failure:
                     # Empty/refused response — mark as failed so it gets retried
-                    print(f"⚠️ Chapter {idx+1} returned empty/refused content — marking as failed for retry")
+                    print(f"⚠️ Chapter {_chap_num} returned empty/refused content — marking as failed for retry")
                     _fr = locals().get('finish_reason') or locals().get('chunk_finish_reason', 'stop')
                     if chapter_had_truncated_chunk:
                         _fr = 'length'
@@ -7742,7 +7769,7 @@ def main(log_callback=None, stop_callback=None):
                     if chapter_had_truncated_chunk:
                         _fr = 'length'
                     if _glossary_issue_from_finish_reason(_fr, None) == "TRUNCATED":
-                        print(f"⚠️ Chapter {idx+1} was truncated — entries kept but chapter will be retried")
+                        print(f"⚠️ Chapter {_chap_num} was truncated — entries kept but chapter will be retried")
                         _mark_glossary_failed(failed, idx, "TRUNCATED")
                     
                     # If this was a merged request, also mark child chapters as completed
@@ -7751,11 +7778,11 @@ def main(log_callback=None, stop_callback=None):
                         for g_idx, _ in merge_groups[idx]:
                             if g_idx != idx and g_idx not in completed:
                                 completed.append(g_idx)
-                                marked_children.append(g_idx + 1)
+                                marked_children.append(_glossary_chapter_actual_num(g_idx, context=progress_context))
                             if g_idx != idx and g_idx not in merged_indices:
                                 merged_indices.append(g_idx)
                         if marked_children:
-                            print(f"   ✅ Marked chapters {marked_children} as completed (merged with {idx+1})")
+                            print(f"   ✅ Marked chapters {marked_children} as completed (merged with {_chap_num})")
 
                 # Only add to history if contextual is enabled
                 if contextual_enabled:
@@ -7776,7 +7803,7 @@ def main(log_callback=None, stop_callback=None):
                                 raw_assistant_object=raw_obj if 'raw_obj' in locals() else None
                             )
                         except Exception as e:
-                            print(f"⚠️ Failed to save history for chapter {idx+1}: {e}")
+                            print(f"⚠️ Failed to save history for chapter {_chap_num}: {e}")
 
                 _clear_glossary_in_progress(current_progress_indices)
                 save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
@@ -7802,15 +7829,15 @@ def main(log_callback=None, stop_callback=None):
                             
                 # Check for stop after processing chapter
                 if check_stop():
-                    print(f"❌ Glossary extraction stopped after processing chapter {idx+1}")
+                    print(f"❌ Glossary extraction stopped after processing chapter {_chap_num}")
                     return
 
             except Exception as e:
                 if _glossary_is_hard_stop_requested(stop_callback):
                     _restore_glossary_in_progress_for_hard_stop(locals().get('current_progress_indices', [idx]))
-                    print(f"❌ Glossary extraction stopped after error in chapter {idx+1}")
+                    print(f"❌ Glossary extraction stopped after error in chapter {locals().get('_chap_num', idx + 1)}")
                     return
-                print(f"Error at chapter {idx+1}: {e}")
+                print(f"Error at chapter {locals().get('_chap_num', idx + 1)}: {e}")
                 import traceback
                 print(f"Full traceback: {traceback.format_exc()}")
                 _mark_glossary_failed(failed, idx, "API_ERROR")
@@ -7818,7 +7845,7 @@ def main(log_callback=None, stop_callback=None):
                 save_progress(completed, glossary, merged_indices, failed=failed, in_progress=in_progress, context=progress_context)
                 # Check for stop even after error
                 if check_stop():
-                    print(f"❌ Glossary extraction stopped after error in chapter {idx+1}")
+                    print(f"❌ Glossary extraction stopped after error in chapter {locals().get('_chap_num', idx + 1)}")
                     return
     
     # Print skip summary if any chapters were skipped

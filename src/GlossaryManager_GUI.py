@@ -2462,20 +2462,23 @@ class GlossaryManagerMixin:
         settings_frame = QGroupBox("Balanced/Full Extraction Settings")
         settings_frame_layout = QVBoxLayout(settings_frame)
         manual_layout.addWidget(settings_frame)
+
+        settings_content = QHBoxLayout()
+        settings_content.setContentsMargins(0, 0, 0, 0)
+        settings_content.setSpacing(20)
+        settings_frame_layout.addLayout(settings_content)
         
-        settings_grid = QGridLayout()
+        settings_grid_host = QWidget()
+        settings_grid_host.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        settings_content.addWidget(settings_grid_host, 0, Qt.AlignTop)
+
+        settings_grid = QGridLayout(settings_grid_host)
         settings_grid.setContentsMargins(2, 4, 6, 6)
         settings_grid.setHorizontalSpacing(20)
         settings_grid.setVerticalSpacing(10)
-        settings_frame_layout.addLayout(settings_grid)
         settings_grid.setColumnStretch(0, 0)
         settings_grid.setColumnStretch(1, 0)
         settings_grid.setColumnStretch(2, 0)
-        settings_grid.setColumnStretch(3, 0)
-        settings_grid.setColumnStretch(4, 1)
-        settings_spacer = QWidget()
-        settings_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
-        settings_grid.addWidget(settings_spacer, 0, 4, 3, 1)
         
         # Compact label+field pair helper for manual Extraction Settings
         def _m_pair(label_text, field_widget, label_width=120, tooltip=None):
@@ -2501,15 +2504,17 @@ class GlossaryManagerMixin:
             tooltip="AI creativity for manual extraction.\nLower = more deterministic (recommended 0.1–0.3)."
         ), 0, 0)
 
-        # Large accent icon; keep it in one side column so it does not add empty rows.
+        # Large accent icon lives outside the grid so row spacing does not affect it.
         icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
         if os.path.exists(icon_path):
             from PySide6.QtGui import QIcon
             icon_label = QLabel()
-            icon_label.setFixedSize(150, 150)
+            icon_label.setFixedSize(120, 120)
+            icon_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             icon_label.setAlignment(Qt.AlignCenter)
             icon_label.setPixmap(QIcon(icon_path).pixmap(120, 120))
-            settings_grid.addWidget(icon_label, 0, 3, 3, 1, Qt.AlignCenter)
+            settings_content.addWidget(icon_label, 0, Qt.AlignTop)
+        settings_content.addStretch()
         
         # Row 1: Compression Factor and Rolling window checkbox
         self.glossary_compression_factor_entry = QLineEdit(str(self.config.get('glossary_compression_factor', 1.0)))
