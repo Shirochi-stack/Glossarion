@@ -1199,6 +1199,7 @@ class GlossaryManagerMixin:
                     ('include_all_characters_checkbox', 'glossary_include_all_characters_var'),
                     ('skip_identical_entries_checkbox', 'glossary_skip_identical_entries_var'),
                     ('skip_gender_tracking_checkbox', 'glossary_skip_gender_tracking_var'),
+                    ('disable_glossary_history_checkbox', 'disable_glossary_history_var'),
                 ]
                 
                 # Handle inverted logic for disable_smart_filtering_checkbox
@@ -1256,6 +1257,8 @@ class GlossaryManagerMixin:
                         elif checkbox_name == 'skip_gender_tracking_checkbox':
                             self.config['glossary_skip_gender_tracking'] = bool(checked)
                             os.environ['GLOSSARY_SKIP_GENDER_TRACKING'] = '1' if checked else '0'
+                        elif checkbox_name == 'disable_glossary_history_checkbox':
+                            self.config['disable_glossary_history'] = bool(checked)
 
                 # If Append Glossary + Auto-load are enabled, auto-fill glossary selection/mapping
                 # (Skip if a glossary is already mapped — dialog is recreated each open)
@@ -2482,18 +2485,6 @@ class GlossaryManagerMixin:
             h.addStretch()
             return cont
         
-        # Add icon to third column
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
-        if os.path.exists(icon_path):
-            from PySide6.QtGui import QPixmap, QIcon
-            icon_label = QLabel()
-            icon_label.setMinimumSize(180, 180)
-            icon = QIcon(icon_path)
-            pixmap = icon.pixmap(140, 140)  # Smaller icon with padding
-            icon_label.setPixmap(pixmap)
-            icon_label.setAlignment(Qt.AlignCenter)
-            settings_grid.addWidget(icon_label, 0, 2, 4, 1)  # Span 4 rows
-        
         # Row 0: Temperature and Glossary History Limit
         self.manual_temp_entry = QLineEdit(str(self.config.get('manual_glossary_temperature', 0.1)))
         self.manual_temp_entry.setFixedWidth(80)
@@ -2508,6 +2499,16 @@ class GlossaryManagerMixin:
             "Glossary History Limit:", self.manual_context_entry,
             tooltip="This controls how many chapters to include with contextual translation"
         ), 0, 1)
+
+        # Large accent icon; keep it in one side column so it does not add empty rows.
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        if os.path.exists(icon_path):
+            from PySide6.QtGui import QIcon
+            icon_label = QLabel()
+            icon_label.setFixedSize(150, 150)
+            icon_label.setAlignment(Qt.AlignCenter)
+            icon_label.setPixmap(QIcon(icon_path).pixmap(120, 120))
+            settings_grid.addWidget(icon_label, 0, 2, 4, 1, Qt.AlignCenter)
         
         # Row 1: Compression Factor and Rolling window checkbox
         self.glossary_compression_factor_entry = QLineEdit(str(self.config.get('glossary_compression_factor', 1.0)))
@@ -2559,6 +2560,16 @@ class GlossaryManagerMixin:
         ), 2, 0)
         # Label tooltip
         token_cont.parentWidget().layout().itemAt(0).widget().setToolTip("Maximum tokens allowed in AI responses. -1 inherits main translation output limit.")
+
+        # Row 3: Disable glossary conversation history
+        if not hasattr(self, 'disable_glossary_history_checkbox'):
+            self.disable_glossary_history_checkbox = self._create_styled_checkbox("Disable Glossary History")
+        self.disable_glossary_history_checkbox.setChecked(self.config.get('disable_glossary_history', True))
+        self.disable_glossary_history_checkbox.setToolTip(
+            "When enabled, Extract Glossary will not send previous glossary extraction\n"
+            "responses as contextual conversation history. Recommended ON."
+        )
+        settings_grid.addWidget(self.disable_glossary_history_checkbox, 3, 0)
         
         if not hasattr(self, 'glossary_request_merging_checkbox'):
             self.glossary_request_merging_checkbox = self._create_styled_checkbox("Glossary Request Merging")

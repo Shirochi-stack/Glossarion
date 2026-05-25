@@ -3535,6 +3535,7 @@ Recent translations to summarize:
             ('include_source_in_history_var', 'include_source_in_history', False),
             ('translation_history_rolling_var', 'translation_history_rolling', True),
             ('glossary_history_rolling_var', 'glossary_history_rolling', True),
+            ('disable_glossary_history_var', 'disable_glossary_history', True),
             ('translate_book_title_var', 'translate_book_title', True),
             ('skip_txt_title_translation_var', 'skip_txt_title_translation', True),
             ('include_book_title_glossary_var', 'include_book_title_glossary', False),
@@ -9484,6 +9485,17 @@ Recent translations to summarize:
             True,
         )
         return '1' if merging_enabled else '0', str(merge_count), '1' if chapter_split else '0'
+
+    def _glossary_contextual_env_value(self):
+        disable_history = self._live_bool_setting(
+            'disable_glossary_history_checkbox',
+            'disable_glossary_history_var',
+            'disable_glossary_history',
+            True,
+        )
+        if disable_history:
+            return '0'
+        return '1' if getattr(self, 'contextual_var', False) else '0'
 
     def _on_context_mode_changed(self, index=None):
         """Map the Context Mode combo onto the existing runtime config flags."""
@@ -18078,7 +18090,7 @@ Important rules:
                     'GLOSSARY_DUPLICATE_KEY_MODE': 'skip',  # Always use skip mode for new format
                     'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
                     'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.0001',
-                    'CONTEXTUAL': '1' if self.contextual_var else '0',
+                    'CONTEXTUAL': self._glossary_contextual_env_value(),
                     'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
                     
                     # Glossary anti-duplicate parameters (separate from translation)
@@ -24755,6 +24767,7 @@ Important rules:
                 ('manual_glossary_temperature', ['manual_temp_entry', 'manual_temp_var'], 0.3, lambda v: safe_float(v, 0.3)),
                 ('manual_context_limit', ['manual_context_entry', 'manual_context_var'], 5, lambda v: safe_int(v, 5)),
                 ('glossary_history_rolling', ['glossary_history_rolling_var'], True, bool),
+                ('disable_glossary_history', ['disable_glossary_history_checkbox', 'disable_glossary_history_var'], True, bool),
                 ('enable_auto_glossary', ['enable_auto_glossary_checkbox', 'enable_auto_glossary_var'], False, bool),
                 ('auto_glossary_mode', ['auto_glossary_mode_var'], 'balanced', str),
                 ('glossary_use_legacy_csv', ['use_legacy_csv_checkbox', 'use_legacy_csv_var'], False, bool),
