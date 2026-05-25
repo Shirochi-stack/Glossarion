@@ -83,22 +83,84 @@ def _pool_output_limit_override(keys, global_limit):
         limits.append(limit if limit is not None else global_limit)
     return min(limits) if limits else None
 
+def _peek_live_pool_output_limit():
+    """Peek at the live key pool to read the output token limit of the next key
+    about to be assigned (based on current rotation index).
+
+    Returns the individual_output_token_limit of that key, or None if no pool
+    is active or the next key has no per-key limit configured.
+    """
+    # 1. Try glossary-specific key pool first
+    try:
+        _gk_pool = getattr(UnifiedClient, '_glossary_key_pool', None)
+        if _gk_pool and hasattr(_gk_pool, 'keys') and _gk_pool.keys:
+            _pool_keys = _gk_pool.keys
+            _cur_idx = getattr(_gk_pool, 'current_index', 0) % len(_pool_keys)
+            # Scan from rotation index to find first enabled key
+            for offset in range(len(_pool_keys)):
+                _key = _pool_keys[(_cur_idx + offset) % len(_pool_keys)]
+                if getattr(_key, 'enabled', True):
+                    limit = getattr(_key, 'individual_output_token_limit', None)
+                    if limit is not None and int(limit) > 0:
+                        return int(limit)
+                    # Key is enabled but has no per-key limit — fall through
+                    return None
+    except Exception:
+        pass
+
+    # 2. Fallback: multi-key pool
+    try:
+        _mk_pool = getattr(UnifiedClient, '_api_key_pool', None)
+        if _mk_pool and hasattr(_mk_pool, 'keys') and _mk_pool.keys:
+            _pool_keys = _mk_pool.keys
+            _cur_idx = getattr(_mk_pool, 'current_index', 0) % len(_pool_keys)
+            for offset in range(len(_pool_keys)):
+                _key = _pool_keys[(_cur_idx + offset) % len(_pool_keys)]
+                if getattr(_key, 'enabled', True):
+                    limit = getattr(_key, 'individual_output_token_limit', None)
+                    if limit is not None and int(limit) > 0:
+                        return int(limit)
+                    return None
+    except Exception:
+        pass
+
+    # 3. Fallback: in-memory glossary keys (raw dicts, before pool is hydrated)
+    try:
+        _im_gk = getattr(UnifiedClient, '_in_memory_glossary_keys', None)
+        if _im_gk:
+            for _gk_dict in _im_gk:
+                if isinstance(_gk_dict, dict) and _gk_dict.get('enabled', True):
+                    limit = _positive_int(_gk_dict.get('individual_output_token_limit'))
+                    if limit is not None:
+                        return limit
+                    return None
+    except Exception:
+        pass
+
+    return None
+
 def _effective_glossary_output_limit(config, model_name=None):
     raw_output_env = os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", os.getenv("MAX_OUTPUT_TOKENS", "0"))
     effective = _positive_int(str(raw_output_env).strip())
     if effective is None:
         effective = _positive_int(os.getenv("MAX_OUTPUT_TOKENS", str(config.get("max_tokens", 65536)))) or 65536
 
-    if os.getenv("USE_GLOSSARY_KEYS", "0") == "1" or config.get("use_glossary_keys", False):
-        glossary_keys = _load_key_pool_from_env_or_config("GLOSSARY_API_KEYS", "glossary_keys", config)
-        pool_limit = _pool_output_limit_override(glossary_keys, effective)
-        if pool_limit is not None:
-            effective = pool_limit
-    elif config.get("use_multi_api_keys", False) or os.getenv("USE_MULTI_API_KEYS", "0") == "1":
-        multi_keys = _load_key_pool_from_env_or_config("MULTI_API_KEYS", "multi_api_keys", config)
-        pool_limit = _pool_output_limit_override(multi_keys, effective)
-        if pool_limit is not None:
-            effective = pool_limit
+    # ── Priority 1: Live key pool (runtime truth for multi-key rotation) ──
+    live_limit = _peek_live_pool_output_limit()
+    if live_limit is not None:
+        effective = live_limit
+    else:
+        # ── Priority 2: Env / config JSON fallback ──
+        if os.getenv("USE_GLOSSARY_KEYS", "0") == "1" or config.get("use_glossary_keys", False):
+            glossary_keys = _load_key_pool_from_env_or_config("GLOSSARY_API_KEYS", "glossary_keys", config)
+            pool_limit = _pool_output_limit_override(glossary_keys, effective)
+            if pool_limit is not None:
+                effective = pool_limit
+        elif config.get("use_multi_api_keys", False) or os.getenv("USE_MULTI_API_KEYS", "0") == "1":
+            multi_keys = _load_key_pool_from_env_or_config("MULTI_API_KEYS", "multi_api_keys", config)
+            pool_limit = _pool_output_limit_override(multi_keys, effective)
+            if pool_limit is not None:
+                effective = pool_limit
 
     try:
         with UnifiedClient._model_limits_lock:
@@ -6323,9 +6385,22 @@ def main(log_callback=None, stop_callback=None):
                 is_merged_mode = True
             else:
                 # Original simple grouping by count when split toggle is OFF
+                # Still enforce token budget to prevent oversized requests
                 merge_groups = []
-                for i in range(0, len(chapters_to_process), request_merge_count):
-                    merge_groups.append(chapters_to_process[i:i + request_merge_count])
+                i = 0
+                while i < len(chapters_to_process):
+                    group = [chapters_to_process[i]]
+                    i += 1
+                    while i < len(chapters_to_process) and len(group) < request_merge_count:
+                        candidate = chapters_to_process[i]
+                        merged_preview = "\n\n".join([c for (_, c) in group + [candidate]])
+                        merged_tokens = chapter_splitter.count_tokens(merged_preview)
+                        if merged_tokens <= available_tokens:
+                            group.append(candidate)
+                            i += 1
+                        else:
+                            break
+                    merge_groups.append(group)
                 print(f"🔗 Created {len(merge_groups)} merge groups from {len(chapters_to_process)} chapters (count-based)")
                 units_to_process = merge_groups
                 is_merged_mode = True
@@ -7030,8 +7105,20 @@ def main(log_callback=None, stop_callback=None):
                                 merged_children.add(child_idx)
             else:
                 # Count-based grouping when chapter splitting toggle is OFF
-                for i in range(0, len(chapters_needing_processing), request_merge_count):
-                    group = chapters_needing_processing[i:i + request_merge_count]
+                # Still enforce token budget to prevent oversized requests
+                i = 0
+                while i < len(chapters_needing_processing):
+                    group = [chapters_needing_processing[i]]
+                    i += 1
+                    while i < len(chapters_needing_processing) and len(group) < request_merge_count:
+                        candidate = chapters_needing_processing[i]
+                        merged_preview = "\n\n".join([c for (_, c) in group + [candidate]])
+                        merged_tokens = chapter_splitter.count_tokens(merged_preview)
+                        if merged_tokens <= available_tokens:
+                            group.append(candidate)
+                            i += 1
+                        else:
+                            break
                     parent_idx = group[0][0]
                     merge_groups[parent_idx] = group
                     if len(group) > 1:

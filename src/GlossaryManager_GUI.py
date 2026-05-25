@@ -2568,15 +2568,14 @@ class GlossaryManagerMixin:
         )
         settings_grid.addWidget(self.glossary_request_merging_checkbox, 1, 1)
 
-        # Row 3: Chapter split toggle (output-limit safe chunking)
+        # Dynamic request splitting toggle (below Glossary Request Merging)
         if not hasattr(self, 'glossary_enable_chapter_split_checkbox'):
-            self.glossary_enable_chapter_split_checkbox = self._create_styled_checkbox("Enable chapter splitting")
-            self.glossary_enable_chapter_split_checkbox.setToolTip("When enabled, large glossary chapters are auto-split using the output token limit and compression factor to avoid oversized requests.")
-        self.glossary_enable_chapter_split_checkbox.setChecked(self.config.get('glossary_enable_chapter_split', False))
+            self.glossary_enable_chapter_split_checkbox = self._create_styled_checkbox("Dynamic request splitting")
+        self.glossary_enable_chapter_split_checkbox.setChecked(self.config.get('glossary_enable_chapter_split', True))
         self.glossary_enable_chapter_split_checkbox.setToolTip(
             "Automatically split large chapters using token/output limits\nso each glossary request stays under size caps."
         )
-        settings_grid.addWidget(self.glossary_enable_chapter_split_checkbox, 3, 0)
+        settings_grid.addWidget(self.glossary_enable_chapter_split_checkbox, 2, 1)
 
         # Logic for Auto Compression Factor
         def _update_glossary_compression():
@@ -3975,7 +3974,7 @@ Do not stop after the glossary."""
                 self.glossary_max_sentences_entry.setText("200")
                 self.glossary_target_language_combo.setCurrentText("English")
                 if hasattr(self, 'glossary_enable_chapter_split_checkbox'):
-                    self.glossary_enable_chapter_split_checkbox.setChecked(False)
+                    self.glossary_enable_chapter_split_checkbox.setChecked(True)
                 
                 # Reset filter mode to 'all'
                 if 'all' in self.glossary_filter_mode_buttons:
