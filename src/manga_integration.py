@@ -1260,20 +1260,31 @@ class MangaTranslationTab(QObject):
             # Store waiting state for context menu checks
             self._waiting_for_model = waiting
             
-            # Always hide the stop button during model loading — the stop flag
-            # reaches the inpainter/detector loader and kills it.
+            # If a workflow operation (OCR, clean, translate) is actively running,
+            # handle model state transitions without touching button text/enabled state.
+            if getattr(self, '_workflow_operation_active', False):
+                if waiting:
+                    # Model still loading — hide stop button (stop kills the loader).
+                    if hasattr(self, 'image_preview_widget'):
+                        ipw = self.image_preview_widget
+                        if hasattr(ipw, 'stop_translation_btn'):
+                            ipw.stop_translation_btn.setVisible(False)
+                else:
+                    # Model just finished loading — show stop button (now safe).
+                    if hasattr(self, 'image_preview_widget'):
+                        ipw = self.image_preview_widget
+                        if hasattr(ipw, 'stop_translation_btn'):
+                            ipw.stop_translation_btn.setVisible(True)
+                            ipw.stop_translation_btn.setEnabled(True)
+                            ipw.stop_translation_btn.setText("\u23f9 Stop")
+                # Don't touch button text/enabled — the operation owns them.
+                return
+            
+            # No operation active — hide stop during model loading.
             if waiting and hasattr(self, 'image_preview_widget'):
                 ipw = self.image_preview_widget
                 if hasattr(ipw, 'stop_translation_btn'):
                     ipw.stop_translation_btn.setVisible(False)
-            
-            # If a workflow operation (OCR, clean, translate) is actively running
-            # and we're entering waiting state, don't overwrite button text with
-            # "Waiting..." — the operation owns the button states.
-            # But when waiting=False (model done loading), always let it through
-            # so buttons get their normal text restored.
-            if waiting and getattr(self, '_workflow_operation_active', False):
-                return
             
             # Start Translation button
             if hasattr(self, 'start_button') and self.start_button:
