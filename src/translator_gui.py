@@ -82,6 +82,7 @@ if '--run-glossary-extraction' in sys.argv:
     _glossary_worker_exit_code = 1
     try:
         os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+        os.environ['GLOSSARION_HEADLESS_KEY_MANAGER'] = '1'
         try:
             _env_file = None
             _new_argv = [sys.argv[0]]
@@ -18372,17 +18373,12 @@ Important rules:
                     import traceback
 
                     try:
-                        glossary_batch_size = int(str(self.batch_size_var).replace(',', '').strip() or '0')
+                        glossary_batch_size = int(str(self.batch_size_var).replace(',', '').strip() or '1')
                     except Exception:
-                        glossary_batch_size = 0
+                        glossary_batch_size = 1
+                    glossary_batch_size = max(1, glossary_batch_size)
 
-                    glossary_batch_enabled = os.environ.get('BATCH_TRANSLATION', '0') == '1'
-                    if glossary_batch_enabled and glossary_batch_size >= 11:
-                        ok = run_glossary_subprocess()
-                    else:
-                        reason = "batch mode off" if not glossary_batch_enabled else "batch size <= 10"
-                        self.append_log(f"Running glossary extraction in-process ({reason})")
-                        ok = run_glossary_in_process()
+                    ok = run_glossary_subprocess()
 
                     if not ok:
                         return False

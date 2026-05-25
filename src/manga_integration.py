@@ -1260,6 +1260,13 @@ class MangaTranslationTab(QObject):
             # Store waiting state for context menu checks
             self._waiting_for_model = waiting
             
+            # Always hide the stop button during model loading — the stop flag
+            # reaches the inpainter/detector loader and kills it.
+            if waiting and hasattr(self, 'image_preview_widget'):
+                ipw = self.image_preview_widget
+                if hasattr(ipw, 'stop_translation_btn'):
+                    ipw.stop_translation_btn.setVisible(False)
+            
             # If a workflow operation (OCR, clean, translate) is actively running,
             # don't touch button states — the operation owns them until it finishes.
             if getattr(self, '_workflow_operation_active', False):
@@ -1336,10 +1343,6 @@ class MangaTranslationTab(QObject):
                         ipw.clean_btn.setEnabled(True)
                         ipw.clean_btn.setText("Clean")
                 
-                # Hide the stop button during waiting state — stopping during
-                # model load causes hard failures.
-                if waiting and hasattr(ipw, 'stop_translation_btn'):
-                    ipw.stop_translation_btn.setVisible(False)
         except Exception as e:
             print(f"[BUTTON_STATE] Error setting button state: {e}")
     

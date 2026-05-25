@@ -4378,7 +4378,7 @@ def _dedupe_worker(item, all_items, fuzzy_threshold, use_rapidfuzz):
     return (entry, raw_name, cleaned_name, is_dup, best_score, best_match)
 
 
-def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz, current_entry=None, advanced_config=None, no_partial_config=None):
+def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz, current_entry=None):
     """Find the best duplicate match using multi-algorithm fuzzy matching"""
     if not seen_raw_names:
         return (False, 0.0, None)
@@ -4390,83 +4390,30 @@ def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, us
     
     if use_advanced:
         try:
-            from duplicate_detection_config import calculate_similarity_with_config
-            config = advanced_config
-            if config is None:
-                from duplicate_detection_config import get_duplicate_detection_config
-                config = get_duplicate_detection_config()
-
-            algorithms = list(config.get("algorithms", []))
-            partial_weight = max(0.0, min(1.0, float(config.get("partial_ratio_weight", 1.0) or 1.0)))
+            from duplicate_detection_config import calculate_similarity_with_config, get_duplicate_detection_config
+            config = get_duplicate_detection_config()
+            
             best_score = 0.0
             best_match = None
-
-            if use_rapidfuzz:
-                try:
-                    from rapidfuzz import fuzz as _rf_fuzz
-                except Exception:
-                    _rf_fuzz = None
-                try:
-                    import jellyfish as _jellyfish
-                except Exception:
-                    _jellyfish = None
-
-                partial_can_matter = 'partial' in algorithms and partial_weight > 0 and (fuzzy_threshold / partial_weight) <= 1.0
-                for idx, seen_item in enumerate(seen_raw_names):
-                    seen_clean = seen_item[0]
-                    seen_original = seen_item[1]
-                    seen_entry = seen_item[2] if len(seen_item) > 2 else None
-                    seen_lower = seen_clean.lower()
-                    score = 0.0
-                    if _rf_fuzz is not None:
-                        if 'basic' in algorithms:
-                            score = max(score, _rf_fuzz.ratio(name_lower, seen_lower) / 100.0)
-                        if 'token_sort' in algorithms:
-                            score = max(score, _rf_fuzz.token_sort_ratio(name_lower, seen_lower) / 100.0)
-                        if partial_can_matter:
-                            if not _partial_ratio_gender_only() or (
-                                _entry_type_has_active_gender(current_entry)
-                                and _entry_type_has_active_gender(seen_entry)
-                            ):
-                                score = max(score, (_rf_fuzz.partial_ratio(name_lower, seen_lower) / 100.0) * partial_weight)
-                    if 'jaro_winkler' in algorithms and _jellyfish is not None:
-                        score = max(score, _jellyfish.jaro_winkler_similarity(cleaned_name, seen_clean))
-
-                    if score >= fuzzy_threshold:
-                        compare_config = config
-                        if _partial_ratio_gender_only() and not (
-                            _entry_type_has_active_gender(current_entry)
-                            and _entry_type_has_active_gender(seen_entry)
-                        ):
-                            compare_config = no_partial_config
-                            if compare_config is None:
-                                compare_config = dict(config)
-                                compare_config["algorithms"] = [a for a in config.get("algorithms", []) if a != "partial"]
-                        score = calculate_similarity_with_config(cleaned_name, seen_clean, compare_config)
-
-                    if score >= fuzzy_threshold and score > best_score:
-                        best_score = score
-                        best_match = seen_original
-            else:
-                for seen_item in seen_raw_names:
-                    seen_clean = seen_item[0]
-                    seen_original = seen_item[1]
-                    seen_entry = seen_item[2] if len(seen_item) > 2 else None
-                    compare_config = config
-                    if _partial_ratio_gender_only() and not (
-                        _entry_type_has_active_gender(current_entry)
-                        and _entry_type_has_active_gender(seen_entry)
-                    ):
-                        compare_config = no_partial_config
-                        if compare_config is None:
-                            compare_config = dict(config)
-                            compare_config["algorithms"] = [a for a in config.get("algorithms", []) if a != "partial"]
-                    score = calculate_similarity_with_config(cleaned_name, seen_clean, compare_config)
-
-                    if score >= fuzzy_threshold and score > best_score:
-                        best_score = score
-                        best_match = seen_original
-
+            
+            for seen_item in seen_raw_names:
+                seen_clean = seen_item[0]
+                seen_original = seen_item[1]
+                seen_entry = seen_item[2] if len(seen_item) > 2 else None
+                compare_config = config
+                if _partial_ratio_gender_only() and not (
+                    _entry_type_has_active_gender(current_entry)
+                    and _entry_type_has_active_gender(seen_entry)
+                ):
+                    compare_config = dict(config)
+                    compare_config["algorithms"] = [a for a in config.get("algorithms", []) if a != "partial"]
+                # Use multi-algorithm similarity scoring
+                score = calculate_similarity_with_config(cleaned_name, seen_clean, compare_config)
+                
+                if score >= fuzzy_threshold and score > best_score:
+                    best_score = score
+                    best_match = seen_original
+            
             return (best_score >= fuzzy_threshold, best_score, best_match)
         except ImportError:
             # Fallback to basic if advanced module not available
@@ -4540,21 +4487,6 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
         from rapidfuzz import fuzz
     else:
         import difflib
-
-    advanced_config = None
-    no_partial_config = None
-    if os.getenv('GLOSSARY_USE_ADVANCED_DETECTION', '1') == '1':
-        try:
-            from duplicate_detection_config import get_duplicate_detection_config
-            advanced_config = get_duplicate_detection_config()
-            if _partial_ratio_gender_only():
-                no_partial_config = dict(advanced_config)
-                no_partial_config["algorithms"] = [
-                    a for a in advanced_config.get("algorithms", []) if a != "partial"
-                ]
-        except ImportError:
-            advanced_config = None
-            no_partial_config = None
     
     seen_raw_names = []  # List of (cleaned_name, original_raw_name) tuples
     raw_name_to_indices = {}  # raw_name -> list of indices in deduplicated
@@ -4651,13 +4583,7 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz, d
                 continue
 
         is_duplicate, best_score, best_match = _find_best_duplicate_match(
-            cleaned_name,
-            seen_raw_names,
-            fuzzy_threshold,
-            use_rapidfuzz,
-            entry,
-            advanced_config,
-            no_partial_config,
+            cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz, entry
         )
         
         if is_duplicate:
@@ -6898,11 +6824,6 @@ def main(log_callback=None, stop_callback=None):
                             if unit is None:
                                 continue
 
-                            # Refill freed slot ASAP (unless graceful stop is active)
-                            if os.environ.get('GRACEFUL_STOP') != '1':
-                                while len(active_futures) < effective_aggressive_batch_size and _submit_next():
-                                    pass
-
                             _handle_future_result(future, unit)
                             if stopped_early:
                                 break
@@ -6911,6 +6832,12 @@ def main(log_callback=None, stop_callback=None):
                                 if not graceful_drain_logged:
                                     print("\u2705 Graceful stop: draining in-flight glossary API calls...")
                                     graceful_drain_logged = True
+                            elif os.environ.get('GRACEFUL_STOP') != '1':
+                                # Refill only after the completed unit has been handled,
+                                # saved, and logged.  The slot represents one full
+                                # glossary work item, not merely one finished HTTP send.
+                                while len(active_futures) < effective_aggressive_batch_size and _submit_next():
+                                    pass
 
                         if stopped_early:
                             break

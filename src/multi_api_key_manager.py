@@ -4,8 +4,18 @@ Multi API Key Manager for Glossarion
 Handles multiple API keys with round-robin load balancing and rate limit management
 """
 
+import os
+import sys
+
 # GUI imports - optional for Discord bot
+_HEADLESS_IMPORT = (
+    os.environ.get("GLOSSARION_HEADLESS_KEY_MANAGER", "0") == "1"
+    or "--run-glossary-extraction" in sys.argv
+)
+
 try:
+    if _HEADLESS_IMPORT:
+        raise ImportError("headless key-manager import requested")
     from PySide6.QtCore import QMetaObject, Q_ARG
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QLabel, QPushButton, QLineEdit,
@@ -33,8 +43,40 @@ except ImportError:
     QInputDialog = object
     QTreeWidget = object
     QTreeWidgetItem = object
+    QMainWindow = object
+    QTextEdit = object
+    QScrollArea = object
+    QFileDialog = object
+    QMessageBox = object
+    QComboBox = object
+    QVBoxLayout = object
+    QHBoxLayout = object
+    QGridLayout = object
+    QGroupBox = object
+    QDoubleSpinBox = object
+    QAbstractItemView = object
+    QHeaderView = object
+    QMenu = object
+    QFrame = object
+    QCompleter = object
+    QDialogButtonBox = object
+    QIcon = object
+    QFont = object
+    QPixmap = object
+    QShortcut = object
+    QKeySequence = object
+    QTransform = object
+    QPropertyAnimation = object
+    QEasingCurve = object
+    QMetaObject = None
+    Q_ARG = None
+    Signal = None
+    Qt = type("Qt", (), {"QueuedConnection": None, "AlignLeft": 0})
+    QTimer = type("QTimer", (), {"singleShot": staticmethod(lambda *args, **kwargs: None)})
+    Slot = lambda *args, **kwargs: (lambda func: func)
+    create_icon_label = lambda *args, **kwargs: None
+    animate_icon = lambda *args, **kwargs: None
 import json
-import os
 import threading
 import time
 import queue
@@ -45,6 +87,8 @@ import logging
 from model_options import get_model_options
 # Dialog for configuring per-key endpoint
 try:
+    if _HEADLESS_IMPORT:
+        raise ImportError("headless key-manager import requested")
     from individual_endpoint_dialog import IndividualEndpointDialog
 except Exception:
     IndividualEndpointDialog = None
