@@ -484,7 +484,7 @@ class APIKeyPool:
                                     if not self._keys_in_use[k_idx]:
                                         del self._keys_in_use[k_idx]
 
-                        print(f"[Thread-{thread_name}] Assigned {key_id}")
+                        print(f"[Thread-{thread_name}] 🔑 Assigned {key_id}")
                         # logger.debug("💤 Pausing briefly to improve retry responsiveness after key assignment")
                         time.sleep(0.0001)  # Tiny yield for scheduler fairness without serializing workers
                         return key, key_index, key_id

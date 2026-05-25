@@ -4215,7 +4215,7 @@ class UnifiedClient:
                 if self._api_key_pool and hasattr(self._api_key_pool, '_rate_limit_cache'):
                     is_limited = self._api_key_pool._rate_limit_cache.is_rate_limited(key_id)
                 if key.is_available() and not is_limited:
-                    print(f"[{thread_name}] Assigned {key_id} (fallback)")
+                    print(f"[{thread_name}] 🔑 Assigned {key_id} (fallback)")
                     return (key, current_idx)
             
             # No available keys

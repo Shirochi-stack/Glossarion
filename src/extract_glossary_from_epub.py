@@ -6420,7 +6420,18 @@ def main(log_callback=None, stop_callback=None):
                 print(f"\n🔄 Processing Batch {batch_num+1}/{total_batches} ({len(current_batch_units)} merged groups, {chapters_in_batch} chapters)")
             else:
                 current_batch = [unit[0] for unit in current_batch_units]
-                print(f"\n🔄 Processing Batch {batch_num+1}/{total_batches} (Chapters: {[idx+1 for idx, _ in current_batch]})")
+                chapter_nums = sorted(idx + 1 for idx, _ in current_batch)
+                # Collapse consecutive chapter numbers into ranges (e.g. 168–171)
+                ranges = []
+                i = 0
+                while i < len(chapter_nums):
+                    start = chapter_nums[i]
+                    while i + 1 < len(chapter_nums) and chapter_nums[i + 1] == chapter_nums[i] + 1:
+                        i += 1
+                    end = chapter_nums[i]
+                    ranges.append(str(start) if start == end else f"{start}–{end}")
+                    i += 1
+                print(f"\n🔄 Processing Batch {batch_num+1}/{total_batches} (Chapters: {', '.join(ranges)})")
             print(f"[BATCH] Submitting {len(current_batch_units)} work units for parallel processing...")
             batch_start_time = time.time()
             
