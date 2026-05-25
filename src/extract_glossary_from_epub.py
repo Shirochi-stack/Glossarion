@@ -609,6 +609,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         if hasattr(client, 'cancel_current_operation'):
                             client.cancel_current_operation()
                         
+                        os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
                         # Don't wait for the thread to finish - just raise immediately
                         raise UnifiedClientError("Glossary extraction stopped by user")
                     
@@ -619,9 +620,12 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                                 client._in_cleanup = True
                             if hasattr(client, 'cancel_current_operation'):
                                 client.cancel_current_operation()
+                            os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
                             raise UnifiedClientError(f"API call timed out after {timeout} seconds") from None
         
         except UnifiedClientError as e:
+            if os.environ.get('GRACEFUL_STOP') != '1':
+                os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
             error_msg = str(e)
             
             # Retry transport timeouts, but treat graceful-stop cancellation as a clean skip.
@@ -1017,15 +1021,24 @@ def set_stop_flag(value):
     if not value:
         _glossary_hard_cancel_dispatched = False
         os.environ['TRANSLATION_CANCELLED'] = '0'
+        os.environ['GRACEFUL_STOP'] = '0'
+        os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
+        os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
         
         # Also clear UnifiedClient global flag
         try:
             import unified_api_client
+            if hasattr(unified_api_client, 'set_stop_flag'):
+                unified_api_client.set_stop_flag(False)
             if hasattr(unified_api_client, 'UnifiedClient'):
                 unified_api_client.UnifiedClient._global_cancelled = False
         except:
             pass
     else:
+        os.environ['TRANSLATION_CANCELLED'] = '1'
+        os.environ['GRACEFUL_STOP'] = '0'
+        os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
+        os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
         # Propagate stop to UnifiedClient (for streaming cancellation)
         try:
             import unified_api_client

@@ -2274,9 +2274,9 @@ def _on_clean_image_clicked(self):
             self._log("⚠️ No image loaded for cleaning", "warning")
             return
 
-        # Disable the clean button to prevent multiple clicks
+        # Disable all workflow buttons and show stop button
+        _disable_workflow_buttons(self)
         if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'clean_btn'):
-            self.image_preview_widget.clean_btn.setEnabled(False)
             self.image_preview_widget.clean_btn.setText("Cleaning...")
 
         # Determine base image path from the preview's current image. Do not
@@ -2771,44 +2771,43 @@ def _restore_clean_button(self):
             image_path = getattr(self.image_preview_widget, 'current_image_path', None)
         _remove_processing_overlay(self, image_path)
         
-        if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'clean_btn'):
-            self.image_preview_widget.clean_btn.setEnabled(True)
-            self.image_preview_widget.clean_btn.setText("Clean")
+        # Re-enable all workflow buttons and hide stop button
+        _enable_workflow_buttons(self)
+        
+        # Switch display mode to 'cleaned' so user sees the result
+        try:
+            ipw = self.image_preview_widget
+            ipw.source_display_mode = 'cleaned'
+            ipw.cleaned_images_enabled = True  # Deprecated flag for compatibility
             
-            # Switch display mode to 'cleaned' so user sees the result
-            try:
-                ipw = self.image_preview_widget
-                ipw.source_display_mode = 'cleaned'
-                ipw.cleaned_images_enabled = True  # Deprecated flag for compatibility
-                
-                # Update the toggle button appearance to match 'cleaned' state
-                if hasattr(ipw, 'cleaned_toggle_btn') and ipw.cleaned_toggle_btn:
-                    ipw.cleaned_toggle_btn.setText("🧽")  # Sponge for cleaned
-                    ipw.cleaned_toggle_btn.setToolTip("Showing cleaned images (click to cycle)")
-                    ipw.cleaned_toggle_btn.setStyleSheet("""
-                        QToolButton {
-                            background-color: #4a7ba7;
-                            border: 2px solid #5a9fd4;
-                            font-size: 12pt;
-                            min-width: 32px;
-                            min-height: 32px;
-                            max-width: 36px;
-                            max-height: 36px;
-                            padding: 3px;
-                            border-radius: 3px;
-                            color: white;
-                        }
-                        QToolButton:hover {
-                            background-color: #5a9fd4;
-                        }
-                    """)
-                
-                # Reload the image to show the cleaned version
-                if image_path:
-                    ipw.load_image(image_path, preserve_rectangles=True, preserve_text_overlays=True)
-                print(f"[CLEAN_RESTORE] Switched display mode to 'cleaned'")
-            except Exception as mode_err:
-                print(f"[CLEAN_RESTORE] Failed to switch display mode: {mode_err}")
+            # Update the toggle button appearance to match 'cleaned' state
+            if hasattr(ipw, 'cleaned_toggle_btn') and ipw.cleaned_toggle_btn:
+                ipw.cleaned_toggle_btn.setText("🧽")  # Sponge for cleaned
+                ipw.cleaned_toggle_btn.setToolTip("Showing cleaned images (click to cycle)")
+                ipw.cleaned_toggle_btn.setStyleSheet("""
+                    QToolButton {
+                        background-color: #4a7ba7;
+                        border: 2px solid #5a9fd4;
+                        font-size: 12pt;
+                        min-width: 32px;
+                        min-height: 32px;
+                        max-width: 36px;
+                        max-height: 36px;
+                        padding: 3px;
+                        border-radius: 3px;
+                        color: white;
+                    }
+                    QToolButton:hover {
+                        background-color: #5a9fd4;
+                    }
+                """)
+            
+            # Reload the image to show the cleaned version
+            if image_path:
+                ipw.load_image(image_path, preserve_rectangles=True, preserve_text_overlays=True)
+            print(f"[CLEAN_RESTORE] Switched display mode to 'cleaned'")
+        except Exception as mode_err:
+            print(f"[CLEAN_RESTORE] Failed to switch display mode: {mode_err}")
     except Exception:
         pass
 
@@ -4359,11 +4358,11 @@ def _on_recognize_text_clicked(self):
             print("[DEBUG] No image loaded - returning early")
             return
         
-        # Disable the recognize button to prevent multiple clicks
+        # Disable all workflow buttons and show stop button
+        _disable_workflow_buttons(self)
         print(f"[DEBUG] Has recognize_btn: {hasattr(self.image_preview_widget, 'recognize_btn')}")
         if hasattr(self.image_preview_widget, 'recognize_btn'):
             print(f"[DEBUG] Disabling recognize button")
-            self.image_preview_widget.recognize_btn.setEnabled(False)
             self.image_preview_widget.recognize_btn.setText("Recognizing...")
         else:
             print("[DEBUG] No recognize_btn found!")
@@ -4546,9 +4545,8 @@ def _restore_recognize_button(self):
             image_path = getattr(self.image_preview_widget, 'current_image_path', None)
         _remove_processing_overlay(self, image_path)
         
-        if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'recognize_btn'):
-            self.image_preview_widget.recognize_btn.setEnabled(True)
-            self.image_preview_widget.recognize_btn.setText("Recognize Text")
+        # Re-enable all workflow buttons and hide stop button
+        _enable_workflow_buttons(self)
     except Exception:
         pass
 
@@ -11385,12 +11383,18 @@ def _disable_workflow_buttons(self, exclude=None, show_stop_button=True):
             self.start_button.setEnabled(False)
         
         # Show the stop button when workflow operations start (not for Start Translation)
-        if show_stop_button and hasattr(ipw, 'stop_translation_btn'):
+        # Suppress the stop button while models are still loading — stopping during
+        # inpainter/bubble-detector load causes hard failures.
+        models_still_loading = (
+            getattr(self, '_waiting_for_model', False)
+            or not getattr(self, '_preload_complete', True)
+        )
+        if show_stop_button and not models_still_loading and hasattr(ipw, 'stop_translation_btn'):
             ipw.stop_translation_btn.setVisible(True)
             ipw.stop_translation_btn.setEnabled(True)
             ipw.stop_translation_btn.setText("⏹ Stop")
         
-        print(f"[WORKFLOW] Disabled workflow buttons (exclude={exclude}, show_stop={show_stop_button})")
+        print(f"[WORKFLOW] Disabled workflow buttons (exclude={exclude}, show_stop={show_stop_button}, models_loading={models_still_loading})")
     except Exception as e:
         print(f"[WORKFLOW] Error disabling buttons: {e}")
 

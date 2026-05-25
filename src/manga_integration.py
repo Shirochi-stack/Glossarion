@@ -1181,20 +1181,15 @@ class MangaTranslationTab(QObject):
 
             if hasattr(self, 'start_button') and self.start_button:
                 self.start_button.setEnabled(False)
-                if hasattr(self, 'start_button_text'):
-                    self.start_button_text.setText("Inpainter failed")
 
+            # Disable inpainting-dependent buttons but keep their normal labels.
+            # The failure is already communicated via the status label and logs.
             if hasattr(self, 'image_preview_widget'):
                 ipw = self.image_preview_widget
-                for attr, text in (
-                    ('translate_btn', 'Inpainter failed'),
-                    ('translate_all_btn', 'Inpainter failed'),
-                    ('clean_btn', 'Inpainter failed'),
-                ):
+                for attr in ('translate_btn', 'translate_all_btn', 'clean_btn'):
                     btn = getattr(ipw, attr, None)
                     if btn:
                         btn.setEnabled(False)
-                        btn.setText(text)
         except Exception as e:
             print(f"[BUTTON_STATE] Error setting inpainter failure state: {e}")
     

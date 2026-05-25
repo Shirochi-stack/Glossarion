@@ -16682,7 +16682,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
             QMessageBox.warning(self, "Process Running", "Please wait for translation to complete before extracting glossary.")
             return
         
-        if self.glossary_thread and self.glossary_thread.is_alive():
+        glossary_thread_running = bool(
+            self.glossary_thread
+            and getattr(self.glossary_thread, 'is_alive', lambda: False)()
+        )
+        glossary_future_running = bool(
+            getattr(self, 'glossary_future', None)
+            and hasattr(self.glossary_future, 'done')
+            and not self.glossary_future.done()
+        )
+        if glossary_thread_running or glossary_future_running:
             self.stop_glossary_extraction()
             return
         
@@ -19686,6 +19695,10 @@ Important rules:
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
         if graceful_stop:
             os.environ['TRANSLATION_CANCELLED'] = '0'
+        else:
+            os.environ['TRANSLATION_CANCELLED'] = '1'
+            os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
+            os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
         wait_for_chunks = getattr(self, 'wait_for_chunks_var', False) and graceful_stop
         os.environ['WAIT_FOR_CHUNKS'] = '1' if wait_for_chunks else '0'
         self.graceful_stop_active = graceful_stop
