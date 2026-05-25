@@ -4926,8 +4926,9 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                     sleep_time = thread_delay - time_since_last
                     thread_name = threading.current_thread().name
                     
-                    # PRINT BEFORE THE DELAY STARTS
-                    print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.5f}s for Chapter {idx+1}")
+                    # Only log delays large enough to be useful in the GUI log.
+                    if sleep_time >= 0.1:
+                        print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.5f}s for Chapter {idx+1}")
                     
                     # Interruptible sleep - check stop flag every 0.1 seconds
                     elapsed = 0

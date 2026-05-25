@@ -502,8 +502,7 @@ class APIKeyPool:
             with self.key_locks.get(key_index, threading.Lock()):
                 self.keys[key_index].mark_success()
 
-                key = self.keys[key_index]
-                logger.debug(f"Marked key {key_index} ({key.model}) as successful")
+                # logger.debug(f"Marked key {key_index} ({self.keys[key_index].model}) as successful")
 
     def release_thread_assignment(self, thread_id: int = None):
         """Release key assignment for a thread"""
@@ -523,7 +522,7 @@ class APIKeyPool:
                         if not self._keys_in_use[key_index]:
                             del self._keys_in_use[key_index]
 
-                logger.debug(f"Released key assignment for thread {thread_id}")
+                # logger.debug(f"Released key assignment for thread {thread_id}")
 
     def get_all_keys(self) -> List[APIKeyEntry]:
         """Get all keys in the pool"""

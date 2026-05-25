@@ -1601,6 +1601,7 @@ class UnifiedClient:
             return False
         # 2) Safety indicators in raw response/error details
         response_str = ""
+        response_is_exception = isinstance(response, BaseException)
         if response is not None:
             if hasattr(response, 'raw_response') and response.raw_response is not None:
                 response_str = str(response.raw_response).lower()
@@ -1633,7 +1634,10 @@ class UnifiedClient:
                 return True
         # 4) Provider-specific empty behavior (can be disabled via toggle)
         if os.getenv('DISABLE_EMPTY_SAFETY_HEURISTIC', '0') != '1':
-            if provider in ['openai', 'azure', 'electronhub', 'openrouter', 'poe', 'gemini']:
+            if (
+                provider in ['openai', 'azure', 'electronhub', 'openrouter', 'poe', 'gemini']
+                and not response_is_exception
+            ):
                 # Exclude known model errors that are NOT safety filters
                 _non_safety_reasons = {
                     'error',
@@ -20381,7 +20385,34 @@ class UnifiedClient:
             max_tokens_adjusted = False
             for attempt in range(max_retries):
                 client = None
+                resp = None
+                underlying = None
                 fresh_sdk_client = False
+                def _close_fresh_sdk_client_now():
+                    if not (fresh_sdk_client and client is not None):
+                        return
+                    try:
+                        if hasattr(client, "close"):
+                            client.close()
+                    except Exception:
+                        pass
+                    try:
+                        if underlying is not None and hasattr(underlying, "close"):
+                            underlying.close()
+                    except Exception:
+                        pass
+                    try:
+                        with self._all_openai_clients_lock:
+                            self._all_openai_clients.discard(client)
+                    except Exception:
+                        pass
+                    try:
+                        if underlying is not None:
+                            with self._all_httpx_clients_lock:
+                                self._all_httpx_clients.discard(underlying)
+                    except Exception:
+                        pass
+
                 try:
                     # Check all stop sources (global flag, class-level, instance-level, etc.)
                     if self._is_stop_requested():
@@ -20455,7 +20486,7 @@ class UnifiedClient:
                                 self._all_httpx_clients.add(underlying)
                     except Exception:
                         pass
-                    
+
                     # Check if this is Gemini via OpenAI endpoint
                     is_gemini_endpoint = provider == "gemini-openai" or effective_model.lower().startswith('gemini')
                     
@@ -21703,6 +21734,10 @@ class UnifiedClient:
                                 self._active_streams.discard(resp)
                         except Exception:
                             pass
+                        try:
+                            _close_fresh_sdk_client_now()
+                        except Exception:
+                            pass
                         
                         # Count thinking tokens from accumulated text
                         if oai_thinking_chunks > 0 and not self._is_stop_requested():
@@ -22017,6 +22052,15 @@ class UnifiedClient:
                     )
                     
                 except Exception as e:
+                    try:
+                        if use_streaming and resp is not None:
+                            if hasattr(resp, 'close'):
+                                resp.close()
+                            with self._active_streams_lock:
+                                self._active_streams.discard(resp)
+                            _close_fresh_sdk_client_now()
+                    except Exception:
+                        pass
                     # Check for stop request after API call returns
                     if self._is_stop_requested():
                         self._cancelled = True
@@ -22307,30 +22351,17 @@ class UnifiedClient:
                         raise UnifiedClientError(f"{provider} error: {e}", error_type="api_error")
                     raise UnifiedClientError(f"{provider} SDK error: {e}")
                 finally:
-                    if fresh_sdk_client and client is not None:
-                        # Ensure no pooled connections are reused across calls (all SDK providers).
+                    # Non-streaming responses are fully materialized by create().
+                    # Streaming responses must keep the SDK/httpx client alive
+                    # until after the iterator is consumed; closing here can
+                    # produce WinError 10038 ("not a socket") mid-stream.
+                    try:
+                        _defer_stream_close = bool(use_streaming and resp is not None)
+                    except Exception:
+                        _defer_stream_close = False
+                    if not _defer_stream_close:
                         try:
-                            if hasattr(client, "close"):
-                                client.close()
-                        except Exception:
-                            pass
-                        try:
-                            underlying = getattr(client, "_client", None)
-                            if underlying is not None and hasattr(underlying, "close"):
-                                underlying.close()
-                        except Exception:
-                            pass
-
-                        # Remove from global tracking sets (best-effort)
-                        try:
-                            with self._all_openai_clients_lock:
-                                self._all_openai_clients.discard(client)
-                        except Exception:
-                            pass
-                        try:
-                            if underlying is not None:
-                                with self._all_httpx_clients_lock:
-                                    self._all_httpx_clients.discard(underlying)
+                            _close_fresh_sdk_client_now()
                         except Exception:
                             pass
         else:
