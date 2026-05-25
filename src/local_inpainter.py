@@ -100,14 +100,18 @@ except ImportError:
 # on first use inside load_onnx_model().
 ONNX_CPP_AVAILABLE = False  # Kept for backward compat; real check is lazy in load_onnx_model
 
-# Bubble detector - optional
+# Bubble detector - optional.  Availability is checked lazily via
+# importlib.util.find_spec so that importing this module does NOT pull in the
+# entire bubble_detector ML stack (huggingface_hub, transformers, pydot, ONNX).
+# This matters for subprocess workers (e.g. glossary generation) that import
+# local_inpainter transitively but never use the bubble detector.
 BUBBLE_DETECTOR_AVAILABLE = False
 try:
-    from bubble_detector import BubbleDetector
-    BUBBLE_DETECTOR_AVAILABLE = True
-    logger.info("✓ Bubble detector available")
-except ImportError:
-    logger.info("Bubble detector not available - basic inpainting will be used")
+    import importlib.util as _ilu
+    if _ilu.find_spec("bubble_detector") is not None:
+        BUBBLE_DETECTOR_AVAILABLE = True
+except Exception:
+    pass
 
 
 # JIT Model URLs (for automatic download)
@@ -820,6 +824,7 @@ class LocalInpainter:
         # Initialize bubble detector if available
         if BUBBLE_DETECTOR_AVAILABLE:
             try:
+                from bubble_detector import BubbleDetector
                 self.bubble_detector = BubbleDetector()
                 logger.info("🗨️ Bubble detection available")
             except:
@@ -5137,6 +5142,7 @@ class LocalInpainter:
             return False
         
         if self.bubble_detector is None:
+            from bubble_detector import BubbleDetector
             self.bubble_detector = BubbleDetector()
         
         if self.bubble_detector.load_model(model_path):

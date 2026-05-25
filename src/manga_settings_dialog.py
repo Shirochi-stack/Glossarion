@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
 from PySide6.QtCore import Qt, Signal, QTimer, QEvent, QObject, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QIcon, QPixmap, QImage, QPainter, QColor
 from typing import Dict, Any, Optional, Callable
-from bubble_detector import BubbleDetector
 import logging
 import time
 import copy

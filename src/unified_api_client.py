@@ -7903,11 +7903,11 @@ class UnifiedClient:
         # Try to load from config file
         try:
             # Try to import CONFIG_FILE path, but don't fail if GUI isn't available
-            try:
-                from translator_gui import CONFIG_FILE
-            except (ImportError, SystemExit):
-                # GUI not available, use default config path
-                CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.json')
+            # Resolve config path WITHOUT importing translator_gui (which
+            # drags in manga_integration -> manga_translator -> bubble_detector
+            # and the entire ML stack, causing ~15s of heavy imports in
+            # subprocesses that never need the GUI).
+            CONFIG_FILE = os.environ.get('CONFIG_FILE') or os.path.join(os.path.dirname(__file__), 'config.json')
             
             if os.path.exists(CONFIG_FILE):
                 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
