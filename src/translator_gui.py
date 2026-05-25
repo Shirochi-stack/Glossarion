@@ -75,72 +75,6 @@ if getattr(sys, 'frozen', False):
     # to future maintainers: don't try to rmtree `sys._MEIPASS` from inside
     # the frozen process, it only makes the bootloader's own cleanup fail.
 
-# Fast worker-mode dispatch for manual glossary extraction subprocesses.
-# Keep this before GUI/manga imports so glossary workers do not import OCR/ML
-# modules such as bubble_detector, huggingface_hub, torch, or pydot.
-if '--run-glossary-extraction' in sys.argv:
-    _glossary_worker_exit_code = 1
-    try:
-        os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
-        os.environ['GLOSSARION_HEADLESS_KEY_MANAGER'] = '1'
-        try:
-            _env_file = None
-            _new_argv = [sys.argv[0]]
-            _skip_next = False
-            for _idx, _arg in enumerate(sys.argv[1:]):
-                if _skip_next:
-                    _skip_next = False
-                    continue
-                if _arg == '--run-glossary-extraction':
-                    continue
-                if _arg == '--glossary-env-file':
-                    _real_idx = _idx + 1
-                    if len(sys.argv) > _real_idx + 1:
-                        _env_file = sys.argv[_real_idx + 1]
-                    _skip_next = True
-                    continue
-                _new_argv.append(_arg)
-            sys.argv = _new_argv
-
-            if _env_file:
-                try:
-                    import json as _glossary_env_json
-                    with open(_env_file, 'r', encoding='utf-8') as _f:
-                        _env_updates = _glossary_env_json.load(_f)
-                    if isinstance(_env_updates, dict):
-                        for _k, _v in _env_updates.items():
-                            os.environ[str(_k)] = "" if _v is None else str(_v)
-                finally:
-                    try:
-                        os.remove(_env_file)
-                    except Exception:
-                        pass
-        except Exception as _env_e:
-            try:
-                print(f"[ERROR] Failed to load glossary worker env: {_env_e}")
-            except Exception:
-                pass
-
-        from extract_glossary_from_epub import main as _glossary_extract_main
-        _result = _glossary_extract_main()
-        try:
-            sys.stdout.flush()
-            sys.stderr.flush()
-        except Exception:
-            pass
-        _glossary_worker_exit_code = 0 if _result is None else int(_result)
-    except SystemExit as _e:
-        _code = getattr(_e, 'code', 0)
-        _glossary_worker_exit_code = int(_code) if isinstance(_code, int) else (0 if _code in (None, '') else 1)
-    except Exception as _e:
-        try:
-            print(f"[ERROR] Glossary extraction worker failed: {_e}")
-        except Exception:
-            pass
-        _glossary_worker_exit_code = 1
-    finally:
-        sys.exit(_glossary_worker_exit_code)
-
 # --- Helper utilities to quiet PyInstaller temp-dir warnings & stray children ---
 def _kill_child_process_tree(timeout=1.5):
     """Terminate all child processes of the current process to free _MEIPASS locks.
@@ -644,6 +578,7 @@ if '--run-pdf-extraction' in sys.argv:
     finally:
         sys.exit(0)
 
+
 # Enforce a 400 MB cap on app-local debug caches (Payloads/, http_requests/).
 # Runs at startup (background thread) and again at exit. Both runs log a
 # [CLEANUP] line per folder when anything is actually deleted. See
@@ -684,13 +619,13 @@ try:
 except Exception:
     pass
     
-# Manga translation support (optional).  Import on normal GUI startup so the
-# manga stack is ready immediately; glossary worker mode exits above this block.
+# Manga translation support (optional)
 try:
     from manga_integration import MangaTranslationTab
     MANGA_SUPPORT = True
-except Exception:
+except ImportError:
     MANGA_SUPPORT = False
+    print("Manga translation modules not found.")
 
 # Async processing support (lazy loaded)
 ASYNC_SUPPORT = False
@@ -2783,14 +2718,6 @@ Text to analyze:
                         self._glossary_thread.join(timeout=1.0)
                 except:
                     pass
-
-            try:
-                proc = getattr(self, 'glossary_process', None)
-                if proc and proc.poll() is None:
-                    print("[CLEANUP] Stopping glossary subprocess...")
-                    proc.terminate()
-            except Exception:
-                pass
             
             # Stop executor if it exists
             if hasattr(self, 'executor') and self.executor:
@@ -3240,7 +3167,7 @@ Text to analyze:
             from PySide6.QtCore import Qt
         except ImportError:
             QMessageBox.critical(self, "Missing Dependency", 
-                               "Manga translation dependencies are missing.")
+                               "PySide6 is required for manga translation. Please install it:\npip install PySide6")
             return
 
         # If dialog already exists, just show and focus it to preserve exact state
@@ -9377,7 +9304,10 @@ Recent translations to summarize:
                 self._set_batching_mode('direct')
             return
 
-        if mode == 'off':
+        if (
+            getattr(self, '_context_forced_batch_mode_source', None) == 'aggressive'
+            and current == 'direct'
+        ):
             self._set_batching_mode('aggressive')
         self._context_forced_batch_mode_source = None
 
@@ -13973,15 +13903,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # Restore original print for main GUI
                     if hasattr(builtins, 'print') and hasattr(builtins.print, '__name__'):
                         if builtins.print.__name__ == 'manga_print':
-                            # Print is hijacked, restore it.  Do not import the
-                            # manga stack here; it is loaded at GUI startup.
-                            import sys
-                            _manga_mod = sys.modules.get('manga_translator')
-                            MangaTranslator = getattr(_manga_mod, 'MangaTranslator', None)
-                            if MangaTranslator is not None and hasattr(MangaTranslator, '_original_print_backup'):
+                            # Print is hijacked, restore it
+                            from manga_translator import MangaTranslator
+                            if hasattr(MangaTranslator, '_original_print_backup'):
                                 builtins.print = MangaTranslator._original_print_backup
                                 # Also restore in unified_api_client
                                 try:
+                                    import sys
                                     import unified_api_client
                                     uc_module = sys.modules.get('unified_api_client')
                                     if uc_module:
@@ -16689,16 +16617,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             QMessageBox.warning(self, "Process Running", "Please wait for translation to complete before extracting glossary.")
             return
         
-        glossary_thread_running = bool(
-            self.glossary_thread
-            and getattr(self.glossary_thread, 'is_alive', lambda: False)()
-        )
-        glossary_future_running = bool(
-            getattr(self, 'glossary_future', None)
-            and hasattr(self.glossary_future, 'done')
-            and not self.glossary_future.done()
-        )
-        if glossary_thread_running or glossary_future_running:
+        if self.glossary_thread and self.glossary_thread.is_alive():
             self.stop_glossary_extraction()
             return
         
@@ -16793,15 +16712,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # Restore original print for main GUI
                     if hasattr(builtins, 'print') and hasattr(builtins.print, '__name__'):
                         if builtins.print.__name__ == 'manga_print':
-                            # Print is hijacked, restore it.  Do not import the
-                            # manga stack here; it is loaded at GUI startup.
-                            import sys
-                            _manga_mod = sys.modules.get('manga_translator')
-                            MangaTranslator = getattr(_manga_mod, 'MangaTranslator', None)
-                            if MangaTranslator is not None and hasattr(MangaTranslator, '_original_print_backup'):
+                            # Print is hijacked, restore it
+                            from manga_translator import MangaTranslator
+                            if hasattr(MangaTranslator, '_original_print_backup'):
                                 builtins.print = MangaTranslator._original_print_backup
                                 # Also restore in unified_api_client
                                 try:
+                                    import sys
                                     import unified_api_client
                                     uc_module = sys.modules.get('unified_api_client')
                                     if uc_module:
@@ -17034,16 +16951,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if self.stop_requested:
                 self._glossary_stop_was_requested = True
             self.stop_requested = False
-            self.graceful_stop_active = False
-            os.environ['GRACEFUL_STOP'] = '0'
-            os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
-            os.environ['WAIT_FOR_CHUNKS'] = '0'
-            try:
-                stop_file = os.environ.get('GLOSSARY_STOP_FILE')
-                if stop_file and os.path.exists(stop_file):
-                    os.remove(stop_file)
-            except Exception:
-                pass
             if glossary_stop_flag:
                 glossary_stop_flag(False)
             
@@ -18118,6 +18025,13 @@ Important rules:
                         os.environ['MAX_INPUT_TOKENS'] = '50000'
                         self.append_log(f"🎯 Input Token Limit: 50000 (default)")
                 
+                sys.argv = [
+                    'extract_glossary_from_epub.py',
+                    '--epub', file_path,
+                    '--output', output_path,
+                    '--config', CONFIG_FILE
+                ]
+                
                 self.append_log(f"🚀 Extracting glossary from: {os.path.basename(file_path)}")
                 self.append_log(f"📤 Output Token Limit: {resolved_glossary_tokens} ({'glossary override' if str(glossary_token_cfg) != '-1' else 'global'})")
                 format_parts = ["type", "raw_name", "translated_name", "gender"]
@@ -18138,252 +18052,48 @@ Important rules:
                 
                 os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
                 
-                # Run the manual text glossary extractor out-of-process. This keeps
-                # EPUB parsing, tokenization, and dedupe CPU work out of the Qt
-                # process, and the worker flag keeps PyInstaller .exe builds safe.
-                def run_glossary_subprocess():
-                    env_delta = {
-                        k: v for k, v in os.environ.items()
-                        if old_env.get(k) != v
-                    }
-                    env_delta['QUIET_LOGS'] = '0'
-                    env_delta['GRACEFUL_STOP_HTTP_SUPPRESS'] = '0'
-                    env_file = None
-                    try:
-                        import subprocess
-                        import tempfile
+                # Enhanced stop callback that checks both flags
+                def enhanced_stop_callback():
+                    """Stop callback for glossary extraction.
 
-                        with tempfile.NamedTemporaryFile(
-                            mode='w',
-                            encoding='utf-8',
-                            delete=False,
-                            prefix='glossarion_glossary_env_',
-                            suffix='.json'
-                        ) as _env_f:
-                            json.dump(env_delta, _env_f, ensure_ascii=False)
-                            env_file = _env_f.name
-
-                        if getattr(sys, 'frozen', False):
-                            cmd = [
-                                sys.executable,
-                                '--run-glossary-extraction',
-                                '--glossary-env-file', env_file,
-                                '--epub', file_path,
-                                '--output', output_path,
-                                '--config', CONFIG_FILE,
-                            ]
-                        else:
-                            cmd = [
-                                sys.executable,
-                                '-u',
-                                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'extract_glossary_from_epub.py'),
-                                '--glossary-env-file', env_file,
-                                '--epub', file_path,
-                                '--output', output_path,
-                                '--config', CONFIG_FILE,
-                            ]
-
-                        child_env = old_env.copy()
-                        child_env['PYTHONUNBUFFERED'] = '1'
-                        child_env['PYTHONIOENCODING'] = 'utf-8'
-                        child_env['QUIET_LOGS'] = '0'
-                        child_env['GRACEFUL_STOP_HTTP_SUPPRESS'] = '0'
-                        child_env.setdefault('PYTHONLEGACYWINDOWSSTDIO', '0')
-                        creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0
-                        self.append_log(f"🚀 Launching glossary subprocess (batch size {glossary_batch_size})")
-
-                        suppress_warning_continuation = False
-                        suppress_http_continuation = False
-
-                        def _forward_worker_log(raw_line):
-                            nonlocal suppress_warning_continuation, suppress_http_continuation
-                            line = str(raw_line or '').rstrip()
-                            if not line:
-                                return
-
-                            stripped = line.strip()
-                            if suppress_http_continuation:
-                                suppress_http_continuation = False
-                                if (
-                                    not stripped.startswith(("INFO:", "DEBUG:", "WARNING:", "ERROR:"))
-                                    and not stripped.startswith(("[", "Chapter", "Done.", "Also saved"))
-                                ):
-                                    return
-
-                            if suppress_warning_continuation:
-                                suppress_warning_continuation = False
-                                if (
-                                    stripped.startswith("warnings.warn(")
-                                    or stripped.startswith("for root_file in")
-                                    or stripped.startswith("warnings.warn")
-                                ):
-                                    return
-
-                            noisy_prefixes = (
-                                "[HTTP Logger] Enabled",
-                                "DEBUG:httpcore.",
-                                "DEBUG:httpcore:",
-                                "DEBUG:httpx:",
-                                "DEBUG:unified_api_client:",
-                                "INFO:unified_api_client:",
-                            )
-                            if stripped.startswith("INFO:httpx:"):
-                                if "HTTP Request:" in stripped:
-                                    http_msg = stripped.split("INFO:httpx:", 1)[1].strip()
-                                    self.append_log(http_msg)
-                                return
-                            if stripped.startswith(("INFO:unified_api_client:", "DEBUG:unified_api_client:")):
-                                api_msg = stripped.split(":", 2)[2].strip() if stripped.count(":") >= 2 else stripped
-                                lifecycle_markers = (
-                                    "Queued ",
-                                    "API call in progress",
-                                    "thinking=",
-                                    "SDK stream start",
-                                    "SDK stream opened",
-                                    "HTTP Request:",
-                                    "[GLOSSARY KEYS]",
-                                    "(glossary-key)",
-                                )
-                                if any(marker in api_msg for marker in lifecycle_markers):
-                                    self.append_log(api_msg)
-                                return
-                            if stripped.startswith(noisy_prefixes):
-                                if "return_value=" in stripped or "request=<" in stripped:
-                                    suppress_http_continuation = True
-                                return
-                            if "DPI scaling configured" in stripped:
-                                return
-                            if "site-packages\\ebooklib\\epub.py:" in line or "site-packages/ebooklib/epub.py:" in line:
-                                suppress_warning_continuation = True
-                                return
-                            if "Processing Batch" in stripped and "(Chapters:" in stripped and len(stripped) > 400:
-                                chapter_nums = re.findall(r'\d+', stripped.split("(Chapters:", 1)[1])
-                                batch_head = stripped.split("(Chapters:", 1)[0].rstrip()
-                                if chapter_nums:
-                                    preview = ", ".join(chapter_nums[:8])
-                                    remaining = max(0, len(chapter_nums) - 8)
-                                    suffix = f", +{remaining} more" if remaining else ""
-                                    self.append_log(f"{batch_head} ({len(chapter_nums)} chapters: {preview}{suffix})")
-                                    return
-                            if len(line) > 4000:
-                                self.append_log(f"{line[:4000]} ... [truncated {len(line) - 4000} chars]")
-                                return
-
-                            self.append_log(line)
-
-                        proc = subprocess.Popen(
-                            cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True,
-                            encoding='utf-8',
-                            errors='replace',
-                            bufsize=1,
-                            universal_newlines=True,
-                            env=child_env,
-                            creationflags=creationflags,
-                        )
-                        self.glossary_process = proc
-
-                        hard_stop_logged = False
-                        while True:
-                            if self.stop_requested and not bool(getattr(self, 'graceful_stop_active', False)):
-                                if not hard_stop_logged:
-                                    self.append_log("🛑 Immediate stop requested — waiting for glossary worker cleanup/dedupe")
-                                    hard_stop_logged = True
-                                if proc.poll() is not None:
-                                    break
-
-                            line = proc.stdout.readline() if proc.stdout else ''
-                            if line:
-                                _forward_worker_log(line)
-                                continue
-
-                            if proc.poll() is not None:
-                                break
-
-                            time.sleep(0.05)
-
-                        try:
-                            if proc.stdout:
-                                for line in proc.stdout:
-                                    if line:
-                                        _forward_worker_log(line)
-                        except Exception:
-                            pass
-
-                        return_code = proc.wait(timeout=5)
-                        if return_code != 0 and not self.stop_requested:
-                            self.append_log(f"Glossary subprocess exited with code {return_code}")
-                            return False
-                        return True
-                    finally:
-                        try:
-                            self.glossary_process = None
-                        except Exception:
-                            pass
-                        try:
-                            if env_file and os.path.exists(env_file):
-                                os.remove(env_file)
-                        except Exception:
-                            pass
-
-                def run_glossary_in_process():
-                    sys.argv = [
-                        'extract_glossary_from_epub.py',
-                        '--epub', file_path,
-                        '--output', output_path,
-                        '--config', CONFIG_FILE
-                    ]
-
-                    def enhanced_stop_callback():
-                        """Stop callback for glossary extraction.
-
-                        Immediate stop: abort quickly.
-                        Graceful stop: do NOT abort an in-flight API call; stop only once in-flight is idle.
-                        """
-                        if self.stop_requested:
-                            graceful = bool(getattr(self, 'graceful_stop_active', False)) or (os.environ.get('GRACEFUL_STOP') == '1')
-                            if graceful:
-                                try:
-                                    import unified_api_client
-                                    st = unified_api_client.get_api_watchdog_state() or {}
-                                    if int(st.get('in_flight', 0) or 0) > 0:
-                                        return False
-                                except Exception:
+                    Immediate stop: abort quickly.
+                    Graceful stop: do NOT abort an in-flight API call; stop only once in-flight is idle.
+                    """
+                    # Check GUI stop flag
+                    if self.stop_requested:
+                        graceful = bool(getattr(self, 'graceful_stop_active', False)) or (os.environ.get('GRACEFUL_STOP') == '1')
+                        if graceful:
+                            # If any API calls are currently in flight, keep going so they can finish.
+                            try:
+                                import unified_api_client
+                                st = unified_api_client.get_api_watchdog_state() or {}
+                                if int(st.get('in_flight', 0) or 0) > 0:
                                     return False
-                                return True
+                            except Exception:
+                                return False
+                            # No in-flight calls: safe to stop before starting a new one.
                             return True
-
-                        try:
-                            import extract_glossary_from_epub
-                            if hasattr(extract_glossary_from_epub, 'is_stop_requested') and extract_glossary_from_epub.is_stop_requested():
-                                return True
-                        except Exception:
-                            pass
-
-                        return False
-
-                    glossary_main(
-                        log_callback=self.append_log,
-                        stop_callback=enhanced_stop_callback
-                    )
-                    return True
+                        return True
+                        
+                    # Also check if the glossary extraction module has its own stop flag
+                    try:
+                        import extract_glossary_from_epub
+                        if hasattr(extract_glossary_from_epub, 'is_stop_requested') and extract_glossary_from_epub.is_stop_requested():
+                            return True
+                    except:
+                        pass
+                        
+                    return False
 
                 try:
                     # Import traceback for better error info
                     import traceback
-
-                    try:
-                        glossary_batch_size = int(str(self.batch_size_var).replace(',', '').strip() or '1')
-                    except Exception:
-                        glossary_batch_size = 1
-                    glossary_batch_size = max(1, glossary_batch_size)
-
-                    ok = run_glossary_subprocess()
-
-                    if not ok:
-                        return False
+                    
+                    # Run glossary extraction with enhanced stop callback
+                    glossary_main(
+                        log_callback=self.append_log,
+                        stop_callback=enhanced_stop_callback
+                    )
                 except Exception as e:
                     # Get the full traceback
                     tb_lines = traceback.format_exc()
@@ -18427,8 +18137,7 @@ Important rules:
                         has_content = True
                 
                 if has_content:
-                    graceful_stop_finished = bool(getattr(self, 'graceful_stop_active', False)) or (os.environ.get('GRACEFUL_STOP') == '1')
-                    if self.stop_requested and not graceful_stop_finished:
+                    if self.stop_requested:
                         self.append_log(f"⚠️ Partial glossary saved (stopped by user): {output_path}")
                         # Don't return True here so it doesn't count as fully successful, 
                         # but we can track it as partial if needed
@@ -19385,9 +19094,8 @@ Important rules:
                 # Collect inpainter worker PIDs to protect from termination.
                 _protected_pids = set()
                 try:
-                    _manga_mod = sys.modules.get('manga_translator')
-                    MangaTranslator = getattr(_manga_mod, 'MangaTranslator', None)
-                    if MangaTranslator is not None and hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
+                    from manga_translator import MangaTranslator
+                    if hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
                         for _key, _rec in MangaTranslator._inpaint_pool.items():
                             if _rec and 'spares' in _rec:
                                 for _inp in _rec['spares']:
@@ -19424,7 +19132,6 @@ Important rules:
 
                         # Known helper flags / scripts
                         if ("--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s
-                                or "--run-glossary-extraction" in cmd_s or "extract_glossary_from_epub" in cmd_s
                                 or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
                                 or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s):
                             processes_to_terminate.append(child)
@@ -19570,142 +19277,6 @@ Important rules:
             import traceback
             traceback.print_exc()
 
-    def _terminate_glossary_process_tree(self, proc=None, *, grace_seconds=0.8, reason="immediate stop"):
-        """Terminate the glossary worker process and any children it spawned."""
-        proc = proc or getattr(self, 'glossary_process', None)
-        if not proc:
-            return False
-        try:
-            if proc.poll() is not None:
-                return True
-        except Exception:
-            return False
-
-        try:
-            proc.wait(timeout=max(0.0, float(grace_seconds)))
-            return True
-        except Exception:
-            pass
-
-        terminated = False
-        try:
-            import psutil
-            parent = psutil.Process(proc.pid)
-            children = parent.children(recursive=True)
-            targets = children + [parent]
-            for p in targets:
-                try:
-                    p.terminate()
-                    terminated = True
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-            try:
-                _, alive = psutil.wait_procs(targets, timeout=0.75)
-            except Exception:
-                alive = targets
-            for p in alive:
-                try:
-                    p.kill()
-                    terminated = True
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-        except Exception:
-            try:
-                proc.terminate()
-                terminated = True
-                proc.wait(timeout=0.75)
-            except Exception:
-                try:
-                    proc.kill()
-                    terminated = True
-                except Exception:
-                    pass
-
-        if terminated:
-            try:
-                self.append_log(f"🔧 Terminated glossary subprocess ({reason})")
-            except Exception:
-                pass
-        return terminated
-
-    def _start_glossary_force_stop_cleanup(self):
-        """Run slow force-stop cleanup away from the Qt GUI thread."""
-        try:
-            existing = getattr(self, '_glossary_force_stop_thread', None)
-            if existing and getattr(existing, 'is_alive', lambda: False)():
-                return
-        except Exception:
-            pass
-
-        def _cleanup():
-            try:
-                import unified_api_client
-                if hasattr(unified_api_client, 'hard_cancel_all'):
-                    unified_api_client.hard_cancel_all()
-            except Exception:
-                pass
-
-            # Best-effort: terminate only non-glossary helper subprocesses.
-            # The glossary worker receives GLOSSARY_STOP_FILE=immediate and closes
-            # its own HTTP sessions, then deduplicates/saves before exiting. Do not
-            # kill it here or the final dedupe/save logs are truncated.
-            try:
-                import psutil
-                current_process = psutil.Process(os.getpid())
-                children = current_process.children(recursive=True)
-
-                def _cmdline_s(proc) -> str:
-                    try:
-                        cmd = proc.cmdline()
-                        return " ".join(cmd) if isinstance(cmd, list) else str(cmd)
-                    except Exception:
-                        return ""
-
-                def _is_mp_internal(cmd_s: str) -> bool:
-                    cs = (cmd_s or "")
-                    return ("--multiprocessing-fork" in cs) or ("spawn_main" in cs) or ("multiprocessing.spawn" in cs)
-
-                processes_to_terminate = []
-                for child in children:
-                    try:
-                        cmd_s = _cmdline_s(child)
-                        if _is_mp_internal(cmd_s):
-                            continue
-                        if ("--run-chapter-extraction" in cmd_s or "chapter_extraction_worker" in cmd_s
-                                or "--run-pdf-extraction" in cmd_s or "_pdf_extraction_worker" in cmd_s
-                                or "pdf_extraction_manager" in cmd_s or "pdf_extractor" in cmd_s):
-                            processes_to_terminate.append(child)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        continue
-
-                if processes_to_terminate:
-                    self.append_log(f"🔧 Terminating {len(processes_to_terminate)} helper process(es)...")
-                    for proc in processes_to_terminate:
-                        try:
-                            proc.terminate()
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-
-                    try:
-                        _, alive = psutil.wait_procs(processes_to_terminate, timeout=1)
-                    except Exception:
-                        alive = processes_to_terminate
-                    for proc in alive:
-                        try:
-                            proc.kill()
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-            except Exception as e:
-                print(f"Error terminating helper child processes: {e}")
-
-        try:
-            import threading
-            thread = threading.Thread(target=_cleanup, name="GlossaryForceStopCleanup", daemon=True)
-            self._glossary_force_stop_thread = thread
-            thread.start()
-        except Exception:
-            _cleanup()
-
     def stop_glossary_extraction(self):
         """Stop glossary extraction specifically"""
         # Check if graceful stop is enabled
@@ -19770,29 +19341,6 @@ Important rules:
         
         # Set graceful stop mode in environment so API client knows to show logs
         os.environ['GRACEFUL_STOP'] = '1' if graceful_stop else '0'
-        if graceful_stop:
-            os.environ['TRANSLATION_CANCELLED'] = '0'
-        else:
-            os.environ['TRANSLATION_CANCELLED'] = '1'
-            os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
-            os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
-        wait_for_chunks = getattr(self, 'wait_for_chunks_var', False) and graceful_stop
-        os.environ['WAIT_FOR_CHUNKS'] = '1' if wait_for_chunks else '0'
-        self.graceful_stop_active = graceful_stop
-
-        # Propagate stop mode to glossary subprocesses. Child processes do not
-        # see parent os.environ changes after launch, so this file is the live
-        # control channel for graceful vs immediate stop.
-        try:
-            stop_file = os.environ.get('GLOSSARY_STOP_FILE')
-            if stop_file:
-                with open(stop_file, 'w', encoding='utf-8') as f:
-                    if graceful_stop:
-                        f.write(f"graceful\nwait_for_chunks={1 if wait_for_chunks else 0}\n")
-                    else:
-                        f.write("immediate\n")
-        except Exception:
-            pass
         
         # Suppress HTTP logs during graceful stop
         if graceful_stop:
@@ -19804,47 +19352,10 @@ Important rules:
                 pass
         
         self.stop_requested = True
-        force_cleanup_started = False
-
-        if not graceful_stop:
-            try:
-                self._reset_api_watchdog_progress(clear_stale_external_files=True)
-            except Exception:
-                pass
-
-            try:
-                if glossary_stop_flag:
-                    glossary_stop_flag(True)
-            except Exception:
-                pass
-
-            try:
-                import extract_glossary_from_epub
-                if hasattr(extract_glossary_from_epub, 'set_stop_flag'):
-                    extract_glossary_from_epub.set_stop_flag(True)
-            except Exception:
-                pass
-
-            try:
-                import unified_api_client
-                if hasattr(unified_api_client, 'set_stop_flag'):
-                    unified_api_client.set_stop_flag(True)
-                if hasattr(unified_api_client, 'UnifiedClient'):
-                    unified_api_client.UnifiedClient._global_cancelled = True
-            except Exception:
-                pass
-
-            self._start_glossary_force_stop_cleanup()
-            force_cleanup_started = True
         
         # For graceful stop: DON'T abort in-flight API calls, let them finish
         # For immediate stop: abort everything aggressively
-        if not graceful_stop and not force_cleanup_started:
-            try:
-                self._reset_api_watchdog_progress(clear_stale_external_files=True)
-            except Exception:
-                pass
-
+        if not graceful_stop:
             if glossary_stop_flag:
                 glossary_stop_flag(True)
             
@@ -19867,15 +19378,6 @@ Important rules:
                     unified_api_client.hard_cancel_all()
             except Exception:
                 pass
-
-            try:
-                self._terminate_glossary_process_tree(
-                    getattr(self, 'glossary_process', None),
-                    grace_seconds=1.0,
-                    reason="force stop",
-                )
-            except Exception:
-                pass
             
             # Best-effort: terminate only known helper subprocesses we started.
             # See stop_translation(): avoid touching multiprocessing spawn/worker processes in frozen builds.
@@ -19886,9 +19388,8 @@ Important rules:
 
                 _protected_pids = set()
                 try:
-                    _manga_mod = sys.modules.get('manga_translator')
-                    MangaTranslator = getattr(_manga_mod, 'MangaTranslator', None)
-                    if MangaTranslator is not None and hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
+                    from manga_translator import MangaTranslator
+                    if hasattr(MangaTranslator, '_inpaint_pool') and MangaTranslator._inpaint_pool:
                         for _key, _rec in MangaTranslator._inpaint_pool.items():
                             if _rec and 'spares' in _rec:
                                 for _inp in _rec['spares']:
@@ -19948,7 +19449,14 @@ Important rules:
             except Exception as e:
                 print(f"Error terminating helper child processes: {e}")
 
-            # Stop file already written above before any process termination.
+            # Touch stop file for GlossaryManager subprocesses
+            try:
+                stop_file = os.environ.get('GLOSSARY_STOP_FILE')
+                if stop_file:
+                    with open(stop_file, 'w', encoding='utf-8') as f:
+                        f.write('stop')
+            except Exception:
+                pass
         
         # Log message depends on stop mode
         if graceful_stop:
@@ -19959,7 +19467,7 @@ Important rules:
             if wait_for_chunks:
                 self.append_log("⏳ Graceful stop — waiting for in-flight API calls to complete...")
             else:
-                self.append_log("⏳ Graceful stop — not starting new glossary API calls; draining in-flight calls (WAIT_FOR_CHUNKS=0)")
+                self.append_log("🛑 Stop requested — cancelling glossary API calls (WAIT_FOR_CHUNKS=0)")
         else:
             self.append_log("❌ Glossary extraction stop requested.")
             self.append_log("⏳ Please wait... stopping after current API call completes.")

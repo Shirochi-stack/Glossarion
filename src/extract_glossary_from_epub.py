@@ -1,5 +1,4 @@
 # extract_glossary_from_epub.py
-
 import os
 import json
 import re
@@ -19,26 +18,6 @@ from ebooklib import epub
 from chapter_splitter import ChapterSplitter
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from typing import List, Dict, Tuple
-
-if '--glossary-env-file' in sys.argv:
-    try:
-        _env_idx = sys.argv.index('--glossary-env-file')
-        _env_file = sys.argv[_env_idx + 1] if len(sys.argv) > _env_idx + 1 else ''
-        if _env_file:
-            with open(_env_file, 'r', encoding='utf-8') as _f:
-                _env_updates = json.load(_f)
-            if isinstance(_env_updates, dict):
-                for _k, _v in _env_updates.items():
-                    os.environ[str(_k)] = "" if _v is None else str(_v)
-        del sys.argv[_env_idx:_env_idx + 2]
-        try:
-            if _env_file:
-                os.remove(_env_file)
-        except Exception:
-            pass
-    except Exception as _env_e:
-        print(f"[ERROR] Failed to load glossary worker env: {_env_e}")
-
 from unified_api_client import UnifiedClient, UnifiedClientError
 from glossary_paths import (
     get_book_glossary_dir,
@@ -160,28 +139,7 @@ def _is_graceful_stop_skip_error(err: Exception) -> bool:
         s = str(err).lower()
     except Exception:
         return False
-    if "graceful stop active" in s or "skipped before api call" in s:
-        return True
-    if "operation cancelled" in s:
-        return os.environ.get('GRACEFUL_STOP', '0') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED', '0') == '1'
-    return False
-
-def _log_glossary_entries(idx: int, entries: list, elapsed: float = None, total_chapters: int = None) -> None:
-    """Log parsed glossary entries as soon as a chapter response is validated."""
-    try:
-        total_ent = len(entries or [])
-        if total_ent <= 0:
-            return
-        chapter_num = _chapter_positions.get(idx, idx + 1) if '_chapter_positions' in globals() else idx + 1
-        chapter_label = f"{chapter_num}/{total_chapters}" if total_chapters else str(chapter_num)
-        elapsed_part = f" ({elapsed:.1f}s elapsed)" if elapsed is not None else ""
-        for eidx, entry in enumerate(entries, start=1):
-            entry_type = entry.get("type", "?")
-            raw_name = entry.get("raw_name", "?")
-            trans_name = entry.get("translated_name", "?")
-            print(f'[Chapter {chapter_label}] [{eidx}/{total_ent}]{elapsed_part} -> {entry_type}: {raw_name} ({trans_name})', flush=True)
-    except Exception:
-        pass
+    return "graceful stop active - not starting new api call" in s
 
 def create_client_with_multi_key_support(api_key, model, output_dir, config):
     """Create a UnifiedClient with multi API key support if enabled.
@@ -240,7 +198,6 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config):
         os.environ['USE_MULTI_API_KEYS'] = '1'
         os.environ['USE_MULTI_KEYS'] = '1'
         os.environ['USE_GLOSSARY_KEYS'] = '1'
-        os.environ['GLOSSARY_API_KEYS'] = json.dumps(glossary_keys)
         os.environ['FORCE_KEY_ROTATION'] = '1' if config.get('force_key_rotation', True) else '0'
         os.environ['ROTATION_FREQUENCY'] = str(config.get('rotation_frequency', 1))
 
@@ -351,7 +308,6 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     """
     global _glossary_last_thread_submit, _glossary_thread_submit_lock
     
-    _sync_glossary_stop_control()
     # Early exit: if stop/graceful-stop is already flagged, skip client init and delays
     if stop_check_fn() or os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
         raise UnifiedClientError("Glossary extraction stopped by user (skipped before API call)")
@@ -454,19 +410,6 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                             before_send_callback()
                     except Exception as cb_err:
                         print(f"⚠️ Failed to register pre-send glossary progress callback: {cb_err}")
-
-                try:
-                    _effective_api_delay = float(api_delay) if api_delay not in (None, '') else 0.0
-                except Exception:
-                    _effective_api_delay = 0.0
-                if _effective_api_delay > 0 and hasattr(client, '_get_thread_local_client'):
-                    try:
-                        tls_delay = client._get_thread_local_client()
-                        tls_delay.api_call_delay = _effective_api_delay
-                        tls_delay.active_api_delay_override = _effective_api_delay
-                        tls_delay.current_request_context = context or 'glossary'
-                    except Exception:
-                        pass
 
                 start_time = time.time()
                 try:
@@ -571,30 +514,6 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
         api_thread = threading.Thread(target=api_call)
         api_thread.daemon = True
         api_thread.start()
-
-        def _wait_for_api_thread_shutdown(reason: str, timeout_s: float = None) -> bool:
-            """After cancellation, do not free the batch slot until this send thread exits."""
-            try:
-                timeout_s = float(
-                    timeout_s
-                    if timeout_s is not None
-                    else os.getenv("GLOSSARY_API_CANCEL_JOIN_TIMEOUT", "10")
-                )
-            except Exception:
-                timeout_s = 10.0
-            deadline = time.time() + max(0.0, timeout_s)
-            while api_thread.is_alive() and time.time() < deadline:
-                try:
-                    api_thread.join(timeout=0.1)
-                except RuntimeError:
-                    break
-            if api_thread.is_alive():
-                try:
-                    print(f"⚠️ {chapter_label}: API thread still shutting down after {timeout_s:.1f}s ({reason}); not retrying this request")
-                except Exception:
-                    pass
-                return False
-            return True
         
         timeout = chunk_timeout  # None means wait indefinitely
         check_interval = 0.1
@@ -640,7 +559,6 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                             os.environ['GRACEFUL_STOP_COMPLETED'] = '1'
                         return content, finish_reason or 'stop', raw_obj
                 except queue.Empty:
-                    _sync_glossary_stop_control()
                     # During graceful stop, don't cancel the API call - let it complete
                     if os.environ.get('GRACEFUL_STOP') != '1' and stop_check_fn():
                         # More aggressive cancellation
@@ -653,15 +571,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         # Try to cancel the operation
                         if hasattr(client, 'cancel_current_operation'):
                             client.cancel_current_operation()
-                        try:
-                            import unified_api_client
-                            if hasattr(unified_api_client, 'hard_cancel_all'):
-                                unified_api_client.hard_cancel_all()
-                        except Exception:
-                            pass
-                        _wait_for_api_thread_shutdown("stop requested")
                         
-                        os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
+                        # Don't wait for the thread to finish - just raise immediately
                         raise UnifiedClientError("Glossary extraction stopped by user")
                     
                     if timeout is not None:
@@ -671,28 +582,13 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                                 client._in_cleanup = True
                             if hasattr(client, 'cancel_current_operation'):
                                 client.cancel_current_operation()
-                            os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
-                            if not _wait_for_api_thread_shutdown("timeout"):
-                                raise UnifiedClientError(
-                                    f"API call timed out after {timeout} seconds and is still shutting down"
-                                ) from None
                             raise UnifiedClientError(f"API call timed out after {timeout} seconds") from None
         
         except UnifiedClientError as e:
-            if os.environ.get('GRACEFUL_STOP') != '1':
-                os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
             error_msg = str(e)
             
-            # Retry transport timeouts, but treat graceful-stop cancellation as a clean skip.
+            # Treat cancelled errors (from client being closed) as timeout
             if "cancelled" in error_msg.lower() or "Gemini client not initialized" in error_msg or "timed out" in error_msg.lower():
-                _sync_glossary_stop_control()
-                graceful_stop_active = (
-                    os.environ.get('GRACEFUL_STOP', '0') == '1'
-                    or os.environ.get('GRACEFUL_STOP_COMPLETED', '0') == '1'
-                )
-                if graceful_stop_active and "timed out" not in error_msg.lower():
-                    raise UnifiedClientError("Graceful stop active - not starting new API call") from None
-
                 # Check stop flag before retrying
                 if stop_check_fn():
                     # print("❌ Glossary extraction stopped by user during timeout retry")  # Redundant
@@ -733,20 +629,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     # Prefer per-key delay from glossary keys, fall back to SEND_INTERVAL_SECONDS
                     import random
                     _retry_per_key = getattr(client, '_per_key_api_delay', None)
-                    try:
-                        _retry_per_key = float(_retry_per_key) if _retry_per_key not in (None, '') else 0.0
-                    except Exception:
-                        _retry_per_key = 0.0
-                    try:
-                        _computed_api_delay = float(api_delay) if api_delay not in (None, '') else 0.0
-                    except Exception:
-                        _computed_api_delay = 0.0
-                    if _retry_per_key > 0:
-                        base_delay = _retry_per_key
-                    elif _computed_api_delay > 0:
-                        base_delay = _computed_api_delay
-                    else:
-                        base_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                    base_delay = float(_retry_per_key) if _retry_per_key and float(_retry_per_key) > 0 else float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
                     retry_delay = random.uniform(base_delay / 2, base_delay)
                     print(f"   ⏳ Waiting {retry_delay:.1f}s before retry...")
                     time.sleep(retry_delay)
@@ -806,7 +689,6 @@ def _compute_safe_input_tokens(max_output_tokens: int, compression_factor: float
 
 # Global stop flag for GUI integration
 _stop_requested = False
-_glossary_hard_cancel_dispatched = False
 
 # Threading locks for atomic glossary saves
 _glossary_json_lock = threading.Lock()
@@ -1069,31 +951,21 @@ def _ensure_book_title_entry(glossary: List[Dict], context=None) -> List[Dict]:
 
 def set_stop_flag(value):
     """Set the global stop flag"""
-    global _stop_requested, _glossary_hard_cancel_dispatched
+    global _stop_requested
     _stop_requested = value
     
     # When clearing the stop flag, also clear the multi-key environment variable
     if not value:
-        _glossary_hard_cancel_dispatched = False
         os.environ['TRANSLATION_CANCELLED'] = '0'
-        os.environ['GRACEFUL_STOP'] = '0'
-        os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
-        os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
         
         # Also clear UnifiedClient global flag
         try:
             import unified_api_client
-            if hasattr(unified_api_client, 'set_stop_flag'):
-                unified_api_client.set_stop_flag(False)
             if hasattr(unified_api_client, 'UnifiedClient'):
                 unified_api_client.UnifiedClient._global_cancelled = False
         except:
             pass
     else:
-        os.environ['TRANSLATION_CANCELLED'] = '1'
-        os.environ['GRACEFUL_STOP'] = '0'
-        os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
-        os.environ['GRACEFUL_STOP_API_ACTIVE'] = '0'
         # Propagate stop to UnifiedClient (for streaming cancellation)
         try:
             import unified_api_client
@@ -1104,73 +976,10 @@ def set_stop_flag(value):
         except Exception:
             pass
 
-def _dispatch_glossary_hard_cancel():
-    """Close API transports in this process for an immediate glossary stop."""
-    global _glossary_hard_cancel_dispatched
-    if _glossary_hard_cancel_dispatched:
-        return
-    _glossary_hard_cancel_dispatched = True
-    try:
-        import unified_api_client
-        if hasattr(unified_api_client, 'set_stop_flag'):
-            unified_api_client.set_stop_flag(True)
-        if hasattr(unified_api_client, 'UnifiedClient'):
-            unified_api_client.UnifiedClient._global_cancelled = True
-        if hasattr(unified_api_client, 'hard_cancel_all'):
-            unified_api_client.hard_cancel_all()
-        print("🛑 Immediate stop: closed glossary HTTP sessions")
-    except Exception:
-        pass
-
-def _read_glossary_stop_control():
-    """Return cross-process stop mode from GLOSSARY_STOP_FILE.
-
-    Values:
-    - "graceful": stop scheduling new work, let in-flight API calls finish.
-    - "immediate": abort queued/in-flight work as soon as possible.
-    """
-    try:
-        stop_file = os.environ.get('GLOSSARY_STOP_FILE')
-        if not stop_file or not os.path.exists(stop_file):
-            return None
-        with open(stop_file, 'r', encoding='utf-8', errors='ignore') as f:
-            data = f.read(512).strip().lower()
-        if not data:
-            return "immediate"
-        if "graceful" in data:
-            return "graceful"
-        if any(token in data for token in ("immediate", "force", "cancel", "stop")):
-            return "immediate"
-    except Exception:
-        return None
-    return None
-
-def _sync_glossary_stop_control():
-    """Mirror cross-process stop file state into env vars used by this module."""
-    mode = _read_glossary_stop_control()
-    if mode == "graceful":
-        os.environ['GRACEFUL_STOP'] = '1'
-        os.environ['TRANSLATION_CANCELLED'] = '0'
-        return mode
-    if mode == "immediate":
-        os.environ['GRACEFUL_STOP'] = '0'
-        os.environ['GRACEFUL_STOP_COMPLETED'] = '0'
-        os.environ['TRANSLATION_CANCELLED'] = '1'
-        _dispatch_glossary_hard_cancel()
-        return mode
-    return None
-
 def is_stop_requested():
     """Check if stop was requested"""
     global _stop_requested
-    mode = _sync_glossary_stop_control()
-    if mode == "graceful":
-        return False
-    if mode == "immediate":
-        return True
-    if _stop_requested:
-        return True
-    return False
+    return _stop_requested
 
 # ─── resilient tokenizer setup ───
 try:
@@ -1599,15 +1408,12 @@ def _glossary_disk_entry_is_still_in_progress(idx, context=None):
     return bool(snapshot is not None and idx in snapshot)
 
 def _glossary_is_graceful_stop_active():
-    _sync_glossary_stop_control()
     return os.environ.get('GRACEFUL_STOP') == '1' or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
 
 def _glossary_is_hard_stop_env_active():
-    _sync_glossary_stop_control()
     return os.environ.get('TRANSLATION_CANCELLED') == '1' and not _glossary_is_graceful_stop_active()
 
 def _glossary_is_hard_stop_requested(stop_callback=None):
-    _sync_glossary_stop_control()
     if os.environ.get('TRANSLATION_CANCELLED') == '1':
         return True
     if _glossary_is_graceful_stop_active():
@@ -3987,126 +3793,6 @@ def _dedup_field_count(entry):
     return count
 
 
-def skip_duplicate_entries_incremental(existing_glossary, new_entries):
-    """Fast incremental deduplication: check *only* new_entries against existing_glossary.
-
-    existing_glossary is assumed to already be deduplicated (from CSV load or
-    prior full dedup).  New entries are checked against the existing ones and
-    against each other, but existing entries are NOT re-compared to each other.
-
-    Returns a new list: existing_glossary (possibly with replacements) + any
-    genuinely new entries that survived dedup.
-    """
-    if not new_entries:
-        return list(existing_glossary)
-
-    try:
-        from rapidfuzz import fuzz
-        use_rapidfuzz = True
-    except ImportError:
-        use_rapidfuzz = False
-
-    fuzzy_threshold = float(os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.9'))
-    dedupe_translations = os.getenv('GLOSSARY_DEDUPE_TRANSLATIONS', '1') == '1'
-
-    # --- Build seen-state from existing glossary (O(n), no comparisons) ---
-    result = list(existing_glossary)
-    seen_raw_names = []          # (cleaned, original_raw, entry)
-    raw_name_to_indices = {}     # raw_name -> [indices in result]
-    seen_translations = {}       # translated_lower -> (raw_name, entry, index)
-
-    for idx, entry in enumerate(result):
-        raw_name = entry.get('raw_name', '')
-        if not raw_name:
-            continue
-        cleaned = unicodedata.normalize('NFC', remove_honorifics(raw_name))
-        seen_raw_names.append((cleaned, raw_name, entry))
-        raw_name_to_indices.setdefault(raw_name, []).append(idx)
-
-        if dedupe_translations:
-            trans = str(entry.get('translated_name', '')).strip().lower()
-            if trans:
-                seen_translations[trans] = (raw_name, entry, idx)
-
-    added = 0
-    skipped = 0
-    replaced = 0
-
-    for entry in new_entries:
-        raw_name = entry.get('raw_name', '')
-        if not raw_name:
-            continue
-
-        cleaned = unicodedata.normalize('NFC', remove_honorifics(raw_name))
-
-        # --- Exact raw-name match ---
-        exact_indices = raw_name_to_indices.get(raw_name)
-        if exact_indices:
-            existing_idx = exact_indices[0]
-            existing_entry = result[existing_idx]
-            if _dedup_field_count(entry) > _dedup_field_count(existing_entry):
-                result[existing_idx] = entry
-                replaced += 1
-            else:
-                skipped += 1
-            continue
-
-        # --- Fuzzy raw-name match ---
-        is_dup, best_score, best_match = _find_best_duplicate_match(
-            cleaned, seen_raw_names, fuzzy_threshold, use_rapidfuzz, entry
-        )
-        if is_dup and best_match:
-            best_indices = raw_name_to_indices.get(best_match, [])
-            if best_indices:
-                existing_idx = best_indices[0]
-                existing_entry = result[existing_idx]
-                if _dedup_field_count(entry) > _dedup_field_count(existing_entry):
-                    result[existing_idx] = entry
-                    raw_name_to_indices[raw_name] = [existing_idx]
-                    del raw_name_to_indices[best_match]
-                    # Update seen_raw_names for future comparisons within this batch
-                    for si, (sc, so, se) in enumerate(seen_raw_names):
-                        if so == best_match:
-                            seen_raw_names[si] = (cleaned, raw_name, entry)
-                            break
-                    replaced += 1
-                else:
-                    skipped += 1
-            else:
-                skipped += 1
-            continue
-
-        # --- Pass 2: translated-name exact match ---
-        if dedupe_translations:
-            trans = str(entry.get('translated_name', '')).strip().lower()
-            if trans and trans in seen_translations:
-                existing_raw, existing_entry, existing_idx = seen_translations[trans]
-                if _dedup_field_count(entry) > _dedup_field_count(existing_entry):
-                    result[existing_idx] = entry
-                    seen_translations[trans] = (raw_name, entry, existing_idx)
-                    replaced += 1
-                else:
-                    skipped += 1
-                    print(f"[Skip] Pass 2: '{raw_name}' -> '{entry.get('translated_name','')}' (duplicate of '{existing_raw}' -> '{existing_entry.get('translated_name','')}')")
-                continue
-
-        # --- Genuinely new entry ---
-        new_idx = len(result)
-        result.append(entry)
-        seen_raw_names.append((cleaned, raw_name, entry))
-        raw_name_to_indices.setdefault(raw_name, []).append(new_idx)
-        if dedupe_translations:
-            trans = str(entry.get('translated_name', '')).strip().lower()
-            if trans:
-                seen_translations[trans] = (raw_name, entry, new_idx)
-        added += 1
-
-    total_new = len(new_entries)
-    if skipped or replaced:
-        print(f"[Dedup] Incremental: {total_new} new entries → {added} added, {skipped} duplicates skipped, {replaced} replaced")
-    return result
-
-
 def skip_duplicate_entries(glossary, dry_run=False, output_dir=None):
     """
     Skip entries with duplicate raw names and translated names using 2-pass deduplication.
@@ -5114,9 +4800,8 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                     sleep_time = thread_delay - time_since_last
                     thread_name = threading.current_thread().name
                     
-                    # Only log delays large enough to be useful in the GUI log.
-                    if sleep_time >= 0.1:
-                        print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.5f}s for Chapter {idx+1}")
+                    # PRINT BEFORE THE DELAY STARTS
+                    print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.5f}s for Chapter {idx+1}")
                     
                     # Interruptible sleep - check stop flag every 0.1 seconds
                     elapsed = 0
@@ -5225,8 +4910,8 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
         data = parse_api_response(resp)
         
         # More detailed debug logging
-        print(f"[BATCH] Chapter {idx+1} - Raw response length: {len(resp)} chars", flush=True)
-        print(f"[BATCH] Chapter {idx+1} - Parsed {len(data)} entries before validation", flush=True)
+        print(f"[BATCH] Chapter {idx+1} - Raw response length: {len(resp)} chars")
+        print(f"[BATCH] Chapter {idx+1} - Parsed {len(data)} entries before validation")
         
         # Filter out invalid entries
         valid_data = []
@@ -5237,11 +4922,10 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                     entry['raw_name'] = entry['raw_name'].strip()
                 valid_data.append(entry)
             else:
-                print(f"[BATCH] Chapter {idx+1} - Invalid entry: {entry}", flush=True)
+                print(f"[BATCH] Chapter {idx+1} - Invalid entry: {entry}")
         
         elapsed = time.time() - start_time
-        print(f"[BATCH] Completed Chapter {idx+1} in {elapsed:.1f}s at {time.strftime('%H:%M:%S')} - Extracted {len(valid_data)} valid entries", flush=True)
-        _log_glossary_entries(idx, valid_data, elapsed=elapsed)
+        print(f"[BATCH] Completed Chapter {idx+1} in {elapsed:.1f}s at {time.strftime('%H:%M:%S')} - Extracted {len(valid_data)} valid entries")
         
         return {
             'idx': idx,
@@ -5250,7 +4934,6 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             'chap': chap,  # Include the chapter text in the result
             'raw_obj': raw_obj,  # Include raw object for history (from send_with_interrupt)
             'finish_reason': finish_reason,  # Track truncation ('length'/'MAX_TOKENS' = truncated)
-            'entries_logged': True,
             'error': None
         }
             
@@ -5696,7 +5379,6 @@ def main(log_callback=None, stop_callback=None):
     
     # Set up stop checking
     def check_stop():
-        _sync_glossary_stop_control()
         if os.environ.get('TRANSLATION_CANCELLED') == '1':
             return True
         # During graceful stop, ALWAYS return False to let current chapter complete fully
@@ -6789,12 +6471,11 @@ def main(log_callback=None, stop_callback=None):
                                     batch_entry_count += total_ent
                                     
                                     for eidx, entry in enumerate(data, start=1):
-                                        if not result.get('entries_logged'):
-                                            elapsed = time.time() - start
-                                            entry_type = entry.get("type", "?")
-                                            raw_name = entry.get("raw_name", "?")
-                                            trans_name = entry.get("translated_name", "?")
-                                            print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
+                                        elapsed = time.time() - start
+                                        entry_type = entry.get("type", "?")
+                                        raw_name = entry.get("raw_name", "?")
+                                        trans_name = entry.get("translated_name", "?")
+                                        print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
                                         glossary.append(entry)
                                 
                                 # Check if this was actually a failure (empty/refused content)
@@ -6862,13 +6543,14 @@ def main(log_callback=None, stop_callback=None):
                                 batch_entry_count += total_ent
                                 
                                 for eidx, entry in enumerate(data, start=1):
-                                    if not result.get('entries_logged'):
-                                        elapsed = time.time() - start
-                                        # Get entry info
-                                        entry_type = entry.get("type", "?")
-                                        raw_name = entry.get("raw_name", "?")
-                                        trans_name = entry.get("translated_name", "?")
-                                        print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
+                                    elapsed = time.time() - start
+                                    
+                                    # Get entry info
+                                    entry_type = entry.get("type", "?")
+                                    raw_name = entry.get("raw_name", "?")
+                                    trans_name = entry.get("translated_name", "?")
+                                    
+                                    print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
                                     
                                     # Add entry immediately WITHOUT deduplication
                                     glossary.append(entry)
@@ -6936,7 +6618,6 @@ def main(log_callback=None, stop_callback=None):
                     # Use wait(FIRST_COMPLETED) so newly-submitted futures are also observed promptly.
                     active_futures = {}
                     next_unit_idx = 0
-                    graceful_drain_logged = False
                     # Ensure batch_size is at least 1 to avoid submission loops never running
                     effective_aggressive_batch_size = max(1, batch_size)
 
@@ -6955,7 +6636,6 @@ def main(log_callback=None, stop_callback=None):
                         pass
 
                     while active_futures or next_unit_idx < len(current_batch_units):
-                        _sync_glossary_stop_control()
                         if check_stop():
                             stopped_early = True
                             for active_unit in list(active_futures.values()):
@@ -6975,12 +6655,6 @@ def main(log_callback=None, stop_callback=None):
                         # Only break if truly done: no active futures AND nothing left to submit
                         if not active_futures and next_unit_idx >= len(current_batch_units):
                             break
-
-                        # Graceful stop: do not submit more work. Drain and save
-                        # all already-started futures, then leave the batch.
-                        if os.environ.get('GRACEFUL_STOP') == '1' and not active_futures:
-                            stopped_early = True
-                            break
                         
                         # If active_futures is empty but there are items left, submit them now
                         # (This handles edge cases where graceful stop was briefly set then cleared)
@@ -6999,20 +6673,24 @@ def main(log_callback=None, stop_callback=None):
                             if unit is None:
                                 continue
 
+                            # Refill freed slot ASAP (unless graceful stop is active)
+                            if os.environ.get('GRACEFUL_STOP') != '1':
+                                while len(active_futures) < effective_aggressive_batch_size and _submit_next():
+                                    pass
+
                             _handle_future_result(future, unit)
                             if stopped_early:
                                 break
 
                             if os.environ.get('GRACEFUL_STOP_COMPLETED') == '1':
-                                if not graceful_drain_logged:
-                                    print("\u2705 Graceful stop: draining in-flight glossary API calls...")
-                                    graceful_drain_logged = True
-                            elif os.environ.get('GRACEFUL_STOP') != '1':
-                                # Refill only after the completed unit has been handled,
-                                # saved, and logged.  The slot represents one full
-                                # glossary work item, not merely one finished HTTP send.
-                                while len(active_futures) < effective_aggressive_batch_size and _submit_next():
-                                    pass
+                                print("\u2705 Graceful stop: Chapter completed and saved, stopping...")
+                                stopped_early = True
+                                cancelled = cancel_all_futures(list(active_futures.keys()))
+                                if cancelled > 0:
+                                    print(f"\u2705 Cancelled {cancelled} pending API calls")
+                                executor.shutdown(wait=False)
+                                active_futures.clear()
+                                break
 
                         if stopped_early:
                             break
@@ -7863,7 +7541,8 @@ def main(log_callback=None, stop_callback=None):
                             chapter_num=_chapter_positions.get(tracker_idx, tracker_idx + 1),
                             chapter_file=_chapter_filenames.get(tracker_idx, ""),
                         )
-                    glossary[:] = skip_duplicate_entries_incremental(glossary, data)
+                    glossary.extend(data)
+                    glossary[:] = skip_duplicate_entries(glossary)
                     completed.append(idx)
                     
                     # Mark truncated chapters as failed so they get retried
