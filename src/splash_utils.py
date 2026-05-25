@@ -497,7 +497,7 @@ class SplashManager(QObject):
             "✅ EPUB converter loaded": 75,
             "Loading QA scanner...": 78,
             "✅ QA scanner loaded": 82,
-            "Finalizing module initialization...": 85,
+            "Finalizing module initialization..": 85,
             "✅ All modules loaded successfully": 88,
             
             "Creating main window...": 92,

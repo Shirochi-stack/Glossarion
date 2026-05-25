@@ -439,7 +439,7 @@ def _get_disabled_halgakos_icon_path(icon_path: str) -> str:
         return disabled_path.replace('\\', '/')
     except Exception:
         return icon_path.replace('\\', '/')
-from metadata_batch_translator import MetadataBatchTranslatorUI
+
 from model_options import get_model_options
 
 # Support worker-mode dispatch in frozen builds to avoid requiring Python interpreter
@@ -2526,6 +2526,7 @@ Text to analyze:
             except Exception:
                 pass
         
+        from metadata_batch_translator import MetadataBatchTranslatorUI
         self.metadata_batch_ui = MetadataBatchTranslatorUI(self)
         
         try:
@@ -26066,6 +26067,32 @@ if __name__ == "__main__":
             loading_results = {}
             
             def load_modules_thread():
+                # Silent background loader for optional ML modules (bubble_detector, manga_translator).
+                # These run in parallel with the visible splash steps so the user never sees them.
+                def _bg_load_ml_modules():
+                    try:
+                        import metadata_batch_translator  # pre-import (78ms)
+                    except Exception:
+                        pass
+                    try:
+                        from bubble_detector import BubbleDetector as _BD
+                        try:
+                            import manga_translator as _mt
+                            _mt.BubbleDetector = _BD
+                        except Exception:
+                            pass
+                    except ImportError:
+                        # Not bundled in .exe — that's fine
+                        try:
+                            import manga_translator  # still pre-import cv2
+                        except ImportError:
+                            pass
+                    except Exception as e:
+                        print(f"Warning: background ML module load failed: {e}")
+
+                bg_ml_thread = threading.Thread(target=_bg_load_ml_modules, daemon=True)
+                bg_ml_thread.start()
+
                 try:
                     # Load TranslateKRtoEN
                     loading_queue.put("Loading translation engine...")
@@ -26124,7 +26151,10 @@ if __name__ == "__main__":
                     except Exception as e:
                         loading_queue.put(f"ERROR: QA scanner failed: {e}")
                         print(f"Warning: Could not import scan_html_folder: {e}")
-                        
+
+                    # Wait for background ML modules to finish before declaring done
+                    bg_ml_thread.join(timeout=30)
+
                 except Exception as e:
                     print(f"Critical error in module loader thread: {e}")
                 finally:

@@ -19,7 +19,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
-from bubble_detector import BubbleDetector
+BubbleDetector = None  # Lazy-loaded during splash screen; use _get_bubble_detector_class()
+
+def _get_bubble_detector_class():
+    """Lazy-load BubbleDetector to defer heavy ML imports to the splash screen."""
+    global BubbleDetector
+    if BubbleDetector is None:
+        from bubble_detector import BubbleDetector as _BD
+        BubbleDetector = _BD
+    return BubbleDetector
 from TransateKRtoEN import send_with_interrupt
 
 # Google Cloud Vision imports
