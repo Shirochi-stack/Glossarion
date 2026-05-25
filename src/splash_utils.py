@@ -416,7 +416,7 @@ class SplashManager(QObject):
         if not self.timer:
             self.timer = QTimer()
             self.timer.timeout.connect(self._update_progress)
-            self.timer.start(100)  # Update every 100ms
+            self.timer.start(10)  # Update every 10ms for smooth animation
     
     def _update_progress(self):
         """Update progress animation"""
@@ -427,26 +427,30 @@ class SplashManager(QObject):
                 
             if self.splash_window and self.progress_value < 100:
                 # Auto-increment progress for visual effect during startup
-                if self.progress_value < 30:
-                    self.progress_value += 8  # Fast initial progress
-                elif self.progress_value < 70:
-                    self.progress_value += 4  # Medium progress
-                elif self.progress_value < 90:
-                    self.progress_value += 2  # Slow progress
-                else:
-                    self.progress_value += 1  # Very slow final progress
+                # Rates are tuned so the bar takes ~12-15s to reach 90%,
+                # matching real-world loading time.  Actual progress_map
+                # messages will jump ahead when real milestones are hit.
+                if self.progress_value < 20:
+                    self.progress_value += 0.3
+                elif self.progress_value < 50:
+                    self.progress_value += 0.18
+                elif self.progress_value < 75:
+                    self.progress_value += 0.12
+                elif self.progress_value < 99:
+                    self.progress_value += 0.08
+                # else: freeze at 99 — only "Ready!" pushes to 100%
                 
-                # Cap at 99% until explicitly set to 100%
+                # Cap at 99% — only explicit "Ready!" reaches 100
                 if self.progress_value >= 99:
                     self.progress_value = 99
                 
                 # Update progress bar
                 if self.progress_bar:
-                    self.progress_bar.setValue(self.progress_value)
+                    self.progress_bar.setValue(int(self.progress_value))
                 
                 # Update percentage text
                 if self.progress_label:
-                    self.progress_label.setText(f"{self.progress_value}%")
+                    self.progress_label.setText(f"{int(self.progress_value)}%")
                 
                 # Process events
                 if self.app:
@@ -497,7 +501,7 @@ class SplashManager(QObject):
             "✅ EPUB converter loaded": 75,
             "Loading QA scanner...": 78,
             "✅ QA scanner loaded": 82,
-            "Finalizing module initialization..": 85,
+            "Finalizing module initialization...": 85,
             "✅ All modules loaded successfully": 88,
             
             "Creating main window...": 92,
@@ -538,15 +542,19 @@ class SplashManager(QObject):
             pass
     
     def set_progress(self, value):
-        """Manually set progress value (0-100) - thread-safe"""
+        """Manually set progress value (0-100) - thread-safe, monotonic (never goes backwards)"""
         if self._closed:
             return
-            
-        self.progress_value = max(0, min(100, value))
+        
+        value = max(0, min(100, value))
+        # Only allow forward progress — never jump backwards
+        if value <= self.progress_value:
+            return
+        self.progress_value = value
         
         # Use thread-safe signal to update UI
         try:
-            self._progress_update_signal.emit(self.progress_value)
+            self._progress_update_signal.emit(int(self.progress_value))
         except Exception:
             pass
     
