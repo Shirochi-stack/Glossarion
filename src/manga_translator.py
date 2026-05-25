@@ -9784,15 +9784,29 @@ class MangaTranslator:
                 inpainter.config['custom_image_edit_prompt'] = system_prompt
             inpainter.config['custom_image_edit_user_prompt'] = user_prompt or ''
             if isinstance(cfg, dict):
-                inpainter.config['custom_image_edit_full_page_output'] = bool(cfg.get('custom_image_edit_full_page_output', False))
+                _fp_raw = cfg.get('custom_image_edit_full_page_output', 10)
+                if isinstance(_fp_raw, bool):
+                    _fp_raw = 100 if _fp_raw else 0
+                else:
+                    try:
+                        _fp_raw = int(_fp_raw)
+                    except (ValueError, TypeError):
+                        _fp_raw = 10
+                inpainter.config['custom_image_edit_full_page_output'] = max(0, min(100, _fp_raw))
             if hasattr(self, 'main_gui'):
-                inpainter.config['custom_image_edit_full_page_output'] = bool(
-                    getattr(
-                        self.main_gui,
-                        'custom_image_edit_full_page_output_var',
-                        inpainter.config.get('custom_image_edit_full_page_output', False)
-                    )
+                _fp_raw = getattr(
+                    self.main_gui,
+                    'custom_image_edit_full_page_output_var',
+                    inpainter.config.get('custom_image_edit_full_page_output', 10)
                 )
+                if isinstance(_fp_raw, bool):
+                    _fp_raw = 100 if _fp_raw else 0
+                else:
+                    try:
+                        _fp_raw = int(_fp_raw)
+                    except (ValueError, TypeError):
+                        _fp_raw = 10
+                inpainter.config['custom_image_edit_full_page_output'] = max(0, min(100, _fp_raw))
             if hasattr(self, 'main_gui'):
                 endpoint = ''
                 use_custom_openai = False

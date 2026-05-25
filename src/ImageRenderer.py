@@ -3458,10 +3458,16 @@ def _run_inpainting_sync(
                         inpainter.config['custom_image_edit_system_prompt'] = image_edit_system_prompt
                         inpainter.config['custom_image_edit_prompt'] = image_edit_system_prompt
                     inpainter.config['custom_image_edit_user_prompt'] = image_edit_user_prompt or ''
-                    full_page_output = bool(
-                        getattr(self.main_gui, 'custom_image_edit_full_page_output_var', False)
-                        or (cfg.get('custom_image_edit_full_page_output', False) if isinstance(cfg, dict) else False)
-                    )
+                    _fp_raw = getattr(self.main_gui, 'custom_image_edit_full_page_output_var', 10)
+                    if isinstance(_fp_raw, bool):
+                        _fp_raw = 100 if _fp_raw else 0
+                    elif not isinstance(_fp_raw, int):
+                        try:
+                            _fp_cfg = cfg.get('custom_image_edit_full_page_output', 10) if isinstance(cfg, dict) else 10
+                            _fp_raw = int(_fp_cfg) if not isinstance(_fp_cfg, bool) else (100 if _fp_cfg else 0)
+                        except (ValueError, TypeError):
+                            _fp_raw = 10
+                    full_page_output = max(0, min(100, int(_fp_raw)))
                     inpainter.config['custom_image_edit_full_page_output'] = full_page_output
                     if not custom_image_edit_system_prompt and hasattr(inpainter, '_custom_image_edit_request_system_prompt'):
                         delattr(inpainter, '_custom_image_edit_request_system_prompt')
