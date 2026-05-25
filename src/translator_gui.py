@@ -9330,6 +9330,107 @@ Recent translations to summarize:
             mode = 'direct'
         return mode
 
+    def _coerce_live_bool(self, value, default=False):
+        if value is None:
+            return bool(default)
+        if hasattr(value, 'isChecked'):
+            try:
+                return bool(value.isChecked())
+            except Exception:
+                return bool(default)
+        if hasattr(value, 'get'):
+            try:
+                return self._coerce_live_bool(value.get(), default)
+            except Exception:
+                return bool(default)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in ('1', 'true', 'yes', 'on', 'checked'):
+                return True
+            if normalized in ('0', 'false', 'no', 'off', 'unchecked', ''):
+                return False
+        return bool(value)
+
+    def _live_bool_setting(self, checkbox_attr, var_attr, config_key, default=False):
+        widget = getattr(self, checkbox_attr, None)
+        if widget is not None and hasattr(widget, 'isChecked'):
+            try:
+                return bool(widget.isChecked())
+            except Exception:
+                pass
+        if hasattr(self, var_attr):
+            return self._coerce_live_bool(getattr(self, var_attr), default)
+        return self._coerce_live_bool(self.config.get(config_key, default), default)
+
+    def _live_text_setting(self, widget_attr, var_attr, config_key, default=''):
+        widget = getattr(self, widget_attr, None)
+        if widget is not None and hasattr(widget, 'text'):
+            try:
+                value = str(widget.text()).strip()
+                if value:
+                    return value
+            except Exception:
+                pass
+        if hasattr(self, var_attr):
+            value = getattr(self, var_attr)
+            if value is not None:
+                value = str(value).strip()
+                if value:
+                    return value
+        value = self.config.get(config_key, default)
+        return str(value if value is not None else default).strip()
+
+    def _current_auto_glossary_mode(self):
+        combo = getattr(self, 'auto_glossary_mode_combo', None)
+        if combo is not None and hasattr(combo, 'currentText'):
+            try:
+                mode_raw = str(combo.currentText() or '').strip()
+            except Exception:
+                mode_raw = ''
+        else:
+            mode_raw = str(
+                getattr(self, 'auto_glossary_mode_var', None)
+                or self.config.get('auto_glossary_mode')
+                or ''
+            ).strip()
+        if not mode_raw:
+            return 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
+        display_to_mode = {
+            'Off': 'off',
+            'Off (Fuzzy Mapping)': 'off_fuzzy_automap',
+            'Manual Glossary Only': 'off_no_automap',
+            'Off (No Auto-Mapping)': 'off_no_automap',
+            'No Glossary': 'no_glossary',
+            'Minimal': 'minimal',
+            'Balanced': 'balanced',
+            'Full': 'full',
+            'Single Pass': 'single_pass',
+        }
+        return display_to_mode.get(mode_raw, mode_raw.lower().replace(' ', '_'))
+
+    def _current_glossary_request_env(self, force_balanced_request_merging=False):
+        if force_balanced_request_merging:
+            return '1', '99', '1'
+        merging_enabled = self._live_bool_setting(
+            'glossary_request_merging_checkbox',
+            'glossary_request_merging_enabled_var',
+            'glossary_request_merging_enabled',
+            False,
+        )
+        merge_count = self._live_text_setting(
+            'glossary_request_merge_count_entry',
+            'glossary_request_merge_count_var',
+            'glossary_request_merge_count',
+            '10',
+        ) or '10'
+        chapter_split = self._live_bool_setting(
+            'glossary_enable_chapter_split_checkbox',
+            'glossary_enable_chapter_split_var',
+            'glossary_enable_chapter_split',
+            True,
+        )
+        return '1' if merging_enabled else '0', str(merge_count), '1' if chapter_split else '0'
+
     def _on_context_mode_changed(self, index=None):
         """Map the Context Mode combo onto the existing runtime config flags."""
         mode = 'off'
@@ -13617,10 +13718,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['OUTPUT_LANGUAGE'] = _output_lang
                 
                 # ===== PRE-TRANSLATION GLOSSARY EXTRACTION (Balanced/Full modes) =====
-                auto_glossary_mode = self.config.get('auto_glossary_mode', None)
-                if auto_glossary_mode is None:
-                    # Backward compat: derive from old boolean
-                    auto_glossary_mode = 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
+                auto_glossary_mode = self._current_auto_glossary_mode()
 
                 current_output_mode = self._get_output_mode()
                 if current_output_mode == 'audio' and auto_glossary_mode in ('balanced', 'full'):
@@ -13628,16 +13726,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     auto_glossary_mode = 'off'
                 
                 if current_output_mode == 'vision' and auto_glossary_mode in ('balanced', 'full'):
-                    glossary_merge_count = str(self.config.get(
-                        'glossary_request_merge_count',
-                        getattr(self, 'request_merge_count_var', '10')
-                    ) or '10')
-                    if auto_glossary_mode == 'balanced':
-                        os.environ['GLOSSARY_REQUEST_MERGING_ENABLED'] = '1'
-                        os.environ['GLOSSARY_ENABLE_CHAPTER_SPLIT'] = '1'
-                    else:
-                        os.environ['GLOSSARY_REQUEST_MERGING_ENABLED'] = '1' if self.config.get('glossary_request_merging_enabled', False) else '0'
-                        os.environ['GLOSSARY_ENABLE_CHAPTER_SPLIT'] = '1' if self.config.get('glossary_enable_chapter_split', False) else '0'
+                    glossary_merging_enabled, glossary_merge_count, glossary_chapter_split = self._current_glossary_request_env(
+                        force_balanced_request_merging=(auto_glossary_mode == 'balanced')
+                    )
+                    os.environ['GLOSSARY_REQUEST_MERGING_ENABLED'] = glossary_merging_enabled
+                    os.environ['GLOSSARY_ENABLE_CHAPTER_SPLIT'] = glossary_chapter_split
                     os.environ['GLOSSARY_REQUEST_MERGE_COUNT'] = glossary_merge_count
                     self.append_log(f"📑 Vision mode: OCR prepass will run before glossary extraction (merge count: {glossary_merge_count})")
                 elif auto_glossary_mode in ('balanced', 'full'):
@@ -13694,7 +13787,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         try:
                             # Reuse the exact same Extract Glossary flow
                             self._glossary_stop_was_requested = False  # Reset before extraction
-                            self.run_glossary_extraction_direct()
+                            self.run_glossary_extraction_direct(
+                                force_balanced_request_merging=(auto_glossary_mode == 'balanced' and has_text_files)
+                            )
                             
                             # Check saved stop flag (run_glossary_extraction_direct resets self.stop_requested in finally)
                             if self.stop_requested or getattr(self, '_glossary_stop_was_requested', False):
@@ -16250,19 +16345,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
         resolved_max_retries = self._resolve_max_retries()
         
         auto_inject_book_title = bool(getattr(self, 'auto_inject_book_title_var', self.config.get('auto_inject_book_title', False)))
-        auto_glossary_mode = self.config.get('auto_glossary_mode', None)
-        if auto_glossary_mode is None:
-            auto_glossary_mode = 'minimal' if self.config.get('enable_auto_glossary', False) else 'off'
-        glossary_request_merge_count = str(self.config.get(
-            'glossary_request_merge_count',
-            getattr(self, 'request_merge_count_var', '10')
-        ) or '10')
-        if output_mode == 'vision' and auto_glossary_mode == 'balanced':
-            glossary_request_merging_enabled = '1'
-            glossary_enable_chapter_split = '1'
-        else:
-            glossary_request_merging_enabled = '1' if self.config.get('glossary_request_merging_enabled', False) else '0'
-            glossary_enable_chapter_split = '1' if self.config.get('glossary_enable_chapter_split', False) else '0'
+        auto_glossary_mode = self._current_auto_glossary_mode()
+        (
+            glossary_request_merging_enabled,
+            glossary_request_merge_count,
+            glossary_enable_chapter_split,
+        ) = self._current_glossary_request_env(
+            force_balanced_request_merging=(output_mode == 'vision' and auto_glossary_mode == 'balanced')
+        )
         output_override_for_env = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
         if output_override_for_env:
             glossary_shared_dir = os.path.join(os.path.abspath(output_override_for_env), 'Glossary')
@@ -16330,7 +16420,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_OUTPUT_BACKUP_DIR': self._output_side_glossary_backup_dir_for_source(epub_path) if self.config.get('save_glossary_in_output', False) else '',
             # Whether to include previous source text as memory context
             'INCLUDE_SOURCE_IN_HISTORY': "1" if getattr(self, 'include_source_in_history_var', False) else "0",
-            'APPEND_GLOSSARY': "0" if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ("1" if self.append_glossary_var else "0"),
+            'APPEND_GLOSSARY': "0" if auto_glossary_mode == 'no_glossary' else ("1" if self.append_glossary_var else "0"),
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
             'ADD_ADDITIONAL_GLOSSARY': "1" if self.config.get('add_additional_glossary', False) else "0",
             'ADDITIONAL_GLOSSARY_PATH': self.config.get('additional_glossary_path', ''),
@@ -16364,9 +16454,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_REQUEST_MERGING_ENABLED': glossary_request_merging_enabled,
             'GLOSSARY_REQUEST_MERGE_COUNT': glossary_request_merge_count,
             'GLOSSARY_ENABLE_CHAPTER_SPLIT': glossary_enable_chapter_split,
-            'ENABLE_AUTO_GLOSSARY': "1" if (self.config.get('auto_glossary_mode', 'off') == 'minimal' or (self.config.get('auto_glossary_mode') is None and self.enable_auto_glossary_var)) else "0",
-            'AUTO_GLOSSARY_MODE': self.config.get('auto_glossary_mode', 'off'),
-            'SINGLE_PASS_GLOSSARY_MODE': '1' if self.config.get('auto_glossary_mode', 'off') == 'single_pass' else '',
+            'ENABLE_AUTO_GLOSSARY': "1" if auto_glossary_mode == 'minimal' else "0",
+            'AUTO_GLOSSARY_MODE': auto_glossary_mode,
+            'SINGLE_PASS_GLOSSARY_MODE': '1' if auto_glossary_mode == 'single_pass' else '',
             'SINGLE_PASS_GLOSSARY_HEADER_PROMPT': self.config.get('single_pass_glossary_header_prompt', ''),
             'AUTO_GLOSSARY_PROMPT': self.unified_auto_glosary_prompt3 if hasattr(self, 'unified_auto_glosary_prompt3') else '',
             'GLOSSARY_REFINEMENT_ENABLED': '1' if self.config.get('glossary_refinement_enabled', False) else '0',
@@ -16745,7 +16835,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         except Exception:
             pass
 
-    def run_glossary_extraction_direct(self):
+    def run_glossary_extraction_direct(self, force_balanced_request_merging=False):
         """Run glossary extraction directly - handles multiple files and different file types"""
         try:
             # Re-attach GUI logging handlers FIRST to reclaim logs from standalone header translation
@@ -17897,6 +17987,14 @@ Important rules:
                     resolved_glossary_tokens = int(glossary_token_cfg)
                 
                 glossary_batching_mode = self._glossary_batching_mode_for_env()
+                auto_glossary_mode = self._current_auto_glossary_mode()
+                (
+                    glossary_request_merging_enabled,
+                    glossary_request_merge_count,
+                    glossary_enable_chapter_split,
+                ) = self._current_glossary_request_env(
+                    force_balanced_request_merging=force_balanced_request_merging
+                )
 
                 env_updates = {
                     'GLOSSARY_TEMPERATURE': str(self.config.get('manual_glossary_temperature', 0.1)),
@@ -17949,11 +18047,11 @@ Important rules:
                     'SAVE_GLOSSARY_IN_OUTPUT': '1' if save_glossary_in_output else '0',
                     'GLOSSARY_OUTPUT_BACKUP_DIR': output_side_backup_dir if save_glossary_in_output else '',
                     'VISION_OCR_SOURCE_PREPASS': str(self.config.get('vision_ocr_source_prepass', 'auto') or 'auto'),
-                    'ENABLE_AUTO_GLOSSARY': "1" if (self.config.get('auto_glossary_mode', 'off') == 'minimal' or (self.config.get('auto_glossary_mode') is None and self.enable_auto_glossary_var)) else "0",
-                    'AUTO_GLOSSARY_MODE': self.config.get('auto_glossary_mode', 'off'),
-                    'SINGLE_PASS_GLOSSARY_MODE': '1' if self.config.get('auto_glossary_mode', 'off') == 'single_pass' else '',
+                    'ENABLE_AUTO_GLOSSARY': "1" if auto_glossary_mode == 'minimal' else "0",
+                    'AUTO_GLOSSARY_MODE': auto_glossary_mode,
+                    'SINGLE_PASS_GLOSSARY_MODE': '1' if auto_glossary_mode == 'single_pass' else '',
                     'SINGLE_PASS_GLOSSARY_HEADER_PROMPT': self.config.get('single_pass_glossary_header_prompt', ''),
-                    'APPEND_GLOSSARY': "0" if self.config.get('auto_glossary_mode', 'off') == 'no_glossary' else ("1" if self.append_glossary_var else "0"),
+                    'APPEND_GLOSSARY': "0" if auto_glossary_mode == 'no_glossary' else ("1" if self.append_glossary_var else "0"),
                     'GLOSSARY_STRIP_HONORIFICS': '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var else '1',
                     'AUTO_GLOSSARY_PROMPT': getattr(self, 'unified_auto_glosary_prompt3', ''),
                     'APPEND_GLOSSARY_PROMPT': getattr(self, 'append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'),
@@ -17989,15 +18087,11 @@ Important rules:
                     'METADATA_API_KEYS': json.dumps(self.config.get('metadata_keys', [])),
                     
                     # Glossary-specific overrides (with fallback to global settings)
-                    # Check os.environ first to respect balanced mode hardcoded overrides
-                    'GLOSSARY_REQUEST_MERGING_ENABLED': os.environ.get('GLOSSARY_REQUEST_MERGING_ENABLED',
-                        '1' if self.config.get('glossary_request_merging_enabled', False) else '0'),
-                    'GLOSSARY_REQUEST_MERGE_COUNT': os.environ.get('GLOSSARY_REQUEST_MERGE_COUNT',
-                        str(self.config.get('glossary_request_merge_count', 10))),
+                    'GLOSSARY_REQUEST_MERGING_ENABLED': glossary_request_merging_enabled,
+                    'GLOSSARY_REQUEST_MERGE_COUNT': glossary_request_merge_count,
                     'GLOSSARY_COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', getattr(self, 'compression_factor_var', 1.0))),
                     'GLOSSARY_OUTPUT_LEGACY_JSON': '1' if getattr(self, 'glossary_output_legacy_json_var', False) else '0',
-                    'GLOSSARY_ENABLE_CHAPTER_SPLIT': os.environ.get('GLOSSARY_ENABLE_CHAPTER_SPLIT',
-                        '1' if self.config.get('glossary_enable_chapter_split', False) else '0'),
+                    'GLOSSARY_ENABLE_CHAPTER_SPLIT': glossary_enable_chapter_split,
                     # Optional assistant prefill prompt
                     'ASSISTANT_PROMPT': getattr(self, 'assistant_prompt', '') or '',
                     # Subprocess PDF extraction to prevent GUI lag
@@ -25530,14 +25624,14 @@ Important rules:
                 env_text_extraction_method = 'enhanced'
                 env_extraction_mode = 'enhanced'
                 env_enhanced_filtering = getattr(self, 'file_filtering_level_var', env_enhanced_filtering)
-            env_auto_glossary_mode = self.config.get('auto_glossary_mode', 'off')
-            env_glossary_merge_count = str(self.config.get('glossary_request_merge_count', '10') or '10')
-            if output_mode == 'vision' and env_auto_glossary_mode == 'balanced':
-                env_glossary_merging_enabled = '1'
-                env_glossary_chapter_split = '1'
-            else:
-                env_glossary_merging_enabled = '1' if self.config.get('glossary_request_merging_enabled', False) else '0'
-                env_glossary_chapter_split = '1' if self.config.get('glossary_enable_chapter_split', False) else '0'
+            env_auto_glossary_mode = self._current_auto_glossary_mode()
+            (
+                env_glossary_merging_enabled,
+                env_glossary_merge_count,
+                env_glossary_chapter_split,
+            ) = self._current_glossary_request_env(
+                force_balanced_request_merging=(output_mode == 'vision' and env_auto_glossary_mode == 'balanced')
+            )
 
             def _bool_value(value, default=False):
                 if value is None:
