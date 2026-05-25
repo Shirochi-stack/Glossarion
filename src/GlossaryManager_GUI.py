@@ -3065,13 +3065,21 @@ Do not stop after the glossary."""
 
         _sync_fuzzy_enabled()
         try:
-            # Disconnect all before reconnect to avoid accumulation across dialog opens
-            try:
-                self.fuzzy_auto_mapping_checkbox.toggled.disconnect()
-            except Exception:
-                pass
+            # Replace only the slots owned by this setup path. Broad disconnects
+            # emit PySide warnings when no slots exist and can remove unrelated slots.
+            previous_slot = getattr(self, '_sync_fuzzy_enabled_slot', None)
+            if previous_slot is not None:
+                try:
+                    self.append_glossary_auto_load_checkbox.toggled.disconnect(previous_slot)
+                except (TypeError, RuntimeError):
+                    pass
+                try:
+                    self.fuzzy_auto_mapping_checkbox.toggled.disconnect(previous_slot)
+                except (TypeError, RuntimeError):
+                    pass
             self.append_glossary_auto_load_checkbox.toggled.connect(_sync_fuzzy_enabled)
             self.fuzzy_auto_mapping_checkbox.toggled.connect(_sync_fuzzy_enabled)
+            self._sync_fuzzy_enabled_slot = _sync_fuzzy_enabled
         except Exception:
             pass
 
@@ -3091,11 +3099,14 @@ Do not stop after the glossary."""
 
         # Keep it in sync when Append Glossary changes (avoid duplicate connections)
         try:
-            self.append_glossary_checkbox.toggled.disconnect()
-        except Exception:
-            pass
-        try:
+            previous_slot = getattr(self, '_sync_auto_mapping_enabled_state_slot', None)
+            if previous_slot is not None:
+                try:
+                    self.append_glossary_checkbox.toggled.disconnect(previous_slot)
+                except (TypeError, RuntimeError):
+                    pass
             self.append_glossary_checkbox.toggled.connect(_sync_auto_mapping_enabled_state)
+            self._sync_auto_mapping_enabled_state_slot = _sync_auto_mapping_enabled_state
         except Exception:
             pass
 
@@ -3185,14 +3196,16 @@ Do not stop after the glossary."""
             except Exception:
                 pass
 
-        # Connect (avoid duplicate connections — disconnect ALL slots first since
-        # each glossary_manager() call creates a new closure that can't be matched)
+        # Replace this handler without disturbing the fuzzy enabled-state sync.
         try:
-            self.append_glossary_auto_load_checkbox.toggled.disconnect()
-        except Exception:
-            pass
-        try:
+            previous_slot = getattr(self, '_on_auto_mapping_toggled_slot', None)
+            if previous_slot is not None:
+                try:
+                    self.append_glossary_auto_load_checkbox.toggled.disconnect(previous_slot)
+                except (TypeError, RuntimeError):
+                    pass
             self.append_glossary_auto_load_checkbox.toggled.connect(_on_auto_mapping_toggled)
+            self._on_auto_mapping_toggled_slot = _on_auto_mapping_toggled
         except Exception:
             pass
         
@@ -7245,12 +7258,16 @@ Do not stop after the glossary."""
 
         self._update_editor_nav_buttons = _update_editor_nav_buttons_impl
 
-        # Reconnect combo signal to our impl (it was connected before the method existed)
-        try:
-            self.editor_file_combo.currentIndexChanged.disconnect()
-        except Exception:
-            pass
+        # Reconnect only this setup's previous handler; broad disconnects warn
+        # when there is nothing connected and can remove unrelated handlers.
+        previous_slot = getattr(self, '_on_editor_combo_changed_slot', None)
+        if previous_slot is not None:
+            try:
+                self.editor_file_combo.currentIndexChanged.disconnect(previous_slot)
+            except (TypeError, RuntimeError):
+                pass
         self.editor_file_combo.currentIndexChanged.connect(_on_editor_combo_changed_impl)
+        self._on_editor_combo_changed_slot = _on_editor_combo_changed_impl
 
         # ------------------------------------------------------------------
         # Auto-select glossary: populates combo for all selected EPUBs
@@ -7669,11 +7686,14 @@ Do not stop after the glossary."""
             menu.addAction("Reload", load_glossary_for_editing)
             menu.exec(self.glossary_tree.viewport().mapToGlobal(pos))
 
-        try:
-            self.glossary_tree.customContextMenuRequested.disconnect()
-        except Exception:
-            pass
+        previous_slot = getattr(self, '_show_tree_context_menu_slot', None)
+        if previous_slot is not None:
+            try:
+                self.glossary_tree.customContextMenuRequested.disconnect(previous_slot)
+            except (TypeError, RuntimeError):
+                pass
         self.glossary_tree.customContextMenuRequested.connect(show_tree_context_menu)
+        self._show_tree_context_menu_slot = show_tree_context_menu
        
         def find_in_tree():
             import re
