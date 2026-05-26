@@ -5170,7 +5170,7 @@ class MangaTranslationTab(QObject):
         hybrid_radio.setFont(radio_font)
         hybrid_radio.setToolTip(
             "Show and use both cloud and local/API inpainting settings.\n"
-            "Useful when combining a Replicate fallback with a local or custom-image-edit API model."
+            "Experimental and not recommended for normal use."
         )
         hybrid_radio.setChecked(self.inpaint_method_value == 'hybrid')
         hybrid_radio.toggled.connect(lambda checked: self._on_inpaint_method_change() if checked else None)
