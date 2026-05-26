@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout
                                QDialog, QButtonGroup, QApplication, QSizePolicy, QToolButton,
                                QAbstractItemView)
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QEvent, QPropertyAnimation, QEasingCurve, Property, QThread
-from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent, QPixmap, QTransform, QBrush, QPalette
+from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent, QPixmap, QTransform, QBrush
 from typing import List, Dict, Optional, Any
 from queue import Queue, Empty
 import logging
@@ -3663,22 +3663,17 @@ class MangaTranslationTab(QObject):
 
     def _preview_pool_button_stylesheet(self) -> str:
         return (
-            "background: #0d6efd; background-color: #0d6efd; color: white; "
+            "QPushButton#previewPoolButton { background-color: #0d6efd; color: white; "
             "font-weight: bold; padding: 5px 15px; border: 1px solid #64a5ff; "
-            "border-radius: 3px;"
+            "border-radius: 3px; } "
+            "QPushButton#previewPoolButton:hover { background-color: #2f80ff; } "
+            "QPushButton#previewPoolButton:pressed { background-color: #0a58ca; }"
         )
 
     def _style_preview_pool_button(self, button):
         button.setObjectName("previewPoolButton")
         button.setStyleSheet(self._preview_pool_button_stylesheet())
         try:
-            button.setAutoFillBackground(True)
-            button.setFlat(False)
-            button.setAttribute(Qt.WA_StyledBackground, True)
-            palette = button.palette()
-            palette.setColor(QPalette.Button, QColor("#0d6efd"))
-            palette.setColor(QPalette.ButtonText, QColor("#ffffff"))
-            button.setPalette(palette)
             button.style().unpolish(button)
             button.style().polish(button)
             button.update()
@@ -4364,7 +4359,7 @@ class MangaTranslationTab(QObject):
         self.ocr_provider_frame = QWidget()
         ocr_provider_layout = QHBoxLayout(self.ocr_provider_frame)
         ocr_provider_layout.setContentsMargins(0, 0, 0, 10)
-        ocr_provider_layout.setSpacing(4)
+        ocr_provider_layout.setSpacing(6)
         ocr_label_column_width = 105
 
         provider_label = QLabel("OCR Provider:")
@@ -4414,6 +4409,12 @@ class MangaTranslationTab(QObject):
         self.provider_status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         ocr_provider_layout.addWidget(self.provider_status_label)
 
+        self.vision_key_pool_btn = QPushButton("Vision Keys")
+        self.vision_key_pool_btn.setToolTip("Open the Multi API Key Manager focused on the Vision key pool.")
+        self._style_preview_pool_button(self.vision_key_pool_btn)
+        self.vision_key_pool_btn.clicked.connect(lambda: self._open_multi_api_key_pool_preview('qa_scan'))
+        ocr_provider_layout.addWidget(self.vision_key_pool_btn)
+
         # Setup/Install button for non-cloud providers
         self.provider_setup_btn = QPushButton("Setup")
         self.provider_setup_btn.clicked.connect(self._setup_ocr_provider)
@@ -4436,7 +4437,7 @@ class MangaTranslationTab(QObject):
         self.custom_api_ocr_batch_frame = QWidget()
         custom_api_batch_layout = QHBoxLayout(self.custom_api_ocr_batch_frame)
         custom_api_batch_layout.setContentsMargins(0, 0, 0, 10)
-        custom_api_batch_layout.setSpacing(4)
+        custom_api_batch_layout.setSpacing(6)
 
         batch_label = QLabel("Custom API OCR:")
         batch_label.setFixedWidth(ocr_label_column_width)
@@ -4480,12 +4481,6 @@ class MangaTranslationTab(QObject):
         )
         self._disable_combobox_mousewheel(self.custom_api_ocr_batch_size_spinbox)
         custom_api_batch_layout.addWidget(self.custom_api_ocr_batch_size_spinbox)
-
-        self.vision_key_pool_btn = QPushButton("Vision Keys")
-        self.vision_key_pool_btn.setToolTip("Open the Multi API Key Manager focused on the Vision key pool.")
-        self._style_preview_pool_button(self.vision_key_pool_btn)
-        self.vision_key_pool_btn.clicked.connect(lambda: self._open_multi_api_key_pool_preview('qa_scan'))
-        custom_api_batch_layout.addWidget(self.vision_key_pool_btn)
 
         custom_api_batch_layout.addStretch()
         settings_frame_layout.addWidget(self.custom_api_ocr_batch_frame)
@@ -5400,7 +5395,7 @@ class MangaTranslationTab(QObject):
         custom_image_edit_controls_layout.addWidget(custom_controls_spacer)
         custom_image_edit_controls_layout.addWidget(custom_image_edit_cb)
         custom_image_edit_controls_layout.addWidget(custom_image_edit_prompt_btn)
-        custom_image_edit_keys_btn = QPushButton("Image Gen/Edit Keys")
+        custom_image_edit_keys_btn = QPushButton("Image Keys")
         custom_image_edit_keys_btn.setToolTip("Open the Multi API Key Manager focused on the Image Gen/Edit key pool.")
         self._style_preview_pool_button(custom_image_edit_keys_btn)
         custom_image_edit_keys_btn.clicked.connect(lambda: self._open_multi_api_key_pool_preview('inpainter'))
@@ -10817,7 +10812,9 @@ class MangaTranslationTab(QObject):
                         # Restore buttons with their original colors
                         for button in frame.findChildren(QPushButton):
                             btn_text = button.text()
-                            if "Browse" in btn_text:
+                            if button is getattr(self, 'custom_image_edit_keys_btn', None) or btn_text in ("Image Gen/Edit Keys", "Image Keys"):
+                                self._style_preview_pool_button(button)
+                            elif "Browse" in btn_text:
                                 button.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 5px 15px; }")
                             elif "Load" in btn_text:
                                 button.setStyleSheet("QPushButton { background-color: #28a745; color: white; padding: 5px 15px; }")
