@@ -13184,8 +13184,16 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             )
             if skip_reason:
                 if multipass_failed_mode and skip_reason == "completed":
-                    return "excluded", f"☑️ Chapter {actual_num}: not targeted by Failed multipass (status: completed)"
-                return "skipped", f"⏭️ Chapter {actual_num}: skipped refinement ({skip_reason})"
+                    return "excluded", None, {
+                        "kind": "not_targeted",
+                        "chapter": actual_num,
+                        "reason": "completed",
+                    }
+                return "skipped", None, {
+                    "kind": "refinement_skip",
+                    "chapter": actual_num,
+                    "reason": skip_reason,
+                }
 
         # Ensure a base completed entry exists so the two post-process checks are visible.
         with progress_lock:
@@ -13309,10 +13317,33 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
     excluded = 0
     skipped = 0
     failed = 0
+    grouped_not_targeted = []
+    grouped_refinement_skips = {}
+
+    def _format_chapter_values(values, limit=40):
+        def _sort_key(value):
+            try:
+                return (0, float(value))
+            except Exception:
+                return (1, str(value))
+
+        def _label(value):
+            if isinstance(value, float) and value.is_integer():
+                return str(int(value))
+            return str(value)
+
+        ordered = sorted(values, key=_sort_key)
+        labels = [_label(value) for value in ordered[:limit]]
+        remaining = len(ordered) - len(labels)
+        if remaining > 0:
+            labels.append(f"... and {remaining} more")
+        return ", ".join(labels)
 
     def _record_result(result):
         nonlocal processed, excluded, skipped, failed
-        status, message = result
+        status = result[0]
+        message = result[1] if len(result) > 1 else None
+        detail = result[2] if len(result) > 2 and isinstance(result[2], dict) else None
         if status == "processed":
             processed += 1
         elif status == "excluded":
@@ -13321,6 +13352,16 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             failed += 1
         else:
             skipped += 1
+        if detail and mode == "refinement":
+            kind = detail.get("kind")
+            chapter = detail.get("chapter")
+            reason = str(detail.get("reason") or "unknown")
+            if kind == "not_targeted":
+                grouped_not_targeted.append(chapter)
+                return
+            if kind == "refinement_skip":
+                grouped_refinement_skips.setdefault(reason, []).append(chapter)
+                return
         if message:
             print(message)
 
@@ -13391,6 +13432,17 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 client.restore_refinement_key_pool_for_batch(refinement_pool_state)
             except Exception:
                 pass
+
+    if grouped_not_targeted:
+        print(
+            f"☑️ Failed multipass: {len(grouped_not_targeted)} completed chapter(s) "
+            f"not targeted: {_format_chapter_values(grouped_not_targeted)}"
+        )
+    for reason, chapters_for_reason in sorted(grouped_refinement_skips.items()):
+        print(
+            f"⏭️ Refinement skipped {len(chapters_for_reason)} chapter(s) "
+            f"({reason}): {_format_chapter_values(chapters_for_reason)}"
+        )
 
     if excluded:
         print(f"\n📊 {mode.title()} summary: {processed} processed, {excluded} excluded, {skipped} skipped, {failed} failed")
