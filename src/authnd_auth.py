@@ -195,6 +195,17 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(value).strip().lower() not in ("0", "false", "no", "off")
 
 
+def _build_page_model_slug(model_id: str) -> str:
+    """Return the NVIDIA Build page slug for a model id.
+
+    Build pages use underscore separators for numeric version components
+    in several public model slugs (for example llama-3_1-70b-instruct),
+    while the chat payload still expects the dotted model name.
+    """
+    model_id = str(model_id or "").strip("/")
+    return re.sub(r"(?<=\d)\.(?=\d)", "_", model_id)
+
+
 def _normalize_model(model: str) -> Tuple[str, str, str]:
     """
     Return (publisher, model_id, page_url) from authnd/z-ai/glm-5.1 or glm-5.1.
@@ -214,7 +225,7 @@ def _normalize_model(model: str) -> Tuple[str, str, str]:
         publisher = os.getenv("AUTHND_DEFAULT_PUBLISHER", DEFAULT_PUBLISHER).strip("/") or DEFAULT_PUBLISHER
         model_id = raw
 
-    page_url = f"{BUILD_BASE_URL}/{publisher}/{model_id}"
+    page_url = f"{BUILD_BASE_URL}/{publisher}/{_build_page_model_slug(model_id)}"
     return publisher, model_id, page_url
 
 
@@ -256,6 +267,10 @@ def _resolve_model_metadata(page_url: str) -> Dict[str, str]:
         r'\\"artifactName\\":\\"([^"\\]+)\\"',
         r'"artifactName"\s*:\s*"([^"]+)"',
     ))
+    payload_model = _match((
+        r'\\"model\\"\s*:\s*\\"([^"\\]+)\\"',
+        r'"model"\s*:\s*"([^"]+)"',
+    ))
     namespace = os.getenv("AUTHND_NGC_ORG", "").strip("/") or _match((
         r'\\"namespace\\":\\"([^"\\]+)\\"',
         r'"namespace"\s*:\s*"([^"]+)"',
@@ -267,6 +282,7 @@ def _resolve_model_metadata(page_url: str) -> Dict[str, str]:
         "function_id": function_id,
         "artifact_name": artifact_name,
         "namespace": namespace,
+        "payload_model": payload_model,
     }
     with _metadata_lock:
         _metadata_cache[page_url] = dict(metadata)
@@ -1393,10 +1409,11 @@ def _post_prediction(
     metadata = _resolve_model_metadata(page_url)
     org_id = metadata.get("namespace") or DEFAULT_ORG_ID
     endpoint_id = metadata.get("endpoint_id") or model_id
+    payload_model = metadata.get("payload_model") or _payload_model_name(model_path)
     url = f"{API_BASE_URL}/v2/predict/models/{org_id}/{endpoint_id}"
     payload: Dict[str, Any] = {
         "messages": messages,
-        "model": _payload_model_name(model_path),
+        "model": payload_model,
         "stream": bool(stream),
     }
     if temperature is not None:
@@ -1425,6 +1442,7 @@ def _post_prediction(
                     "endpoint_id": endpoint_id,
                     "function_id": metadata.get("function_id") or "",
                     "artifact_name": metadata.get("artifact_name") or "",
+                    "payload_model": payload_model,
                 },
                 "payload": _payload_summary(payload),
             },
