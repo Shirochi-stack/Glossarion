@@ -31,6 +31,7 @@ except ImportError:
     raise ImportError("html2text is required. Install with: pip install html2text")
 
 from _empty_attr_fix import fix_empty_attr_tags
+from html_tag_entities import unescape_valid_html_tag_entities
 
 # Standard HTML / SVG / MathML / common legacy tag names. Used by
 # ``_protect_non_html_angle_brackets`` to decide whether an angle-bracket
@@ -437,7 +438,9 @@ class EnhancedTextExtractor:
     # prompt (and downstream HTML output) retains the furigana markup.
     _RUBY_PLACEHOLDER_PREFIX = '\u2997RUBY'   # ⦗RUBY
     _RUBY_PLACEHOLDER_SUFFIX = '\u2998'        # ⦘
+    _RUBY_TAG_PLACEHOLDER_PREFIX = '\u2997RUBYTAG'
     _ruby_stash: dict  # populated per-call
+    _ruby_tag_stash: dict  # populated per-call
 
     def _protect_ruby_tags(self, text: str) -> str:
         """Replace <ruby>...</ruby> blocks with unique placeholders."""
@@ -460,9 +463,30 @@ class EnhancedTextExtractor:
         )
         return text
 
+    def _protect_ruby_child_tags(self, text: str) -> str:
+        """Shield standalone rb/rt/rp/rtc tags from html2text stripping."""
+        self._ruby_tag_stash = {}
+        import re as _re
+        _counter = [0]
+
+        def _stash(m):
+            key = f"{self._RUBY_TAG_PLACEHOLDER_PREFIX}{_counter[0]}{self._RUBY_PLACEHOLDER_SUFFIX}"
+            self._ruby_tag_stash[key] = m.group(0)
+            _counter[0] += 1
+            return key
+
+        return _re.sub(
+            r'</?(?:rb|rt|rp|rtc)(?:\s[^>]*)?\s*/?>',
+            _stash,
+            text,
+            flags=_re.IGNORECASE,
+        )
+
     def _restore_ruby_tags(self, text: str) -> str:
         """Restore ruby placeholders back to their original HTML."""
         for key, original in getattr(self, '_ruby_stash', {}).items():
+            text = text.replace(key, original)
+        for key, original in getattr(self, '_ruby_tag_stash', {}).items():
             text = text.replace(key, original)
         return text
     
@@ -773,6 +797,7 @@ class EnhancedTextExtractor:
             
             # Protect <ruby>...</ruby> blocks from html2text stripping
             content_to_convert = self._protect_ruby_tags(content_to_convert)
+            content_to_convert = self._protect_ruby_child_tags(content_to_convert)
             
             # Convert to text with error handling
             try:
@@ -814,6 +839,7 @@ class EnhancedTextExtractor:
             
             # Restore ruby/furigana placeholders back to HTML
             clean_text = self._restore_ruby_tags(clean_text)
+            clean_text = unescape_valid_html_tag_entities(clean_text)
 
             # Strip internal provenance markers before the model sees the text.
             clean_text = self._strip_heading_markers_and_record_provenance(clean_text)

@@ -19,6 +19,10 @@ from ebooklib import epub, ITEM_DOCUMENT
 from bs4 import BeautifulSoup
 from metadata_batch_translator import enhance_epub_compiler
 from _empty_attr_fix import fix_empty_attr_tags
+from html_tag_entities import (
+    VALID_ENTITY_TAGS as _VALID_ENTITY_TAGS,
+    unescape_valid_html_tag_entities as _unescape_valid_html_tag_entities,
+)
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 # Import the lightweight compression worker for ProcessPoolExecutor.
@@ -701,23 +705,7 @@ class TitleExtractor:
 class XHTMLConverter:
     """Handles XHTML conversion and compliance"""
 
-    VALID_ENTITY_TAGS = frozenset({
-        'html', 'head', 'body', 'title', 'meta', 'link', 'style', 'noscript',
-        'p', 'div', 'span', 'br', 'hr', 'img', 'a', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-        'ul', 'ol', 'li', 'dl', 'dt', 'dd',
-        'pre', 'code', 'em', 'strong', 'b', 'i', 'u', 's', 'strike', 'del', 'ins', 'mark',
-        'small', 'sub', 'sup',
-        'table', 'thead', 'tbody', 'tr', 'td', 'th', 'caption', 'col', 'colgroup',
-        'blockquote', 'q', 'cite',
-        'section', 'article', 'header', 'footer', 'nav', 'main', 'aside', 'details', 'summary',
-        'figure', 'figcaption',
-        'form', 'input', 'button', 'select', 'option', 'textarea', 'label', 'fieldset', 'legend',
-        'iframe', 'canvas', 'svg', 'math',
-        'video', 'audio', 'source', 'track', 'embed', 'object', 'param',
-        'map', 'area',
-        'ruby', 'rt', 'rp', 'rb', 'rtc',
-        'center', 'font', 'base',
-    })
+    VALID_ENTITY_TAGS = _VALID_ENTITY_TAGS
     
     # Default language for generated XHTML (used for html[@lang] and html[@xml:lang])
     # This will be synchronized with the EPUB book language by EPUBCompiler.
@@ -736,32 +724,7 @@ class XHTMLConverter:
     @staticmethod
     def unescape_valid_html_tag_entities(text: str) -> str:
         """Turn encoded known HTML tags back into real tags while preserving narrative angle text."""
-        if not isinstance(text, str) or '&' not in text:
-            return text
-        import html as _html
-        import re as _re
-
-        tag_entity_re = _re.compile(
-            r'(&lt;|&LT;|&#0*60;|&#x0*3[cC];)(.*?)(&gt;|&GT;|&#0*62;|&#x0*3[eE];)',
-            _re.DOTALL,
-        )
-
-        def repl(match):
-            inner = _html.unescape(match.group(2))
-            stripped = inner.strip()
-            if not stripped:
-                return match.group(0)
-            tag_bits = stripped[1:].lstrip() if stripped.startswith('/') else stripped
-            if tag_bits.startswith(('!', '?')):
-                return match.group(0)
-            tag_name = _re.split(r'[\s/>]', tag_bits, 1)[0].lower()
-            if tag_name.endswith('/'):
-                tag_name = tag_name[:-1]
-            if tag_name in XHTMLConverter.VALID_ENTITY_TAGS:
-                return f'<{inner}>'
-            return match.group(0)
-
-        return tag_entity_re.sub(repl, text)
+        return _unescape_valid_html_tag_entities(text)
     
     @staticmethod
     def ensure_compliance(html_content: str, title: str = "Chapter", 

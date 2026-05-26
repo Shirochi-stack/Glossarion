@@ -38,6 +38,7 @@ except ImportError:
     pass
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from collections import Counter
+from html_tag_entities import unescape_valid_html_tag_entities
 
 _DEFAULT_SPECIAL_KEYWORDS = [
     'cover', 'title', 'toc', 'copyright', 'preface', 'nav', 'message',
@@ -2751,6 +2752,7 @@ def _process_single_html_file(
                 else:
                     content_html = html_content
                     content_text = soup.get_text(strip=True)
+            content_html = unescape_valid_html_tag_entities(content_html)
             
             # Extract title (with ignore settings support)
             chapter_title = None

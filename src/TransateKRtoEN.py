@@ -17098,10 +17098,10 @@ def main(log_callback=None, stop_callback=None):
         return start <= actual_num <= end
 
     # When USE_SPINE_ORDER is active, build a mapping from each extracted
-    # chapter's list index → its spine-offset position.  The positions
-    # are computed using the FULL OPF spine (same logic as the GUI preview
-    # dialog) so the numbers always match what the preview shows.
-    _spine_pos_by_idx = {}  # chapter list index -> 1-based spine offset
+    # chapter's list index to its raw OPF spine position. This matches the
+    # Progress Manager display.
+    # Special-file skipping is applied separately after range matching.
+    _spine_pos_by_idx = {}  # chapter list index -> 1-based OPF spine position
     if use_spine_order and start is not None:
         opf_path = os.path.join(out, 'content.opf')
         if os.path.exists(opf_path):
@@ -17134,21 +17134,16 @@ def main(log_callback=None, stop_callback=None):
                         if _idref and _idref in _manifest:
                             _all_spine_basenames.append(_manifest[_idref])
 
-                _offset_by_basename = {}   # basename -> offset pos (1-based)
-                _tpos = 0
-                for _sb in _all_spine_basenames:
-                    _special = _is_configured_special_file(_sb)
-                    _skip = (not translate_special and _special)
-                    if not _skip:
-                        _tpos += 1
-                        _offset_by_basename[_sb] = _tpos
-                        _offset_by_basename[os.path.splitext(_sb)[0]] = _tpos
+                _opf_pos_by_basename = {}   # basename -> raw OPF pos (1-based)
+                for _raw_idx, _sb in enumerate(_all_spine_basenames, 1):
+                    _opf_pos_by_basename[_sb] = _raw_idx
+                    _opf_pos_by_basename[os.path.splitext(_sb)[0]] = _raw_idx
 
-                # Map each extracted chapter to its offset position
+                # Map each extracted chapter to its OPF position
                 for _ci, _ch in enumerate(chapters):
                     _bn = _ch.get('original_basename') or os.path.basename(_ch.get('filename', ''))
                     _bn_noext = os.path.splitext(_bn)[0] if _bn else ''
-                    _pos = _offset_by_basename.get(_bn) or _offset_by_basename.get(_bn_noext)
+                    _pos = _opf_pos_by_basename.get(_bn) or _opf_pos_by_basename.get(_bn_noext)
                     if _pos is not None:
                         _spine_pos_by_idx[_ci] = _pos
 
@@ -17156,7 +17151,7 @@ def main(log_callback=None, stop_callback=None):
                     _mapped = len(_spine_pos_by_idx)
                     _total_spine = len(_all_spine_basenames)
                     print(f"📊 Spine order: mapped {_mapped}/{len(chapters)} chapters "
-                          f"(OPF has {_total_spine} items, {_tpos} translatable)")
+                          f"(OPF has {_total_spine} items)")
                 else:
                     print("⚠️ Spine order: could not map chapters to OPF positions")
             except Exception as _e:

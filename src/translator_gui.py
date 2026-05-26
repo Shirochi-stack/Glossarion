@@ -8134,7 +8134,7 @@ Recent translations to summarize:
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
             "When enabled, the chapter range uses the exact EPUB spine (reading order) "
             "instead of chapter numbers extracted from filenames. "
-            "Skipped special files do not count unless Translate Special Files is enabled.</p></qt>"
+            "Spine numbers match the Progress Manager/OPF positions; special files are still skipped unless enabled.</p></qt>"
         )
         self.use_spine_order_checkbox.stateChanged.connect(self._on_spine_order_toggle)
         self.use_spine_order_checkbox.setChecked(self.config.get('use_spine_order', False))
@@ -13345,17 +13345,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 return False
         return True
 
-    def _should_skip_spine_range_file(self, filename, translate_special=False):
-        """Match the translator's spine-range counter for preview numbering."""
-        if translate_special:
-            return False
-        return self._is_special_file(filename)
-
     def _get_spine_filenames_for_preview(self, epub_path, start, end, spine_mode, translate_special=False):
         """
         Read the EPUB spine and return list of (position_label, filename, is_special_skipped) tuples
         that fall within the given range.
-        If spine_mode is True, range refers to spine position (1-based), offset past special files.
+        If spine_mode is True, range refers to raw OPF spine position (1-based),
+        matching the Progress Manager display.
         If spine_mode is False, range refers to chapter numbers extracted from filenames.
         is_special_skipped is True when translate_special is False and the file is a special file.
         """
@@ -13415,27 +13410,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             spine_items.append(manifest[idref])
 
                 if spine_mode:
-                    # Spine order with offset: position 1 = first non-special file
-                    # when translate_special is off
-                    translatable_pos = 0
                     for i, fname in enumerate(spine_items):
-                        skip_this = self._should_skip_spine_range_file(fname, translate_special)
-
-                        if not skip_this:
-                            translatable_pos += 1
-
-                        # Show all files in the absolute spine range for context,
-                        # but use the offset position for matching
-                        effective_pos = translatable_pos if not skip_this else None
-
-                        if effective_pos is not None and start <= effective_pos <= end:
-                            results.append((f"Spine #{effective_pos}", fname, False))
-                        elif skip_this:
-                            # Show special files that appear before/within the range
-                            # for context (e.g. between spine #1 and #5)
-                            raw_pos = i + 1
-                            if translatable_pos < end and (translatable_pos >= start - 1 or raw_pos <= end + 2):
-                                results.append((f"[Spine {raw_pos}]", fname, True))
+                        raw_pos = i + 1
+                        if not (start <= raw_pos <= end):
+                            continue
+                        skip_this = self._should_skip_special_file(fname, translate_special)
+                        results.append((f"[{raw_pos:03d}]", fname, skip_this))
                 else:
                     # Range refers to chapter numbers parsed from filenames
                     for i, fname in enumerate(spine_items):
