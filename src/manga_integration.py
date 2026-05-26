@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout
                                QDialog, QButtonGroup, QApplication, QSizePolicy, QToolButton,
                                QAbstractItemView)
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QEvent, QPropertyAnimation, QEasingCurve, Property, QThread
-from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent, QPixmap, QTransform, QBrush
+from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent, QPixmap, QTransform, QBrush, QPalette
 from typing import List, Dict, Optional, Any
 from queue import Queue, Empty
 import logging
@@ -3663,18 +3663,22 @@ class MangaTranslationTab(QObject):
 
     def _preview_pool_button_stylesheet(self) -> str:
         return (
-            "QPushButton#previewPoolButton { background-color: #0d6efd; color: white; "
+            "background: #0d6efd; background-color: #0d6efd; color: white; "
             "font-weight: bold; padding: 5px 15px; border: 1px solid #64a5ff; "
-            "border-radius: 3px; } "
-            "QPushButton#previewPoolButton:hover { background-color: #2f80ff; } "
-            "QPushButton#previewPoolButton:pressed { background-color: #0a58ca; } "
-            "QPushButton#previewPoolButton:disabled { background-color: #0d6efd; color: white; }"
+            "border-radius: 3px;"
         )
 
     def _style_preview_pool_button(self, button):
         button.setObjectName("previewPoolButton")
         button.setStyleSheet(self._preview_pool_button_stylesheet())
         try:
+            button.setAutoFillBackground(True)
+            button.setFlat(False)
+            button.setAttribute(Qt.WA_StyledBackground, True)
+            palette = button.palette()
+            palette.setColor(QPalette.Button, QColor("#0d6efd"))
+            palette.setColor(QPalette.ButtonText, QColor("#ffffff"))
+            button.setPalette(palette)
             button.style().unpolish(button)
             button.style().polish(button)
             button.update()
