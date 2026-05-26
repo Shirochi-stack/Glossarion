@@ -13165,6 +13165,12 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             normalized_output_path = os.path.normcase(os.path.abspath(output_path))
             with progress_lock:
                 if normalized_output_path in refined_output_paths:
+                    return "skipped", None, {
+                        "kind": "already_refined",
+                        "chapter": actual_num,
+                        "reason": "already refined in this pass",
+                    }
+                if normalized_output_path in refined_output_paths:
                     return "skipped", f"âœ¨ Chapter {actual_num}: output already refined in this pass ({output_file})"
                 refined_output_paths.add(normalized_output_path)
 
@@ -13208,7 +13214,11 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
 
         if mode == "refinement":
             if entry.get("refinement_status") == "refined":
-                return "skipped", f"✨ Chapter {actual_num}: already refined"
+                return "skipped", None, {
+                    "kind": "already_refined",
+                    "chapter": actual_num,
+                    "reason": "already refined",
+                }
             try:
                 refine_system = _format_refinement_prompt(
                     getattr(config, "REFINEMENT_SYSTEM_PROMPT", "").strip(),
@@ -13318,6 +13328,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
     skipped = 0
     failed = 0
     grouped_not_targeted = []
+    grouped_already_refined = []
     grouped_refinement_skips = {}
 
     def _format_chapter_values(values, limit=40):
@@ -13358,6 +13369,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             reason = str(detail.get("reason") or "unknown")
             if kind == "not_targeted":
                 grouped_not_targeted.append(chapter)
+                return
+            if kind == "already_refined":
+                grouped_already_refined.append(chapter)
                 return
             if kind == "refinement_skip":
                 grouped_refinement_skips.setdefault(reason, []).append(chapter)
@@ -13437,6 +13451,11 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         print(
             f"☑️ Failed multipass: {len(grouped_not_targeted)} completed chapter(s) "
             f"not targeted: {_format_chapter_values(grouped_not_targeted)}"
+        )
+    if grouped_already_refined:
+        print(
+            f"✨ Refinement already done for {len(grouped_already_refined)} chapter(s): "
+            f"{_format_chapter_values(grouped_already_refined)}"
         )
     for reason, chapters_for_reason in sorted(grouped_refinement_skips.items()):
         print(
