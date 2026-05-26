@@ -5158,7 +5158,8 @@ class MangaTranslationTab(QObject):
         local_radio = QRadioButton("Local / API Model")
         local_radio.setFont(radio_font)
         local_radio.setToolTip(
-            "Use the selected local inpainter, or the API-backed custom-image-edit option from the model dropdown.\n"
+            "For best local performance, select anime_onnx from the model dropdown.\n"
+            "For best results, select custom-image-edit and use a modern image edit model.\n"
             "Recommended for image edit models such as Nano Banana 2 and Wan 2.6 Image Edit."
         )
         local_radio.setChecked(self.inpaint_method_value == 'local')
