@@ -25,6 +25,8 @@ from PySide6.QtGui import QFont, QColor, QIcon, QKeySequence, QShortcut, QBrush
 class GlossaryManagerMixin:
     """Mixin class containing glossary management methods for TranslatorGUI"""
 
+    GLOSSARY_PROMPT_DEFAULT_PROFILE = "Default"
+
     def _prewarm_glossary_settings_tabs(self, dialog=None, notebook=None):
         """Force hidden glossary settings tabs through their first layout pass."""
         prewarm_start = time.perf_counter()
@@ -168,6 +170,420 @@ class GlossaryManagerMixin:
                 combo.setIconSize(QSize(size, size))
         except Exception:
             pass
+
+    def _glossary_prompt_profile_meta(self, profile_key):
+        """Metadata for user-defined glossary prompt profile buckets."""
+        meta = {
+            'balanced_full': {
+                'config_key': 'manual_glossary_prompt3',
+                'legacy_config_key': 'manual_glossary_prompt',
+                'attr': 'manual_glossary_prompt',
+                'label': 'Balanced/Full Profile:',
+                'empty_tip': 'Create a profile for the Balanced/Full extraction prompt',
+            },
+            'minimal': {
+                'config_key': 'unified_auto_glosary_prompt3',
+                'legacy_config_key': None,
+                'attr': 'unified_auto_glosary_prompt3',
+                'label': 'Minimal Profile:',
+                'empty_tip': 'Create a profile for the Minimal glossary prompt',
+            },
+        }
+        return meta.get(profile_key, meta['balanced_full'])
+
+    def _is_default_glossary_prompt_profile(self, profile_name):
+        return str(profile_name or '').strip().casefold() == self.GLOSSARY_PROMPT_DEFAULT_PROFILE.casefold()
+
+    def _ensure_glossary_prompt_profiles(self):
+        """Ensure glossary prompt profile containers exist without seeding defaults."""
+        profiles = self.config.get('glossary_prompt_profiles', {})
+        if not isinstance(profiles, dict):
+            profiles = {}
+        for key in ('balanced_full', 'minimal'):
+            if not isinstance(profiles.get(key), dict):
+                profiles[key] = {}
+        self.config['glossary_prompt_profiles'] = profiles
+
+        active = self.config.get('active_glossary_prompt_profiles', {})
+        if not isinstance(active, dict):
+            active = {}
+        self.config['active_glossary_prompt_profiles'] = active
+
+        defaults = self.config.get('glossary_prompt_profile_defaults', {})
+        if not isinstance(defaults, dict):
+            defaults = {}
+        for key in ('balanced_full', 'minimal'):
+            if key not in defaults:
+                meta = self._glossary_prompt_profile_meta(key)
+                defaults[key] = str(
+                    self.config.get(meta['config_key'])
+                    or getattr(self, meta['attr'], '')
+                    or ''
+                )
+        self.config['glossary_prompt_profile_defaults'] = defaults
+        return profiles, active
+
+    def _glossary_prompt_profiles_for(self, profile_key):
+        profiles, _active = self._ensure_glossary_prompt_profiles()
+        return profiles.setdefault(profile_key, {})
+
+    def _active_glossary_prompt_profile_for(self, profile_key):
+        _profiles, active = self._ensure_glossary_prompt_profiles()
+        return str(active.get(profile_key, '') or '').strip()
+
+    def _set_active_glossary_prompt_profile(self, profile_key, profile_name):
+        _profiles, active = self._ensure_glossary_prompt_profiles()
+        if profile_name and not self._is_default_glossary_prompt_profile(profile_name):
+            active[profile_key] = profile_name
+        else:
+            active.pop(profile_key, None)
+        self.config['active_glossary_prompt_profiles'] = active
+
+    def _default_glossary_prompt_profile_text(self, profile_key):
+        self._ensure_glossary_prompt_profiles()
+        defaults = self.config.setdefault('glossary_prompt_profile_defaults', {})
+        return str(defaults.get(profile_key, '') or '')
+
+    def _set_default_glossary_prompt_profile_text(self, profile_key, text):
+        self._ensure_glossary_prompt_profiles()
+        defaults = self.config.setdefault('glossary_prompt_profile_defaults', {})
+        defaults[profile_key] = text or ''
+        self.config['glossary_prompt_profile_defaults'] = defaults
+
+    def _glossary_prompt_text(self, editor):
+        if editor is None:
+            return ''
+        try:
+            return self._sep_from_display(editor.toPlainText()).strip()
+        except Exception:
+            try:
+                return editor.toPlainText().strip()
+            except Exception:
+                return ''
+
+    def _set_glossary_prompt_editor_text(self, editor, text):
+        if editor is None:
+            return
+        try:
+            editor.blockSignals(True)
+            editor.setPlainText(self._sep_for_display(text or ''))
+        finally:
+            try:
+                editor.blockSignals(False)
+            except Exception:
+                pass
+
+    def _sync_glossary_prompt_profile_current_prompt(self, profile_key):
+        widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
+        editor = widgets.get('editor')
+        text = self._glossary_prompt_text(editor)
+        meta = self._glossary_prompt_profile_meta(profile_key)
+        setattr(self, meta['attr'], text)
+        self.config[meta['config_key']] = text
+        if meta.get('legacy_config_key'):
+            self.config[meta['legacy_config_key']] = text
+        return text
+
+    def _persist_glossary_prompt_profiles(self):
+        """Persist profile changes through the main config saver when available."""
+        try:
+            if hasattr(self, 'save_config'):
+                self.save_config(show_message=False)
+        except Exception:
+            pass
+
+    def _refresh_glossary_prompt_profile_combo(self, profile_key, selected_name=None):
+        widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
+        combo = widgets.get('combo')
+        if combo is None:
+            return
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        selected_name = selected_name if selected_name is not None else self._active_glossary_prompt_profile_for(profile_key)
+        if not selected_name or self._is_default_glossary_prompt_profile(selected_name) or selected_name not in profiles:
+            selected_name = self.GLOSSARY_PROMPT_DEFAULT_PROFILE
+        try:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem(self.GLOSSARY_PROMPT_DEFAULT_PROFILE)
+            for name in profiles.keys():
+                if not self._is_default_glossary_prompt_profile(name):
+                    combo.addItem(name)
+            combo.setCurrentText(selected_name)
+            self._apply_halgakos_combo_icons(combo)
+        finally:
+            try:
+                combo.blockSignals(False)
+            except Exception:
+                pass
+
+    def _on_glossary_prompt_profile_selected(self, profile_key):
+        widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
+        combo = widgets.get('combo')
+        editor = widgets.get('editor')
+        if combo is None or editor is None:
+            return
+        name = combo.currentText().strip()
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        if self._is_default_glossary_prompt_profile(name):
+            self._set_glossary_prompt_editor_text(editor, self._default_glossary_prompt_profile_text(profile_key))
+            self._set_active_glossary_prompt_profile(profile_key, '')
+            self._sync_glossary_prompt_profile_current_prompt(profile_key)
+            return
+        if not name or name not in profiles:
+            return
+        self._set_glossary_prompt_editor_text(editor, profiles.get(name, ''))
+        self._set_active_glossary_prompt_profile(profile_key, name)
+        self._sync_glossary_prompt_profile_current_prompt(profile_key)
+
+    def _auto_save_glossary_prompt_profile(self, profile_key):
+        """Stage edits into the active prompt profile in memory, matching system prompt profiles."""
+        widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
+        combo = widgets.get('combo')
+        editor = widgets.get('editor')
+        if combo is None or editor is None:
+            return
+        name = combo.currentText().strip()
+        if not name or self._is_default_glossary_prompt_profile(name):
+            self._set_default_glossary_prompt_profile_text(profile_key, self._glossary_prompt_text(editor))
+            self._set_active_glossary_prompt_profile(profile_key, '')
+            self._sync_glossary_prompt_profile_current_prompt(profile_key)
+            return
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        active = self._active_glossary_prompt_profile_for(profile_key)
+        if name in profiles and active == name:
+            profiles[name] = self._glossary_prompt_text(editor)
+            self.config['glossary_prompt_profiles'][profile_key] = profiles
+        self._sync_glossary_prompt_profile_current_prompt(profile_key)
+
+    def _new_glossary_prompt_profile(self, profile_key):
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
+        combo = widgets.get('combo')
+        editor = widgets.get('editor')
+
+        existing = set(profiles.keys())
+        if combo is not None:
+            for i in range(combo.count()):
+                existing.add(combo.itemText(i))
+
+        n = 1
+        while f"New Profile #{n}" in existing:
+            n += 1
+        name = f"New Profile #{n}"
+
+        profiles[name] = ''
+        self.config['glossary_prompt_profiles'][profile_key] = profiles
+        self._set_active_glossary_prompt_profile(profile_key, name)
+        self._refresh_glossary_prompt_profile_combo(profile_key, name)
+        self._set_glossary_prompt_editor_text(editor, '')
+        self._sync_glossary_prompt_profile_current_prompt(profile_key)
+        self._persist_glossary_prompt_profiles()
+        if hasattr(self, 'append_log'):
+            self.append_log(f"✅ Created glossary prompt profile: '{name}'")
+
+    def _save_glossary_prompt_profile(self, profile_key):
+        widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
+        combo = widgets.get('combo')
+        editor = widgets.get('editor')
+        if combo is None or editor is None:
+            return
+        name = combo.currentText().strip()
+        if not name:
+            QMessageBox.warning(self, "Profile Name Required", "Enter a profile name before saving.")
+            return
+
+        if self._is_default_glossary_prompt_profile(name):
+            self._set_default_glossary_prompt_profile_text(profile_key, self._glossary_prompt_text(editor))
+            self._set_active_glossary_prompt_profile(profile_key, '')
+            self._refresh_glossary_prompt_profile_combo(profile_key, self.GLOSSARY_PROMPT_DEFAULT_PROFILE)
+            self._sync_glossary_prompt_profile_current_prompt(profile_key)
+            self._persist_glossary_prompt_profiles()
+            if hasattr(self, 'append_log'):
+                self.append_log("✅ Saved default glossary prompt profile")
+            return
+
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        profiles[name] = self._glossary_prompt_text(editor)
+        self.config['glossary_prompt_profiles'][profile_key] = profiles
+        self._set_active_glossary_prompt_profile(profile_key, name)
+        self._refresh_glossary_prompt_profile_combo(profile_key, name)
+        self._sync_glossary_prompt_profile_current_prompt(profile_key)
+        self._persist_glossary_prompt_profiles()
+        if hasattr(self, 'append_log'):
+            self.append_log(f"✅ Saved glossary prompt profile: '{name}'")
+
+    def _delete_glossary_prompt_profile(self, profile_key):
+        widgets = getattr(self, '_glossary_prompt_profile_widgets', {}).get(profile_key, {})
+        combo = widgets.get('combo')
+        if combo is None:
+            return
+        name = combo.currentText().strip()
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        if self._is_default_glossary_prompt_profile(name):
+            QMessageBox.warning(self, "Default Profile", "The Default glossary prompt profile cannot be deleted.")
+            return
+        if not name or name not in profiles:
+            QMessageBox.warning(self, "Profile Not Found", "Select an existing profile to delete.")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Delete Profile",
+            f"Delete glossary prompt profile '{name}'?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        del profiles[name]
+        self.config['glossary_prompt_profiles'][profile_key] = profiles
+        next_name = next((profile for profile in profiles if not self._is_default_glossary_prompt_profile(profile)), '')
+        self._set_active_glossary_prompt_profile(profile_key, next_name)
+        self._refresh_glossary_prompt_profile_combo(profile_key, next_name or self.GLOSSARY_PROMPT_DEFAULT_PROFILE)
+        self._on_glossary_prompt_profile_selected(profile_key)
+        self._persist_glossary_prompt_profiles()
+        if hasattr(self, 'append_log'):
+            self.append_log(f"🗑️ Deleted glossary prompt profile: '{name}'")
+
+    def _create_glossary_prompt_profile_controls(self, profile_key, editor):
+        """Create New/Save/Delete controls for one glossary prompt editor."""
+        self._ensure_glossary_prompt_profiles()
+        if not hasattr(self, '_glossary_prompt_profile_widgets'):
+            self._glossary_prompt_profile_widgets = {}
+
+        meta = self._glossary_prompt_profile_meta(profile_key)
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 6)
+        layout.setSpacing(8)
+
+        label = QLabel(meta['label'])
+        layout.addWidget(label)
+
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setMinimumWidth(220)
+        combo.setMaximumWidth(420)
+        combo.setToolTip(meta['empty_tip'])
+        try:
+            combo.lineEdit().setPlaceholderText("Profile name")
+        except Exception:
+            pass
+        combo.setStyleSheet("""
+            QComboBox {
+                padding-right: 28px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 26px;
+                border-left: 1px solid #4a5568;
+            }
+        """)
+        self._disable_combobox_mousewheel(combo)
+        self._add_combobox_arrow(combo)
+        layout.addWidget(combo)
+
+        new_btn = QPushButton("+ New Profile")
+        new_btn.setFixedHeight(28)
+        new_btn.setToolTip("Create a new empty glossary prompt profile")
+        new_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2d5a2d;
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: bold;
+                border: 1px solid #3a7a3a;
+                border-radius: 4px;
+                padding: 0px 8px;
+            }
+            QPushButton:hover {
+                background-color: #3a7a3a;
+                border-color: #4a9a4a;
+            }
+            QPushButton:pressed {
+                background-color: #1e3e1e;
+            }
+        """)
+        new_btn.clicked.connect(lambda: self._new_glossary_prompt_profile(profile_key))
+        layout.addWidget(new_btn)
+
+        save_btn = QPushButton("💾 Save Profile")
+        save_btn.setFixedWidth(120)
+        save_btn.setFixedHeight(28)
+        save_btn.setToolTip("Save the selected glossary prompt profile")
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2f5f8f;
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: bold;
+                border: 1px solid #4a78a8;
+                border-radius: 4px;
+                padding: 0px 8px;
+            }
+            QPushButton:hover {
+                background-color: #3f78ad;
+                border-color: #5a91c8;
+            }
+            QPushButton:pressed {
+                background-color: #244766;
+            }
+        """)
+        save_btn.clicked.connect(lambda: self._save_glossary_prompt_profile(profile_key))
+        layout.addWidget(save_btn)
+
+        delete_btn = QPushButton("🗑 Delete Profile")
+        delete_btn.setFixedWidth(128)
+        delete_btn.setFixedHeight(28)
+        delete_btn.setToolTip("Delete the selected custom glossary prompt profile")
+        delete_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6f2f2f;
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: bold;
+                border: 1px solid #944545;
+                border-radius: 4px;
+                padding: 0px 8px;
+            }
+            QPushButton:hover {
+                background-color: #8a3a3a;
+                border-color: #b65252;
+            }
+            QPushButton:pressed {
+                background-color: #512424;
+            }
+        """)
+        delete_btn.clicked.connect(lambda: self._delete_glossary_prompt_profile(profile_key))
+        layout.addWidget(delete_btn)
+        layout.addStretch()
+
+        self._glossary_prompt_profile_widgets[profile_key] = {
+            'combo': combo,
+            'editor': editor,
+        }
+        self._refresh_glossary_prompt_profile_combo(profile_key)
+        combo.currentIndexChanged.connect(lambda _idx: self._on_glossary_prompt_profile_selected(profile_key))
+        try:
+            combo.lineEdit().returnPressed.connect(lambda: self._on_glossary_prompt_profile_selected(profile_key))
+        except Exception:
+            pass
+        try:
+            editor.textChanged.connect(lambda: self._auto_save_glossary_prompt_profile(profile_key))
+        except Exception:
+            pass
+        return row
+
+    def _apply_active_glossary_prompt_profile(self, profile_key):
+        active = self._active_glossary_prompt_profile_for(profile_key)
+        profiles = self._glossary_prompt_profiles_for(profile_key)
+        if active and not self._is_default_glossary_prompt_profile(active) and active in profiles:
+            self._refresh_glossary_prompt_profile_combo(profile_key, active)
+            self._on_glossary_prompt_profile_selected(profile_key)
+        else:
+            self._refresh_glossary_prompt_profile_combo(profile_key, self.GLOSSARY_PROMPT_DEFAULT_PROFILE)
+            self._on_glossary_prompt_profile_selected(profile_key)
 
     def _set_glossary_tree_font_size(self, point_size, persist=True):
         """Apply a bounded font size to the glossary editor tree."""
@@ -2395,6 +2811,9 @@ class GlossaryManagerMixin:
         prompt_height = int(self._screen.height() * 0.25)
         self.manual_prompt_text.setMinimumHeight(prompt_height)
         self.manual_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        prompt_frame_layout.addWidget(
+            self._create_glossary_prompt_profile_controls('balanced_full', self.manual_prompt_text)
+        )
         prompt_frame_layout.addWidget(self.manual_prompt_text)
 
         # If the user clears the prompt and leaves the field, restore the default.
@@ -2430,6 +2849,7 @@ class GlossaryManagerMixin:
             self.manual_glossary_prompt = manual_prompt_from_config
 
         self.manual_prompt_text.setPlainText(self._sep_for_display(self.manual_glossary_prompt))
+        self._apply_active_glossary_prompt_profile('balanced_full')
         
         prompt_controls_widget = QWidget()
         prompt_controls_layout = QHBoxLayout(prompt_controls_widget)
@@ -2712,14 +3132,21 @@ class GlossaryManagerMixin:
 
                 # Save to config (using new key)
                 self.config['manual_glossary_prompt3'] = self.manual_glossary_prompt
+                self.config['manual_glossary_prompt'] = self.manual_glossary_prompt
 
                 if debug_enabled:
                     print(f"🔍 [UPDATE] manual_glossary_prompt3: {len(self.manual_glossary_prompt)} chars")
             
             if hasattr(self, 'auto_prompt_text'):
                 self.unified_auto_glosary_prompt3 = self._sep_from_display(self.auto_prompt_text.toPlainText()).strip()
+                self.config['unified_auto_glosary_prompt3'] = self.unified_auto_glosary_prompt3
                 if debug_enabled:
                     print(f"🔍 [UPDATE] unified_auto_glosary_prompt3: {len(self.unified_auto_glosary_prompt3)} chars")
+
+            if hasattr(self, '_glossary_prompt_profile_widgets'):
+                for _profile_key in ('balanced_full', 'minimal'):
+                    if _profile_key in self._glossary_prompt_profile_widgets:
+                        self._auto_save_glossary_prompt_profile(_profile_key)
             
             if hasattr(self, 'append_prompt_text'):
                 old_value = getattr(self, 'append_glossary_prompt', '<NOT SET>')
@@ -4193,6 +4620,9 @@ Do not stop after the glossary."""
         self.auto_prompt_text = QTextEdit()
         self.auto_prompt_text.setMinimumHeight(250)
         self.auto_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        glossary_prompt_frame_layout.addWidget(
+            self._create_glossary_prompt_profile_controls('minimal', self.auto_prompt_text)
+        )
         glossary_prompt_frame_layout.addWidget(self.auto_prompt_text)
         
         # Default unified prompt — imported from canonical source of truth
@@ -4209,6 +4639,7 @@ Do not stop after the glossary."""
         if not self.unified_auto_glosary_prompt3 or not self.unified_auto_glosary_prompt3.strip():
             self.unified_auto_glosary_prompt3 = default_unified_prompt
         self.auto_prompt_text.setPlainText(self._sep_for_display(self.unified_auto_glosary_prompt3))
+        self._apply_active_glossary_prompt_profile('minimal')
         
         glossary_prompt_controls_widget = QWidget()
         glossary_prompt_controls_layout = QHBoxLayout(glossary_prompt_controls_widget)

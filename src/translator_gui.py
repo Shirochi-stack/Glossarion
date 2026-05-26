@@ -4237,7 +4237,14 @@ Recent translations to summarize:
     def _get_multipass_refinement_mode(self):
         """Return the live multipass refinement mode from the combobox/config."""
         mode = None
-        combo = getattr(self, 'multipass_refinement_mode_combo', None)
+        can_read_widgets = True
+        try:
+            app = QApplication.instance()
+            can_read_widgets = app is None or QThread.currentThread() == app.thread()
+        except Exception:
+            can_read_widgets = True
+
+        combo = getattr(self, 'multipass_refinement_mode_combo', None) if can_read_widgets else None
         if combo is not None:
             try:
                 mode = combo.currentData()
@@ -4259,6 +4266,41 @@ Recent translations to summarize:
         mode = self._get_multipass_refinement_mode()
         self.multipass_refinement_mode_var = mode
         self.config['multipass_refinement_mode'] = mode
+
+    def _export_multipass_runtime_env(self):
+        """Capture the live multipass controls and export them for the worker."""
+        can_read_widgets = True
+        try:
+            app = QApplication.instance()
+            can_read_widgets = app is None or QThread.currentThread() == app.thread()
+        except Exception:
+            can_read_widgets = True
+
+        if can_read_widgets:
+            checkbox = getattr(self, 'multipass_checkbox', None)
+            if checkbox is not None:
+                try:
+                    self.multipass_mode_var = bool(checkbox.isChecked())
+                except Exception:
+                    pass
+            self._sync_multipass_refinement_mode_from_combo()
+
+        enabled = bool(getattr(self, 'multipass_mode_var', self.config.get('multipass_mode', False)))
+        mode = self._get_multipass_refinement_mode()
+
+        self.multipass_mode_var = enabled
+        self.multipass_refinement_mode_var = mode
+        self.config['multipass_mode'] = enabled
+        self.config['multipass_refinement_mode'] = mode
+
+        os.environ['MULTIPASS_MODE'] = '1' if enabled else '0'
+        os.environ['MULTIPASS_REFINEMENT_MODE'] = mode
+        try:
+            os.environ['SCAN_PHASE_MODE'] = self._get_scan_phase_mode()
+            os.environ['QA_SCANNER_SETTINGS_JSON'] = self._get_qa_scanner_settings_json()
+        except Exception:
+            pass
+        return enabled, mode
 
     def _get_scan_phase_mode(self):
         """Return the live QA scan mode used by post-translation scanning."""
@@ -13826,6 +13868,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
         except Exception:
             os.environ['GLOSSARION_RUN_ID'] = str(int(time.time()))
 
+        try:
+            multipass_enabled, multipass_refinement_mode = self._export_multipass_runtime_env()
+            if multipass_enabled:
+                self.append_log(
+                    f"Multipass refinement mode: {multipass_refinement_mode.title()} "
+                    "(exported for translation)"
+                )
+        except Exception as e:
+            self.append_log(f"Warning: Could not export multipass refinement mode: {e}")
+
         if translation_stop_flag:
             translation_stop_flag(False)
         
@@ -14289,6 +14341,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
         """Run translation directly - handles multiple files and different file types"""
 
         try:
+            self._export_multipass_runtime_env()
+
             # AUTO-SWITCH PROFILE BASED ON EXTRACTION MODE
             # Check if profile name contains BeautifulSoup or html2text
             current_profile = self.profile_var
@@ -16299,7 +16353,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.append_log("📄 Processing as text file")
                 
                 # Set environment variables
+                multipass_enabled, multipass_refinement_mode = self._export_multipass_runtime_env()
                 env_vars = self._get_environment_variables(file_path, api_key)
+                env_vars['MULTIPASS_MODE'] = '1' if multipass_enabled else '0'
+                env_vars['MULTIPASS_REFINEMENT_MODE'] = multipass_refinement_mode
                 
                 # Enable async chapter extraction for EPUBs and PDFs to prevent GUI freezing
                 if file_path.lower().endswith(('.epub', '.pdf')):
