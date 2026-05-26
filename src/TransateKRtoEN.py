@@ -565,41 +565,6 @@ def _load_qa_scanner_settings_from_env():
     return settings
 
 
-def _apply_qa_scan_env_from_settings(qa_settings):
-    settings = qa_settings if isinstance(qa_settings, dict) else {}
-    counting_mode = str(settings.get("counting_mode", "") or "").strip().lower()
-    mappings = {
-        "QA_FOREIGN_CHAR_THRESHOLD": str(settings.get("foreign_char_threshold", 10)),
-        "QA_TARGET_LANGUAGE": str(settings.get("target_language", "english")),
-        "QA_CHECK_ENCODING": "1" if settings.get("check_encoding_issues", False) else "0",
-        "QA_CHECK_REPETITION": "1" if settings.get("check_repetition", True) else "0",
-        "QA_CHECK_ARTIFACTS": "1" if settings.get("check_translation_artifacts", False) else "0",
-        "QA_CHECK_AI_ARTIFACTS": "1" if settings.get("check_ai_artifacts", False) else "0",
-        "QA_CHECK_GLOSSARY_LEAKAGE": "1" if settings.get("check_glossary_leakage", True) else "0",
-        "QA_CHECK_MISSING_IMAGES": "1" if settings.get("check_missing_images", True) else "0",
-        "QA_MIN_FILE_LENGTH": str(settings.get("min_file_length", 0)),
-        "QA_REPORT_FORMAT": str(settings.get("report_format", "detailed")),
-        "QA_AUTO_SAVE_REPORT": "1" if settings.get("auto_save_report", True) else "0",
-        "QA_CACHE_ENABLED": "1" if settings.get("cache_enabled", True) else "0",
-        "QA_PARAGRAPH_THRESHOLD": str(settings.get("paragraph_threshold", 0.3)),
-        "QA_USE_THREAD_EXECUTOR": "1" if settings.get("use_thread_executor", False) else "0",
-        "QA_USE_WORD_COUNT": "1" if counting_mode == "word" else "0",
-        "QA_EXACT_CHAR_COUNT": "1" if counting_mode == "exact" else "0",
-    }
-    previous = {key: os.environ.get(key) for key in mappings}
-    for key, value in mappings.items():
-        os.environ[key] = value
-    return previous
-
-
-def _restore_env(previous):
-    for key, value in previous.items():
-        if value is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = value
-
-
 class TranslationConfig:
     """Centralized configuration management"""
     def __init__(self):
@@ -21284,16 +21249,14 @@ def main(log_callback=None, stop_callback=None):
             if not isinstance(qa_settings, dict):
                 qa_settings = _load_qa_scanner_settings_from_env()
             print(f"Failed multipass mode: running QA Scanner in {qa_scan_mode} mode before refinement.")
-            qa_env_restore = {}
             try:
                 try:
                     progress_manager.save()
                     print(f"Saved current translation progress before Failed-mode QA scan: {progress_manager.PROGRESS_FILE}")
                 except Exception as save_exc:
                     print(f"⚠️ Failed to save progress before QA scan: {save_exc}")
-                qa_env_restore = _apply_qa_scan_env_from_settings(qa_settings)
-                from scan_html_folder import scan_html_folder as _scan_html_folder
-                _scan_html_folder(
+                from qa_scan_runtime import run_qa_scan_path
+                run_qa_scan_path(
                     out,
                     log=print,
                     stop_flag=check_stop,
@@ -21301,6 +21264,7 @@ def main(log_callback=None, stop_callback=None):
                     qa_settings=qa_settings,
                     epub_path=getattr(config, "input_path", ""),
                     progress_path=progress_manager.PROGRESS_FILE,
+                    config=config,
                 )
                 try:
                     progress_manager.prog = progress_manager._init_or_load()
@@ -21309,9 +21273,6 @@ def main(log_callback=None, stop_callback=None):
                     print(f"⚠️ Failed to reload progress after QA scan: {reload_exc}")
             except Exception as scan_exc:
                 print(f"⚠️ QA scan before failed multipass failed: {scan_exc}")
-            finally:
-                if qa_env_restore:
-                    _restore_env(qa_env_restore)
         original_output_mode = config.OUTPUT_MODE
         try:
             config.OUTPUT_MODE = "refinement"

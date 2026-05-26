@@ -2056,51 +2056,10 @@ class QAScannerMixin:
             self.append_log(f"🔍 Starting bulk QA scan in {mode.upper()} mode for {len(folders_to_scan)} folders")
         
         self.stop_requested = False
-
-        # Extract cache configuration from qa_settings
-        cache_config = {
-            'enabled': qa_settings.get('cache_enabled', True),
-            'auto_size': qa_settings.get('cache_auto_size', False),
-            'show_stats': qa_settings.get('cache_show_stats', False),
-            'sizes': {}
-        }
-        
-        # Get individual cache sizes
-        for cache_name in ['normalize_text', 'similarity_ratio', 'content_hashes', 
-                          'semantic_fingerprint', 'structural_signature', 'translation_artifacts']:
-            size = qa_settings.get(f'cache_{cache_name}', None)
-            if size is not None:
-                # Convert -1 to None for unlimited
-                cache_config['sizes'][cache_name] = None if size == -1 else size
-        
-        # Create custom settings that includes cache config
-        custom_settings = {
-            'qa_settings': qa_settings,
-            'cache_config': cache_config,
-            'log_cache_stats': qa_settings.get('cache_show_stats', False)
-        }
  
         def run_scan():
             try:
-                # Extract cache configuration from qa_settings
-                cache_config = {
-                    'enabled': qa_settings.get('cache_enabled', True),
-                    'auto_size': qa_settings.get('cache_auto_size', False),
-                    'show_stats': qa_settings.get('cache_show_stats', False),
-                    'sizes': {}
-                }
-                
-                # Get individual cache sizes
-                for cache_name in ['normalize_text', 'similarity_ratio', 'content_hashes', 
-                                  'semantic_fingerprint', 'structural_signature', 'translation_artifacts']:
-                    size = qa_settings.get(f'cache_{cache_name}', None)
-                    if size is not None:
-                        # Convert -1 to None for unlimited
-                        cache_config['sizes'][cache_name] = None if size == -1 else size
-                
-                # Configure the cache BEFORE calling scan_html_folder
-                from scan_html_folder import configure_qa_cache
-                configure_qa_cache(cache_config)
+                from qa_scan_runtime import run_qa_scan_path
                 
                 # Loop through all selected folders for bulk scanning
                 successful_scans = 0
@@ -2118,26 +2077,6 @@ class QAScannerMixin:
                     # Determine the correct EPUB path for this specific folder
                     current_epub_path = epub_path
                     current_qa_settings = qa_settings.copy()
-                    
-                    # Inject live API credentials for AI truncation detection
-                    # (config.json on disk is encrypted, so we pass the decrypted values)
-                    try:
-                        current_qa_settings['_live_api_key'] = self.api_key_entry.text().strip() if hasattr(self, 'api_key_entry') else ''
-                        current_qa_settings['_live_model'] = getattr(self, 'model_var', self.config.get('model', ''))
-                        live_cfg = dict(self.config)
-                        if hasattr(self, 'batch_translation_var'):
-                            batch_value = self.batch_translation_var
-                            if hasattr(batch_value, 'isChecked'):
-                                batch_value = batch_value.isChecked()
-                            live_cfg['batch_translation'] = bool(batch_value)
-                        if hasattr(self, 'batch_size_entry'):
-                            try:
-                                live_cfg['batch_size'] = int(self.batch_size_entry.text() or 3)
-                            except ValueError:
-                                pass
-                        current_qa_settings['_live_config'] = live_cfg  # Decrypted in-memory config + live UI state
-                    except Exception:
-                        pass
                     
                     # Any EPUB-dependent check needs per-folder matching
                     _needs_epub = (
@@ -2339,18 +2278,9 @@ class QAScannerMixin:
                                     current_epub_path = potential_pdf_alt
                                     self.append_log(f"   📄 Auto-detected PDF source: {os.path.basename(potential_pdf_alt)}")
                         
-                        # Pass the QA settings to scan_html_folder
-                        # Don't pass text_file_mode explicitly - let scan_html_folder auto-detect from epub_path
-                        try:
-                            current_qa_settings = current_qa_settings.copy()
-                            current_qa_settings['_output_mode'] = self._get_output_mode() if hasattr(self, '_get_output_mode') else self.config.get('output_mode', 'text')
-                        except Exception:
-                            pass
-                        
-                        # Get scan_html_folder from translator_gui's global scope
-                        import translator_gui
-                        scan_func = translator_gui.scan_html_folder
-                        scan_func(
+                        # Run through the shared configured QA scan path used by worker-side scans too.
+                        # Don't pass text_file_mode explicitly - let scan_html_folder auto-detect from epub_path.
+                        run_qa_scan_path(
                             current_folder, 
                             log=self.append_log, 
                             stop_flag=lambda: self.stop_requested, 
@@ -2358,7 +2288,8 @@ class QAScannerMixin:
                             qa_settings=current_qa_settings,
                             epub_path=current_epub_path,
                             selected_files=current_selected_files,
-                            text_file_mode=None  # Let it auto-detect from epub_path extension
+                            text_file_mode=None,
+                            owner=self,
                         )
                         
                         successful_scans += 1

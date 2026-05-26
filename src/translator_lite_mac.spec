@@ -88,6 +88,7 @@ app_files = [
     # File processors
     ('epub_converter.py', '.'),
     ('html_tag_entities.py', '.'),
+    ('qa_scan_runtime.py', '.'),
     ('txt_processor.py', '.'),
     ('chapter_splitter.py', '.'),
     
@@ -209,6 +210,7 @@ app_modules = [
     'PatternManager',
     'epub_converter',
     'html_tag_entities',
+    'qa_scan_runtime',
     'txt_processor',
     'scan_html_folder',
     'unified_api_client',

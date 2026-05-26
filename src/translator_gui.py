@@ -16589,6 +16589,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['USE_QA_SCAN_KEYS'] = '0'
             os.environ['VISION_API_KEYS'] = json.dumps(self.config.get('qa_scan_keys', []))
             os.environ['QA_SCAN_API_KEYS'] = os.environ['VISION_API_KEYS']
+            os.environ['USE_AI_TRUNCATION_DETECTION_KEYS'] = '1' if self.config.get('use_ai_truncation_detection_keys', False) else '0'
+            os.environ['AI_TRUNCATION_DETECTION_API_KEYS'] = json.dumps(self.config.get('ai_truncation_detection_keys', []))
             os.environ['USE_ROLLING_SUMMARY_KEYS'] = '1' if self.config.get('use_rolling_summary_keys', False) else '0'
             os.environ['ROLLING_SUMMARY_API_KEYS'] = json.dumps(self.config.get('rolling_summary_keys', []))
             os.environ['USE_TRUNCATION_RETRY_KEYS'] = '1' if self.config.get('use_truncation_retry_keys', False) else '0'
@@ -16895,6 +16897,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'VISION_API_KEYS': json.dumps(self.config.get('qa_scan_keys', [])),
             'USE_QA_SCAN_KEYS': '1' if self.config.get('use_qa_scan_keys', False) else '0',
             'QA_SCAN_API_KEYS': json.dumps(self.config.get('qa_scan_keys', [])),
+            'USE_AI_TRUNCATION_DETECTION_KEYS': '1' if self.config.get('use_ai_truncation_detection_keys', False) else '0',
+            'AI_TRUNCATION_DETECTION_API_KEYS': json.dumps(self.config.get('ai_truncation_detection_keys', [])),
             'USE_ROLLING_SUMMARY_KEYS': '1' if self.config.get('use_rolling_summary_keys', False) else '0',
             'ROLLING_SUMMARY_API_KEYS': json.dumps(self.config.get('rolling_summary_keys', [])),
             'USE_TRUNCATION_RETRY_KEYS': '1' if self.config.get('use_truncation_retry_keys', False) else '0',
