@@ -4358,8 +4358,8 @@ class MangaTranslationTab(QObject):
         # OCR Provider Selection - ENHANCED VERSION
         self.ocr_provider_frame = QWidget()
         ocr_provider_layout = QHBoxLayout(self.ocr_provider_frame)
-        ocr_provider_layout.setContentsMargins(0, 0, 0, 10)
-        ocr_provider_layout.setSpacing(8)
+        ocr_provider_layout.setContentsMargins(0, 0, 0, 14)
+        ocr_provider_layout.setSpacing(10)
         ocr_label_column_width = 105
 
         provider_label = QLabel("OCR Provider:")
@@ -4430,8 +4430,8 @@ class MangaTranslationTab(QObject):
 
         self.custom_api_ocr_batch_frame = QWidget()
         custom_api_batch_layout = QHBoxLayout(self.custom_api_ocr_batch_frame)
-        custom_api_batch_layout.setContentsMargins(0, 0, 0, 10)
-        custom_api_batch_layout.setSpacing(8)
+        custom_api_batch_layout.setContentsMargins(0, 0, 0, 14)
+        custom_api_batch_layout.setSpacing(10)
 
         batch_label = QLabel("Custom API OCR:")
         batch_label.setFixedWidth(ocr_label_column_width)
@@ -5144,15 +5144,23 @@ class MangaTranslationTab(QObject):
         # Set smaller font for radio buttons
         radio_font = QFont('Arial', 9)
         
-        cloud_radio = QRadioButton("Cloud API")
+        cloud_radio = QRadioButton("Replicate API")
         cloud_radio.setFont(radio_font)
+        cloud_radio.setToolTip(
+            "Use Replicate for cloud inpainting with the configured Replicate API key and cloud inpaint model.\n"
+            "Best when you want remote inpainting instead of loading a local model."
+        )
         cloud_radio.setChecked(self.inpaint_method_value == 'cloud')
         cloud_radio.toggled.connect(lambda checked: self._on_inpaint_method_change() if checked else None)
         self.inpaint_method_group.addButton(cloud_radio, 0)
         method_selection_layout.addWidget(cloud_radio)
 
-        local_radio = QRadioButton("Local Model")
+        local_radio = QRadioButton("Local / API Model")
         local_radio.setFont(radio_font)
+        local_radio.setToolTip(
+            "Use the selected local inpainter, or the API-backed custom-image-edit option from the model dropdown.\n"
+            "Recommended for image edit models such as Nano Banana 2 and Wan 2.6 Image Edit."
+        )
         local_radio.setChecked(self.inpaint_method_value == 'local')
         local_radio.toggled.connect(lambda checked: self._on_inpaint_method_change() if checked else None)
         self.inpaint_method_group.addButton(local_radio, 1)
@@ -5160,6 +5168,10 @@ class MangaTranslationTab(QObject):
 
         hybrid_radio = QRadioButton("Hybrid")
         hybrid_radio.setFont(radio_font)
+        hybrid_radio.setToolTip(
+            "Show and use both cloud and local/API inpainting settings.\n"
+            "Useful when combining a Replicate fallback with a local or custom-image-edit API model."
+        )
         hybrid_radio.setChecked(self.inpaint_method_value == 'hybrid')
         hybrid_radio.toggled.connect(lambda checked: self._on_inpaint_method_change() if checked else None)
         self.inpaint_method_group.addButton(hybrid_radio, 2)
