@@ -588,17 +588,10 @@ def refine_glossary_entries(
             "output_file": os.path.basename(output_path or ""),
         }, atomic_replace_fn=atomic_replace_fn)
 
-        refined_entries = []
-        for chunk_text, chunk_idx, total_chunks, chunk_entry_type, whole_type_chunk in chunks:
+        def _process_chunk(chunk_info):
+            chunk_text, chunk_idx, total_chunks, chunk_entry_type, whole_type_chunk = chunk_info
             if check_stop():
-                log(f"Glossary refinement stopped during chunk {chunk_idx}/{total_chunks}")
-                update_refinement_progress(
-                    progress_file,
-                    type_key,
-                    {"status": "in_progress", "completed_chunks": chunk_idx - 1},
-                    atomic_replace_fn=atomic_replace_fn,
-                )
-                return "stopped", entry_type, {}
+                return {"status": "stopped", "chunk_idx": chunk_idx, "total_chunks": total_chunks}
 
             if whole_type_chunk:
                 log(f"✨ Refining {chunk_entry_type} entries ({chunk_idx}/{total_chunks})...")
@@ -621,28 +614,17 @@ def refine_glossary_entries(
                     context_label,
                 )
             except Exception as e:
-                model_name = _actual_request_model_name(client)
-                log(f"Refinement failed for chunk {chunk_idx}: {e}")
-                failed_update = {"status": "failed", "error": str(e)}
-                if model_name:
-                    failed_update["model_name"] = model_name
-                failed_update.update(_actual_request_key_context(client))
-                update_refinement_progress(progress_file, type_key, failed_update, atomic_replace_fn=atomic_replace_fn)
-                refined_entries = []
-                break
+                return {
+                    "status": "failed",
+                    "chunk_idx": chunk_idx,
+                    "total_chunks": total_chunks,
+                    "error": str(e),
+                    "model_name": _actual_request_model_name(client),
+                    "request_context": _actual_request_key_context(client),
+                }
 
             model_name = _actual_request_model_name(client)
             request_context = _actual_request_key_context(client)
-            if model_name or request_context:
-                model_update = dict(request_context)
-                if model_name:
-                    model_update["model_name"] = model_name
-                update_refinement_progress(
-                    progress_file,
-                    type_key,
-                    model_update,
-                    atomic_replace_fn=atomic_replace_fn,
-                )
             response_text = raw[0] if isinstance(raw, tuple) else raw
             response_text = response_text if isinstance(response_text, str) else str(response_text or "")
             parsed = parse_response_fn(response_text)
@@ -652,30 +634,147 @@ def refine_glossary_entries(
             ]
             parsed = _strip_inactive_description(parsed)
             if not parsed:
-                log(f"⚠️ Refinement returned no valid entries for chunk {chunk_idx}; keeping original selected entries.")
-                failed_update = {"status": "failed", "error": "empty_or_invalid_response"}
-                if model_name:
-                    failed_update["model_name"] = model_name
-                failed_update.update(request_context)
-                update_refinement_progress(progress_file, type_key, failed_update, atomic_replace_fn=atomic_replace_fn)
-                refined_entries = []
-                break
+                return {
+                    "status": "failed",
+                    "chunk_idx": chunk_idx,
+                    "total_chunks": total_chunks,
+                    "error": "empty_or_invalid_response",
+                    "model_name": model_name,
+                    "request_context": request_context,
+                }
 
-            refined_entries.extend(parsed)
-            chunk_update = {"status": "in_progress", "completed_chunks": chunk_idx}
-            if model_name:
-                chunk_update["model_name"] = model_name
-            chunk_update.update(request_context)
-            update_refinement_progress(progress_file, type_key, chunk_update, atomic_replace_fn=atomic_replace_fn)
             if _issue_from_finish_reason(finish_reason, None) == "TRUNCATED":
+                return {
+                    "status": "failed",
+                    "chunk_idx": chunk_idx,
+                    "total_chunks": total_chunks,
+                    "error": "TRUNCATED",
+                    "model_name": model_name,
+                    "request_context": request_context,
+                }
+
+            return {
+                "status": "ok",
+                "chunk_idx": chunk_idx,
+                "total_chunks": total_chunks,
+                "entries": parsed,
+                "model_name": model_name,
+                "request_context": request_context,
+            }
+
+        def _result_model_update(result):
+            model_update = dict(result.get("request_context") or {})
+            model_name = result.get("model_name")
+            if model_name:
+                model_update["model_name"] = model_name
+            return model_update
+
+        def _record_failed_chunk(result):
+            chunk_idx = result.get("chunk_idx", "?")
+            error = result.get("error") or "unknown_error"
+            if error == "empty_or_invalid_response":
+                log(f"⚠️ Refinement returned no valid entries for chunk {chunk_idx}; keeping original selected entries.")
+            elif error == "TRUNCATED":
                 log(f"Refinement chunk {chunk_idx} was truncated; keeping original selected entries.")
-                failed_update = {"status": "failed", "error": "TRUNCATED"}
-                if model_name:
-                    failed_update["model_name"] = model_name
-                failed_update.update(request_context)
-                update_refinement_progress(progress_file, type_key, failed_update, atomic_replace_fn=atomic_replace_fn)
+            else:
+                log(f"Refinement failed for chunk {chunk_idx}: {error}")
+            failed_update = {"status": "failed", "error": error}
+            failed_update.update(_result_model_update(result))
+            update_refinement_progress(progress_file, type_key, failed_update, atomic_replace_fn=atomic_replace_fn)
+
+        refined_entries = []
+        last_model_name = ""
+        last_request_context = {}
+
+        def _remember_success(result):
+            nonlocal last_model_name, last_request_context
+            if result.get("model_name"):
+                last_model_name = result.get("model_name")
+            if result.get("request_context"):
+                last_request_context = dict(result.get("request_context") or {})
+
+        chunk_batch_enabled = _batch_translation_enabled() and len(chunks) > 1
+        if chunk_batch_enabled:
+            max_workers = min(_batch_size(), len(chunks))
+            log(f"Glossary refinement batch mode: {max_workers} parallel chunk request(s)")
+            completed_chunks = 0
+            chunk_results = {}
+            failed_result = None
+            stopped_result = None
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(_process_chunk, chunk): chunk for chunk in chunks}
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        chunk = futures.get(future)
+                        result = {
+                            "status": "failed",
+                            "chunk_idx": chunk[1] if chunk else "?",
+                            "total_chunks": chunk[2] if chunk else len(chunks),
+                            "error": str(e),
+                        }
+                    status = result.get("status")
+                    if status == "stopped":
+                        stopped_result = result
+                        for pending in futures:
+                            pending.cancel()
+                        break
+                    if status != "ok":
+                        failed_result = result
+                        for pending in futures:
+                            pending.cancel()
+                        break
+
+                    chunk_results[result["chunk_idx"]] = result
+                    completed_chunks += 1
+                    _remember_success(result)
+                    chunk_update = {"status": "in_progress", "completed_chunks": completed_chunks}
+                    chunk_update.update(_result_model_update(result))
+                    update_refinement_progress(progress_file, type_key, chunk_update, atomic_replace_fn=atomic_replace_fn)
+
+            if stopped_result:
+                completed_chunks = len(chunk_results)
+                log(f"Glossary refinement stopped during chunk {stopped_result.get('chunk_idx')}/{stopped_result.get('total_chunks')}")
+                update_refinement_progress(
+                    progress_file,
+                    type_key,
+                    {"status": "in_progress", "completed_chunks": completed_chunks},
+                    atomic_replace_fn=atomic_replace_fn,
+                )
+                return "stopped", entry_type, {}
+
+            if failed_result:
+                _record_failed_chunk(failed_result)
                 refined_entries = []
-                break
+            else:
+                for chunk_idx in sorted(chunk_results):
+                    refined_entries.extend(chunk_results[chunk_idx].get("entries") or [])
+        else:
+            completed_chunks = 0
+            for chunk in chunks:
+                result = _process_chunk(chunk)
+                status = result.get("status")
+                if status == "stopped":
+                    log(f"Glossary refinement stopped during chunk {result.get('chunk_idx')}/{result.get('total_chunks')}")
+                    update_refinement_progress(
+                        progress_file,
+                        type_key,
+                        {"status": "in_progress", "completed_chunks": completed_chunks},
+                        atomic_replace_fn=atomic_replace_fn,
+                    )
+                    return "stopped", entry_type, {}
+                if status != "ok":
+                    _record_failed_chunk(result)
+                    refined_entries = []
+                    break
+
+                refined_entries.extend(result.get("entries") or [])
+                completed_chunks += 1
+                _remember_success(result)
+                chunk_update = {"status": "in_progress", "completed_chunks": completed_chunks}
+                chunk_update.update(_result_model_update(result))
+                update_refinement_progress(progress_file, type_key, chunk_update, atomic_replace_fn=atomic_replace_fn)
 
         if refined_entries:
             if not skip_dedupe:
@@ -701,10 +800,10 @@ def refine_glossary_entries(
                 "entry_count_after": len(refined_entries),
                 "completed_chunks": len(chunks),
             }
-            model_name = _actual_request_model_name(client)
+            model_name = last_model_name or _actual_request_model_name(client)
             if model_name:
                 completed_update["model_name"] = model_name
-            completed_update.update(_actual_request_key_context(client))
+            completed_update.update(last_request_context or _actual_request_key_context(client))
             update_refinement_progress(progress_file, type_key, completed_update, atomic_replace_fn=atomic_replace_fn)
             log(f"✅ Refined selected entries: {len(entries)} -> {len(refined_entries)} entries")
             return "ok", entry_type, result_mapping

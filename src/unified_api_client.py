@@ -5981,6 +5981,7 @@ class UnifiedClient:
         context=None,
         image_data=None,
         request_id=None,
+        retry_reason=None,
     ):
         """Send one request through a dedicated pool without mutating this shared client.
 
@@ -6090,7 +6091,7 @@ class UnifiedClient:
                     max_tokens,
                     max_completion_tokens,
                     context,
-                    retry_reason=None,
+                    retry_reason=retry_reason,
                     request_id=request_id,
                     image_data=image_data,
                 )
@@ -6103,6 +6104,10 @@ class UnifiedClient:
                     shared_tls.last_actual_request_model = getattr(temp, 'last_actual_request_model', temp.model)
                     shared_tls.last_actual_key_identifier = temp.key_identifier
                     shared_tls.last_unified_response = temp.get_last_unified_response()
+                    self._remember_actual_request_model(
+                        getattr(temp, 'last_actual_request_model', temp.model),
+                        temp.key_identifier,
+                    )
                 except Exception:
                     pass
                 return result
@@ -6447,6 +6452,20 @@ class UnifiedClient:
                             self.__class__._metadata_key_pool = APIKeyPool("Metadata key pool")
                         self.__class__._metadata_key_pool.load_from_list(metadata_keys)
                         metadata_pool = self.__class__._metadata_key_pool
+                    if batch_mode:
+                        return self._send_with_isolated_dedicated_key(
+                            metadata_pool,
+                            metadata_keys,
+                            'Metadata',
+                            'MetadataKey',
+                            messages,
+                            temperature,
+                            max_tokens,
+                            max_completion_tokens,
+                            context,
+                            image_data=image_data,
+                            request_id=request_id,
+                        )
                     pool_state = self._apply_dedicated_key_pool_override(
                         metadata_pool, metadata_keys, 'Metadata', 'MetadataKey'
                     )
@@ -6474,6 +6493,20 @@ class UnifiedClient:
                             self.__class__._ai_truncation_detection_key_pool = APIKeyPool("AI truncation detection key pool")
                         self.__class__._ai_truncation_detection_key_pool.load_from_list(ai_keys)
                         ai_pool = self.__class__._ai_truncation_detection_key_pool
+                    if batch_mode:
+                        return self._send_with_isolated_dedicated_key(
+                            ai_pool,
+                            ai_keys,
+                            'AITruncationDetection',
+                            'AITruncationDetectionKey',
+                            messages,
+                            temperature,
+                            max_tokens,
+                            max_completion_tokens,
+                            context,
+                            image_data=image_data,
+                            request_id=request_id,
+                        )
                     pool_state = self._apply_dedicated_key_pool_override(
                         ai_pool, ai_keys, 'AITruncationDetection', 'AITruncationDetectionKey'
                     )
@@ -6517,6 +6550,23 @@ class UnifiedClient:
                             rs_list = self.__class__._in_memory_rolling_summary_keys or []
                     except Exception:
                         rs_list = []
+                    if batch_mode:
+                        if not getattr(self.__class__, '_rolling_summary_pool_logged', False):
+                            print(f"[ROLLING SUMMARY KEYS] Using rolling summary key pool ({len(rolling_summary_pool.keys)} keys)")
+                            self.__class__._rolling_summary_pool_logged = True
+                        return self._send_with_isolated_dedicated_key(
+                            rolling_summary_pool,
+                            rs_list,
+                            'RollingSummary',
+                            'RollingSummaryKey',
+                            messages,
+                            temperature,
+                            max_tokens,
+                            max_completion_tokens,
+                            context,
+                            image_data=image_data,
+                            request_id=request_id,
+                        )
                     pool_state = self._apply_dedicated_key_pool_override(
                         rolling_summary_pool,
                         rs_list,
@@ -6762,8 +6812,27 @@ class UnifiedClient:
                                 except Exception:
                                     pass
 
+                        if not (inpainter_pool and getattr(inpainter_pool, 'keys', [])):
+                            raise UnifiedClientError("Image gen/edit key pool is enabled for this context but has no available keys; refusing fallback to another pool", error_type="no_keys")
                         with self.__class__._in_memory_inpainter_keys_lock:
                             ik_list = self.__class__._in_memory_inpainter_keys or []
+                        if batch_mode:
+                            if not getattr(self.__class__, '_inpainter_pool_logged', False):
+                                print(f"[IMAGE GEN/EDIT KEYS] Using image gen/edit key pool ({len(inpainter_pool.keys)} keys)")
+                                self.__class__._inpainter_pool_logged = True
+                            return self._send_with_isolated_dedicated_key(
+                                inpainter_pool,
+                                ik_list,
+                                'ImageGenEdit',
+                                'ImageGenEditKey',
+                                messages,
+                                temperature,
+                                max_tokens,
+                                max_completion_tokens,
+                                context,
+                                image_data=image_data,
+                                request_id=request_id,
+                            )
                         _dedicated_pool_state = self._apply_dedicated_key_pool_override(
                             inpainter_pool,
                             ik_list,
@@ -6820,6 +6889,25 @@ class UnifiedClient:
                         else:
                             with self.__class__._in_memory_glossary_refinement_keys_lock:
                                 rk_list = self.__class__._in_memory_glossary_refinement_keys or []
+                            if batch_mode:
+                                if refinement_pool and getattr(refinement_pool, 'keys', []):
+                                    if not getattr(self.__class__, '_glossary_refinement_pool_logged', False):
+                                        print(f"[REFINEMENT KEYS] Using refinement key pool ({len(refinement_pool.keys)} keys)")
+                                        self.__class__._glossary_refinement_pool_logged = True
+                                    return self._send_with_isolated_dedicated_key(
+                                        refinement_pool,
+                                        rk_list,
+                                        'GlossaryRefinement',
+                                        'GlossaryRefinementKey',
+                                        messages,
+                                        temperature,
+                                        max_tokens,
+                                        max_completion_tokens,
+                                        context,
+                                        image_data=image_data,
+                                        request_id=request_id,
+                                    )
+                                print("[REFINEMENT KEYS] Enabled, but no available refinement keys; falling back to the next eligible pool")
                             _dedicated_pool_state = self._apply_dedicated_key_pool_override(
                                 refinement_pool,
                                 rk_list,
@@ -9067,6 +9155,31 @@ class UnifiedClient:
                         else:
                             allowed_attempts = min(truncation_retry_attempts, attempts_remaining)
 
+                            def _isolated_truncation_retry_pool():
+                                if os.getenv("BATCH_TRANSLATION", "0") != "1" or os.getenv('USE_TRUNCATION_RETRY_KEYS', '0') != '1':
+                                    return None, None
+                                truncation_pool = self.__class__._truncation_retry_key_pool
+                                if not truncation_pool or not getattr(truncation_pool, 'keys', []):
+                                    truncation_keys_json = os.getenv('TRUNCATION_RETRY_API_KEYS', '[]')
+                                    if truncation_keys_json != '[]':
+                                        try:
+                                            truncation_keys_list = json.loads(truncation_keys_json)
+                                            if truncation_keys_list:
+                                                self.__class__.setup_truncation_retry_key_pool(truncation_keys_list)
+                                                truncation_pool = self.__class__._truncation_retry_key_pool
+                                        except Exception:
+                                            pass
+                                if not (truncation_pool and getattr(truncation_pool, 'keys', [])):
+                                    return None, None
+                                if not any(getattr(k, 'enabled', True) for k in truncation_pool.keys):
+                                    return None, None
+                                try:
+                                    with self.__class__._in_memory_truncation_retry_keys_lock:
+                                        tr_list = self.__class__._in_memory_truncation_retry_keys or []
+                                except Exception:
+                                    tr_list = []
+                                return truncation_pool, tr_list
+
                             def _run_truncation_retry(new_tokens: int, reason_suffix: str, retry_attempt: int):
                                 tls = self._get_thread_local_client()
                                 prev_override = getattr(tls, 'max_retries_override', None)
@@ -9075,8 +9188,32 @@ class UnifiedClient:
                                 # Set flag to prevent nested truncation retries
                                 tls._in_truncation_retry = True
                                 try:
-                                    pool_state, _ = self._apply_truncation_retry_key_pool_override()
                                     retry_tokens = new_tokens
+                                    isolated_pool, isolated_key_data = _isolated_truncation_retry_pool()
+                                    if isolated_pool:
+                                        if not getattr(self.__class__, '_truncation_retry_pool_logged', False):
+                                            print(f"[TRUNCATION RETRY KEYS] Using truncation retry key pool ({len(isolated_pool.keys)} keys)")
+                                            self.__class__._truncation_retry_pool_logged = True
+                                        _api_watchdog_record_retry(
+                                            request_id,
+                                            retry_attempt,
+                                            reason="truncation_retry_keypool",
+                                        )
+                                        return self._send_with_isolated_dedicated_key(
+                                            isolated_pool,
+                                            isolated_key_data,
+                                            'TruncationRetry',
+                                            'TruncationRetryKey',
+                                            messages,
+                                            temperature,
+                                            retry_tokens,
+                                            max_completion_tokens,
+                                            context,
+                                            image_data=image_data,
+                                            request_id=request_id,
+                                            retry_reason=f"truncation_retry_{reason_suffix}",
+                                        )
+                                    pool_state, _ = self._apply_truncation_retry_key_pool_override()
                                     try:
                                         per_key_limit = (
                                             getattr(tls, 'output_token_limit', None)
