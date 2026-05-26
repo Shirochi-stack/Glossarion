@@ -539,30 +539,14 @@ def _load_qa_scanner_settings_from_env():
             "paragraph_threshold": _env_float("QA_PARAGRAPH_THRESHOLD", 0.3),
         }
 
-    output_lang = os.getenv("OUTPUT_LANGUAGE", "").strip()
-    if output_lang:
-        settings["target_language"] = output_lang.lower()
-    settings["word_count_multipliers"] = {
-        "english": 1.0,
-        "spanish": 1.10,
-        "french": 1.10,
-        "german": 1.05,
-        "italian": 1.05,
-        "portuguese": 1.10,
-        "russian": 1.15,
-        "arabic": 1.15,
-        "hindi": 1.10,
-        "turkish": 1.05,
-        "chinese": 2.50,
-        "chinese (simplified)": 2.50,
-        "chinese (traditional)": 2.50,
-        "japanese": 2.20,
-        "korean": 2.30,
-        "hebrew": 1.05,
-        "thai": 1.10,
-        "other": 1.0,
-    }
-    return settings
+    try:
+        from qa_scan_runtime import normalize_qa_scan_settings
+        return normalize_qa_scan_settings(settings, target_language=os.getenv("OUTPUT_LANGUAGE", "").strip())
+    except Exception:
+        output_lang = os.getenv("OUTPUT_LANGUAGE", "").strip()
+        if output_lang:
+            settings["target_language"] = output_lang.lower()
+        return settings
 
 
 class TranslationConfig:

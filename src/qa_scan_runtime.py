@@ -5,6 +5,130 @@ import json
 import os
 
 
+CANONICAL_WORD_COUNT_MULTIPLIERS = {
+    "english": 1.0,
+    "spanish": 1.10,
+    "french": 1.10,
+    "german": 1.05,
+    "italian": 1.05,
+    "portuguese": 1.10,
+    "russian": 1.15,
+    "arabic": 1.15,
+    "hindi": 1.10,
+    "turkish": 1.05,
+    "chinese": 2.50,
+    "chinese (simplified)": 2.50,
+    "chinese (traditional)": 2.50,
+    "japanese": 2.20,
+    "korean": 2.30,
+    "hebrew": 1.05,
+    "thai": 1.10,
+    "other": 1.0,
+}
+
+
+def normalize_target_language(display_text):
+    if not display_text:
+        return "english"
+    s = str(display_text).strip().lower()
+    mapping = {
+        "english": "english",
+        "en": "english",
+        "spanish": "spanish",
+        "es": "spanish",
+        "french": "french",
+        "fr": "french",
+        "german": "german",
+        "de": "german",
+        "portuguese": "portuguese",
+        "pt": "portuguese",
+        "italian": "italian",
+        "it": "italian",
+        "russian": "russian",
+        "ru": "russian",
+        "japanese": "japanese",
+        "ja": "japanese",
+        "korean": "korean",
+        "ko": "korean",
+        "chinese": "chinese",
+        "chinese (simplified)": "chinese (simplified)",
+        "chinese (traditional)": "chinese (traditional)",
+        "zh": "chinese",
+        "zh-cn": "chinese (simplified)",
+        "zh-tw": "chinese (traditional)",
+        "arabic": "arabic",
+        "ar": "arabic",
+        "hebrew": "hebrew",
+        "he": "hebrew",
+        "thai": "thai",
+        "th": "thai",
+    }
+    if s in mapping:
+        return mapping[s]
+    first = s.split()[0] if s.split() else "english"
+    return mapping.get(first, first)
+
+
+def default_qa_scan_settings():
+    return {
+        "foreign_char_threshold": 10,
+        "excluded_characters": "",
+        "target_language": "english",
+        "source_language": "auto",
+        "check_encoding_issues": False,
+        "check_repetition": True,
+        "check_translation_artifacts": True,
+        "check_ai_artifacts": True,
+        "check_punctuation_mismatch": False,
+        "punctuation_loss_threshold": 49,
+        "flag_excess_punctuation": False,
+        "excess_punctuation_threshold": 49,
+        "check_glossary_leakage": True,
+        "check_potential_truncation": False,
+        "check_missing_images": True,
+        "min_file_length": 0,
+        "report_format": "detailed",
+        "auto_save_report": True,
+        "check_missing_html_tag": True,
+        "check_missing_header_tags": False,
+        "check_all_text_in_header": True,
+        "check_invalid_tag_mismatch": False,
+        "check_invalid_nesting": False,
+        "check_silent_truncation": False,
+        "truncation_cheap_threshold": 12,
+        "truncation_borderline_score": 40,
+        "truncation_length_threshold": 30,
+        "truncation_embed_threshold": 30,
+        "check_ai_truncation_detection": False,
+        "ai_truncation_tail_chars": 400,
+        "check_word_count_ratio": True,
+        "check_multiple_headers": True,
+        "warn_name_mismatch": True,
+        "quick_scan_sample_size": 1000,
+        "cache_enabled": True,
+        "cache_auto_size": False,
+        "cache_show_stats": False,
+        "cache_normalize_text": 10000,
+        "cache_similarity_ratio": 20000,
+        "cache_content_hashes": 5000,
+        "cache_semantic_fingerprint": 2000,
+        "cache_structural_signature": 2000,
+        "cache_translation_artifacts": 1000,
+        "word_count_multipliers": dict(CANONICAL_WORD_COUNT_MULTIPLIERS),
+    }
+
+
+def normalize_qa_scan_settings(settings=None, target_language=None):
+    normalized = default_qa_scan_settings()
+    if isinstance(settings, dict):
+        normalized.update(settings)
+    normalized["word_count_multipliers"] = dict(CANONICAL_WORD_COUNT_MULTIPLIERS)
+    language = target_language or normalized.get("target_language") or os.getenv("OUTPUT_LANGUAGE", "")
+    if language:
+        normalized["target_language"] = normalize_target_language(language)
+    return normalized
+
+
 def _env_bool(name, default=False):
     raw = os.getenv(name)
     if raw is None:
@@ -193,7 +317,6 @@ def _live_config_from_worker(config):
 
 
 def prepare_qa_scan_settings(qa_settings, owner=None, config=None, output_mode=None):
-    settings = dict(qa_settings) if isinstance(qa_settings, dict) else {}
     if owner is not None:
         live_config, api_key, model = _live_config_from_owner(owner)
         if output_mode is None:
@@ -206,6 +329,7 @@ def prepare_qa_scan_settings(qa_settings, owner=None, config=None, output_mode=N
         if output_mode is None:
             output_mode = getattr(config, "OUTPUT_MODE", os.getenv("OUTPUT_MODE", "text")) if config is not None else os.getenv("OUTPUT_MODE", "text")
 
+    settings = normalize_qa_scan_settings(qa_settings, target_language=live_config.get("output_language"))
     settings["_live_api_key"] = api_key
     settings["_live_model"] = model
     settings["_live_config"] = live_config

@@ -501,93 +501,18 @@ class QAScannerMixin:
             self.append_log(f"❌ Error initializing QA scanner: {e}")
             return
         
-        # Load QA scanner settings from config
-        qa_settings = self.config.get('qa_scanner_settings', {
-            'foreign_char_threshold': 10,
-            'excluded_characters': '',
-            'target_language': 'english',
-            'source_language': 'auto',
-            'check_encoding_issues': False,
-            'check_repetition': True,
-            'check_translation_artifacts': True,
-            'check_ai_artifacts': True,
-            'check_punctuation_mismatch': False,
-            'punctuation_loss_threshold': 49,
-            'flag_excess_punctuation': False,
-            'excess_punctuation_threshold': 49,
-            'check_glossary_leakage': True,
-            'check_potential_truncation': False,
-            'check_missing_images': True,
-            'min_file_length': 0,
-            'report_format': 'detailed',
-            'auto_save_report': True,
-            'check_missing_html_tag': True,
-            'check_missing_header_tags': False,
-            'check_all_text_in_header': True,
-            'check_invalid_tag_mismatch': False,
-            'check_invalid_nesting': False,
-            'check_silent_truncation': False,
-            'truncation_cheap_threshold': 12,
-            'truncation_borderline_score': 40,
-            'truncation_length_threshold': 30,
-            'truncation_embed_threshold': 30,
-            'check_ai_truncation_detection': False,
-            'ai_truncation_tail_chars': 400,
-            'check_word_count_ratio': True,
-            'check_multiple_headers': True,
-            'warn_name_mismatch': True,
-            'quick_scan_sample_size': 1000,
-            'cache_enabled': True,
-            'cache_auto_size': False,
-            'cache_show_stats': False,
-            'cache_normalize_text': 10000,
-            'cache_similarity_ratio': 20000,
-            'cache_content_hashes': 5000,
-            'cache_semantic_fingerprint': 2000,
-            'cache_structural_signature': 2000,
-            'cache_translation_artifacts': 1000,
-            'word_count_multipliers': {
-                # Character-based multipliers (source chars → target chars, no spaces)
-                # CJK languages expand significantly when translated to alphabetic languages
-                'english': 1.0,
-                'spanish': 1.10,
-                'french': 1.10,
-                'german': 1.05,
-                'italian': 1.05,
-                'portuguese': 1.10,
-                'russian': 1.15,
-                'arabic': 1.15,
-                'hindi': 1.10,
-                'turkish': 1.05,
-                'chinese': 2.50,
-                'chinese (simplified)': 2.50,
-                'chinese (traditional)': 2.50,
-                'japanese': 2.20,
-                'korean': 2.30,
-                'hebrew': 1.05,
-                'thai': 1.10
-            }
-          
-        })
-        # Force canonical multiplier defaults — always override stale old config values
-        # (Old configs may have e.g. chinese=1.6 which is incorrect; hardcoded values must always win)
-        _canonical_multipliers = {
-            'english': 1.0, 'spanish': 1.10, 'french': 1.10, 'german': 1.05, 'italian': 1.05,
-            'portuguese': 1.10, 'russian': 1.15, 'arabic': 1.15, 'hindi': 1.10, 'turkish': 1.05,
-            'chinese': 2.50, 'chinese (simplified)': 2.50, 'chinese (traditional)': 2.50,
-            'japanese': 2.20, 'korean': 2.30, 'hebrew': 1.05, 'thai': 1.10,
-            'other': 1.0
-        }
-        qa_settings['word_count_multipliers'] = _canonical_multipliers
-        # Keep QA target language aligned with the main target language.
-        # This ensures the scanner respects the same language the user
-        # selected for translation.
+        # Load and normalize QA scanner settings through the shared runtime so
+        # post-translation scans and worker-side Failed multipass scans use the
+        # same defaults, target-language handling, and word-count multipliers.
         try:
+            from qa_scan_runtime import normalize_qa_scan_settings
             main_lang = self.config.get('output_language') or os.getenv('OUTPUT_LANGUAGE', '')
-            if main_lang:
-                qa_settings['target_language'] = _normalize_target_language(main_lang)
+            qa_settings = normalize_qa_scan_settings(
+                self.config.get('qa_scanner_settings', {}),
+                target_language=main_lang,
+            )
         except Exception:
-            pass
+            qa_settings = dict(self.config.get('qa_scanner_settings', {}) or {})
 
         # Debug: Print current settings
         print(f"[DEBUG] QA Settings: {qa_settings}")
