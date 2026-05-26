@@ -1440,7 +1440,7 @@ class MultiAPIKeyDialog(QDialog):
     """Dialog for managing multiple API keys"""
 
     @staticmethod
-    def show_dialog(parent, translator_gui):
+    def show_dialog(parent, translator_gui, preview_pool: Optional[str] = None):
         """Static method to create and show the dialog non-modally.
 
         This ensures proper PySide6 application context.
@@ -1450,16 +1450,19 @@ class MultiAPIKeyDialog(QDialog):
         if app is None:
             app = QApplication([])
 
+        preview_pool = (str(preview_pool or '').strip() or None)
+        dialog_attr = '_multi_api_key_dialog' if preview_pool is None else f"_multi_api_key_dialog_preview_{preview_pool}"
+
         # Check if dialog already exists on the translator_gui
-        if not hasattr(translator_gui, '_multi_api_key_dialog') or translator_gui._multi_api_key_dialog is None:
+        if not hasattr(translator_gui, dialog_attr) or getattr(translator_gui, dialog_attr) is None:
             # Create and show dialog non-modally
-            dialog = MultiAPIKeyDialog(parent, translator_gui)
+            dialog = MultiAPIKeyDialog(parent, translator_gui, preview_pool=preview_pool)
             dialog.setWindowModality(Qt.NonModal)
             # Make dialog stay on top of other windows
             dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
-            translator_gui._multi_api_key_dialog = dialog
+            setattr(translator_gui, dialog_attr, dialog)
         else:
-            dialog = translator_gui._multi_api_key_dialog
+            dialog = getattr(translator_gui, dialog_attr)
 
         # Show and raise the dialog
         dialog.show()
@@ -1468,12 +1471,13 @@ class MultiAPIKeyDialog(QDialog):
 
         return dialog
 
-    def __init__(self, parent, translator_gui):
+    def __init__(self, parent, translator_gui, preview_pool: Optional[str] = None):
         # PySide6 dialogs need QWidget parents or None
         style_parent = parent if HAS_GUI and isinstance(parent, QWidget) else None
         super().__init__(style_parent)
 
         self.translator_gui = translator_gui
+        self.preview_pool = (str(preview_pool or '').strip() or None)
         self.tree = None
         self.test_results = queue.Queue()
 
@@ -1898,6 +1902,9 @@ class MultiAPIKeyDialog(QDialog):
     def _create_dialog(self):
         """Create the main dialog using PySide6"""
         # Set window properties
+        if self.preview_pool:
+            return self._create_preview_dialog()
+
         self.setWindowTitle("Multi API Key Manager")
         # Use screen ratios for sizing
         screen = QApplication.primaryScreen().geometry()
@@ -2083,6 +2090,47 @@ class MultiAPIKeyDialog(QDialog):
         if not self._deferred_render_count:
             self._finish_deferred_key_pool_render()
 
+    def _create_preview_dialog(self):
+        """Create a one-pool manager view using the normal dedicated-pool UI."""
+        spec = self._dedicated_pool_spec(self.preview_pool)
+        self.setWindowTitle(f"{spec['title']} - Multi API Key Manager")
+        screen = QApplication.primaryScreen().geometry()
+        self.resize(int(screen.width() * 0.46), int(screen.height() * 0.54))
+
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        scrollable_widget = QWidget()
+        scrollable_layout = QVBoxLayout(scrollable_widget)
+        scrollable_layout.setContentsMargins(20, 10, 20, 20)
+        scrollable_layout.setSpacing(10)
+        scroll_area.setWidget(scrollable_widget)
+
+        dialog_layout = QVBoxLayout(self)
+        dialog_layout.setContentsMargins(0, 0, 0, 0)
+        dialog_layout.setSpacing(0)
+        dialog_layout.addWidget(scroll_area)
+
+        self.main_frame = scrollable_widget
+        self.scrollable_frame = scrollable_widget
+        self.main_layout = scrollable_layout
+        self.scrollable_layout = scrollable_layout
+
+        title_label = QLabel(f"{spec['title']}")
+        title_font = QFont()
+        title_font.setPointSize(16)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        scrollable_layout.addWidget(title_label)
+
+        self._create_dedicated_key_pool_section(scrollable_layout, self.preview_pool)
+        scrollable_layout.addStretch(1)
+        self._create_button_bar(dialog_layout)
+        self._set_icon(self)
+        self._initializing = False
+
     def _multi_key_mode_widgets(self):
         return [
             getattr(self, 'rotation_frame', None),
@@ -2115,7 +2163,8 @@ class MultiAPIKeyDialog(QDialog):
         if getattr(self, '_deferred_render_finished', False):
             return
         self._deferred_render_finished = True
-        self._toggle_multi_key_mode()
+        if not getattr(self, 'preview_pool', None):
+            self._toggle_multi_key_mode()
         self._initializing = False
 
     def _create_fallback_section(self, parent_layout):
@@ -3399,6 +3448,7 @@ class MultiAPIKeyDialog(QDialog):
 
     def _create_button_bar(self, parent_layout):
         """Create the bottom button bar as a fixed section"""
+        preview_mode = bool(getattr(self, 'preview_pool', None))
         # Create container for separator and buttons
         button_container = QWidget()
         button_container_layout = QVBoxLayout(button_container)
@@ -3423,45 +3473,46 @@ class MultiAPIKeyDialog(QDialog):
         button_layout = QHBoxLayout(self.button_frame)
         button_layout.setContentsMargins(20, 15, 20, 15)
 
-        # Import/Export
-        import_btn = QPushButton("Import")
-        import_btn.setMinimumHeight(40)
-        import_btn.setStyleSheet("QPushButton { font-size: 11pt; padding: 8px 20px; }")
-        import_btn.clicked.connect(self._import_keys)
-        button_layout.addWidget(import_btn)
+        if not preview_mode:
+            # Import/Export
+            import_btn = QPushButton("Import")
+            import_btn.setMinimumHeight(40)
+            import_btn.setStyleSheet("QPushButton { font-size: 11pt; padding: 8px 20px; }")
+            import_btn.clicked.connect(self._import_keys)
+            button_layout.addWidget(import_btn)
 
-        export_btn = QPushButton("Export")
-        export_btn.setMinimumHeight(40)
-        export_btn.setStyleSheet("QPushButton { font-size: 11pt; padding: 8px 20px; }")
-        export_btn.clicked.connect(self._export_keys)
-        button_layout.addWidget(export_btn)
+            export_btn = QPushButton("Export")
+            export_btn.setMinimumHeight(40)
+            export_btn.setStyleSheet("QPushButton { font-size: 11pt; padding: 8px 20px; }")
+            export_btn.clicked.connect(self._export_keys)
+            button_layout.addWidget(export_btn)
 
-        # Manage Refusal Patterns button
-        _refusal_disabled = self.translator_gui.config.get('disable_refusal_checks', True)
-        _refusal_status = "Disabled" if _refusal_disabled else "Enabled"
-        refusal_btn = QPushButton(f"🚫 Manage Refusal Patterns ({_refusal_status})")
-        self.translator_gui._refusal_patterns_btn_multi = refusal_btn
-        refusal_btn.setMinimumHeight(40)
-        refusal_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #5c2e5b;
-                color: #ffffff;
-                font-size: 11pt;
-                padding: 8px 20px;
-                border: 1px solid #42213f;
-                border-radius: 3px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #733d71;
-                border-color: #5c2e5b;
-            }
-            QPushButton:pressed {
-                background-color: #3d1d3c;
-            }
-        """)
-        refusal_btn.clicked.connect(self._manage_refusal_patterns)
-        button_layout.addWidget(refusal_btn)
+            # Manage Refusal Patterns button
+            _refusal_disabled = self.translator_gui.config.get('disable_refusal_checks', True)
+            _refusal_status = "Disabled" if _refusal_disabled else "Enabled"
+            refusal_btn = QPushButton(f"🚫 Manage Refusal Patterns ({_refusal_status})")
+            self.translator_gui._refusal_patterns_btn_multi = refusal_btn
+            refusal_btn.setMinimumHeight(40)
+            refusal_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #5c2e5b;
+                    color: #ffffff;
+                    font-size: 11pt;
+                    padding: 8px 20px;
+                    border: 1px solid #42213f;
+                    border-radius: 3px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #733d71;
+                    border-color: #5c2e5b;
+                }
+                QPushButton:pressed {
+                    background-color: #3d1d3c;
+                }
+            """)
+            refusal_btn.clicked.connect(self._manage_refusal_patterns)
+            button_layout.addWidget(refusal_btn)
 
         button_layout.addStretch()
 

@@ -3651,6 +3651,35 @@ class MangaTranslationTab(QObject):
         if hasattr(self, 'translator') and self.translator:
             self._log(f"OCR provider changed to {provider.upper()}. Translator will be recreated on next run.", "info")
             self.translator = None  # Force recreation on next translation
+
+    def _open_multi_api_key_pool_preview(self, pool_name: str):
+        """Open the multi-key manager with only one dedicated pool rendered."""
+        try:
+            from multi_api_key_manager import MultiAPIKeyDialog
+            parent = getattr(self, 'dialog', None) or getattr(self, 'parent_widget', None)
+            MultiAPIKeyDialog.show_dialog(parent, self.main_gui, preview_pool=pool_name)
+        except Exception as exc:
+            QMessageBox.critical(self.dialog if hasattr(self, 'dialog') else None, "Error", f"Failed to open key pool manager: {exc}")
+
+    def _preview_pool_button_stylesheet(self) -> str:
+        return (
+            "QPushButton#previewPoolButton { background-color: #0d6efd; color: white; "
+            "font-weight: bold; padding: 5px 15px; border: 1px solid #64a5ff; "
+            "border-radius: 3px; } "
+            "QPushButton#previewPoolButton:hover { background-color: #2f80ff; } "
+            "QPushButton#previewPoolButton:pressed { background-color: #0a58ca; } "
+            "QPushButton#previewPoolButton:disabled { background-color: #0d6efd; color: white; }"
+        )
+
+    def _style_preview_pool_button(self, button):
+        button.setObjectName("previewPoolButton")
+        button.setStyleSheet(self._preview_pool_button_stylesheet())
+        try:
+            button.style().unpolish(button)
+            button.style().polish(button)
+            button.update()
+        except Exception:
+            pass
     
     def _update_main_status_label(self):
         """Update the main status label at the top based on current provider and credentials"""
@@ -4331,10 +4360,11 @@ class MangaTranslationTab(QObject):
         self.ocr_provider_frame = QWidget()
         ocr_provider_layout = QHBoxLayout(self.ocr_provider_frame)
         ocr_provider_layout.setContentsMargins(0, 0, 0, 10)
-        ocr_provider_layout.setSpacing(10)
+        ocr_provider_layout.setSpacing(4)
+        ocr_label_column_width = 105
 
         provider_label = QLabel("OCR Provider:")
-        provider_label.setMinimumWidth(150)
+        provider_label.setFixedWidth(ocr_label_column_width)
         provider_label.setAlignment(Qt.AlignLeft)
         ocr_provider_layout.addWidget(provider_label)
 
@@ -4402,10 +4432,10 @@ class MangaTranslationTab(QObject):
         self.custom_api_ocr_batch_frame = QWidget()
         custom_api_batch_layout = QHBoxLayout(self.custom_api_ocr_batch_frame)
         custom_api_batch_layout.setContentsMargins(0, 0, 0, 10)
-        custom_api_batch_layout.setSpacing(10)
+        custom_api_batch_layout.setSpacing(4)
 
         batch_label = QLabel("Custom API OCR:")
-        batch_label.setMinimumWidth(150)
+        batch_label.setFixedWidth(ocr_label_column_width)
         batch_label.setAlignment(Qt.AlignLeft)
         custom_api_batch_layout.addWidget(batch_label)
 
@@ -4447,8 +4477,15 @@ class MangaTranslationTab(QObject):
         self._disable_combobox_mousewheel(self.custom_api_ocr_batch_size_spinbox)
         custom_api_batch_layout.addWidget(self.custom_api_ocr_batch_size_spinbox)
 
+        self.vision_key_pool_btn = QPushButton("Vision Keys")
+        self.vision_key_pool_btn.setToolTip("Open the Multi API Key Manager focused on the Vision key pool.")
+        self._style_preview_pool_button(self.vision_key_pool_btn)
+        self.vision_key_pool_btn.clicked.connect(lambda: self._open_multi_api_key_pool_preview('qa_scan'))
+        custom_api_batch_layout.addWidget(self.vision_key_pool_btn)
+
         custom_api_batch_layout.addStretch()
         settings_frame_layout.addWidget(self.custom_api_ocr_batch_frame)
+        self.custom_api_ocr_batch_frame.setVisible(self.ocr_provider_value == 'custom-api')
 
         # Initialize OCR manager
         from ocr_manager import OCRManager
@@ -5359,6 +5396,12 @@ class MangaTranslationTab(QObject):
         custom_image_edit_controls_layout.addWidget(custom_controls_spacer)
         custom_image_edit_controls_layout.addWidget(custom_image_edit_cb)
         custom_image_edit_controls_layout.addWidget(custom_image_edit_prompt_btn)
+        custom_image_edit_keys_btn = QPushButton("Image Gen/Edit Keys")
+        custom_image_edit_keys_btn.setToolTip("Open the Multi API Key Manager focused on the Image Gen/Edit key pool.")
+        self._style_preview_pool_button(custom_image_edit_keys_btn)
+        custom_image_edit_keys_btn.clicked.connect(lambda: self._open_multi_api_key_pool_preview('inpainter'))
+        custom_image_edit_controls_layout.addWidget(custom_image_edit_keys_btn)
+        self.custom_image_edit_keys_btn = custom_image_edit_keys_btn
         custom_image_edit_controls_layout.addStretch()
         local_inpaint_layout.addWidget(custom_image_edit_controls_frame)
         self.custom_image_edit_controls_frame = custom_image_edit_controls_frame
@@ -11175,6 +11218,9 @@ class MangaTranslationTab(QObject):
             self.custom_image_edit_endpoint_checkbox.setVisible(custom_selected)
         if hasattr(self, 'custom_image_edit_prompt_btn'):
             self.custom_image_edit_prompt_btn.setVisible(custom_selected)
+        if hasattr(self, 'custom_image_edit_keys_btn'):
+            self._style_preview_pool_button(self.custom_image_edit_keys_btn)
+            self.custom_image_edit_keys_btn.setVisible(custom_selected)
         if hasattr(self, 'custom_image_edit_output_frame'):
             self.custom_image_edit_output_frame.setVisible(custom_selected)
         if hasattr(self, 'custom_image_edit_area_spin'):
