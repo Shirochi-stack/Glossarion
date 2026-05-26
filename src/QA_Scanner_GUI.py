@@ -3264,6 +3264,12 @@ class QAScannerMixin:
         additional_layout.setContentsMargins(20, 15, 20, 15)
         scroll_layout.addWidget(additional_group)
 
+        # Missing header tags check
+        check_missing_header_tags_checkbox = self._create_styled_checkbox("Flags HTML files missing header tags (h1-h6)")
+        check_missing_header_tags_checkbox.setChecked(qa_settings.get('check_missing_header_tags', False))
+        additional_layout.addWidget(check_missing_header_tags_checkbox)
+        additional_layout.addSpacing(10)
+
         # Multiple headers check
         check_multiple_headers_checkbox = self._create_styled_checkbox("Detect files with 2 or more headers (h1-h6 tags)")
         check_multiple_headers_checkbox.setChecked(qa_settings.get('check_multiple_headers', True))
@@ -3298,11 +3304,6 @@ class QAScannerMixin:
         body_tag_layout.addWidget(body_tag_hint)
         body_tag_layout.addStretch()
         additional_layout.addWidget(body_tag_widget)
-
-        # Missing header tags check
-        check_missing_header_tags_checkbox = self._create_styled_checkbox("Flag HTML files with no heading tags (h1-h6)")
-        check_missing_header_tags_checkbox.setChecked(qa_settings.get('check_missing_header_tags', False))
-        additional_layout.addWidget(check_missing_header_tags_checkbox)
 
         # Detect chapters where (almost) all text is wrapped in one header tag
         check_all_text_in_header_checkbox = self._create_styled_checkbox(
