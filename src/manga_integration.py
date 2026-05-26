@@ -4358,7 +4358,7 @@ class MangaTranslationTab(QObject):
         # OCR Provider Selection - ENHANCED VERSION
         self.ocr_provider_frame = QWidget()
         ocr_provider_layout = QHBoxLayout(self.ocr_provider_frame)
-        ocr_provider_layout.setContentsMargins(0, 0, 0, 10)
+        ocr_provider_layout.setContentsMargins(0, 0, 0, 14)
         ocr_provider_layout.setSpacing(6)
         ocr_label_column_width = 105
 
@@ -4409,12 +4409,6 @@ class MangaTranslationTab(QObject):
         self.provider_status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         ocr_provider_layout.addWidget(self.provider_status_label)
 
-        self.vision_key_pool_btn = QPushButton("Vision Keys")
-        self.vision_key_pool_btn.setToolTip("Open the Multi API Key Manager focused on the Vision key pool.")
-        self._style_preview_pool_button(self.vision_key_pool_btn)
-        self.vision_key_pool_btn.clicked.connect(lambda: self._open_multi_api_key_pool_preview('qa_scan'))
-        ocr_provider_layout.addWidget(self.vision_key_pool_btn)
-
         # Setup/Install button for non-cloud providers
         self.provider_setup_btn = QPushButton("Setup")
         self.provider_setup_btn.clicked.connect(self._setup_ocr_provider)
@@ -4436,7 +4430,7 @@ class MangaTranslationTab(QObject):
 
         self.custom_api_ocr_batch_frame = QWidget()
         custom_api_batch_layout = QHBoxLayout(self.custom_api_ocr_batch_frame)
-        custom_api_batch_layout.setContentsMargins(0, 0, 0, 10)
+        custom_api_batch_layout.setContentsMargins(0, 0, 0, 14)
         custom_api_batch_layout.setSpacing(6)
 
         batch_label = QLabel("Custom API OCR:")
@@ -4466,9 +4460,6 @@ class MangaTranslationTab(QObject):
         )
         custom_api_batch_layout.addWidget(self.custom_api_ocr_batch_checkbox)
 
-        size_label = QLabel("Batch Size:")
-        custom_api_batch_layout.addWidget(size_label)
-
         self.custom_api_ocr_batch_size_spinbox = QSpinBox()
         self.custom_api_ocr_batch_size_spinbox.setRange(1, 32)
         self.custom_api_ocr_batch_size_spinbox.setValue(int(getattr(self, 'custom_api_ocr_batch_size_value', 5)))
@@ -4481,6 +4472,12 @@ class MangaTranslationTab(QObject):
         )
         self._disable_combobox_mousewheel(self.custom_api_ocr_batch_size_spinbox)
         custom_api_batch_layout.addWidget(self.custom_api_ocr_batch_size_spinbox)
+
+        self.vision_key_pool_btn = QPushButton("Vision Keys")
+        self.vision_key_pool_btn.setToolTip("Open the Multi API Key Manager focused on the Vision key pool.")
+        self._style_preview_pool_button(self.vision_key_pool_btn)
+        self.vision_key_pool_btn.clicked.connect(lambda: self._open_multi_api_key_pool_preview('qa_scan'))
+        custom_api_batch_layout.addWidget(self.vision_key_pool_btn)
 
         custom_api_batch_layout.addStretch()
         settings_frame_layout.addWidget(self.custom_api_ocr_batch_frame)
