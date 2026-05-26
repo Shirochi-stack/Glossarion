@@ -4358,8 +4358,8 @@ class MangaTranslationTab(QObject):
         # OCR Provider Selection - ENHANCED VERSION
         self.ocr_provider_frame = QWidget()
         ocr_provider_layout = QHBoxLayout(self.ocr_provider_frame)
-        ocr_provider_layout.setContentsMargins(0, 0, 0, 14)
-        ocr_provider_layout.setSpacing(6)
+        ocr_provider_layout.setContentsMargins(0, 0, 0, 10)
+        ocr_provider_layout.setSpacing(8)
         ocr_label_column_width = 105
 
         provider_label = QLabel("OCR Provider:")
@@ -4430,8 +4430,8 @@ class MangaTranslationTab(QObject):
 
         self.custom_api_ocr_batch_frame = QWidget()
         custom_api_batch_layout = QHBoxLayout(self.custom_api_ocr_batch_frame)
-        custom_api_batch_layout.setContentsMargins(0, 0, 0, 14)
-        custom_api_batch_layout.setSpacing(6)
+        custom_api_batch_layout.setContentsMargins(0, 0, 0, 10)
+        custom_api_batch_layout.setSpacing(8)
 
         batch_label = QLabel("Custom API OCR:")
         batch_label.setFixedWidth(ocr_label_column_width)
