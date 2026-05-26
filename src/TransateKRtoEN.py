@@ -13181,6 +13181,11 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         with progress_lock:
             _pre_key, pre_existing_entry = _find_progress_entry_for_output(output_file, actual_num)
             pre_existing_entry = dict(pre_existing_entry) if pre_existing_entry else {}
+        preserve_failed_mode_qa_status = (
+            mode == "refinement"
+            and multipass_failed_mode
+            and str(pre_existing_entry.get("status", "") or "").strip().lower() == "qa_failed"
+        )
 
         if mode == "refinement":
             skip_reason = _refinement_skip_reason_for_qa(
@@ -13202,8 +13207,10 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 }
 
         # Ensure a base completed entry exists so the two post-process checks are visible.
+        # In Failed multipass, keep QA scan failures as qa_failed until refinement succeeds.
         with progress_lock:
-            progress_manager.update(idx, actual_num, content_hash, output_file, status="completed", chapter_obj=chapter)
+            if not preserve_failed_mode_qa_status:
+                progress_manager.update(idx, actual_num, content_hash, output_file, status="completed", chapter_obj=chapter)
 
             chapter_key = progress_manager._get_chapter_key(actual_num, output_file, chapter, content_hash)
             entry = dict(progress_manager.prog.get("chapters", {}).get(chapter_key, {}))
@@ -13273,7 +13280,19 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 return "processed", f"✨ Refined Chapter {actual_num}: {output_file}"
             except Exception as exc:
                 with progress_lock:
-                    progress_manager.update(idx, actual_num, content_hash, output_file, status="completed", chapter_obj=chapter)
+                    if preserve_failed_mode_qa_status:
+                        preserved_qa_issues = pre_existing_entry.get("qa_issues_found", [])
+                        progress_manager.update(
+                            idx,
+                            actual_num,
+                            content_hash,
+                            output_file,
+                            status="qa_failed",
+                            chapter_obj=chapter,
+                            qa_issues_found=preserved_qa_issues if isinstance(preserved_qa_issues, list) else [preserved_qa_issues],
+                        )
+                    else:
+                        progress_manager.update(idx, actual_num, content_hash, output_file, status="completed", chapter_obj=chapter)
                     progress_manager.update_refinement_status(idx, actual_num, content_hash, output_file, "failed", chapter_obj=chapter, error=exc)
                     progress_manager.save()
                 return "failed", f"❌ Refinement failed for Chapter {actual_num}: {exc}"
