@@ -4239,9 +4239,9 @@ def generate_html_report(results, output_path, duplicate_confidence):
     with open(os.path.join(output_path, "validation_results.html"), "w", encoding="utf-8") as html_file:
         html_file.write(html)
 
-def update_progress_file(folder_path, results, log):
+def update_progress_file(folder_path, results, log, progress_path=None):
     """Update translation progress file"""
-    prog_path = os.path.join(folder_path, "translation_progress.json")
+    prog_path = progress_path or os.path.join(folder_path, "translation_progress.json")
     
     try:
         with open(prog_path, "r", encoding="utf-8") as pf:
@@ -7689,7 +7689,7 @@ def _init_worker_process():
         pass
 
 
-def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None, text_file_mode=None):
+def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None, text_file_mode=None, progress_path=None):
     """
     Scan HTML folder for QA issues - PROCESSPOOLEXECUTOR VERSION
     Also supports text file scanning (auto-detected from epub_path extension)
@@ -9129,7 +9129,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     generate_reports(results, folder_path, duplicate_confidence, log, qa_settings)
     
     # Update progress file
-    update_progress_file(folder_path, results, log)
+    update_progress_file(folder_path, results, log, progress_path=progress_path)
     
     # Final timing
     total_time = time.time() - start_time

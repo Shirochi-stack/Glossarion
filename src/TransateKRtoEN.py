@@ -21196,6 +21196,11 @@ def main(log_callback=None, stop_callback=None):
             print(f"Failed multipass mode: running QA Scanner in {qa_scan_mode} mode before refinement.")
             qa_env_restore = {}
             try:
+                try:
+                    progress_manager.save()
+                    print(f"Saved current translation progress before Failed-mode QA scan: {progress_manager.PROGRESS_FILE}")
+                except Exception as save_exc:
+                    print(f"⚠️ Failed to save progress before QA scan: {save_exc}")
                 qa_env_restore = _apply_qa_scan_env_from_settings(qa_settings)
                 from scan_html_folder import scan_html_folder as _scan_html_folder
                 _scan_html_folder(
@@ -21205,10 +21210,11 @@ def main(log_callback=None, stop_callback=None):
                     mode=qa_scan_mode,
                     qa_settings=qa_settings,
                     epub_path=getattr(config, "input_path", ""),
+                    progress_path=progress_manager.PROGRESS_FILE,
                 )
                 try:
                     progress_manager.prog = progress_manager._init_or_load()
-                    print("Reloaded translation progress after QA scan.")
+                    print(f"Reloaded translation progress after QA scan: {progress_manager.PROGRESS_FILE}")
                 except Exception as reload_exc:
                     print(f"⚠️ Failed to reload progress after QA scan: {reload_exc}")
             except Exception as scan_exc:
