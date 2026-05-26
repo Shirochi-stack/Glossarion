@@ -1269,6 +1269,22 @@ def _glossary_chapter_actual_num(idx: int, context=None) -> int:
     except (TypeError, ValueError):
         return int(idx) + 1
 
+def _glossary_chapter_log_label(chapter_num, total_chapters=None, context=None) -> str:
+    """Return the bracketed chapter label used by glossary progress logs."""
+    if total_chapters is None:
+        _progress_file, _output_file, _positions, _numbers, _filenames, total_chapters = _progress_context_values(context)
+    try:
+        chapter_num = int(chapter_num)
+    except (TypeError, ValueError):
+        chapter_num = str(chapter_num)
+    try:
+        total_chapters = int(total_chapters or 0)
+    except (TypeError, ValueError):
+        total_chapters = 0
+    if total_chapters > 0:
+        return f"[Chapter {chapter_num}/{total_chapters}]"
+    return f"[Chapter {chapter_num}]"
+
 def _glossary_chapter_key(idx: int) -> str:
     """Build a stable zero-based progress key.
 
@@ -4785,6 +4801,7 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
             if check_stop():
                 break
             display_idx = _glossary_chapter_actual_num(idx)
+            chapter_label = _glossary_chapter_log_label(display_idx, config.get("total_chapters") or None)
                 
             # Get system and user prompts
             system_prompt, user_prompt = build_prompt(chap)
@@ -4827,13 +4844,13 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
 
                 if contextual_enabled and assistant_tokens > 0:
                     print(
-                        f"💬 Batch Chapter {display_idx} combined prompt: "
+                        f"💬 {chapter_label} combined prompt: "
                         f"{total_tokens:,} tokens (system + user: {non_assistant:,}, "
                         f"assistant/memory: {assistant_tokens:,}) / {GLOSSARY_LIMIT_STR}"
                     )
                 else:
                     print(
-                        f"💬 Batch Chapter {display_idx} combined prompt: "
+                        f"💬 {chapter_label} combined prompt: "
                         f"{total_tokens:,} tokens (system + user) / {GLOSSARY_LIMIT_STR}"
                     )
             except Exception:
@@ -7203,6 +7220,7 @@ def main(log_callback=None, stop_callback=None):
             # Show filename alongside chapter number when available
             _fname = _chapter_filenames.get(idx, '')
             _chap_num = _glossary_chapter_actual_num(idx, context=progress_context)
+            _chap_label = _glossary_chapter_log_label(_chap_num, total_chapters)
             if _fname:
                 print(f"🔄 Processing Chapter {_chap_num}/{total_chapters} ({_fname})")
             else:
@@ -7303,13 +7321,13 @@ def main(log_callback=None, stop_callback=None):
                 # Log combined prompt similar to main translator (use safe chunk budget)
                 if contextual_enabled and assistant_tokens > 0:
                     print(
-                        f"💬 Chapter {_chap_num} combined prompt: "
+                        f"💬 {_chap_label} combined prompt: "
                         f"{total_tokens:,} tokens (system + user: {non_assistant_tokens:,}, "
                         f"assistant/memory: {assistant_tokens:,}) | chunk budget {available_tokens:,}"
                     )
                 else:
                     print(
-                        f"💬 Chapter {_chap_num} combined prompt: "
+                        f"💬 {_chap_label} combined prompt: "
                         f"{total_tokens:,} tokens (system + user) | chunk budget {available_tokens:,}"
                     )
 
