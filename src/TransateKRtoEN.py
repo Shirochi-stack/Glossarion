@@ -5346,6 +5346,7 @@ class BatchTranslationProcessor:
         # Initialize variables that might be needed in except block
         content_hash = None
         ai_features = None
+        chapter_fatal_qa_issue = None
         
         # Reinitialize Gemini client if it was closed by a previous timeout
         # Skip in multi-key mode — _ensure_thread_client handles per-thread client setup
@@ -5673,7 +5674,8 @@ class BatchTranslationProcessor:
 
                 # Abort immediately if a prior chunk triggered prohibition (NOT for user stop)
                 if chunk_abort_event.is_set():
-                    raise UnifiedClientError("Chunk aborted due to prohibited content", error_type="cancelled")
+                    print(f"Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: stopped after chapter QA failure ({_chunk_abort_label()})")
+                    return None, chunk_idx, None, False, "chapter_abort"
                 
                 # Log combined prompt token count, including assistant/memory tokens when present
                 total_tokens = 0
@@ -5777,6 +5779,7 @@ class BatchTranslationProcessor:
                             chapter_context=chapter_ctx,
                             bypass_graceful_stop=True,
                             before_send_callback=_mark_batch_chunk_progress_on_send,
+                            local_cancel_only_check=chunk_abort_event.is_set,
                         )
                         if _single_pass_glossary_mode() and isinstance(result, str):
                             result, glossary_block = _split_single_pass_glossary_response(result)
@@ -5790,6 +5793,10 @@ class BatchTranslationProcessor:
                         break  # Success, exit retry loop
                     except UnifiedClientError as e:
                         error_msg = str(e)
+
+                        if chunk_abort_event.is_set():
+                            print(f"Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: stopped after chapter QA failure ({_chunk_abort_label()})")
+                            return None, chunk_idx, None, False, "chapter_abort"
                         
                         # Treat cancelled errors (from client being closed) as timeout
                         if "cancelled" in error_msg or "Gemini client not initialized" in error_msg:
@@ -5878,6 +5885,11 @@ class BatchTranslationProcessor:
                         else:
                             # Not a timeout error, re-raise
                             raise
+                    except Exception:
+                        if chunk_abort_event.is_set():
+                            print(f"Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks}: stopped after chapter QA failure ({_chunk_abort_label()})")
+                            return None, chunk_idx, None, False, "chapter_abort"
+                        raise
                 
                 # Use the raw object directly from send_with_interrupt
                 raw_obj = raw_obj_from_send
@@ -5995,6 +6007,7 @@ class BatchTranslationProcessor:
                                     chapter_context=chapter_ctx,
                                     bypass_graceful_stop=True,
                                     before_send_callback=_mark_batch_chunk_progress_on_send,
+                                    local_cancel_only_check=chunk_abort_event.is_set,
                                 )
                                 if _single_pass_glossary_mode() and isinstance(result_retry, str):
                                     result_retry, glossary_block_retry = _split_single_pass_glossary_response(result_retry)
@@ -6119,6 +6132,38 @@ class BatchTranslationProcessor:
 
             # Shared abort flag for this chapter's chunks (set when a chunk hits prohibited content)
             chunk_abort_event = threading.Event()
+            chunk_abort_reason = {"label": "chapter abort"}
+
+            def _chunk_abort_label() -> str:
+                try:
+                    return str(chunk_abort_reason.get("label") or "chapter abort")
+                except Exception:
+                    return "chapter abort"
+
+            def _mark_chunk_abort(label: str, qa_issue=None) -> None:
+                nonlocal chapter_fatal_qa_issue
+                try:
+                    chunk_abort_reason["label"] = label or "chapter abort"
+                except Exception:
+                    pass
+                if qa_issue:
+                    chapter_fatal_qa_issue = list(qa_issue)
+                chunk_abort_event.set()
+
+            def _result_indicates_prohibited(result_value) -> bool:
+                if not isinstance(result_value, str):
+                    return False
+                lowered = result_value.lower()
+                return any(
+                    marker in lowered
+                    for marker in (
+                        "[content blocked",
+                        "content blocked",
+                        "prohibited_content",
+                        "content_filter",
+                        "safety filter",
+                    )
+                )
 
             # Stop callback that also checks the per-chapter abort flag
             def _user_stop_requested() -> bool:
@@ -6343,6 +6388,9 @@ class BatchTranslationProcessor:
                                 error_type="cancelled"
                             )
 
+                        if finish_reason == "chapter_abort":
+                            continue
+
                         # Handle cancelled chunks (skipped due to stop request)
                         if finish_reason == "cancelled" or (result is None and finish_reason != "stop"):
                             print(f"⏭️ Chunk {chunk_idx}/{total_chunks} cancelled (stop requested)")
@@ -6352,16 +6400,17 @@ class BatchTranslationProcessor:
                         # Immediate QA fail: stop remaining chunks and mark chapter
                         if finish_reason in ("content_filter", "prohibited_content", "error"):
                             # Signal other chunk workers to abort quickly (chapter-local only)
-                            chunk_abort_event.set()
                             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-                            is_prohibited_finish = finish_reason in ("content_filter", "prohibited_content")
+                            is_prohibited_finish = (
+                                finish_reason in ("content_filter", "prohibited_content")
+                                or (finish_reason == "error" and _result_indicates_prohibited(result))
+                            )
                             qa_issue = ["PROHIBITED_CONTENT"] if is_prohibited_finish else ["API_ERROR"]
-                            save_failure_results = (
-                                os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1'
-                                or bool(getattr(self.config, 'save_prohibited_results', False))
-                            ) if is_prohibited_finish else (
-                                os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1'
-                                or bool(getattr(self.config, 'save_partial_results', False))
+                            _mark_chunk_abort(qa_issue[0], qa_issue=qa_issue)
+                            save_failure_results = _should_save_failure_response(
+                                result,
+                                config=self.config,
+                                qa_issue=qa_issue,
                             )
                             if save_failure_results:
                                 # Do NOT preserve original; save AI output if any, otherwise empty
@@ -6588,9 +6637,11 @@ class BatchTranslationProcessor:
                 print(f"❌ Batch: Translation failed for chapter {actual_num} - marked as failed, no output file created (reason: {failure_reason})")
                 with self.progress_lock:
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-                    save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_partial_results', False))
-                    save_prohibited_results = os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_prohibited_results', False))
-                    should_save = (save_prohibited_results if is_prohibited_failure(cleaned, failure_reason) else save_partial_results)
+                    should_save = _should_save_failure_response(
+                        cleaned,
+                        failure_reason=failure_reason,
+                        config=self.config,
+                    )
                     if should_save:
                         try:
                             with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
@@ -6738,6 +6789,21 @@ class BatchTranslationProcessor:
             # Graceful-stop pre-send cancellations are expected (they prevent queued calls from starting).
             # Do not spam per-chapter "failed" logs, and do not mark these chapters as failed.
             error_msg = str(e)
+            if chapter_fatal_qa_issue:
+                try:
+                    fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                    with self.progress_lock:
+                        self.update_progress_fn(
+                            chapter_progress_idx, actual_num, content_hash, fname,
+                            status="qa_failed",
+                            qa_issues_found=chapter_fatal_qa_issue,
+                            chapter_obj=chapter,
+                        )
+                        self.save_progress_fn()
+                except Exception:
+                    pass
+                return False, actual_num, None, None, None
+
             is_graceful_stop_skip = (
                 "graceful stop active - not starting new api call" in (error_msg or "").lower()
                 or (hasattr(e, 'error_type') and getattr(e, 'error_type', None) == 'cancelled' and os.environ.get('GRACEFUL_STOP') == '1')
@@ -7419,9 +7485,15 @@ class BatchTranslationProcessor:
                     ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
                     
                     failure_reason = get_failure_reason(cleaned)
-                    save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_partial_results', False))
-                    save_prohibited_results = os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(self.config, 'save_prohibited_results', False))
-                    should_save = (save_prohibited_results if is_prohibited_failure(cleaned, failure_reason) else save_partial_results)
+                    should_save = _should_save_failure_response(
+                        cleaned,
+                        failure_reason=failure_reason,
+                        config=self.config,
+                    )
+                    block_failure_debug_save = (
+                        is_prohibited_failure(cleaned, failure_reason)
+                        or is_api_error_failure(cleaned, failure_reason)
+                    )
                     if should_save:
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
@@ -7430,7 +7502,7 @@ class BatchTranslationProcessor:
                                 f.write(cleaned_to_save if isinstance(cleaned_to_save, str) else "")
                         except Exception:
                             pass
-                    elif not is_only_error_marker and cleaned_stripped:
+                    elif not block_failure_debug_save and not is_only_error_marker and cleaned_stripped:
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
                             cleaned_to_save = ContentProcessor.strip_split_markers(cleaned)
@@ -9400,11 +9472,69 @@ def _vision_finish_reason_qa_issues(finish_reason):
 
 def _vision_should_save_partial_for_qa(qa_issues, config=None):
     issues = set(qa_issues or [])
-    if "PROHIBITED_CONTENT" in issues:
-        return os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(config, 'save_prohibited_results', False))
+    if "PROHIBITED_CONTENT" in issues or "API_ERROR" in issues:
+        return _save_prohibited_results_enabled(config)
     if "TRUNCATED" in issues or "PARTIAL" in issues:
-        return os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(config, 'save_partial_results', False))
+        return _save_partial_results_enabled(config)
     return False
+
+
+def _save_prohibited_results_enabled(config=None):
+    return os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(config, 'save_prohibited_results', False))
+
+
+def _save_partial_results_enabled(config=None):
+    return os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(config, 'save_partial_results', False))
+
+
+def _normalize_qa_issue_set(qa_issue=None):
+    if qa_issue is None:
+        return set()
+    if isinstance(qa_issue, str):
+        values = [qa_issue]
+    else:
+        try:
+            values = list(qa_issue)
+        except Exception:
+            values = [qa_issue]
+    return {str(v or "").strip().upper().replace(" ", "_") for v in values if str(v or "").strip()}
+
+
+def is_api_error_failure(content, failure_reason=None):
+    """Best-effort detection of provider/API failures for save routing."""
+    try:
+        fr = str(failure_reason or "").lower()
+        if "api_error" in fr or "api error" in fr or "http error" in fr:
+            return True
+    except Exception:
+        pass
+    try:
+        cl = str(content or "").strip().lower()
+        return any(
+            marker in cl
+            for marker in (
+                "[api_error]",
+                "[translation failed]",
+                "api response unavailable",
+                "server disconnected",
+                "invalid_argument",
+                "api_error",
+            )
+        )
+    except Exception:
+        return False
+
+
+def _should_save_failure_response(content=None, failure_reason=None, config=None, qa_issue=None):
+    """Route failed-output saves to the matching user toggle."""
+    issues = _normalize_qa_issue_set(qa_issue)
+    if issues.intersection({"PROHIBITED_CONTENT", "API_ERROR"}):
+        return _save_prohibited_results_enabled(config)
+    if issues.intersection({"TRUNCATED", "PARTIAL", "TIMEOUT"}):
+        return _save_partial_results_enabled(config)
+    if is_prohibited_failure(content, failure_reason) or is_api_error_failure(content, failure_reason):
+        return _save_prohibited_results_enabled(config)
+    return _save_partial_results_enabled(config)
 
 
 def _clean_visible_text_for_combined_ocr(text):
@@ -13214,9 +13344,9 @@ def _skip_thinking_env(context_key):
 # API AND TRANSLATION UTILITIES
 # =====================================================
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn,
-                       chunk_timeout=None, request_id=None, context=None,
-                       chapter_context=None, bypass_graceful_stop=False,
-                       before_send_callback=None):
+                        chunk_timeout=None, request_id=None, context=None,
+                        chapter_context=None, bypass_graceful_stop=False,
+                        before_send_callback=None, local_cancel_only_check=None):
     """Send API request with interrupt capability and optional timeout retry.
     Optional context parameter is passed through to the client to improve payload labeling.
 
@@ -13231,6 +13361,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     
     result_queue = queue.Queue()
     cancel_event = threading.Event()
+    api_call_state = {"tls": None}
     deferred_batch_logs = pop_deferred_batch_logs()
 
     # Honor RETRY_TIMEOUT toggle: when off, disable chunk timeout entirely
@@ -13263,8 +13394,52 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     pass
         except Exception:
             pass
+
+    def _close_api_thread_transport() -> bool:
+        """Close only the API thread's transport/client for this send_with_interrupt call."""
+        closed_any = False
+        api_tls = api_call_state.get("tls")
+        if api_tls is not None:
+            for attr in ("current_stream", "openai_client", "gemini_client"):
+                obj = getattr(api_tls, attr, None)
+                if obj is None:
+                    continue
+                try:
+                    if attr == "gemini_client" and hasattr(obj, "_client"):
+                        http_client = obj._client
+                        if hasattr(http_client, "close"):
+                            http_client.close()
+                        if hasattr(http_client, "_transport"):
+                            http_client._transport.close()
+                    if hasattr(obj, "close"):
+                        obj.close()
+                    closed_any = True
+                except Exception:
+                    pass
+                try:
+                    setattr(api_tls, attr, None)
+                except Exception:
+                    pass
+        return closed_any
+
+    def _cancel_current_api_call() -> None:
+        """Cancel this wrapper's API call without tearing down sibling batch workers."""
+        cancel_event.set()
+        closed_local = _close_api_thread_transport()
+        if closed_local:
+            return
+        try:
+            if callable(local_cancel_only_check) and local_cancel_only_check():
+                return
+        except Exception:
+            pass
+        if hasattr(client, 'cancel_current_operation'):
+            client.cancel_current_operation()
     
     def api_call():
+        tls_for_local_cancel = None
+        had_local_cancel = False
+        previous_local_cancel = None
         try:
             start_time = time.time()
             extend_deferred_batch_logs(deferred_batch_logs)
@@ -13282,6 +13457,16 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 except Exception:
                     # Context is best-effort and should never break the call
                     pass
+
+            try:
+                if hasattr(client, '_get_thread_local_client'):
+                    tls_for_local_cancel = client._get_thread_local_client()
+                    api_call_state["tls"] = tls_for_local_cancel
+                    had_local_cancel = hasattr(tls_for_local_cancel, 'local_cancel_check')
+                    previous_local_cancel = getattr(tls_for_local_cancel, 'local_cancel_check', None)
+                    tls_for_local_cancel.local_cancel_check = cancel_event.is_set
+            except Exception:
+                tls_for_local_cancel = None
             
             # Build send parameters (context is optional)
             send_params = {
@@ -13333,6 +13518,15 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             if cancel_event.is_set():
                 return
             result_queue.put(e)
+        finally:
+            if tls_for_local_cancel is not None:
+                try:
+                    if had_local_cancel:
+                        tls_for_local_cancel.local_cancel_check = previous_local_cancel
+                    else:
+                        tls_for_local_cancel.local_cancel_check = None
+                except Exception:
+                    pass
     
     # Pre-send submission spacing to align staggered logs with actual delay
     try:
@@ -13435,8 +13629,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     if hasattr(client, '_in_cleanup'):
                         client._in_cleanup = True
                     cancel_event.set()
-                    if hasattr(client, 'cancel_current_operation'):
-                        client.cancel_current_operation()
+                    _cancel_current_api_call()
                     # Clear watchdog entries for this chapter since we're abandoning the result.
                     _clear_watchdog_for_chapter_context()
                     try:
@@ -13466,23 +13659,19 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 # Set cleanup flag when user stops
                 if hasattr(client, '_in_cleanup'):
                     client._in_cleanup = True
-                cancel_event.set()
-                if hasattr(client, 'cancel_current_operation'):
-                    client.cancel_current_operation()
+                _cancel_current_api_call()
                 # Clear watchdog entries for this chapter since we're abandoning the result.
                 _clear_watchdog_for_chapter_context()
                 try:
                     api_thread.join(timeout=2.0)
                 except Exception:
                     pass
-                raise UnifiedClientError("Translation stopped by user")
+                raise UnifiedClientError("Translation stopped by user", error_type="cancelled")
             elapsed += check_interval
             if chunk_timeout is not None and elapsed >= chunk_timeout:
                 if hasattr(client, '_in_cleanup'):
                     client._in_cleanup = True
-                cancel_event.set()
-                if hasattr(client, 'cancel_current_operation'):
-                    client.cancel_current_operation()
+                _cancel_current_api_call()
                 # Clear watchdog entries for this chapter since we're abandoning the result.
                 _clear_watchdog_for_chapter_context()
                 # Give the background thread a brief chance to unwind after transport closure
@@ -19804,12 +19993,10 @@ def main(log_callback=None, stop_callback=None):
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
                     is_prohibited_finish = finish_reason in ("content_filter", "prohibited_content")
                     qa_issue = ["PROHIBITED_CONTENT"] if is_prohibited_finish else ["API_ERROR"]
-                    save_failure_results = (
-                        os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1'
-                        or bool(getattr(config, 'save_prohibited_results', False))
-                    ) if is_prohibited_finish else (
-                        os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1'
-                        or bool(getattr(config, 'save_partial_results', False))
+                    save_failure_results = _should_save_failure_response(
+                        result,
+                        config=config,
+                        qa_issue=qa_issue,
                     )
                     if save_failure_results:
                         # Do NOT preserve original; save AI output if any, otherwise empty
@@ -20379,9 +20566,11 @@ def main(log_callback=None, stop_callback=None):
                     ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
                     
                     failure_reason = get_failure_reason(cleaned)
-                    save_partial_results = os.getenv('SAVE_PARTIAL_RESULTS', '0') == '1' or bool(getattr(config, 'save_partial_results', False))
-                    save_prohibited_results = os.getenv('SAVE_PROHIBITED_RESULTS', '0') == '1' or bool(getattr(config, 'save_prohibited_results', False))
-                    should_save = (save_prohibited_results if is_prohibited_failure(cleaned, failure_reason) else save_partial_results)
+                    should_save = _should_save_failure_response(
+                        cleaned,
+                        failure_reason=failure_reason,
+                        config=config,
+                    )
                     if should_save and not is_only_error_marker:
                         # Save for debugging - contains actual translation attempt that failed QA
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)

@@ -4234,8 +4234,27 @@ Recent translations to summarize:
             self.refinement_prompt_button.setStyleSheet("background-color: #6c757d; color: white; font-weight: bold;")
             self.refinement_prompt_button.setToolTip("Edit the prompts used by refinement output mode and multipass refinement")
 
+    def _available_width_for_multipass_refinement_row(self, row):
+        """Return the grid cell width available to the compact multipass controls."""
+        available_width = row.width()
+        try:
+            layout = getattr(self, 'frame', None)
+            index = layout.indexOf(row) if layout is not None else -1
+            if index >= 0:
+                grid_row, grid_col, row_span, col_span = layout.getItemPosition(index)
+                rect = layout.cellRect(grid_row, grid_col)
+                if row_span > 1 or col_span > 1:
+                    for r in range(grid_row, grid_row + row_span):
+                        for c in range(grid_col, grid_col + col_span):
+                            rect = rect.united(layout.cellRect(r, c))
+                if rect.isValid() and rect.width() > 0:
+                    available_width = max(available_width, rect.width())
+        except Exception:
+            pass
+        return available_width
+
     def _update_multipass_refinement_layout(self):
-        """Stack the refine prompt button above the mode combo when the row is tight."""
+        """Move the refine prompt button to the temperature row when the batch row is tight."""
         controls_layout = getattr(self, 'multipass_refinement_controls_layout', None)
         controls_widget = getattr(self, 'multipass_refinement_controls', None)
         combo = getattr(self, 'multipass_refinement_mode_combo', None)
@@ -4243,7 +4262,10 @@ Recent translations to summarize:
         row = getattr(self, 'batch_right_container', None)
         batch_size = getattr(self, 'batch_size_entry', None)
         checkbox = getattr(self, 'multipass_checkbox', None)
-        if not all((controls_layout, controls_widget, combo, button, row, batch_size, checkbox)):
+        temp_layout = getattr(self, 'temp_layout', None)
+        temp_container = getattr(self, 'temp_container', None)
+        temp_entry = getattr(self, 'trans_temp', None)
+        if not all((controls_layout, controls_widget, combo, button, row, batch_size, checkbox, temp_layout, temp_container)):
             return
 
         try:
@@ -4255,41 +4277,54 @@ Recent translations to summarize:
             if batch_size_max and batch_size_max < 16777215:
                 batch_size_width = min(batch_size_width, batch_size_max)
             combo_width = combo.minimumWidth() or combo.sizeHint().width()
+            button_width = max(
+                int(getattr(self, '_refinement_prompt_button_width', 0) or 0),
+                button.minimumWidth(),
+                button.sizeHint().width(),
+                button.minimumSizeHint().width(),
+            )
+            self._refinement_prompt_button_width = button_width
+            button.setFixedWidth(button_width)
+            button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
             desired_width = (
                 margin_width
                 + batch_size_width
                 + checkbox.sizeHint().width()
                 + combo_width
-                + max(button.minimumWidth(), button.sizeHint().width(), button.minimumSizeHint().width())
+                + button_width
                 + (spacing * 3)
             )
-            available_width = row.width()
+            available_width = self._available_width_for_multipass_refinement_row(row)
             currently_compact = bool(getattr(self, '_multipass_refinement_compact', False))
             compact = available_width > 0 and (
-                available_width < desired_width if not currently_compact else available_width < desired_width + 28
+                available_width < desired_width if not currently_compact else available_width < desired_width + 8
             )
-            if compact == currently_compact:
+            target_parent = temp_container if compact else controls_widget
+            if compact == currently_compact and button.parentWidget() is target_parent:
                 return
 
-            while controls_layout.count():
-                item = controls_layout.takeAt(0)
-                widget = item.widget()
-                if widget is not None:
-                    widget.setParent(controls_widget)
+            controls_layout.setDirection(QBoxLayout.LeftToRight)
+            controls_layout.setSpacing(spacing)
+            if controls_layout.indexOf(combo) < 0:
+                controls_layout.insertWidget(0, combo)
+            combo.setParent(controls_widget)
 
+            controls_layout.removeWidget(button)
+            temp_layout.removeWidget(button)
             if compact:
-                controls_layout.setDirection(QBoxLayout.TopToBottom)
-                controls_layout.setSpacing(2)
-                controls_layout.addWidget(button)
-                controls_layout.addWidget(combo)
+                insert_at = 2
+                if temp_entry is not None:
+                    temp_index = temp_layout.indexOf(temp_entry)
+                    if temp_index >= 0:
+                        insert_at = temp_index + 1
+                temp_layout.insertWidget(insert_at, button)
             else:
-                controls_layout.setDirection(QBoxLayout.LeftToRight)
-                controls_layout.setSpacing(spacing)
-                controls_layout.addWidget(combo)
                 controls_layout.addWidget(button)
 
             self._multipass_refinement_compact = compact
             controls_widget.updateGeometry()
+            temp_container.updateGeometry()
             row.updateGeometry()
         except Exception:
             pass
@@ -8299,6 +8334,7 @@ Recent translations to summarize:
         self.trans_temp.setMaximumWidth(60)
         temp_layout.addWidget(self.trans_temp)
         temp_layout.addStretch()
+        self.temp_layout = temp_layout
         self.temp_container = temp_container
         self.frame.addWidget(temp_container, 6, 2, 1, 2, Qt.AlignLeft)
         
@@ -8431,6 +8467,13 @@ Recent translations to summarize:
         self.refinement_prompt_button.setMinimumWidth(90)
         self.refinement_prompt_button.clicked.connect(self.show_refinement_prompt_dialog)
         self._update_refinement_prompt_button_style()
+        self._refinement_prompt_button_width = max(
+            90,
+            self.refinement_prompt_button.sizeHint().width(),
+            self.refinement_prompt_button.minimumSizeHint().width(),
+        )
+        self.refinement_prompt_button.setFixedWidth(self._refinement_prompt_button_width)
+        self.refinement_prompt_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.multipass_refinement_controls_layout.addWidget(self.refinement_prompt_button)
         batch_right_layout.addWidget(self.multipass_refinement_controls)
 
@@ -9280,6 +9323,16 @@ Recent translations to summarize:
         self.frame.addWidget(auto_glossary_row_container, 5, 2, 1, 2, Qt.AlignLeft)
         self.frame.addWidget(batch_right_container, 7, 3, Qt.AlignLeft)
         self.frame.addWidget(self._gloss_status_row, 5, 4, Qt.AlignRight)
+        multipass_parent_widget = batch_right_container.parentWidget()
+        if multipass_parent_widget is not None and not getattr(multipass_parent_widget, '_multipass_refinement_resize_hooked', False):
+            original_multipass_parent_resize = multipass_parent_widget.resizeEvent
+
+            def _multipass_parent_resize_with_refinement_layout(event):
+                original_multipass_parent_resize(event)
+                QTimer.singleShot(0, self._update_multipass_refinement_layout)
+
+            multipass_parent_widget.resizeEvent = _multipass_parent_resize_with_refinement_layout
+            multipass_parent_widget._multipass_refinement_resize_hooked = True
         QTimer.singleShot(0, self._update_multipass_refinement_layout)
 
         # ── 📚 Library button (above Other Settings, below glossary status) ──

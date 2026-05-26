@@ -4495,8 +4495,8 @@ def _create_response_handling_section(self, parent):
     self.save_prohibited_results_checkbox = self._create_styled_checkbox("Save blocked/prohibited responses")
     self.save_prohibited_results_checkbox.setContentsMargins(20, 0, 0, 0)
     self.save_prohibited_results_checkbox.setToolTip(
-        "When enabled, blocked/prohibited responses are saved (AI output or empty)\n"
-        "and marked as QA failed (PROHIBITED_CONTENT)."
+        "When enabled, blocked/prohibited/API-error responses are saved (AI output or empty)\n"
+        "and marked as QA failed (PROHIBITED_CONTENT or API_ERROR)."
     )
     try:
         self.save_prohibited_results_checkbox.setChecked(bool(self.save_prohibited_results_var))
@@ -4511,7 +4511,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(self.save_prohibited_results_checkbox)
 
     save_prohibited_desc = QLabel(
-        "Saves blocked/prohibited responses and marks the chapter QA failed."
+        "Saves blocked/prohibited/API-error responses and marks the chapter QA failed."
     )
     save_prohibited_desc.setStyleSheet("color: gray; font-size: 10pt;")
     save_prohibited_desc.setContentsMargins(20, 2, 0, 10)

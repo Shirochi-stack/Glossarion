@@ -3752,6 +3752,8 @@ class UnifiedClient:
             self._thread_local.current_request_id = None
             self._thread_local.current_request_label = None
             self._thread_local.chapter_context = None
+            self._thread_local.local_cancel_check = None
+            self._thread_local.current_stream = None
             self._thread_local.output_token_limit = None
             
             # THREAD-LOCAL CACHE
@@ -9619,7 +9621,7 @@ class UnifiedClient:
                     self._save_failed_request(messages, e, context)
                     self._track_stats(context, False, type(e).__name__, time.time() - start_time)
                     fallback_content = self._handle_empty_result(messages, context, str(e))
-                    return fallback_content, 'error'
+                    return fallback_content, 'prohibited_content'
                 
                 # Check for retryable server errors (500, 502, 503, 504)
                 http_status = getattr(e, 'http_status', None)
@@ -13049,31 +13051,34 @@ class UnifiedClient:
         except Exception:
             pass
 
-        # Close Gemini client to abort in-flight native API requests
-        try:
-            if hasattr(self, 'gemini_client') and self.gemini_client is not None:
-                # Try to close underlying HTTP client/transport
-                try:
-                    if hasattr(self.gemini_client, '_client'):
-                        http_client = self.gemini_client._client
-                        if hasattr(http_client, 'close'):
-                            http_client.close()
-                        if hasattr(http_client, '_transport'):
-                            http_client._transport.close()
-                except Exception:
-                    pass
-                
-                # Close the Gemini client itself
-                try:
-                    if hasattr(self.gemini_client, 'close'):
-                        self.gemini_client.close()
-                except Exception:
-                    pass
-                
-                # Force None to prevent further use
-                self.gemini_client = None
-        except Exception:
-            pass
+        # Close the shared Gemini client only outside batch mode. In batch mode
+        # each request owns the API thread's thread-local client; closing the
+        # shared pointer can disconnect unrelated chapter workers.
+        if not batch_mode:
+            try:
+                if hasattr(self, 'gemini_client') and self.gemini_client is not None:
+                    # Try to close underlying HTTP client/transport
+                    try:
+                        if hasattr(self.gemini_client, '_client'):
+                            http_client = self.gemini_client._client
+                            if hasattr(http_client, 'close'):
+                                http_client.close()
+                            if hasattr(http_client, '_transport'):
+                                http_client._transport.close()
+                    except Exception:
+                        pass
+
+                    # Close the Gemini client itself
+                    try:
+                        if hasattr(self.gemini_client, 'close'):
+                            self.gemini_client.close()
+                    except Exception:
+                        pass
+
+                    # Force None to prevent further use
+                    self.gemini_client = None
+            except Exception:
+                pass
         
         # Also try to close thread-local Gemini clients
         try:
@@ -17074,6 +17079,15 @@ class UnifiedClient:
         """
         return self._get_actual_provider() == 'gemini'
     
+    def _is_local_cancel_requested(self) -> bool:
+        """Return True when only the current API call was locally cancelled."""
+        try:
+            tls = self._get_thread_local_client()
+            local_cancel_check = getattr(tls, 'local_cancel_check', None)
+            return callable(local_cancel_check) and bool(local_cancel_check())
+        except Exception:
+            return False
+
     def _is_stop_requested(self) -> bool:
         """
         Check if stop was requested by checking global flag, local cancelled flag, and class-level cancellation.
@@ -17084,6 +17098,9 @@ class UnifiedClient:
         Use _should_abort_retry() for retry/wait contexts that should also bail on graceful stop.
         """
         global global_stop_flag
+
+        if self._is_local_cancel_requested():
+            return True
 
         # Module-level flag set by GUI
         if global_stop_flag:
@@ -18078,6 +18095,8 @@ class UnifiedClient:
             request_tls = self._get_thread_local_client()
         except Exception:
             request_tls = None
+        if self._is_local_cancel_requested():
+            raise UnifiedClientError("Operation cancelled by caller", error_type="cancelled")
         request_gemini_client = getattr(request_tls, 'gemini_client', None) if request_tls is not None else None
         if request_gemini_client is None:
             request_gemini_client = getattr(self, 'gemini_client', None)
@@ -18841,6 +18860,11 @@ class UnifiedClient:
                                 contents=contents,
                                 config=generation_config
                             )
+                            try:
+                                _tls_stream = self._get_thread_local_client()
+                                _tls_stream.current_stream = stream
+                            except Exception:
+                                _tls_stream = None
                             # Register for hard_cancel_all so forceful stop can
                             # close this stream from another thread.
                             with self._active_streams_lock:
@@ -18862,12 +18886,14 @@ class UnifiedClient:
                                 for evt in stream:
                                     # ── Forceful stop: close the HTTP stream immediately ──
                                     if self._is_stop_requested():
+                                        local_cancel_active = self._is_local_cancel_requested()
                                         try:
                                             if hasattr(stream, 'close'):
                                                 stream.close()
                                         except Exception:
                                             pass
-                                        self._cancelled = True
+                                        if not local_cancel_active:
+                                            self._cancelled = True
                                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
 
                                     response = evt  # keep last event for debugging
@@ -18937,6 +18963,11 @@ class UnifiedClient:
                             finally:
                                 with self._active_streams_lock:
                                     self._active_streams.discard(stream)
+                                try:
+                                    if _tls_stream is not None and getattr(_tls_stream, 'current_stream', None) is stream:
+                                        _tls_stream.current_stream = None
+                                except Exception:
+                                    pass
                             if log_stream and not self._is_stop_requested():
                                 if log_buf:
                                     print("".join(log_buf).replace('\x1f', '\\x1F'))
