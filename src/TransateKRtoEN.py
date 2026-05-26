@@ -490,6 +490,116 @@ def _generate_and_replace_toc(html_body: str) -> str:
 # =====================================================
 # CONFIGURATION AND ENVIRONMENT MANAGEMENT
 # =====================================================
+def _env_bool(name, default=False):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, default))
+    except Exception:
+        return default
+
+
+def _env_float(name, default):
+    try:
+        return float(os.getenv(name, default))
+    except Exception:
+        return default
+
+
+def _load_qa_scanner_settings_from_env():
+    raw = os.getenv("QA_SCANNER_SETTINGS_JSON", "").strip()
+    settings = {}
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                settings = dict(parsed)
+        except Exception as exc:
+            print(f"Warning: failed to parse QA_SCANNER_SETTINGS_JSON: {exc}")
+
+    if not settings:
+        settings = {
+            "foreign_char_threshold": _env_int("QA_FOREIGN_CHAR_THRESHOLD", 10),
+            "target_language": os.getenv("QA_TARGET_LANGUAGE", "english"),
+            "check_encoding_issues": _env_bool("QA_CHECK_ENCODING", False),
+            "check_repetition": _env_bool("QA_CHECK_REPETITION", True),
+            "check_translation_artifacts": _env_bool("QA_CHECK_ARTIFACTS", False),
+            "check_ai_artifacts": _env_bool("QA_CHECK_AI_ARTIFACTS", False),
+            "check_glossary_leakage": _env_bool("QA_CHECK_GLOSSARY_LEAKAGE", True),
+            "check_missing_images": _env_bool("QA_CHECK_MISSING_IMAGES", True),
+            "min_file_length": _env_int("QA_MIN_FILE_LENGTH", 0),
+            "report_format": os.getenv("QA_REPORT_FORMAT", "detailed"),
+            "auto_save_report": _env_bool("QA_AUTO_SAVE_REPORT", True),
+            "cache_enabled": _env_bool("QA_CACHE_ENABLED", True),
+            "paragraph_threshold": _env_float("QA_PARAGRAPH_THRESHOLD", 0.3),
+        }
+
+    output_lang = os.getenv("OUTPUT_LANGUAGE", "").strip()
+    if output_lang:
+        settings["target_language"] = output_lang.lower()
+    settings["word_count_multipliers"] = {
+        "english": 1.0,
+        "spanish": 1.10,
+        "french": 1.10,
+        "german": 1.05,
+        "italian": 1.05,
+        "portuguese": 1.10,
+        "russian": 1.15,
+        "arabic": 1.15,
+        "hindi": 1.10,
+        "turkish": 1.05,
+        "chinese": 2.50,
+        "chinese (simplified)": 2.50,
+        "chinese (traditional)": 2.50,
+        "japanese": 2.20,
+        "korean": 2.30,
+        "hebrew": 1.05,
+        "thai": 1.10,
+        "other": 1.0,
+    }
+    return settings
+
+
+def _apply_qa_scan_env_from_settings(qa_settings):
+    settings = qa_settings if isinstance(qa_settings, dict) else {}
+    counting_mode = str(settings.get("counting_mode", "") or "").strip().lower()
+    mappings = {
+        "QA_FOREIGN_CHAR_THRESHOLD": str(settings.get("foreign_char_threshold", 10)),
+        "QA_TARGET_LANGUAGE": str(settings.get("target_language", "english")),
+        "QA_CHECK_ENCODING": "1" if settings.get("check_encoding_issues", False) else "0",
+        "QA_CHECK_REPETITION": "1" if settings.get("check_repetition", True) else "0",
+        "QA_CHECK_ARTIFACTS": "1" if settings.get("check_translation_artifacts", False) else "0",
+        "QA_CHECK_AI_ARTIFACTS": "1" if settings.get("check_ai_artifacts", False) else "0",
+        "QA_CHECK_GLOSSARY_LEAKAGE": "1" if settings.get("check_glossary_leakage", True) else "0",
+        "QA_CHECK_MISSING_IMAGES": "1" if settings.get("check_missing_images", True) else "0",
+        "QA_MIN_FILE_LENGTH": str(settings.get("min_file_length", 0)),
+        "QA_REPORT_FORMAT": str(settings.get("report_format", "detailed")),
+        "QA_AUTO_SAVE_REPORT": "1" if settings.get("auto_save_report", True) else "0",
+        "QA_CACHE_ENABLED": "1" if settings.get("cache_enabled", True) else "0",
+        "QA_PARAGRAPH_THRESHOLD": str(settings.get("paragraph_threshold", 0.3)),
+        "QA_USE_THREAD_EXECUTOR": "1" if settings.get("use_thread_executor", False) else "0",
+        "QA_USE_WORD_COUNT": "1" if counting_mode == "word" else "0",
+        "QA_EXACT_CHAR_COUNT": "1" if counting_mode == "exact" else "0",
+    }
+    previous = {key: os.environ.get(key) for key in mappings}
+    for key, value in mappings.items():
+        os.environ[key] = value
+    return previous
+
+
+def _restore_env(previous):
+    for key, value in previous.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
 class TranslationConfig:
     """Centralized configuration management"""
     def __init__(self):
@@ -503,6 +613,10 @@ class TranslationConfig:
         self.MULTIPASS_REFINEMENT_MODE = os.getenv("MULTIPASS_REFINEMENT_MODE", "full").strip().lower()
         if self.MULTIPASS_REFINEMENT_MODE not in ("full", "failed"):
             self.MULTIPASS_REFINEMENT_MODE = "full"
+        self.SCAN_PHASE_MODE = os.getenv("SCAN_PHASE_MODE", "quick-scan").strip().lower()
+        if self.SCAN_PHASE_MODE not in ("quick-scan", "aggressive", "ai-hunter", "custom"):
+            self.SCAN_PHASE_MODE = "quick-scan"
+        self.QA_SCANNER_SETTINGS = _load_qa_scanner_settings_from_env()
         self.input_path = os.getenv("input_path", "default.epub")
         self.PROFILE_NAME = os.getenv("PROFILE_NAME", "korean").lower()
         self.CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
@@ -12969,7 +13083,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         ):
             _collect(entry.get(key))
 
-        status = str(entry.get("status", "") or "").lower()
+        status = str(entry.get("status", "") or "").strip().lower()
         if failed_mode and status == "completed":
             return "completed"
         if status == "qa_failed":
@@ -21063,25 +21177,37 @@ def main(log_callback=None, stop_callback=None):
         multipass_refinement_mode = str(getattr(config, "MULTIPASS_REFINEMENT_MODE", "full") or "full").strip().lower()
         if multipass_refinement_mode not in ("full", "failed"):
             multipass_refinement_mode = "full"
-        print("Running a refinement pass over translated HTML output.")
+        print(f"Running a refinement pass over translated HTML output (mode: {multipass_refinement_mode}).")
         if multipass_refinement_mode == "failed":
-            print("Failed multipass mode: running QA quick scan before refinement.")
+            qa_scan_mode = str(getattr(config, "SCAN_PHASE_MODE", "quick-scan") or "quick-scan").strip().lower()
+            if qa_scan_mode not in ("quick-scan", "aggressive", "ai-hunter", "custom"):
+                qa_scan_mode = "quick-scan"
+            qa_settings = getattr(config, "QA_SCANNER_SETTINGS", None)
+            if not isinstance(qa_settings, dict):
+                qa_settings = _load_qa_scanner_settings_from_env()
+            print(f"Failed multipass mode: running QA Scanner in {qa_scan_mode} mode before refinement.")
+            qa_env_restore = {}
             try:
+                qa_env_restore = _apply_qa_scan_env_from_settings(qa_settings)
                 from scan_html_folder import scan_html_folder as _scan_html_folder
                 _scan_html_folder(
                     out,
                     log=print,
                     stop_flag=check_stop,
-                    mode="quick-scan",
+                    mode=qa_scan_mode,
+                    qa_settings=qa_settings,
                     epub_path=getattr(config, "input_path", ""),
                 )
                 try:
                     progress_manager.prog = progress_manager._init_or_load()
-                    print("Reloaded translation progress after QA quick scan.")
+                    print("Reloaded translation progress after QA scan.")
                 except Exception as reload_exc:
-                    print(f"⚠️ Failed to reload progress after QA quick scan: {reload_exc}")
+                    print(f"⚠️ Failed to reload progress after QA scan: {reload_exc}")
             except Exception as scan_exc:
-                print(f"⚠️ QA quick scan before failed multipass failed: {scan_exc}")
+                print(f"⚠️ QA scan before failed multipass failed: {scan_exc}")
+            finally:
+                if qa_env_restore:
+                    _restore_env(qa_env_restore)
         original_output_mode = config.OUTPUT_MODE
         try:
             config.OUTPUT_MODE = "refinement"

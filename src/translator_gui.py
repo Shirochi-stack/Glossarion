@@ -4234,6 +4234,57 @@ Recent translations to summarize:
             self.refinement_prompt_button.setStyleSheet("background-color: #6c757d; color: white; font-weight: bold;")
             self.refinement_prompt_button.setToolTip("Edit the prompts used by refinement output mode and multipass refinement")
 
+    def _get_multipass_refinement_mode(self):
+        """Return the live multipass refinement mode from the combobox/config."""
+        mode = None
+        combo = getattr(self, 'multipass_refinement_mode_combo', None)
+        if combo is not None:
+            try:
+                mode = combo.currentData()
+            except Exception:
+                mode = None
+            if not mode:
+                try:
+                    mode = combo.currentText()
+                except Exception:
+                    mode = None
+        if not mode:
+            mode = getattr(self, 'multipass_refinement_mode_var', None)
+        if not mode:
+            mode = self.config.get('multipass_refinement_mode', 'full')
+        mode = str(mode or 'full').strip().lower()
+        return 'failed' if mode == 'failed' else 'full'
+
+    def _sync_multipass_refinement_mode_from_combo(self, _idx=None):
+        mode = self._get_multipass_refinement_mode()
+        self.multipass_refinement_mode_var = mode
+        self.config['multipass_refinement_mode'] = mode
+
+    def _get_scan_phase_mode(self):
+        """Return the live QA scan mode used by post-translation scanning."""
+        mode = getattr(self, 'scan_phase_mode_var', None) or self.config.get('scan_phase_mode', 'quick-scan')
+        mode = str(mode or 'quick-scan').strip().lower()
+        if mode not in ('quick-scan', 'aggressive', 'ai-hunter', 'custom'):
+            mode = 'quick-scan'
+        return mode
+
+    def _get_qa_scanner_settings_json(self):
+        """Serialize QA scanner settings so worker-side scans match GUI scans."""
+        settings = self.config.get('qa_scanner_settings', {})
+        if not isinstance(settings, dict):
+            settings = {}
+        settings = dict(settings)
+        try:
+            main_lang = self.config.get('output_language') or getattr(self, 'target_lang_var', '') or os.getenv('OUTPUT_LANGUAGE', '')
+            if main_lang:
+                settings['target_language'] = str(main_lang).strip().lower()
+        except Exception:
+            pass
+        try:
+            return json.dumps(settings, ensure_ascii=False)
+        except Exception:
+            return "{}"
+
     def _available_width_for_multipass_refinement_row(self, row):
         """Return the grid cell width available to the compact multipass controls."""
         available_width = row.width()
@@ -8456,10 +8507,7 @@ Recent translations to summarize:
             }}
         """)
         self.multipass_refinement_mode_combo.currentIndexChanged.connect(
-            lambda _idx: (
-                setattr(self, 'multipass_refinement_mode_var', self.multipass_refinement_mode_combo.currentData() or 'full'),
-                self.config.__setitem__('multipass_refinement_mode', self.multipass_refinement_mode_combo.currentData() or 'full')
-            )
+            self._sync_multipass_refinement_mode_from_combo
         )
         self.multipass_refinement_controls_layout.addWidget(self.multipass_refinement_mode_combo)
 
@@ -14069,7 +14117,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         self.append_log("🖼️ Skipping post-translation scanning for image output mode")
                     elif (hasattr(self, 'scan_phase_enabled_var') and self.scan_phase_enabled_var and 
                         translation_completed and not self.stop_requested):
-                        mode = self.scan_phase_mode_var if hasattr(self, 'scan_phase_mode_var') else 'quick-scan'
+                        mode = self._get_scan_phase_mode()
                         self.append_log(f"🧪 Scanning phase enabled — launching QA Scanner in {mode} mode...")
                         # Emit signal to trigger QA scan on main thread
                         self.trigger_qa_scan_signal.emit()
@@ -16748,13 +16796,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'MAX_RETRIES': str(resolved_max_retries),
             'INDEFINITE_RATE_LIMIT_RETRY': '1' if self.config.get('indefinite_rate_limit_retry', False) else '0',
             # Scanning/QA settings
-            'SCAN_PHASE_ENABLED': '1' if self.config.get('scan_phase_enabled', False) else '0',
-            'SCAN_PHASE_MODE': self.config.get('scan_phase_mode', 'quick-scan'),
+            'SCAN_PHASE_ENABLED': '1' if getattr(self, 'scan_phase_enabled_var', self.config.get('scan_phase_enabled', False)) else '0',
+            'SCAN_PHASE_MODE': self._get_scan_phase_mode(),
+            'QA_SCANNER_SETTINGS_JSON': self._get_qa_scanner_settings_json(),
             'QA_AUTO_SEARCH_OUTPUT': '1' if self.config.get('qa_auto_search_output', True) else '0',
             'BATCH_TRANSLATION': "1" if self.batch_translation_var else "0",
             'BATCH_SIZE': str(self.batch_size_var),
             'MULTIPASS_MODE': "1" if getattr(self, 'multipass_mode_var', self.config.get('multipass_mode', False)) else "0",
-            'MULTIPASS_REFINEMENT_MODE': str(getattr(self, 'multipass_refinement_mode_var', self.config.get('multipass_refinement_mode', 'full')) or 'full').strip().lower(),
+            'MULTIPASS_REFINEMENT_MODE': self._get_multipass_refinement_mode(),
             'BATCHING_MODE': self._translation_batching_mode_for_env(),
             'BATCH_GROUP_SIZE': str(getattr(self, 'batch_group_size_var', '3')),
             # Backward compatibility for older scripts expecting CONSERVATIVE_BATCHING
@@ -19608,7 +19657,7 @@ Important rules:
     def _trigger_qa_scan_on_main_thread(self):
         """Handler called on main thread to trigger QA scan"""
         try:
-            mode = self.scan_phase_mode_var if hasattr(self, 'scan_phase_mode_var') else 'quick-scan'
+            mode = self._get_scan_phase_mode()
             # Call run_qa_scan directly on the main thread with correct parameters
             self.run_qa_scan(mode_override=mode, non_interactive=True)
         except Exception as e:
@@ -24939,7 +24988,7 @@ Important rules:
                 ('glossary_gender_noise_threshold', ['glossary_gender_noise_threshold_var'], 10, lambda v: safe_int(v, 10)),
                 ('glossary_gender_tracking_bias', ['glossary_gender_tracking_bias_var'], 'none', str),
                 ('glossary_filter_mode', ['glossary_filter_mode_var'], 'strict', str),
-                ('scan_phase_mode', ['scan_phase_mode_var'], 'translate', str),
+                ('scan_phase_mode', ['scan_phase_mode_var'], 'quick-scan', str),
 
                 # EPUB layout mode
                 ('epub_layout_mode', ['epub_layout_mode_var', ('config', 'epub_layout_mode')], 'auto', str),
@@ -25743,6 +25792,7 @@ Important rules:
             qa_settings = self.config.get('qa_scanner_settings', {})
             ai_hunter_config = self.config.get('ai_hunter_config', {})
             qa_env_mappings = [
+                ('QA_SCANNER_SETTINGS_JSON', self._get_qa_scanner_settings_json()),
                 ('QA_FOREIGN_CHAR_THRESHOLD', str(qa_settings.get('foreign_char_threshold', 10))),
                 ('QA_TARGET_LANGUAGE', qa_settings.get('target_language', 'english')),
                 ('QA_CHECK_ENCODING', '1' if qa_settings.get('check_encoding_issues', False) else '0'),
@@ -25927,7 +25977,8 @@ Important rules:
 
                 # Post-translation scanning phase
                 ('SCAN_PHASE_ENABLED', '1' if getattr(self, 'scan_phase_enabled_var', False) else '0'),
-                ('SCAN_PHASE_MODE', getattr(self, 'scan_phase_mode_var', 'quick-scan')),
+                ('SCAN_PHASE_MODE', self._get_scan_phase_mode()),
+                ('QA_SCANNER_SETTINGS_JSON', self._get_qa_scanner_settings_json()),
 
                 # Book title handling
                 ('TRANSLATE_BOOK_TITLE', '1' if getattr(self, 'translate_book_title_var', True) else '0'),
@@ -26001,7 +26052,7 @@ Important rules:
                 ('BATCH_GROUP_SIZE', str(getattr(self, 'batch_group_size_var', '3'))),
                 ('CONSERVATIVE_BATCHING', '1' if self._translation_batching_mode_for_env() == 'conservative' else '0'),
                 ('MULTIPASS_MODE', '1' if getattr(self, 'multipass_mode_var', self.config.get('multipass_mode', False)) else '0'),
-                ('MULTIPASS_REFINEMENT_MODE', str(getattr(self, 'multipass_refinement_mode_var', self.config.get('multipass_refinement_mode', 'full')) or 'full').strip().lower()),
+                ('MULTIPASS_REFINEMENT_MODE', self._get_multipass_refinement_mode()),
                 ('REFINEMENT_SYSTEM_PROMPT', self.config.get('refinement_system_prompt') or getattr(self, 'refinement_system_prompt', getattr(self, 'default_refinement_system_prompt', ''))),
                 ('REFINEMENT_USER_PROMPT', self.config.get('refinement_user_prompt', getattr(self, 'refinement_user_prompt', ''))),
                 # Normalize to uppercase so validation in unified_api_client accepts 1K/2K/4K
