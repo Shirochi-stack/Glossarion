@@ -5148,7 +5148,7 @@ class MangaTranslationTab(QObject):
         cloud_radio.setFont(radio_font)
         cloud_radio.setToolTip(
             "Use Replicate for cloud inpainting with the configured Replicate API key and cloud inpaint model.\n"
-            "Best when you want remote inpainting instead of loading a local model."
+            "Not recommended: this option has performed poorly in tests."
         )
         cloud_radio.setChecked(self.inpaint_method_value == 'cloud')
         cloud_radio.toggled.connect(lambda checked: self._on_inpaint_method_change() if checked else None)
