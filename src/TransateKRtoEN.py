@@ -4391,6 +4391,7 @@ class TranslationProcessor:
         previous_summary_text=None,
         previous_summary_chapter_num=None,
         prefer_translations_only_user=False,
+        write_file=True,
     ):
         """Generate rolling summary after a chapter for context continuity.
         Uses a dedicated summary system prompt (with glossary) distinct from translation.
@@ -4529,6 +4530,9 @@ class TranslationProcessor:
             else:
                 summary_resp = send_result
             
+            if not write_file:
+                return summary_resp.strip()
+
             # Save the summary to the output folder
             summary_file = os.path.join(self.out_dir, "rolling_summary.txt")
 
@@ -17975,6 +17979,178 @@ def main(log_callback=None, stop_callback=None):
         if config.USE_ROLLING_SUMMARY:
             # Dedicated processor for summarization between batches (no concurrency with translation threads).
             summary_translation_processor = TranslationProcessor(config, client, out, log_callback, check_stop, uses_zero_based, is_text_file)
+
+        def _rolling_summary_source_budget(splitter):
+            max_input_tokens, _budget_str = parse_token_limit(os.getenv("MAX_INPUT_TOKENS", "").strip())
+            if not max_input_tokens:
+                return None
+            # Keep room for the summary system/user wrapper, model-specific chat overhead, and labels.
+            reserve = max(512, int(max_input_tokens * 0.05))
+            return max(1000, max_input_tokens - reserve)
+
+        def _split_rolling_summary_blocks(translated_blocks):
+            blocks = [str(block or "").strip() for block in translated_blocks if str(block or "").strip()]
+            if not blocks:
+                return []
+            try:
+                from chapter_splitter import ChapterSplitter
+                splitter = ChapterSplitter(model_name=getattr(config, "MODEL", "gpt-3.5-turbo"))
+            except Exception:
+                splitter = chapter_splitter
+            source_budget = _rolling_summary_source_budget(splitter)
+            combined = "\n\n---\n\n".join(blocks)
+            if not source_budget or splitter.count_tokens(combined) <= source_budget:
+                return [combined]
+
+            pieces = []
+            for block in blocks:
+                if splitter.count_tokens(block) <= source_budget:
+                    pieces.append(block)
+                    continue
+                for chunk_text, _chunk_idx, _total_chunks in splitter.split_chapter(
+                    block,
+                    source_budget,
+                    filename="rolling_summary_input.txt",
+                ):
+                    chunk_text = str(chunk_text or "").strip()
+                    if chunk_text:
+                        pieces.append(chunk_text)
+
+            sep = "\n\n---\n\n"
+            sep_tokens = splitter.count_tokens(sep)
+            total_tokens = max(1, splitter.count_tokens(sep.join(pieces)))
+            chunk_count = max(2, (total_tokens + source_budget - 1) // source_budget)
+            target_tokens = max(1, (total_tokens + chunk_count - 1) // chunk_count)
+
+            chunks = []
+            current = []
+            current_tokens = 0
+            for piece in pieces:
+                piece_tokens = splitter.count_tokens(piece)
+                next_tokens = current_tokens + (sep_tokens if current else 0) + piece_tokens
+                if current and (
+                    next_tokens > source_budget
+                    or (next_tokens > target_tokens and len(chunks) < chunk_count - 1)
+                ):
+                    chunks.append(sep.join(current))
+                    current = [piece]
+                    current_tokens = piece_tokens
+                else:
+                    current.append(piece)
+                    current_tokens = next_tokens
+            if current:
+                chunks.append(sep.join(current))
+            return [chunk for chunk in chunks if str(chunk or "").strip()]
+
+        def _read_batch_translated_blocks(batch_items):
+            translated_blocks = []
+            last_actual_num = None
+            for _idx, chapter in sorted(batch_items, key=lambda x: x[0]):
+                try:
+                    actual_num = chapter.get('actual_chapter_num', chapter.get('num'))
+                    last_actual_num = actual_num
+                    fname_guess = FileUtilities.create_chapter_filename(chapter, actual_num)
+                    candidates = [fname_guess]
+                    if isinstance(fname_guess, str) and fname_guess.endswith('.html'):
+                        candidates.insert(0, fname_guess.replace('.html', '.txt'))
+                    elif isinstance(fname_guess, str) and fname_guess.endswith('.txt'):
+                        candidates.append(fname_guess.replace('.txt', '.html'))
+
+                    content = ""
+                    for cand in candidates:
+                        fp = os.path.join(out, cand)
+                        if os.path.exists(fp):
+                            with open(fp, 'r', encoding='utf-8') as f:
+                                content = f.read()
+                            if content:
+                                break
+                    if isinstance(content, str) and content:
+                        translated_blocks.append(content)
+                except Exception:
+                    continue
+            return translated_blocks, last_actual_num
+
+        def _refresh_rolling_summary_snapshot():
+            nonlocal rolling_summary_for_next_batch
+            summary_file = os.path.join(out, 'rolling_summary.txt')
+            if os.path.exists(summary_file):
+                with open(summary_file, 'r', encoding='utf-8') as sf:
+                    rolling_summary_for_next_batch = (sf.read() or "")
+            else:
+                rolling_summary_for_next_batch = ""
+
+        def _update_batch_rolling_summary(batch_items, chapters_in_batch):
+            nonlocal rolling_summary_for_next_batch
+            if not (config.USE_ROLLING_SUMMARY and summary_translation_processor is not None):
+                return
+            translated_blocks, last_actual_num = _read_batch_translated_blocks(batch_items)
+            if not translated_blocks:
+                rolling_summary_for_next_batch = ""
+                return
+
+            old_mode = getattr(config, 'ROLLING_SUMMARY_MODE', 'replace')
+            old_max_entries = getattr(config, 'ROLLING_SUMMARY_MAX_ENTRIES', 0)
+            try:
+                config.ROLLING_SUMMARY_MODE = 'replace'
+                try:
+                    config.ROLLING_SUMMARY_MAX_ENTRIES = int(chapters_in_batch or 0)
+                except Exception:
+                    config.ROLLING_SUMMARY_MAX_ENTRIES = 0
+
+                summary_inputs = _split_rolling_summary_blocks(translated_blocks)
+                if not summary_inputs:
+                    rolling_summary_for_next_batch = ""
+                    return
+                if len(summary_inputs) > 1:
+                    print(f"📝 Rolling summary input split into {len(summary_inputs)} token-budgeted part(s)")
+                    worker_count = max(1, min(int(getattr(config, 'BATCH_SIZE', 1) or 1), len(summary_inputs)))
+                    part_summaries = [None] * len(summary_inputs)
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as summary_executor:
+                        future_to_part = {
+                            summary_executor.submit(
+                                summary_translation_processor.generate_rolling_summary,
+                                history_manager,
+                                last_actual_num,
+                                None,
+                                source_text=summary_text,
+                                previous_summary_text=None,
+                                previous_summary_chapter_num=None,
+                                prefer_translations_only_user=True,
+                                write_file=False,
+                            ): part_idx
+                            for part_idx, summary_text in enumerate(summary_inputs)
+                        }
+                        for future in concurrent.futures.as_completed(future_to_part):
+                            part_idx = future_to_part[future]
+                            part_summaries[part_idx] = future.result()
+
+                    summaries_text = "\n\n---\n\n".join(
+                        f"=== Rolling Summary Part {idx + 1}/{len(part_summaries)} ===\n{summary_text}"
+                        for idx, summary_text in enumerate(part_summaries)
+                        if isinstance(summary_text, str) and summary_text.strip()
+                    )
+                    if not summaries_text:
+                        rolling_summary_for_next_batch = ""
+                        return
+                    final_source_text = summaries_text
+                else:
+                    final_source_text = summary_inputs[0]
+
+                with rolling_summary_update_lock:
+                    time.sleep(0.000001)
+                    summary_translation_processor.generate_rolling_summary(
+                        history_manager,
+                        last_actual_num,
+                        base_system_content=None,
+                        source_text=final_source_text,
+                        previous_summary_text=None,
+                        previous_summary_chapter_num=None,
+                        prefer_translations_only_user=True,
+                    )
+                    _refresh_rolling_summary_snapshot()
+            finally:
+                config.ROLLING_SUMMARY_MODE = old_mode
+                config.ROLLING_SUMMARY_MAX_ENTRIES = old_max_entries
         
         total_to_process = len(chapters_to_translate)
         processed = 0
@@ -18203,57 +18379,7 @@ def main(log_callback=None, stop_callback=None):
                         # Rolling summary update per unit
                         if config.USE_ROLLING_SUMMARY and summary_translation_processor is not None:
                             try:
-                                batch_items = sorted(unit, key=lambda x: x[0])
-                                translated_blocks = []
-                                last_actual_num_in_batch = None
-                                for idx, chapter in batch_items:
-                                    actual_num = chapter.get('actual_chapter_num', chapter.get('num'))
-                                    last_actual_num_in_batch = actual_num
-                                    fname_guess = FileUtilities.create_chapter_filename(chapter, actual_num)
-                                    candidates = [fname_guess]
-                                    if isinstance(fname_guess, str) and fname_guess.endswith('.html'):
-                                        candidates.insert(0, fname_guess.replace('.html', '.txt'))
-                                    elif isinstance(fname_guess, str) and fname_guess.endswith('.txt'):
-                                        candidates.append(fname_guess.replace('.txt', '.html'))
-                                    content = ""
-                                    for cand in candidates:
-                                        fp = os.path.join(out, cand)
-                                        if os.path.exists(fp):
-                                            with open(fp, 'r', encoding='utf-8') as f:
-                                                content = f.read()
-                                            if content:
-                                                break
-                                    if isinstance(content, str) and content:
-                                        translated_blocks.append(content)
-                                batch_translations_text = "\n\n---\n\n".join(translated_blocks)
-                                if batch_translations_text:
-                                    old_mode = getattr(config, 'ROLLING_SUMMARY_MODE', 'replace')
-                                    old_max_entries = getattr(config, 'ROLLING_SUMMARY_MAX_ENTRIES', 0)
-                                    try:
-                                        config.ROLLING_SUMMARY_MODE = 'replace'
-                                        config.ROLLING_SUMMARY_MAX_ENTRIES = int(chapters_in_batch or 0)
-                                        with rolling_summary_update_lock:
-                                            time.sleep(0.000001)
-                                            summary_translation_processor.generate_rolling_summary(
-                                                history_manager,
-                                                last_actual_num_in_batch,
-                                                base_system_content=None,
-                                                source_text=batch_translations_text,
-                                                previous_summary_text=None,
-                                                previous_summary_chapter_num=None,
-                                                prefer_translations_only_user=True,
-                                            )
-                                            summary_file = os.path.join(out, 'rolling_summary.txt')
-                                            if os.path.exists(summary_file):
-                                                with open(summary_file, 'r', encoding='utf-8') as sf:
-                                                    rolling_summary_for_next_batch = (sf.read() or "")
-                                            else:
-                                                rolling_summary_for_next_batch = ""
-                                    finally:
-                                        config.ROLLING_SUMMARY_MODE = old_mode
-                                        config.ROLLING_SUMMARY_MAX_ENTRIES = old_max_entries
-                                else:
-                                    rolling_summary_for_next_batch = ""
+                                _update_batch_rolling_summary(unit, chapters_in_batch)
                             except Exception as e:
                                 print(f"⚠️ Batch rolling summary update failed: {e}")
                                 rolling_summary_for_next_batch = ""
@@ -18408,69 +18534,7 @@ def main(log_callback=None, stop_callback=None):
                             batch_items = []
                             for unit in current_batch_units:
                                 batch_items.extend(unit)
-                            batch_items = sorted(batch_items, key=lambda x: x[0])
-
-                            translated_blocks = []
-                            last_actual_num_in_batch = None
-                            for idx, chapter in batch_items:
-                                try:
-                                    actual_num = chapter.get('actual_chapter_num', chapter.get('num'))
-                                    last_actual_num_in_batch = actual_num
-                                    fname_guess = FileUtilities.create_chapter_filename(chapter, actual_num)
-                                    candidates = [fname_guess]
-                                    if isinstance(fname_guess, str) and fname_guess.endswith('.html'):
-                                        candidates.insert(0, fname_guess.replace('.html', '.txt'))
-                                    elif isinstance(fname_guess, str) and fname_guess.endswith('.txt'):
-                                        candidates.append(fname_guess.replace('.txt', '.html'))
-
-                                    content = ""
-                                    for cand in candidates:
-                                        fp = os.path.join(out, cand)
-                                        if os.path.exists(fp):
-                                            with open(fp, 'r', encoding='utf-8') as f:
-                                                content = f.read()
-                                            if content:
-                                                break
-
-                                    if isinstance(content, str) and content:
-                                        translated_blocks.append(content)
-                                except Exception:
-                                    continue
-
-                            batch_translations_text = "\n\n---\n\n".join(translated_blocks)
-
-                            if batch_translations_text:
-                                old_mode = getattr(config, 'ROLLING_SUMMARY_MODE', 'replace')
-                                old_max_entries = getattr(config, 'ROLLING_SUMMARY_MAX_ENTRIES', 0)
-                                try:
-                                    config.ROLLING_SUMMARY_MODE = 'replace'
-                                    try:
-                                        config.ROLLING_SUMMARY_MAX_ENTRIES = int(chapters_in_batch or 0)
-                                    except Exception:
-                                        config.ROLLING_SUMMARY_MAX_ENTRIES = 0
-
-                                    with rolling_summary_update_lock:
-                                        time.sleep(0.000001)
-                                        summary_translation_processor.generate_rolling_summary(
-                                            history_manager,
-                                            last_actual_num_in_batch,
-                                            base_system_content=None,
-                                            source_text=batch_translations_text,
-                                            previous_summary_text=None,
-                                            previous_summary_chapter_num=None,
-                                            prefer_translations_only_user=True,
-                                        )
-                                        summary_file = os.path.join(out, 'rolling_summary.txt')
-                                        if os.path.exists(summary_file):
-                                            with open(summary_file, 'r', encoding='utf-8') as sf:
-                                                rolling_summary_for_next_batch = (sf.read() or "")
-                                        else:
-                                            rolling_summary_for_next_batch = ""
-                                finally:
-                                    config.ROLLING_SUMMARY_MODE = old_mode
-                                    config.ROLLING_SUMMARY_MAX_ENTRIES = old_max_entries
-                            else:
-                                rolling_summary_for_next_batch = ""
+                            _update_batch_rolling_summary(batch_items, chapters_in_batch)
                         except Exception as e:
                             print(f"⚠️ Batch rolling summary update failed: {e}")
                             rolling_summary_for_next_batch = ""
