@@ -13183,6 +13183,8 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 failed_mode=multipass_failed_mode,
             )
             if skip_reason:
+                if multipass_failed_mode and skip_reason == "completed":
+                    return "excluded", f"☑️ Chapter {actual_num}: not targeted by Failed multipass (status: completed)"
                 return "skipped", f"⏭️ Chapter {actual_num}: skipped refinement ({skip_reason})"
 
         # Ensure a base completed entry exists so the two post-process checks are visible.
@@ -13304,14 +13306,17 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         return "skipped", f"Skipped Chapter {actual_num}"
 
     processed = 0
+    excluded = 0
     skipped = 0
     failed = 0
 
     def _record_result(result):
-        nonlocal processed, skipped, failed
+        nonlocal processed, excluded, skipped, failed
         status, message = result
         if status == "processed":
             processed += 1
+        elif status == "excluded":
+            excluded += 1
         elif status == "failed":
             failed += 1
         else:
@@ -13387,7 +13392,10 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             except Exception:
                 pass
 
-    print(f"\n📊 {mode.title()} summary: {processed} processed, {skipped} skipped, {failed} failed")
+    if excluded:
+        print(f"\n📊 {mode.title()} summary: {processed} processed, {excluded} excluded, {skipped} skipped, {failed} failed")
+    else:
+        print(f"\n📊 {mode.title()} summary: {processed} processed, {skipped} skipped, {failed} failed")
     return True
 
 # =====================================================

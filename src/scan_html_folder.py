@@ -7240,7 +7240,7 @@ def process_html_file_batch(args):
                         issues.append("missing_html_tag")
                     elif issue == 'missing_header_tags':
                         # Check if this check is enabled AND if source file had headers
-                        check_missing_header = qa_settings.get('check_missing_header_tags', True)
+                        check_missing_header = qa_settings.get('check_missing_header_tags', False)
                         if check_missing_header:
                             # Only flag if the source file had header tags to begin with
                             source_had_headers = False
@@ -7758,7 +7758,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'auto_save_report': True,
             'check_missing_html_tag': True,
             'check_body_tag': False,
-            'check_missing_header_tags': True,
+            'check_missing_header_tags': False,
             'check_paragraph_structure': True,
             'check_invalid_nesting': False,
             'check_silent_truncation': False,
@@ -8115,7 +8115,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"   ✓ Glossary leakage check: {'ENABLED' if qa_settings.get('check_glossary_leakage', True) else 'DISABLED'}")
     log(f"   ✓ Missing images check: {'ENABLED' if qa_settings.get('check_missing_images', True) else 'DISABLED'}")
     log(f"   ✓ Missing HTML tag check: {'ENABLED' if qa_settings.get('check_missing_html_tag', False) else 'DISABLED'}")
-    log(f"   ✓ Missing header tags check: {'ENABLED' if qa_settings.get('check_missing_header_tags', True) else 'DISABLED'}")
+    log(f"   ✓ Missing header tags check: {'ENABLED' if qa_settings.get('check_missing_header_tags', False) else 'DISABLED'}")
     log(f"   ✓ Paragraph structure check: {'ENABLED' if qa_settings.get('check_paragraph_structure', True) else 'DISABLED'}")    
     log(f"   ✓ Invalid nesting check: {'ENABLED' if qa_settings.get('check_invalid_nesting', False) else 'DISABLED'}") 
     log(f"   ✓ Silent truncation check: {'ENABLED' if qa_settings.get('check_silent_truncation', False) else 'DISABLED'}")
