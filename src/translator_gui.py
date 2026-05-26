@@ -6122,12 +6122,12 @@ Recent translations to summarize:
         self.model_combo.setStyleSheet(f"""
             QComboBox {{
                 padding-left: 34px;
-                padding-right: 4px;
+                padding-right: 8px;
             }}
             QComboBox::drop-down {{
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 18px;
+                width: 30px;
                 border-left: 1px solid #4a5568;
             }}
             QComboBox::down-arrow {{
@@ -6430,12 +6430,12 @@ Recent translations to summarize:
         self.profile_menu.setStyleSheet(f"""
             QComboBox {{
                 padding-left: 34px;
-                padding-right: 4px;
+                padding-right: 8px;
             }}
             QComboBox::drop-down {{
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
-                width: 18px;
+                width: 30px;
                 border-left: 1px solid #4a5568;
             }}
             QComboBox::down-arrow {{
