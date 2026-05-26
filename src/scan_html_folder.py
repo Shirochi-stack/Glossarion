@@ -7775,9 +7775,16 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     check_multiple_headers = qa_settings.get('check_multiple_headers', True)
     # The invalid-tag-mismatch check reuses the same source metadata dict
     # that the word counter populates, so we need the extraction to run
-    # when either of those checks is enabled.
+    # when either of those checks is enabled. The missing-header check also
+    # needs source metadata so it only flags missing headers when the source
+    # chapter actually had h1-h6 tags.
     check_invalid_tag_mismatch_setting = qa_settings.get('check_invalid_tag_mismatch', False)
-    _need_source_word_counts = check_word_count or check_invalid_tag_mismatch_setting
+    check_missing_header_tags_setting = qa_settings.get('check_missing_header_tags', False)
+    _need_source_word_counts = (
+        check_word_count
+        or check_invalid_tag_mismatch_setting
+        or (check_missing_header_tags_setting and not text_file_mode)
+    )
     
     # Extract word counts, image info, and punctuation from original EPUB/text file if needed
     original_word_counts = {}

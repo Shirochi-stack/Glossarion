@@ -90,7 +90,7 @@ def default_qa_scan_settings():
         "report_format": "detailed",
         "auto_save_report": True,
         "check_missing_html_tag": True,
-        "check_missing_header_tags": False,
+        "check_missing_header_tags": True,
         "check_all_text_in_header": True,
         "check_invalid_tag_mismatch": False,
         "check_invalid_nesting": False,

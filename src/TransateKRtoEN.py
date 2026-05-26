@@ -566,7 +566,7 @@ class TranslationConfig:
         if self.SCAN_PHASE_MODE not in ("quick-scan", "aggressive", "ai-hunter", "custom"):
             self.SCAN_PHASE_MODE = "quick-scan"
         self.QA_SCANNER_SETTINGS = _load_qa_scanner_settings_from_env()
-        self.input_path = os.getenv("input_path", "default.epub")
+        self.input_path = os.getenv("input_path") or os.getenv("EPUB_PATH", "default.epub")
         self.PROFILE_NAME = os.getenv("PROFILE_NAME", "korean").lower()
         self.CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
         self.DELAY = float(os.getenv("SEND_INTERVAL_SECONDS", "1"))
@@ -15343,6 +15343,10 @@ def main(log_callback=None, stop_callback=None):
         parser.add_argument('epub', help='Input EPUB or text file')
         args = parser.parse_args()
         input_path = args.epub
+
+    config.input_path = input_path
+    if input_path:
+        os.environ["EPUB_PATH"] = input_path
     
     is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.md'))
     is_pdf_file = input_path.lower().endswith('.pdf')
@@ -21240,13 +21244,14 @@ def main(log_callback=None, stop_callback=None):
                 except Exception as save_exc:
                     print(f"⚠️ Failed to save progress before QA scan: {save_exc}")
                 from qa_scan_runtime import run_qa_scan_path
+                qa_source_path = os.getenv("EPUB_PATH", "").strip() or input_path or getattr(config, "input_path", "")
                 run_qa_scan_path(
                     out,
                     log=print,
                     stop_flag=check_stop,
                     mode=qa_scan_mode,
                     qa_settings=qa_settings,
-                    epub_path=getattr(config, "input_path", ""),
+                    epub_path=qa_source_path,
                     progress_path=progress_manager.PROGRESS_FILE,
                     config=config,
                 )

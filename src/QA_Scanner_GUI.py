@@ -3122,7 +3122,7 @@ class QAScannerMixin:
 
         # Missing header tags check
         check_missing_header_tags_checkbox = self._create_styled_checkbox("Flags HTML files missing header tags (h1-h6)")
-        check_missing_header_tags_checkbox.setChecked(qa_settings.get('check_missing_header_tags', False))
+        check_missing_header_tags_checkbox.setChecked(qa_settings.get('check_missing_header_tags', True))
         additional_layout.addWidget(check_missing_header_tags_checkbox)
         additional_layout.addSpacing(10)
 
@@ -4761,7 +4761,7 @@ class QAScannerMixin:
                 check_multiple_headers_checkbox.setChecked(True)
                 warn_mismatch_checkbox.setChecked(True)
                 check_missing_html_tag_checkbox.setChecked(True)
-                check_missing_header_tags_checkbox.setChecked(False)
+                check_missing_header_tags_checkbox.setChecked(True)
                 check_all_text_in_header_checkbox.setChecked(True)
                 check_invalid_tag_mismatch_checkbox.setChecked(False)
                 check_paragraph_structure_checkbox.setChecked(True)
