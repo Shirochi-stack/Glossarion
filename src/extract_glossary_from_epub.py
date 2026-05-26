@@ -1285,6 +1285,16 @@ def _glossary_chapter_log_label(chapter_num, total_chapters=None, context=None) 
         return f"[Chapter {chapter_num}/{total_chapters}]"
     return f"[Chapter {chapter_num}]"
 
+def _parse_glossary_chapter_range(value):
+    """Return (start, end), accepting either 'N' or 'N-M'."""
+    value = str(value or "").strip()
+    if re.match(r"^\d+$", value):
+        num = int(value)
+        return num, num
+    if re.match(r"^\d+\s*-\s*\d+$", value):
+        return tuple(map(int, re.split(r"\s*-\s*", value, 1)))
+    return None
+
 def _glossary_chapter_key(idx: int) -> str:
     """Build a stable zero-based progress key.
 
@@ -6053,14 +6063,15 @@ def main(log_callback=None, stop_callback=None):
     chapter_range = os.getenv("CHAPTER_RANGE", "").strip()
     range_start = None
     range_end = None
-    if chapter_range and re.match(r"^\d+\s*-\s*\d+$", chapter_range):
-        range_start, range_end = map(int, chapter_range.split("-", 1))
+    parsed_chapter_range = _parse_glossary_chapter_range(chapter_range)
+    if parsed_chapter_range:
+        range_start, range_end = parsed_chapter_range
         if use_spine_order:
             print(f"📊 Chapter Range Filter (SPINE ORDER): positions {range_start} to {range_end}")
         else:
             print(f"📊 Chapter Range Filter: {range_start} to {range_end}")
     elif chapter_range:
-        print(f"⚠️ Invalid chapter range format: {chapter_range} (use format: 5-10)")
+        print(f"⚠️ Invalid chapter range format: {chapter_range} (use format: 5 or 5-10)")
 
     # Log settings
     format_parts = ["type", "raw_name", "translated_name", "gender"]
