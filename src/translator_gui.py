@@ -391,7 +391,7 @@ except Exception as e:
     print(f"⚠️ DPI setup failed: {e}")
 try:
     from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
-                                    QTextEdit, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
+                                    QTextEdit, QVBoxLayout, QHBoxLayout, QBoxLayout, QGridLayout, QFrame,
                                     QMenuBar, QMenu, QMessageBox, QFileDialog, QDialog,
                                     QScrollArea, QTabWidget, QCheckBox, QComboBox, QSpinBox,
                                     QSizePolicy, QSplitter, QProgressBar, QStyle, QToolButton, QGraphicsOpacityEffect)
@@ -1772,6 +1772,9 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.use_truncation_retry_keys_var = self.config.get('use_truncation_retry_keys', False)
         self.use_inpainter_keys_var = self.config.get('use_inpainter_keys', False)
         self.multipass_mode_var = self.config.get('multipass_mode', False)
+        self.multipass_refinement_mode_var = str(self.config.get('multipass_refinement_mode', 'full') or 'full').strip().lower()
+        if self.multipass_refinement_mode_var not in ('full', 'failed'):
+            self.multipass_refinement_mode_var = 'full'
 
         # Initialize fuzzy threshold variable
         if not hasattr(self, 'fuzzy_threshold_var'):
@@ -4230,6 +4233,66 @@ Recent translations to summarize:
         else:
             self.refinement_prompt_button.setStyleSheet("background-color: #6c757d; color: white; font-weight: bold;")
             self.refinement_prompt_button.setToolTip("Edit the prompts used by refinement output mode and multipass refinement")
+
+    def _update_multipass_refinement_layout(self):
+        """Stack the refine prompt button above the mode combo when the row is tight."""
+        controls_layout = getattr(self, 'multipass_refinement_controls_layout', None)
+        controls_widget = getattr(self, 'multipass_refinement_controls', None)
+        combo = getattr(self, 'multipass_refinement_mode_combo', None)
+        button = getattr(self, 'refinement_prompt_button', None)
+        row = getattr(self, 'batch_right_container', None)
+        batch_size = getattr(self, 'batch_size_entry', None)
+        checkbox = getattr(self, 'multipass_checkbox', None)
+        if not all((controls_layout, controls_widget, combo, button, row, batch_size, checkbox)):
+            return
+
+        try:
+            spacing = 6
+            row_margins = row.layout().contentsMargins() if row.layout() else None
+            margin_width = (row_margins.left() + row_margins.right()) if row_margins else 0
+            batch_size_max = batch_size.maximumWidth()
+            batch_size_width = batch_size.sizeHint().width()
+            if batch_size_max and batch_size_max < 16777215:
+                batch_size_width = min(batch_size_width, batch_size_max)
+            combo_width = combo.minimumWidth() or combo.sizeHint().width()
+            desired_width = (
+                margin_width
+                + batch_size_width
+                + checkbox.sizeHint().width()
+                + combo_width
+                + max(button.minimumWidth(), button.sizeHint().width(), button.minimumSizeHint().width())
+                + (spacing * 3)
+            )
+            available_width = row.width()
+            currently_compact = bool(getattr(self, '_multipass_refinement_compact', False))
+            compact = available_width > 0 and (
+                available_width < desired_width if not currently_compact else available_width < desired_width + 28
+            )
+            if compact == currently_compact:
+                return
+
+            while controls_layout.count():
+                item = controls_layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.setParent(controls_widget)
+
+            if compact:
+                controls_layout.setDirection(QBoxLayout.TopToBottom)
+                controls_layout.setSpacing(2)
+                controls_layout.addWidget(button)
+                controls_layout.addWidget(combo)
+            else:
+                controls_layout.setDirection(QBoxLayout.LeftToRight)
+                controls_layout.setSpacing(spacing)
+                controls_layout.addWidget(combo)
+                controls_layout.addWidget(button)
+
+            self._multipass_refinement_compact = compact
+            controls_widget.updateGeometry()
+            row.updateGeometry()
+        except Exception:
+            pass
 
     def show_refinement_prompt_dialog(self):
         """Open dialog to edit prompts used by refinement output mode and multipass."""
@@ -8301,7 +8364,9 @@ Recent translations to summarize:
         self.multipass_checkbox = self._create_styled_checkbox("Multipass mode")
         self.multipass_checkbox.setToolTip(
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
-            "After the normal translation finishes, run a second pass using refinement output mode."
+            "After the normal translation finishes, run a second pass using refinement output mode.<br><br>"
+            "<b>Full</b>: refine translated output using the current multipass behavior.<br>"
+            "<b>Failed</b>: run a QA quick scan first, then refine chapters still marked QA failed unless they have protected issues."
             "</p></qt>"
         )
         self.multipass_checkbox.setChecked(bool(self.multipass_mode_var))
@@ -8313,11 +8378,67 @@ Recent translations to summarize:
         )
         batch_right_layout.addWidget(self.multipass_checkbox)
 
+        self.multipass_refinement_controls = QWidget()
+        self.multipass_refinement_controls_layout = QBoxLayout(
+            QBoxLayout.LeftToRight,
+            self.multipass_refinement_controls,
+        )
+        self.multipass_refinement_controls_layout.setContentsMargins(0, 0, 0, 0)
+        self.multipass_refinement_controls_layout.setSpacing(6)
+
+        self.multipass_refinement_mode_combo = QComboBox()
+        self.multipass_refinement_mode_combo.addItem("Full", "full")
+        self.multipass_refinement_mode_combo.addItem("Failed", "failed")
+        _multipass_mode_index = 1 if self.multipass_refinement_mode_var == "failed" else 0
+        self.multipass_refinement_mode_combo.setCurrentIndex(_multipass_mode_index)
+        self.multipass_refinement_mode_combo.setToolTip(self.multipass_checkbox.toolTip())
+        self.multipass_refinement_mode_combo.setFixedWidth(55)
+        self.multipass_refinement_mode_combo.setStyleSheet(f"""
+            QComboBox {{
+                padding-right: 0px;
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 0px;
+                border: none;
+            }}
+            QComboBox::down-arrow {{
+                image: none;
+                width: 0px;
+                height: 0px;
+                border: none;
+            }}
+            QComboBox::down-arrow:disabled {{
+                image: none;
+                width: 0px;
+                height: 0px;
+                border: none;
+            }}
+            QComboBox::down-arrow:on {{
+                top: 0px;
+            }}
+        """)
+        self.multipass_refinement_mode_combo.currentIndexChanged.connect(
+            lambda _idx: (
+                setattr(self, 'multipass_refinement_mode_var', self.multipass_refinement_mode_combo.currentData() or 'full'),
+                self.config.__setitem__('multipass_refinement_mode', self.multipass_refinement_mode_combo.currentData() or 'full')
+            )
+        )
+        self.multipass_refinement_controls_layout.addWidget(self.multipass_refinement_mode_combo)
+
         self.refinement_prompt_button = QPushButton("Refine Prompt")
         self.refinement_prompt_button.setMinimumWidth(90)
         self.refinement_prompt_button.clicked.connect(self.show_refinement_prompt_dialog)
         self._update_refinement_prompt_button_style()
-        batch_right_layout.addWidget(self.refinement_prompt_button)
+        self.multipass_refinement_controls_layout.addWidget(self.refinement_prompt_button)
+        batch_right_layout.addWidget(self.multipass_refinement_controls)
+
+        original_batch_right_resize = batch_right_container.resizeEvent
+        def _batch_right_resize_with_multipass_layout(event):
+            original_batch_right_resize(event)
+            QTimer.singleShot(0, self._update_multipass_refinement_layout)
+        batch_right_container.resizeEvent = _batch_right_resize_with_multipass_layout
 
         auto_glossary_row_container = QWidget()
         auto_glossary_row_layout = QHBoxLayout(auto_glossary_row_container)
@@ -9159,6 +9280,7 @@ Recent translations to summarize:
         self.frame.addWidget(auto_glossary_row_container, 5, 2, 1, 2, Qt.AlignLeft)
         self.frame.addWidget(batch_right_container, 7, 3, Qt.AlignLeft)
         self.frame.addWidget(self._gloss_status_row, 5, 4, Qt.AlignRight)
+        QTimer.singleShot(0, self._update_multipass_refinement_layout)
 
         # ── 📚 Library button (above Other Settings, below glossary status) ──
         self.library_btn = QPushButton("📚  Library")
@@ -16594,6 +16716,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'BATCH_TRANSLATION': "1" if self.batch_translation_var else "0",
             'BATCH_SIZE': str(self.batch_size_var),
             'MULTIPASS_MODE': "1" if getattr(self, 'multipass_mode_var', self.config.get('multipass_mode', False)) else "0",
+            'MULTIPASS_REFINEMENT_MODE': str(getattr(self, 'multipass_refinement_mode_var', self.config.get('multipass_refinement_mode', 'full')) or 'full').strip().lower(),
             'BATCHING_MODE': self._translation_batching_mode_for_env(),
             'BATCH_GROUP_SIZE': str(getattr(self, 'batch_group_size_var', '3')),
             # Backward compatibility for older scripts expecting CONSERVATIVE_BATCHING
@@ -24711,6 +24834,7 @@ Important rules:
                 ('batch_translation', ['batch_checkbox', 'batch_translation_var'], True, bool),
                 ('batch_size', ['batch_size_entry', 'batch_size_var'], 5, lambda v: safe_int(v, 5)),
                 ('multipass_mode', ['multipass_checkbox', 'multipass_mode_var'], False, bool),
+                ('multipass_refinement_mode', ['multipass_refinement_mode_combo', 'multipass_refinement_mode_var'], 'full', lambda v: 'failed' if str(v).strip().lower() == 'failed' else 'full'),
                 ('vision_ocr_batch_size', ['vision_ocr_batch_size_var'], 10, lambda v: safe_int(v, 10)),
                 ('batching_mode', ['batch_mode_var'], 'aggressive', str),
                 ('batch_group_size', ['batch_group_size_var'], 3, lambda v: safe_int(v, 3)),
@@ -25839,6 +25963,7 @@ Important rules:
                 ('BATCH_GROUP_SIZE', str(getattr(self, 'batch_group_size_var', '3'))),
                 ('CONSERVATIVE_BATCHING', '1' if self._translation_batching_mode_for_env() == 'conservative' else '0'),
                 ('MULTIPASS_MODE', '1' if getattr(self, 'multipass_mode_var', self.config.get('multipass_mode', False)) else '0'),
+                ('MULTIPASS_REFINEMENT_MODE', str(getattr(self, 'multipass_refinement_mode_var', self.config.get('multipass_refinement_mode', 'full')) or 'full').strip().lower()),
                 ('REFINEMENT_SYSTEM_PROMPT', self.config.get('refinement_system_prompt') or getattr(self, 'refinement_system_prompt', getattr(self, 'default_refinement_system_prompt', ''))),
                 ('REFINEMENT_USER_PROMPT', self.config.get('refinement_user_prompt', getattr(self, 'refinement_user_prompt', ''))),
                 # Normalize to uppercase so validation in unified_api_client accepts 1K/2K/4K

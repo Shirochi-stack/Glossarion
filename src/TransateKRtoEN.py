@@ -500,6 +500,9 @@ class TranslationConfig:
         if self.OUTPUT_MODE not in ("text", "vision", "image", "video", "audio", "refinement"):
             self.OUTPUT_MODE = "text"
         self.MULTIPASS_MODE = os.getenv("MULTIPASS_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
+        self.MULTIPASS_REFINEMENT_MODE = os.getenv("MULTIPASS_REFINEMENT_MODE", "full").strip().lower()
+        if self.MULTIPASS_REFINEMENT_MODE not in ("full", "failed"):
+            self.MULTIPASS_REFINEMENT_MODE = "full"
         self.input_path = os.getenv("input_path", "default.epub")
         self.PROFILE_NAME = os.getenv("PROFILE_NAME", "korean").lower()
         self.CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
@@ -12745,7 +12748,7 @@ def _resolve_postprocess_output_dir(input_path: str, file_base: str, current_out
         print(f"⚠️ Post-processing could not find translated root HTML in candidate output folders. Checked: {checked}")
     return best_dir
 
-def _process_refinement_or_tts_mode(config, client, chapters, out, progress_manager, check_stop):
+def _process_refinement_or_tts_mode(config, client, chapters, out, progress_manager, check_stop, *, multipass_failed_mode=False):
     mode = config.OUTPUT_MODE
     progress_manager.prog["output_mode"] = mode
     progress_manager.save()
@@ -12798,7 +12801,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             return f"{text.strip()}\n\nHTML to refine:\n{html_content}"
         return html_content
 
-    def _refinement_skip_reason_for_qa(entry, html_content=None):
+    def _refinement_skip_reason_for_qa(entry, html_content=None, *, failed_mode=False):
         if html_content is not None and not str(html_content or "").strip():
             return "empty output"
         if not isinstance(entry, dict):
@@ -12831,6 +12834,8 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             _collect(entry.get(key))
 
         status = str(entry.get("status", "") or "").lower()
+        if failed_mode and status == "completed":
+            return "completed"
         if status == "qa_failed":
             _collect(status)
 
@@ -12922,7 +12927,11 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             pre_existing_entry = dict(pre_existing_entry) if pre_existing_entry else {}
 
         if mode == "refinement":
-            skip_reason = _refinement_skip_reason_for_qa(pre_existing_entry, html_content)
+            skip_reason = _refinement_skip_reason_for_qa(
+                pre_existing_entry,
+                html_content,
+                failed_mode=multipass_failed_mode,
+            )
             if skip_reason:
                 return "skipped", f"⏭️ Chapter {actual_num}: skipped refinement ({skip_reason})"
 
@@ -20861,7 +20870,28 @@ def main(log_callback=None, stop_callback=None):
         print("\n" + "=" * 50)
         print("✨ MULTIPASS REFINEMENT")
         print("=" * 50)
+        multipass_refinement_mode = str(getattr(config, "MULTIPASS_REFINEMENT_MODE", "full") or "full").strip().lower()
+        if multipass_refinement_mode not in ("full", "failed"):
+            multipass_refinement_mode = "full"
         print("Running a refinement pass over translated HTML output.")
+        if multipass_refinement_mode == "failed":
+            print("Failed multipass mode: running QA quick scan before refinement.")
+            try:
+                from scan_html_folder import scan_html_folder as _scan_html_folder
+                _scan_html_folder(
+                    out,
+                    log=print,
+                    stop_flag=check_stop,
+                    mode="quick-scan",
+                    epub_path=getattr(config, "input_path", ""),
+                )
+                try:
+                    progress_manager.prog = progress_manager._init_or_load()
+                    print("Reloaded translation progress after QA quick scan.")
+                except Exception as reload_exc:
+                    print(f"⚠️ Failed to reload progress after QA quick scan: {reload_exc}")
+            except Exception as scan_exc:
+                print(f"⚠️ QA quick scan before failed multipass failed: {scan_exc}")
         original_output_mode = config.OUTPUT_MODE
         try:
             config.OUTPUT_MODE = "refinement"
@@ -20876,7 +20906,15 @@ def main(log_callback=None, stop_callback=None):
                 multipass_chapters.append(_chapter)
             if skipped_special_refinement:
                 print(f"⏭️ Skipping {skipped_special_refinement} copied-as-is special file(s) during multipass refinement")
-            _process_refinement_or_tts_mode(config, client, multipass_chapters, out, progress_manager, check_stop)
+            _process_refinement_or_tts_mode(
+                config,
+                client,
+                multipass_chapters,
+                out,
+                progress_manager,
+                check_stop,
+                multipass_failed_mode=multipass_refinement_mode == "failed",
+            )
         finally:
             config.OUTPUT_MODE = original_output_mode
             try:
