@@ -3842,6 +3842,8 @@ class ContentProcessor:
             
             soup_copy = BeautifulSoup(str(soup), 'html.parser')
             
+            for tag in soup_copy.find_all(['head', 'title', 'script', 'style', 'meta', 'link']):
+                tag.decompose()
             for img in soup_copy.find_all('img'):
                 img.decompose()
             for tag in soup_copy.find_all(['image', 'object', 'video', 'svg']):
@@ -3878,6 +3880,10 @@ class ContentProcessor:
                 return True
             
             if len(header_text.strip()) > 100:
+                return True
+
+            all_visible_text = _clean_visible_text(soup_copy.get_text(separator=' ', strip=True))
+            if len(re.sub(r'\s+', '', all_visible_text)) > 50:
                 return True
                 
             return False

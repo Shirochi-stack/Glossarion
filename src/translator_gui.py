@@ -8133,8 +8133,8 @@ Recent translations to summarize:
         self.use_spine_order_checkbox.setToolTip(
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
             "When enabled, the chapter range uses the exact EPUB spine (reading order) "
-            "position instead of chapter numbers extracted from filenames. "
-            "Spine position 1 = first item in the EPUB's reading order.</p></qt>"
+            "instead of chapter numbers extracted from filenames. "
+            "Skipped special files do not count unless Translate Special Files is enabled.</p></qt>"
         )
         self.use_spine_order_checkbox.stateChanged.connect(self._on_spine_order_toggle)
         self.use_spine_order_checkbox.setChecked(self.config.get('use_spine_order', False))
@@ -8401,8 +8401,8 @@ Recent translations to summarize:
         self.multipass_checkbox.setToolTip(
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
             "After the normal translation finishes, run a second pass using refinement output mode.<br><br>"
-            "<b>Full</b>: refine translated output using the current multipass behavior.<br>"
-            "<b>Failed</b>: run a QA quick scan first, then refine chapters still marked QA failed unless they have protected issues."
+            "<b>Full</b>: refine translated output using all currently translated chapters.<br>"
+            "<b>Failed</b>: run a QA quick scan first, then only refine chapters still marked as QA failed."
             "</p></qt>"
         )
         self.multipass_checkbox.setChecked(bool(self.multipass_mode_var))
@@ -8428,7 +8428,7 @@ Recent translations to summarize:
         _multipass_mode_index = 1 if self.multipass_refinement_mode_var == "failed" else 0
         self.multipass_refinement_mode_combo.setCurrentIndex(_multipass_mode_index)
         self.multipass_refinement_mode_combo.setToolTip(self.multipass_checkbox.toolTip())
-        self.multipass_refinement_mode_combo.setFixedWidth(55)
+        self.multipass_refinement_mode_combo.setFixedWidth(50)
         self.multipass_refinement_mode_combo.setStyleSheet(f"""
             QComboBox {{
                 padding-right: 0px;
@@ -13345,6 +13345,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 return False
         return True
 
+    def _should_skip_spine_range_file(self, filename, translate_special=False):
+        """Match the translator's spine-range counter for preview numbering."""
+        if translate_special:
+            return False
+        return self._is_special_file(filename)
+
     def _get_spine_filenames_for_preview(self, epub_path, start, end, spine_mode, translate_special=False):
         """
         Read the EPUB spine and return list of (position_label, filename, is_special_skipped) tuples
@@ -13413,8 +13419,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # when translate_special is off
                     translatable_pos = 0
                     for i, fname in enumerate(spine_items):
-                        is_special = self._is_special_file(fname)
-                        skip_this = self._should_skip_special_file(fname, translate_special)
+                        skip_this = self._should_skip_spine_range_file(fname, translate_special)
 
                         if not skip_this:
                             translatable_pos += 1
