@@ -31,8 +31,8 @@ DEFAULT_ORG_ID = "qc69jvmznzxy"
 DEFAULT_HCAPTCHA_SITEKEY = "0c6a1e45-75d7-43cc-b836-a0c9d886b8ee"
 DEFAULT_PUBLISHER = "z-ai"
 DEFAULT_TIMEOUT = 180
-DEFAULT_TOKEN_CONCURRENCY_LIMIT = 4
-DEFAULT_TOKEN_SUBPROCESS_CONCURRENCY_LIMIT = 8
+DEFAULT_TOKEN_CONCURRENCY_LIMIT = 2
+DEFAULT_TOKEN_SUBPROCESS_CONCURRENCY_LIMIT = 4
 TOKEN_CONCURRENCY_ENV = "AUTHND_TOKEN_CONCURRENCY"
 TOKEN_SUBPROCESS_CONCURRENCY_ENV = "AUTHND_TOKEN_SUBPROCESS_CONCURRENCY"
 USER_AGENT = (
@@ -844,7 +844,16 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
             return holder.get("value")
 
         load_loop = QEventLoop()
-        load_state: Dict[str, Any] = {"ok": False, "error": ""}
+        load_state: Dict[str, Any] = {"ok": False, "error": "", "last_event": ""}
+
+        def _qt_value_text(value: Any) -> str:
+            try:
+                name = getattr(value, "name", "")
+                if name:
+                    return str(name)
+            except Exception:
+                pass
+            return str(value)
 
         def _loaded(ok: bool) -> None:
             load_state["ok"] = bool(ok)
@@ -852,11 +861,31 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
 
         def _loading_changed(info: Any) -> None:
             try:
-                status = str(info.status()).lower()
-                if "loadfailed" in status or "failed" in status:
-                    err = getattr(info, "errorString", lambda: "")()
-                    code = getattr(info, "errorCode", lambda: "")()
-                    load_state["error"] = f"{err} ({code})".strip()
+                status_text = _qt_value_text(info.status())
+                status_lower = status_text.lower()
+                err = str(getattr(info, "errorString", lambda: "")() or "").strip()
+                code = getattr(info, "errorCode", lambda: "")()
+                domain = _qt_value_text(getattr(info, "errorDomain", lambda: "")())
+                info_url_obj = getattr(info, "url", lambda: None)()
+                info_url = ""
+                if info_url_obj is not None:
+                    info_url = info_url_obj.toString() if hasattr(info_url_obj, "toString") else str(info_url_obj)
+                page_current_url = page.url().toString()
+                detail_parts = [
+                    f"status={status_text}",
+                    f"error_domain={domain}",
+                    f"error_code={code}",
+                ]
+                if err:
+                    detail_parts.append(f"error={err}")
+                if info_url:
+                    detail_parts.append(f"url={info_url}")
+                if page_current_url:
+                    detail_parts.append(f"current_url={page_current_url}")
+                detail = ", ".join(detail_parts)
+                load_state["last_event"] = detail
+                if "loadfailed" in status_lower or "failed" in status_lower or "stopped" in status_lower:
+                    load_state["error"] = detail
             except Exception:
                 pass
 
@@ -869,7 +898,7 @@ def _mint_captcha_token_qt(page_url: str, timeout: int) -> str:
         QTimer.singleShot(min(max(timeout * 1000, 15000), 60000), load_loop.quit)
         load_loop.exec()
         if not load_state.get("ok"):
-            detail = str(load_state.get("error") or "").strip()
+            detail = str(load_state.get("error") or load_state.get("last_event") or "").strip()
             if detail:
                 raise RuntimeError(f"AuthND browser failed to load {page_url}: {detail}")
             raise RuntimeError(f"AuthND browser failed to load {page_url}")

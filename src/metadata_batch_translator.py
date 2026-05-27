@@ -30,7 +30,7 @@ from typing import Dict, List, Tuple, Optional, Any
 import zipfile
 from bs4 import BeautifulSoup
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 
 class MetadataBatchTranslatorUI:
@@ -2745,6 +2745,10 @@ class BatchHeaderTranslator:
             print(f"⏭️ {len(skipped_files)} file(s) already up-to-date (skipped write)")
         print(f"\n📝 Updated {updated_count} HTML files, added headers to {added_count} files")
 
+class MetadataTranslationCancelled(Exception):
+    """Raised when metadata translation stops because the user cancelled the run."""
+
+
 class MetadataTranslator:
     """Translate EPUB metadata fields"""
     
@@ -2762,9 +2766,71 @@ class MetadataTranslator:
                 self.stop_check_fn = is_stop_requested
             except ImportError:
                 self.stop_check_fn = lambda: False
+
+    def _stop_check_active(self) -> bool:
+        try:
+            return bool(self.stop_check_fn and self.stop_check_fn())
+        except Exception:
+            return False
+
+    def _is_force_stop_requested(self) -> bool:
+        if os.environ.get('TRANSLATION_CANCELLED') == '1':
+            return True
+        try:
+            if hasattr(self.client, 'is_globally_cancelled') and self.client.is_globally_cancelled():
+                return True
+        except Exception:
+            pass
+        if os.environ.get('GRACEFUL_STOP') == '1':
+            return False
+        return self._stop_check_active()
+
+    def _is_any_stop_requested(self) -> bool:
+        return (
+            self._is_force_stop_requested()
+            or os.environ.get('GRACEFUL_STOP') == '1'
+            or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+            or self._stop_check_active()
+        )
+
+    @staticmethod
+    def _is_cancelled_error(exc: Exception) -> bool:
+        error_type = getattr(exc, 'error_type', '')
+        if isinstance(exc, MetadataTranslationCancelled) or error_type == 'cancelled':
+            return True
+        message = str(exc).lower()
+        return (
+            'stopped by user' in message
+            or 'cancelled by user' in message
+            or 'canceled by user' in message
+            or 'operation cancelled' in message
+            or 'operation canceled' in message
+        )
+
+    def _raise_if_stop_requested(self) -> None:
+        if self._is_any_stop_requested():
+            raise MetadataTranslationCancelled("Metadata translation stopped by user")
+
+    def _cancel_active_metadata_calls(self) -> None:
+        if not self._is_force_stop_requested():
+            return
+        try:
+            if hasattr(self.client, 'cancel_current_operation'):
+                self.client.cancel_current_operation()
+        except Exception:
+            pass
+        try:
+            import unified_api_client
+            if hasattr(unified_api_client, 'set_stop_flag'):
+                unified_api_client.set_stop_flag(True)
+            if hasattr(unified_api_client, 'hard_cancel_all'):
+                unified_api_client.hard_cancel_all()
+        except Exception:
+            pass
     
     def _send_with_retry(self, messages, temperature, max_tokens, context=None):
         """Send API request through send_with_interrupt for retry/timeout/interrupt support."""
+        self._raise_if_stop_requested()
         try:
             from TransateKRtoEN import send_with_interrupt, _skip_thinking_env
             with _skip_thinking_env('METADATA'):
@@ -2784,6 +2850,8 @@ class MetadataTranslator:
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
+
+        self._raise_if_stop_requested()
         
         # Extract content from response - handle both object and tuple formats
         response_content = None
@@ -2917,10 +2985,9 @@ class MetadataTranslator:
                 return {}
             
         except Exception as e:
-            error_type = getattr(e, 'error_type', '')
-            if error_type == 'cancelled' or 'stopped by user' in str(e).lower():
+            if self._is_cancelled_error(e):
                 print(f"⏭️ Metadata translation cancelled by user")
-                return {}
+                raise
             print(f"❌ Error translating metadata: {repr(e)}")
             import traceback; traceback.print_exc()
             return {}
@@ -2938,26 +3005,65 @@ class MetadataTranslator:
             return {}
             
         translated = {}
-        
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {}
-            
-            for field, value in fields_to_process:
+        max_workers = min(5, len(fields_to_process))
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        futures = {}
+        next_field_index = 0
+        force_cancelled = False
+
+        def submit_available_work() -> None:
+            nonlocal next_field_index
+            while (
+                next_field_index < len(fields_to_process)
+                and len(futures) < max_workers
+                and not self._is_any_stop_requested()
+            ):
+                field, value = fields_to_process[next_field_index]
+                next_field_index += 1
                 future = executor.submit(self._translate_single_field, field, value)
                 futures[future] = field
-                
-            for future in futures:
-                field = futures[future]
-                try:
-                    result = future.result()
-                    if result:
-                        translated[field] = result
-                        print(f"✓ Translated {field}: {metadata.get(field)} → {result}")
-                except Exception as e:
-                    print(f"❌ Error translating {field}: {repr(e)}")
-                    import traceback; traceback.print_exc()
-                    
-        return translated
+
+        try:
+            submit_available_work()
+
+            while futures:
+                if self._is_force_stop_requested():
+                    force_cancelled = True
+                    self._cancel_active_metadata_calls()
+                    for pending_future in futures:
+                        pending_future.cancel()
+                    raise MetadataTranslationCancelled("Metadata translation stopped by user")
+
+                done, _ = wait(futures.keys(), timeout=0.5, return_when=FIRST_COMPLETED)
+                if not done:
+                    continue
+
+                for future in done:
+                    field = futures.pop(future)
+                    try:
+                        result = future.result()
+                        if result:
+                            translated[field] = result
+                            print(f"✓ Translated {field}: {metadata.get(field)} → {result}")
+                    except Exception as e:
+                        if self._is_cancelled_error(e):
+                            force_cancelled = self._is_force_stop_requested()
+                            if force_cancelled:
+                                self._cancel_active_metadata_calls()
+                            for pending_future in futures:
+                                pending_future.cancel()
+                            raise
+                        print(f"❌ Error translating {field}: {repr(e)}")
+                        import traceback; traceback.print_exc()
+
+                submit_available_work()
+
+            if self._is_any_stop_requested():
+                raise MetadataTranslationCancelled("Metadata translation stopped by user")
+
+            return translated
+        finally:
+            executor.shutdown(wait=not force_cancelled, cancel_futures=True)
     
     def _translate_single_field(self, field_name: str, field_value: str) -> Optional[str]:
         """Translate a single field using configured prompts"""
@@ -3037,10 +3143,9 @@ class MetadataTranslator:
             
         except Exception as e:
             # Gracefully handle user-initiated cancellation without traceback
-            error_type = getattr(e, 'error_type', '')
-            if error_type == 'cancelled' or 'stopped by user' in str(e).lower():
+            if self._is_cancelled_error(e):
                 print(f"⏭️ Metadata translation of '{field_name}' cancelled by user")
-                return None
+                raise
             print(f"❌ Error translating {field_name}: {repr(e)}")
             import traceback; traceback.print_exc()
             return None

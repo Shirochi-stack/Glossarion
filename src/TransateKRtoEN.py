@@ -16634,8 +16634,23 @@ def main(log_callback=None, stop_callback=None):
     translate_metadata_fields_str = os.getenv('TRANSLATE_METADATA_FIELDS', '{}')
     metadata_translation_mode = os.getenv('METADATA_TRANSLATION_MODE', 'together')
 
+    def _metadata_phase_stop_requested() -> bool:
+        if (
+            os.environ.get('TRANSLATION_CANCELLED') == '1'
+            or os.environ.get('GRACEFUL_STOP') == '1'
+            or os.environ.get('GRACEFUL_STOP_COMPLETED') == '1'
+        ):
+            return True
+        try:
+            return bool(check_stop())
+        except Exception:
+            return False
+
     try:
         translate_metadata_fields = json.loads(translate_metadata_fields_str)
+        if _metadata_phase_stop_requested():
+            print("⏹️ Translation stopped during metadata phase")
+            return
         
         if not _skip_metadata_translation and translate_metadata_fields and any(translate_metadata_fields.values()):
             # Filter out fields that should be translated (excluding already translated fields)
@@ -16658,7 +16673,7 @@ def main(log_callback=None, stop_callback=None):
                 print(f"🌐 Translating {len(fields_to_translate)} metadata fields...")
                 
                 # Use MetadataTranslator (same path as EPUB converter)
-                from metadata_batch_translator import MetadataTranslator
+                from metadata_batch_translator import MetadataTranslationCancelled, MetadataTranslator
                 
                 # Build config from environment variables
                 mt_config = {
@@ -16681,9 +16696,17 @@ def main(log_callback=None, stop_callback=None):
                 print(f"📝 Using {metadata_mode} metadata translation mode...")
                 
                 translator = MetadataTranslator(client, mt_config, stop_check_fn=check_stop)
-                translated_metadata = translator.translate_metadata(
-                    metadata, fields_to_translate, mode=metadata_mode
-                )
+                try:
+                    translated_metadata = translator.translate_metadata(
+                        metadata, fields_to_translate, mode=metadata_mode
+                    )
+                except MetadataTranslationCancelled:
+                    print("⏹️ Translation stopped during metadata phase")
+                    return
+
+                if _metadata_phase_stop_requested():
+                    print("⏹️ Translation stopped during metadata phase")
+                    return
                 
                 # Apply translated fields back to metadata
                 for field_name, translated_value in translated_metadata.items():
@@ -16698,6 +16721,10 @@ def main(log_callback=None, stop_callback=None):
         print(f"⚠️ Error processing metadata translation settings: {e}")
         import traceback
         traceback.print_exc()
+
+    if _metadata_phase_stop_requested():
+        print("⏹️ Translation stopped during metadata phase")
+        return
     
     # Skip metadata.json for plain text files — it serves no purpose there
     if not is_text_file:
