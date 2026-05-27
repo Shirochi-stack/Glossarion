@@ -2949,7 +2949,7 @@ class MetadataTranslator:
             for future in futures:
                 field = futures[future]
                 try:
-                    result = future.result(timeout=30)
+                    result = future.result()
                     if result:
                         translated[field] = result
                         print(f"✓ Translated {field}: {metadata.get(field)} → {result}")
