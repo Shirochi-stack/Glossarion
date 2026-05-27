@@ -549,6 +549,77 @@ def _load_qa_scanner_settings_from_env():
         return settings
 
 
+class _BufferedQAScanLog:
+    """Batch worker-side QA scan logs so the GUI is not flooded line-by-line."""
+
+    def __init__(self, flush_interval=0.2, max_lines_per_flush=25):
+        self._messages = queue.Queue()
+        self._flush_interval = max(0.05, float(flush_interval))
+        self._max_lines_per_flush = max(1, int(max_lines_per_flush))
+        self._last_flush = time.monotonic()
+
+    def __call__(self, message):
+        text = str(message or "").strip("\r\n")
+        if text:
+            self._messages.put(text)
+
+    def flush(self, force=False):
+        now = time.monotonic()
+        if not force and (now - self._last_flush) < self._flush_interval:
+            return False
+
+        lines = []
+        limit = self._max_lines_per_flush
+        while len(lines) < limit:
+            try:
+                lines.append(self._messages.get_nowait())
+            except queue.Empty:
+                break
+
+        if lines:
+            print("\n".join(lines))
+        self._last_flush = now
+        return bool(lines)
+
+
+def _run_multipass_refinement_qa_scan(
+    folder_path,
+    *,
+    stop_flag,
+    mode,
+    qa_settings,
+    epub_path,
+    progress_path,
+    config,
+):
+    from qa_scan_runtime import run_qa_scan_path
+
+    qa_log = _BufferedQAScanLog()
+
+    def _scan():
+        return run_qa_scan_path(
+            folder_path,
+            log=qa_log,
+            stop_flag=stop_flag,
+            mode=mode,
+            qa_settings=qa_settings,
+            epub_path=epub_path,
+            selected_files=None,
+            text_file_mode=None,
+            progress_path=progress_path,
+            config=config,
+        )
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="MultipassQAScan") as executor:
+        future = executor.submit(_scan)
+        while not future.done():
+            qa_log.flush()
+            time.sleep(0.05)
+        while qa_log.flush(force=True):
+            time.sleep(0.01)
+        return future.result()
+
+
 class TranslationConfig:
     """Centralized configuration management"""
     def __init__(self):
@@ -22138,11 +22209,9 @@ def main(log_callback=None, stop_callback=None):
                     print(f"Saved current translation progress before {mode_label}-mode QA scan: {progress_manager.PROGRESS_FILE}")
                 except Exception as save_exc:
                     print(f"⚠️ Failed to save progress before QA scan: {save_exc}")
-                from qa_scan_runtime import run_qa_scan_path
                 qa_source_path = os.getenv("EPUB_PATH", "").strip() or input_path or getattr(config, "input_path", "")
-                run_qa_scan_path(
+                _run_multipass_refinement_qa_scan(
                     out,
-                    log=print,
                     stop_flag=check_stop,
                     mode=qa_scan_mode,
                     qa_settings=qa_settings,
