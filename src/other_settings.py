@@ -3468,6 +3468,7 @@ def _create_response_handling_section(self, parent):
         control_h.addWidget(label)
 
         spin = QDoubleSpinBox()
+        spin.setObjectName(spin_attr)
         spin.setRange(1, maximum)
         spin.setSingleStep(1)
         spin.setDecimals(0)
@@ -3487,6 +3488,7 @@ def _create_response_handling_section(self, parent):
         def _set_authnd_spin_text_color(color_hex):
             try:
                 color = QColor(color_hex)
+                disabled_color = QColor("#777777")
                 for widget in (spin, spin.lineEdit()):
                     palette = widget.palette()
                     for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive):
@@ -3494,15 +3496,16 @@ def _create_response_handling_section(self, parent):
                         palette.setColor(group, QPalette.ColorRole.WindowText, color)
                         palette.setColor(group, QPalette.ColorRole.ButtonText, color)
                         palette.setColor(group, QPalette.ColorRole.HighlightedText, color)
+                    for group in (QPalette.ColorGroup.Disabled,):
+                        palette.setColor(group, QPalette.ColorRole.Text, disabled_color)
+                        palette.setColor(group, QPalette.ColorRole.WindowText, disabled_color)
+                        palette.setColor(group, QPalette.ColorRole.ButtonText, disabled_color)
+                        palette.setColor(group, QPalette.ColorRole.HighlightedText, disabled_color)
                     widget.setPalette(palette)
-                selection_bg = "#2d2d2d"
-                spin.setStyleSheet(
-                    f"QDoubleSpinBox {{ color: {color_hex}; selection-color: {color_hex}; "
-                    f"selection-background-color: {selection_bg}; }}"
-                )
+                spin.setStyleSheet("")
                 spin.lineEdit().setStyleSheet(
-                    f"QLineEdit {{ color: {color_hex}; selection-color: {color_hex}; "
-                    f"selection-background-color: {selection_bg}; }}"
+                    f"QLineEdit {{ color: {color_hex}; selection-color: {color_hex}; }}"
+                    "QLineEdit:disabled { color: #777777; selection-color: #777777; }"
                 )
             except Exception:
                 pass
@@ -3532,6 +3535,7 @@ def _create_response_handling_section(self, parent):
 
         spin.valueChanged.connect(_on_authnd_spin_changed)
         setattr(self, f"{spin_attr}_label", label)
+        setattr(self, f"{spin_attr}_sync_warning", _sync_authnd_spin_warning)
         setattr(self, spin_attr, spin)
         _sync_authnd_spin_warning(current_value)
 
@@ -3596,6 +3600,8 @@ def _create_response_handling_section(self, parent):
 
     def _apply_authnd_auto_state(enabled=None):
         try:
+            from PySide6.QtWidgets import QGraphicsOpacityEffect
+
             enabled = bool(authnd_auto_cb.isChecked()) if enabled is None else bool(enabled)
             self.authnd_token_concurrency_auto_var = enabled
             self.config['authnd_token_concurrency_auto'] = enabled
@@ -3606,12 +3612,21 @@ def _create_response_handling_section(self, parent):
             ):
                 if spin is not None:
                     spin.setEnabled(not enabled)
+                    spin.setGraphicsEffect(None)
+                    if enabled:
+                        disabled_effect = QGraphicsOpacityEffect(spin)
+                        disabled_effect.setOpacity(0.48)
+                        spin.setGraphicsEffect(disabled_effect)
+                    sync_warning = getattr(self, f"{spin.objectName()}_sync_warning", None)
+                    if callable(sync_warning):
+                        sync_warning(spin.value())
             for label in (
                 getattr(self, 'authnd_token_concurrency_spin_label', None),
                 getattr(self, 'authnd_token_subprocess_concurrency_spin_label', None),
             ):
                 if label is not None:
                     label.setEnabled(not enabled)
+                    label.setStyleSheet("color: #777777;" if enabled else "color: #ffffff;")
             if enabled:
                 token_limit, subprocess_limit, cores = _authnd_auto_limits()
                 authnd_auto_hint.setText(f"{cores} CPU cores -> {token_limit}/{subprocess_limit}")
