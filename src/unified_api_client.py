@@ -16713,14 +16713,6 @@ class UnifiedClient:
             except Exception:
                 pass
 
-        try:
-            rid = request_id
-            if not rid:
-                tls = self._get_thread_local_client()
-                rid = getattr(tls, 'current_request_id', None)
-            _api_watchdog_mark_in_flight(rid, getattr(self, 'model', None))
-        except Exception:
-            pass
         # Ensure client_type is initialized before routing (important for multi-key mode)
         try:
             if not hasattr(self, 'client_type') or self.client_type is None:
@@ -16729,6 +16721,23 @@ class UnifiedClient:
             # Guard against missing attribute in extreme early paths
             if not hasattr(self, 'client_type'):
                 self.client_type = None
+
+        try:
+            defer_watchdog_mark = (
+                str(getattr(self, 'client_type', '') or '').lower() == 'authnd'
+                or self._get_actual_provider() == 'authnd'
+            )
+        except Exception:
+            defer_watchdog_mark = str(getattr(self, 'client_type', '') or '').lower() == 'authnd'
+        if not defer_watchdog_mark:
+            try:
+                rid = request_id
+                if not rid:
+                    tls = self._get_thread_local_client()
+                    rid = getattr(tls, 'current_request_id', None)
+                _api_watchdog_mark_in_flight(rid, getattr(self, 'model', None))
+            except Exception:
+                pass
 
         # FIX: Ensure max_tokens has a value before passing to handlers
         if max_tokens is None and max_completion_tokens is None:
@@ -24649,6 +24658,26 @@ class UnifiedClient:
                     _ctx = 'translation'
                 _thread_name = threading.current_thread().name
                 authnd_progress_label = f"📤 [{_thread_name}] {_label} ({_ctx}) API call in progress{_authnd_think}"
+                authnd_request_id = None
+                try:
+                    authnd_request_id = getattr(tls, 'current_request_id', None)
+                except Exception:
+                    pass
+                authnd_watchdog_marked = False
+
+                def _authnd_log_fn(message):
+                    nonlocal authnd_watchdog_marked
+                    try:
+                        if (
+                            not authnd_watchdog_marked
+                            and authnd_request_id
+                            and str(message or "") == authnd_progress_label
+                        ):
+                            _api_watchdog_mark_in_flight(authnd_request_id, getattr(self, 'model', None))
+                            authnd_watchdog_marked = True
+                    except Exception:
+                        pass
+                    print(message)
 
                 result = _authnd_send(
                     messages=messages,
@@ -24656,7 +24685,7 @@ class UnifiedClient:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     timeout=_read_timeout,
-                    log_fn=print,
+                    log_fn=_authnd_log_fn,
                     connect_timeout=_connect_timeout,
                     top_p=anti_dupe_params.get("top_p"),
                     frequency_penalty=anti_dupe_params.get("frequency_penalty"),
@@ -24712,10 +24741,12 @@ class UnifiedClient:
                             _re_ctx.search(r"\((\d+)\s+in\s+the\s+messages", error_str, _re_ctx.IGNORECASE)
                             or _re_ctx.search(r"\((\d+)\s+of\s+(?:text\s+)?input", error_str, _re_ctx.IGNORECASE)
                             or _re_ctx.search(r"\((\d+)\s+in\s+the\s+prompt", error_str, _re_ctx.IGNORECASE)
+                            or _re_ctx.search(r"request\s+has\s+([\d,]+)\s+input\s+tokens?", error_str, _re_ctx.IGNORECASE)
+                            or _re_ctx.search(r"\binput\s+tokens?\s*[:=]\s*([\d,]+)", error_str, _re_ctx.IGNORECASE)
                         )
                         if m_ctx and m_in:
-                            max_ctx = int(m_ctx.group(1))
-                            input_tokens = int(m_in.group(1))
+                            max_ctx = int(str(m_ctx.group(1)).replace(",", ""))
+                            input_tokens = int(str(m_in.group(1)).replace(",", ""))
                             allowed_out = max_ctx - input_tokens
                             if allowed_out <= 0:
                                 raise UnifiedClientError(
