@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import html as html_lib
 import json
 import os
 import queue
@@ -72,10 +73,54 @@ def _log(log_fn: Optional[Callable[[str], None]], message: str, *, debug_only: b
 
 
 def _short_error(error: Any, limit: int = 1200) -> str:
-    text = str(error or "").replace("\r", " ").replace("\n", " ").strip()
+    text = _sanitize_error_text(str(error or ""))
     if len(text) <= limit:
         return text
     return text[: limit - 3] + "..."
+
+
+def _html_error_summary(text: str) -> str:
+    text = str(text or "")
+    text = re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
+    for pattern in (
+        r"<title[^>]*>(.*?)</title>",
+        r"<h1[^>]*>(.*?)</h1>",
+        r"<h2[^>]*>(.*?)</h2>",
+    ):
+        match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            summary = re.sub(r"<[^>]+>", " ", match.group(1))
+            summary = html_lib.unescape(summary)
+            return re.sub(r"\s+", " ", summary).strip()
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html_lib.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _sanitize_error_text(text: str) -> str:
+    text = str(text or "").replace("\r", " ").replace("\n", " ").strip()
+    html_match = re.search(r"<\s*(?:!doctype|html|head|body|title|h[1-6]|center)\b", text, flags=re.IGNORECASE)
+    if not html_match:
+        return re.sub(r"\s+", " ", text).strip()
+
+    prefix = text[:html_match.start()].strip()
+    summary = _html_error_summary(text[html_match.start():])
+    if prefix and summary:
+        prefix = prefix.rstrip(" :")
+        if summary.lower() in prefix.lower():
+            return prefix
+        return f"{prefix}: {summary}"
+    return summary or prefix
+
+
+def _authnd_http_error_message(status_code: int, headers: Any, body: str, reason: str = "") -> str:
+    nv_error = ""
+    try:
+        nv_error = headers.get("x-nv-error-msg") or headers.get("x-nv-error-code") or ""
+    except Exception:
+        nv_error = ""
+    detail = " ".join(part for part in (nv_error, _sanitize_error_text(body)) if part).strip()
+    return f"AuthND HTTP {status_code}: {detail or reason or 'HTTP error'}"
 
 
 def _terminate_process_tree(proc: Any, *, kill: bool = False) -> None:
@@ -1470,22 +1515,24 @@ def _log_non_stream_summary(
 def _raise_for_status(response: requests.Response) -> None:
     if response.status_code < 400:
         return
-    nv_error = response.headers.get("x-nv-error-msg") or response.headers.get("x-nv-error-code") or ""
-    body = (response.text or "").strip()
-    detail = " ".join(part for part in (nv_error, body[:1000]) if part)
-    raise RuntimeError(f"AuthND HTTP {response.status_code}: {detail or response.reason}")
+    raise RuntimeError(
+        _authnd_http_error_message(
+            response.status_code,
+            response.headers,
+            response.text or "",
+            response.reason,
+        )
+    )
 
 
 def _httpx_status_error(resp: Any) -> RuntimeError:
     headers = getattr(resp, "headers", {}) or {}
-    nv_error = headers.get("x-nv-error-msg") or headers.get("x-nv-error-code") or ""
     reason = getattr(resp, "reason_phrase", "") or ""
     try:
         body = resp.read().decode("utf-8", errors="replace").strip()
     except Exception:
         body = ""
-    detail = " ".join(part for part in (nv_error, body[:1000]) if part)
-    return RuntimeError(f"AuthND HTTP {resp.status_code}: {detail or reason or 'HTTP error'}")
+    return RuntimeError(_authnd_http_error_message(resp.status_code, headers, body, reason))
 
 
 def _post_prediction(
@@ -1661,11 +1708,9 @@ def _post_prediction(
         debug_only=True,
     )
     if response.status_code >= 400:
-        nv_error = response.headers.get("x-nv-error-msg") or response.headers.get("x-nv-error-code") or ""
-        body = (response.text or "").strip()
         _log(
             log_fn,
-            f"⚠️ AuthND HTTP failure: status={response.status_code}, nv_error={_short_error(nv_error, 300)}, body={_short_error(body, 900)}",
+            f"⚠️ AuthND HTTP failure: {_authnd_http_error_message(response.status_code, response.headers, response.text or '', response.reason)}",
         )
     _raise_for_status(response)
     content_type = (response.headers.get("content-type") or "").lower()
