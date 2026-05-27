@@ -31,6 +31,8 @@ DEFAULT_ORG_ID = "qc69jvmznzxy"
 DEFAULT_HCAPTCHA_SITEKEY = "0c6a1e45-75d7-43cc-b836-a0c9d886b8ee"
 DEFAULT_PUBLISHER = "z-ai"
 DEFAULT_TIMEOUT = 180
+TOKEN_CONCURRENCY_LIMIT = 4
+TOKEN_SUBPROCESS_CONCURRENCY_LIMIT = 8
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -43,7 +45,8 @@ _metadata_cache: Dict[str, Dict[str, str]] = {}
 _metadata_lock = threading.Lock()
 _chat_template_unsupported_models: set = set()
 _chat_template_unsupported_lock = threading.Lock()
-_captcha_mint_lock = threading.Lock()
+_captcha_mint_gate = threading.BoundedSemaphore(TOKEN_CONCURRENCY_LIMIT)
+_token_subprocess_gate = threading.BoundedSemaphore(TOKEN_SUBPROCESS_CONCURRENCY_LIMIT)
 _active_helper_processes: set = set()
 _active_helper_lock = threading.Lock()
 _active_sessions: set = set()
@@ -179,6 +182,21 @@ def reset_cancel() -> None:
 
 def _is_cancelled() -> bool:
     return _cancel_event.is_set()
+
+
+def _acquire_gate(
+    gate: threading.BoundedSemaphore,
+    *,
+    log_fn: Optional[Callable[[str], None]] = None,
+    wait_message: str = "",
+) -> None:
+    waited = False
+    while not gate.acquire(timeout=0.1):
+        if _is_cancelled():
+            raise RuntimeError("stream cancelled")
+        if wait_message and not waited:
+            _log(log_fn, wait_message)
+            waited = True
 
 
 def _env_int(name: str, default: int) -> int:
@@ -691,20 +709,22 @@ def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
     if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
         creationflags = subprocess.CREATE_NO_WINDOW
 
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-        creationflags=creationflags,
-    )
-    with _active_helper_lock:
-        _active_helper_processes.add(proc)
+    _acquire_gate(_token_subprocess_gate)
+    proc = None
     deadline = time.time() + helper_timeout + 20
     stdout = ""
     stderr = ""
     try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            creationflags=creationflags,
+        )
+        with _active_helper_lock:
+            _active_helper_processes.add(proc)
         while proc.poll() is None:
             if _is_cancelled():
                 _terminate_process_tree(proc, kill=True)
@@ -718,8 +738,10 @@ def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
         except Exception:
             stdout, stderr = "", ""
     finally:
-        with _active_helper_lock:
-            _active_helper_processes.discard(proc)
+        if proc is not None:
+            with _active_helper_lock:
+                _active_helper_processes.discard(proc)
+        _token_subprocess_gate.release()
     if _is_cancelled() and proc.returncode:
         raise RuntimeError("stream cancelled")
     if proc.returncode != 0:
@@ -928,20 +950,15 @@ def _get_captcha_token_for_request(
     timeout: int = 90,
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> str:
-    if not _env_bool("AUTHND_SERIALIZE_CAPTCHA_MINT", True):
-        return get_captcha_token(page_url, timeout)
-
-    waited = False
-    while not _captcha_mint_lock.acquire(timeout=0.1):
-        if _is_cancelled():
-            raise RuntimeError("stream cancelled")
-        if not waited:
-            _log(log_fn, "⏳ AuthND: waiting for browser token slot")
-            waited = True
+    _acquire_gate(
+        _captcha_mint_gate,
+        log_fn=log_fn,
+        wait_message="⏳ AuthND: waiting for browser token slot",
+    )
     try:
         return get_captcha_token(page_url, timeout)
     finally:
-        _captcha_mint_lock.release()
+        _captcha_mint_gate.release()
 
 
 def _extract_content_from_obj(obj: Any) -> str:
