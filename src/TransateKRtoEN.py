@@ -2208,18 +2208,64 @@ class ProgressManager:
                         pass
 
     @staticmethod
+    def _entry_has_qa_issue_marker(info):
+        if not isinstance(info, dict):
+            return False
+        issues = info.get("qa_issues_found")
+        if isinstance(issues, str):
+            if issues.strip():
+                return True
+        elif isinstance(issues, dict):
+            if issues:
+                return True
+        elif isinstance(issues, (list, tuple, set)):
+            if any(str(issue).strip() for issue in issues):
+                return True
+        elif issues:
+            return True
+
+        qa_flag = info.get("qa_issues")
+        if isinstance(qa_flag, str):
+            return qa_flag.strip().lower() not in ("", "0", "false", "none", "no")
+        return bool(qa_flag)
+
+    @staticmethod
+    def _entry_or_previous_has_qa_issue_marker(info):
+        if ProgressManager._entry_has_qa_issue_marker(info):
+            return True
+        if isinstance(info, dict):
+            previous_entry = info.get("previous_progress_entry")
+            if ProgressManager._entry_has_qa_issue_marker(previous_entry):
+                return True
+        return False
+
+    @staticmethod
+    def _status_with_qa_marker(status, info):
+        status_l = str(status or "").lower()
+        if status_l == "failed" and ProgressManager._entry_or_previous_has_qa_issue_marker(info):
+            return "qa_failed"
+        return status_l
+
+    @staticmethod
     def restore_in_progress_entry(info):
         """Restore the entry that existed before a temporary in_progress status."""
         if not isinstance(info, dict):
             return None
-        previous_status = str(info.get("previous_status", "") or "").lower()
         previous_entry = info.get("previous_progress_entry")
+        previous_status = ProgressManager._status_with_qa_marker(
+            info.get("previous_status", ""),
+            previous_entry if isinstance(previous_entry, dict) else info,
+        )
         transient_statuses = {"in_progress", "not_translated", "not translated", "not_completed"}
 
         if isinstance(previous_entry, dict):
             restored = dict(previous_entry)
-            restored_status = str(restored.get("status", previous_status) or previous_status).lower()
+            restored_status = ProgressManager._status_with_qa_marker(
+                restored.get("status", previous_status) or previous_status,
+                restored,
+            )
             if restored_status and restored_status not in transient_statuses:
+                restored["status"] = restored_status
                 restored.pop("previous_status", None)
                 restored.pop("previous_progress_entry", None)
                 return restored
@@ -2258,7 +2304,7 @@ class ProgressManager:
         if not isinstance(info, dict):
             return None
         failed = dict(info)
-        failed["status"] = "failed"
+        failed["status"] = "qa_failed" if ProgressManager._entry_or_previous_has_qa_issue_marker(info) else "failed"
         failed.pop("previous_status", None)
         failed.pop("previous_progress_entry", None)
         failed.pop("previous_status_unknown", None)
@@ -2305,6 +2351,35 @@ class ProgressManager:
         target_out = chapter_info.get("output_file")
         target_num = chapter_info.get("actual_num") or chapter_info.get("chapter_num")
         return bool(target_out and target_num is not None and (str(target_num), str(target_out)) in refs)
+
+    def _disk_chapter_entry(self, chapter_key, chapter_info):
+        """Load the matching on-disk chapter row, if it still exists."""
+        try:
+            with open(self.PROGRESS_FILE, "r", encoding="utf-8") as f:
+                disk_progress = json.load(f)
+            disk_chapters = disk_progress.get("chapters", {}) if isinstance(disk_progress, dict) else {}
+            if not isinstance(disk_chapters, dict):
+                return None, None
+
+            key = str(chapter_key)
+            candidate = disk_chapters.get(key)
+            if isinstance(candidate, dict):
+                return key, dict(candidate)
+
+            target_out = chapter_info.get("output_file")
+            target_num = chapter_info.get("actual_num") or chapter_info.get("chapter_num")
+            if target_out and target_num is not None:
+                target_ref = (str(target_num), str(target_out))
+                for disk_key, candidate in disk_chapters.items():
+                    if not isinstance(candidate, dict):
+                        continue
+                    out = candidate.get("output_file")
+                    num = candidate.get("actual_num") or candidate.get("chapter_num")
+                    if out and num is not None and (str(num), str(out)) == target_ref:
+                        return str(disk_key), dict(candidate)
+        except Exception:
+            pass
+        return None, None
 
     def _mark_all_known_progress_failed_after_file_delete(self):
         """If the progress file was deleted mid-run, do not recreate old completed/merged rows."""
@@ -2395,10 +2470,16 @@ class ProgressManager:
             previous_status = "not_translated"
             previous_entry = None
             if isinstance(existing_info, dict) and existing_info:
-                existing_status = str(existing_info.get("status", "not_translated") or "not_translated")
+                existing_status = ProgressManager._status_with_qa_marker(
+                    existing_info.get("status", "not_translated") or "not_translated",
+                    existing_info,
+                )
                 if existing_status.lower() == "in_progress":
-                    previous_status = str(existing_info.get("previous_status", "not_translated") or "not_translated")
                     previous_entry = existing_info.get("previous_progress_entry")
+                    previous_status = ProgressManager._status_with_qa_marker(
+                        existing_info.get("previous_status", "not_translated") or "not_translated",
+                        previous_entry if isinstance(previous_entry, dict) else existing_info,
+                    )
                     if not isinstance(previous_entry, dict):
                         chapter_info["previous_status_unknown"] = True
                 else:
@@ -2407,6 +2488,8 @@ class ProgressManager:
                         k: v for k, v in existing_info.items()
                         if k not in ("previous_status", "previous_progress_entry", "previous_status_unknown")
                     }
+                    if previous_status == "qa_failed":
+                        previous_entry["status"] = "qa_failed"
             chapter_info["previous_status"] = previous_status
             if isinstance(previous_entry, dict) and previous_status.lower() not in ("not_translated", "not translated", "not_completed"):
                 chapter_info["previous_progress_entry"] = previous_entry
@@ -2635,6 +2718,24 @@ class ProgressManager:
             self._mark_all_known_progress_failed_after_file_delete()
             return True
         if not self._disk_entry_is_still_in_progress(chapter_key, chapter_info):
+            disk_key, disk_entry = self._disk_chapter_entry(chapter_key, chapter_info)
+            if isinstance(disk_entry, dict):
+                disk_status = ProgressManager._status_with_qa_marker(disk_entry.get("status", ""), disk_entry)
+                if disk_status and disk_status != "in_progress":
+                    disk_entry["status"] = disk_status
+                    local_restored = self.restore_in_progress_entry(chapter_info)
+                    if (
+                        disk_status == "failed"
+                        and isinstance(local_restored, dict)
+                        and str(local_restored.get("status", "")).lower() == "qa_failed"
+                    ):
+                        disk_entry = local_restored
+                        disk_status = "qa_failed"
+                    if disk_key and str(disk_key) != str(chapter_key):
+                        self.prog["chapters"].pop(chapter_key, None)
+                    self.prog["chapters"][disk_key or chapter_key] = disk_entry
+                    return True
+
             failed = self.failed_from_in_progress_entry(chapter_info)
             if failed:
                 self.prog["chapters"][chapter_key] = failed

@@ -1573,6 +1573,8 @@ def _post_prediction(
     )
 
     request_started = time.time()
+    if _is_cancelled():
+        raise RuntimeError("stream cancelled")
     if stream:
         try:
             import httpx as _httpx
@@ -1596,6 +1598,12 @@ def _post_prediction(
                     _log(log_fn, f"⚠️ AuthND HTTP failure: {_short_error(exc)}")
                     _unregister_response_closer(closer)
                     raise exc
+                if _is_cancelled():
+                    try:
+                        response.close()
+                    finally:
+                        _unregister_response_closer(closer)
+                    raise RuntimeError("stream cancelled")
                 if progress_label:
                     _log(log_fn, progress_label)
                 if log_stream is None or log_stream:
@@ -1619,6 +1627,8 @@ def _post_prediction(
         request_timeout = (connect_timeout, timeout)
 
     session = _get_session()
+    if _is_cancelled():
+        raise RuntimeError("stream cancelled")
     response = _post_with_cancel(
         session,
         url,
@@ -1642,6 +1652,12 @@ def _post_prediction(
     _raise_for_status(response)
     content_type = (response.headers.get("content-type") or "").lower()
     if stream or "text/event-stream" in content_type:
+        if _is_cancelled():
+            try:
+                response.close()
+            except Exception:
+                pass
+            raise RuntimeError("stream cancelled")
         if progress_label:
             _log(log_fn, progress_label)
         if log_stream is None or log_stream:
@@ -1729,6 +1745,8 @@ def send_chat_completion(
         try:
             captcha_token = _get_captcha_token_for_request(page_url, token_timeout, log_fn=log_fn)
         except RuntimeError as exc:
+            if _is_cancelled() or "cancelled" in str(exc).lower():
+                raise RuntimeError("stream cancelled") from exc
             error_detail = _short_error(exc)
             _log(
                 log_fn,

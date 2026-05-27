@@ -24581,6 +24581,11 @@ class UnifiedClient:
         max_retries = self._get_max_retries()
         last_error = None
         _authnd_think = self._get_thinking_status_label()
+        if self._should_abort_retry():
+            raise UnifiedClientError(
+                "AuthND: Translation stopped by user",
+                error_type="cancelled"
+            )
         print(f"🚀 AuthND: Sending request via NVIDIA Build browser route (model={actual_model})")
 
         cache_keys = []
@@ -24610,8 +24615,18 @@ class UnifiedClient:
                 )
 
             try:
+                if self._should_abort_retry():
+                    raise UnifiedClientError(
+                        "AuthND: Translation stopped by user",
+                        error_type="cancelled"
+                    )
                 if _authnd_reset_cancel is not None:
                     _authnd_reset_cancel()
+                if self._should_abort_retry():
+                    raise UnifiedClientError(
+                        "AuthND: Translation stopped by user",
+                        error_type="cancelled"
+                    )
 
                 _http_tuning_on = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
                 _connect_timeout = float(os.getenv("CONNECT_TIMEOUT", "30")) if _http_tuning_on else None
