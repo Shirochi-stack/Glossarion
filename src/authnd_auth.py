@@ -35,6 +35,7 @@ DEFAULT_TOKEN_CONCURRENCY_LIMIT = 1
 DEFAULT_TOKEN_SUBPROCESS_CONCURRENCY_LIMIT = 1
 TOKEN_CONCURRENCY_ENV = "AUTHND_TOKEN_CONCURRENCY"
 TOKEN_SUBPROCESS_CONCURRENCY_ENV = "AUTHND_TOKEN_SUBPROCESS_CONCURRENCY"
+TOKEN_CONCURRENCY_AUTO_ENV = "AUTHND_TOKEN_CONCURRENCY_AUTO"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -212,8 +213,25 @@ def _env_positive_int(name: str, default: int) -> int:
     return max(1, _env_int(name, default))
 
 
+def _auto_token_limits() -> Tuple[int, int]:
+    cores = max(1, int(os.cpu_count() or 1))
+    token_limit = min(4, max(1, cores // 2))
+    subprocess_limit = min(8, max(token_limit, cores))
+    return token_limit, subprocess_limit
+
+
+def _effective_token_limit(env_name: str, default_limit: int) -> int:
+    if _env_bool(TOKEN_CONCURRENCY_AUTO_ENV, False):
+        token_limit, subprocess_limit = _auto_token_limits()
+        if env_name == TOKEN_SUBPROCESS_CONCURRENCY_ENV:
+            return subprocess_limit
+        if env_name == TOKEN_CONCURRENCY_ENV:
+            return token_limit
+    return _env_positive_int(env_name, default_limit)
+
+
 def _get_configured_gate(env_name: str, default_limit: int) -> threading.BoundedSemaphore:
-    limit = _env_positive_int(env_name, default_limit)
+    limit = _effective_token_limit(env_name, default_limit)
     with _configured_gate_lock:
         current = _configured_gates.get(env_name)
         if current and current[1] == limit:
@@ -234,8 +252,8 @@ def _captcha_token_failure_hint(error: Any) -> str:
     text = str(error or "").lower()
     if not any(marker in text for marker in ("rate-limited", "rate limited", "rate_limit", "too many", "429")):
         return ""
-    token_limit = _env_positive_int(TOKEN_CONCURRENCY_ENV, DEFAULT_TOKEN_CONCURRENCY_LIMIT)
-    subprocess_limit = _env_positive_int(TOKEN_SUBPROCESS_CONCURRENCY_ENV, DEFAULT_TOKEN_SUBPROCESS_CONCURRENCY_LIMIT)
+    token_limit = _effective_token_limit(TOKEN_CONCURRENCY_ENV, DEFAULT_TOKEN_CONCURRENCY_LIMIT)
+    subprocess_limit = _effective_token_limit(TOKEN_SUBPROCESS_CONCURRENCY_ENV, DEFAULT_TOKEN_SUBPROCESS_CONCURRENCY_LIMIT)
     return (
         " hCaptcha is rate-limiting token creation. Reduce Other Settings > "
         f"NIM/AuthND Token Helpers > Token concurrency (currently {token_limit}; try 1-2). "

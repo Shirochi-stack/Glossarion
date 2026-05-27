@@ -11,6 +11,7 @@ import re
 import sys
 import platform
 import tempfile
+import multiprocessing
 
 # PySide6 imports (fully migrated from Tkinter)
 from PySide6.QtWidgets import (
@@ -3441,7 +3442,17 @@ def _create_response_handling_section(self, parent):
         except (TypeError, ValueError):
             return default
 
-    def _make_authnd_spin_control(label_text, attr_name, spin_attr, config_key, env_key, default, maximum, warning_threshold, tooltip):
+    def _authnd_auto_limits():
+        try:
+            cores = multiprocessing.cpu_count()
+        except Exception:
+            cores = os.cpu_count() or 1
+        cores = max(1, int(cores or 1))
+        token_limit = min(4, max(1, cores // 2))
+        subprocess_limit = min(8, max(token_limit, cores))
+        return token_limit, subprocess_limit, cores
+
+    def _make_authnd_spin_control(label_text, attr_name, spin_attr, config_key, env_key, default, maximum, caution_threshold, warning_threshold, tooltip):
         current_value = _authnd_int_setting(config_key, env_key, default)
         setattr(self, attr_name, current_value)
         self.config[config_key] = current_value
@@ -3498,8 +3509,14 @@ def _create_response_handling_section(self, parent):
 
         def _sync_authnd_spin_warning(value):
             try:
-                is_warning = int(value) > warning_threshold
-                _set_authnd_spin_text_color("#ff4d4d" if is_warning else "#ffffff")
+                numeric_value = int(value)
+                if numeric_value > warning_threshold:
+                    color = "#ff4d4d"
+                elif numeric_value > caution_threshold:
+                    color = "#facc15"
+                else:
+                    color = "#ffffff"
+                _set_authnd_spin_text_color(color)
             except Exception:
                 pass
 
@@ -3520,6 +3537,31 @@ def _create_response_handling_section(self, parent):
         control_h.addWidget(spin)
         return control
 
+    authnd_auto_enabled = bool(self.config.get('authnd_token_concurrency_auto', False))
+    authnd_auto_token_limit, authnd_auto_subprocess_limit, authnd_auto_cores = _authnd_auto_limits()
+    setattr(self, 'authnd_token_concurrency_auto_var', authnd_auto_enabled)
+    os.environ['AUTHND_TOKEN_CONCURRENCY_AUTO'] = '1' if authnd_auto_enabled else '0'
+
+    authnd_auto_row = QWidget()
+    authnd_auto_h = QHBoxLayout(authnd_auto_row)
+    authnd_auto_h.setContentsMargins(16, 2, 0, 0)
+    authnd_auto_h.setSpacing(8)
+    authnd_auto_cb = QCheckBox("Auto token helper limits")
+    authnd_auto_cb.setChecked(authnd_auto_enabled)
+    authnd_auto_cb.setToolTip(
+        "Automatically set AuthND token helper limits from CPU cores "
+        "(token flows capped at 4, helper subprocesses capped at 8)."
+    )
+    authnd_auto_hint = QLabel(
+        f"{authnd_auto_cores} CPU cores -> {authnd_auto_token_limit}/{authnd_auto_subprocess_limit}"
+    )
+    authnd_auto_hint.setStyleSheet("color: gray; font-size: 9pt;")
+    authnd_auto_h.addWidget(authnd_auto_cb)
+    authnd_auto_h.addWidget(authnd_auto_hint)
+    authnd_auto_h.addStretch()
+    section_v.addWidget(authnd_auto_row)
+    self.authnd_token_concurrency_auto_checkbox = authnd_auto_cb
+
     authnd_limits_row = QWidget()
     authnd_limits_h = QHBoxLayout(authnd_limits_row)
     authnd_limits_h.setContentsMargins(16, 2, 0, 8)
@@ -3532,6 +3574,7 @@ def _create_response_handling_section(self, parent):
         "AUTHND_TOKEN_CONCURRENCY",
         1,
         64,
+        4,
         7,
         "Maximum simultaneous AuthND browser token mint flows.",
     ))
@@ -3543,11 +3586,48 @@ def _create_response_handling_section(self, parent):
         "AUTHND_TOKEN_SUBPROCESS_CONCURRENCY",
         1,
         128,
+        8,
         14,
         "Maximum helper child processes AuthND may launch for token minting.",
     ))
     authnd_limits_h.addStretch()
     section_v.addWidget(authnd_limits_row)
+
+    def _apply_authnd_auto_state(enabled=None):
+        try:
+            enabled = bool(authnd_auto_cb.isChecked()) if enabled is None else bool(enabled)
+            self.authnd_token_concurrency_auto_var = enabled
+            self.config['authnd_token_concurrency_auto'] = enabled
+            os.environ['AUTHND_TOKEN_CONCURRENCY_AUTO'] = '1' if enabled else '0'
+            for spin in (
+                getattr(self, 'authnd_token_concurrency_spin', None),
+                getattr(self, 'authnd_token_subprocess_concurrency_spin', None),
+            ):
+                if spin is not None:
+                    spin.setEnabled(not enabled)
+            if enabled:
+                token_limit, subprocess_limit, cores = _authnd_auto_limits()
+                authnd_auto_hint.setText(f"{cores} CPU cores -> {token_limit}/{subprocess_limit}")
+                self.authnd_token_concurrency_var = token_limit
+                self.authnd_token_subprocess_concurrency_var = subprocess_limit
+                self.config['authnd_token_concurrency'] = token_limit
+                self.config['authnd_token_subprocess_concurrency'] = subprocess_limit
+                os.environ['AUTHND_TOKEN_CONCURRENCY'] = str(token_limit)
+                os.environ['AUTHND_TOKEN_SUBPROCESS_CONCURRENCY'] = str(subprocess_limit)
+                try:
+                    self.authnd_token_concurrency_spin.blockSignals(True)
+                    self.authnd_token_concurrency_spin.setValue(token_limit)
+                    self.authnd_token_concurrency_spin.blockSignals(False)
+                    self.authnd_token_subprocess_concurrency_spin.blockSignals(True)
+                    self.authnd_token_subprocess_concurrency_spin.setValue(subprocess_limit)
+                    self.authnd_token_subprocess_concurrency_spin.blockSignals(False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    authnd_auto_cb.toggled.connect(_apply_authnd_auto_state)
+    _apply_authnd_auto_state(authnd_auto_enabled)
 
 
     # Parallel Extraction

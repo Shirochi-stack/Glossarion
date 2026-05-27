@@ -13759,8 +13759,6 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         else:
             system_prompt = getattr(config, "REFINEMENT_SYSTEM_PROMPT", "").strip()
             user_prompt = getattr(config, "REFINEMENT_USER_PROMPT", "").strip()
-        if not system_prompt:
-            system_prompt = getattr(config, "REFINEMENT_SYSTEM_PROMPT", "").strip()
         return system_prompt, user_prompt
 
     def _build_refinement_messages(html_content, *, partial=False, partial_kind="tags", enhanced=False, qa_entry=None):
@@ -13772,8 +13770,6 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             None,
             qa_issues_text=qa_issues_text,
         ).strip()
-        if not refine_system:
-            refine_system = "You are refining an existing English translation. Improve clarity, flow, consistency, and readability while preserving all HTML structure, tags, images, links, ids, and meaning. Retain the original meaning of the translation, while retaining the original translation style. Convert any foreign onomatopoeia to romaji. Return only the refined HTML."
         if enhanced:
             enhanced_system = (
                 "For this request, the input is the translated chapter converted through the Enhanced "
@@ -13783,24 +13779,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 "Do not wrap it in a full HTML document."
             )
             refine_system = f"{refine_system}\n\n{enhanced_system}"
-        if partial:
-            if partial_kind == "lines":
-                partial_system = (
-                    "Partial multipass mode: the input is one raw text line, or adjacent raw text lines, "
-                    "selected because QA found foreign/source-language characters and no valid HTML tag "
-                    "wrapper was available. Translate or naturalize only the leftover foreign characters. "
-                    "Return only the corrected raw line text."
-                )
-            else:
-                partial_system = (
-                    "Partial multipass mode: the input is one affected valid HTML tag entry, or adjacent "
-                    "affected tag entries separated by Glossarion marker lines, selected because QA found "
-                    "foreign/source-language characters. Preserve the supplied outer tag wrappers and "
-                    "attributes; do not add extra wrappers around a tag entry. Translate or naturalize only "
-                    "the leftover foreign characters. If Glossarion marker lines are present, preserve them "
-                    "exactly and keep each corrected tag entry between its original markers."
-                )
-            refine_system = f"{refine_system}\n\n{partial_system}"
+        refine_system = refine_system.strip()
 
         refine_user = _format_refinement_prompt(
             user_template,
@@ -13814,7 +13793,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 f"{refine_user}"
             )
 
-        messages = [{"role": "system", "content": refine_system}]
+        messages = []
+        if refine_system:
+            messages.append({"role": "system", "content": refine_system})
         refine_assistant = _format_refinement_prompt(
             getattr(config, "ASSISTANT_PROMPT", "").strip(),
             None

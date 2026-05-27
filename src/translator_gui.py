@@ -42,6 +42,13 @@ import os
 import tempfile
 from app_version import APP_DISPLAY_NAME, APP_READY_MESSAGE, APP_STARTUP_MESSAGE, APP_USER_MODEL_ID, APP_VERSION
 
+
+def _authnd_auto_token_limits():
+    cores = max(1, int(os.cpu_count() or 1))
+    token_limit = min(4, max(1, cores // 2))
+    subprocess_limit = min(8, max(token_limit, cores))
+    return token_limit, subprocess_limit, cores
+
 # Force UTF-8 console output to prevent UnicodeEncodeError on Windows cp1252
 os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
 try:
@@ -16859,6 +16866,22 @@ If you see multiple p-b cookies, use the one with the longest value."""
             except (TypeError, ValueError):
                 return str(default)
 
+        def _bool_config_value(attr_name, config_key, default=False):
+            value = getattr(self, attr_name, self.config.get(config_key, default))
+            return _bool_setting(value, default)
+
+        def _authnd_effective_token_limits():
+            if _bool_config_value('authnd_token_concurrency_auto_var', 'authnd_token_concurrency_auto', False):
+                token_limit, subprocess_limit, _cores = _authnd_auto_token_limits()
+                return str(token_limit), str(subprocess_limit), '1'
+            return (
+                _positive_config_int('authnd_token_concurrency_var', 'authnd_token_concurrency', 1),
+                _positive_config_int('authnd_token_subprocess_concurrency_var', 'authnd_token_subprocess_concurrency', 1),
+                '0',
+            )
+
+        authnd_token_limit, authnd_subprocess_limit, authnd_auto_flag = _authnd_effective_token_limits()
+
         return {
             'EPUB_PATH': epub_path,
             'MODEL': self.model_var,
@@ -16964,8 +16987,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ALLOW_BATCH_STREAM_LOGS': '1' if bool(getattr(self, 'allow_batch_stream_logs_var', self.config.get('allow_batch_stream_logs', False))) else '0',
             'ALLOW_AUTHGPT_BATCH_STREAM_LOGS': '1' if bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False))) else '0',
             'STREAM_THINKING_LOGS': '1' if bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False))) else '0',
-            'AUTHND_TOKEN_CONCURRENCY': _positive_config_int('authnd_token_concurrency_var', 'authnd_token_concurrency', 1),
-            'AUTHND_TOKEN_SUBPROCESS_CONCURRENCY': _positive_config_int('authnd_token_subprocess_concurrency_var', 'authnd_token_subprocess_concurrency', 1),
+            'AUTHND_TOKEN_CONCURRENCY_AUTO': authnd_auto_flag,
+            'AUTHND_TOKEN_CONCURRENCY': authnd_token_limit,
+            'AUTHND_TOKEN_SUBPROCESS_CONCURRENCY': authnd_subprocess_limit,
             'VISION_OCR_PROMPT': str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', ''))),
             'VISION_OCR_USER_PROMPT': str(getattr(self, 'vision_ocr_user_prompt', self.config.get('vision_ocr_user_prompt', ''))),
             'VISION_OCR_COMBINED_CONTEXT_PROMPT': str(getattr(self, 'vision_ocr_combined_context_prompt', self.config.get('vision_ocr_combined_context_prompt', ''))),
@@ -25146,6 +25170,7 @@ Important rules:
                 ('toc_ncx_per_batch', ['toc_ncx_per_batch_var'], -1, lambda v: safe_int(v, -1)),
 
                 # NIM/AuthND runtime settings
+                ('authnd_token_concurrency_auto', ['authnd_token_concurrency_auto_checkbox', 'authnd_token_concurrency_auto_var'], False, bool),
                 ('authnd_token_concurrency', ['authnd_token_concurrency_var'], 1, lambda v: max(1, safe_int(v, 1))),
                 ('authnd_token_subprocess_concurrency', ['authnd_token_subprocess_concurrency_var'], 1, lambda v: max(1, safe_int(v, 1))),
 
@@ -25518,8 +25543,15 @@ Important rules:
             env_vars_set.append(_update_env('OPENROUTER_PREFERRED_PROVIDER', (str(self.config.get('openrouter_preferred_provider', 'Auto') or '').strip() or 'Auto')))
             env_vars_set.append(_update_env('RETAIN_SOURCE_EXTENSION', self.config.get('retain_source_extension'), is_bool=True))
             env_vars_set.append(_update_env('ENABLE_GUI_YIELD', self.config.get('enable_gui_yield'), is_bool=True))
-            env_vars_set.append(_update_env('AUTHND_TOKEN_CONCURRENCY', max(1, safe_int(self.config.get('authnd_token_concurrency', 1), 1))))
-            env_vars_set.append(_update_env('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', max(1, safe_int(self.config.get('authnd_token_subprocess_concurrency', 1), 1))))
+            authnd_auto_enabled = bool(self.config.get('authnd_token_concurrency_auto', False))
+            if authnd_auto_enabled:
+                authnd_token_limit, authnd_subprocess_limit, _authnd_cores = _authnd_auto_token_limits()
+            else:
+                authnd_token_limit = max(1, safe_int(self.config.get('authnd_token_concurrency', 1), 1))
+                authnd_subprocess_limit = max(1, safe_int(self.config.get('authnd_token_subprocess_concurrency', 1), 1))
+            env_vars_set.append(_update_env('AUTHND_TOKEN_CONCURRENCY_AUTO', authnd_auto_enabled, is_bool=True))
+            env_vars_set.append(_update_env('AUTHND_TOKEN_CONCURRENCY', authnd_token_limit))
+            env_vars_set.append(_update_env('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', authnd_subprocess_limit))
 
             # Extraction workers env var
             new_workers = str(self.config['extraction_workers']) if self.config['enable_parallel_extraction'] else "1"
@@ -25977,6 +26009,13 @@ Important rules:
                 except (TypeError, ValueError):
                     return str(default)
 
+            authnd_auto_enabled = bool(self.config.get('authnd_token_concurrency_auto', False))
+            if authnd_auto_enabled:
+                authnd_token_limit, authnd_subprocess_limit, _authnd_cores = _authnd_auto_token_limits()
+            else:
+                authnd_token_limit = _positive_int_config('authnd_token_concurrency', 1)
+                authnd_subprocess_limit = _positive_int_config('authnd_token_subprocess_concurrency', 1)
+
             # Initialize glossary-related environment variables
             env_mappings = [
                 ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', getattr(self, 'manual_glossary_prompt', ''))),
@@ -26015,8 +26054,9 @@ Important rules:
                 ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers', 1)) if self.config.get('enable_parallel_extraction', False) else '1'),
                 ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield', True) else '0'),
                 ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension', False) else '0'),
-                ('AUTHND_TOKEN_CONCURRENCY', _positive_int_config('authnd_token_concurrency', 1)),
-                ('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', _positive_int_config('authnd_token_subprocess_concurrency', 1)),
+                ('AUTHND_TOKEN_CONCURRENCY_AUTO', '1' if authnd_auto_enabled else '0'),
+                ('AUTHND_TOKEN_CONCURRENCY', str(authnd_token_limit)),
+                ('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', str(authnd_subprocess_limit)),
             ]
             
             # Add QA Scanner environment variables
