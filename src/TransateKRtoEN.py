@@ -13001,7 +13001,6 @@ def _is_foreign_character_qa_issue(issue) -> bool:
     return (
         bool(_FOREIGN_CHARACTER_QA_ISSUE_RE.search(normalized))
         or ("_text_found_" in normalized and "_chars_" in normalized)
-        or ("foreign" in normalized and "char" in normalized)
     )
 
 
@@ -13376,8 +13375,10 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
     def _force_stop_requested():
         return (
             os.environ.get("TRANSLATION_CANCELLED") == "1"
-            and os.environ.get("GRACEFUL_STOP") != "1"
-        ) or (check_stop() and os.environ.get("GRACEFUL_STOP") != "1")
+            or os.environ.get("GRACEFUL_STOP") == "1"
+            or os.environ.get("GRACEFUL_STOP_COMPLETED") == "1"
+            or check_stop()
+        )
 
     def _format_refinement_prompt(prompt, html_content=None):
         text = str(prompt or "")
@@ -13435,8 +13436,10 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
 
         blocked_issues = (
             ("truncated", ("truncated", "truncation", "max_tokens", "max_length", "finish_reason_length")),
+            ("timeout", ("timeout", "timed_out", "call_timed_out", "api_call_took")),
             ("prohibited content", ("prohibited_content", "content_filter", "blocked_by_safety", "safety_filter")),
             ("api error", ("api_error", "api_call_failed", "request_failed", "server_error", "client_error")),
+            ("cancelled", ("cancelled", "canceled", "stop_requested", "stopped_by_user", "graceful_stop")),
             ("empty output", ("empty_output", "blank_output", "no_usable_output", "no_output")),
         )
         for label, markers in blocked_issues:
@@ -13561,7 +13564,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         return None, None
 
     def _process_one(idx, chapter):
-        if check_stop():
+        if _force_stop_requested():
             return "skipped", f"⏹️ Post-processing stopped before item {idx + 1}"
 
         actual_num = chapter.get("actual_chapter_num", chapter.get("num"))
@@ -13676,6 +13679,8 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 if multipass_partial_mode:
                     total_targets = _partial_refinement_target_count(partial_targets)
                     for target_index, target in enumerate(partial_targets, start=1):
+                        if _force_stop_requested():
+                            return "skipped", f"⏹️ Refinement stopped before Chapter {actual_num} fragment {target_index}/{len(partial_targets)}"
                         fragment_html = _partial_refinement_target_fragment(target, partial_document)
                         target_kind = target.get("kind", "tags")
                         messages = _build_refinement_messages(
@@ -14363,8 +14368,9 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             # overrides graceful stop protection for in-flight calls.
             hard_cancelled = hasattr(client, 'is_globally_cancelled') and client.is_globally_cancelled()
             
-            # During graceful stop, protect in-flight calls unless hard-cancelled.
-            should_cancel = hard_cancelled or (should_stop and not graceful_active)
+            # During graceful stop, protect in-flight calls unless the caller
+            # supplied its own graceful-stop policy via stop_check_fn.
+            should_cancel = hard_cancelled or (should_stop and (bypass_graceful_stop or not graceful_active))
             
             if should_cancel:
                 # Set cleanup flag when user stops
