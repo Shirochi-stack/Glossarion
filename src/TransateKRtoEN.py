@@ -13595,19 +13595,6 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 "Return only the refined markdown/plain text.\n\n"
                 f"{refine_user}"
             )
-        elif partial and partial_kind == "lines":
-            refine_user = (
-                "Refine only this raw text line content. Do not add commentary. "
-                "Do not wrap it in HTML unless the original line already contains HTML.\n\n"
-                f"{refine_user}"
-            )
-        elif partial:
-            refine_user = (
-                "Refine only this HTML tag inner content. The original outer tag wrapper has been removed "
-                "and will be restored automatically. Do not add the outer wrapper back. If Glossarion "
-                "marker lines are present, preserve them exactly. Do not add commentary.\n\n"
-                f"{refine_user}"
-            )
 
         messages = [{"role": "system", "content": refine_system}]
         refine_assistant = _format_refinement_prompt(
