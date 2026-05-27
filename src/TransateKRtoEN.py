@@ -592,7 +592,7 @@ class TranslationConfig:
                 "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
                 "Return only the refined HTML."
             )
-        _qa_issue_prompt_default = "QA issue(s) to address: {QA_Issues}"
+        _qa_issue_prompt_default = "{QA_Issues}"
         _qa_issue_system_default = f"{self.REFINEMENT_SYSTEM_PROMPT}\n\n{_qa_issue_prompt_default}"
         _failed_system = _prompt_env_raw("REFINEMENT_FAILED_SYSTEM_PROMPT")
         _failed_user = _prompt_env_raw("REFINEMENT_FAILED_USER_PROMPT")
@@ -13225,8 +13225,9 @@ def _replace_qa_issues_placeholder(prompt, qa_issues_text=""):
     if not any(placeholder in text for placeholder in placeholders):
         return text
     if qa_issues_text:
+        qa_issue_prompt_text = f"QA issue(s) to address: {qa_issues_text}"
         for placeholder in placeholders:
-            text = text.replace(placeholder, qa_issues_text)
+            text = text.replace(placeholder, qa_issue_prompt_text)
         return text
     lines = []
     for line in text.splitlines():
@@ -13386,6 +13387,10 @@ def _partial_refinement_tag_inner_html(tag):
     return "".join(str(child) for child in getattr(tag, "contents", []))
 
 
+def _partial_refinement_tag_outer_html(tag):
+    return str(tag)
+
+
 def _partial_refinement_unpad_marker_content(text):
     value = str(text or "")
     for ending in ("\r\n", "\n", "\r"):
@@ -13447,12 +13452,12 @@ def _partial_refinement_target_fragment(target, document):
         return "".join(lines[target["start"]:target["end"] + 1])
     tags = target.get("tags", [])
     if len(tags) <= 1:
-        return _partial_refinement_tag_inner_html(tags[0]) if tags else ""
+        return _partial_refinement_tag_outer_html(tags[0]) if tags else ""
     chunks = []
     for index, tag in enumerate(tags, start=1):
         start_marker = _partial_refinement_group_marker(index, "START")
         end_marker = _partial_refinement_group_marker(index, "END")
-        chunks.append(f"{start_marker}\n{_partial_refinement_tag_inner_html(tag)}\n{end_marker}")
+        chunks.append(f"{start_marker}\n{_partial_refinement_tag_outer_html(tag)}\n{end_marker}")
     return "\n\n".join(chunks)
 
 
@@ -13715,14 +13720,12 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 )
             else:
                 partial_system = (
-                    "Partial multipass mode: the input is only the inner content from one affected valid "
-                    "HTML tag entry, or adjacent affected entries separated by Glossarion marker lines, "
-                    "selected because QA found foreign/source-language characters. The original outer valid "
-                    "HTML tag boundaries and attributes were removed and will be restored automatically. "
-                    "Unknown/custom angle-bracket text inside the content is ordinary content, not a "
-                    "refinement boundary. Translate or naturalize only the leftover foreign characters. "
-                    "Do not add the removed outer tag wrappers. If Glossarion marker lines are present, "
-                    "preserve them exactly and keep each corrected entry between its original markers."
+                    "Partial multipass mode: the input is one affected valid HTML tag entry, or adjacent "
+                    "affected tag entries separated by Glossarion marker lines, selected because QA found "
+                    "foreign/source-language characters. Preserve the supplied outer tag wrappers and "
+                    "attributes; do not add extra wrappers around a tag entry. Translate or naturalize only "
+                    "the leftover foreign characters. If Glossarion marker lines are present, preserve them "
+                    "exactly and keep each corrected tag entry between its original markers."
                 )
             refine_system = f"{refine_system}\n\n{partial_system}"
 

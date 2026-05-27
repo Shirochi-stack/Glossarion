@@ -3327,7 +3327,7 @@ Text to analyze:
             "Return only the refined HTML."
         )
         self.default_refinement_user_prompt = ""
-        self.default_refinement_qa_issue_prompt = "QA issue(s) to address: {QA_Issues}"
+        self.default_refinement_qa_issue_prompt = "{QA_Issues}"
         self.default_refinement_failed_system_prompt = (
             f"{self.default_refinement_system_prompt}\n\n{self.default_refinement_qa_issue_prompt}"
         )
@@ -4584,14 +4584,22 @@ Recent translations to summarize:
             dialog.accept()
 
         def reset_prompt():
-            reply = QMessageBox.question(
-                dialog,
-                "Reset Refinement Prompts",
-                "Reset all refinement prompt tabs to their defaults?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
-            )
-            if reply != QMessageBox.Yes:
+            msg = QMessageBox(dialog)
+            msg.setWindowTitle("Reset Refinement Prompts")
+            msg.setIcon(QMessageBox.Question)
+            msg.setText("Reset all refinement prompt tabs to their defaults?")
+            msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg.setDefaultButton(QMessageBox.No)
+            msg.setStyleSheet("""
+                QMessageBox QPushButton {
+                    min-width: 64px;
+                    padding: 5px 12px;
+                }
+                QMessageBox QDialogButtonBox {
+                    qproperty-centerButtons: true;
+                }
+            """)
+            if msg.exec() != QMessageBox.Yes:
                 return
             for mode_key, (system_editor, user_editor) in editors.items():
                 if mode_key == "all":
@@ -8617,7 +8625,7 @@ Recent translations to summarize:
             "After the normal translation finishes, run a second pass using refinement output mode.<br><br>"
             "<b>Full</b>: refine translated output using all currently translated chapters.<br>"
             "<b>Failed</b>: run a QA quick scan first, then only refine chapters still marked as QA failed.<br>"
-            "<b>Partial</b>: like Failed, but only targets chapters with foreign-character QA issues and sends only the affected tag contents for refinement, restoring the original tag wrappers during injection."
+            "<b>Partial</b>: like Failed, but only targets chapters with foreign-character QA issues and sends the affected HTML tag entries for refinement."
             "</p></qt>"
         )
         self.multipass_checkbox.setChecked(bool(self.multipass_mode_var))
