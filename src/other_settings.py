@@ -3467,13 +3467,12 @@ def _create_response_handling_section(self, parent):
 
         def _sync_authnd_spin_warning(value):
             try:
-                spin.lineEdit().setStyleSheet(
-                    "color: #ff4d4f; font-weight: bold;" if int(value) > warning_threshold else ""
+                is_warning = int(value) > warning_threshold
+                spin.setStyleSheet(
+                    "QSpinBox { color: #ff3b30; }" if is_warning else "QSpinBox { color: white; }"
                 )
             except Exception:
-                spin.setStyleSheet(
-                    "QSpinBox { color: #ff4d4f; font-weight: bold; }" if int(value) > warning_threshold else ""
-                )
+                pass
 
         def _on_authnd_spin_changed(value):
             try:
