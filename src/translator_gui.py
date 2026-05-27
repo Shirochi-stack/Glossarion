@@ -16833,8 +16833,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ALLOW_BATCH_STREAM_LOGS': '1' if bool(getattr(self, 'allow_batch_stream_logs_var', self.config.get('allow_batch_stream_logs', False))) else '0',
             'ALLOW_AUTHGPT_BATCH_STREAM_LOGS': '1' if bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False))) else '0',
             'STREAM_THINKING_LOGS': '1' if bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False))) else '0',
-            'AUTHND_TOKEN_CONCURRENCY': _positive_config_int('authnd_token_concurrency_var', 'authnd_token_concurrency', 2),
-            'AUTHND_TOKEN_SUBPROCESS_CONCURRENCY': _positive_config_int('authnd_token_subprocess_concurrency_var', 'authnd_token_subprocess_concurrency', 4),
+            'AUTHND_TOKEN_CONCURRENCY': _positive_config_int('authnd_token_concurrency_var', 'authnd_token_concurrency', 1),
+            'AUTHND_TOKEN_SUBPROCESS_CONCURRENCY': _positive_config_int('authnd_token_subprocess_concurrency_var', 'authnd_token_subprocess_concurrency', 1),
             'VISION_OCR_PROMPT': str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', ''))),
             'VISION_OCR_USER_PROMPT': str(getattr(self, 'vision_ocr_user_prompt', self.config.get('vision_ocr_user_prompt', ''))),
             'VISION_OCR_COMBINED_CONTEXT_PROMPT': str(getattr(self, 'vision_ocr_combined_context_prompt', self.config.get('vision_ocr_combined_context_prompt', ''))),
@@ -25007,8 +25007,8 @@ Important rules:
                 ('toc_ncx_per_batch', ['toc_ncx_per_batch_var'], -1, lambda v: safe_int(v, -1)),
 
                 # NIM/AuthND runtime settings
-                ('authnd_token_concurrency', ['authnd_token_concurrency_var'], 2, lambda v: max(1, safe_int(v, 2))),
-                ('authnd_token_subprocess_concurrency', ['authnd_token_subprocess_concurrency_var'], 4, lambda v: max(1, safe_int(v, 4))),
+                ('authnd_token_concurrency', ['authnd_token_concurrency_var'], 1, lambda v: max(1, safe_int(v, 1))),
+                ('authnd_token_subprocess_concurrency', ['authnd_token_subprocess_concurrency_var'], 1, lambda v: max(1, safe_int(v, 1))),
 
                 # Gemini/GPT/DeepSeek Thinking
                 ('enable_gemini_thinking', ['enable_gemini_thinking_var'], False, bool),
@@ -25379,8 +25379,8 @@ Important rules:
             env_vars_set.append(_update_env('OPENROUTER_PREFERRED_PROVIDER', (str(self.config.get('openrouter_preferred_provider', 'Auto') or '').strip() or 'Auto')))
             env_vars_set.append(_update_env('RETAIN_SOURCE_EXTENSION', self.config.get('retain_source_extension'), is_bool=True))
             env_vars_set.append(_update_env('ENABLE_GUI_YIELD', self.config.get('enable_gui_yield'), is_bool=True))
-            env_vars_set.append(_update_env('AUTHND_TOKEN_CONCURRENCY', max(1, safe_int(self.config.get('authnd_token_concurrency', 2), 2))))
-            env_vars_set.append(_update_env('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', max(1, safe_int(self.config.get('authnd_token_subprocess_concurrency', 4), 4))))
+            env_vars_set.append(_update_env('AUTHND_TOKEN_CONCURRENCY', max(1, safe_int(self.config.get('authnd_token_concurrency', 1), 1))))
+            env_vars_set.append(_update_env('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', max(1, safe_int(self.config.get('authnd_token_subprocess_concurrency', 1), 1))))
 
             # Extraction workers env var
             new_workers = str(self.config['extraction_workers']) if self.config['enable_parallel_extraction'] else "1"
@@ -25876,8 +25876,8 @@ Important rules:
                 ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers', 1)) if self.config.get('enable_parallel_extraction', False) else '1'),
                 ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield', True) else '0'),
                 ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension', False) else '0'),
-                ('AUTHND_TOKEN_CONCURRENCY', _positive_int_config('authnd_token_concurrency', 2)),
-                ('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', _positive_int_config('authnd_token_subprocess_concurrency', 4)),
+                ('AUTHND_TOKEN_CONCURRENCY', _positive_int_config('authnd_token_concurrency', 1)),
+                ('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', _positive_int_config('authnd_token_subprocess_concurrency', 1)),
             ]
             
             # Add QA Scanner environment variables
