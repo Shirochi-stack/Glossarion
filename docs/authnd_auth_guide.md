@@ -138,6 +138,13 @@ python src/authnd_auth.py --model deepseek-ai/deepseek-v4-flash --prompt-file pr
 - `AUTHND_ENABLE_STG_PREFIX=1`: legacy mode that sends `stg/<publisher>/<model>`.
 - `AUTHND_LEGACY_EXTRA_HEADERS=1`: legacy mode that sends the older extra NVIDIA headers.
 
+## Token Helper Concurrency
+
+AuthND uses subprocess token helpers by default. Browser token minting is
+hard-capped at 4 concurrent token flows, and helper subprocess launches are
+hard-capped at 8 concurrent child processes. Because the token-flow cap is
+lower, normal subprocess mode uses at most 4 helpers at once.
+
 ## Debugging
 
 Use `--debug` for one run:
