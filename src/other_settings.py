@@ -3502,11 +3502,15 @@ def _create_response_handling_section(self, parent):
                         palette.setColor(group, QPalette.ColorRole.ButtonText, disabled_color)
                         palette.setColor(group, QPalette.ColorRole.HighlightedText, disabled_color)
                     widget.setPalette(palette)
-                spin.setStyleSheet("")
+                spin.setStyleSheet(
+                    f"QDoubleSpinBox {{ color: {color_hex}; selection-color: {color_hex}; }}"
+                    "QDoubleSpinBox:disabled { color: #777777; selection-color: #777777; }"
+                )
                 spin.lineEdit().setStyleSheet(
                     f"QLineEdit {{ color: {color_hex}; selection-color: {color_hex}; }}"
                     "QLineEdit:disabled { color: #777777; selection-color: #777777; }"
                 )
+                label.setStyleSheet(f"color: {color_hex};" if spin.isEnabled() else "color: #777777;")
             except Exception:
                 pass
 
@@ -3617,9 +3621,6 @@ def _create_response_handling_section(self, parent):
                         disabled_effect = QGraphicsOpacityEffect(spin)
                         disabled_effect.setOpacity(0.48)
                         spin.setGraphicsEffect(disabled_effect)
-                    sync_warning = getattr(self, f"{spin.objectName()}_sync_warning", None)
-                    if callable(sync_warning):
-                        sync_warning(spin.value())
             for label in (
                 getattr(self, 'authnd_token_concurrency_spin_label', None),
                 getattr(self, 'authnd_token_subprocess_concurrency_spin_label', None),
@@ -3627,6 +3628,14 @@ def _create_response_handling_section(self, parent):
                 if label is not None:
                     label.setEnabled(not enabled)
                     label.setStyleSheet("color: #777777;" if enabled else "color: #ffffff;")
+            for spin in (
+                getattr(self, 'authnd_token_concurrency_spin', None),
+                getattr(self, 'authnd_token_subprocess_concurrency_spin', None),
+            ):
+                if spin is not None:
+                    sync_warning = getattr(self, f"{spin.objectName()}_sync_warning", None)
+                    if callable(sync_warning):
+                        sync_warning(spin.value())
             if enabled:
                 token_limit, subprocess_limit, cores = _authnd_auto_limits()
                 authnd_auto_hint.setText(f"{cores} CPU cores -> {token_limit}/{subprocess_limit}")
