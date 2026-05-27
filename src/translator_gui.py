@@ -1773,7 +1773,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.use_inpainter_keys_var = self.config.get('use_inpainter_keys', False)
         self.multipass_mode_var = self.config.get('multipass_mode', False)
         self.multipass_refinement_mode_var = str(self.config.get('multipass_refinement_mode', 'full') or 'full').strip().lower()
-        if self.multipass_refinement_mode_var not in ('full', 'failed'):
+        if self.multipass_refinement_mode_var not in ('full', 'failed', 'partial'):
             self.multipass_refinement_mode_var = 'full'
 
         # Initialize fuzzy threshold variable
@@ -4260,7 +4260,7 @@ Recent translations to summarize:
         if not mode:
             mode = self.config.get('multipass_refinement_mode', 'full')
         mode = str(mode or 'full').strip().lower()
-        return 'failed' if mode == 'failed' else 'full'
+        return mode if mode in ('failed', 'partial') else 'full'
 
     def _sync_multipass_refinement_mode_from_combo(self, _idx=None):
         mode = self._get_multipass_refinement_mode()
@@ -8495,7 +8495,8 @@ Recent translations to summarize:
             "<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>"
             "After the normal translation finishes, run a second pass using refinement output mode.<br><br>"
             "<b>Full</b>: refine translated output using all currently translated chapters.<br>"
-            "<b>Failed</b>: run a QA quick scan first, then only refine chapters still marked as QA failed."
+            "<b>Failed</b>: run a QA quick scan first, then only refine chapters still marked as QA failed.<br>"
+            "<b>Partial</b>: like Failed, but only targets chapters with foreign-character QA issues and sends only the affected HTML tag entries for refinement."
             "</p></qt>"
         )
         self.multipass_checkbox.setChecked(bool(self.multipass_mode_var))
@@ -8518,10 +8519,11 @@ Recent translations to summarize:
         self.multipass_refinement_mode_combo = QComboBox()
         self.multipass_refinement_mode_combo.addItem("Full", "full")
         self.multipass_refinement_mode_combo.addItem("Failed", "failed")
-        _multipass_mode_index = 1 if self.multipass_refinement_mode_var == "failed" else 0
+        self.multipass_refinement_mode_combo.addItem("Partial", "partial")
+        _multipass_mode_index = {"full": 0, "failed": 1, "partial": 2}.get(self.multipass_refinement_mode_var, 0)
         self.multipass_refinement_mode_combo.setCurrentIndex(_multipass_mode_index)
         self.multipass_refinement_mode_combo.setToolTip(self.multipass_checkbox.toolTip())
-        self.multipass_refinement_mode_combo.setFixedWidth(50)
+        self.multipass_refinement_mode_combo.setFixedWidth(58)
         self.multipass_refinement_mode_combo.setStyleSheet(f"""
             QComboBox {{
                 padding-right: 0px;
@@ -24997,7 +24999,7 @@ Important rules:
                 ('batch_translation', ['batch_checkbox', 'batch_translation_var'], True, bool),
                 ('batch_size', ['batch_size_entry', 'batch_size_var'], 5, lambda v: safe_int(v, 5)),
                 ('multipass_mode', ['multipass_checkbox', 'multipass_mode_var'], False, bool),
-                ('multipass_refinement_mode', ['multipass_refinement_mode_combo', 'multipass_refinement_mode_var'], 'full', lambda v: 'failed' if str(v).strip().lower() == 'failed' else 'full'),
+                ('multipass_refinement_mode', ['multipass_refinement_mode_combo', 'multipass_refinement_mode_var'], 'full', lambda v: str(v).strip().lower() if str(v).strip().lower() in ('failed', 'partial') else 'full'),
                 ('vision_ocr_batch_size', ['vision_ocr_batch_size_var'], 10, lambda v: safe_int(v, 10)),
                 ('batching_mode', ['batch_mode_var'], 'aggressive', str),
                 ('batch_group_size', ['batch_group_size_var'], 3, lambda v: safe_int(v, 3)),

@@ -560,7 +560,7 @@ class TranslationConfig:
             self.OUTPUT_MODE = "text"
         self.MULTIPASS_MODE = os.getenv("MULTIPASS_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
         self.MULTIPASS_REFINEMENT_MODE = os.getenv("MULTIPASS_REFINEMENT_MODE", "full").strip().lower()
-        if self.MULTIPASS_REFINEMENT_MODE not in ("full", "failed"):
+        if self.MULTIPASS_REFINEMENT_MODE not in ("full", "failed", "partial"):
             self.MULTIPASS_REFINEMENT_MODE = "full"
         self.SCAN_PHASE_MODE = os.getenv("SCAN_PHASE_MODE", "quick-scan").strip().lower()
         if self.SCAN_PHASE_MODE not in ("quick-scan", "aggressive", "ai-hunter", "custom"):
@@ -12959,7 +12959,264 @@ def _resolve_postprocess_output_dir(input_path: str, file_base: str, current_out
         print(f"⚠️ Post-processing could not find translated root HTML in candidate output folders. Checked: {checked}")
     return best_dir
 
-def _process_refinement_or_tts_mode(config, client, chapters, out, progress_manager, check_stop, *, multipass_failed_mode=False):
+_FOREIGN_CHARACTER_QA_ISSUE_RE = re.compile(
+    r"(?:^|[^a-z])(?:korean|japanese|chinese|hebrew|arabic|syriac|thai|cyrillic)_text_found_\d+_chars_",
+    re.IGNORECASE,
+)
+
+_PARTIAL_REFINEMENT_BLOCK_TAGS = {
+    "p", "li", "blockquote", "figcaption", "caption", "td", "th", "dt", "dd",
+    "h1", "h2", "h3", "h4", "h5", "h6", "pre",
+}
+_PARTIAL_REFINEMENT_SKIP_TAGS = {
+    "html", "head", "body", "script", "style", "meta", "link", "title", "svg",
+    "math", "noscript", "template",
+}
+
+try:
+    from html_tag_entities import VALID_ENTITY_TAGS as _PARTIAL_VALID_HTML_TAGS
+except Exception:
+    _PARTIAL_VALID_HTML_TAGS = frozenset(_PARTIAL_REFINEMENT_BLOCK_TAGS | {"div", "span", "a"})
+
+
+def _flatten_partial_refinement_issue_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        parts = []
+        for key, item in value.items():
+            parts.append(_flatten_partial_refinement_issue_text(key))
+            parts.append(_flatten_partial_refinement_issue_text(item))
+        return " ".join(part for part in parts if part)
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(
+            part for part in (_flatten_partial_refinement_issue_text(item) for item in value) if part
+        )
+    return str(value)
+
+
+def _is_foreign_character_qa_issue(issue) -> bool:
+    text = _flatten_partial_refinement_issue_text(issue).strip()
+    if not text:
+        return False
+    normalized = text.lower().replace("-", "_").replace(" ", "_")
+    return (
+        bool(_FOREIGN_CHARACTER_QA_ISSUE_RE.search(normalized))
+        or ("_text_found_" in normalized and "_chars_" in normalized)
+        or ("foreign" in normalized and "char" in normalized)
+    )
+
+
+def _entry_has_foreign_character_qa_issue(entry) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    issues = []
+    for key in ("qa_issues_found", "qa_issues", "failure_reason", "error_message"):
+        value = entry.get(key)
+        if isinstance(value, (list, tuple, set)):
+            issues.extend(value)
+        elif value is not None:
+            issues.append(value)
+    return any(_is_foreign_character_qa_issue(issue) for issue in issues)
+
+
+def _partial_refinement_detection_settings(qa_settings):
+    settings = dict(qa_settings or {})
+    settings["foreign_char_threshold"] = 0
+    return settings
+
+
+def _text_has_foreign_characters_for_partial_refinement(text, qa_settings) -> bool:
+    if not text or not str(text).strip():
+        return False
+    try:
+        from scan_html_folder import detect_non_english_content
+        has_issue, issues = detect_non_english_content(
+            str(text),
+            _partial_refinement_detection_settings(qa_settings),
+        )
+        return bool(has_issue and any(_is_foreign_character_qa_issue(issue) for issue in issues))
+    except Exception:
+        return False
+
+
+def _partial_refinement_tag_name(tag) -> str:
+    name = str(getattr(tag, "name", "") or "").lower().strip()
+    if ":" in name:
+        name = name.rsplit(":", 1)[-1]
+    return name
+
+
+def _is_valid_partial_refinement_tag(tag) -> bool:
+    name = _partial_refinement_tag_name(tag)
+    return bool(name and name in _PARTIAL_VALID_HTML_TAGS and name not in _PARTIAL_REFINEMENT_SKIP_TAGS)
+
+
+def _nearest_partial_refinement_tag(text_node):
+    valid_fallback = None
+    parent = getattr(text_node, "parent", None)
+    while parent is not None and getattr(parent, "name", None):
+        name = _partial_refinement_tag_name(parent)
+        if name in _PARTIAL_REFINEMENT_SKIP_TAGS:
+            parent = getattr(parent, "parent", None)
+            continue
+        if _is_valid_partial_refinement_tag(parent) and name in _PARTIAL_REFINEMENT_BLOCK_TAGS:
+            return parent
+        if valid_fallback is None and _is_valid_partial_refinement_tag(parent):
+            valid_fallback = parent
+        parent = getattr(parent, "parent", None)
+    return valid_fallback
+
+
+def _tag_has_selected_ancestor(tag, selected_ids) -> bool:
+    parent = getattr(tag, "parent", None)
+    while parent is not None and getattr(parent, "name", None):
+        if id(parent) in selected_ids:
+            return True
+        parent = getattr(parent, "parent", None)
+    return False
+
+
+def _partial_refinement_tags_are_adjacent(left, right) -> bool:
+    if getattr(left, "parent", None) is not getattr(right, "parent", None):
+        return False
+    seen_left = False
+    for child in left.parent.children:
+        if child is left:
+            seen_left = True
+            continue
+        if not seen_left:
+            continue
+        if child is right:
+            return True
+        if isinstance(child, NavigableString) and not str(child).strip():
+            continue
+        return False
+    return False
+
+
+def _partial_refinement_split_line_ending(line):
+    for ending in ("\r\n", "\n", "\r"):
+        if line.endswith(ending):
+            return line[:-len(ending)], ending
+    return line, ""
+
+
+def _collect_partial_refinement_line_targets(raw_text, qa_settings):
+    lines = str(raw_text or "").splitlines(keepends=True)
+    if not lines and raw_text:
+        lines = [str(raw_text)]
+
+    issue_indexes = []
+    for index, line in enumerate(lines):
+        line_text, _ending = _partial_refinement_split_line_ending(line)
+        if _text_has_foreign_characters_for_partial_refinement(line_text, qa_settings):
+            issue_indexes.append(index)
+
+    targets = [{"kind": "lines", "start": index, "end": index} for index in issue_indexes]
+    return {"kind": "lines", "lines": lines}, targets
+
+
+def _collect_partial_refinement_tag_groups(html_content, qa_settings):
+    soup = BeautifulSoup(html_content or "", "html.parser")
+    selected_tags = []
+    selected_ids = set()
+
+    for text_node in soup.find_all(string=True):
+        parent = getattr(text_node, "parent", None)
+        if parent is None:
+            continue
+        parent_name = str(getattr(parent, "name", "") or "").lower()
+        if parent_name in _PARTIAL_REFINEMENT_SKIP_TAGS:
+            continue
+        if not _text_has_foreign_characters_for_partial_refinement(str(text_node), qa_settings):
+            continue
+        tag = _nearest_partial_refinement_tag(text_node)
+        if tag is None or id(tag) in selected_ids:
+            continue
+        selected_tags.append(tag)
+        selected_ids.add(id(tag))
+
+    selected_ids = {id(tag) for tag in selected_tags}
+    pruned_tags = [tag for tag in selected_tags if not _tag_has_selected_ancestor(tag, selected_ids)]
+
+    groups = []
+    for tag in pruned_tags:
+        if groups and _partial_refinement_tags_are_adjacent(groups[-1][-1], tag):
+            groups[-1].append(tag)
+        else:
+            groups.append([tag])
+    if groups:
+        return {"kind": "tags", "soup": soup}, [{"kind": "tags", "tags": group} for group in groups]
+    return _collect_partial_refinement_line_targets(html_content, qa_settings)
+
+
+def _strip_refinement_code_fence(text):
+    cleaned = str(text or "").strip()
+    cleaned = re.sub(r"^```(?:html)?\s*\n?", "", cleaned, count=1, flags=re.IGNORECASE | re.MULTILINE)
+    cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
+    return cleaned.strip()
+
+
+def _replacement_nodes_from_refined_fragment(refined_fragment):
+    fragment_soup = BeautifulSoup(_strip_refinement_code_fence(refined_fragment), "html.parser")
+    container = fragment_soup.body if fragment_soup.body is not None else fragment_soup
+    nodes = [
+        node.extract()
+        for node in list(container.contents)
+        if not (isinstance(node, NavigableString) and not str(node).strip())
+    ]
+    if not any(_is_valid_partial_refinement_tag(node) for node in nodes):
+        raise RuntimeError("Partial refinement response did not include a valid HTML tag")
+    return nodes
+
+
+def _partial_refinement_target_fragment(target, document):
+    if target.get("kind") == "lines":
+        lines = document.get("lines", [])
+        return "".join(lines[target["start"]:target["end"] + 1])
+    return "".join(str(tag) for tag in target.get("tags", []))
+
+
+def _partial_refinement_target_count(targets):
+    total = 0
+    for target in targets:
+        if target.get("kind") == "lines":
+            total += target.get("end", 0) - target.get("start", 0) + 1
+        else:
+            total += len(target.get("tags", []))
+    return total
+
+
+def _apply_partial_refinement_response(document, target, refined_fragment):
+    if target.get("kind") == "lines":
+        lines = document.get("lines", [])
+        start = target["start"]
+        end = target["end"]
+        refined = _strip_refinement_code_fence(refined_fragment)
+        if end < len(lines):
+            _text, original_ending = _partial_refinement_split_line_ending(lines[end])
+            if original_ending and not refined.endswith(("\r\n", "\n", "\r")):
+                refined += original_ending
+        lines[start:end + 1] = [refined]
+        return
+
+    tag_group = target.get("tags", [])
+    replacement_nodes = _replacement_nodes_from_refined_fragment(refined_fragment)
+    first_tag = tag_group[0]
+    for node in replacement_nodes:
+        first_tag.insert_before(node)
+    for tag in tag_group:
+        tag.extract()
+
+
+def _render_partial_refinement_document(document):
+    if document.get("kind") == "lines":
+        return "".join(document.get("lines", []))
+    return str(document.get("soup", ""))
+
+
+def _process_refinement_or_tts_mode(config, client, chapters, out, progress_manager, check_stop, *, multipass_failed_mode=False, multipass_partial_mode=False):
     mode = config.OUTPUT_MODE
     progress_manager.prog["output_mode"] = mode
     progress_manager.save()
@@ -13065,6 +13322,59 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 return label
         return None
 
+    def _build_refinement_messages(html_content, *, partial=False, partial_kind="tags"):
+        refine_system = _format_refinement_prompt(
+            getattr(config, "REFINEMENT_SYSTEM_PROMPT", "").strip(),
+            None
+        ).strip()
+        if not refine_system:
+            refine_system = "You are refining an existing English translation. Improve clarity, flow, consistency, and readability while preserving all HTML structure, tags, images, links, ids, and meaning. Return only the refined HTML."
+        if partial:
+            if partial_kind == "lines":
+                partial_system = (
+                    "Partial multipass mode: the input is one raw text line, or adjacent raw text lines, "
+                    "selected because QA found foreign/source-language characters and no valid HTML tag "
+                    "wrapper was available. Translate or naturalize only the leftover foreign characters. "
+                    "Return only the corrected raw line text."
+                )
+            else:
+                partial_system = (
+                    "Partial multipass mode: the input is only one affected valid HTML tag entry, "
+                    "or adjacent affected tag entries, selected because QA found foreign/source-language "
+                    "characters. Unknown/custom angle-bracket tags inside the fragment are surrounding raw "
+                    "text, not refinement boundaries. Translate or naturalize only the leftover foreign "
+                    "characters, preserve the valid outer HTML tags and attributes, and return only the "
+                    "corrected fragment."
+                )
+            refine_system = f"{refine_system}\n\n{partial_system}"
+
+        refine_user = _format_refinement_prompt(
+            getattr(config, "REFINEMENT_USER_PROMPT", "").strip(),
+            html_content
+        )
+        if partial and partial_kind == "lines":
+            refine_user = (
+                "Refine only this raw text line content. Do not add commentary. "
+                "Do not wrap it in HTML unless the original line already contains HTML.\n\n"
+                f"{refine_user}"
+            )
+        elif partial:
+            refine_user = (
+                "Refine only this HTML fragment. Do not add surrounding document HTML. "
+                "Return a valid HTML fragment with the same outer tag structure.\n\n"
+                f"{refine_user}"
+            )
+
+        messages = [{"role": "system", "content": refine_system}]
+        refine_assistant = _format_refinement_prompt(
+            getattr(config, "ASSISTANT_PROMPT", "").strip(),
+            None
+        ).strip()
+        if refine_assistant:
+            messages.append({"role": "assistant", "content": refine_assistant})
+        messages.append({"role": "user", "content": refine_user})
+        return messages
+
     def _find_progress_entry_for_output(output_file, actual_num=None):
         if not output_file:
             return None, {}
@@ -13166,6 +13476,31 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     "chapter": actual_num,
                     "reason": skip_reason,
                 }
+            partial_document = None
+            partial_targets = []
+            if multipass_partial_mode:
+                if not _entry_has_foreign_character_qa_issue(pre_existing_entry):
+                    return "excluded", None, {
+                        "kind": "not_targeted",
+                        "chapter": actual_num,
+                        "reason": "no foreign-character QA issue",
+                    }
+                qa_settings = getattr(config, "QA_SCANNER_SETTINGS", None)
+                if not isinstance(qa_settings, dict):
+                    qa_settings = _load_qa_scanner_settings_from_env()
+                partial_document, partial_targets = _collect_partial_refinement_tag_groups(
+                    html_content,
+                    qa_settings,
+                )
+                if not partial_targets:
+                    return "skipped", None, {
+                        "kind": "refinement_skip",
+                        "chapter": actual_num,
+                        "reason": "no foreign-character valid tag or line found",
+                    }
+        else:
+            partial_document = None
+            partial_targets = []
 
         # Ensure a base completed entry exists so the two post-process checks are visible.
         # In Failed multipass, keep QA scan failures as qa_failed until refinement succeeds.
@@ -13188,47 +13523,66 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     "reason": "already refined",
                 }
             try:
-                refine_system = _format_refinement_prompt(
-                    getattr(config, "REFINEMENT_SYSTEM_PROMPT", "").strip(),
-                    None
-                ).strip()
-                if not refine_system:
-                    refine_system = "You are refining an existing English translation. Improve clarity, flow, consistency, and readability while preserving all HTML structure, tags, images, links, ids, and meaning. Return only the refined HTML."
-                refine_user = _format_refinement_prompt(
-                    getattr(config, "REFINEMENT_USER_PROMPT", "").strip(),
-                    html_content
-                )
-                messages = [{"role": "system", "content": refine_system}]
-                refine_assistant = _format_refinement_prompt(
-                    getattr(config, "ASSISTANT_PROMPT", "").strip(),
-                    None
-                ).strip()
-                if refine_assistant:
-                    messages.append({"role": "assistant", "content": refine_assistant})
-                messages.append({"role": "user", "content": refine_user})
-
                 def _mark_refinement_progress_on_send():
                     with progress_lock:
                         progress_manager.update(idx, actual_num, content_hash, output_file, status="in_progress", chapter_obj=chapter)
                         progress_manager.update_refinement_status(idx, actual_num, content_hash, output_file, "in_progress", chapter_obj=chapter)
                         progress_manager.save()
 
-                refined, finish_reason, _raw_obj = send_with_interrupt(
-                    messages,
-                    client,
-                    config.TEMP,
-                    config.MAX_OUTPUT_TOKENS,
-                    check_stop,
-                    chunk_timeout=None,
-                    context="refinement",
-                    chapter_context={"chapter": actual_num},
-                    bypass_graceful_stop=True,
-                    before_send_callback=_mark_refinement_progress_on_send,
-                )
-                if not refined or not str(refined).strip() or finish_reason in ("content_filter", "prohibited_content", "error"):
-                    raise RuntimeError(f"Refinement returned no usable HTML (finish_reason={finish_reason})")
-                refined = re.sub(r"^```(?:html)?\s*\n?", "", refined, count=1, flags=re.MULTILINE)
-                refined = re.sub(r"\n?```\s*$", "", refined, count=1, flags=re.MULTILINE)
+                if multipass_partial_mode:
+                    total_targets = _partial_refinement_target_count(partial_targets)
+                    for target_index, target in enumerate(partial_targets, start=1):
+                        fragment_html = _partial_refinement_target_fragment(target, partial_document)
+                        target_kind = target.get("kind", "tags")
+                        messages = _build_refinement_messages(
+                            fragment_html,
+                            partial=True,
+                            partial_kind=target_kind,
+                        )
+                        refined_fragment, finish_reason, _raw_obj = send_with_interrupt(
+                            messages,
+                            client,
+                            config.TEMP,
+                            config.MAX_OUTPUT_TOKENS,
+                            check_stop,
+                            chunk_timeout=None,
+                            context="refinement",
+                            chapter_context={
+                                "chapter": actual_num,
+                                "chunk": target_index,
+                                "total_chunks": len(partial_targets),
+                            },
+                            bypass_graceful_stop=True,
+                            before_send_callback=_mark_refinement_progress_on_send,
+                        )
+                        if (
+                            not refined_fragment
+                            or not str(refined_fragment).strip()
+                            or finish_reason in ("content_filter", "prohibited_content", "error")
+                        ):
+                            raise RuntimeError(
+                                f"Partial refinement returned no usable content for fragment {target_index}/{len(partial_targets)} "
+                                f"(finish_reason={finish_reason})"
+                            )
+                        _apply_partial_refinement_response(partial_document, target, refined_fragment)
+                    refined = _render_partial_refinement_document(partial_document)
+                else:
+                    messages = _build_refinement_messages(html_content, partial=False)
+                    refined, finish_reason, _raw_obj = send_with_interrupt(
+                        messages,
+                        client,
+                        config.TEMP,
+                        config.MAX_OUTPUT_TOKENS,
+                        check_stop,
+                        chunk_timeout=None,
+                        context="refinement",
+                        chapter_context={"chapter": actual_num},
+                        bypass_graceful_stop=True,
+                        before_send_callback=_mark_refinement_progress_on_send,
+                    )
+                    if not refined or not str(refined).strip() or finish_reason in ("content_filter", "prohibited_content", "error"):
+                        raise RuntimeError(f"Refinement returned no usable HTML (finish_reason={finish_reason})")
+                    refined = _strip_refinement_code_fence(refined)
                 backup_path = _backup_unrefined_file(output_path, backup_dir)
                 with open(output_path, "w", encoding="utf-8") as f:
                     f.write(refined)
@@ -13238,6 +13592,11 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     progress_manager.update_refinement_status(idx, actual_num, new_hash, output_file, "refined", chapter_obj=chapter)
                     progress_manager.prog["chapters"][progress_manager._get_chapter_key(actual_num, output_file, chapter, new_hash)]["unrefined_backup_file"] = os.path.relpath(backup_path, out).replace("\\", "/")
                     progress_manager.save()
+                if multipass_partial_mode:
+                    return "processed", (
+                        f"Partial refined Chapter {actual_num}: {output_file} "
+                        f"({len(partial_targets)} request(s), {total_targets} target(s))"
+                    )
                 return "processed", f"✨ Refined Chapter {actual_num}: {output_file}"
             except Exception as exc:
                 with progress_lock:
@@ -13428,8 +13787,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 pass
 
     if grouped_not_targeted:
+        multipass_label = "Partial" if multipass_partial_mode else "Failed"
         print(
-            f"☑️ Failed multipass: {len(grouped_not_targeted)} completed chapter(s) "
+            f"☑️ {multipass_label} multipass: {len(grouped_not_targeted)} chapter(s) "
             f"not targeted: {_format_chapter_values(grouped_not_targeted)}"
         )
     if grouped_already_refined:
@@ -21238,21 +21598,22 @@ def main(log_callback=None, stop_callback=None):
         print("✨ MULTIPASS REFINEMENT")
         print("=" * 50)
         multipass_refinement_mode = str(getattr(config, "MULTIPASS_REFINEMENT_MODE", "full") or "full").strip().lower()
-        if multipass_refinement_mode not in ("full", "failed"):
+        if multipass_refinement_mode not in ("full", "failed", "partial"):
             multipass_refinement_mode = "full"
         print(f"Running a refinement pass over translated HTML output (mode: {multipass_refinement_mode}).")
-        if multipass_refinement_mode == "failed":
+        if multipass_refinement_mode in ("failed", "partial"):
             qa_scan_mode = str(getattr(config, "SCAN_PHASE_MODE", "quick-scan") or "quick-scan").strip().lower()
             if qa_scan_mode not in ("quick-scan", "aggressive", "ai-hunter", "custom"):
                 qa_scan_mode = "quick-scan"
             qa_settings = getattr(config, "QA_SCANNER_SETTINGS", None)
             if not isinstance(qa_settings, dict):
                 qa_settings = _load_qa_scanner_settings_from_env()
-            print(f"Failed multipass mode: running QA Scanner in {qa_scan_mode} mode before refinement.")
+            mode_label = "Partial" if multipass_refinement_mode == "partial" else "Failed"
+            print(f"{mode_label} multipass mode: running QA Scanner in {qa_scan_mode} mode before refinement.")
             try:
                 try:
                     progress_manager.save()
-                    print(f"Saved current translation progress before Failed-mode QA scan: {progress_manager.PROGRESS_FILE}")
+                    print(f"Saved current translation progress before {mode_label}-mode QA scan: {progress_manager.PROGRESS_FILE}")
                 except Exception as save_exc:
                     print(f"⚠️ Failed to save progress before QA scan: {save_exc}")
                 from qa_scan_runtime import run_qa_scan_path
@@ -21273,7 +21634,7 @@ def main(log_callback=None, stop_callback=None):
                 except Exception as reload_exc:
                     print(f"⚠️ Failed to reload progress after QA scan: {reload_exc}")
             except Exception as scan_exc:
-                print(f"⚠️ QA scan before failed multipass failed: {scan_exc}")
+                print(f"⚠️ QA scan before {mode_label.lower()} multipass failed: {scan_exc}")
         original_output_mode = config.OUTPUT_MODE
         try:
             config.OUTPUT_MODE = "refinement"
@@ -21295,7 +21656,8 @@ def main(log_callback=None, stop_callback=None):
                 out,
                 progress_manager,
                 check_stop,
-                multipass_failed_mode=multipass_refinement_mode == "failed",
+                multipass_failed_mode=multipass_refinement_mode in ("failed", "partial"),
+                multipass_partial_mode=multipass_refinement_mode == "partial",
             )
         finally:
             config.OUTPUT_MODE = original_output_mode
