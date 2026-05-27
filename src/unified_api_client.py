@@ -3923,7 +3923,7 @@ class UnifiedClient:
                     _is_refinement_pool = (self._api_key_pool is getattr(self.__class__, '_glossary_refinement_key_pool', None))
                     _is_truncation_retry_pool = (self._api_key_pool is getattr(self.__class__, '_truncation_retry_key_pool', None))
                     _is_rolling_summary_pool = (self._api_key_pool is getattr(self.__class__, '_rolling_summary_key_pool', None))
-                    _prefix = "RollingSummaryKey" if _is_rolling_summary_pool else "TruncationRetryKey" if _is_truncation_retry_pool else "GlossaryRefinementKey" if _is_refinement_pool else "GlossaryKey" if _is_glossary_pool else "Key"
+                    _prefix = "RollingSummaryKey" if _is_rolling_summary_pool else "TruncationRetryKey" if _is_truncation_retry_pool else "Refinement Key" if _is_refinement_pool else "GlossaryKey" if _is_glossary_pool else "Key"
                     key_id = f"{_prefix}#{key_index+1} ({key.model})"
                     if hasattr(key, 'identifier') and key.identifier:
                         key_id = key.identifier
@@ -7943,7 +7943,7 @@ class UnifiedClient:
                 # pool can otherwise win the cosmetic log line.
                 try:
                     key_identifier = str(getattr(self, 'key_identifier', '') or '')
-                    if key_identifier.startswith(('VisionKey#', 'AITruncationDetectionKey#', 'MetadataKey#', 'GlossaryKey#', 'GlossaryRefinementKey#', 'RollingSummaryKey#', 'TruncationRetryKey#')):
+                    if key_identifier.startswith(('VisionKey#', 'AITruncationDetectionKey#', 'MetadataKey#', 'GlossaryKey#', 'GlossaryRefinementKey#', 'Refinement Key#', 'RollingSummaryKey#', 'TruncationRetryKey#')):
                         current_model = getattr(self, 'model', None)
                         if current_model:
                             log_model = current_model
@@ -7967,6 +7967,7 @@ class UnifiedClient:
                 _is_glossary_refinement_pool = (
                     active_pool is getattr(self.__class__, '_glossary_refinement_key_pool', None)
                     or _key_identifier.startswith('GlossaryRefinementKey#')
+                    or _key_identifier.startswith('Refinement Key#')
                 )
                 _is_qa_pool = (
                     active_pool is getattr(self.__class__, '_qa_scan_key_pool', None)
@@ -7985,11 +7986,11 @@ class UnifiedClient:
                     or _key_identifier.startswith('RollingSummaryKey#')
                 )
                 _pool_label = "(rolling-summary-key)" if _is_rolling_summary_pool else "(truncation-retry-key)" if _is_truncation_retry_pool else "(refinement-key)" if _is_glossary_refinement_pool else "(glossary-key)" if _is_glossary_pool else "(image-gen/edit-key)" if _is_inpainter_pool else "(vision-key)" if _is_qa_pool else "(multi-key)"
-                defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model} {_pool_label}")
+                defer_batch_log(f"🔌 Initialized {self.client_type} client for model: {log_model} {_pool_label}")
             elif log_model != model_snapshot and not self._is_stop_requested():
-                defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model}")
+                defer_batch_log(f"🔌 Initialized {self.client_type} client for model: {log_model}")
             elif not self._is_stop_requested():
-                defer_batch_log(f"✅ Initialized {self.client_type} client for model: {log_model}")
+                defer_batch_log(f"🔌 Initialized {self.client_type} client for model: {log_model}")
         except Exception:
             # Last-resort: never fail client init due to logging
             pass

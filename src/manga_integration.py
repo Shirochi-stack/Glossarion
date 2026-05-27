@@ -14557,7 +14557,7 @@ class MangaTranslationTab(QObject):
                 try:
                     if UnifiedClient:
                         self.main_gui.client = UnifiedClient(api_key=api_key)
-                        self._log("✅ Initialized translation client", "debug")
+                        self._log("🔌 Initialized translation client", "debug")
                 except Exception as e:
                     self._log(f"❌ Failed to initialize translation client: {e}", "error")
                     return False
