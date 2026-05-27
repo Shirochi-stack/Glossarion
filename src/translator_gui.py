@@ -16501,6 +16501,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
         3) Empty string — no glossary
         """
         try:
+            if self._current_auto_glossary_mode() == 'no_glossary':
+                return ''
+        except Exception:
+            pass
+
+        try:
             mgm = getattr(self, 'manual_glossary_map', None)
             if isinstance(mgm, dict) and mgm and file_path:
                 key = os.path.normpath(os.path.abspath(file_path))
@@ -16948,7 +16954,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ADVANCED_WATERMARK_REMOVAL': "1" if self.advanced_watermark_removal_var else "0",
             'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var else "0",
             'EMERGENCY_IMAGE_RESTORE': "1" if getattr(self, 'emergency_image_restore_var', False) else "0",
-            'EMERGENCY_GLOSSARY_COMPLIANCE': "1" if getattr(self, 'emergency_glossary_compliance_var', False) else "0",
+            'EMERGENCY_GLOSSARY_COMPLIANCE': "1" if (getattr(self, 'emergency_glossary_compliance_var', False) and auto_glossary_mode != 'no_glossary') else "0",
             'EMERGENCY_GLOSSARY_COMPLIANCE_MODE': str(getattr(self, 'emergency_glossary_compliance_mode_var', 'characters')),
             'EMERGENCY_GLOSSARY_COMPLIANCE_CUSTOM_TYPES': json.dumps(getattr(self, 'emergency_glossary_compliance_custom_types_var', [])),
             'COMPRESSION_FACTOR': str(self.compression_factor_var),

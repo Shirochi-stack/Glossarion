@@ -7914,6 +7914,9 @@ def clean_ai_artifacts(text, remove_artifacts=True):
 def find_glossary_file(output_dir):
     """Return path to glossary file preferring CSV/MD/TXT over JSON, or None if not found"""
     ext_priority = [".csv", ".md", ".txt", ".json"]
+    auto_mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if auto_mode in ("no_glossary", "noglossary"):
+        return None
 
     def _usable_glossary_file(path):
         if not path:
@@ -7975,7 +7978,6 @@ def find_glossary_file(output_dir):
         return [item[3] for item in direct] + [item[2] for item in fallback]
 
     shared_glossary_dir = _single_pass_shared_glossary_dir(output_dir)
-    auto_mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower()
     output_override_active = bool((os.getenv("OUTPUT_DIRECTORY") or os.getenv("OUTPUT_DIR") or "").strip())
     prefer_shared = (
         auto_mode in ("balanced", "full", "single_pass")
@@ -8497,6 +8499,16 @@ def apply_emergency_glossary_compliance(content, output_dir):
     Returns the modified content (unchanged if feature is disabled or no glossary found).
     """
     if os.getenv("EMERGENCY_GLOSSARY_COMPLIANCE", "0") != "1":
+        return content
+
+    auto_mode = (os.getenv("AUTO_GLOSSARY_MODE") or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if auto_mode in ("no_glossary", "noglossary"):
+        try:
+            if not getattr(apply_emergency_glossary_compliance, "_logged_no_glossary_skip", False):
+                apply_emergency_glossary_compliance._logged_no_glossary_skip = True
+                print("🔄 Emergency Glossary Compliance: skipped because Glossary Mode is No Glossary")
+        except Exception:
+            pass
         return content
     
     mode = os.getenv("EMERGENCY_GLOSSARY_COMPLIANCE_MODE", "characters").lower()

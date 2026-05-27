@@ -438,8 +438,7 @@ def setup_other_settings_methods(gui_instance):
         '_create_context_management_section', '_create_response_handling_section',
         '_create_prompt_management_section', '_create_processing_options_section',
         '_create_image_translation_section', '_create_anti_duplicate_section',
-        '_create_custom_api_endpoints_section', '_create_nim_settings_section',
-        '_create_debug_controls_section',
+        '_create_custom_api_endpoints_section', '_create_debug_controls_section',
         '_create_output_settings_section', '_create_danger_zone_section',
         # Helper methods
         '_create_multi_key_row', '_create_manual_config_backup', '_manual_restore_config',
@@ -1532,7 +1531,6 @@ def open_other_settings(self, *args, show=True):
         ("image_translation", lambda: self._create_image_translation_section(container)),
         ("anti_duplicate", lambda: self._create_anti_duplicate_section(container)),
         ("custom_api_endpoints", lambda: self._create_custom_api_endpoints_section(container)),
-        ("nim_settings", lambda: self._create_nim_settings_section(container)),
         ("debug_controls", lambda: self._create_debug_controls_section(container)),
         ("output_settings", lambda: self._create_output_settings_section(container)),
         ("danger_zone", lambda: self._create_danger_zone_section(container)),
@@ -2822,7 +2820,7 @@ def _create_context_management_section(self, parent):
 
 def _create_response_handling_section(self, parent):
     """Create response handling section with AI Hunter additions (PySide6)"""
-    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox, QLineEdit, QPushButton, QWidget, QRadioButton, QButtonGroup
+    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox, QLineEdit, QPushButton, QWidget, QRadioButton, QButtonGroup, QSpinBox
     from PySide6.QtCore import Qt
     
     section_box = QGroupBox("Response Handling & Retry Logic")
@@ -3424,6 +3422,92 @@ def _create_response_handling_section(self, parent):
     # Initialize enabled state for Anthropic controls
     self.toggle_anthropic_thinking_controls()
 
+    # NIM/AuthND runtime settings
+    nim_title = QLabel("NIM / AuthND Settings")
+    nim_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(nim_title)
+
+    authnd_title = QLabel("AuthND Token Helpers")
+    authnd_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
+    authnd_title.setContentsMargins(20, 0, 0, 0)
+    section_v.addWidget(authnd_title)
+
+    authnd_desc = QLabel(
+        "Controls the browser token flow used by authnd/. Defaults are 4 token flows and 8 helper subprocesses."
+    )
+    authnd_desc.setWordWrap(True)
+    authnd_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    authnd_desc.setContentsMargins(20, 0, 0, 4)
+    section_v.addWidget(authnd_desc)
+
+    def _authnd_int_setting(config_key, env_key, default):
+        try:
+            value = self.config.get(config_key, os.environ.get(env_key, default))
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return default
+
+    def _add_authnd_spin_row(label_text, attr_name, spin_attr, config_key, env_key, default, maximum, tooltip):
+        current_value = _authnd_int_setting(config_key, env_key, default)
+        setattr(self, attr_name, current_value)
+        self.config[config_key] = current_value
+        os.environ[env_key] = str(current_value)
+
+        row = QWidget()
+        row_h = QHBoxLayout(row)
+        row_h.setContentsMargins(40, 2, 0, 2)
+        row_h.setSpacing(8)
+
+        label = QLabel(label_text)
+        label.setToolTip(tooltip)
+        row_h.addWidget(label)
+
+        spin = QSpinBox()
+        spin.setRange(1, maximum)
+        spin.setValue(current_value)
+        spin.setFixedWidth(80)
+        spin.setToolTip(tooltip)
+        try:
+            self._disable_spinbox_mousewheel(spin)
+        except Exception:
+            pass
+
+        def _on_authnd_spin_changed(value):
+            try:
+                value = max(1, int(value))
+                setattr(self, attr_name, value)
+                self.config[config_key] = value
+                os.environ[env_key] = str(value)
+            except Exception:
+                pass
+
+        spin.valueChanged.connect(_on_authnd_spin_changed)
+        setattr(self, spin_attr, spin)
+
+        row_h.addWidget(spin)
+        row_h.addStretch()
+        section_v.addWidget(row)
+
+    _add_authnd_spin_row(
+        "Token concurrency:",
+        "authnd_token_concurrency_var",
+        "authnd_token_concurrency_spin",
+        "authnd_token_concurrency",
+        "AUTHND_TOKEN_CONCURRENCY",
+        4,
+        64,
+        "Maximum simultaneous AuthND browser token mint flows.",
+    )
+    _add_authnd_spin_row(
+        "Token subprocess limit:",
+        "authnd_token_subprocess_concurrency_var",
+        "authnd_token_subprocess_concurrency_spin",
+        "authnd_token_subprocess_concurrency",
+        "AUTHND_TOKEN_SUBPROCESS_CONCURRENCY",
+        8,
+        128,
+        "Maximum helper child processes AuthND may launch for token minting.",
+    )
 
 
     # Parallel Extraction
@@ -11721,113 +11805,6 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     self.toggle_custom_endpoint_ui()
     self.toggle_gemini_endpoint()
     self.toggle_anthropic_endpoint()
-
-def _create_nim_settings_section(self, parent_frame):
-    """Create NIM/AuthND runtime settings."""
-    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QWidget, QSpinBox
-    from PySide6.QtWidgets import QGridLayout
-
-    def _int_setting(config_key, env_key, default):
-        try:
-            value = self.config.get(config_key, os.environ.get(env_key, default))
-            return max(1, int(value))
-        except (TypeError, ValueError):
-            return default
-
-    section_box = QGroupBox("NIM / AuthND Settings")
-    section_v = QVBoxLayout(section_box)
-    section_v.setContentsMargins(8, 8, 8, 8)
-    section_v.setSpacing(6)
-
-    authnd_title = QLabel("AuthND Token Helpers")
-    authnd_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
-    section_v.addWidget(authnd_title)
-
-    desc_label = QLabel(
-        "Controls the browser token flow used by authnd/. Defaults are 4 token flows and 8 helper subprocesses."
-    )
-    desc_label.setWordWrap(True)
-    desc_label.setStyleSheet("color: gray; font-size: 9pt;")
-    section_v.addWidget(desc_label)
-
-    def _add_spin_row(label_text, attr_name, spin_attr, config_key, env_key, default, maximum, tooltip):
-        current_value = _int_setting(config_key, env_key, default)
-        setattr(self, attr_name, current_value)
-        self.config[config_key] = current_value
-        os.environ[env_key] = str(current_value)
-
-        row = QWidget()
-        row_h = QHBoxLayout(row)
-        row_h.setContentsMargins(20, 2, 0, 2)
-        row_h.setSpacing(8)
-
-        label = QLabel(label_text)
-        label.setToolTip(tooltip)
-        row_h.addWidget(label)
-
-        spin = QSpinBox()
-        spin.setRange(1, maximum)
-        spin.setValue(current_value)
-        spin.setFixedWidth(80)
-        spin.setToolTip(tooltip)
-        try:
-            self._disable_spinbox_mousewheel(spin)
-        except Exception:
-            pass
-
-        def _on_changed(value):
-            try:
-                value = max(1, int(value))
-                setattr(self, attr_name, value)
-                self.config[config_key] = value
-                os.environ[env_key] = str(value)
-            except Exception:
-                pass
-
-        spin.valueChanged.connect(_on_changed)
-        setattr(self, spin_attr, spin)
-
-        row_h.addWidget(spin)
-        row_h.addStretch()
-        section_v.addWidget(row)
-
-    _add_spin_row(
-        "Token concurrency:",
-        "authnd_token_concurrency_var",
-        "authnd_token_concurrency_spin",
-        "authnd_token_concurrency",
-        "AUTHND_TOKEN_CONCURRENCY",
-        4,
-        64,
-        "Maximum simultaneous AuthND browser token mint flows.",
-    )
-    _add_spin_row(
-        "Token subprocess limit:",
-        "authnd_token_subprocess_concurrency_var",
-        "authnd_token_subprocess_concurrency_spin",
-        "authnd_token_subprocess_concurrency",
-        "AUTHND_TOKEN_SUBPROCESS_CONCURRENCY",
-        8,
-        128,
-        "Maximum helper child processes AuthND may launch for token minting.",
-    )
-
-    try:
-        grid = parent_frame.layout()
-        if isinstance(grid, QGridLayout):
-            row = grid.rowCount()
-            grid.addWidget(section_box, row, 0, 1, 2)
-            return
-    except Exception:
-        pass
-
-    try:
-        if hasattr(parent_frame, 'layout') and parent_frame.layout():
-            parent_frame.layout().addWidget(section_box)
-        else:
-            section_box.setParent(parent_frame)
-    except Exception:
-        section_box.setParent(parent_frame)
 
 def _check_azure_endpoint(self, *args):
     """Check if endpoint is Azure and update UI (Qt version)"""
