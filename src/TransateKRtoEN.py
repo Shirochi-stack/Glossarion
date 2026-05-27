@@ -16353,7 +16353,10 @@ def main(log_callback=None, stop_callback=None):
     chapter_splitter = ChapterSplitter(model_name=config.MODEL)
     chunk_context_manager = ChunkContextManager()
     progress_manager = ProgressManager(payloads_dir)
-    if not is_pdf_file and progress_manager.prog.pop("pdf_ocr", None) is not None:
+    should_keep_pdf_ocr_progress = is_pdf_file and config.OUTPUT_MODE == "vision"
+    if not should_keep_pdf_ocr_progress:
+        _clear_vision_ocr_source_env()
+    if not should_keep_pdf_ocr_progress and progress_manager.prog.pop("pdf_ocr", None) is not None:
         progress_manager.save()
     
     # Prepare progress callback for chapter extraction

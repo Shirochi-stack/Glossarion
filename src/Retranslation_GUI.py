@@ -5830,6 +5830,17 @@ class RetranslationMixin:
         try:
             prog = data.get('prog') or {}
             pdf_ocr = prog.get('pdf_ocr')
+            progress_output_mode = str(prog.get('output_mode') or data.get('output_mode') or '').lower().strip()
+            ui_output_mode = ""
+            try:
+                if hasattr(self, '_get_output_mode'):
+                    ui_output_mode = str(self._get_output_mode() or '').lower().strip()
+            except Exception:
+                ui_output_mode = ""
+            if ui_output_mode and ui_output_mode != 'vision':
+                return
+            if progress_output_mode and progress_output_mode != 'vision':
+                return
             current_file = str(data.get('file_path') or '')
             if current_file and not current_file.lower().endswith('.pdf'):
                 return
