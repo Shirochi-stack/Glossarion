@@ -230,6 +230,19 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(value).strip().lower() not in ("0", "false", "no", "off")
 
 
+def _captcha_token_failure_hint(error: Any) -> str:
+    text = str(error or "").lower()
+    if not any(marker in text for marker in ("rate-limited", "rate limited", "rate_limit", "too many", "429")):
+        return ""
+    token_limit = _env_positive_int(TOKEN_CONCURRENCY_ENV, DEFAULT_TOKEN_CONCURRENCY_LIMIT)
+    subprocess_limit = _env_positive_int(TOKEN_SUBPROCESS_CONCURRENCY_ENV, DEFAULT_TOKEN_SUBPROCESS_CONCURRENCY_LIMIT)
+    return (
+        " hCaptcha is rate-limiting token creation. Reduce Other Settings > "
+        f"NIM/AuthND Token Helpers > Token concurrency (currently {token_limit}; try 1-2). "
+        f"Keep Token subprocess limit modest too (currently {subprocess_limit}), then retry after a short cooldown."
+    )
+
+
 def _build_page_model_slug(model_id: str) -> str:
     """Return the NVIDIA Build page slug for a model id.
 
@@ -1687,9 +1700,11 @@ def send_chat_completion(
         try:
             captcha_token = _get_captcha_token_for_request(page_url, token_timeout, log_fn=log_fn)
         except RuntimeError as exc:
+            error_detail = _short_error(exc)
             _log(
                 log_fn,
-                f"⚠️ AuthND captcha token flow failed (attempt {attempt + 1}/2): {_short_error(exc)}",
+                f"⚠️ AuthND captcha token flow failed (attempt {attempt + 1}/2): "
+                f"{error_detail}{_captcha_token_failure_hint(exc)}",
             )
             raise
         if _is_cancelled():

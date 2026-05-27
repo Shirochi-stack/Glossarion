@@ -149,6 +149,9 @@ which defaults to `8`. Because the token-flow default is lower, normal
 subprocess mode uses at most 4 helpers at once unless you raise the token
 concurrency setting.
 
+In the desktop app, change these under **Other Setting > Response Handling &
+Retry Logic > NIM / AuthND Token Helpers**.
+
 ## Debugging
 
 Use `--debug` for one run:

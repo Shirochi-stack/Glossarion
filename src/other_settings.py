@@ -3423,21 +3423,14 @@ def _create_response_handling_section(self, parent):
     self.toggle_anthropic_thinking_controls()
 
     # NIM/AuthND runtime settings
-    nim_title = QLabel("NIM / AuthND Settings")
+    nim_title = QLabel("NIM / AuthND Token Helpers")
     nim_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
     section_v.addWidget(nim_title)
 
-    authnd_title = QLabel("AuthND Token Helpers")
-    authnd_title.setStyleSheet("font-weight: bold; font-size: 10pt;")
-    authnd_title.setContentsMargins(20, 0, 0, 0)
-    section_v.addWidget(authnd_title)
-
-    authnd_desc = QLabel(
-        "Controls the browser token flow used by authnd/. Defaults are 4 token flows and 8 helper subprocesses."
-    )
+    authnd_desc = QLabel("Controls the browser token flow used by authnd/.")
     authnd_desc.setWordWrap(True)
     authnd_desc.setStyleSheet("color: gray; font-size: 9pt;")
-    authnd_desc.setContentsMargins(20, 0, 0, 4)
+    authnd_desc.setContentsMargins(12, 0, 0, 4)
     section_v.addWidget(authnd_desc)
 
     def _authnd_int_setting(config_key, env_key, default):
@@ -3447,20 +3440,20 @@ def _create_response_handling_section(self, parent):
         except (TypeError, ValueError):
             return default
 
-    def _add_authnd_spin_row(label_text, attr_name, spin_attr, config_key, env_key, default, maximum, tooltip):
+    def _make_authnd_spin_control(label_text, attr_name, spin_attr, config_key, env_key, default, maximum, tooltip):
         current_value = _authnd_int_setting(config_key, env_key, default)
         setattr(self, attr_name, current_value)
         self.config[config_key] = current_value
         os.environ[env_key] = str(current_value)
 
-        row = QWidget()
-        row_h = QHBoxLayout(row)
-        row_h.setContentsMargins(40, 2, 0, 2)
-        row_h.setSpacing(8)
+        control = QWidget()
+        control_h = QHBoxLayout(control)
+        control_h.setContentsMargins(0, 0, 0, 0)
+        control_h.setSpacing(8)
 
         label = QLabel(label_text)
         label.setToolTip(tooltip)
-        row_h.addWidget(label)
+        control_h.addWidget(label)
 
         spin = QSpinBox()
         spin.setRange(1, maximum)
@@ -3484,11 +3477,14 @@ def _create_response_handling_section(self, parent):
         spin.valueChanged.connect(_on_authnd_spin_changed)
         setattr(self, spin_attr, spin)
 
-        row_h.addWidget(spin)
-        row_h.addStretch()
-        section_v.addWidget(row)
+        control_h.addWidget(spin)
+        return control
 
-    _add_authnd_spin_row(
+    authnd_limits_row = QWidget()
+    authnd_limits_h = QHBoxLayout(authnd_limits_row)
+    authnd_limits_h.setContentsMargins(16, 2, 0, 8)
+    authnd_limits_h.setSpacing(18)
+    authnd_limits_h.addWidget(_make_authnd_spin_control(
         "Token concurrency:",
         "authnd_token_concurrency_var",
         "authnd_token_concurrency_spin",
@@ -3497,8 +3493,8 @@ def _create_response_handling_section(self, parent):
         4,
         64,
         "Maximum simultaneous AuthND browser token mint flows.",
-    )
-    _add_authnd_spin_row(
+    ))
+    authnd_limits_h.addWidget(_make_authnd_spin_control(
         "Token subprocess limit:",
         "authnd_token_subprocess_concurrency_var",
         "authnd_token_subprocess_concurrency_spin",
@@ -3507,7 +3503,9 @@ def _create_response_handling_section(self, parent):
         8,
         128,
         "Maximum helper child processes AuthND may launch for token minting.",
-    )
+    ))
+    authnd_limits_h.addStretch()
+    section_v.addWidget(authnd_limits_row)
 
 
     # Parallel Extraction
