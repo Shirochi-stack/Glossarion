@@ -7036,7 +7036,7 @@ def process_html_file_batch(args):
         check_missing_imgs = qa_settings.get('check_missing_images', True)
         
         # DEBUG: Show the condition check
-        print(f"[DEBUG] File {filename}: text_mode={text_file_mode}, check_imgs={check_missing_imgs}, is_html={filename.lower().endswith(('.html', '.xhtml', '.htm'))}, has_img_info={bool(original_image_info)}")
+        # print(f"[DEBUG] File {filename}: text_mode={text_file_mode}, check_imgs={check_missing_imgs}, is_html={filename.lower().endswith(('.html', '.xhtml', '.htm'))}, has_img_info={bool(original_image_info)}")
         
         # Allow image checking for HTML files even in text_file_mode if we have original_image_info
         # This handles cases where PDF sources generate HTML output
@@ -7072,9 +7072,10 @@ def process_html_file_batch(args):
                     
                     if matched_key:
                         has_missing_imgs, img_issues = detect_missing_images(translated_html, matched_key, original_image_info)
-                        print(f"[IMAGE DEBUG] Matched {filename} to original chunk '{matched_key}'")
+                        # print(f"[IMAGE DEBUG] Matched {filename} to original chunk '{matched_key}'")
                     else:
-                        print(f"[IMAGE DEBUG] No match found for {filename} in word_count folder")
+                        # print(f"[IMAGE DEBUG] No match found for {filename} in word_count folder")
+                        pass
                 else:
                     # EPUB mode: match by spine index
                     search_basename = os.path.splitext(search_filename)[0]  # Remove extension
@@ -7086,19 +7087,20 @@ def process_html_file_batch(args):
                         if orig_basename == search_basename:
                             has_missing_imgs, img_issues = detect_missing_images(translated_html, spine_idx, original_image_info)
                             matched_key = spine_idx
-                            print(f"[IMAGE DEBUG] Matched {filename} to spine file '{orig_filename}' at spine_idx={spine_idx}")
+                            # print(f"[IMAGE DEBUG] Matched {filename} to spine file '{orig_filename}' at spine_idx={spine_idx}")
                             break
                     else:
-                        print(f"[IMAGE DEBUG] No exact match found for {filename} (searched for basename: '{search_basename}')")
+                        # print(f"[IMAGE DEBUG] No exact match found for {filename} (searched for basename: '{search_basename}')")
+                        pass
                 
                 if matched_key:
-                    print(f"[IMAGE DEBUG] Checked {filename}: found_match={has_missing_imgs}")
+                    # print(f"[IMAGE DEBUG] Checked {filename}: found_match={has_missing_imgs}")
                     if has_missing_imgs:
                         orig_info = original_image_info.get(matched_key, {})
-                        print(f"[IMAGE DEBUG]   Original has {orig_info.get('image_count', 0)} images")
+                        # print(f"[IMAGE DEBUG]   Original has {orig_info.get('image_count', 0)} images")
                 
                 if has_missing_imgs:
-                    print(f"[IMAGE DEBUG] Found image issues! Issues: {img_issues}")
+                    # print(f"[IMAGE DEBUG] Found image issues! Issues: {img_issues}")
                     # Add to translation artifacts
                     for img_issue in img_issues:
                         issue_type = img_issue.get('type', 'missing_images')
@@ -7120,12 +7122,14 @@ def process_html_file_batch(args):
                         else:
                             issues.append(f"missing_images_{issue_count}_lost_({trans_count}/{orig_count})")
                 else:
-                    print(f"[IMAGE DEBUG] No missing images detected for chapter {chapter_num}")
+                    # print(f"[IMAGE DEBUG] No missing images detected for chapter {chapter_num}")
+                    pass
             except Exception as e:
                 # Print exception for debugging
-                print(f"[IMAGE DEBUG] Exception during image check: {e}")
-                import traceback
-                print(traceback.format_exc())
+                # print(f"[IMAGE DEBUG] Exception during image check: {e}")
+                # import traceback
+                # print(traceback.format_exc())
+                pass
         
         # Check for punctuation mismatches (if enabled)
         check_punctuation = qa_settings.get('check_punctuation_mismatch', False)
