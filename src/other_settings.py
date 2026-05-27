@@ -2820,8 +2820,9 @@ def _create_context_management_section(self, parent):
 
 def _create_response_handling_section(self, parent):
     """Create response handling section with AI Hunter additions (PySide6)"""
-    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox, QLineEdit, QPushButton, QWidget, QRadioButton, QButtonGroup, QSpinBox
+    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox, QLineEdit, QPushButton, QWidget, QRadioButton, QButtonGroup, QDoubleSpinBox
     from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QPalette
     
     section_box = QGroupBox("Response Handling & Retry Logic")
     # No max width - let it expand in fullscreen
@@ -3455,22 +3456,50 @@ def _create_response_handling_section(self, parent):
         label.setToolTip(tooltip)
         control_h.addWidget(label)
 
-        spin = QSpinBox()
+        spin = QDoubleSpinBox()
         spin.setRange(1, maximum)
+        spin.setSingleStep(1)
+        spin.setDecimals(0)
         spin.setValue(current_value)
-        spin.setFixedWidth(80)
+        spin.setFixedSize(72, 26)
+        spin.setFocusPolicy(Qt.StrongFocus)
+        value_alignment = Qt.AlignHCenter | Qt.AlignVCenter
+        spin.setAlignment(value_alignment)
+        spin.lineEdit().setAlignment(value_alignment)
+        spin.lineEdit().setTextMargins(0, 0, 0, 1)
         spin.setToolTip(tooltip)
         try:
             self._disable_spinbox_mousewheel(spin)
         except Exception:
             pass
 
+        def _set_authnd_spin_text_color(color_hex):
+            try:
+                color = QColor(color_hex)
+                for widget in (spin, spin.lineEdit()):
+                    palette = widget.palette()
+                    for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive):
+                        palette.setColor(group, QPalette.ColorRole.Text, color)
+                        palette.setColor(group, QPalette.ColorRole.WindowText, color)
+                        palette.setColor(group, QPalette.ColorRole.ButtonText, color)
+                        palette.setColor(group, QPalette.ColorRole.HighlightedText, color)
+                    widget.setPalette(palette)
+                selection_bg = "#2d2d2d"
+                spin.setStyleSheet(
+                    f"QDoubleSpinBox {{ color: {color_hex}; selection-color: {color_hex}; "
+                    f"selection-background-color: {selection_bg}; }}"
+                )
+                spin.lineEdit().setStyleSheet(
+                    f"QLineEdit {{ color: {color_hex}; selection-color: {color_hex}; "
+                    f"selection-background-color: {selection_bg}; }}"
+                )
+            except Exception:
+                pass
+
         def _sync_authnd_spin_warning(value):
             try:
                 is_warning = int(value) > warning_threshold
-                spin.setStyleSheet(
-                    "QSpinBox { color: #ff3b30; }" if is_warning else "QSpinBox { color: white; }"
-                )
+                _set_authnd_spin_text_color("#ff4d4d" if is_warning else "#ffffff")
             except Exception:
                 pass
 
