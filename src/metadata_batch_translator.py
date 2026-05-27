@@ -3063,7 +3063,7 @@ class MetadataTranslator:
 
             return translated
         finally:
-            executor.shutdown(wait=not force_cancelled, cancel_futures=True)
+            executor.shutdown(wait=True, cancel_futures=True)
     
     def _translate_single_field(self, field_name: str, field_value: str) -> Optional[str]:
         """Translate a single field using configured prompts"""
