@@ -5399,8 +5399,6 @@ class BatchTranslationProcessor:
                             if self.check_stop_fn():
                                 # Only log if not during graceful stop (expected interruption)
                                 graceful_stop_active = os.environ.get('GRACEFUL_STOP') == '1'
-                                if not graceful_stop_active:
-                                    print(f"🛑 Threading delay interrupted by stop flag")
                                 raise Exception("Translation stopped by user during threading delay")
                             
                             sleep_chunk = min(check_interval, sleep_time - elapsed)
@@ -6383,7 +6381,6 @@ class BatchTranslationProcessor:
                                         _cancel_chapter_due_to_stop("stop requested before all chunks were sent")
                                 else:
                                     # Immediate stop
-                                    print(f"🛑 Chunk submission delay interrupted")
                                     raise Exception("Translation stopped by user during chunk submission delay")
 
                             if chunk_abort_event.is_set():
