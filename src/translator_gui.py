@@ -3324,6 +3324,8 @@ Text to analyze:
         self.default_refinement_system_prompt = (
             "You are refining an existing English translation. Improve clarity, flow, consistency, "
             "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
+            "Retain the original meaning of the translation, while retaining the original translation style. "
+            "Convert any foreign onomatopoeia to romaji. "
             "Return only the refined HTML."
         )
         self.default_refinement_user_prompt = ""

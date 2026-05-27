@@ -590,6 +590,8 @@ class TranslationConfig:
             self.REFINEMENT_SYSTEM_PROMPT = (
                 "You are refining an existing English translation. Improve clarity, flow, consistency, "
                 "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
+                "Retain the original meaning of the translation, while retaining the original translation style. "
+                "Convert any foreign onomatopoeia to romaji. "
                 "Return only the refined HTML."
             )
         _qa_issue_prompt_default = "{QA_Issues}"
@@ -13700,7 +13702,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             qa_issues_text=qa_issues_text,
         ).strip()
         if not refine_system:
-            refine_system = "You are refining an existing English translation. Improve clarity, flow, consistency, and readability while preserving all HTML structure, tags, images, links, ids, and meaning. Return only the refined HTML."
+            refine_system = "You are refining an existing English translation. Improve clarity, flow, consistency, and readability while preserving all HTML structure, tags, images, links, ids, and meaning. Retain the original meaning of the translation, while retaining the original translation style. Convert any foreign onomatopoeia to romaji. Return only the refined HTML."
         if enhanced:
             enhanced_system = (
                 "For this request, the input is the translated chapter converted through the Enhanced "
