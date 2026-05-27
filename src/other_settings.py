@@ -3531,13 +3531,14 @@ def _create_response_handling_section(self, parent):
                 pass
 
         spin.valueChanged.connect(_on_authnd_spin_changed)
+        setattr(self, f"{spin_attr}_label", label)
         setattr(self, spin_attr, spin)
         _sync_authnd_spin_warning(current_value)
 
         control_h.addWidget(spin)
         return control
 
-    authnd_auto_enabled = bool(self.config.get('authnd_token_concurrency_auto', False))
+    authnd_auto_enabled = bool(self.config.get('authnd_token_concurrency_auto', True))
     authnd_auto_token_limit, authnd_auto_subprocess_limit, authnd_auto_cores = _authnd_auto_limits()
     setattr(self, 'authnd_token_concurrency_auto_var', authnd_auto_enabled)
     os.environ['AUTHND_TOKEN_CONCURRENCY_AUTO'] = '1' if authnd_auto_enabled else '0'
@@ -3546,7 +3547,7 @@ def _create_response_handling_section(self, parent):
     authnd_auto_h = QHBoxLayout(authnd_auto_row)
     authnd_auto_h.setContentsMargins(16, 2, 0, 0)
     authnd_auto_h.setSpacing(8)
-    authnd_auto_cb = QCheckBox("Auto token helper limits")
+    authnd_auto_cb = self._create_styled_checkbox("Auto token helper limits")
     authnd_auto_cb.setChecked(authnd_auto_enabled)
     authnd_auto_cb.setToolTip(
         "Automatically set AuthND token helper limits from CPU cores "
@@ -3605,6 +3606,12 @@ def _create_response_handling_section(self, parent):
             ):
                 if spin is not None:
                     spin.setEnabled(not enabled)
+            for label in (
+                getattr(self, 'authnd_token_concurrency_spin_label', None),
+                getattr(self, 'authnd_token_subprocess_concurrency_spin_label', None),
+            ):
+                if label is not None:
+                    label.setEnabled(not enabled)
             if enabled:
                 token_limit, subprocess_limit, cores = _authnd_auto_limits()
                 authnd_auto_hint.setText(f"{cores} CPU cores -> {token_limit}/{subprocess_limit}")

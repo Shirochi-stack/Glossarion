@@ -16871,7 +16871,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             return _bool_setting(value, default)
 
         def _authnd_effective_token_limits():
-            if _bool_config_value('authnd_token_concurrency_auto_var', 'authnd_token_concurrency_auto', False):
+            if _bool_config_value('authnd_token_concurrency_auto_var', 'authnd_token_concurrency_auto', True):
                 token_limit, subprocess_limit, _cores = _authnd_auto_token_limits()
                 return str(token_limit), str(subprocess_limit), '1'
             return (
@@ -25170,7 +25170,7 @@ Important rules:
                 ('toc_ncx_per_batch', ['toc_ncx_per_batch_var'], -1, lambda v: safe_int(v, -1)),
 
                 # NIM/AuthND runtime settings
-                ('authnd_token_concurrency_auto', ['authnd_token_concurrency_auto_checkbox', 'authnd_token_concurrency_auto_var'], False, bool),
+                ('authnd_token_concurrency_auto', ['authnd_token_concurrency_auto_checkbox', 'authnd_token_concurrency_auto_var'], True, bool),
                 ('authnd_token_concurrency', ['authnd_token_concurrency_var'], 1, lambda v: max(1, safe_int(v, 1))),
                 ('authnd_token_subprocess_concurrency', ['authnd_token_subprocess_concurrency_var'], 1, lambda v: max(1, safe_int(v, 1))),
 
@@ -25543,7 +25543,7 @@ Important rules:
             env_vars_set.append(_update_env('OPENROUTER_PREFERRED_PROVIDER', (str(self.config.get('openrouter_preferred_provider', 'Auto') or '').strip() or 'Auto')))
             env_vars_set.append(_update_env('RETAIN_SOURCE_EXTENSION', self.config.get('retain_source_extension'), is_bool=True))
             env_vars_set.append(_update_env('ENABLE_GUI_YIELD', self.config.get('enable_gui_yield'), is_bool=True))
-            authnd_auto_enabled = bool(self.config.get('authnd_token_concurrency_auto', False))
+            authnd_auto_enabled = bool(self.config.get('authnd_token_concurrency_auto', True))
             if authnd_auto_enabled:
                 authnd_token_limit, authnd_subprocess_limit, _authnd_cores = _authnd_auto_token_limits()
             else:
@@ -26009,7 +26009,7 @@ Important rules:
                 except (TypeError, ValueError):
                     return str(default)
 
-            authnd_auto_enabled = bool(self.config.get('authnd_token_concurrency_auto', False))
+            authnd_auto_enabled = bool(self.config.get('authnd_token_concurrency_auto', True))
             if authnd_auto_enabled:
                 authnd_token_limit, authnd_subprocess_limit, _authnd_cores = _authnd_auto_token_limits()
             else:
