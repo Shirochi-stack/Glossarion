@@ -132,6 +132,8 @@ python src/authnd_auth.py --model deepseek-ai/deepseek-v4-flash --prompt-file pr
 - `AUTHND_TOKEN_TIMEOUT=120`: browser captcha token timeout in seconds.
 - `AUTHND_TIMEOUT=180`: request read timeout in seconds.
 - `AUTHND_TOKEN_MODE=inline`: run the Qt token helper inline instead of subprocess.
+- `AUTHND_TOKEN_CONCURRENCY=4`: maximum simultaneous browser token flows.
+- `AUTHND_TOKEN_SUBPROCESS_CONCURRENCY=8`: maximum simultaneous token helper child processes.
 - `AUTHND_DISABLE_SOFTWARE_RASTERIZER=1`: advanced workaround to disable Chromium software rendering. Leave unset on Linux unless debugging GPU-specific issues.
 - `AUTHND_ENABLE_THINKING=1`: enable model-specific thinking where supported.
 - `AUTHND_REASONING_EFFORT`, `GPT_EFFORT`, `REASONING_EFFORT`: map to AuthND thinking enablement.
@@ -141,9 +143,11 @@ python src/authnd_auth.py --model deepseek-ai/deepseek-v4-flash --prompt-file pr
 ## Token Helper Concurrency
 
 AuthND uses subprocess token helpers by default. Browser token minting is
-hard-capped at 4 concurrent token flows, and helper subprocess launches are
-hard-capped at 8 concurrent child processes. Because the token-flow cap is
-lower, normal subprocess mode uses at most 4 helpers at once.
+limited by `AUTHND_TOKEN_CONCURRENCY`, which defaults to `4`. Helper child
+process launches are separately limited by `AUTHND_TOKEN_SUBPROCESS_CONCURRENCY`,
+which defaults to `8`. Because the token-flow default is lower, normal
+subprocess mode uses at most 4 helpers at once unless you raise the token
+concurrency setting.
 
 ## Debugging
 

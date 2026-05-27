@@ -31,8 +31,10 @@ DEFAULT_ORG_ID = "qc69jvmznzxy"
 DEFAULT_HCAPTCHA_SITEKEY = "0c6a1e45-75d7-43cc-b836-a0c9d886b8ee"
 DEFAULT_PUBLISHER = "z-ai"
 DEFAULT_TIMEOUT = 180
-TOKEN_CONCURRENCY_LIMIT = 4
-TOKEN_SUBPROCESS_CONCURRENCY_LIMIT = 8
+DEFAULT_TOKEN_CONCURRENCY_LIMIT = 4
+DEFAULT_TOKEN_SUBPROCESS_CONCURRENCY_LIMIT = 8
+TOKEN_CONCURRENCY_ENV = "AUTHND_TOKEN_CONCURRENCY"
+TOKEN_SUBPROCESS_CONCURRENCY_ENV = "AUTHND_TOKEN_SUBPROCESS_CONCURRENCY"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -45,8 +47,8 @@ _metadata_cache: Dict[str, Dict[str, str]] = {}
 _metadata_lock = threading.Lock()
 _chat_template_unsupported_models: set = set()
 _chat_template_unsupported_lock = threading.Lock()
-_captcha_mint_gate = threading.BoundedSemaphore(TOKEN_CONCURRENCY_LIMIT)
-_token_subprocess_gate = threading.BoundedSemaphore(TOKEN_SUBPROCESS_CONCURRENCY_LIMIT)
+_configured_gate_lock = threading.Lock()
+_configured_gates: Dict[str, Tuple[threading.BoundedSemaphore, int]] = {}
 _active_helper_processes: set = set()
 _active_helper_lock = threading.Lock()
 _active_sessions: set = set()
@@ -204,6 +206,21 @@ def _env_int(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    return max(1, _env_int(name, default))
+
+
+def _get_configured_gate(env_name: str, default_limit: int) -> threading.BoundedSemaphore:
+    limit = _env_positive_int(env_name, default_limit)
+    with _configured_gate_lock:
+        current = _configured_gates.get(env_name)
+        if current and current[1] == limit:
+            return current[0]
+        gate = threading.BoundedSemaphore(limit)
+        _configured_gates[env_name] = (gate, limit)
+        return gate
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -709,7 +726,11 @@ def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
     if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
         creationflags = subprocess.CREATE_NO_WINDOW
 
-    _acquire_gate(_token_subprocess_gate)
+    subprocess_gate = _get_configured_gate(
+        TOKEN_SUBPROCESS_CONCURRENCY_ENV,
+        DEFAULT_TOKEN_SUBPROCESS_CONCURRENCY_LIMIT,
+    )
+    _acquire_gate(subprocess_gate)
     proc = None
     deadline = time.time() + helper_timeout + 20
     stdout = ""
@@ -741,7 +762,7 @@ def _mint_captcha_token_subprocess(page_url: str, timeout: int) -> str:
         if proc is not None:
             with _active_helper_lock:
                 _active_helper_processes.discard(proc)
-        _token_subprocess_gate.release()
+        subprocess_gate.release()
     if _is_cancelled() and proc.returncode:
         raise RuntimeError("stream cancelled")
     if proc.returncode != 0:
@@ -950,15 +971,19 @@ def _get_captcha_token_for_request(
     timeout: int = 90,
     log_fn: Optional[Callable[[str], None]] = None,
 ) -> str:
+    captcha_gate = _get_configured_gate(
+        TOKEN_CONCURRENCY_ENV,
+        DEFAULT_TOKEN_CONCURRENCY_LIMIT,
+    )
     _acquire_gate(
-        _captcha_mint_gate,
+        captcha_gate,
         log_fn=log_fn,
         wait_message="⏳ AuthND: waiting for browser token slot",
     )
     try:
         return get_captcha_token(page_url, timeout)
     finally:
-        _captcha_mint_gate.release()
+        captcha_gate.release()
 
 
 def _extract_content_from_obj(obj: Any) -> str:

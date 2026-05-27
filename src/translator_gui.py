@@ -16713,6 +16713,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 return value.strip().lower() in ('1', 'true', 'yes', 'on')
             return bool(value)
 
+        def _positive_config_int(attr_name, config_key, default):
+            try:
+                value = getattr(self, attr_name, self.config.get(config_key, default))
+                return str(max(1, int(value or default)))
+            except (TypeError, ValueError):
+                return str(default)
+
         return {
             'EPUB_PATH': epub_path,
             'MODEL': self.model_var,
@@ -16818,6 +16825,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ALLOW_BATCH_STREAM_LOGS': '1' if bool(getattr(self, 'allow_batch_stream_logs_var', self.config.get('allow_batch_stream_logs', False))) else '0',
             'ALLOW_AUTHGPT_BATCH_STREAM_LOGS': '1' if bool(getattr(self, 'allow_authgpt_batch_stream_logs_var', self.config.get('allow_authgpt_batch_stream_logs', False))) else '0',
             'STREAM_THINKING_LOGS': '1' if bool(getattr(self, 'stream_thinking_logs_var', self.config.get('stream_thinking_logs', False))) else '0',
+            'AUTHND_TOKEN_CONCURRENCY': _positive_config_int('authnd_token_concurrency_var', 'authnd_token_concurrency', 4),
+            'AUTHND_TOKEN_SUBPROCESS_CONCURRENCY': _positive_config_int('authnd_token_subprocess_concurrency_var', 'authnd_token_subprocess_concurrency', 8),
             'VISION_OCR_PROMPT': str(getattr(self, 'vision_ocr_prompt', self.config.get('vision_ocr_prompt', ''))),
             'VISION_OCR_USER_PROMPT': str(getattr(self, 'vision_ocr_user_prompt', self.config.get('vision_ocr_user_prompt', ''))),
             'VISION_OCR_COMBINED_CONTEXT_PROMPT': str(getattr(self, 'vision_ocr_combined_context_prompt', self.config.get('vision_ocr_combined_context_prompt', ''))),
@@ -24989,6 +24998,10 @@ Important rules:
                 ('headers_per_batch', ['headers_per_batch_var'], -1, lambda v: safe_int(v, -1)),
                 ('toc_ncx_per_batch', ['toc_ncx_per_batch_var'], -1, lambda v: safe_int(v, -1)),
 
+                # NIM/AuthND runtime settings
+                ('authnd_token_concurrency', ['authnd_token_concurrency_var'], 4, lambda v: max(1, safe_int(v, 4))),
+                ('authnd_token_subprocess_concurrency', ['authnd_token_subprocess_concurrency_var'], 8, lambda v: max(1, safe_int(v, 8))),
+
                 # Gemini/GPT/DeepSeek Thinking
                 ('enable_gemini_thinking', ['enable_gemini_thinking_var'], False, bool),
                 ('thinking_budget', ['thinking_budget_var'], 0, lambda v: int(v) if str(v).lstrip('-').isdigit() else 0),
@@ -25358,6 +25371,8 @@ Important rules:
             env_vars_set.append(_update_env('OPENROUTER_PREFERRED_PROVIDER', (str(self.config.get('openrouter_preferred_provider', 'Auto') or '').strip() or 'Auto')))
             env_vars_set.append(_update_env('RETAIN_SOURCE_EXTENSION', self.config.get('retain_source_extension'), is_bool=True))
             env_vars_set.append(_update_env('ENABLE_GUI_YIELD', self.config.get('enable_gui_yield'), is_bool=True))
+            env_vars_set.append(_update_env('AUTHND_TOKEN_CONCURRENCY', max(1, safe_int(self.config.get('authnd_token_concurrency', 4), 4))))
+            env_vars_set.append(_update_env('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', max(1, safe_int(self.config.get('authnd_token_subprocess_concurrency', 8), 8))))
 
             # Extraction workers env var
             new_workers = str(self.config['extraction_workers']) if self.config['enable_parallel_extraction'] else "1"
@@ -25809,6 +25824,12 @@ Important rules:
             pass
         
         try:
+            def _positive_int_config(key, default):
+                try:
+                    return str(max(1, int(self.config.get(key, default) or default)))
+                except (TypeError, ValueError):
+                    return str(default)
+
             # Initialize glossary-related environment variables
             env_mappings = [
                 ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', getattr(self, 'manual_glossary_prompt', ''))),
@@ -25847,6 +25868,8 @@ Important rules:
                 ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers', 1)) if self.config.get('enable_parallel_extraction', False) else '1'),
                 ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield', True) else '0'),
                 ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension', False) else '0'),
+                ('AUTHND_TOKEN_CONCURRENCY', _positive_int_config('authnd_token_concurrency', 4)),
+                ('AUTHND_TOKEN_SUBPROCESS_CONCURRENCY', _positive_int_config('authnd_token_subprocess_concurrency', 8)),
             ]
             
             # Add QA Scanner environment variables
