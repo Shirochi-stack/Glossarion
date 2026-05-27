@@ -3440,7 +3440,7 @@ def _create_response_handling_section(self, parent):
         except (TypeError, ValueError):
             return default
 
-    def _make_authnd_spin_control(label_text, attr_name, spin_attr, config_key, env_key, default, maximum, tooltip):
+    def _make_authnd_spin_control(label_text, attr_name, spin_attr, config_key, env_key, default, maximum, warning_threshold, tooltip):
         current_value = _authnd_int_setting(config_key, env_key, default)
         setattr(self, attr_name, current_value)
         self.config[config_key] = current_value
@@ -3465,17 +3465,29 @@ def _create_response_handling_section(self, parent):
         except Exception:
             pass
 
+        def _sync_authnd_spin_warning(value):
+            try:
+                spin.lineEdit().setStyleSheet(
+                    "color: #ff4d4f; font-weight: bold;" if int(value) > warning_threshold else ""
+                )
+            except Exception:
+                spin.setStyleSheet(
+                    "QSpinBox { color: #ff4d4f; font-weight: bold; }" if int(value) > warning_threshold else ""
+                )
+
         def _on_authnd_spin_changed(value):
             try:
                 value = max(1, int(value))
                 setattr(self, attr_name, value)
                 self.config[config_key] = value
                 os.environ[env_key] = str(value)
+                _sync_authnd_spin_warning(value)
             except Exception:
                 pass
 
         spin.valueChanged.connect(_on_authnd_spin_changed)
         setattr(self, spin_attr, spin)
+        _sync_authnd_spin_warning(current_value)
 
         control_h.addWidget(spin)
         return control
@@ -3492,6 +3504,7 @@ def _create_response_handling_section(self, parent):
         "AUTHND_TOKEN_CONCURRENCY",
         4,
         64,
+        7,
         "Maximum simultaneous AuthND browser token mint flows.",
     ))
     authnd_limits_h.addWidget(_make_authnd_spin_control(
@@ -3502,6 +3515,7 @@ def _create_response_handling_section(self, parent):
         "AUTHND_TOKEN_SUBPROCESS_CONCURRENCY",
         8,
         128,
+        14,
         "Maximum helper child processes AuthND may launch for token minting.",
     ))
     authnd_limits_h.addStretch()
