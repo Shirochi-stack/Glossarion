@@ -8496,7 +8496,7 @@ Recent translations to summarize:
             "After the normal translation finishes, run a second pass using refinement output mode.<br><br>"
             "<b>Full</b>: refine translated output using all currently translated chapters.<br>"
             "<b>Failed</b>: run a QA quick scan first, then only refine chapters still marked as QA failed.<br>"
-            "<b>Partial</b>: like Failed, but only targets chapters with foreign-character QA issues and sends only the affected HTML tag entries for refinement."
+            "<b>Partial</b>: like Failed, but only targets chapters with foreign-character QA issues and sends only the affected tag contents for refinement, restoring the original tag wrappers during injection."
             "</p></qt>"
         )
         self.multipass_checkbox.setChecked(bool(self.multipass_mode_var))

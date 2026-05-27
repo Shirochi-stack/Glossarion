@@ -12972,6 +12972,7 @@ _PARTIAL_REFINEMENT_SKIP_TAGS = {
     "html", "head", "body", "script", "style", "meta", "link", "title", "svg",
     "math", "noscript", "template",
 }
+_PARTIAL_REFINEMENT_GROUP_MARKER_PREFIX = "GLOSSARION_PARTIAL_TARGET"
 
 try:
     from html_tag_entities import VALID_ENTITY_TAGS as _PARTIAL_VALID_HTML_TAGS
@@ -13158,24 +13159,82 @@ def _strip_refinement_code_fence(text):
     return cleaned.strip()
 
 
-def _replacement_nodes_from_refined_fragment(refined_fragment):
-    fragment_soup = BeautifulSoup(_strip_refinement_code_fence(refined_fragment), "html.parser")
+def _partial_refinement_group_marker(index, side):
+    return f"[[{_PARTIAL_REFINEMENT_GROUP_MARKER_PREFIX}_{index}_{side}]]"
+
+
+def _partial_refinement_tag_inner_html(tag):
+    return "".join(str(child) for child in getattr(tag, "contents", []))
+
+
+def _partial_refinement_unpad_marker_content(text):
+    value = str(text or "")
+    for ending in ("\r\n", "\n", "\r"):
+        if value.startswith(ending):
+            value = value[len(ending):]
+            break
+    for ending in ("\r\n", "\n", "\r"):
+        if value.endswith(ending):
+            value = value[:-len(ending)]
+            break
+    return value
+
+
+def _partial_refinement_response_parts(refined_fragment, tag_count):
+    cleaned = _strip_refinement_code_fence(refined_fragment)
+    if tag_count <= 1:
+        return [cleaned]
+
+    parts = []
+    for index in range(1, tag_count + 1):
+        start_marker = re.escape(_partial_refinement_group_marker(index, "START"))
+        end_marker = re.escape(_partial_refinement_group_marker(index, "END"))
+        match = re.search(f"{start_marker}(.*?){end_marker}", cleaned, flags=re.DOTALL)
+        if not match:
+            raise RuntimeError("Partial refinement response did not preserve adjacent tag markers")
+        parts.append(_partial_refinement_unpad_marker_content(match.group(1)))
+    return parts
+
+
+def _strip_matching_partial_outer_tag(refined_inner, original_tag):
+    cleaned = _strip_refinement_code_fence(refined_inner)
+    fragment_soup = BeautifulSoup(cleaned, "html.parser")
     container = fragment_soup.body if fragment_soup.body is not None else fragment_soup
-    nodes = [
-        node.extract()
-        for node in list(container.contents)
+    non_empty_nodes = [
+        node
+        for node in container.contents
         if not (isinstance(node, NavigableString) and not str(node).strip())
     ]
-    if not any(_is_valid_partial_refinement_tag(node) for node in nodes):
-        raise RuntimeError("Partial refinement response did not include a valid HTML tag")
-    return nodes
+    if len(non_empty_nodes) == 1:
+        node = non_empty_nodes[0]
+        if getattr(node, "name", None) and _partial_refinement_tag_name(node) == _partial_refinement_tag_name(original_tag):
+            return _partial_refinement_tag_inner_html(node)
+    return cleaned
+
+
+def _replace_partial_refinement_tag_contents(tag, refined_inner):
+    inner = _strip_matching_partial_outer_tag(refined_inner, tag)
+    fragment_soup = BeautifulSoup(inner, "html.parser")
+    container = fragment_soup.body if fragment_soup.body is not None else fragment_soup
+    nodes = [node.extract() for node in list(container.contents)]
+    tag.clear()
+    for node in nodes:
+        tag.append(node)
 
 
 def _partial_refinement_target_fragment(target, document):
     if target.get("kind") == "lines":
         lines = document.get("lines", [])
         return "".join(lines[target["start"]:target["end"] + 1])
-    return "".join(str(tag) for tag in target.get("tags", []))
+    tags = target.get("tags", [])
+    if len(tags) <= 1:
+        return _partial_refinement_tag_inner_html(tags[0]) if tags else ""
+    chunks = []
+    for index, tag in enumerate(tags, start=1):
+        start_marker = _partial_refinement_group_marker(index, "START")
+        end_marker = _partial_refinement_group_marker(index, "END")
+        chunks.append(f"{start_marker}\n{_partial_refinement_tag_inner_html(tag)}\n{end_marker}")
+    return "\n\n".join(chunks)
 
 
 def _partial_refinement_target_count(targets):
@@ -13202,18 +13261,84 @@ def _apply_partial_refinement_response(document, target, refined_fragment):
         return
 
     tag_group = target.get("tags", [])
-    replacement_nodes = _replacement_nodes_from_refined_fragment(refined_fragment)
-    first_tag = tag_group[0]
-    for node in replacement_nodes:
-        first_tag.insert_before(node)
-    for tag in tag_group:
-        tag.extract()
+    response_parts = _partial_refinement_response_parts(refined_fragment, len(tag_group))
+    for tag, response_part in zip(tag_group, response_parts):
+        _replace_partial_refinement_tag_contents(tag, response_part)
 
 
 def _render_partial_refinement_document(document):
     if document.get("kind") == "lines":
         return "".join(document.get("lines", []))
     return str(document.get("soup", ""))
+
+
+def _refinement_should_use_enhanced_text(chapter, *, partial=False):
+    if partial:
+        return False
+    if isinstance(chapter, dict):
+        if chapter.get("enhanced_extraction"):
+            return True
+        extraction_mode = str(chapter.get("extraction_mode", "") or "").strip().lower()
+        if extraction_mode in ("enhanced", "html2text", "markdown"):
+            return True
+    return os.getenv("USE_HTML2TEXT", "0") == "1"
+
+
+def _enhanced_refinement_chapter_info(chapter, html_content, extractor=None):
+    info = dict(chapter or {})
+    info["enhanced_extraction"] = True
+    if "preserve_structure" not in info:
+        info["preserve_structure"] = os.getenv("ENHANCED_PRESERVE_STRUCTURE", "1") == "1"
+    if "enhanced_filtering" not in info:
+        enhanced_filtering = os.getenv("ENHANCED_FILTERING", "smart")
+        info["enhanced_filtering"] = "comprehensive" if str(enhanced_filtering).lower() == "full" else enhanced_filtering
+    if extractor is not None:
+        info["markdown_provenance"] = getattr(extractor, "last_markdown_provenance", {})
+    elif "markdown_provenance" not in info:
+        info["markdown_provenance"] = {}
+    info.setdefault("original_html", html_content)
+    return info
+
+
+def _html_to_enhanced_refinement_text(html_content, chapter):
+    enhanced_filtering = str(
+        (chapter or {}).get("enhanced_filtering")
+        or os.getenv("ENHANCED_FILTERING", "smart")
+        or "smart"
+    ).strip().lower()
+    if enhanced_filtering == "full":
+        enhanced_filtering = "comprehensive"
+    preserve_structure = (chapter or {}).get("preserve_structure")
+    if preserve_structure is None:
+        preserve_structure = os.getenv("ENHANCED_PRESERVE_STRUCTURE", "1") == "1"
+
+    from enhanced_text_extractor import EnhancedTextExtractor
+    saved_env = {
+        key: os.environ.get(key)
+        for key in ("IGNORE_HEADER", "REMOVE_DUPLICATE_H1_P")
+    }
+    try:
+        # First-pass extraction may intentionally omit headers. Refinement is
+        # operating on an already-written output file, so do not strip visible
+        # chapter content a second time while converting it to html2text form.
+        os.environ["IGNORE_HEADER"] = "0"
+        os.environ["REMOVE_DUPLICATE_H1_P"] = "0"
+        extractor = EnhancedTextExtractor(
+            filtering_mode=enhanced_filtering,
+            preserve_structure=bool(preserve_structure),
+        )
+        _display_text, refinement_text, _title = extractor.extract_chapter_content(
+            html_content,
+            extraction_mode="full",
+        )
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    enhanced_info = _enhanced_refinement_chapter_info(chapter, html_content, extractor)
+    return refinement_text, enhanced_info
 
 
 def _process_refinement_or_tts_mode(config, client, chapters, out, progress_manager, check_stop, *, multipass_failed_mode=False, multipass_partial_mode=False):
@@ -13322,13 +13447,22 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 return label
         return None
 
-    def _build_refinement_messages(html_content, *, partial=False, partial_kind="tags"):
+    def _build_refinement_messages(html_content, *, partial=False, partial_kind="tags", enhanced=False):
         refine_system = _format_refinement_prompt(
             getattr(config, "REFINEMENT_SYSTEM_PROMPT", "").strip(),
             None
         ).strip()
         if not refine_system:
             refine_system = "You are refining an existing English translation. Improve clarity, flow, consistency, and readability while preserving all HTML structure, tags, images, links, ids, and meaning. Return only the refined HTML."
+        if enhanced:
+            enhanced_system = (
+                "For this request, the input is the translated chapter converted through the Enhanced "
+                "html2text extraction path, so it may be markdown/plain text with preserved HTML snippets "
+                "such as images or ruby. Refine that markdown/plain text directly, preserve its structure "
+                "and any embedded valid HTML snippets, and return only the refined markdown/plain text. "
+                "Do not wrap it in a full HTML document."
+            )
+            refine_system = f"{refine_system}\n\n{enhanced_system}"
         if partial:
             if partial_kind == "lines":
                 partial_system = (
@@ -13339,12 +13473,14 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 )
             else:
                 partial_system = (
-                    "Partial multipass mode: the input is only one affected valid HTML tag entry, "
-                    "or adjacent affected tag entries, selected because QA found foreign/source-language "
-                    "characters. Unknown/custom angle-bracket tags inside the fragment are surrounding raw "
-                    "text, not refinement boundaries. Translate or naturalize only the leftover foreign "
-                    "characters, preserve the valid outer HTML tags and attributes, and return only the "
-                    "corrected fragment."
+                    "Partial multipass mode: the input is only the inner content from one affected valid "
+                    "HTML tag entry, or adjacent affected entries separated by Glossarion marker lines, "
+                    "selected because QA found foreign/source-language characters. The original outer valid "
+                    "HTML tag boundaries and attributes were removed and will be restored automatically. "
+                    "Unknown/custom angle-bracket text inside the content is ordinary content, not a "
+                    "refinement boundary. Translate or naturalize only the leftover foreign characters. "
+                    "Do not add the removed outer tag wrappers. If Glossarion marker lines are present, "
+                    "preserve them exactly and keep each corrected entry between its original markers."
                 )
             refine_system = f"{refine_system}\n\n{partial_system}"
 
@@ -13352,7 +13488,13 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             getattr(config, "REFINEMENT_USER_PROMPT", "").strip(),
             html_content
         )
-        if partial and partial_kind == "lines":
+        if enhanced:
+            refine_user = (
+                "Refine only this enhanced extraction markdown/plain text. "
+                "Return only the refined markdown/plain text.\n\n"
+                f"{refine_user}"
+            )
+        elif partial and partial_kind == "lines":
             refine_user = (
                 "Refine only this raw text line content. Do not add commentary. "
                 "Do not wrap it in HTML unless the original line already contains HTML.\n\n"
@@ -13360,8 +13502,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             )
         elif partial:
             refine_user = (
-                "Refine only this HTML fragment. Do not add surrounding document HTML. "
-                "Return a valid HTML fragment with the same outer tag structure.\n\n"
+                "Refine only this HTML tag inner content. The original outer tag wrapper has been removed "
+                "and will be restored automatically. Do not add the outer wrapper back. If Glossarion "
+                "marker lines are present, preserve them exactly. Do not add commentary.\n\n"
                 f"{refine_user}"
             )
 
@@ -13448,6 +13591,10 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         with open(output_path, "r", encoding="utf-8", errors="ignore") as f:
             html_content = f.read()
         content_hash = ContentProcessor.get_content_hash(html_content)
+        use_enhanced_refinement_text = (
+            mode == "refinement"
+            and _refinement_should_use_enhanced_text(chapter, partial=multipass_partial_mode)
+        )
 
         with progress_lock:
             _pre_key, pre_existing_entry = _find_progress_entry_for_output(output_file, actual_num)
@@ -13567,7 +13714,27 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         _apply_partial_refinement_response(partial_document, target, refined_fragment)
                     refined = _render_partial_refinement_document(partial_document)
                 else:
-                    messages = _build_refinement_messages(html_content, partial=False)
+                    refinement_input = html_content
+                    enhanced_chapter_info = None
+                    if use_enhanced_refinement_text:
+                        try:
+                            refinement_input, enhanced_chapter_info = _html_to_enhanced_refinement_text(
+                                html_content,
+                                chapter,
+                            )
+                            print(f"🔄 Chapter {actual_num}: using Enhanced/html2text input for refinement")
+                        except Exception as enhanced_exc:
+                            print(
+                                f"⚠️ Chapter {actual_num}: Enhanced/html2text refinement input failed; "
+                                f"falling back to HTML ({enhanced_exc})"
+                            )
+                            refinement_input = html_content
+                            enhanced_chapter_info = None
+                    messages = _build_refinement_messages(
+                        refinement_input,
+                        partial=False,
+                        enhanced=enhanced_chapter_info is not None,
+                    )
                     refined, finish_reason, _raw_obj = send_with_interrupt(
                         messages,
                         client,
@@ -13583,6 +13750,14 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     if not refined or not str(refined).strip() or finish_reason in ("content_filter", "prohibited_content", "error"):
                         raise RuntimeError(f"Refinement returned no usable HTML (finish_reason={finish_reason})")
                     refined = _strip_refinement_code_fence(refined)
+                    if enhanced_chapter_info is not None:
+                        print(f"🔄 Chapter {actual_num}: converting refined markdown back to HTML")
+                        refined = convert_enhanced_text_to_html(refined, enhanced_chapter_info)
+                        try:
+                            if getattr(config, "EMERGENCY_IMAGE_RESTORE", False):
+                                refined = ContentProcessor.emergency_restore_images(refined, html_content)
+                        except Exception:
+                            pass
                 backup_path = _backup_unrefined_file(output_path, backup_dir)
                 with open(output_path, "w", encoding="utf-8") as f:
                     f.write(refined)
