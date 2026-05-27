@@ -3327,6 +3327,15 @@ Text to analyze:
             "Return only the refined HTML."
         )
         self.default_refinement_user_prompt = ""
+        self.default_refinement_qa_issue_prompt = "QA issue(s) to address: {QA_Issues}"
+        self.default_refinement_failed_system_prompt = (
+            f"{self.default_refinement_system_prompt}\n\n{self.default_refinement_qa_issue_prompt}"
+        )
+        self.default_refinement_failed_user_prompt = ""
+        self.default_refinement_partial_system_prompt = (
+            f"{self.default_refinement_system_prompt}\n\n{self.default_refinement_qa_issue_prompt}"
+        )
+        self.default_refinement_partial_user_prompt = ""
         
         self.default_rolling_summary_user_prompt = """Analyze the recent translation exchanges and create a structured summary for context continuity.
 
@@ -3446,6 +3455,26 @@ Recent translations to summarize:
         self.refinement_user_prompt = self.config.get(
             'refinement_user_prompt',
             getattr(self, 'default_refinement_user_prompt', '')
+        )
+        self.refinement_failed_system_prompt = self.config.get(
+            'refinement_failed_system_prompt',
+            getattr(self, 'default_refinement_failed_system_prompt', self.refinement_system_prompt)
+        )
+        if not self.refinement_failed_system_prompt or not str(self.refinement_failed_system_prompt).strip():
+            self.refinement_failed_system_prompt = getattr(self, 'default_refinement_failed_system_prompt', self.refinement_system_prompt)
+        self.refinement_failed_user_prompt = self.config.get(
+            'refinement_failed_user_prompt',
+            getattr(self, 'default_refinement_failed_user_prompt', '')
+        )
+        self.refinement_partial_system_prompt = self.config.get(
+            'refinement_partial_system_prompt',
+            getattr(self, 'default_refinement_partial_system_prompt', self.refinement_system_prompt)
+        )
+        if not self.refinement_partial_system_prompt or not str(self.refinement_partial_system_prompt).strip():
+            self.refinement_partial_system_prompt = getattr(self, 'default_refinement_partial_system_prompt', self.refinement_system_prompt)
+        self.refinement_partial_user_prompt = self.config.get(
+            'refinement_partial_user_prompt',
+            getattr(self, 'default_refinement_partial_user_prompt', '')
         )
         self.rolling_summary_system_prompt = self.config.get('rolling_summary_system_prompt', self.default_rolling_summary_system_prompt)
         self.rolling_summary_user_prompt = self.config.get('rolling_summary_user_prompt', self.default_rolling_summary_user_prompt)
@@ -4220,12 +4249,17 @@ Recent translations to summarize:
         """Update the refinement prompt button style based on custom prompt fields."""
         if not hasattr(self, 'refinement_prompt_button'):
             return
-        default_system = getattr(self, 'default_refinement_system_prompt', '')
-        system_prompt = str(getattr(self, 'refinement_system_prompt', '') or '')
-        user_prompt = str(getattr(self, 'refinement_user_prompt', '') or '')
-        is_custom = (
-            (system_prompt.strip() and system_prompt.strip() != str(default_system).strip())
-            or bool(user_prompt.strip())
+        prompt_pairs = [
+            ('refinement_system_prompt', 'default_refinement_system_prompt'),
+            ('refinement_user_prompt', 'default_refinement_user_prompt'),
+            ('refinement_failed_system_prompt', 'default_refinement_failed_system_prompt'),
+            ('refinement_failed_user_prompt', 'default_refinement_failed_user_prompt'),
+            ('refinement_partial_system_prompt', 'default_refinement_partial_system_prompt'),
+            ('refinement_partial_user_prompt', 'default_refinement_partial_user_prompt'),
+        ]
+        is_custom = any(
+            str(getattr(self, attr, '') or '').strip() != str(getattr(self, default_attr, '') or '').strip()
+            for attr, default_attr in prompt_pairs
         )
         if is_custom:
             self.refinement_prompt_button.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
@@ -4434,37 +4468,116 @@ Recent translations to summarize:
             "Edit prompts sent only to refinement requests. "
             "Use {target_lang} for the selected target language. "
             "In the user prompt, {html} or {content} can mark where the translated HTML should be inserted. "
+            "In Failed and Partial prompts, {QA_Issues} is replaced with the current non-protected QA issue when available. "
             "The existing Assistant Prompt button is used for optional assistant prefill."
         )
         instructions.setWordWrap(True)
         layout.addWidget(instructions)
 
-        system_label = QLabel("System Prompt:")
-        layout.addWidget(system_label)
-        system_prompt_editor = QTextEdit()
-        system_prompt_editor.setPlainText(
-            str(getattr(self, 'refinement_system_prompt', '') or self.config.get('refinement_system_prompt', '') or getattr(self, 'default_refinement_system_prompt', ''))
-        )
-        layout.addWidget(system_prompt_editor)
+        tabs = QTabWidget()
+        tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #4b5565;
+                border-radius: 6px;
+                top: -1px;
+                background: #1f1f1f;
+            }
+            QTabBar::tab {
+                background: #2a2d32;
+                color: #d7dde8;
+                border: 1px solid #4b5565;
+                border-bottom: 0;
+                min-width: 78px;
+                padding: 8px 16px;
+                margin-right: 4px;
+                font-weight: 600;
+            }
+            QTabBar::tab:selected {
+                background: #2f80d0;
+                color: #ffffff;
+                border-color: #6eb6ff;
+            }
+            QTabBar::tab:hover:!selected {
+                background: #39414d;
+                color: #ffffff;
+                border-color: #718096;
+            }
+            QTabBar::tab:first {
+                border-top-left-radius: 6px;
+            }
+            QTabBar::tab:last {
+                border-top-right-radius: 6px;
+            }
+        """)
+        editors = {}
 
-        user_label = QLabel("User Prompt (optional):")
-        layout.addWidget(user_label)
-        user_prompt_editor = QTextEdit()
-        user_prompt_editor.setPlaceholderText("Optional extra instruction for this refinement request")
-        user_prompt_editor.setPlainText(
-            str(getattr(self, 'refinement_user_prompt', '') or self.config.get('refinement_user_prompt', ''))
+        def _prompt_value(attr, config_key, default_attr, allow_default=True):
+            value = getattr(self, attr, None)
+            if value is None:
+                value = self.config.get(config_key, None)
+            if value is None or (allow_default and not str(value).strip()):
+                value = getattr(self, default_attr, '')
+            return str(value or '')
+
+        def _add_prompt_tab(mode_key, label, system_attr, user_attr, system_config_key, user_config_key, default_system_attr, default_user_attr):
+            tab = QWidget()
+            tab_layout = QVBoxLayout(tab)
+            tab_layout.addWidget(QLabel("System Prompt:"))
+            system_editor = QTextEdit()
+            system_editor.setPlainText(_prompt_value(system_attr, system_config_key, default_system_attr))
+            tab_layout.addWidget(system_editor)
+
+            tab_layout.addWidget(QLabel("User Prompt (optional):"))
+            user_editor = QTextEdit()
+            if mode_key == "all":
+                user_editor.setPlaceholderText("Optional extra instruction for this refinement request")
+            else:
+                user_editor.setPlaceholderText("Optional extra instruction for this refinement mode")
+            user_editor.setPlainText(_prompt_value(user_attr, user_config_key, default_user_attr, allow_default=False))
+            tab_layout.addWidget(user_editor)
+            editors[mode_key] = (system_editor, user_editor)
+            tabs.addTab(tab, label)
+
+        _add_prompt_tab(
+            "all", "All",
+            "refinement_system_prompt", "refinement_user_prompt",
+            "refinement_system_prompt", "refinement_user_prompt",
+            "default_refinement_system_prompt", "default_refinement_user_prompt",
         )
-        layout.addWidget(user_prompt_editor)
+        _add_prompt_tab(
+            "failed", "Failed",
+            "refinement_failed_system_prompt", "refinement_failed_user_prompt",
+            "refinement_failed_system_prompt", "refinement_failed_user_prompt",
+            "default_refinement_failed_system_prompt", "default_refinement_failed_user_prompt",
+        )
+        _add_prompt_tab(
+            "partial", "Partial",
+            "refinement_partial_system_prompt", "refinement_partial_user_prompt",
+            "refinement_partial_system_prompt", "refinement_partial_user_prompt",
+            "default_refinement_partial_system_prompt", "default_refinement_partial_user_prompt",
+        )
+        layout.addWidget(tabs)
 
         button_layout = QHBoxLayout()
 
         def save_prompt():
-            system_prompt = system_prompt_editor.toPlainText().strip() or getattr(self, 'default_refinement_system_prompt', '')
-            user_prompt = user_prompt_editor.toPlainText().strip()
-            self.refinement_system_prompt = system_prompt
-            self.refinement_user_prompt = user_prompt
-            self.config['refinement_system_prompt'] = system_prompt
-            self.config['refinement_user_prompt'] = user_prompt
+            all_system, all_user = editors["all"]
+            failed_system, failed_user = editors["failed"]
+            partial_system, partial_user = editors["partial"]
+
+            self.refinement_system_prompt = all_system.toPlainText().strip() or getattr(self, 'default_refinement_system_prompt', '')
+            self.refinement_user_prompt = all_user.toPlainText().strip()
+            self.refinement_failed_system_prompt = failed_system.toPlainText().strip() or getattr(self, 'default_refinement_failed_system_prompt', self.refinement_system_prompt)
+            self.refinement_failed_user_prompt = failed_user.toPlainText().strip()
+            self.refinement_partial_system_prompt = partial_system.toPlainText().strip() or getattr(self, 'default_refinement_partial_system_prompt', self.refinement_system_prompt)
+            self.refinement_partial_user_prompt = partial_user.toPlainText().strip()
+
+            self.config['refinement_system_prompt'] = self.refinement_system_prompt
+            self.config['refinement_user_prompt'] = self.refinement_user_prompt
+            self.config['refinement_failed_system_prompt'] = self.refinement_failed_system_prompt
+            self.config['refinement_failed_user_prompt'] = self.refinement_failed_user_prompt
+            self.config['refinement_partial_system_prompt'] = self.refinement_partial_system_prompt
+            self.config['refinement_partial_user_prompt'] = self.refinement_partial_user_prompt
             self._update_refinement_prompt_button_style()
             self.save_config(show_message=False)
             self.append_log("✅ Refinement prompts updated")
@@ -4474,14 +4587,22 @@ Recent translations to summarize:
             reply = QMessageBox.question(
                 dialog,
                 "Reset Refinement Prompts",
-                "Reset the refinement system prompt to the default and clear the optional user prompt?",
+                "Reset all refinement prompt tabs to their defaults?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No
             )
             if reply != QMessageBox.Yes:
                 return
-            system_prompt_editor.setPlainText(getattr(self, 'default_refinement_system_prompt', ''))
-            user_prompt_editor.clear()
+            for mode_key, (system_editor, user_editor) in editors.items():
+                if mode_key == "all":
+                    system_editor.setPlainText(getattr(self, 'default_refinement_system_prompt', ''))
+                    user_editor.setPlainText(getattr(self, 'default_refinement_user_prompt', ''))
+                elif mode_key == "failed":
+                    system_editor.setPlainText(getattr(self, 'default_refinement_failed_system_prompt', ''))
+                    user_editor.setPlainText(getattr(self, 'default_refinement_failed_user_prompt', ''))
+                elif mode_key == "partial":
+                    system_editor.setPlainText(getattr(self, 'default_refinement_partial_system_prompt', ''))
+                    user_editor.setPlainText(getattr(self, 'default_refinement_partial_user_prompt', ''))
 
         save_btn = QPushButton("Save")
         save_btn.clicked.connect(save_prompt)
@@ -16847,6 +16968,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ENABLE_REFINEMENT_OUTPUT_MODE': "1" if output_mode == 'refinement' else "0",
             'REFINEMENT_SYSTEM_PROMPT': self.config.get('refinement_system_prompt') or getattr(self, 'refinement_system_prompt', getattr(self, 'default_refinement_system_prompt', '')),
             'REFINEMENT_USER_PROMPT': self.config.get('refinement_user_prompt', getattr(self, 'refinement_user_prompt', '')),
+            'REFINEMENT_FAILED_SYSTEM_PROMPT': getattr(self, 'refinement_failed_system_prompt', None) or self.config.get('refinement_failed_system_prompt') or getattr(self, 'default_refinement_failed_system_prompt', ''),
+            'REFINEMENT_FAILED_USER_PROMPT': getattr(self, 'refinement_failed_user_prompt', self.config.get('refinement_failed_user_prompt', getattr(self, 'default_refinement_failed_user_prompt', ''))),
+            'REFINEMENT_PARTIAL_SYSTEM_PROMPT': getattr(self, 'refinement_partial_system_prompt', None) or self.config.get('refinement_partial_system_prompt') or getattr(self, 'default_refinement_partial_system_prompt', ''),
+            'REFINEMENT_PARTIAL_USER_PROMPT': getattr(self, 'refinement_partial_user_prompt', self.config.get('refinement_partial_user_prompt', getattr(self, 'default_refinement_partial_user_prompt', ''))),
             'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var else "0",
             'WEBNOVEL_MIN_HEIGHT': str(self.webnovel_min_height_var),
@@ -24952,6 +25077,10 @@ Important rules:
                 ('custom_image_edit_user_prompt', ['custom_image_edit_user_prompt_var'], '', str),
                 ('refinement_system_prompt', ['refinement_system_prompt'], getattr(self, 'default_refinement_system_prompt', ''), str),
                 ('refinement_user_prompt', ['refinement_user_prompt'], '', str),
+                ('refinement_failed_system_prompt', ['refinement_failed_system_prompt'], getattr(self, 'default_refinement_failed_system_prompt', ''), str),
+                ('refinement_failed_user_prompt', ['refinement_failed_user_prompt'], getattr(self, 'default_refinement_failed_user_prompt', ''), str),
+                ('refinement_partial_system_prompt', ['refinement_partial_system_prompt'], getattr(self, 'default_refinement_partial_system_prompt', ''), str),
+                ('refinement_partial_user_prompt', ['refinement_partial_user_prompt'], getattr(self, 'default_refinement_partial_user_prompt', ''), str),
                 ('inpainter_keys', ['inpainter_keys_var'], [], list),
                 ('rolling_summary_keys', ['rolling_summary_keys_var'], [], list),
                 ('truncation_retry_keys', ['truncation_retry_keys_var'], [], list),
@@ -26147,6 +26276,10 @@ Important rules:
                 ('MULTIPASS_REFINEMENT_MODE', self._get_multipass_refinement_mode()),
                 ('REFINEMENT_SYSTEM_PROMPT', self.config.get('refinement_system_prompt') or getattr(self, 'refinement_system_prompt', getattr(self, 'default_refinement_system_prompt', ''))),
                 ('REFINEMENT_USER_PROMPT', self.config.get('refinement_user_prompt', getattr(self, 'refinement_user_prompt', ''))),
+                ('REFINEMENT_FAILED_SYSTEM_PROMPT', getattr(self, 'refinement_failed_system_prompt', None) or self.config.get('refinement_failed_system_prompt') or getattr(self, 'default_refinement_failed_system_prompt', '')),
+                ('REFINEMENT_FAILED_USER_PROMPT', getattr(self, 'refinement_failed_user_prompt', self.config.get('refinement_failed_user_prompt', getattr(self, 'default_refinement_failed_user_prompt', '')))),
+                ('REFINEMENT_PARTIAL_SYSTEM_PROMPT', getattr(self, 'refinement_partial_system_prompt', None) or self.config.get('refinement_partial_system_prompt') or getattr(self, 'default_refinement_partial_system_prompt', '')),
+                ('REFINEMENT_PARTIAL_USER_PROMPT', getattr(self, 'refinement_partial_user_prompt', self.config.get('refinement_partial_user_prompt', getattr(self, 'default_refinement_partial_user_prompt', '')))),
                 # Normalize to uppercase so validation in unified_api_client accepts 1K/2K/4K
                 ('IMAGE_OUTPUT_RESOLUTION', str(getattr(self, 'image_output_resolution_var', '1K')).upper()),
                 ('NANOGPT_VIDEO_DURATION', str(getattr(self, 'nanogpt_video_duration_var', '60')) + 's'),

@@ -571,11 +571,17 @@ class TranslationConfig:
         self.CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
         self.DELAY = float(os.getenv("SEND_INTERVAL_SECONDS", "1"))
         # Use large_env to bypass Windows 32,767-char env var limit for large prompts
+        def _prompt_env_raw(key):
+            try:
+                import large_env
+                return large_env.get_env(key, None)
+            except Exception:
+                return os.environ.get(key, None)
+
         try:
-            import large_env
-            self.SYSTEM_PROMPT = (large_env.get_env("SYSTEM_PROMPT", "") or "").strip()
-            self.REFINEMENT_SYSTEM_PROMPT = (large_env.get_env("REFINEMENT_SYSTEM_PROMPT", "") or "").strip()
-            self.REFINEMENT_USER_PROMPT = (large_env.get_env("REFINEMENT_USER_PROMPT", "") or "").strip()
+            self.SYSTEM_PROMPT = (_prompt_env_raw("SYSTEM_PROMPT") or "").strip()
+            self.REFINEMENT_SYSTEM_PROMPT = (_prompt_env_raw("REFINEMENT_SYSTEM_PROMPT") or "").strip()
+            self.REFINEMENT_USER_PROMPT = (_prompt_env_raw("REFINEMENT_USER_PROMPT") or "").strip()
         except Exception:
             self.SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "").strip()
             self.REFINEMENT_SYSTEM_PROMPT = os.getenv("REFINEMENT_SYSTEM_PROMPT", "").strip()
@@ -586,6 +592,26 @@ class TranslationConfig:
                 "and readability while preserving all HTML structure, tags, images, links, ids, and meaning. "
                 "Return only the refined HTML."
             )
+        _qa_issue_prompt_default = "QA issue(s) to address: {QA_Issues}"
+        _qa_issue_system_default = f"{self.REFINEMENT_SYSTEM_PROMPT}\n\n{_qa_issue_prompt_default}"
+        _failed_system = _prompt_env_raw("REFINEMENT_FAILED_SYSTEM_PROMPT")
+        _failed_user = _prompt_env_raw("REFINEMENT_FAILED_USER_PROMPT")
+        _partial_system = _prompt_env_raw("REFINEMENT_PARTIAL_SYSTEM_PROMPT")
+        _partial_user = _prompt_env_raw("REFINEMENT_PARTIAL_USER_PROMPT")
+        failed_system_prompt = (
+            str(_failed_system).strip() if _failed_system is not None and str(_failed_system).strip()
+            else _qa_issue_system_default
+        )
+        failed_user_prompt = str(_failed_user).strip() if _failed_user is not None else ""
+        partial_system_prompt = (
+            str(_partial_system).strip() if _partial_system is not None and str(_partial_system).strip()
+            else _qa_issue_system_default
+        )
+        partial_user_prompt = str(_partial_user).strip() if _partial_user is not None else ""
+        self.REFINEMENT_FAILED_SYSTEM_PROMPT = failed_system_prompt
+        self.REFINEMENT_FAILED_USER_PROMPT = failed_user_prompt
+        self.REFINEMENT_PARTIAL_SYSTEM_PROMPT = partial_system_prompt
+        self.REFINEMENT_PARTIAL_USER_PROMPT = partial_user_prompt
         self.ASSISTANT_PROMPT = os.getenv("ASSISTANT_PROMPT", "").strip()  # Optional assistant prefill
         self.REQUEST_MERGING_ENABLED = os.getenv("REQUEST_MERGING_ENABLED", "0") == "1"
         
@@ -13108,14 +13134,110 @@ def _is_foreign_character_qa_issue(issue) -> bool:
 def _entry_has_foreign_character_qa_issue(entry) -> bool:
     if not isinstance(entry, dict):
         return False
-    issues = []
-    for key in ("qa_issues_found", "qa_issues", "failure_reason", "error_message"):
-        value = entry.get(key)
-        if isinstance(value, (list, tuple, set)):
-            issues.extend(value)
-        elif value is not None:
-            issues.append(value)
-    return any(_is_foreign_character_qa_issue(issue) for issue in issues)
+    seen = set()
+    current = entry
+    while isinstance(current, dict) and id(current) not in seen:
+        seen.add(id(current))
+        issues = []
+        for key in ("qa_issues_found", "qa_issues", "failure_reason", "error_message"):
+            value = current.get(key)
+            if isinstance(value, (list, tuple, set)):
+                issues.extend(value)
+            elif value is not None:
+                issues.append(value)
+        if any(_is_foreign_character_qa_issue(issue) for issue in issues):
+            return True
+        current = current.get("previous_progress_entry")
+    return False
+
+
+_REFINEMENT_PROMPT_PROTECTED_QA_ISSUES = {
+    "SPLIT_FAILED",
+    "TRUNCATED",
+    "PROHIBITED_CONTENT",
+    "EMPTY_OUTPUT",
+    "API_ERROR",
+    "TIMEOUT",
+}
+
+
+def _qa_issue_type_text(issue) -> str:
+    if isinstance(issue, dict):
+        for key in ("type", "issue_type", "code", "reason", "name"):
+            value = issue.get(key)
+            if value:
+                return str(value)
+    return _flatten_partial_refinement_issue_text(issue)
+
+
+def _normalize_qa_issue_name(value) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", str(value or "")).strip("_").upper()
+
+
+def _is_protected_refinement_prompt_qa_issue(issue) -> bool:
+    normalized = _normalize_qa_issue_name(_qa_issue_type_text(issue))
+    if not normalized:
+        return False
+    return any(
+        normalized == protected or normalized.startswith(f"{protected}_")
+        for protected in _REFINEMENT_PROMPT_PROTECTED_QA_ISSUES
+    )
+
+
+def _qa_failed_source_entry(entry):
+    seen = set()
+    current = entry
+    while isinstance(current, dict) and id(current) not in seen:
+        seen.add(id(current))
+        if str(current.get("status", "") or "").strip().lower() == "qa_failed":
+            return current
+        current = current.get("previous_progress_entry")
+    return None
+
+
+def _qa_issues_for_refinement_prompt(entry) -> str:
+    entry = _qa_failed_source_entry(entry)
+    if not isinstance(entry, dict):
+        return ""
+    issues = entry.get("qa_issues_found")
+    if issues is None:
+        return ""
+    if not isinstance(issues, (list, tuple, set)):
+        issues = [issues]
+
+    filtered = []
+    seen = set()
+    for issue in issues:
+        if _is_protected_refinement_prompt_qa_issue(issue):
+            continue
+        text = _flatten_partial_refinement_issue_text(issue).strip()
+        if not text or text.lower() in {"true", "false", "none", "null"}:
+            continue
+        if text not in seen:
+            seen.add(text)
+            filtered.append(text)
+    return "; ".join(filtered)
+
+
+def _replace_qa_issues_placeholder(prompt, qa_issues_text=""):
+    text = str(prompt or "")
+    placeholders = ("{QA_Issues}", "{QA_ISSUES}", "{qa_issues}")
+    if not any(placeholder in text for placeholder in placeholders):
+        return text
+    if qa_issues_text:
+        for placeholder in placeholders:
+            text = text.replace(placeholder, qa_issues_text)
+        return text
+    lines = []
+    for line in text.splitlines():
+        if any(placeholder in line for placeholder in placeholders):
+            if lines:
+                previous = lines[-1].strip().lower()
+                if "qa issue" in previous and previous.endswith(":"):
+                    lines.pop()
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def _partial_refinement_detection_settings(qa_settings):
@@ -13481,10 +13603,11 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             or check_stop()
         )
 
-    def _format_refinement_prompt(prompt, html_content=None):
+    def _format_refinement_prompt(prompt, html_content=None, qa_issues_text=""):
         text = str(prompt or "")
         target_lang = os.getenv("OUTPUT_LANGUAGE", "English")
         text = text.replace("{target_lang}", target_lang)
+        text = _replace_qa_issues_placeholder(text, qa_issues_text)
         if html_content is None:
             return text
         if "{html}" in text or "{content}" in text:
@@ -13548,10 +13671,28 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 return label
         return None
 
-    def _build_refinement_messages(html_content, *, partial=False, partial_kind="tags", enhanced=False):
+    def _refinement_prompt_templates(prompt_mode):
+        if prompt_mode == "partial":
+            system_prompt = getattr(config, "REFINEMENT_PARTIAL_SYSTEM_PROMPT", "").strip()
+            user_prompt = getattr(config, "REFINEMENT_PARTIAL_USER_PROMPT", "").strip()
+        elif prompt_mode == "failed":
+            system_prompt = getattr(config, "REFINEMENT_FAILED_SYSTEM_PROMPT", "").strip()
+            user_prompt = getattr(config, "REFINEMENT_FAILED_USER_PROMPT", "").strip()
+        else:
+            system_prompt = getattr(config, "REFINEMENT_SYSTEM_PROMPT", "").strip()
+            user_prompt = getattr(config, "REFINEMENT_USER_PROMPT", "").strip()
+        if not system_prompt:
+            system_prompt = getattr(config, "REFINEMENT_SYSTEM_PROMPT", "").strip()
+        return system_prompt, user_prompt
+
+    def _build_refinement_messages(html_content, *, partial=False, partial_kind="tags", enhanced=False, qa_entry=None):
+        prompt_mode = "partial" if partial else ("failed" if multipass_failed_mode else "full")
+        system_template, user_template = _refinement_prompt_templates(prompt_mode)
+        qa_issues_text = _qa_issues_for_refinement_prompt(qa_entry)
         refine_system = _format_refinement_prompt(
-            getattr(config, "REFINEMENT_SYSTEM_PROMPT", "").strip(),
-            None
+            system_template,
+            None,
+            qa_issues_text=qa_issues_text,
         ).strip()
         if not refine_system:
             refine_system = "You are refining an existing English translation. Improve clarity, flow, consistency, and readability while preserving all HTML structure, tags, images, links, ids, and meaning. Return only the refined HTML."
@@ -13586,8 +13727,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             refine_system = f"{refine_system}\n\n{partial_system}"
 
         refine_user = _format_refinement_prompt(
-            getattr(config, "REFINEMENT_USER_PROMPT", "").strip(),
-            html_content
+            user_template,
+            html_content,
+            qa_issues_text=qa_issues_text,
         )
         if enhanced:
             refine_user = (
@@ -13687,11 +13829,20 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
         with progress_lock:
             _pre_key, pre_existing_entry = _find_progress_entry_for_output(output_file, actual_num)
             pre_existing_entry = dict(pre_existing_entry) if pre_existing_entry else {}
+        pre_existing_qa_source_entry = _qa_failed_source_entry(pre_existing_entry)
+        pre_existing_has_foreign_qa_issue = _entry_has_foreign_character_qa_issue(pre_existing_entry)
         preserve_failed_mode_qa_status = (
             mode == "refinement"
             and multipass_failed_mode
-            and str(pre_existing_entry.get("status", "") or "").strip().lower() == "qa_failed"
+            and pre_existing_qa_source_entry is not None
         )
+        preserve_partial_mode_qa_status = (
+            mode == "refinement"
+            and multipass_partial_mode
+            and pre_existing_qa_source_entry is not None
+            and pre_existing_has_foreign_qa_issue
+        )
+        preserve_multipass_qa_status = preserve_failed_mode_qa_status or preserve_partial_mode_qa_status
 
         if mode == "refinement":
             skip_reason = _refinement_skip_reason_for_qa(
@@ -13714,7 +13865,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             partial_document = None
             partial_targets = []
             if multipass_partial_mode:
-                if not _entry_has_foreign_character_qa_issue(pre_existing_entry):
+                if not pre_existing_has_foreign_qa_issue:
                     return "excluded", None, {
                         "kind": "not_targeted",
                         "chapter": actual_num,
@@ -13738,9 +13889,9 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
             partial_targets = []
 
         # Ensure a base completed entry exists so the two post-process checks are visible.
-        # In Failed multipass, keep QA scan failures as qa_failed until refinement succeeds.
+        # In multipass refinement, keep active QA scan failures as qa_failed until refinement succeeds.
         with progress_lock:
-            if not preserve_failed_mode_qa_status:
+            if not preserve_multipass_qa_status:
                 progress_manager.update(idx, actual_num, content_hash, output_file, status="completed", chapter_obj=chapter)
 
             chapter_key = progress_manager._get_chapter_key(actual_num, output_file, chapter, content_hash)
@@ -13751,7 +13902,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                     entry = dict(existing_entry)
 
         if mode == "refinement":
-            if entry.get("refinement_status") == "refined":
+            if entry.get("refinement_status") == "refined" and not preserve_multipass_qa_status:
                 return "skipped", None, {
                     "kind": "already_refined",
                     "chapter": actual_num,
@@ -13766,6 +13917,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
 
                 if multipass_partial_mode:
                     total_targets = _partial_refinement_target_count(partial_targets)
+                    partial_requests = []
                     for target_index, target in enumerate(partial_targets, start=1):
                         if _force_stop_requested():
                             return "skipped", f"⏹️ Refinement stopped before Chapter {actual_num} fragment {target_index}/{len(partial_targets)}"
@@ -13775,7 +13927,11 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                             fragment_html,
                             partial=True,
                             partial_kind=target_kind,
+                            qa_entry=pre_existing_qa_source_entry or pre_existing_entry,
                         )
+                        partial_requests.append((target_index, target, messages))
+
+                    def _send_partial_refinement_fragment(target_index, target, messages):
                         refined_fragment, finish_reason, _raw_obj = send_with_interrupt(
                             messages,
                             client,
@@ -13792,6 +13948,73 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                             bypass_graceful_stop=True,
                             before_send_callback=_mark_refinement_progress_on_send,
                         )
+                        return target_index, target, refined_fragment, finish_reason
+
+                    partial_results = {}
+                    partial_stop_message = None
+                    fragment_workers = 1
+                    if use_batch and batch_size > 1 and len(partial_requests) > 1:
+                        chapter_worker_slots = min(batch_size, len(chapters)) if len(chapters) > 1 else 1
+                        fragment_worker_budget = max(1, batch_size // max(1, chapter_worker_slots))
+                        fragment_workers = min(fragment_worker_budget, len(partial_requests))
+                    if fragment_workers > 1:
+                        print(
+                            f"⚡ Partial refinement batch mode: {fragment_workers} parallel fragment workers "
+                            f"for Chapter {actual_num} ({len(partial_requests)} request(s))"
+                        )
+                        executor = ThreadPoolExecutor(
+                            max_workers=fragment_workers,
+                            thread_name_prefix=f"PartialRefineCh{actual_num}",
+                        )
+                        futures = {
+                            executor.submit(_send_partial_refinement_fragment, target_index, target, messages): target_index
+                            for target_index, target, messages in partial_requests
+                        }
+                        pending = set(futures.keys())
+                        try:
+                            while pending:
+                                if _force_stop_requested():
+                                    for future in pending:
+                                        future.cancel()
+                                    partial_stop_message = (
+                                        f"⏹️ Refinement stopped during Chapter {actual_num} partial batch "
+                                        f"({len(partial_requests) - len(pending)}/{len(partial_requests)} finished)"
+                                    )
+                                    print("⏹️ Force stop requested; cancelling queued partial refinement fragments...")
+                                    break
+
+                                done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+                                if not done:
+                                    continue
+                                for future in done:
+                                    try:
+                                        result = future.result()
+                                    except Exception:
+                                        for pending_future in pending:
+                                            pending_future.cancel()
+                                        raise
+                                    partial_results[result[0]] = result
+                        finally:
+                            executor.shutdown(wait=not _force_stop_requested(), cancel_futures=True)
+                    else:
+                        for target_index, target, messages in partial_requests:
+                            if _force_stop_requested():
+                                return "skipped", f"⏹️ Refinement stopped before Chapter {actual_num} fragment {target_index}/{len(partial_targets)}"
+                            result = _send_partial_refinement_fragment(target_index, target, messages)
+                            partial_results[result[0]] = result
+
+                    if partial_stop_message:
+                        return "skipped", partial_stop_message
+
+                    for target_index, target, _messages in partial_requests:
+                        result = partial_results.get(target_index)
+                        if result is None:
+                            if _force_stop_requested():
+                                return "skipped", f"⏹️ Refinement stopped before applying Chapter {actual_num} fragment {target_index}/{len(partial_targets)}"
+                            raise RuntimeError(
+                                f"Partial refinement did not return a response for fragment {target_index}/{len(partial_targets)}"
+                            )
+                        _result_index, result_target, refined_fragment, finish_reason = result
                         if (
                             not refined_fragment
                             or not str(refined_fragment).strip()
@@ -13801,7 +14024,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                                 f"Partial refinement returned no usable content for fragment {target_index}/{len(partial_targets)} "
                                 f"(finish_reason={finish_reason})"
                             )
-                        _apply_partial_refinement_response(partial_document, target, refined_fragment)
+                        _apply_partial_refinement_response(partial_document, result_target, refined_fragment)
                     refined = _render_partial_refinement_document(partial_document)
                 else:
                     refinement_input = html_content
@@ -13824,6 +14047,7 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                         refinement_input,
                         partial=False,
                         enhanced=enhanced_chapter_info is not None,
+                        qa_entry=pre_existing_qa_source_entry or pre_existing_entry,
                     )
                     refined, finish_reason, _raw_obj = send_with_interrupt(
                         messages,
@@ -13865,8 +14089,8 @@ def _process_refinement_or_tts_mode(config, client, chapters, out, progress_mana
                 return "processed", f"✨ Refined Chapter {actual_num}: {output_file}"
             except Exception as exc:
                 with progress_lock:
-                    if preserve_failed_mode_qa_status:
-                        preserved_qa_issues = pre_existing_entry.get("qa_issues_found", [])
+                    if preserve_multipass_qa_status:
+                        preserved_qa_issues = (pre_existing_qa_source_entry or pre_existing_entry).get("qa_issues_found", [])
                         progress_manager.update(
                             idx,
                             actual_num,
