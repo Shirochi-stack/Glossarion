@@ -1995,6 +1995,54 @@ class MultiAPIKeyDialog(QDialog):
         except Exception:
             pass
 
+    def _schedule_key_pool_config_flush(self, pool_name=None, refresh_keys=False, refresh_parent=True, delay_ms=160):
+        """Coalesce config saves and sibling/parent refreshes after UI updates settle."""
+        pending = getattr(self, '_pending_key_pool_config_flush', None)
+        if pending is None:
+            pending = {
+                'all': False,
+                'all_refresh_keys': False,
+                'pools': {},
+                'refresh_parent': False,
+            }
+            self._pending_key_pool_config_flush = pending
+
+        if pool_name is None:
+            pending['all'] = True
+            pending['all_refresh_keys'] = bool(pending['all_refresh_keys'] or refresh_keys)
+        else:
+            pools = pending.setdefault('pools', {})
+            pools[pool_name] = bool(pools.get(pool_name, False) or refresh_keys)
+        pending['refresh_parent'] = bool(pending.get('refresh_parent', False) or refresh_parent)
+
+        timer = getattr(self, '_key_pool_config_flush_timer', None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._flush_key_pool_config_changes)
+            self._key_pool_config_flush_timer = timer
+        timer.start(delay_ms)
+
+    def _flush_key_pool_config_changes(self):
+        pending = getattr(self, '_pending_key_pool_config_flush', None)
+        if not pending:
+            return
+        self._pending_key_pool_config_flush = None
+
+        try:
+            self.translator_gui.save_config(show_message=False)
+        except Exception:
+            pass
+
+        if pending.get('all'):
+            self._broadcast_key_pool_config_changed(None, refresh_keys=bool(pending.get('all_refresh_keys')))
+        else:
+            for pool_name, refresh_keys in (pending.get('pools') or {}).items():
+                self._broadcast_key_pool_config_changed(pool_name, refresh_keys=bool(refresh_keys))
+
+        if pending.get('refresh_parent'):
+            self._refresh_parent_model_requirements(save_config=False)
+
     def _coerce_bool_config_value(self, value, default=False):
         """Coerce persisted config values without treating non-empty strings as True."""
         if isinstance(value, bool):
@@ -3011,6 +3059,7 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_fallback_keys()
         self._show_fallback_status(f"Changed model to '{new_model}' for {len(selected)} fallback keys")
+        self._notify_authgpt_visibility()
 
     def _load_fallback_keys(self):
         """Load fallback keys from config"""
@@ -3216,7 +3265,6 @@ class MultiAPIKeyDialog(QDialog):
 
         # Save to config
         self.translator_gui.config['fallback_keys'] = fallback_keys
-        self.translator_gui.save_config(show_message=False)
 
         # Clear inputs
         self.fallback_key_entry.clear()
@@ -3244,7 +3292,7 @@ class MultiAPIKeyDialog(QDialog):
         self._show_fallback_status(f"Added fallback key for model: {model}{extra_info}")
 
         # Re-evaluate AuthGPT login button visibility
-        self._notify_authgpt_visibility()
+        self._schedule_key_pool_config_flush('fallback', refresh_keys=True, refresh_parent=True)
 
     def _move_fallback_key(self, direction):
         """Move selected fallback key up or down"""
@@ -4488,6 +4536,7 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.save_config(show_message=False)
                 self._load_fallback_keys()
                 self._show_fallback_status(f"Updated model to: {new_value}")
+                self._notify_authgpt_visibility()
         elif column == 2:  # Output Limit column
             value, ok = self._show_output_token_limit_dialog(
                 self._default_output_token_limit([fallback_keys[index]], fallback=0),
@@ -4739,6 +4788,7 @@ class MultiAPIKeyDialog(QDialog):
                 key.model = new_value
                 self._refresh_key_list()
                 self._show_status(f"Updated model to: {new_value}")
+                self._notify_authgpt_visibility()
         elif column == 2:  # Cooldown column
             # Create inline editor for cooldown
             old_value = key.cooldown
@@ -4801,9 +4851,9 @@ class MultiAPIKeyDialog(QDialog):
 
         layout.addWidget(QLabel(label_text))
         combo = QComboBox()
-        combo.addItems(all_models)
         combo.setEditable(True)
-        self._attach_model_autofill(combo, self._on_model_requirement_input_changed)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        self._attach_model_autofill(combo, None, model_values=all_models, search_debounce_ms=180)
         combo.setCurrentText(current_value)
         self._apply_combobox_icon(combo)
         if combo.lineEdit():
@@ -5184,6 +5234,7 @@ class MultiAPIKeyDialog(QDialog):
 
         self._refresh_key_list()
         self._show_status(f"Changed model to '{new_model}' for {len(selected)} keys")
+        self._notify_authgpt_visibility()
 
     def _configure_individual_endpoint(self, key_index):
         """Configure individual endpoint for a specific key"""
@@ -5771,7 +5822,6 @@ class MultiAPIKeyDialog(QDialog):
         })
 
         self.translator_gui.config['glossary_keys'] = glossary_keys
-        self.translator_gui.save_config(show_message=False)
 
         # Clear inputs
         self.glossary_key_entry.clear()
@@ -5794,7 +5844,7 @@ class MultiAPIKeyDialog(QDialog):
         extra_info = f" ({', '.join(extras)})" if extras else ""
         self._show_glossary_status(f"Added glossary key for model: {model}{extra_info}")
 
-        self._notify_authgpt_visibility()
+        self._schedule_key_pool_config_flush('glossary', refresh_keys=True, refresh_parent=True)
 
     def _move_glossary_key(self, direction):
         """Move selected glossary key up or down"""
@@ -6320,6 +6370,7 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.save_config(show_message=False)
         self._load_glossary_keys()
         self._show_glossary_status(f"Changed model to '{new_model}' for {len(selected)} glossary keys")
+        self._notify_authgpt_visibility()
 
     def _on_glossary_rows_moved(self):
         """Sync glossary_keys config with tree order after drag-drop"""
@@ -6373,6 +6424,7 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.save_config(show_message=False)
                 self._load_glossary_keys()
                 self._show_glossary_status(f"Updated model to: {new_value}")
+                self._notify_authgpt_visibility()
         elif column == 2:  # Output Limit column
             value, ok = self._show_output_token_limit_dialog(
                 self._default_output_token_limit([glossary_keys[index]], fallback=0),
@@ -6777,7 +6829,7 @@ class MultiAPIKeyDialog(QDialog):
         self._refusal_patterns_dialog.raise_()
         self._refusal_patterns_dialog.activateWindow()
 
-    def _attach_model_autofill(self, combo: QComboBox, on_change=None):
+    def _attach_model_autofill(self, combo: QComboBox, on_change=None, model_values=None, search_debounce_ms=80):
         """Attach the same prefix-priority contains completer used by translator_gui."""
         from PySide6.QtCore import QSortFilterProxyModel, QStringListModel
 
@@ -6819,7 +6871,10 @@ class MultiAPIKeyDialog(QDialog):
                     pos = slash + 1
                 return 3
 
-        model_values = [combo.itemText(i) for i in range(combo.count())]
+        if model_values is None:
+            model_values = [combo.itemText(i) for i in range(combo.count())]
+        else:
+            model_values = list(model_values)
         source = QStringListModel(model_values, combo)
         proxy = _PrefixPriorityProxy(combo)
         proxy.setSourceModel(source)
@@ -6850,7 +6905,7 @@ class MultiAPIKeyDialog(QDialog):
 
         def _schedule_search_text(text):
             search_text["value"] = text
-            search_timer.start(80)
+            search_timer.start(search_debounce_ms)
 
         if combo.lineEdit():
             if on_change:
@@ -7076,6 +7131,7 @@ class MultiAPIKeyDialog(QDialog):
             individual_key_temperature=individual_key_temperature,
         )
         self.key_pool.add_key(key_entry)
+        self.translator_gui.config['multi_api_keys'] = [key.to_dict() for key in self.key_pool.get_all_keys()]
 
         # Clear inputs
         self.api_key_entry.clear()
@@ -7104,7 +7160,7 @@ class MultiAPIKeyDialog(QDialog):
         self._show_status(f"Added key for model: {model}{extra_info}")
 
         # Re-evaluate AuthGPT login button visibility
-        self._notify_authgpt_visibility()
+        self._schedule_key_pool_config_flush('main', refresh_keys=True, refresh_parent=True)
 
     # Note: _refresh_key_list is defined earlier in the file (PySide6 version)
 
@@ -8091,11 +8147,12 @@ class MultiAPIKeyDialog(QDialog):
         spec = self._dedicated_pool_spec(pool_name)
         return self.translator_gui.config.get(spec['config_key'], []) or []
 
-    def _dedicated_set_keys(self, pool_name: str, keys):
+    def _dedicated_set_keys(self, pool_name: str, keys, save_config=True, broadcast=True):
         spec = self._dedicated_pool_spec(pool_name)
         self.translator_gui.config[spec['config_key']] = keys
-        self.translator_gui.save_config(show_message=False)
-        if not getattr(self, '_syncing_external_key_pool_state', False):
+        if save_config:
+            self.translator_gui.save_config(show_message=False)
+        if broadcast and not getattr(self, '_syncing_external_key_pool_state', False):
             self._broadcast_key_pool_config_changed(pool_name, refresh_keys=True)
 
     def _dedicated_status(self, pool_name: str, message: str):
@@ -8457,7 +8514,7 @@ class MultiAPIKeyDialog(QDialog):
             'enabled': True,
             'times_used': 0,
         })
-        self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_set_keys(pool_name, keys, save_config=False, broadcast=False)
         key_entry.clear()
         model_combo.setCurrentText("")
         self._dedicated_widget(pool_name, 'google_creds_entry').clear()
@@ -8467,7 +8524,7 @@ class MultiAPIKeyDialog(QDialog):
         self._dedicated_widget(pool_name, 'individual_endpoint_toggle').setChecked(False)
         self._dedicated_load_keys(pool_name)
         self._dedicated_status(pool_name, f"Added {spec['label']} key for model: {model}")
-        self._notify_authgpt_visibility()
+        self._schedule_key_pool_config_flush(pool_name, refresh_keys=True, refresh_parent=True)
 
     def _dedicated_move_key(self, pool_name: str, direction: str):
         tree = self._dedicated_widget(pool_name, 'tree')
@@ -8772,9 +8829,10 @@ class MultiAPIKeyDialog(QDialog):
         for idx in indices:
             if 0 <= idx < len(keys):
                 keys[idx]['model'] = new_model
-        self._dedicated_set_keys(pool_name, keys)
+        self._dedicated_set_keys(pool_name, keys, save_config=False, broadcast=False)
         self._dedicated_load_keys(pool_name)
         self._dedicated_status(pool_name, f"Changed model to '{new_model}' for {len(indices)} key(s)")
+        self._schedule_key_pool_config_flush(pool_name, refresh_keys=True, refresh_parent=True)
 
     def _dedicated_on_rows_moved(self, pool_name: str):
         tree = self._dedicated_widget(pool_name, 'tree')
