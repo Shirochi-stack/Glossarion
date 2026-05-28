@@ -1802,8 +1802,32 @@ class MultiAPIKeyDialog(QDialog):
             pass
         self._refresh_parent_model_requirements(save_config=False)
 
-    def _on_model_requirement_input_changed(self):
+    def _flush_model_requirement_refresh(self):
+        """Run the expensive parent model-requirement refresh after typing settles."""
         self._refresh_parent_model_requirements(save_config=False)
+
+    def _on_model_requirement_input_changed(self, immediate=False):
+        """Debounce live model-field edits so typing in key pools stays responsive."""
+        if immediate:
+            try:
+                timer = getattr(self, '_model_requirement_refresh_timer', None)
+                if timer is not None and timer.isActive():
+                    timer.stop()
+            except Exception:
+                pass
+            self._flush_model_requirement_refresh()
+            return
+
+        try:
+            timer = getattr(self, '_model_requirement_refresh_timer', None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.timeout.connect(self._flush_model_requirement_refresh)
+                self._model_requirement_refresh_timer = timer
+            timer.start(350)
+        except Exception:
+            self._flush_model_requirement_refresh()
 
     def _bind_shared_pool(self):
         """Bind this dialog to the UnifiedClient's shared APIKeyPool if available.
@@ -2472,7 +2496,7 @@ class MultiAPIKeyDialog(QDialog):
                 print(f"[MULTI_KEY_RENDER] Failed to render key-pool section: {exc}")
 
         if pending_builders:
-            QTimer.singleShot(16, self._render_next_deferred_key_pool_section)
+            QTimer.singleShot(75, self._render_next_deferred_key_pool_section)
         else:
             self._finish_key_pool_render()
 
@@ -2485,7 +2509,6 @@ class MultiAPIKeyDialog(QDialog):
             host = getattr(self, '_deferred_key_pool_host', None)
             if host is not None:
                 host.updateGeometry()
-                host.adjustSize()
 
             scrollable_layout = getattr(self, 'scrollable_layout', None)
             if scrollable_layout is not None:
@@ -2495,9 +2518,6 @@ class MultiAPIKeyDialog(QDialog):
                 widget = getattr(self, widget_name, None)
                 if widget is not None:
                     widget.updateGeometry()
-                    widget.adjustSize()
-
-            QApplication.processEvents()
         except Exception:
             pass
 
@@ -2838,6 +2858,7 @@ class MultiAPIKeyDialog(QDialog):
 
         # Right side: TreeWidget with drag and drop
         self.fallback_tree = QTreeWidget()
+        self.fallback_tree.setUniformRowHeights(True)
         self._tighten_api_key_tree_first_column(self.fallback_tree)
         # Add explicit column for per-key output token limit
         self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
@@ -3004,10 +3025,13 @@ class MultiAPIKeyDialog(QDialog):
         for item in self.fallback_tree.selectedItems():
             selected_indices.append(self.fallback_tree.indexOfTopLevelItem(item))
 
+        self.fallback_tree.setUpdatesEnabled(False)
+
         # Clear tree
         self.fallback_tree.clear()
 
         # Add keys to tree
+        tree_items = []
         for config_index, key_data in enumerate(fallback_keys):
             api_key = key_data.get('api_key', '')
             model = key_data.get('model', '')
@@ -3098,7 +3122,10 @@ class MultiAPIKeyDialog(QDialog):
 
             # Disable drop on this item to prevent nesting (keep it a flat list)
             item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
-            self.fallback_tree.addTopLevelItem(item)
+            tree_items.append(item)
+
+        if tree_items:
+            self.fallback_tree.addTopLevelItems(tree_items)
 
         # Restore selection
         for index in selected_indices:
@@ -3109,6 +3136,8 @@ class MultiAPIKeyDialog(QDialog):
         # Restore scroll position
         self.fallback_tree.verticalScrollBar().setValue(v_scroll)
         self.fallback_tree.horizontalScrollBar().setValue(h_scroll)
+        self.fallback_tree.setUpdatesEnabled(True)
+        self.fallback_tree.viewport().update()
 
     def _fallback_config_index_for_item(self, item):
         if item is None:
@@ -3569,7 +3598,8 @@ class MultiAPIKeyDialog(QDialog):
                 self.translator_gui.use_fallback_keys_var.set(enabled)
             except Exception:
                 self.translator_gui.use_fallback_keys_var = enabled
-        if not getattr(self, '_initializing', False) and not getattr(self, '_syncing_external_key_pool_state', False):
+        live_updates = self._can_emit_live_key_pool_updates()
+        if live_updates:
             self._broadcast_key_pool_config_changed('fallback', refresh_keys=False)
 
         # Show/hide the input frame
@@ -3619,7 +3649,7 @@ class MultiAPIKeyDialog(QDialog):
         # Show status message
         status = "enabled" if enabled else "disabled"
         self._show_fallback_status(f"Fallback Keys {status}")
-        if not getattr(self, '_initializing', False) and not getattr(self, '_syncing_external_key_pool_state', False):
+        if live_updates:
             fallback_keys = self.translator_gui.config.get('fallback_keys', [])
             if enabled:
                 msg = f"🔑 Fallback key pool: {len(fallback_keys)} keys loaded"
@@ -3633,18 +3663,19 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 print(msg)
 
-        # Sync env vars immediately
-        try:
-            import os as _os
-            if enabled:
-                _os.environ['USE_FALLBACK_KEYS'] = '1'
-            else:
-                _os.environ['USE_FALLBACK_KEYS'] = '0'
-        except Exception:
-            pass
+        if live_updates:
+            # Sync env vars immediately
+            try:
+                import os as _os
+                if enabled:
+                    _os.environ['USE_FALLBACK_KEYS'] = '1'
+                else:
+                    _os.environ['USE_FALLBACK_KEYS'] = '0'
+            except Exception:
+                pass
 
-        # Re-evaluate AuthGPT login button visibility
-        self._notify_authgpt_visibility()
+            # Re-evaluate AuthGPT login button visibility
+            self._notify_authgpt_visibility()
 
     def _toggle_fallback_visibility(self):
         """Toggle fallback key visibility"""
@@ -4067,6 +4098,7 @@ class MultiAPIKeyDialog(QDialog):
 
         # Right side: TreeWidget with drag and drop support
         self.tree = QTreeWidget()
+        self.tree.setUniformRowHeights(True)
         self._tighten_api_key_tree_first_column(self.tree)
         # Add explicit column for per-key output token limit
         self.tree.setHeaderLabels(['API Key', 'Model', '\u231b', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
@@ -4510,6 +4542,8 @@ class MultiAPIKeyDialog(QDialog):
         for item in self.tree.selectedItems():
             selected_indices.append(self.tree.indexOfTopLevelItem(item))
 
+        self.tree.setUpdatesEnabled(False)
+
         # Clear tree
         self.tree.clear()
 
@@ -4523,6 +4557,7 @@ class MultiAPIKeyDialog(QDialog):
 
         # Add keys
         keys = self.key_pool.get_all_keys()
+        tree_items = []
         for i, key in enumerate(keys):
             # Mask API key for display
             masked_key = key.api_key[:8] + "..." + key.api_key[-4:] if len(key.api_key) > 12 else key.api_key
@@ -4657,7 +4692,10 @@ class MultiAPIKeyDialog(QDialog):
 
             # Disable drop on this item to prevent nesting (keep it a flat list)
             item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
-            self.tree.addTopLevelItem(item)
+            tree_items.append(item)
+
+        if tree_items:
+            self.tree.addTopLevelItems(tree_items)
 
         # Update stats
         active_count = sum(1 for k in keys if k.enabled and not k.is_cooling_down)
@@ -4674,6 +4712,8 @@ class MultiAPIKeyDialog(QDialog):
         # Restore scroll position
         self.tree.verticalScrollBar().setValue(v_scroll)
         self.tree.horizontalScrollBar().setValue(h_scroll)
+        self.tree.setUpdatesEnabled(True)
+        self.tree.viewport().update()
 
     def _on_click(self, item, column):
         """Handle click on tree item for inline editing"""
@@ -5501,6 +5541,7 @@ class MultiAPIKeyDialog(QDialog):
 
         # Right side: TreeWidget with drag and drop
         self.glossary_tree = QTreeWidget()
+        self.glossary_tree.setUniformRowHeights(True)
         self._tighten_api_key_tree_first_column(self.glossary_tree)
         self.glossary_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
         self.glossary_tree.setColumnWidth(0, self.API_KEY_TREE_FIRST_COLUMN_WIDTH)
@@ -5582,8 +5623,10 @@ class MultiAPIKeyDialog(QDialog):
         for item in self.glossary_tree.selectedItems():
             selected_indices.append(self.glossary_tree.indexOfTopLevelItem(item))
 
+        self.glossary_tree.setUpdatesEnabled(False)
         self.glossary_tree.clear()
 
+        tree_items = []
         for key_data in glossary_keys:
             api_key = key_data.get('api_key', '')
             model = key_data.get('model', '')
@@ -5667,7 +5710,10 @@ class MultiAPIKeyDialog(QDialog):
                 item.setToolTip(col, tooltip)
 
             item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
-            self.glossary_tree.addTopLevelItem(item)
+            tree_items.append(item)
+
+        if tree_items:
+            self.glossary_tree.addTopLevelItems(tree_items)
 
         for index in selected_indices:
             if index < self.glossary_tree.topLevelItemCount():
@@ -5676,9 +5722,11 @@ class MultiAPIKeyDialog(QDialog):
 
         self.glossary_tree.verticalScrollBar().setValue(v_scroll)
         self.glossary_tree.horizontalScrollBar().setValue(h_scroll)
+        self.glossary_tree.setUpdatesEnabled(True)
+        self.glossary_tree.viewport().update()
 
         # Auto-refresh the in-memory pool so changes take effect immediately
-        if not getattr(self, '_initializing', False) and not getattr(self, '_syncing_external_key_pool_state', False):
+        if self._can_emit_live_key_pool_updates():
             self._refresh_glossary_pool()
 
     def _add_glossary_key(self):
@@ -6101,7 +6149,8 @@ class MultiAPIKeyDialog(QDialog):
         if hasattr(self.translator_gui, 'use_glossary_keys_var'):
             self.translator_gui.use_glossary_keys_var = enabled
 
-        if not getattr(self, '_initializing', False):
+        live_updates = self._can_emit_live_key_pool_updates()
+        if live_updates:
             glossary_keys = self.translator_gui.config.get('glossary_keys', [])
             if enabled:
                 msg = f"🔑 Glossary key pool: {len(glossary_keys)} keys loaded"
@@ -6115,30 +6164,31 @@ class MultiAPIKeyDialog(QDialog):
             else:
                 print(msg)
 
-        try:
-            import os as _os
-            _os.environ['USE_GLOSSARY_KEYS'] = '1' if enabled else '0'
-        except Exception:
-            pass
-
-        if enabled:
-            # Setup in-memory glossary pool so keys work immediately without restart
+        if live_updates:
             try:
-                from unified_api_client import UnifiedClient
-                gk_list = self.translator_gui.config.get('glossary_keys', []) or []
-                if gk_list:
-                    UnifiedClient.set_in_memory_glossary_keys(gk_list)
-            except Exception:
-                pass
-        else:
-            # Clear in-memory glossary pool when disabled to prevent stale pool usage
-            try:
-                from unified_api_client import UnifiedClient
-                UnifiedClient.clear_in_memory_glossary_keys()
+                import os as _os
+                _os.environ['USE_GLOSSARY_KEYS'] = '1' if enabled else '0'
             except Exception:
                 pass
 
-        self._notify_authgpt_visibility()
+            if enabled:
+                # Setup in-memory glossary pool so keys work immediately without restart
+                try:
+                    from unified_api_client import UnifiedClient
+                    gk_list = self.translator_gui.config.get('glossary_keys', []) or []
+                    if gk_list:
+                        UnifiedClient.set_in_memory_glossary_keys(gk_list)
+                except Exception:
+                    pass
+            else:
+                # Clear in-memory glossary pool when disabled to prevent stale pool usage
+                try:
+                    from unified_api_client import UnifiedClient
+                    UnifiedClient.clear_in_memory_glossary_keys()
+                except Exception:
+                    pass
+
+            self._notify_authgpt_visibility()
 
     def _refresh_glossary_pool(self):
         """Refresh the in-memory glossary key pool after any change (add/remove/enable/disable).
@@ -6781,21 +6831,47 @@ class MultiAPIKeyDialog(QDialog):
         completer.setFilterMode(Qt.MatchContains)
         combo.setCompleter(completer)
 
-        # Store callback for changes
+        # Store callback for changes. This used to call the parent model refresh
+        # synchronously on every keystroke, which made all key-pool model fields
+        # laggy while typing.
         if on_change:
-            combo.currentTextChanged.connect(lambda: on_change())
-            combo.editTextChanged.connect(lambda: on_change())
+            def _notify_model_change(immediate=False):
+                try:
+                    on_change(immediate=immediate)
+                except TypeError:
+                    on_change()
+            combo.currentTextChanged.connect(lambda: _notify_model_change(False))
+            combo.editTextChanged.connect(lambda: _notify_model_change(False))
+
+        search_text = {"value": ""}
+        search_timer = QTimer(combo)
+        search_timer.setSingleShot(True)
+        search_timer.timeout.connect(lambda: proxy.set_search_text(search_text["value"]))
+
+        def _schedule_search_text(text):
+            search_text["value"] = text
+            search_timer.start(80)
 
         if combo.lineEdit():
-            combo.lineEdit().textEdited.connect(proxy.set_search_text)
+            if on_change:
+                combo.lineEdit().editingFinished.connect(lambda: _notify_model_change(True))
+            combo.lineEdit().textEdited.connect(_schedule_search_text)
 
         combo._model_completer = completer
         combo._model_completer_proxy = proxy
         combo._model_completer_source = source
+        combo._model_completer_search_timer = search_timer
 
     def _notify_authgpt_visibility(self):
         """Notify the translator GUI to re-evaluate AuthGPT/AuthGem login button visibility."""
         self._refresh_parent_model_requirements(save_config=True)
+
+    def _can_emit_live_key_pool_updates(self) -> bool:
+        """Return True only for user actions, not initial dialog construction/sync."""
+        return (
+            not getattr(self, '_initializing', False)
+            and not getattr(self, '_syncing_external_key_pool_state', False)
+        )
 
     def _toggle_key_visibility(self):
         """Toggle API key visibility"""
@@ -6814,12 +6890,13 @@ class MultiAPIKeyDialog(QDialog):
 
         # Save the config immediately for direct user toggles. Live-sync refreshes
         # are already reading the saved value from the shared config.
-        if not getattr(self, '_initializing', False) and not getattr(self, '_syncing_external_key_pool_state', False):
+        live_updates = self._can_emit_live_key_pool_updates()
+        if live_updates:
             self.translator_gui.save_config(show_message=False)
             self._broadcast_key_pool_config_changed('main', refresh_keys=False)
 
         # Sync environment variables and UnifiedClient pool immediately (skip during init)
-        if not getattr(self, '_initializing', False):
+        if live_updates:
             try:
                 import os as _os
                 if enabled:
@@ -6941,8 +7018,9 @@ class MultiAPIKeyDialog(QDialog):
             except Exception:
                 pass
 
-        # Re-evaluate AuthGPT login button visibility
-        self._notify_authgpt_visibility()
+        # Re-evaluate AuthGPT login button visibility only for real user changes.
+        if live_updates:
+            self._notify_authgpt_visibility()
 
     def _copy_current_settings(self):
         """Copy current API key and model from main GUI"""
@@ -8241,6 +8319,7 @@ class MultiAPIKeyDialog(QDialog):
         layout.addWidget(move_frame)
 
         tree = QTreeWidget()
+        tree.setUniformRowHeights(True)
         self._tighten_api_key_tree_first_column(tree)
         tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
         for col, width in enumerate((self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 100, 42, 42, 80)):
@@ -8293,7 +8372,9 @@ class MultiAPIKeyDialog(QDialog):
         v_scroll = tree.verticalScrollBar().value()
         h_scroll = tree.horizontalScrollBar().value()
         selected_indices = [tree.indexOfTopLevelItem(item) for item in tree.selectedItems()]
+        tree.setUpdatesEnabled(False)
         tree.clear()
+        tree_items = []
         for key_data in keys:
             api_key = key_data.get('api_key', '')
             model = key_data.get('model', '')
@@ -8332,13 +8413,17 @@ class MultiAPIKeyDialog(QDialog):
             for col in range(item.columnCount()):
                 item.setForeground(col, color)
             item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
-            tree.addTopLevelItem(item)
+            tree_items.append(item)
+        if tree_items:
+            tree.addTopLevelItems(tree_items)
         for index in selected_indices:
             if index < tree.topLevelItemCount():
                 tree.topLevelItem(index).setSelected(True)
         tree.verticalScrollBar().setValue(v_scroll)
         tree.horizontalScrollBar().setValue(h_scroll)
-        if not getattr(self, '_initializing', False):
+        tree.setUpdatesEnabled(True)
+        tree.viewport().update()
+        if self._can_emit_live_key_pool_updates():
             self._dedicated_refresh_pool(pool_name)
 
     def _dedicated_add_key(self, pool_name: str):
@@ -8604,18 +8689,19 @@ class MultiAPIKeyDialog(QDialog):
             tree.clearSelection()
         self.translator_gui.config[spec['toggle_key']] = enabled
         setattr(self.translator_gui, f"use_{pool_name}_keys_var", enabled)
-        if not getattr(self, '_initializing', False) and not getattr(self, '_syncing_external_key_pool_state', False):
+        live_updates = self._can_emit_live_key_pool_updates()
+        if live_updates:
             self._broadcast_key_pool_config_changed(pool_name, refresh_keys=False)
-        self._dedicated_set_env(pool_name, enabled)
-        self._dedicated_refresh_pool(pool_name)
+            self._dedicated_set_env(pool_name, enabled)
+            self._dedicated_refresh_pool(pool_name)
         self._dedicated_status(pool_name, f"{spec['title']} {'enabled' if enabled else 'disabled'}")
-        if not getattr(self, '_initializing', False) and not getattr(self, '_syncing_external_key_pool_state', False):
+        if live_updates:
             msg = f"🔑 {spec['label']} key pool: {len(self._dedicated_keys(pool_name)) if enabled else 'disabled'}"
             try:
                 self.translator_gui.append_log(msg)
             except Exception:
                 print(msg)
-        self._notify_authgpt_visibility()
+            self._notify_authgpt_visibility()
 
     def _dedicated_toggle_key_visibility(self, pool_name: str):
         entry = self._dedicated_widget(pool_name, 'key_entry')

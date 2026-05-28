@@ -2508,7 +2508,7 @@ def _create_context_management_section(self, parent):
     rolling_keys_btn = _create_preview_pool_button(
         self,
         'rolling_summary',
-        "Summary Keys",
+        "RS Keys",
         "Open the Multi API Key Manager focused on the Rolling Summary key pool.",
         section_box,
     )

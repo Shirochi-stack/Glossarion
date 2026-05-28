@@ -8846,11 +8846,11 @@ Recent translations to summarize:
                 self,
                 self,
                 'rolling_summary',
-                "Summary Keys",
+                "RS Keys",
                 "Open the Multi API Key Manager focused on the Rolling Summary key pool.",
             )
         except Exception:
-            self.rolling_summary_keys_btn = QPushButton("Summary Keys")
+            self.rolling_summary_keys_btn = QPushButton("RS Keys")
             self.rolling_summary_keys_btn.setToolTip(
                 "Open the Multi API Key Manager focused on the Rolling Summary key pool."
             )
