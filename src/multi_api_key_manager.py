@@ -851,6 +851,7 @@ class RefusalPatternsDialog(QDialog):
                 pass
 
         checkbox.stateChanged.connect(update_checkmark)
+        checkbox._update_checkmark = update_checkmark
 
         def safe_init():
             try:
@@ -1506,6 +1507,10 @@ class MultiAPIKeyDialog(QDialog):
             setattr(translator_gui, dialog_attr, dialog)
         else:
             dialog = getattr(translator_gui, dialog_attr)
+            try:
+                dialog._refresh_visible_key_pool_views()
+            except Exception:
+                pass
 
         # Show and raise the dialog
         dialog.show()
@@ -1597,6 +1602,14 @@ class MultiAPIKeyDialog(QDialog):
         except Exception:
             pass
 
+    def _center_api_key_tree_item_text(self, item):
+        """Center text in every visible column of an API key tree row."""
+        try:
+            for col in range(item.columnCount()):
+                item.setTextAlignment(col, Qt.AlignCenter)
+        except Exception:
+            pass
+
     def _halgakos_icon_path(self):
         """Return the best available Halgakos icon path for Qt stylesheets."""
         candidates = []
@@ -1677,6 +1690,7 @@ class MultiAPIKeyDialog(QDialog):
                 pass
 
         checkbox.stateChanged.connect(update_checkmark)
+        checkbox._update_checkmark = update_checkmark
 
         def safe_init():
             try:
@@ -1812,6 +1826,150 @@ class MultiAPIKeyDialog(QDialog):
             multi_api_keys = self.translator_gui.config.get('multi_api_keys', [])
             self.key_pool.load_from_list(multi_api_keys)
 
+    def _set_checkbox_from_config(self, checkbox, checked):
+        if checkbox is None:
+            return
+        try:
+            previous = checkbox.blockSignals(True)
+            checkbox.setChecked(bool(checked))
+            checkbox.blockSignals(previous)
+            refresh_checkmark = getattr(checkbox, '_update_checkmark', None)
+            if callable(refresh_checkmark):
+                refresh_checkmark()
+            checkbox.update()
+        except Exception:
+            pass
+
+    def _set_spinbox_from_config(self, spinbox, value):
+        if spinbox is None:
+            return
+        try:
+            previous = spinbox.blockSignals(True)
+            spinbox.setValue(int(value))
+            spinbox.blockSignals(previous)
+        except Exception:
+            pass
+
+    def _sync_rotation_controls_from_config(self):
+        cfg = getattr(self.translator_gui, 'config', {}) or {}
+        self._set_checkbox_from_config(
+            getattr(self, 'force_rotation_checkbox', None),
+            cfg.get('force_key_rotation', True),
+        )
+        self._set_spinbox_from_config(
+            getattr(self, 'frequency_spinbox', None),
+            cfg.get('rotation_frequency', 1) or 1,
+        )
+        self._update_rotation_display()
+
+    def _sync_main_controls_from_config(self):
+        cfg = getattr(self.translator_gui, 'config', {}) or {}
+        self._set_checkbox_from_config(
+            getattr(self, 'enabled_checkbox', None),
+            cfg.get('use_multi_api_keys', False),
+        )
+        if hasattr(self, 'enabled_checkbox'):
+            self._toggle_multi_key_mode()
+        self._sync_rotation_controls_from_config()
+
+    def _sync_fallback_controls_from_config(self):
+        cfg = getattr(self.translator_gui, 'config', {}) or {}
+        self._set_checkbox_from_config(
+            getattr(self, 'use_fallback_checkbox', None),
+            cfg.get('use_fallback_keys', False),
+        )
+        self._set_checkbox_from_config(
+            getattr(self, 'use_main_key_fallback_checkbox', None),
+            cfg.get('use_main_key_fallback', True),
+        )
+        self._set_checkbox_from_config(
+            getattr(self, 'fallback_key_shuffle_checkbox', None),
+            cfg.get('fallback_key_shuffle', False),
+        )
+        if hasattr(self, 'use_fallback_checkbox'):
+            self._toggle_fallback_section()
+
+    def _sync_dedicated_controls_from_config(self, pool_name: str):
+        cfg = getattr(self.translator_gui, 'config', {}) or {}
+        spec = self._dedicated_pool_spec(pool_name)
+        checkbox = self._dedicated_widget(pool_name, 'keys_checkbox')
+        self._set_checkbox_from_config(checkbox, cfg.get(spec['toggle_key'], False))
+        if checkbox is not None:
+            self._dedicated_toggle_section(pool_name)
+
+    def _refresh_visible_key_pool_views(self):
+        self._refresh_pool_from_config(None, refresh_keys=True)
+
+    def _refresh_pool_from_config(self, pool_name=None, refresh_keys=False):
+        if getattr(self, '_syncing_external_key_pool_state', False):
+            return
+        self._syncing_external_key_pool_state = True
+        try:
+            self._sync_rotation_controls_from_config()
+
+            if pool_name == 'rotation':
+                return
+
+            if self.preview_pool == 'fallback':
+                if pool_name not in (None, 'fallback'):
+                    return
+                self._sync_fallback_controls_from_config()
+                if refresh_keys and hasattr(self, 'fallback_tree'):
+                    self._load_fallback_keys()
+                return
+
+            if self.preview_pool:
+                if pool_name not in (None, self.preview_pool):
+                    return
+                self._sync_dedicated_controls_from_config(self.preview_pool)
+                if refresh_keys and self._dedicated_widget(self.preview_pool, 'tree') is not None:
+                    self._dedicated_load_keys(self.preview_pool)
+                return
+
+            if pool_name in (None, 'main'):
+                if refresh_keys:
+                    self._load_keys_from_config()
+                self._sync_main_controls_from_config()
+                if refresh_keys and getattr(self, 'tree', None) is not None:
+                    self._refresh_key_list()
+
+            if pool_name in (None, 'fallback'):
+                self._sync_fallback_controls_from_config()
+                if refresh_keys and hasattr(self, 'fallback_tree'):
+                    self._load_fallback_keys()
+
+            pool_names = [pool_name] if pool_name not in (None, 'main', 'fallback') else sorted(self._dedicated_pool_specs())
+            for current_pool in pool_names:
+                if current_pool not in self._dedicated_pool_specs():
+                    continue
+                if self._dedicated_widget(current_pool, 'tree') is None:
+                    continue
+                self._sync_dedicated_controls_from_config(current_pool)
+                if refresh_keys:
+                    self._dedicated_load_keys(current_pool)
+        finally:
+            self._syncing_external_key_pool_state = False
+
+    def _broadcast_key_pool_config_changed(self, pool_name=None, refresh_keys=False):
+        """Refresh sibling key-manager dialogs after this dialog writes shared config."""
+        try:
+            for attr_name, dialog in vars(self.translator_gui).items():
+                if not str(attr_name).startswith('_multi_api_key_dialog'):
+                    continue
+                if dialog is self or not isinstance(dialog, MultiAPIKeyDialog):
+                    continue
+                try:
+                    dialog._refresh_pool_from_config(pool_name, refresh_keys=refresh_keys)
+                except RuntimeError:
+                    try:
+                        setattr(self.translator_gui, attr_name, None)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _coerce_bool_config_value(self, value, default=False):
         """Coerce persisted config values without treating non-empty strings as True."""
         if isinstance(value, bool):
@@ -1857,10 +2015,76 @@ class MultiAPIKeyDialog(QDialog):
 
         if hasattr(self, 'rotation_desc_label'):
             self.rotation_desc_label.setText(desc)
+        if hasattr(self, 'force_rotation_checkbox'):
+            self.force_rotation_var = self.force_rotation_checkbox.isChecked()
+        if hasattr(self, 'frequency_spinbox'):
+            self.rotation_frequency_var = self.frequency_spinbox.value()
+
+    def _on_rotation_settings_changed(self, *args):
+        """Persist and broadcast global rotation setting changes."""
+        self._update_rotation_display()
+        if (
+            hasattr(self.translator_gui, 'config')
+            and hasattr(self, 'force_rotation_checkbox')
+            and hasattr(self, 'frequency_spinbox')
+            and not getattr(self, '_initializing', False)
+            and not getattr(self, '_syncing_external_key_pool_state', False)
+        ):
+            self.translator_gui.config['force_key_rotation'] = self.force_rotation_checkbox.isChecked()
+            self.translator_gui.config['rotation_frequency'] = self.frequency_spinbox.value()
+            self._apply_rotation_settings_to_runtime_pools()
+            self._broadcast_key_pool_config_changed('rotation', refresh_keys=False)
+
+    def _apply_rotation_settings_to_runtime_pools(self):
+        """Reapply current rotation settings to all enabled in-memory key pools."""
+        if not hasattr(self.translator_gui, 'config'):
+            return
+        cfg = self.translator_gui.config
+        force_rotation = bool(cfg.get('force_key_rotation', True))
+        try:
+            rotation_frequency = int(cfg.get('rotation_frequency', 1) or 1)
+        except Exception:
+            rotation_frequency = 1
+        try:
+            os.environ['FORCE_KEY_ROTATION'] = '1' if force_rotation else '0'
+            os.environ['ROTATION_FREQUENCY'] = str(rotation_frequency)
+        except Exception:
+            pass
+        try:
+            from unified_api_client import UnifiedClient
+        except Exception:
+            return
+        try:
+            multi_keys = cfg.get('multi_api_keys', []) or []
+            if bool(cfg.get('use_multi_api_keys', False)) and multi_keys:
+                UnifiedClient.set_in_memory_multi_keys(
+                    multi_keys,
+                    force_rotation=force_rotation,
+                    rotation_frequency=rotation_frequency,
+                )
+        except Exception:
+            pass
+        for pool_name, spec in self._dedicated_pool_specs().items():
+            try:
+                keys = cfg.get(spec['config_key'], []) or []
+                if bool(cfg.get(spec['toggle_key'], False)) and keys:
+                    getattr(UnifiedClient, spec['set_method'])(
+                        keys,
+                        force_rotation=force_rotation,
+                        rotation_frequency=rotation_frequency,
+                    )
+            except Exception:
+                pass
 
     def _save_keys_to_config(self):
         """Save API keys and rotation settings to translator GUI config"""
         if hasattr(self.translator_gui, 'config'):
+            if getattr(self, 'preview_pool', None):
+                self._save_preview_pool_controls_to_config()
+                self.translator_gui.save_config(show_message=False)
+                self._broadcast_key_pool_config_changed(self.preview_pool, refresh_keys=True)
+                return
+
             # Convert keys to list of dicts
             key_list = [key.to_dict() for key in self.key_pool.get_all_keys()]
             self.translator_gui.config['multi_api_keys'] = key_list
@@ -1983,6 +2207,77 @@ class MultiAPIKeyDialog(QDialog):
                     self.translator_gui._update_multi_key_status_label()
                 except Exception:
                     pass
+            self._broadcast_key_pool_config_changed(None, refresh_keys=True)
+
+    def _save_preview_pool_controls_to_config(self):
+        """Save controls visible in a one-pool preview without touching main keys."""
+        if not hasattr(self.translator_gui, 'config'):
+            return
+        if hasattr(self, 'force_rotation_checkbox'):
+            self.translator_gui.config['force_key_rotation'] = self.force_rotation_checkbox.isChecked()
+        if hasattr(self, 'frequency_spinbox'):
+            self.translator_gui.config['rotation_frequency'] = self.frequency_spinbox.value()
+
+        if self.preview_pool == 'fallback':
+            if hasattr(self, 'use_fallback_checkbox'):
+                use_fallback = self.use_fallback_checkbox.isChecked()
+                self.translator_gui.config['use_fallback_keys'] = use_fallback
+                if hasattr(self.translator_gui, 'use_fallback_keys_var'):
+                    try:
+                        self.translator_gui.use_fallback_keys_var.set(use_fallback)
+                    except Exception:
+                        self.translator_gui.use_fallback_keys_var = use_fallback
+            if hasattr(self, 'use_main_key_fallback_checkbox'):
+                self.translator_gui.config['use_main_key_fallback'] = self.use_main_key_fallback_checkbox.isChecked()
+            if hasattr(self, 'fallback_key_shuffle_checkbox'):
+                self.translator_gui.config['fallback_key_shuffle'] = self.fallback_key_shuffle_checkbox.isChecked()
+            return
+
+        if self.preview_pool:
+            spec = self._dedicated_pool_spec(self.preview_pool)
+            checkbox = self._dedicated_widget(self.preview_pool, 'keys_checkbox')
+            if checkbox is not None:
+                enabled = checkbox.isChecked()
+                self.translator_gui.config[spec['toggle_key']] = enabled
+                setattr(self.translator_gui, f"use_{self.preview_pool}_keys_var", enabled)
+
+    def _create_rotation_settings_section(self, parent_layout):
+        """Create the global rotation settings shared by every key pool."""
+        self.rotation_frame = QGroupBox("Rotation Settings")
+        rotation_frame_layout = QVBoxLayout(self.rotation_frame)
+        rotation_frame_layout.setContentsMargins(15, 10, 15, 10)
+
+        rotation_settings = QWidget()
+        rotation_settings_layout = QHBoxLayout(rotation_settings)
+        rotation_settings_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.force_rotation_var = self.translator_gui.config.get('force_key_rotation', True)
+        self.force_rotation_checkbox = self._create_styled_checkbox("Force Key Rotation")
+        self.force_rotation_checkbox.setChecked(self.force_rotation_var)
+        self.force_rotation_checkbox.toggled.connect(self._on_rotation_settings_changed)
+        rotation_settings_layout.addWidget(self.force_rotation_checkbox)
+
+        rotation_settings_layout.addSpacing(20)
+        rotation_settings_layout.addWidget(QLabel("Every"))
+        self.rotation_frequency_var = self.translator_gui.config.get('rotation_frequency', 1)
+        self.frequency_spinbox = QSpinBox()
+        self.frequency_spinbox.setRange(1, 100)
+        self.frequency_spinbox.setValue(self.rotation_frequency_var)
+        self.frequency_spinbox.setMaximumWidth(60)
+        self.frequency_spinbox.valueChanged.connect(self._on_rotation_settings_changed)
+        self._disable_spinbox_mousewheel(self.frequency_spinbox)
+        rotation_settings_layout.addWidget(self.frequency_spinbox)
+        rotation_settings_layout.addWidget(QLabel("requests"))
+        rotation_settings_layout.addStretch()
+
+        rotation_frame_layout.addWidget(rotation_settings)
+
+        self.rotation_desc_label = QLabel()
+        self.rotation_desc_label.setStyleSheet("color: #5a9fd4; font-style: italic;")
+        rotation_frame_layout.addWidget(self.rotation_desc_label)
+        self._update_rotation_display()
+
+        parent_layout.addWidget(self.rotation_frame)
 
     def _create_dialog(self):
         """Create the main dialog using PySide6"""
@@ -2102,45 +2397,7 @@ class MultiAPIKeyDialog(QDialog):
         translation_pool_enable_layout.addStretch()
         translation_pool_layout.addWidget(translation_pool_enable_row)
 
-        # Rotation settings frame - store reference for enabling/disabling
-        self.rotation_frame = QGroupBox("Rotation Settings")
-        rotation_frame_layout = QVBoxLayout(self.rotation_frame)
-        rotation_frame_layout.setContentsMargins(15, 10, 15, 10)
-
-        # Force rotation toggle
-        rotation_settings = QWidget()
-        rotation_settings_layout = QHBoxLayout(rotation_settings)
-        rotation_settings_layout.setContentsMargins(0, 0, 0, 0)
-
-        self.force_rotation_var = self.translator_gui.config.get('force_key_rotation', True)
-        self.force_rotation_checkbox = self._create_styled_checkbox("Force Key Rotation")
-        self.force_rotation_checkbox.setChecked(self.force_rotation_var)
-        self.force_rotation_checkbox.toggled.connect(self._update_rotation_display)
-        rotation_settings_layout.addWidget(self.force_rotation_checkbox)
-
-        # Rotation frequency
-        rotation_settings_layout.addSpacing(20)
-        rotation_settings_layout.addWidget(QLabel("Every"))
-        self.rotation_frequency_var = self.translator_gui.config.get('rotation_frequency', 1)
-        self.frequency_spinbox = QSpinBox()
-        self.frequency_spinbox.setRange(1, 100)
-        self.frequency_spinbox.setValue(self.rotation_frequency_var)
-        self.frequency_spinbox.setMaximumWidth(60)
-        self.frequency_spinbox.valueChanged.connect(self._update_rotation_display)
-        self._disable_spinbox_mousewheel(self.frequency_spinbox)  # Disable mousewheel
-        rotation_settings_layout.addWidget(self.frequency_spinbox)
-        rotation_settings_layout.addWidget(QLabel("requests"))
-        rotation_settings_layout.addStretch()
-
-        rotation_frame_layout.addWidget(rotation_settings)
-
-        # Rotation description
-        self.rotation_desc_label = QLabel()
-        self.rotation_desc_label.setStyleSheet("color: #5a9fd4; font-style: italic;")
-        rotation_frame_layout.addWidget(self.rotation_desc_label)
-        self._update_rotation_display()
-
-        translation_pool_layout.addWidget(self.rotation_frame)
+        self._create_rotation_settings_section(scrollable_layout)
 
         # Add key section
         self._create_add_key_section(translation_pool_layout)
@@ -2234,6 +2491,8 @@ class MultiAPIKeyDialog(QDialog):
         title_label.setFont(title_font)
         scrollable_layout.addWidget(title_label)
 
+        self._create_rotation_settings_section(scrollable_layout)
+
         if self.preview_pool == 'fallback':
             self._create_fallback_section(scrollable_layout)
         else:
@@ -2245,7 +2504,6 @@ class MultiAPIKeyDialog(QDialog):
 
     def _multi_key_mode_widgets(self):
         return [
-            getattr(self, 'rotation_frame', None),
             getattr(self, 'add_key_frame', None),
             getattr(self, 'multikey_separator', None),
             getattr(self, 'key_list_frame', None),
@@ -2773,6 +3031,7 @@ class MultiAPIKeyDialog(QDialog):
             success_count = int(key_data.get('success_count', 0))
             error_count = int(key_data.get('error_count', 0))
             item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
+            self._center_api_key_tree_item_text(item)
             item.setData(0, Qt.UserRole, config_index)
             # Apply status-based coloring (consistent with multi-key tree)
             for col in range(item.columnCount()):
@@ -3263,6 +3522,14 @@ class MultiAPIKeyDialog(QDialog):
     def _toggle_fallback_section(self):
         """Toggle fallback section - simply hide/show elements"""
         enabled = self.use_fallback_checkbox.isChecked()
+        self.translator_gui.config['use_fallback_keys'] = enabled
+        if hasattr(self.translator_gui, 'use_fallback_keys_var'):
+            try:
+                self.translator_gui.use_fallback_keys_var.set(enabled)
+            except Exception:
+                self.translator_gui.use_fallback_keys_var = enabled
+        if not getattr(self, '_initializing', False) and not getattr(self, '_syncing_external_key_pool_state', False):
+            self._broadcast_key_pool_config_changed('fallback', refresh_keys=False)
 
         # Show/hide the input frame
         if hasattr(self, 'add_fallback_frame'):
@@ -3311,7 +3578,7 @@ class MultiAPIKeyDialog(QDialog):
         # Show status message
         status = "enabled" if enabled else "disabled"
         self._show_fallback_status(f"Fallback Keys {status}")
-        if not getattr(self, '_initializing', False):
+        if not getattr(self, '_initializing', False) and not getattr(self, '_syncing_external_key_pool_state', False):
             fallback_keys = self.translator_gui.config.get('fallback_keys', [])
             if enabled:
                 msg = f"🔑 Fallback key pool: {len(fallback_keys)} keys loaded"
@@ -4298,6 +4565,7 @@ class MultiAPIKeyDialog(QDialog):
                 str(key.error_count),
                 str(times_used),
             ])
+            self._center_api_key_tree_item_text(item)
 
             # Tooltip for per-key settings
             tooltip_parts = []
@@ -5335,6 +5603,7 @@ class MultiAPIKeyDialog(QDialog):
             success_count = int(key_data.get('success_count', 0))
             error_count = int(key_data.get('error_count', 0))
             item = QTreeWidgetItem([masked_key, model, output_limit_str, temp_str, delay_str, status, str(success_count), str(error_count), str(times_used)])
+            self._center_api_key_tree_item_text(item)
             for col in range(item.columnCount()):
                 item.setForeground(col, color)
 
@@ -5368,7 +5637,7 @@ class MultiAPIKeyDialog(QDialog):
         self.glossary_tree.horizontalScrollBar().setValue(h_scroll)
 
         # Auto-refresh the in-memory pool so changes take effect immediately
-        if not getattr(self, '_initializing', False):
+        if not getattr(self, '_initializing', False) and not getattr(self, '_syncing_external_key_pool_state', False):
             self._refresh_glossary_pool()
 
     def _add_glossary_key(self):
@@ -6502,8 +6771,11 @@ class MultiAPIKeyDialog(QDialog):
         self.translator_gui.config['use_multi_api_keys'] = enabled
         self.enabled_var = enabled
 
-        # Save the config immediately
-        self.translator_gui.save_config(show_message=False)
+        # Save the config immediately for direct user toggles. Live-sync refreshes
+        # are already reading the saved value from the shared config.
+        if not getattr(self, '_initializing', False) and not getattr(self, '_syncing_external_key_pool_state', False):
+            self.translator_gui.save_config(show_message=False)
+            self._broadcast_key_pool_config_changed('main', refresh_keys=False)
 
         # Sync environment variables and UnifiedClient pool immediately (skip during init)
         if not getattr(self, '_initializing', False):
@@ -6539,24 +6811,15 @@ class MultiAPIKeyDialog(QDialog):
                     except Exception:
                         pass
                     msg = "🔑 Translation key pool: disabled"
-                    if hasattr(self.translator_gui, 'append_log'):
+                    if hasattr(self.translator_gui, 'append_log') and not getattr(self, '_syncing_external_key_pool_state', False):
                         try:
                             self.translator_gui.append_log(msg)
                         except Exception:
                             print(msg)
-                    else:
+                    elif not getattr(self, '_syncing_external_key_pool_state', False):
                         print(msg)
             except Exception as _env_err:
                 print(f"[MULTI_KEY_TOGGLE] Failed to sync env/pool: {_env_err}")
-
-        # === Rotation Settings Frame ===
-        if hasattr(self, 'rotation_frame'):
-            if enabled:
-                self.rotation_frame.setMaximumHeight(16777215)  # Reset to max
-                self.rotation_frame.show()
-            else:
-                self.rotation_frame.hide()
-                self.rotation_frame.setMaximumHeight(0)
 
         # === Add Key Section ===
         if hasattr(self, 'add_key_frame'):
@@ -7713,6 +7976,8 @@ class MultiAPIKeyDialog(QDialog):
         spec = self._dedicated_pool_spec(pool_name)
         self.translator_gui.config[spec['config_key']] = keys
         self.translator_gui.save_config(show_message=False)
+        if not getattr(self, '_syncing_external_key_pool_state', False):
+            self._broadcast_key_pool_config_changed(pool_name, refresh_keys=True)
 
     def _dedicated_status(self, pool_name: str, message: str):
         label = self._dedicated_widget(pool_name, 'status_label')
@@ -8022,6 +8287,7 @@ class MultiAPIKeyDialog(QDialog):
                 str(int(key_data.get('error_count', 0))),
                 str(int(key_data.get('times_used', 0))),
             ])
+            self._center_api_key_tree_item_text(item)
             for col in range(item.columnCount()):
                 item.setForeground(col, color)
             item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
@@ -8297,10 +8563,12 @@ class MultiAPIKeyDialog(QDialog):
             tree.clearSelection()
         self.translator_gui.config[spec['toggle_key']] = enabled
         setattr(self.translator_gui, f"use_{pool_name}_keys_var", enabled)
+        if not getattr(self, '_initializing', False) and not getattr(self, '_syncing_external_key_pool_state', False):
+            self._broadcast_key_pool_config_changed(pool_name, refresh_keys=False)
         self._dedicated_set_env(pool_name, enabled)
         self._dedicated_refresh_pool(pool_name)
         self._dedicated_status(pool_name, f"{spec['title']} {'enabled' if enabled else 'disabled'}")
-        if not getattr(self, '_initializing', False):
+        if not getattr(self, '_initializing', False) and not getattr(self, '_syncing_external_key_pool_state', False):
             msg = f"🔑 {spec['label']} key pool: {len(self._dedicated_keys(pool_name)) if enabled else 'disabled'}"
             try:
                 self.translator_gui.append_log(msg)
