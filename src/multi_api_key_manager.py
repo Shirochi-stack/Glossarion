@@ -1480,6 +1480,8 @@ class RefusalPatternsDialog(QDialog):
 class MultiAPIKeyDialog(QDialog):
     """Dialog for managing multiple API keys"""
 
+    API_KEY_TREE_FIRST_COLUMN_WIDTH = 116
+
     @staticmethod
     def show_dialog(parent, translator_gui, preview_pool: Optional[str] = None):
         """Static method to create and show the dialog non-modally.
@@ -1550,6 +1552,48 @@ class MultiAPIKeyDialog(QDialog):
                     window.setWindowIcon(QIcon(ico_path))
                 except Exception:
                     pass
+        except Exception:
+            pass
+
+    def _tighten_api_key_tree_first_column(self, tree):
+        """Reduce the unused left gutter in API key trees."""
+        try:
+            tree.setRootIsDecorated(False)
+            tree.setIndentation(1)
+            tree.setItemsExpandable(False)
+            tree.header().setDefaultAlignment(Qt.AlignCenter)
+            tree_style = """
+                QTreeWidget {
+                    border: 1px solid #5f6f82;
+                }
+                QTreeWidget::item {
+                    border-left: 1px solid #4f5f70;
+                    border-right: 1px solid #4f5f70;
+                    border-bottom: 1px solid #3f4c5a;
+                    padding-left: 1px;
+                    padding-right: 3px;
+                }
+                QTreeWidget::item:selected,
+                QTreeWidget::item:selected:active,
+                QTreeWidget::item:selected:!active {
+                    background-color: #2f6fb3;
+                    color: #ffffff;
+                    border-left: 1px solid #6f9ed0;
+                    border-right: 1px solid #6f9ed0;
+                    border-bottom: 1px solid #6f9ed0;
+                }
+                QHeaderView::section {
+                    background-color: #252525;
+                    color: #e0e0e0;
+                    border-top: 1px solid #3a3a3a;
+                    border-left: 1px solid #3a3a3a;
+                    border-right: 1px solid #5f6f82;
+                    border-bottom: 1px solid #5f6f82;
+                    padding: 4px 3px;
+                }
+            """
+            existing = tree.styleSheet()
+            tree.setStyleSheet(f"{existing}\n{tree_style}" if existing else tree_style)
         except Exception:
             pass
 
@@ -2495,17 +2539,18 @@ class MultiAPIKeyDialog(QDialog):
 
         # Right side: TreeWidget with drag and drop
         self.fallback_tree = QTreeWidget()
+        self._tighten_api_key_tree_first_column(self.fallback_tree)
         # Add explicit column for per-key output token limit
-        self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', 'Success', 'Errors', 'Times Used'])
-        self.fallback_tree.setColumnWidth(0, 125)  # API Key
+        self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
+        self.fallback_tree.setColumnWidth(0, self.API_KEY_TREE_FIRST_COLUMN_WIDTH)  # API Key
         self.fallback_tree.setColumnWidth(1, 220)  # Model
         self.fallback_tree.setColumnWidth(2, 105)  # Output Limit
         self.fallback_tree.setColumnWidth(3, 100)  # Temperature
         self.fallback_tree.setColumnWidth(4, 90)   # API Delay
         self.fallback_tree.setColumnWidth(5, 100)  # Status
-        self.fallback_tree.setColumnWidth(6, 75)   # Success
-        self.fallback_tree.setColumnWidth(7, 55)   # Errors
-        self.fallback_tree.setColumnWidth(8, 80)   # Times Used
+        self.fallback_tree.setColumnWidth(6, 42)   # Success
+        self.fallback_tree.setColumnWidth(7, 42)   # Errors
+        self.fallback_tree.setColumnWidth(8, 80)   # Requests
 
         # Set header font to match multi-key tree
         fb_header = self.fallback_tree.header()
@@ -3714,19 +3759,20 @@ class MultiAPIKeyDialog(QDialog):
 
         # Right side: TreeWidget with drag and drop support
         self.tree = QTreeWidget()
+        self._tighten_api_key_tree_first_column(self.tree)
         # Add explicit column for per-key output token limit
-        self.tree.setHeaderLabels(['API Key', 'Model', 'Cooldown', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', 'Success', 'Errors', 'Times Used'])
+        self.tree.setHeaderLabels(['API Key', 'Model', '\u231b', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
         # Adjusted column widths: balanced distribution
-        self.tree.setColumnWidth(0, 125)  # API Key
+        self.tree.setColumnWidth(0, self.API_KEY_TREE_FIRST_COLUMN_WIDTH)  # API Key
         self.tree.setColumnWidth(1, 220)  # Model
-        self.tree.setColumnWidth(2, 70)   # Cooldown
+        self.tree.setColumnWidth(2, 42)   # Cooldown
         self.tree.setColumnWidth(3, 105)  # Output Limit
         self.tree.setColumnWidth(4, 100)  # Temperature
         self.tree.setColumnWidth(5, 90)   # API Delay
         self.tree.setColumnWidth(6, 100)  # Status
-        self.tree.setColumnWidth(7, 75)   # Success
-        self.tree.setColumnWidth(8, 55)   # Errors
-        self.tree.setColumnWidth(9, 80)   # Times Used
+        self.tree.setColumnWidth(7, 42)   # Success
+        self.tree.setColumnWidth(8, 42)   # Errors
+        self.tree.setColumnWidth(9, 80)   # Requests
 
         # Set header font
         header = self.tree.header()
@@ -5146,15 +5192,16 @@ class MultiAPIKeyDialog(QDialog):
 
         # Right side: TreeWidget with drag and drop
         self.glossary_tree = QTreeWidget()
-        self.glossary_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', 'Success', 'Errors', 'Times Used'])
-        self.glossary_tree.setColumnWidth(0, 125)
+        self._tighten_api_key_tree_first_column(self.glossary_tree)
+        self.glossary_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
+        self.glossary_tree.setColumnWidth(0, self.API_KEY_TREE_FIRST_COLUMN_WIDTH)
         self.glossary_tree.setColumnWidth(1, 220)
         self.glossary_tree.setColumnWidth(2, 105)
         self.glossary_tree.setColumnWidth(3, 100)
         self.glossary_tree.setColumnWidth(4, 90)
         self.glossary_tree.setColumnWidth(5, 100)
-        self.glossary_tree.setColumnWidth(6, 75)
-        self.glossary_tree.setColumnWidth(7, 55)
+        self.glossary_tree.setColumnWidth(6, 42)
+        self.glossary_tree.setColumnWidth(7, 42)
         self.glossary_tree.setColumnWidth(8, 80)
 
         gl_header = self.glossary_tree.header()
@@ -7888,8 +7935,9 @@ class MultiAPIKeyDialog(QDialog):
         layout.addWidget(move_frame)
 
         tree = QTreeWidget()
-        tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', 'Success', 'Errors', 'Times Used'])
-        for col, width in enumerate((125, 220, 105, 100, 90, 100, 75, 55, 80)):
+        self._tighten_api_key_tree_first_column(tree)
+        tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Temperature', 'Delay (s)', 'Status', '\u2705', '\u274c', 'Requests'])
+        for col, width in enumerate((self.API_KEY_TREE_FIRST_COLUMN_WIDTH, 220, 105, 100, 90, 100, 42, 42, 80)):
             tree.setColumnWidth(col, width)
         header = tree.header()
         header_font = QFont()

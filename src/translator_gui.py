@@ -4401,6 +4401,7 @@ Recent translations to summarize:
         temp_layout = getattr(self, 'temp_layout', None)
         temp_container = getattr(self, 'temp_container', None)
         temp_entry = getattr(self, 'trans_temp', None)
+        compact_spacer = getattr(self, '_refinement_prompt_compact_spacer', None)
         if not all((controls_layout, controls_widget, combo, button, row, batch_size, checkbox, temp_layout, temp_container)):
             return
 
@@ -4438,7 +4439,8 @@ Recent translations to summarize:
             )
             target_parent = temp_container if compact else controls_widget
             if compact == currently_compact and button.parentWidget() is target_parent:
-                return
+                if not compact or (compact_spacer is not None and temp_layout.indexOf(compact_spacer) >= 0):
+                    return
 
             controls_layout.setDirection(QBoxLayout.LeftToRight)
             controls_layout.setSpacing(spacing)
@@ -4448,13 +4450,26 @@ Recent translations to summarize:
 
             controls_layout.removeWidget(button)
             temp_layout.removeWidget(button)
+            if compact_spacer is not None:
+                temp_layout.removeWidget(compact_spacer)
+                controls_layout.removeWidget(compact_spacer)
+                compact_spacer.hide()
+                compact_spacer.setParent(None)
             if compact:
+                if compact_spacer is None:
+                    compact_spacer = QWidget()
+                    compact_spacer.setObjectName("refinementPromptCompactSpacer")
+                    compact_spacer.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                    self._refinement_prompt_compact_spacer = compact_spacer
+                compact_spacer.setFixedWidth(50)
                 insert_at = 2
                 if temp_entry is not None:
                     temp_index = temp_layout.indexOf(temp_entry)
                     if temp_index >= 0:
                         insert_at = temp_index + 1
-                temp_layout.insertWidget(insert_at, button)
+                temp_layout.insertWidget(insert_at, compact_spacer)
+                compact_spacer.show()
+                temp_layout.insertWidget(insert_at + 1, button)
             else:
                 controls_layout.addWidget(button)
 
@@ -10436,7 +10451,7 @@ Recent translations to summarize:
 
     def _create_api_section(self):
         """Create API key section"""
-        self.multi_keys_button = QPushButton("Multi Keys")
+        self.multi_keys_button = QPushButton("Multi Key Manager")
         self.multi_keys_button.setToolTip("Open the Multi API Key Manager.")
         try:
             from multi_api_key_manager import style_preview_pool_button
@@ -10452,23 +10467,23 @@ Recent translations to summarize:
                 QMessageBox.critical(self, "Error", f"Failed to open key pool manager: {exc}")
 
         self.multi_keys_button.clicked.connect(_open_multi_keys_from_main)
-        self.frame.addWidget(self.multi_keys_button, 8, 0, Qt.AlignLeft)
-
-        api_key_input_container = QWidget()
-        api_key_input_layout = QHBoxLayout(api_key_input_container)
-        api_key_input_layout.setContentsMargins(10, 0, 0, 0)
-        api_key_input_layout.setSpacing(6)
 
         self.api_key_label = QLabel("API Key:")
-        api_key_input_layout.addWidget(self.api_key_label)
+        api_key_controls_container = QWidget()
+        api_key_controls_layout = QHBoxLayout(api_key_controls_container)
+        api_key_controls_layout.setContentsMargins(0, 0, 0, 0)
+        api_key_controls_layout.setSpacing(10)
+        api_key_controls_layout.addWidget(self.multi_keys_button)
+        api_key_controls_layout.addWidget(self.api_key_label)
+        self.frame.addWidget(api_key_controls_container, 8, 0, Qt.AlignRight)
         
         self.api_key_entry = QLineEdit()
         self.api_key_entry.setEchoMode(QLineEdit.Password)  # Show '*' instead of text
         initial_key = self.config.get('api_key', '')
         if initial_key:
             self.api_key_entry.setText(initial_key)
-        api_key_input_layout.addWidget(self.api_key_entry, 1)
-        self.frame.addWidget(api_key_input_container, 8, 1, 1, 3)
+        self.api_key_entry.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.frame.addWidget(self.api_key_entry, 8, 1, 1, 3)
         
         # Show/Hide API Key button (row 8)
         self.show_api_btn = QPushButton("Show")
