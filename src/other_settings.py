@@ -2505,6 +2505,17 @@ def _create_context_management_section(self, parent):
     section_v.addWidget(cfg_btn)
     rolling_controls.append(cfg_btn)
 
+    rolling_keys_btn = _create_preview_pool_button(
+        self,
+        'rolling_summary',
+        "Summary Keys",
+        "Open the Multi API Key Manager focused on the Rolling Summary key pool.",
+        section_box,
+    )
+    rolling_keys_btn.setMinimumHeight(28)
+    section_v.addWidget(rolling_keys_btn)
+    rolling_controls.append(rolling_keys_btn)
+
     # Separator
     sep1 = QFrame()
     sep1.setFrameShape(QFrame.HLine)

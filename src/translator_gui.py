@@ -8839,6 +8839,29 @@ Recent translations to summarize:
         self.context_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.context_mode_combo.currentIndexChanged.connect(self._on_context_mode_changed)
         contextual_layout.addWidget(self.context_mode_combo)
+
+        try:
+            from multi_api_key_manager import create_preview_pool_button
+            self.rolling_summary_keys_btn = create_preview_pool_button(
+                self,
+                self,
+                'rolling_summary',
+                "Summary Keys",
+                "Open the Multi API Key Manager focused on the Rolling Summary key pool.",
+            )
+        except Exception:
+            self.rolling_summary_keys_btn = QPushButton("Summary Keys")
+            self.rolling_summary_keys_btn.setToolTip(
+                "Open the Multi API Key Manager focused on the Rolling Summary key pool."
+            )
+            def _open_rolling_summary_keys():
+                try:
+                    from multi_api_key_manager import open_multi_api_key_pool_preview
+                    open_multi_api_key_pool_preview(self, self, 'rolling_summary')
+                except Exception as exc:
+                    QMessageBox.critical(self, "Error", f"Failed to open key pool manager: {exc}")
+            self.rolling_summary_keys_btn.clicked.connect(_open_rolling_summary_keys)
+        contextual_layout.addWidget(self.rolling_summary_keys_btn)
         
         contextual_warning = QLabel("⚠️ May result in malformed outputs")
         contextual_warning.setStyleSheet("color: #ff9800; font-size: 9pt; font-style: italic;")
@@ -10262,6 +10285,8 @@ Recent translations to summarize:
             self.contextual_warning_label.setVisible(is_contextual)
         if hasattr(self, 'context_options_container'):
             self.context_options_container.setVisible(has_context_options)
+        if hasattr(self, 'rolling_summary_keys_btn'):
+            self.rolling_summary_keys_btn.setVisible(is_summary)
         if hasattr(self, 'trans_history_label'):
             self.trans_history_label.setVisible(is_contextual)
         if hasattr(self, 'trans_history'):
