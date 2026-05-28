@@ -545,16 +545,38 @@ def refine_glossary_entries(
 
     for entry_type in selected_types:
         entries = entries_by_type.get(entry_type) or []
-        if not entries:
-            continue
         type_key = type_keys[entry_type]
-        type_hash = type_hashes[entry_type]
+        type_hash = type_hashes.get(entry_type) or _entry_hash(entry_type, entries, hash_mode)
         type_progress = progress.get(type_key, {})
-        if (
-            isinstance(type_progress, dict)
-            and type_progress.get("status") == "completed"
-            and type_progress.get("input_hash") == type_hash
-        ):
+        if isinstance(type_progress, dict) and type_progress.get("status") == "completed":
+            # A completed type can appear in either shape on the next run:
+            # the original pre-refinement input or the refined output loaded
+            # back from glossary.csv/json. Accept both hashes so completed
+            # refinement work is not resent just because the persisted file is
+            # already refined.
+            completed_hashes = {
+                str(type_progress.get("input_hash") or ""),
+                str(type_progress.get("output_hash") or ""),
+            }
+            if type_hash in completed_hashes:
+                continue
+        if not entries:
+            no_entries_update = {
+                "entry_type": entry_type,
+                "status": "completed",
+                "input_hash": type_hash,
+                "output_hash": type_hash,
+                "chunking_mode": "separate",
+                "payload_delimiter": payload_delimiter_name,
+                "entry_count_before": 0,
+                "entry_count_after": 0,
+                "completed_chunks": 0,
+                "total_chunks": 0,
+                "output_file": os.path.basename(output_path or ""),
+                "reason": "no_entries",
+            }
+            update_refinement_progress(progress_file, type_key, no_entries_update, atomic_replace_fn=atomic_replace_fn)
+            progress[type_key] = dict(progress.get(type_key, {}), **no_entries_update)
             continue
         placeholder = {
             "entry_type": entry_type,
@@ -572,7 +594,7 @@ def refine_glossary_entries(
         pending_types.append(entry_type)
 
     if not pending_types:
-        log("Glossary refinement already completed for selected entry types; skipping.")
+        log("Glossary refinement already completed for selected entry types, or no entries were present; skipping.")
         return glossary
 
     selected_types = pending_types
