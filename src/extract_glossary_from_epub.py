@@ -8245,18 +8245,30 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
                 previous_entry = None
                 if isinstance(existing_info, dict) and existing_info:
                     if str(existing_info.get("status", "")).lower() == "in_progress":
-                        previous_status = str(existing_info.get("previous_status", "not_completed") or "not_completed")
-                        previous_entry = existing_info.get("previous_progress_entry")
-                        if not isinstance(previous_entry, dict):
+                        copied_previous = False
+                        for key in ("previous_status", "previous_progress_entry", "previous_status_unknown"):
+                            if key in existing_info:
+                                chapter_info[key] = existing_info[key]
+                                copied_previous = True
+                        previous_entry = chapter_info.get("previous_progress_entry")
+                        if "previous_status" not in chapter_info and isinstance(previous_entry, dict):
+                            chapter_info["previous_status"] = str(previous_entry.get("status", "not_completed") or "not_completed")
+                        if not copied_previous:
                             chapter_info["previous_status_unknown"] = True
+                        previous_status = None
                     else:
                         previous_status = str(existing_info.get("status", "not_completed") or "not_completed")
                         previous_entry = {
                             k: v for k, v in existing_info.items()
                             if k not in ("previous_status", "previous_progress_entry", "previous_status_unknown")
                         }
-                chapter_info["previous_status"] = previous_status
-                if isinstance(previous_entry, dict) and previous_status.lower() not in ("not_completed", "not translated", "not_translated"):
+                if previous_status is not None:
+                    chapter_info["previous_status"] = previous_status
+                if (
+                    previous_status is not None
+                    and isinstance(previous_entry, dict)
+                    and previous_status.lower() not in ("not_completed", "not translated", "not_translated")
+                ):
                     chapter_info["previous_progress_entry"] = previous_entry
             if isinstance(existing_info, dict) and isinstance(existing_info.get("ocr_progress"), dict):
                 chapter_info["ocr_progress"] = existing_info["ocr_progress"]

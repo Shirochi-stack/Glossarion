@@ -2278,6 +2278,8 @@ class ProgressManager:
                 ):
                     self.restore_all_in_progress_for_hard_stop()
 
+                self._preserve_disk_previous_progress_entries()
+
                 self.prog["completed_list"] = []
                 for chapter_key, chapter_info in self.prog.get("chapters", {}).items():
                     if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
@@ -2430,6 +2432,17 @@ class ProgressManager:
         failed.pop("previous_status_unknown", None)
         return failed
 
+    @staticmethod
+    def _copy_previous_progress_fields(target, source):
+        if not isinstance(target, dict) or not isinstance(source, dict):
+            return False
+        copied = False
+        for key in ("previous_status", "previous_progress_entry", "previous_status_unknown"):
+            if key in source:
+                target[key] = source[key]
+                copied = True
+        return copied
+
     def _disk_in_progress_snapshot(self):
         """Load the on-disk in-progress rows once per file version."""
         try:
@@ -2500,6 +2513,49 @@ class ProgressManager:
         except Exception:
             pass
         return None, None
+
+    def _preserve_disk_previous_progress_entries(self):
+        """Keep retry/in-progress writes from erasing an existing previous snapshot on disk."""
+        try:
+            with open(self.PROGRESS_FILE, "r", encoding="utf-8") as f:
+                disk_progress = json.load(f)
+            disk_chapters = disk_progress.get("chapters", {}) if isinstance(disk_progress, dict) else {}
+            memory_chapters = self.prog.get("chapters", {})
+            if not isinstance(disk_chapters, dict) or not isinstance(memory_chapters, dict):
+                return
+
+            disk_refs = {}
+            for disk_key, disk_info in disk_chapters.items():
+                if not isinstance(disk_info, dict):
+                    continue
+                if str(disk_info.get("status", "")).lower() != "in_progress":
+                    continue
+                out = disk_info.get("output_file")
+                num = disk_info.get("actual_num") or disk_info.get("chapter_num")
+                if out and num is not None:
+                    disk_refs[(str(num), str(out))] = disk_info
+
+            for chapter_key, chapter_info in memory_chapters.items():
+                if not isinstance(chapter_info, dict):
+                    continue
+                if str(chapter_info.get("status", "")).lower() != "in_progress":
+                    continue
+                if isinstance(chapter_info.get("previous_progress_entry"), dict):
+                    continue
+
+                disk_info = disk_chapters.get(str(chapter_key))
+                if not isinstance(disk_info, dict):
+                    out = chapter_info.get("output_file")
+                    num = chapter_info.get("actual_num") or chapter_info.get("chapter_num")
+                    disk_info = disk_refs.get((str(num), str(out))) if out and num is not None else None
+                if not isinstance(disk_info, dict):
+                    continue
+                if str(disk_info.get("status", "")).lower() != "in_progress":
+                    continue
+                if isinstance(disk_info.get("previous_progress_entry"), dict):
+                    self._copy_previous_progress_fields(chapter_info, disk_info)
+        except Exception:
+            return
 
     def _mark_all_known_progress_failed_after_file_delete(self):
         """If the progress file was deleted mid-run, do not recreate old completed/merged rows."""
@@ -2595,13 +2651,16 @@ class ProgressManager:
                     existing_info,
                 )
                 if existing_status.lower() == "in_progress":
-                    previous_entry = existing_info.get("previous_progress_entry")
-                    previous_status = ProgressManager._status_with_qa_marker(
-                        existing_info.get("previous_status", "not_translated") or "not_translated",
-                        previous_entry if isinstance(previous_entry, dict) else existing_info,
-                    )
-                    if not isinstance(previous_entry, dict):
+                    if ProgressManager._copy_previous_progress_fields(chapter_info, existing_info):
+                        previous_entry = chapter_info.get("previous_progress_entry")
+                        if "previous_status" not in chapter_info and isinstance(previous_entry, dict):
+                            chapter_info["previous_status"] = ProgressManager._status_with_qa_marker(
+                                previous_entry.get("status", "not_translated") or "not_translated",
+                                previous_entry,
+                            )
+                    else:
                         chapter_info["previous_status_unknown"] = True
+                    previous_status = None
                 else:
                     previous_status = existing_status
                     previous_entry = {
@@ -2610,8 +2669,13 @@ class ProgressManager:
                     }
                     if previous_status == "qa_failed":
                         previous_entry["status"] = "qa_failed"
-            chapter_info["previous_status"] = previous_status
-            if isinstance(previous_entry, dict) and previous_status.lower() not in ("not_translated", "not translated", "not_completed"):
+            if previous_status is not None:
+                chapter_info["previous_status"] = previous_status
+            if (
+                previous_status is not None
+                and isinstance(previous_entry, dict)
+                and previous_status.lower() not in ("not_translated", "not translated", "not_completed")
+            ):
                 chapter_info["previous_progress_entry"] = previous_entry
         
         # CRITICAL: Store original_basename for OPF->output mapping in GUI
