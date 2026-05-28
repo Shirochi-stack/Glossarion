@@ -2731,21 +2731,77 @@ Text to analyze:
             print("[CLEANUP] Stopping all background operations...")
             self._request_hard_stop_for_shutdown()
 
-            # Shut down the persistent extraction daemon
             try:
-                from chapter_extraction_manager import shutdown_daemon
-                shutdown_daemon()
-                print("[CLEANUP] Extraction daemon shut down")
+                import concurrent.futures as _shutdown_cf
+                import time as _shutdown_time
             except Exception:
-                pass
+                _shutdown_cf = None
+                _shutdown_time = None
+            shutdown_pool = None
+            shutdown_futures = []
+
+            def _submit_shutdown_task(label, fn):
+                nonlocal shutdown_pool
+                try:
+                    if _shutdown_cf is None:
+                        fn()
+                        return
+                    if shutdown_pool is None:
+                        shutdown_pool = _shutdown_cf.ThreadPoolExecutor(
+                            max_workers=4,
+                            thread_name_prefix="gui-shutdown",
+                        )
+                    shutdown_futures.append((label, shutdown_pool.submit(fn)))
+                except Exception:
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+
+            def _drain_shutdown_tasks(timeout=0.45):
+                try:
+                    if not shutdown_futures or _shutdown_time is None:
+                        return
+                    deadline = _shutdown_time.monotonic() + max(0.0, float(timeout))
+                    for label, future in list(shutdown_futures):
+                        remaining = deadline - _shutdown_time.monotonic()
+                        if remaining <= 0:
+                            if not future.done():
+                                print(f"[CLEANUP] {label} still shutting down in background")
+                            continue
+                        try:
+                            future.result(timeout=remaining)
+                        except TimeoutError:
+                            print(f"[CLEANUP] {label} still shutting down in background")
+                        except Exception:
+                            pass
+                finally:
+                    try:
+                        if shutdown_pool is not None:
+                            shutdown_pool.shutdown(wait=False, cancel_futures=True)
+                    except Exception:
+                        pass
+
+            def _stop_extraction_daemon():
+                try:
+                    from chapter_extraction_manager import shutdown_daemon
+                    shutdown_daemon()
+                    print("[CLEANUP] Extraction daemon shut down")
+                except Exception:
+                    pass
+
+            def _stop_qa_scanner():
+                try:
+                    from scan_html_folder import stop_scan
+                    stop_scan()
+                    print("[CLEANUP] QA scanner stop signal sent")
+                except Exception:
+                    pass
+
+            _submit_shutdown_task("extraction daemon", _stop_extraction_daemon)
 
             # Stop QA scanner if running (including truncation detection)
-            try:
-                from scan_html_folder import stop_scan
-                stop_scan()
-                print("[CLEANUP] QA scanner stop signal sent")
-            except Exception:
-                pass
+            _submit_shutdown_task("QA scanner", _stop_qa_scanner)
 
             # Helper: force-close dialogs that override closeEvent to hide instead of close
             def _force_close_dialog(dlg):
@@ -2857,35 +2913,44 @@ Text to analyze:
             if hasattr(self, 'executor') and self.executor:
                 try:
                     print("[CLEANUP] Shutting down thread pool executor...")
-                    self.executor.shutdown(wait=False)
+                    executor = self.executor
+                    self.executor = None
+                    _submit_shutdown_task(
+                        "thread pool executor",
+                        lambda executor=executor: executor.shutdown(wait=False)
+                    )
                 except:
                     pass
             
             # Stop PDF worker subprocess if running
             if hasattr(self, 'epub_converter') and hasattr(self.epub_converter, '_active_pdf_mgr'):
-                try:
-                    pdf_mgr = self.epub_converter._active_pdf_mgr
-                    if pdf_mgr and pdf_mgr.is_running:
-                        print("[CLEANUP] Stopping PDF worker subprocess...")
-                        pdf_mgr.stop()
-                        # Force kill the process if still alive
-                        if pdf_mgr.process and pdf_mgr.process.poll() is None:
-                            pdf_mgr.process.kill()
-                except Exception:
-                    pass
+                def _stop_pdf_worker():
+                    try:
+                        pdf_mgr = self.epub_converter._active_pdf_mgr
+                        if pdf_mgr and pdf_mgr.is_running:
+                            print("[CLEANUP] Stopping PDF worker subprocess...")
+                            pdf_mgr.stop()
+                            # Force kill the process if still alive
+                            if pdf_mgr.process and pdf_mgr.process.poll() is None:
+                                pdf_mgr.process.kill()
+                    except Exception:
+                        pass
+                _submit_shutdown_task("PDF worker", _stop_pdf_worker)
 
             # Stop compression worker subprocesses if running
             if hasattr(self, 'epub_converter') and hasattr(self.epub_converter, '_active_compress_workers'):
-                try:
-                    for p in (self.epub_converter._active_compress_workers or []):
-                        if p and p.poll() is None:
-                            try:
-                                p.kill()
-                            except Exception:
-                                pass
-                    print("[CLEANUP] Compression workers killed")
-                except Exception:
-                    pass
+                def _stop_compression_workers():
+                    try:
+                        for p in (self.epub_converter._active_compress_workers or []):
+                            if p and p.poll() is None:
+                                try:
+                                    p.kill()
+                                except Exception:
+                                    pass
+                        print("[CLEANUP] Compression workers killed")
+                    except Exception:
+                        pass
+                _submit_shutdown_task("compression workers", _stop_compression_workers)
             
             # Set any stop flags that might exist
             if hasattr(self, 'stop_flag'):
@@ -2928,7 +2993,10 @@ Text to analyze:
                                 print("[CLEANUP] MangaTranslator shutdown complete")
                             elif translator:
                                 print("[CLEANUP] Fast-canceling MangaTranslator resources...")
-                                _fast_cancel_manga_translator(translator)
+                                _submit_shutdown_task(
+                                    "manga translator fast cancel",
+                                    lambda translator=translator: _fast_cancel_manga_translator(translator)
+                                )
                             
                             # Null out the translator to release memory
                             self.manga_translator.translator = None
@@ -3038,7 +3106,10 @@ Text to analyze:
             try:
                 temp_root = getattr(self, 'cbz_temp_root', None)
                 if temp_root and os.path.isdir(temp_root):
-                    shutil.rmtree(temp_root, ignore_errors=True)
+                    _submit_shutdown_task(
+                        "temporary CBZ cleanup",
+                        lambda temp_root=temp_root: shutil.rmtree(temp_root, ignore_errors=True)
+                    )
             except Exception:
                 pass
 
@@ -3067,6 +3138,7 @@ Text to analyze:
             except Exception:
                 pass
             
+            _drain_shutdown_tasks()
             print("[CLEANUP] Background operations stopped")
             self._stop_all_operations_done = True
             
@@ -3074,6 +3146,11 @@ Text to analyze:
             print(f"[CLEANUP] Error stopping operations: {e}")
             self._stop_all_operations_done = True
         finally:
+            try:
+                if 'shutdown_pool' in locals() and shutdown_pool is not None:
+                    shutdown_pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
             self._stop_all_operations_running = False
         
     # ── MTool Bridge Watcher ──────────────────────────────────────────

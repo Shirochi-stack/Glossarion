@@ -96,20 +96,19 @@ def _terminate_multiprocessing_children(timeout: float = 1.5) -> None:
     try:
         import multiprocessing as mp
         children = mp.active_children()
+        if not children:
+            return
         for p in children:
             try:
                 p.terminate()
             except Exception:
                 pass
-        for p in children:
+
+        def _join_or_kill(p):
             try:
                 p.join(timeout=timeout)
             except Exception:
                 pass
-        # Anything still alive after terminate/join: hard kill so it can
-        # release file handles to DLLs under _MEIPASS before the bootloader
-        # tries to clean the temp directory.
-        for p in children:
             try:
                 if p.is_alive():
                     if hasattr(p, "kill"):
@@ -119,6 +118,21 @@ def _terminate_multiprocessing_children(timeout: float = 1.5) -> None:
                     p.join(timeout=timeout)
             except Exception:
                 pass
+
+        # Anything still alive after terminate/join: hard kill so it can
+        # release file handles to DLLs under _MEIPASS before the bootloader
+        # tries to clean the temp directory. Join/kill in parallel so many
+        # helper processes do not multiply the timeout.
+        workers = min(len(children), _cpu_worker_cap(), 8)
+        if workers <= 1:
+            for p in children:
+                _join_or_kill(p)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="shutdown-mp-child",
+            ) as pool:
+                list(pool.map(_join_or_kill, children))
     except Exception:
         pass
 
@@ -852,9 +866,25 @@ def force_shutdown(exit_code: int = 0, cleanup_fns: Optional[Iterable[Callable[[
     else:
         print("[CLOSE] Skipping duplicate Qt shutdown event drain")
     # Kill descendants first so their handles to _MEIPASS drop before the
-    # bootloader tries to rmtree it after we return.
-    _terminate_multiprocessing_children()
-    _terminate_psutil_children()
+    # bootloader tries to rmtree it after we return. These two scanners overlap
+    # but wait on different APIs, so run them together and ignore races.
+    try:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="shutdown-child-sweep",
+        ) as pool:
+            futures = [
+                pool.submit(_terminate_multiprocessing_children),
+                pool.submit(_terminate_psutil_children),
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    future.result()
+                except Exception:
+                    pass
+    except Exception:
+        _terminate_multiprocessing_children()
+        _terminate_psutil_children()
     _cleanup_pyinstaller_temp_dir()  # no-op, kept for backwards compatibility
     # Disabled by default. Killing our own process tree with taskkill can
     # interrupt Qt/PySide/native DLL teardown at an arbitrary instruction and
