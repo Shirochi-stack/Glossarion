@@ -2720,6 +2720,13 @@ Text to analyze:
 
     def stop_all_operations(self, kill_child_processes=True):
         """Stop all background operations and threads"""
+        if getattr(self, '_stop_all_operations_done', False):
+            print("[CLEANUP] Background operations already stopped")
+            return
+        if getattr(self, '_stop_all_operations_running', False):
+            print("[CLEANUP] Background operations shutdown already in progress")
+            return
+        self._stop_all_operations_running = True
         try:
             print("[CLEANUP] Stopping all background operations...")
             self._request_hard_stop_for_shutdown()
@@ -2778,6 +2785,45 @@ Text to analyze:
                         return
                     if hasattr(thread_obj, 'join'):
                         thread_obj.join(timeout=timeout_ms / 1000.0)
+                except Exception:
+                    pass
+
+            def _fast_cancel_manga_translator(translator):
+                """Cancel manga worker resources without expensive model unloads."""
+                try:
+                    if translator is None:
+                        return
+                    try:
+                        translator.cancel_requested = True
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(translator, '_mem_stop_event') and translator._mem_stop_event:
+                            translator._mem_stop_event.set()
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(translator, '_clear_checkout_references'):
+                            translator._clear_checkout_references()
+                    except Exception:
+                        pass
+                    try:
+                        from manga_translator import MangaTranslator
+                        MangaTranslator.set_global_cancellation(True)
+                        MangaTranslator.force_release_all_pool_checkouts(restart_workers=False)
+                    except Exception:
+                        pass
+                    for attr in ('_inpainting_future', '_inpainting_executor'):
+                        try:
+                            obj = getattr(translator, attr, None)
+                            if attr.endswith('executor') and obj is not None:
+                                try:
+                                    obj.shutdown(wait=False, cancel_futures=True)
+                                except TypeError:
+                                    obj.shutdown(wait=False)
+                            setattr(translator, attr, None)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
             
@@ -2863,15 +2909,26 @@ Text to analyze:
                         try:
                             # Call MangaTranslationTab.cleanup() for timer/worker/state cleanup
                             if hasattr(self.manga_translator, 'cleanup'):
-                                print("[CLEANUP] Running MangaTranslationTab.cleanup()...")
-                                self.manga_translator.cleanup()
+                                print("[CLEANUP] Running MangaTranslationTab.cleanup(fast=True)...")
+                                try:
+                                    self.manga_translator.cleanup(fast=True)
+                                except TypeError:
+                                    self.manga_translator.cleanup()
                             
-                            # Explicitly shutdown the MangaTranslator (models, detectors, torch, HF cache)
+                            # App shutdown exits the process shortly after this. Full torch/HF
+                            # unloads can add seconds and are unnecessary unless explicitly requested.
                             translator = getattr(self.manga_translator, 'translator', None)
-                            if translator and hasattr(translator, 'shutdown'):
-                                print("[CLEANUP] Running MangaTranslator.shutdown()...")
+                            if (
+                                translator
+                                and hasattr(translator, 'shutdown')
+                                and os.environ.get('GLOSSARION_FULL_MANGA_SHUTDOWN', '0') == '1'
+                            ):
+                                print("[CLEANUP] Running full MangaTranslator.shutdown()...")
                                 translator.shutdown()
                                 print("[CLEANUP] MangaTranslator shutdown complete")
+                            elif translator:
+                                print("[CLEANUP] Fast-canceling MangaTranslator resources...")
+                                _fast_cancel_manga_translator(translator)
                             
                             # Null out the translator to release memory
                             self.manga_translator.translator = None
@@ -3011,9 +3068,13 @@ Text to analyze:
                 pass
             
             print("[CLEANUP] Background operations stopped")
+            self._stop_all_operations_done = True
             
         except Exception as e:
             print(f"[CLEANUP] Error stopping operations: {e}")
+            self._stop_all_operations_done = True
+        finally:
+            self._stop_all_operations_running = False
         
     # ── MTool Bridge Watcher ──────────────────────────────────────────
     def _check_mtool_bridge(self):

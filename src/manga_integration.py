@@ -538,9 +538,11 @@ class ImageStateManager:
                     images_with_ocr.append((display_path, ocr_count))
             
             if images_with_ocr:
-                print(f"[STATE DEBUG] Found {len(images_with_ocr)} images with OCR data:")
-                for path, count in images_with_ocr:  # Show all
+                print(f"[STATE DEBUG] Found {len(images_with_ocr)} images with OCR data")
+                for path, count in images_with_ocr[:5]:
                     print(f"[STATE DEBUG]   - {path}: {count} recognized texts")
+                if len(images_with_ocr) > 5:
+                    print(f"[STATE DEBUG]   ... {len(images_with_ocr) - 5} more omitted")
             else:
                 print(f"[STATE DEBUG] NO images have OCR data!")
             
@@ -1070,10 +1072,16 @@ class MangaTranslationTab(QObject):
         except ImportError:
             pass
     
-    def cleanup(self):
+    def cleanup(self, fast: bool = False):
         """Cleanup method called when dialog closes - prevents RAM leaks"""
         try:
-            print("[CLEANUP] Starting MangaTranslationTab cleanup...")
+            if getattr(self, '_cleanup_done', False):
+                print("[CLEANUP] MangaTranslationTab cleanup already completed")
+                return
+            self._cleanup_done = True
+
+            mode = "fast" if fast else "full"
+            print(f"[CLEANUP] Starting MangaTranslationTab cleanup ({mode})...")
             
             # Set shutdown flag to prevent new processes from spawning
             self._shutting_down = True
@@ -1087,7 +1095,10 @@ class MangaTranslationTab(QObject):
             # Shutdown parallel save system and its ThreadPoolExecutor
             if hasattr(self, '_parallel_save_system') and self._parallel_save_system:
                 print("[CLEANUP] Shutting down parallel save system...")
-                self._parallel_save_system.shutdown()
+                try:
+                    self._parallel_save_system.shutdown(wait=not fast)
+                except TypeError:
+                    self._parallel_save_system.shutdown()
                 self._parallel_save_system = None
             
             # Flush image state manager and stop worker process
@@ -1104,9 +1115,11 @@ class MangaTranslationTab(QObject):
                 self.image_state_manager._stop_worker()
                 print("[CLEANUP] State manager worker stopped")
             
-            # Force garbage collection
-            import gc
-            gc.collect()
+            if not fast:
+                # Full dialog cleanup can collect cycles; app shutdown exits the
+                # process immediately, so this only makes closing slower there.
+                import gc
+                gc.collect()
             print("[CLEANUP] Cleanup completed")
             
         except Exception as e:

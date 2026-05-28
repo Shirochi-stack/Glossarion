@@ -17,6 +17,9 @@ from contextlib import contextmanager
 from typing import Callable, Iterable, Optional
 
 
+_last_qt_shutdown_drain_at = 0.0
+
+
 def _normalize_exit_code(code) -> int:
     if code is None:
         return 0
@@ -59,6 +62,7 @@ def drain_qt_events_for_shutdown(duration_ms: int = 350, slice_ms: int = 50) -> 
     except Exception:
         return
 
+    global _last_qt_shutdown_drain_at
     try:
         app = QCoreApplication.instance()
         if app is None:
@@ -83,6 +87,7 @@ def drain_qt_events_for_shutdown(duration_ms: int = 350, slice_ms: int = 50) -> 
                 except Exception:
                     return
             time.sleep(0.01)
+        _last_qt_shutdown_drain_at = time.monotonic()
     except Exception:
         pass
 
@@ -842,7 +847,10 @@ def force_shutdown(exit_code: int = 0, cleanup_fns: Optional[Iterable[Callable[[
     code = _normalize_exit_code(exit_code)
     _ensure_safe_tempdir()
     _run_cleanup_fns(cleanup_fns)
-    drain_qt_events_for_shutdown(duration_ms=350)
+    if time.monotonic() - _last_qt_shutdown_drain_at > 0.75:
+        drain_qt_events_for_shutdown(duration_ms=350)
+    else:
+        print("[CLOSE] Skipping duplicate Qt shutdown event drain")
     # Kill descendants first so their handles to _MEIPASS drop before the
     # bootloader tries to rmtree it after we return.
     _terminate_multiprocessing_children()

@@ -9392,12 +9392,12 @@ def _init_parallel_save_system(self):
                 print(f"[PARALLEL] Batch queued {queued_count}/{len(region_indices)} save tasks")
                 return queued_count
             
-            def shutdown(self):
+            def shutdown(self, wait=False):
                 """Shutdown the parallel processing system."""
                 try:
-                    print(f"[PARALLEL] Shutting down executor (waiting for tasks to complete)...")
-                    # Wait for tasks to complete with short timeout
-                    self.executor.shutdown(wait=True, cancel_futures=True)
+                    wait_label = "waiting for tasks" if wait else "canceling queued tasks"
+                    print(f"[PARALLEL] Shutting down executor ({wait_label})...")
+                    self.executor.shutdown(wait=wait, cancel_futures=True)
                     print(f"[PARALLEL] Parallel save system shutdown completed")
                 except Exception as e:
                     print(f"[PARALLEL] Error during shutdown: {e}")
