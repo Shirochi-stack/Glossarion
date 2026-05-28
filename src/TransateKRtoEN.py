@@ -13160,6 +13160,10 @@ _FOREIGN_CHARACTER_QA_ISSUE_RE = re.compile(
     r"(?:^|[^a-z])(?:korean|japanese|chinese|hebrew|arabic|syriac|thai|cyrillic)_text_found_\d+_chars_",
     re.IGNORECASE,
 )
+_FOREIGN_CHARACTER_QA_ISSUE_EXTRACT_RE = re.compile(
+    r"\b[A-Za-z]+_text_found_\d+_chars_(?:\[[^\]]*\]|[^\s,;|)]+)?",
+    re.IGNORECASE,
+)
 
 _PARTIAL_REFINEMENT_BLOCK_TAGS = {
     "p", "li", "blockquote", "figcaption", "caption", "td", "th", "dt", "dd",
@@ -13204,6 +13208,21 @@ def _is_foreign_character_qa_issue(issue) -> bool:
     )
 
 
+def _foreign_character_qa_issue_prompt_texts(issue):
+    text = _flatten_partial_refinement_issue_text(issue).strip()
+    if not text:
+        return []
+    matches = [
+        match.group(0).strip(" ,;")
+        for match in _FOREIGN_CHARACTER_QA_ISSUE_EXTRACT_RE.finditer(text)
+    ]
+    if matches:
+        return matches
+    if _is_foreign_character_qa_issue(text):
+        return [text]
+    return []
+
+
 def _entry_has_foreign_character_qa_issue(entry) -> bool:
     if not isinstance(entry, dict):
         return False
@@ -13222,39 +13241,6 @@ def _entry_has_foreign_character_qa_issue(entry) -> bool:
             return True
         current = current.get("previous_progress_entry")
     return False
-
-
-_REFINEMENT_PROMPT_PROTECTED_QA_ISSUES = {
-    "SPLIT_FAILED",
-    "TRUNCATED",
-    "PROHIBITED_CONTENT",
-    "EMPTY_OUTPUT",
-    "API_ERROR",
-    "TIMEOUT",
-}
-
-
-def _qa_issue_type_text(issue) -> str:
-    if isinstance(issue, dict):
-        for key in ("type", "issue_type", "code", "reason", "name"):
-            value = issue.get(key)
-            if value:
-                return str(value)
-    return _flatten_partial_refinement_issue_text(issue)
-
-
-def _normalize_qa_issue_name(value) -> str:
-    return re.sub(r"[^A-Za-z0-9]+", "_", str(value or "")).strip("_").upper()
-
-
-def _is_protected_refinement_prompt_qa_issue(issue) -> bool:
-    normalized = _normalize_qa_issue_name(_qa_issue_type_text(issue))
-    if not normalized:
-        return False
-    return any(
-        normalized == protected or normalized.startswith(f"{protected}_")
-        for protected in _REFINEMENT_PROMPT_PROTECTED_QA_ISSUES
-    )
 
 
 def _qa_failed_source_entry(entry):
@@ -13281,14 +13267,12 @@ def _qa_issues_for_refinement_prompt(entry) -> str:
     filtered = []
     seen = set()
     for issue in issues:
-        if _is_protected_refinement_prompt_qa_issue(issue):
-            continue
-        text = _flatten_partial_refinement_issue_text(issue).strip()
-        if not text or text.lower() in {"true", "false", "none", "null"}:
-            continue
-        if text not in seen:
-            seen.add(text)
-            filtered.append(text)
+        for text in _foreign_character_qa_issue_prompt_texts(issue):
+            if not text or text.lower() in {"true", "false", "none", "null"}:
+                continue
+            if text not in seen:
+                seen.add(text)
+                filtered.append(text)
     return "; ".join(filtered)
 
 

@@ -4477,7 +4477,7 @@ Recent translations to summarize:
             "Edit prompts sent only to refinement requests. "
             "Use {target_lang} for the selected target language. "
             "In the user prompt, {html} or {content} can mark where the translated HTML should be inserted. "
-            "In Failed and Partial prompts, {QA_Issues} is replaced with the current non-protected QA issue when available. "
+            "In Failed and Partial prompts, {QA_Issues} is replaced with current character-found QA issues when available. "
             "The existing Assistant Prompt button is used for optional assistant prefill."
         )
         instructions.setWordWrap(True)
