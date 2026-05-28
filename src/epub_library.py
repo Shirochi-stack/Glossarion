@@ -42,6 +42,93 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+_ORPHANED_QTHREADS: set[QThread] = set()
+
+
+def _disconnect_thread_signals(thread, signal_names=()) -> None:
+    """Best-effort disconnect for worker signals targeting closing dialogs."""
+    for name in signal_names or ():
+        signal = getattr(thread, name, None)
+        if signal is None:
+            continue
+        try:
+            signal.disconnect()
+        except Exception:
+            pass
+
+
+def _orphan_running_qthread(thread) -> None:
+    """Keep a still-running QThread alive after its owner dialog closes."""
+    if thread is None:
+        return
+    try:
+        if not thread.isRunning():
+            return
+    except Exception:
+        pass
+    try:
+        thread.setParent(None)
+    except Exception:
+        pass
+    _ORPHANED_QTHREADS.add(thread)
+    if getattr(thread, "_glossarion_orphaned", False):
+        return
+    try:
+        setattr(thread, "_glossarion_orphaned", True)
+    except Exception:
+        pass
+
+    def _cleanup(*_args, t=thread):
+        _ORPHANED_QTHREADS.discard(t)
+        try:
+            t.deleteLater()
+        except Exception:
+            pass
+
+    try:
+        thread.finished.connect(_cleanup)
+    except Exception:
+        pass
+
+
+def _stop_qthread_safely(thread, timeout_ms: int = 1200,
+                         signal_names=(), cancel: bool = True) -> bool:
+    """Request a QThread stop; detach it if it cannot finish immediately."""
+    if thread is None:
+        return True
+    _disconnect_thread_signals(thread, signal_names)
+    if cancel:
+        cancel_fn = getattr(thread, "cancel", None)
+        if callable(cancel_fn):
+            try:
+                cancel_fn()
+            except Exception:
+                pass
+        try:
+            thread.requestInterruption()
+        except Exception:
+            pass
+    try:
+        thread.quit()
+    except Exception:
+        pass
+    try:
+        if not thread.isRunning():
+            return True
+    except Exception:
+        pass
+    try:
+        stopped = thread.wait(max(0, int(timeout_ms)))
+    except TypeError:
+        thread.wait()
+        stopped = True
+    except Exception:
+        stopped = False
+    if stopped is False:
+        _orphan_running_qthread(thread)
+        return False
+    return True
+
 # -- Module-level render caches ---------------------------------------------
 # Flipping the library's View dropdown (S / M / L / XL / …) invalidates the
 # per-card ``preset_key`` and forces cards to rebuild. The rebuild itself is
@@ -6038,6 +6125,9 @@ class EpubLibraryDialog(QDialog):
         self._scanner_thread: _DualScannerThread | None = None
         self._delete_thread: _LibraryDeleteThread | None = None
         self._delete_progress = None
+        self._shutdown_requested = False
+        self._active_details = None
+        self._active_reader = None
         self._initial_scan_started = False
         # Enable drag-and-drop of EPUB / TXT / PDF / HTML files onto the
         # dialog. Drops are routed through the same import pipeline as the
@@ -10742,6 +10832,43 @@ class EpubLibraryDialog(QDialog):
         except Exception:
             pass
 
+    def shutdown(self) -> None:
+        """Close owned dialogs and stop workers before the app exits."""
+        self._shutdown_requested = True
+        for attr in ("_active_reader", "_active_details"):
+            child = getattr(self, attr, None)
+            if child is None:
+                continue
+            try:
+                child.close()
+                QApplication.processEvents()
+            except Exception:
+                pass
+            setattr(self, attr, None)
+        try:
+            self._auto_refresh_timer.stop()
+        except Exception:
+            pass
+        _stop_qthread_safely(
+            getattr(self, "_scanner_thread", None),
+            timeout_ms=1500,
+            signal_names=("finished",),
+        )
+        self._scanner_thread = None
+        _stop_qthread_safely(
+            getattr(self, "_delete_thread", None),
+            timeout_ms=1500,
+            signal_names=("progress", "delete_finished"),
+        )
+        self._delete_thread = None
+        for thread in list(getattr(self, "_cover_threads", []) or []):
+            _stop_qthread_safely(
+                thread, timeout_ms=500,
+                signal_names=("finished",),
+            )
+        self._cover_threads.clear()
+        _persist_config_via_parent(self)
+
     def closeEvent(self, event):
         """Hide the dialog instead of closing \u2014 persist settings.
 
@@ -10754,6 +10881,9 @@ class EpubLibraryDialog(QDialog):
         self._config['epub_library_card_size'] = self._card_size
         self._config['epub_library_tab'] = self._current_tab
         _persist_config_via_parent(self)
+        if getattr(self, "_shutdown_requested", False):
+            event.accept()
+            return
         event.ignore()
         self.hide()
 
@@ -11258,8 +11388,23 @@ class _BookDetailsLoader(QThread):
         super().__init__(parent)
         self._book = book
         self._config = config or {}
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        self.requestInterruption()
+
+    def _should_stop(self) -> bool:
+        if self._cancelled:
+            return True
+        try:
+            return bool(self.isInterruptionRequested())
+        except RuntimeError:
+            return True
 
     def run(self):
+        if self._should_stop():
+            return
         try:
             book_path = self._book.get("path", "") or ""
             book_type = self._book.get("type", "epub")
@@ -11348,11 +11493,14 @@ class _BookDetailsLoader(QThread):
                         metadata_json = None
 
             # Emit the preview so the dialog can paint the hero row now.
-            self.preview_ready.emit({
-                "details": details,
-                "cover": cover or "",
-                "metadata_json": metadata_json or {},
-            })
+            if not self._should_stop():
+                self.preview_ready.emit({
+                    "details": details,
+                    "cover": cover or "",
+                    "metadata_json": metadata_json or {},
+                })
+            else:
+                return
 
             # ---- Phase 2: Slow per-chapter title parsing ----
             # Re-parse the spine WITH per-chapter HTML title extraction so
@@ -11360,6 +11508,8 @@ class _BookDetailsLoader(QThread):
             # rather than just filename stubs.
             if source_is_epub:
                 details = _parse_epub_details(source_epub, parse_chapter_titles=True)
+                if self._should_stop():
+                    return
 
             prog = None
             if progress_file and os.path.isfile(progress_file):
@@ -11547,27 +11697,37 @@ class _BookDetailsLoader(QThread):
                     max_workers = _reader_worker_count(
                         len(items), config=self._config)
                     if max_workers <= 1:
-                        chapters_info = [_resolve_chapter(it) for it in items]
+                        chapters_info = []
+                        for it in items:
+                            if self._should_stop():
+                                return
+                            chapters_info.append(_resolve_chapter(it))
                     else:
                         with ThreadPoolExecutor(max_workers=max_workers) as pool:
                             chapters_info = list(pool.map(_resolve_chapter, items))
                 except Exception:
                     logger.debug("Parallel chapter resolve failed, falling back: %s",
                                  traceback.format_exc())
-                    chapters_info = [_resolve_chapter(it) for it in items]
+                    chapters_info = []
+                    for it in items:
+                        if self._should_stop():
+                            return
+                        chapters_info.append(_resolve_chapter(it))
 
             # metadata_json was loaded in Phase 1 above.
 
-            self.done.emit({
-                "details": details,
-                "cover": cover or "",
-                "chapters_info": chapters_info,
-                "metadata_json": metadata_json or {},
-                "progress": prog or {},
-            })
+            if not self._should_stop():
+                self.done.emit({
+                    "details": details,
+                    "cover": cover or "",
+                    "chapters_info": chapters_info,
+                    "metadata_json": metadata_json or {},
+                    "progress": prog or {},
+                })
         except Exception as exc:
-            logger.error("Book details load error: %s\n%s", exc, traceback.format_exc())
-            self.error.emit(f"{exc}")
+            if not self._should_stop():
+                logger.error("Book details load error: %s\n%s", exc, traceback.format_exc())
+                self.error.emit(f"{exc}")
 
 
 _CHAPTER_PRIMARY_STYLES = {
@@ -13894,6 +14054,14 @@ class BookDetailsDialog(QDialog):
     # -- Qt lifecycle --------------------------------------------------------
 
     def closeEvent(self, event):
+        active_reader = getattr(self, "_active_reader", None)
+        if active_reader is not None:
+            try:
+                active_reader.close()
+                QApplication.processEvents()
+            except Exception:
+                pass
+            self._active_reader = None
         persist_timer = getattr(self, "_details_config_persist_timer", None)
         if persist_timer is not None and persist_timer.isActive():
             persist_timer.stop()
@@ -13903,16 +14071,17 @@ class BookDetailsDialog(QDialog):
             populate_timer.stop()
         self._cancel_chapter_row_prep()
         for thread in list(getattr(self, "_chapter_row_prep_threads", []) or []):
-            try:
-                thread.wait(100)
-            except Exception:
-                pass
+            _stop_qthread_safely(
+                thread, timeout_ms=1000,
+                signal_names=("batch_ready", "finished"),
+            )
+        self._chapter_row_prep_threads.clear()
         if self._loader is not None:
-            try:
-                self._loader.quit()
-                self._loader.wait(200)
-            except Exception:
-                pass
+            _stop_qthread_safely(
+                self._loader, timeout_ms=1500,
+                signal_names=("preview_ready", "done", "error"),
+            )
+            self._loader = None
         super().closeEvent(event)
 
 
@@ -14089,8 +14258,23 @@ class _EpubCacheLoaderThread(QThread):
         self._epub_path = epub_path
         self._show_special_files = bool(show_special_files)
         self._config = config or {}
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        self.requestInterruption()
+
+    def _should_stop(self) -> bool:
+        if self._cancelled:
+            return True
+        try:
+            return bool(self.isInterruptionRequested())
+        except RuntimeError:
+            return True
 
     def run(self):
+        if self._should_stop():
+            return
         try:
             cached = _load_epub_cache(
                 self._epub_path,
@@ -14099,8 +14283,10 @@ class _EpubCacheLoaderThread(QThread):
             )
         except Exception:
             logger.debug("Cache load failed in worker: %s",
-                         traceback.format_exc())
+                             traceback.format_exc())
             cached = None
+        if self._should_stop():
+            return
         if cached:
             chapters, images, filenames = cached
             self.hit.emit(chapters, images, list(filenames or []))
@@ -14141,8 +14327,23 @@ class _OverlayMergeThread(QThread):
         self._overlay = dict(overlay_map or {})
         self._extra_dirs = list(extra_image_dirs or [])
         self._config = dict(config or {})
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        self.requestInterruption()
+
+    def _should_stop(self) -> bool:
+        if self._cancelled:
+            return True
+        try:
+            return bool(self.isInterruptionRequested())
+        except RuntimeError:
+            return True
 
     def run(self):
+        if self._should_stop():
+            return
         raw = self._raw_chapters
         overlaid = raw
         overlay_applied = False
@@ -14158,6 +14359,8 @@ class _OverlayMergeThread(QThread):
 
             def _fetch_overlay(idx_title_content):
                 idx, (title, content) = idx_title_content
+                if self._should_stop():
+                    return (idx, title, content, False)
                 fname = filenames[idx] if idx < len(filenames) else ""
                 key = os.path.basename(fname).lower() if fname else ""
                 ov = overlay.get(key) if key else None
@@ -14172,6 +14375,8 @@ class _OverlayMergeThread(QThread):
                 except OSError:
                     logger.debug("Overlay read failed: %s",
                                  traceback.format_exc())
+                    return (idx, title, content, False)
+                if self._should_stop():
                     return (idx, title, content, False)
                 translated_html = data.decode("utf-8", errors="replace")
                 new_title = title
@@ -14194,6 +14399,8 @@ class _OverlayMergeThread(QThread):
                 results = [_fetch_overlay(item)
                            for item in enumerate(raw)]
 
+            if self._should_stop():
+                return
             merged = [None] * len(raw)
             for idx, title, content, applied in results:
                 merged[idx] = (title, content)
@@ -14213,6 +14420,8 @@ class _OverlayMergeThread(QThread):
                          ".webp", ".svg", ".bmp")
             extra_files: list[tuple[str, str, str]] = []
             for dir_path in self._extra_dirs:
+                if self._should_stop():
+                    return
                 if not dir_path or not os.path.isdir(dir_path):
                     continue
                 try:
@@ -14231,10 +14440,14 @@ class _OverlayMergeThread(QThread):
 
             def _read_extra_image(file_info):
                 path, name, dir_name = file_info
+                if self._should_stop():
+                    return None
                 try:
                     with open(path, "rb") as f:
                         data = f.read()
                 except OSError:
+                    return None
+                if self._should_stop():
                     return None
                 return name, dir_name, data
 
@@ -14258,6 +14471,8 @@ class _OverlayMergeThread(QThread):
                         _read_extra_image(file_info)
                         for file_info in extra_files
                     ]
+                if self._should_stop():
+                    return
                 for loaded in loaded_images:
                     if not loaded:
                         continue
@@ -14268,7 +14483,8 @@ class _OverlayMergeThread(QThread):
                     merged_imgs.setdefault("images/" + name, data)
             images = merged_imgs
 
-        self.done.emit(overlaid, images, overlay_applied)
+        if not self._should_stop():
+            self.done.emit(overlaid, images, overlay_applied)
 
 
 class _EpubSearchThread(QThread):
@@ -14286,9 +14502,20 @@ class _EpubSearchThread(QThread):
 
     def cancel(self) -> None:
         self._cancelled = True
+        self.requestInterruption()
+
+    def _should_stop(self) -> bool:
+        if self._cancelled:
+            return True
+        try:
+            return bool(self.isInterruptionRequested())
+        except RuntimeError:
+            return True
 
     def run(self):
         query = self._query.strip()
+        if self._should_stop():
+            return
         if not query:
             self.results_ready.emit(self._search_id, query, [])
             return
@@ -14301,16 +14528,16 @@ class _EpubSearchThread(QThread):
         def _scan_chapter(item):
             chapter_idx, chapter = item
             title, html = chapter
-            if self._cancelled:
+            if self._should_stop():
                 return []
             plain = _epub_plain_chapter_text(html)
-            if self._cancelled:
+            if self._should_stop():
                 return []
             rows = []
             local_occurrence = 0
             display_title = title or f"Chapter {chapter_idx + 1}"
             for match in pattern.finditer(plain):
-                if self._cancelled:
+                if self._should_stop():
                     return []
                 rows.append({
                     "chapter_idx": chapter_idx,
@@ -14329,16 +14556,48 @@ class _EpubSearchThread(QThread):
         try:
             workers = _reader_worker_count(len(items), config=self._config)
             if workers <= 1:
-                chapter_rows = [_scan_chapter(item) for item in items]
+                chapter_rows = []
+                for item in items:
+                    if self._should_stop():
+                        return
+                    chapter_rows.append(_scan_chapter(item))
             else:
-                with ThreadPoolExecutor(max_workers=workers) as pool:
-                    chapter_rows = list(pool.map(_scan_chapter, items))
+                pool = ThreadPoolExecutor(max_workers=workers)
+                futures = {
+                    pool.submit(_scan_chapter, item): idx
+                    for idx, item in enumerate(items)
+                }
+                completed = []
+                try:
+                    for future in as_completed(futures):
+                        if self._should_stop():
+                            break
+                        completed.append((futures[future], future.result()))
+                finally:
+                    if self._should_stop():
+                        for future in futures:
+                            future.cancel()
+                        try:
+                            pool.shutdown(wait=False, cancel_futures=True)
+                        except TypeError:
+                            pool.shutdown(wait=False)
+                    else:
+                        pool.shutdown(wait=True)
+                if self._should_stop():
+                    return
+                chapter_rows = [
+                    rows for _, rows in sorted(completed, key=lambda item: item[0])
+                ]
         except Exception:
             logger.debug("Parallel EPUB search failed, falling back: %s",
                          traceback.format_exc())
-            chapter_rows = [_scan_chapter(item) for item in items]
+            chapter_rows = []
+            for item in items:
+                if self._should_stop():
+                    return
+                chapter_rows.append(_scan_chapter(item))
 
-        if self._cancelled:
+        if self._should_stop():
             return
         for rows in chapter_rows:
             for row in rows:
@@ -14347,7 +14606,7 @@ class _EpubSearchThread(QThread):
         total = len(matches)
         for row in matches:
             row["total_matches"] = total
-        if not self._cancelled:
+        if not self._should_stop():
             self.results_ready.emit(self._search_id, query, matches)
 
 
@@ -14508,14 +14767,31 @@ class _EpubLoaderThread(QThread):
         # key so on / off variants don't collide.
         self._show_special_files = bool(show_special_files)
         self._config = config or {}
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        self.requestInterruption()
+
+    def _should_stop(self) -> bool:
+        if self._cancelled:
+            return True
+        try:
+            return bool(self.isInterruptionRequested())
+        except RuntimeError:
+            return True
 
     def run(self):
+        if self._should_stop():
+            return
         try:
             import ebooklib
             from ebooklib import epub as epub_mod
             from bs4 import BeautifulSoup
 
             book = epub_mod.read_epub(self._epub_path, options={"ignore_ncx": True})
+            if self._should_stop():
+                return
 
             images: dict[str, bytes] = {}
             _IMAGE_EXTS = (
@@ -14523,6 +14799,8 @@ class _EpubLoaderThread(QThread):
                 ".avif", ".jxl",
             )
             for item in book.get_items():
+                if self._should_stop():
+                    return
                 item_name = item.get_name() or ""
                 item_media = ""
                 try:
@@ -14603,6 +14881,8 @@ class _EpubLoaderThread(QThread):
             try:
                 spine = getattr(book, "spine", None) or []
                 for entry in spine:
+                    if self._should_stop():
+                        return
                     # Spine entries are commonly (idref, linear_flag) but
                     # some producers emit a bare idref string. Accept both.
                     if isinstance(entry, (tuple, list)):
@@ -14618,6 +14898,8 @@ class _EpubLoaderThread(QThread):
             # Pass 2: ebooklib's ITEM_DOCUMENT classification (authoritative).
             if not chapter_items:
                 for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+                    if self._should_stop():
+                        return
                     _add_item(item, True)
 
             # Pass 3: extension-only sweep across the whole manifest
@@ -14626,10 +14908,14 @@ class _EpubLoaderThread(QThread):
             # well-formed EPUBs don't pay any extra cost here.
             if len(chapter_items) <= 1:
                 for item in book.get_items():
+                    if self._should_stop():
+                        return
                     _add_item(item, False)
 
             chapter_sources: list[tuple[object, str, bool]] = []
             for item, authoritative in chapter_items:
+                if self._should_stop():
+                    return
                 try:
                     # "Show special files" toggle: when OFF, drop configured
                     # non-chapter pages so the TOC matches what the
@@ -14648,12 +14934,16 @@ class _EpubLoaderThread(QThread):
 
             def _collect_chapter_payload(source):
                 item, item_name, authoritative = source
+                if self._should_stop():
+                    return None
                 try:
                     raw_content = item.get_content()
                     if isinstance(raw_content, bytes):
                         content = raw_content.decode("utf-8", errors="replace")
                     else:
                         content = str(raw_content or "")
+                    if self._should_stop():
+                        return None
                     return item_name, authoritative, content
                 except Exception:
                     logger.debug("Skipped chapter payload: %s",
@@ -14680,12 +14970,16 @@ class _EpubLoaderThread(QThread):
                     for source in chapter_sources
                 ]
 
+            if self._should_stop():
+                return
             chapter_payloads: list[tuple[str, bool, str]] = [
                 payload for payload in collected_payloads if payload
             ]
 
             def _parse_chapter_payload(payload):
                 item_name, authoritative, content = payload
+                if self._should_stop():
+                    return None
                 try:
                     soup = BeautifulSoup(content, "html.parser")
                     text = soup.get_text(strip=True)
@@ -14724,6 +15018,8 @@ class _EpubLoaderThread(QThread):
                         title = title.replace("_", " ").replace("-", " ").title()
                     if len(title) > 50:
                         title = title[:47] + "\u2026"
+                    if self._should_stop():
+                        return None
                     return title, content, item_name
                 except Exception:
                     logger.debug("Skipped chapter parse: %s",
@@ -14752,6 +15048,8 @@ class _EpubLoaderThread(QThread):
                     for payload in chapter_payloads
                 ]
 
+            if self._should_stop():
+                return
             for parsed in parsed_chapters:
                 if not parsed:
                     continue
@@ -14770,10 +15068,12 @@ class _EpubLoaderThread(QThread):
                 show_special_files=self._show_special_files,
                 config=self._config,
             )
-            self.done.emit()
+            if not self._should_stop():
+                self.done.emit()
         except Exception as exc:
-            logger.error("EPUB load error: %s\n%s", exc, traceback.format_exc())
-            self.error.emit(f"{exc}\n\n{traceback.format_exc()}")
+            if not self._should_stop():
+                logger.error("EPUB load error: %s\n%s", exc, traceback.format_exc())
+                self.error.emit(f"{exc}\n\n{traceback.format_exc()}")
 
 
 # ---------------------------------------------------------------------------
@@ -15029,7 +15329,10 @@ class EpubReaderDialog(QDialog):
         # '_chapter_page_cache'``.
         self._chapter_page_cache: dict[int, int] = {}
         self._loaded_chapter: int = -1
+        self._closing = False
+        self._cache_loader_thread: _EpubCacheLoaderThread | None = None
         self._loader_thread: _EpubLoaderThread | None = None
+        self._overlay_thread: _OverlayMergeThread | None = None
 
         title_text = window_title or os.path.splitext(os.path.basename(epub_path))[0]
         self._window_title_text = title_text
@@ -15592,6 +15895,8 @@ class EpubReaderDialog(QDialog):
     # ── Loading ───────────────────────────────────────────────────
 
     def _start_loading(self):
+        if getattr(self, "_closing", False):
+            return
         self._toolbar_widget.hide()
         self._loading_widget.show()
         self._content_widget.hide()
@@ -15603,15 +15908,10 @@ class EpubReaderDialog(QDialog):
         # :class:`_EpubLoaderThread` re-parse.
         prev_cache = getattr(self, "_cache_loader_thread", None)
         if prev_cache is not None:
-            try:
-                prev_cache.hit.disconnect()
-                prev_cache.miss.disconnect()
-            except Exception:
-                pass
-            try:
-                prev_cache.quit()
-            except Exception:
-                pass
+            _stop_qthread_safely(
+                prev_cache, timeout_ms=250,
+                signal_names=("hit", "miss"),
+            )
         self._cache_loader_thread = _EpubCacheLoaderThread(
             self._epub_path,
             show_special_files=self._show_special_files,
@@ -15624,6 +15924,8 @@ class EpubReaderDialog(QDialog):
 
     @Slot(object, object, list)
     def _on_cache_hit(self, chapters, images, filenames):
+        if getattr(self, "_closing", False):
+            return
         """Cache worker delivered hit — finalize or fall back to reparse."""
         filenames = list(filenames or [])
         # Older caches may not carry filenames. If an overlay is requested
@@ -15636,6 +15938,8 @@ class EpubReaderDialog(QDialog):
 
     @Slot()
     def _on_cache_miss(self):
+        if getattr(self, "_closing", False):
+            return
         """Cache worker had nothing usable — kick off the full reparse."""
         self._loader_thread = _EpubLoaderThread(
             self._epub_path, self,
@@ -15648,21 +15952,18 @@ class EpubReaderDialog(QDialog):
 
     @Slot()
     def _on_loader_done(self):
+        if getattr(self, "_closing", False):
+            return
         """Loader finished — re-read data from cache in a worker so the
         pickle.load doesn't re-freeze the spinner right before the
         reader is about to render.
         """
         prev_cache = getattr(self, "_cache_loader_thread", None)
         if prev_cache is not None:
-            try:
-                prev_cache.hit.disconnect()
-                prev_cache.miss.disconnect()
-            except Exception:
-                pass
-            try:
-                prev_cache.quit()
-            except Exception:
-                pass
+            _stop_qthread_safely(
+                prev_cache, timeout_ms=250,
+                signal_names=("hit", "miss"),
+            )
         reader_thread = _EpubCacheLoaderThread(
             self._epub_path,
             show_special_files=self._show_special_files,
@@ -15679,6 +15980,8 @@ class EpubReaderDialog(QDialog):
         reader_thread.start()
 
     def _on_epub_loaded_from_cache(self, chapters, images, filenames=None):
+        if getattr(self, "_closing", False):
+            return
         self._spin_timer.stop()
         filenames = list(filenames or [])
         raw_chapters = list(chapters or [])
@@ -15700,14 +16003,10 @@ class EpubReaderDialog(QDialog):
         # dual-path reload before the previous merge finished).
         prev = getattr(self, "_overlay_thread", None)
         if prev is not None:
-            try:
-                prev.done.disconnect()
-            except Exception:
-                pass
-            try:
-                prev.quit()
-            except Exception:
-                pass
+            _stop_qthread_safely(
+                prev, timeout_ms=250,
+                signal_names=("done",),
+            )
         self._overlay_thread = _OverlayMergeThread(
             raw_chapters=raw_chapters,
             images=images or {},
@@ -15731,6 +16030,8 @@ class EpubReaderDialog(QDialog):
     @Slot(object, object, bool)
     def _on_overlay_merge_done(self, overlaid_chapters, merged_images,
                                overlay_applied: bool):
+        if getattr(self, "_closing", False):
+            return
         """Merge worker finished: hand off to the main-thread finalizer.
 
         ``@Slot(object, object, bool)`` matches the updated signature
@@ -15961,6 +16262,8 @@ class EpubReaderDialog(QDialog):
 
     @Slot()
     def _on_overlay_refresh_tick(self):
+        if getattr(self, "_closing", False):
+            return
         """Poll the overlay provider and re-merge when the overlay changed.
 
         The translator writes ``response_*.html`` files as it finishes
@@ -16059,14 +16362,10 @@ class EpubReaderDialog(QDialog):
         self._pending_filenames = filenames
         prev = getattr(self, "_overlay_thread", None)
         if prev is not None:
-            try:
-                prev.done.disconnect()
-            except Exception:
-                pass
-            try:
-                prev.quit()
-            except Exception:
-                pass
+            _stop_qthread_safely(
+                prev, timeout_ms=250,
+                signal_names=("done",),
+            )
         self._overlay_thread = _OverlayMergeThread(
             raw_chapters=raw_chapters,
             images=dict(self._images),
@@ -16090,6 +16389,8 @@ class EpubReaderDialog(QDialog):
     def _on_auto_refresh_merge_done(self, overlaid_chapters,
                                     merged_images,
                                     overlay_applied: bool):
+        if getattr(self, "_closing", False):
+            return
         """Swap refreshed chapters into the UI without a full re-render.
 
         Differs from :meth:`_on_overlay_merge_done` in two key ways:
@@ -18051,25 +18352,30 @@ class EpubReaderDialog(QDialog):
             self._config['epub_reader_layout'] = self._layout_mode
         self._config['epub_reader_font_family'] = self._font_family
         self._config['epub_reader_show_raw'] = self._show_raw
-        # Stop the auto-refresh timer + any in-flight merge thread so
-        # the closed dialog can't fire callbacks against a deleted UI.
-        timer = getattr(self, "_overlay_refresh_timer", None)
-        if timer is not None:
-            try:
-                timer.stop()
-            except Exception:
-                pass
-            self._overlay_refresh_timer = None
-        overlay_thread = getattr(self, "_overlay_thread", None)
-        if overlay_thread is not None:
-            try:
-                overlay_thread.done.disconnect()
-            except Exception:
-                pass
-            try:
-                overlay_thread.quit()
-            except Exception:
-                pass
+        self._closing = True
+        # Stop timers and browser loads before worker shutdown so no
+        # queued callbacks can restart work while the dialog is closing.
+        for timer_name in (
+            "_spin_timer",
+            "_overlay_refresh_timer",
+            "_search_debounce_timer",
+            "_search_render_timer",
+        ):
+            timer = getattr(self, timer_name, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+                if timer_name == "_overlay_refresh_timer":
+                    self._overlay_refresh_timer = None
+        for browser_name in ("_reader", "_reader2", "_reader_all"):
+            browser = getattr(self, browser_name, None)
+            if browser is not None:
+                try:
+                    browser.stop()
+                except Exception:
+                    pass
         self._search_dialog_generation = (
             int(getattr(self, "_search_dialog_generation", 0) or 0) + 1)
         self._search_realign_generation = (
@@ -18078,10 +18384,29 @@ class EpubReaderDialog(QDialog):
             int(getattr(self, "_search_selection_generation", 0) or 0) + 1)
         self._cancel_search_dialog_workers()
         for worker in list(getattr(self, "_search_workers", []) or []):
-            try:
-                worker.wait(500)
-            except Exception:
-                pass
+            _stop_qthread_safely(
+                worker, timeout_ms=1200,
+                signal_names=("results_ready", "finished"),
+            )
+        self._search_workers = []
+        _stop_qthread_safely(
+            getattr(self, "_overlay_thread", None),
+            timeout_ms=1500,
+            signal_names=("done",),
+        )
+        self._overlay_thread = None
+        _stop_qthread_safely(
+            getattr(self, "_loader_thread", None),
+            timeout_ms=2000,
+            signal_names=("done", "error"),
+        )
+        self._loader_thread = None
+        _stop_qthread_safely(
+            getattr(self, "_cache_loader_thread", None),
+            timeout_ms=2000,
+            signal_names=("hit", "miss"),
+        )
+        self._cache_loader_thread = None
         _persist_config_via_parent(self)
         super().closeEvent(event)
 
@@ -18232,6 +18557,8 @@ class EpubReaderDialog(QDialog):
         }
 
     def _reload_epub_from_active_path(self):
+        if getattr(self, "_closing", False):
+            return
         """Restart the loader pipeline against the current ``_epub_path``.
 
         Called by the Show-raw toggle in dual-path mode: after swapping
@@ -18272,15 +18599,10 @@ class EpubReaderDialog(QDialog):
         # raw↔translated transition instead of a jarring flash.
         prev_cache = getattr(self, "_cache_loader_thread", None)
         if prev_cache is not None:
-            try:
-                prev_cache.hit.disconnect()
-                prev_cache.miss.disconnect()
-            except Exception:
-                pass
-            try:
-                prev_cache.quit()
-            except Exception:
-                pass
+            _stop_qthread_safely(
+                prev_cache, timeout_ms=250,
+                signal_names=("hit", "miss"),
+            )
         self._cache_loader_thread = _EpubCacheLoaderThread(
             self._epub_path,
             show_special_files=self._show_special_files,

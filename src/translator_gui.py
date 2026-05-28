@@ -2936,6 +2936,30 @@ Text to analyze:
                 except Exception:
                     pass
 
+            # Close EPUB Library/details/reader stack through its own
+            # shutdown hook so reader QThreads are drained before Qt
+            # destroys the dialogs.
+            if hasattr(self, '_epub_library_dialog') and self._epub_library_dialog:
+                try:
+                    print("[CLEANUP] Closing EPUB library dialog...")
+                    dlg = self._epub_library_dialog
+                    if hasattr(dlg, "shutdown"):
+                        dlg.shutdown()
+                    try:
+                        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+                    except Exception:
+                        pass
+                    dlg.close()
+                    try:
+                        QApplication.processEvents()
+                    except Exception:
+                        pass
+                    dlg.deleteLater()
+                    self._epub_library_dialog = None
+                    print("[CLEANUP] EPUB library dialog closed")
+                except Exception:
+                    pass
+
             # Kill stray QtWebEngine child processes that can lock the PyInstaller _MEI temp dir
             try:
                 import psutil, sys
