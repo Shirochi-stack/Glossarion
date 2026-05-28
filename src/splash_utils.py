@@ -24,15 +24,27 @@ try:
 except Exception as e:
     print(f"⚠️ DPI setup failed: {e}")
 
+def _cpu_worker_cap():
+    """Return the user's logical CPU count as a safe worker ceiling."""
+    try:
+        return max(1, int(os.cpu_count() or 1))
+    except Exception:
+        return 1
+
+
 def _load_pyside6_modules():
     module_names = ("PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets")
     if os.environ.get("GLOSSARION_SERIAL_QT_IMPORTS", "0").strip().lower() in ("1", "true", "yes", "on"):
+        print(f"[SPLASH] PySide6 import workers: serial mode (cpu_cap={_cpu_worker_cap()}, modules={len(module_names)})")
         return {name: importlib.import_module(name) for name in module_names}
 
     try:
         modules = {}
+        cpu_cap = _cpu_worker_cap()
+        workers = min(len(module_names), cpu_cap)
+        print(f"[SPLASH] PySide6 import workers: {workers} (cpu_cap={cpu_cap}, modules={len(module_names)})")
         with concurrent.futures.ThreadPoolExecutor(
-            max_workers=len(module_names),
+            max_workers=workers,
             thread_name_prefix="qt-import",
         ) as pool:
             future_to_name = {
@@ -844,16 +856,8 @@ class SplashManager(QObject):
                 raise ImportError(f"{spec['module']} missing required attribute(s): {', '.join(missing)}")
             return spec["key"], spec["result"](module), spec["loaded"]
 
-        try:
-            threading.Thread(
-                target=self._preload_optional_startup_modules,
-                daemon=True,
-                name="optional-startup-preload",
-            ).start()
-        except Exception:
-            pass
-
         if os.environ.get("GLOSSARION_SERIAL_SPLASH_IMPORTS", "0").strip().lower() in ("1", "true", "yes", "on"):
+            print(f"[SPLASH] Startup import workers: serial mode (cpu_cap={_cpu_worker_cap()}, modules={len(specs)})")
             for spec in specs:
                 self.update_status(spec["loading"])
                 try:
@@ -872,10 +876,27 @@ class SplashManager(QObject):
                     self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
             return results
 
+        cpu_cap = _cpu_worker_cap()
         workers = max_workers
         if workers is None:
-            workers = min(len(specs), max(2, int(os.cpu_count() or 2)))
-        workers = max(1, min(int(workers), len(specs)))
+            workers = min(len(specs), cpu_cap)
+        workers = max(1, min(int(workers), len(specs), cpu_cap))
+        preload_enabled = workers < cpu_cap
+        print(
+            f"[SPLASH] Startup import workers: {workers} "
+            f"(cpu_cap={cpu_cap}, modules={len(specs)}, "
+            f"optional_preload={'on' if preload_enabled else 'off'})"
+        )
+
+        if preload_enabled:
+            try:
+                threading.Thread(
+                    target=self._preload_optional_startup_modules,
+                    daemon=True,
+                    name="optional-startup-preload",
+                ).start()
+            except Exception:
+                pass
 
         self.update_status("⚙️ Initializing startup modules...")
         for spec in specs:
