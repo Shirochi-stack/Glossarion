@@ -1539,13 +1539,14 @@ class MultiAPIKeyDialog(QDialog):
 
         # Create and show dialog (suppress toggle logs during init)
         self._initializing = True
-        self._deferred_render_count = 0
         self._create_dialog()
-        if not self._deferred_render_count:
-            self._initializing = False
 
         # Make it a window (not just a dialog)
         self.setWindowFlags(self.windowFlags() | Qt.Window)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._start_deferred_key_pool_render()
 
     def _set_icon(self, window):
         """Set Halgakos.ico as window icon if available."""
@@ -2340,98 +2341,8 @@ class MultiAPIKeyDialog(QDialog):
         self.multikey_desc_label.setWordWrap(True)
         scrollable_layout.addWidget(self.multikey_desc_label)
 
-        self.translation_key_pool_frame = QGroupBox("Translation Keys (Main Pool)")
-        translation_pool_layout = QVBoxLayout(self.translation_key_pool_frame)
-        translation_pool_layout.setContentsMargins(15, 15, 15, 15)
-        translation_pool_layout.setSpacing(10)
-
-        translation_pool_desc = QLabel(
-            "Configure the main translation key rotation pool used by normal translation requests.\n"
-            "Dedicated pools below, such as fallback, glossary, metadata, vision, and image keys, are not restricted by this toggle."
-        )
-        translation_pool_desc.setStyleSheet("color: gray;")
-        translation_pool_desc.setWordWrap(True)
-        translation_pool_layout.addWidget(translation_pool_desc)
-
-        translation_pool_enable_row = QWidget()
-        translation_pool_enable_layout = QHBoxLayout(translation_pool_enable_row)
-        translation_pool_enable_layout.setContentsMargins(0, 0, 0, 0)
-        translation_pool_enable_layout.setSpacing(8)
-
-        # Enable/Disable toggle with spinning icon
-        self.enabled_var = self.translator_gui.config.get('use_multi_api_keys', False)
-        self.enabled_checkbox = self._create_styled_checkbox("Enable Translation Keys")
-        self.enabled_checkbox.setChecked(self.enabled_var)
-        self.enabled_checkbox.toggled.connect(self._toggle_multi_key_mode)
-
-        # Add spinning icon next to multi-key mode checkbox (HiDPI-aware like Extract Glossary)
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
-        self.multikey_icon = QLabel()
-        self.multikey_icon.setStyleSheet("background-color: transparent;")
-        if os.path.exists(icon_path):
-            from PySide6.QtGui import QIcon, QPixmap
-            from PySide6.QtCore import QSize
-            icon = QIcon(icon_path)
-            try:
-                dpr = self.devicePixelRatioF()
-            except Exception:
-                dpr = 1.0
-            logical_px = 16
-            dev_px = int(logical_px * max(1.0, dpr))
-            pm = icon.pixmap(QSize(dev_px, dev_px))
-            if pm.isNull():
-                raw = QPixmap(icon_path)
-                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                pm = QPixmap.fromImage(img)
-            try:
-                pm.setDevicePixelRatio(dpr)
-            except Exception:
-                pass
-            self.multikey_icon.setPixmap(pm)
-        self.multikey_icon.setFixedSize(36, 36)
-        self.multikey_icon.setAlignment(Qt.AlignCenter)
-        self.enabled_checkbox.toggled.connect(lambda: animate_icon(self.multikey_icon))
-
-        translation_pool_enable_layout.addWidget(self.multikey_icon)
-        translation_pool_enable_layout.addWidget(self.enabled_checkbox)
-        translation_pool_enable_layout.addStretch()
-        translation_pool_layout.addWidget(translation_pool_enable_row)
-
         self._create_rotation_settings_section(scrollable_layout)
-
-        # Add key section
-        self._create_add_key_section(translation_pool_layout)
-
-        # Separator - store reference to hide when multi-key mode is off
-        self.multikey_separator = QFrame()
-        self.multikey_separator.setFrameShape(QFrame.HLine)
-        self.multikey_separator.setFrameShadow(QFrame.Sunken)
-        translation_pool_layout.addWidget(self.multikey_separator)
-
-        # Key list section
-        self._create_key_list_section(translation_pool_layout)
-        scrollable_layout.addWidget(self.translation_key_pool_frame)
-
-        # Add stretch before fallback that only appears when multi-key is enabled
-        # This will be removed when multi-key is disabled to bring fallback closer
-        scrollable_layout.addStretch(0)
-
-        # Render the fallback section immediately so the dialog has visible,
-        # useful content on first paint even when multi-key mode is disabled.
-        self._create_fallback_section(scrollable_layout)
-        self._toggle_multi_key_mode()
-
-        # Queue the remaining lower pool sections so the dialog shell paints immediately.
-        # Qt widgets must still be created on the GUI thread, so these render in
-        # independent event-loop tasks instead of one long blocking constructor.
-        self._queue_key_pool_section_render(scrollable_layout, self._create_truncation_retry_section)
-        self._queue_key_pool_section_render(scrollable_layout, self._create_glossary_section)
-        self._queue_key_pool_section_render(scrollable_layout, self._create_glossary_refinement_section)
-        self._queue_key_pool_section_render(scrollable_layout, self._create_metadata_section)
-        self._queue_key_pool_section_render(scrollable_layout, self._create_ai_truncation_detection_section)
-        self._queue_key_pool_section_render(scrollable_layout, self._create_rolling_summary_section)
-        self._queue_key_pool_section_render(scrollable_layout, self._create_qa_scan_section)
-        self._queue_key_pool_section_render(scrollable_layout, self._create_inpainter_section)
+        self._prepare_deferred_key_pool_sections(scrollable_layout)
 
         # Add stretch to fill remaining space in scroll area
         scrollable_layout.addStretch(1)
@@ -2439,18 +2350,14 @@ class MultiAPIKeyDialog(QDialog):
         # Button bar at the bottom - moved outside scroll area below
         # (will be added to dialog_layout instead)
 
-        # Load existing keys into tree
-        self._refresh_key_list()
-
         # Create button bar outside scroll area (fixed at bottom)
         self._create_button_bar(dialog_layout)
 
         # Set icon
         self._set_icon(self)
 
-        # Apply the initial toggle state after deferred sections finish rendering.
-        if not self._deferred_render_count:
-            self._finish_deferred_key_pool_render()
+        if not getattr(self, '_pending_key_pool_section_builders', None):
+            self._finish_key_pool_render()
 
     def _create_preview_dialog(self):
         """Create a one-pool manager view using the normal dedicated-pool UI."""
@@ -2509,30 +2416,138 @@ class MultiAPIKeyDialog(QDialog):
             getattr(self, 'key_list_frame', None),
         ]
 
-    def _queue_key_pool_section_render(self, parent_layout, render_callback):
-        """Render one key-pool section in its own queued GUI event."""
-        host = QWidget()
-        host_layout = QVBoxLayout(host)
-        host_layout.setContentsMargins(0, 0, 0, 0)
-        host_layout.setSpacing(0)
-        parent_layout.addWidget(host)
-        self._deferred_render_count = getattr(self, '_deferred_render_count', 0) + 1
-        QTimer.singleShot(0, lambda cb=render_callback, layout=host_layout: self._render_key_pool_section(cb, layout))
+    def _deferred_key_pool_section_builders(self):
+        return (
+            self._create_translation_key_pool_section,
+            self._create_fallback_section,
+            self._create_truncation_retry_section,
+            self._create_glossary_section,
+            self._create_glossary_refinement_section,
+            self._create_metadata_section,
+            self._create_ai_truncation_detection_section,
+            self._create_rolling_summary_section,
+            self._create_qa_scan_section,
+            self._create_inpainter_section,
+        )
 
-    def _render_key_pool_section(self, render_callback, host_layout):
-        try:
-            render_callback(host_layout)
-        except Exception as exc:
-            print(f"[MULTI_KEY_RENDER] Failed to render key-pool section: {exc}")
-        finally:
-            self._deferred_render_count = max(0, getattr(self, '_deferred_render_count', 1) - 1)
-            if self._deferred_render_count == 0:
-                self._finish_deferred_key_pool_render()
-
-    def _finish_deferred_key_pool_render(self):
-        if getattr(self, '_deferred_render_finished', False):
+    def _prepare_deferred_key_pool_sections(self, parent_layout):
+        self._pending_key_pool_section_builders = list(self._deferred_key_pool_section_builders())
+        self._deferred_key_pool_render_started = False
+        if not self._pending_key_pool_section_builders:
             return
-        self._deferred_render_finished = True
+
+        self._deferred_key_pool_host = QWidget()
+        self._deferred_key_pool_host_layout = QVBoxLayout(self._deferred_key_pool_host)
+        self._deferred_key_pool_host_layout.setContentsMargins(0, 0, 0, 0)
+        self._deferred_key_pool_host_layout.setSpacing(10)
+        parent_layout.addWidget(self._deferred_key_pool_host)
+
+    def _start_deferred_key_pool_render(self):
+        if getattr(self, 'preview_pool', None):
+            return
+        if getattr(self, '_deferred_key_pool_render_started', False):
+            return
+        if not getattr(self, '_pending_key_pool_section_builders', None):
+            return
+        self._deferred_key_pool_render_started = True
+        QTimer.singleShot(25, self._render_next_deferred_key_pool_section)
+
+    def _render_next_deferred_key_pool_section(self):
+        pending_builders = getattr(self, '_pending_key_pool_section_builders', None)
+        if not pending_builders:
+            self._finish_key_pool_render()
+            return
+
+        build_section = pending_builders.pop(0)
+        parent_layout = getattr(self, '_deferred_key_pool_host_layout', None)
+        if parent_layout is None:
+            parent_layout = getattr(self, 'scrollable_layout', None)
+
+        if parent_layout is not None:
+            try:
+                build_section(parent_layout)
+            except Exception as exc:
+                print(f"[MULTI_KEY_RENDER] Failed to render key-pool section: {exc}")
+
+        if pending_builders:
+            QTimer.singleShot(0, self._render_next_deferred_key_pool_section)
+        else:
+            self._finish_key_pool_render()
+
+    def _create_translation_key_pool_section(self, parent_layout):
+        self.translation_key_pool_frame = QGroupBox("Translation Keys (Main Pool)")
+        translation_pool_layout = QVBoxLayout(self.translation_key_pool_frame)
+        translation_pool_layout.setContentsMargins(15, 15, 15, 15)
+        translation_pool_layout.setSpacing(10)
+
+        translation_pool_desc = QLabel(
+            "Configure the main translation key rotation pool used by normal translation requests.\n"
+            "Dedicated pools below, such as fallback, glossary, metadata, vision, and image keys, are not restricted by this toggle."
+        )
+        translation_pool_desc.setStyleSheet("color: gray;")
+        translation_pool_desc.setWordWrap(True)
+        translation_pool_layout.addWidget(translation_pool_desc)
+
+        translation_pool_enable_row = QWidget()
+        translation_pool_enable_layout = QHBoxLayout(translation_pool_enable_row)
+        translation_pool_enable_layout.setContentsMargins(0, 0, 0, 0)
+        translation_pool_enable_layout.setSpacing(8)
+
+        self.enabled_var = self.translator_gui.config.get('use_multi_api_keys', False)
+        self.enabled_checkbox = self._create_styled_checkbox("Enable Translation Keys")
+        self.enabled_checkbox.setChecked(self.enabled_var)
+        self.enabled_checkbox.toggled.connect(self._toggle_multi_key_mode)
+
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        self.multikey_icon = QLabel()
+        self.multikey_icon.setStyleSheet("background-color: transparent;")
+        if os.path.exists(icon_path):
+            from PySide6.QtGui import QIcon, QPixmap
+            from PySide6.QtCore import QSize
+            icon = QIcon(icon_path)
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            logical_px = 16
+            dev_px = int(logical_px * max(1.0, dpr))
+            pm = icon.pixmap(QSize(dev_px, dev_px))
+            if pm.isNull():
+                raw = QPixmap(icon_path)
+                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pm = QPixmap.fromImage(img)
+            try:
+                pm.setDevicePixelRatio(dpr)
+            except Exception:
+                pass
+            self.multikey_icon.setPixmap(pm)
+        self.multikey_icon.setFixedSize(36, 36)
+        self.multikey_icon.setAlignment(Qt.AlignCenter)
+        self.enabled_checkbox.toggled.connect(lambda: animate_icon(self.multikey_icon))
+
+        translation_pool_enable_layout.addWidget(self.multikey_icon)
+        translation_pool_enable_layout.addWidget(self.enabled_checkbox)
+        translation_pool_enable_layout.addStretch()
+        translation_pool_layout.addWidget(translation_pool_enable_row)
+
+        self._create_add_key_section(translation_pool_layout)
+
+        self.multikey_separator = QFrame()
+        self.multikey_separator.setFrameShape(QFrame.HLine)
+        self.multikey_separator.setFrameShadow(QFrame.Sunken)
+        translation_pool_layout.addWidget(self.multikey_separator)
+
+        self._create_key_list_section(translation_pool_layout)
+        parent_layout.addWidget(self.translation_key_pool_frame)
+        parent_layout.addStretch(0)
+
+        self._refresh_key_list()
+        self._toggle_multi_key_mode()
+
+    def _finish_key_pool_render(self):
+        if getattr(self, '_key_pool_render_finished', False):
+            return
+        self._key_pool_render_finished = True
         if not getattr(self, 'preview_pool', None):
             self._toggle_multi_key_mode()
         self._initializing = False
