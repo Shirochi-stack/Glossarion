@@ -1270,18 +1270,29 @@ def _glossary_chapter_actual_num(idx: int, context=None) -> int:
     except (TypeError, ValueError):
         return int(idx) + 1
 
+def _glossary_chapter_display_total(total_chapters=None, context=None) -> int:
+    """Return the visible chapter total from the same numbering used by progress rows."""
+    _progress_file, _output_file, positions, numbers, _filenames, context_total = _progress_context_values(context)
+    number_values = [value for value in _unique_int_list((numbers or {}).values()) if value > 0]
+    if number_values:
+        return max(number_values)
+
+    position_values = [value for value in _unique_int_list((positions or {}).values()) if value > 0]
+    if position_values:
+        return max(position_values)
+
+    try:
+        return int(total_chapters or context_total or 0)
+    except (TypeError, ValueError):
+        return 0
+
 def _glossary_chapter_log_label(chapter_num, total_chapters=None, context=None) -> str:
     """Return the bracketed chapter label used by glossary progress logs."""
-    if total_chapters is None:
-        _progress_file, _output_file, _positions, _numbers, _filenames, total_chapters = _progress_context_values(context)
     try:
         chapter_num = int(chapter_num)
     except (TypeError, ValueError):
         chapter_num = str(chapter_num)
-    try:
-        total_chapters = int(total_chapters or 0)
-    except (TypeError, ValueError):
-        total_chapters = 0
+    total_chapters = _glossary_chapter_display_total(total_chapters, context=context)
     if total_chapters > 0:
         return f"[Chapter {chapter_num}/{total_chapters}]"
     return f"[Chapter {chapter_num}]"
@@ -6707,7 +6718,8 @@ def main(log_callback=None, stop_callback=None):
                                         entry_type = entry.get("type", "?")
                                         raw_name = entry.get("raw_name", "?")
                                         trans_name = entry.get("translated_name", "?")
-                                        print(f'[Chapter {display_idx}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
+                                        chapter_label = _glossary_chapter_log_label(display_idx, total_chapters, context=progress_context)
+                                        print(f'{chapter_label} [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
                                         glossary.append(entry)
                                 
                                 # Check if this was actually a failure (empty/refused content)
@@ -6783,7 +6795,8 @@ def main(log_callback=None, stop_callback=None):
                                     raw_name = entry.get("raw_name", "?")
                                     trans_name = entry.get("translated_name", "?")
                                     
-                                    print(f'[Chapter {display_idx}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
+                                    chapter_label = _glossary_chapter_log_label(display_idx, total_chapters, context=progress_context)
+                                    print(f'{chapter_label} [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
                                     
                                     # Add entry immediately WITHOUT deduplication
                                     glossary.append(entry)
@@ -7232,11 +7245,12 @@ def main(log_callback=None, stop_callback=None):
             # Show filename alongside chapter number when available
             _fname = _chapter_filenames.get(idx, '')
             _chap_num = _glossary_chapter_actual_num(idx, context=progress_context)
-            _chap_label = _glossary_chapter_log_label(_chap_num, total_chapters)
+            _chap_total = _glossary_chapter_display_total(total_chapters, context=progress_context)
+            _chap_label = f"Chapter {_chap_num}/{_chap_total}" if _chap_total > 0 else f"Chapter {_chap_num}"
             if _fname:
-                print(f"🔄 Processing Chapter {_chap_num}/{total_chapters} ({_fname})")
+                print(f"🔄 Processing {_chap_label} ({_fname})")
             else:
-                print(f"🔄 Processing Chapter {_chap_num}/{total_chapters}")
+                print(f"🔄 Processing {_chap_label}")
             
             # Request merging: If this is a parent chapter, merge content from child chapters
             chapter_content = chap
@@ -7746,7 +7760,8 @@ def main(log_callback=None, stop_callback=None):
                         raw_name = entry.get("raw_name", "?")
                         trans_name = entry.get("translated_name", "?")
                         
-                        print(f'[Chapter {_chap_num}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → {entry_type}: {raw_name} ({trans_name})')
+                        chapter_label = _glossary_chapter_log_label(_chap_num, total_chapters, context=progress_context)
+                        print(f'{chapter_label} [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → {entry_type}: {raw_name} ({trans_name})')
                     
                 # Check if this was actually a failure (empty/refused content)
                 _resp_text = locals().get('resp', '') or ''
