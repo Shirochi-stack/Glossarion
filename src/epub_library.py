@@ -6817,20 +6817,39 @@ class EpubLibraryDialog(QDialog):
         self._spin_label = QLabel()
         icon_path = _find_halgakos_icon()
         self._spin_pixmap = None
+        # Pre-rendered rotation frames. Rotating the pixmap every tick with
+        # ``transformed()`` re-rasterises AND reallocates a new QPixmap on the
+        # UI thread each frame, which stutters and competes with the
+        # card-building work. Instead we render every frame ONCE up front with
+        # high-quality (Smooth) sampling and just swap the cached pixmap per
+        # tick — O(1), allocation-free, and no aliasing "crawl".
+        self._spin_frames: list = []
+        self._spin_frame_idx = 0
+        self._spin_period_s = 1.2  # seconds per full revolution
+        self._spin_t0 = 0.0        # perf_counter() baseline, set on show
         if icon_path:
             pm = QPixmap(icon_path)
             if not pm.isNull():
                 self._spin_pixmap = pm.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 self._spin_label.setPixmap(self._spin_pixmap)
+                self._spin_frames = [
+                    self._spin_pixmap.transformed(
+                        QTransform().rotate(a), Qt.SmoothTransformation)
+                    for a in range(0, 360, 6)  # 60 frames → smooth 6° steps
+                ]
         if not self._spin_pixmap:
             self._spin_label.setText("\U0001f4da")
             self._spin_label.setStyleSheet("font-size: 32pt; color: #e0e0e0;")
         self._spin_label.setAlignment(Qt.AlignCenter)
-        self._spin_label.setFixedSize(72, 72)
+        # A 64px square rotated to 45° spans 64·√2 ≈ 91px. Size the label to
+        # fit the largest rotated frame so corners are never clipped — a
+        # clipped/re-cropped pixmap is what makes the icon appear to pulse and
+        # wobble as it turns.
+        self._spin_label.setFixedSize(96, 96)
         loading_layout.addWidget(self._spin_label, 0, Qt.AlignCenter)
         self._spin_angle = 0
         self._spin_timer = QTimer(self)
-        self._spin_timer.setInterval(25)  # ~40 fps
+        self._spin_timer.setInterval(16)  # ~60 fps
         # Wrap in a lambda so PySide6 routes the call directly instead
         # of going through Qt's meta-object slot-lookup — certain
         # PySide6 builds raise ``AttributeError: Slot 'EpubLibraryDialog::
@@ -6916,24 +6935,41 @@ class EpubLibraryDialog(QDialog):
 
     @Slot()
     def _rotate_spinner(self):
-        """Rotate the Halgakos icon by 15° each tick (matches reader).
+        """Timer-driven spinner tick — delegates to the time-based updater.
 
         Decorated with ``@Slot()`` so PySide6 registers it in the Qt
-        meta-object system. Without the decorator, ``QTimer.timeout``
-        can fail to resolve the slot by name at invocation time
-        (``AttributeError: Slot 'EpubLibraryDialog::_rotate_spinner()'
-        not found``).
+        meta-object system. Without the decorator, ``QTimer.timeout`` can fail
+        to resolve the slot by name at invocation time (``AttributeError: Slot
+        'EpubLibraryDialog::_rotate_spinner()' not found``).
         """
-        if self._spin_pixmap:
-            self._spin_angle = (self._spin_angle + 15) % 360
-            t = QTransform().rotate(self._spin_angle)
-            rotated = self._spin_pixmap.transformed(t, Qt.FastTransformation)
-            self._spin_label.setPixmap(rotated)
+        self._tick_spinner()
+
+    def _tick_spinner(self) -> None:
+        """Set the spinner to the frame matching *wall-clock* elapsed time.
+
+        The angle is derived from how long the overlay has been visible rather
+        than incremented per call. This is what kills the "spin, freeze, spin"
+        stutter: while the UI thread is busy building cards the 16 ms timer
+        can't fire on schedule, but every time we DO get a slice of CPU (via
+        :meth:`_pump_loading_events`) the icon jumps straight to the angle it
+        should be at for *now* — so it reads as continuous motion instead of
+        sticking at a stale angle until the next batch boundary.
+        """
+        frames = self._spin_frames
+        if not frames:
+            return
+        n = len(frames)
+        elapsed = time.perf_counter() - self._spin_t0
+        idx = int(elapsed / self._spin_period_s * n) % n
+        if idx != self._spin_frame_idx:
+            self._spin_frame_idx = idx
+            self._spin_label.setPixmap(frames[idx])
 
     def _show_loading(self):
         """Show the spinner overlay and hide both tab grids."""
         self._set_loading_text("Scanning library\u2026")
-        self._spin_angle = 0
+        self._spin_frame_idx = 0
+        self._spin_t0 = time.perf_counter()
         self._spin_timer.start()
         self._tabs.hide()
         self._ip_empty_label.hide()
@@ -6952,10 +6988,18 @@ class EpubLibraryDialog(QDialog):
         self._tabs.show()
 
     def _pump_loading_events(self) -> None:
-        """Let the loading spinner repaint while the main thread builds cards."""
+        """Advance the spinner and let it repaint while cards are being built.
+
+        We explicitly tick the spinner here rather than relying on the 16 ms
+        QTimer — Qt coalesces it to at most one pending timeout per
+        ``processEvents`` pass, so on a busy UI thread the timer alone would
+        only nudge the icon one step per batch. Ticking by wall-clock time
+        keeps it tracking real motion.
+        """
         loading = getattr(self, "_loading_widget", None)
         if loading is None or not loading.isVisible():
             return
+        self._tick_spinner()
         app = QApplication.instance()
         if app is not None:
             app.processEvents(QEventLoop.ExcludeUserInputEvents)
@@ -9100,9 +9144,16 @@ class EpubLibraryDialog(QDialog):
         preset_key = (self._card_size, card_w)
 
         show_raw_title = bool(getattr(self, "_show_raw_titles", False))
+        # Pump on a time budget rather than every Nth card: card build cost
+        # varies wildly (title-fit loop, cover scaling), so a fixed stride
+        # leaves uneven gaps that stall the spinner. Yielding to the event
+        # loop whenever ~10 ms has elapsed keeps the animation continuous and
+        # bounds any single freeze to one card's build time.
+        _last_pump = time.perf_counter()
         for idx, book in enumerate(books):
-            if loading_visible and idx and idx % 4 == 0:
+            if loading_visible and (time.perf_counter() - _last_pump) >= 0.010:
                 self._pump_loading_events()
+                _last_pump = time.perf_counter()
             path = book.get("path", "") or ""
             sig = self._card_signature(book)
             cached = card_cache.get(path)
